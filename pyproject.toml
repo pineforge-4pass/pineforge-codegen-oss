@@ -11,7 +11,7 @@ dynamic = ["version"]
 description = "PineScript v6 to C++ transpiler that targets the pineforge-engine runtime."
 requires-python = ">=3.11"
 authors = [
-    { name = "PineForge", email = "luisleo52655@gmail.com" },
+    { name = "PineForge", email = "luis@4pass.com.tw" },
 ]
 # PolyForm Noncommercial 1.0.0 + Personal Trading exception; see LICENSE.
 license = { file = "LICENSE" }
