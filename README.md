@@ -99,8 +99,8 @@ git clone https://github.com/pineforge-4pass/pineforge-engine.git ../pineforge-e
 
 Follow the engine's [`tutorial/`](https://github.com/pineforge-4pass/pineforge-engine/tree/main/tutorial)
 to build `libpineforge.a`, compile your transpiled `.cpp` into a strategy `.so`,
-load it, feed OHLCV, and read back the closed-trade list. Versions must match —
-see [Versioning](#versioning).
+load it, feed OHLCV, and read back the closed-trade list. The codegen version
+must target a matching `pineforge-engine` ABI (see [`VERSION`](VERSION)).
 
 ---
 
@@ -139,17 +139,6 @@ tests/
 This is — to our knowledge — the first complete PineScript v6 → C++ transpiler
 with a real support checker that rejects unsupported features before codegen
 instead of emitting broken C++.
-
-## Versioning
-
-The transpiler version is aligned with the `pineforge-engine` runtime ABI it
-targets. Current release: see [`VERSION`](VERSION). A mismatched pair (e.g.
-codegen `0.3.0` against an older engine) fails to compile against the headers.
-
-| pineforge-codegen | pineforge-engine | Notable change |
-| ----------------- | ---------------- | -------------- |
-| `0.3.0`           | `>=6790e75`      | Typed-matrix support (`PineMatrix<T>` templates). `strategy.exit` `qty` + `oca_name` plumbed to runtime. `hour(time)` defaults to `syminfo.timezone`. `Series<int>` promoted to `int64_t` for `time`/`timestamp`. `request.security` timeframe literal validated at parse time. `varip` rejected before codegen. |
-| `0.2.0`           | `>=8c07322`      | `strategy_entry` lost the vestigial `market_price` 3rd positional; codegen emits the 9-arg form. |
 
 ## Running tests
 
