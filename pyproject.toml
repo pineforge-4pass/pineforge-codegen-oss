@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pineforge-codegen"
+# Version sourced from /VERSION (single source of truth). Bumped by
+# .github/workflows/deploy-worker.yml. Versioning lockstep with engine
+# ABI per README table.
+dynamic = ["version"]
+description = "PineScript v6 to C++ transpiler that targets the pineforge-engine runtime."
+requires-python = ">=3.11"
+authors = [
+    { name = "PineForge", email = "luisleo52655@gmail.com" },
+]
+# PolyForm Noncommercial 1.0.0 + Personal Trading exception; see LICENSE.
+license = { file = "LICENSE" }
+readme = "README.md"
+keywords = ["pinescript", "transpiler", "trading", "backtesting", "tradingview"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: Free for non-commercial use",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial",
+]
+# Pure-Python; the only runtime-side coupling is the C ABI shape this
+# codegen emits against, pinned via the corresponding pineforge-engine
+# release tag in tests/.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/pineforge-4pass/pineforge-codegen-oss"
+Issues = "https://github.com/pineforge-4pass/pineforge-codegen-oss/issues"
+Engine = "https://github.com/pineforge-4pass/pineforge-engine"
+
+[tool.hatch.version]
+source = "regex"
+path = "VERSION"
+pattern = "^(?P<version>\\S+)"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pineforge_codegen"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"

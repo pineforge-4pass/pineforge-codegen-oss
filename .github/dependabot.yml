@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Keep the SHA-pinned GitHub Actions in workflows up to date with
+  # reviewable PRs (security review: pinned actions need a bump path).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

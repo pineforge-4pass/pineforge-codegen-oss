@@ -1,0 +1,895 @@
+"""Per-callee dispatch + bookkeeping for the analyzer.
+
+This is the largest analyzer mixin (~500 lines). It owns the
+``_handle_*_call`` family that routes Pine ``ta.*`` / ``request.*``
+/ ``strategy.*`` / ``input.*`` / ``fixnan(...)`` / user-defined
+function calls into TA-call-site allocation, ``input.*`` defval
+inference, ``request.security()`` recording, ``fixnan`` site
+allocation, and per-call-site cloning of TA + series state for
+user functions called more than once per bar.
+
+Mixin contract -- host class must provide the following attributes
+(all set by ``Analyzer.__init__`` unless noted):
+
+- ``self._ta_call_sites`` (``list[TACallSite]``): TA call-site
+  registry. Appended to by ``_handle_ta_call`` and (per-call-site
+  clones only) by ``_handle_user_func_call``.
+- ``self._ta_counter`` (``int``): monotonically increasing TA member
+  index used to mint unique ``_ta_<func>_<n>`` member names.
+- ``self._series_bar_fields`` (``set[str]``): bar-field identifiers
+  used as TA inputs anywhere in the program.
+- ``self._security_calls`` (``list[SecurityCallInfo]``): created on
+  first ``request.security(...)`` via ``getattr(..., "_security_calls",
+  [])`` and stored back on ``self`` -- the analyzer also reads this
+  attribute via ``getattr`` in ``analyze()``.
+- ``self._fixnan_counter`` / ``self._fixnan_sites``: ``fixnan(...)``
+  member-name counter + site list.
+- ``self._symbols`` (``SymbolTable``): consulted by
+  ``_handle_input_call`` to type a series-defval input.
+- ``self._enum_defs`` (``dict[str, list[str]]``): enum schema, used
+  by ``_validate_input_member_tv`` for input.enum() checks.
+- ``self._func_defs`` / ``self._func_return_types`` /
+  ``self._func_returns_tuple`` / ``self._func_tuple_element_count``:
+  user-function metadata captured during initial pass; consumed by
+  ``_handle_user_func_call``.
+- ``self._func_series_vars`` / ``self._func_var_members`` /
+  ``self._func_ta_ranges``: per-function state needed for
+  call-site cloning.
+- ``self._func_call_site_count`` / ``self._func_call_cs_map``:
+  per-call-site indices populated by ``_handle_user_func_call``.
+- ``self._func_infos`` (``list[FuncInfo]``): the function-info list
+  surfaced through ``AnalyzerContext``.
+
+Sibling-mixin methods consumed via ``self``:
+
+- ``self._visit`` -- visitor entry (``Analyzer.base``).
+- ``self._expr_to_str`` -- expression stringifier
+  (``DiagnosticsHelper``); used by ``_handle_ta_call`` to render
+  ctor args and by ``_handle_user_func_call`` for the param
+  substitution map.
+- ``self._warn`` / ``self._error`` (``DiagnosticsHelper``).
+- ``self._warn_if_unknown_source_id`` (``DiagnosticsHelper``).
+- ``self._input_diag_loc`` (``DiagnosticsHelper``).
+- ``self._extract_literal_value`` (``TypeHelper``).
+- ``self._collect_security_mutable_globals`` (``Analyzer.base``):
+  stays on the host class because it walks the AST collecting
+  mutable globals -- not an isolated call-handling concern.
+
+Output dataclasses (``TACallSite`` / ``FuncInfo`` / ``FixnanCallSite``
+/ ``SecurityCallInfo``) are imported from sibling ``contracts.py`` so
+the analyzer package's import graph stays a strict DAG with no cycle
+back through ``base.py``.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ..ast_nodes import (
+    ASTNode, BoolLiteral, FuncCall, Identifier, MemberAccess,
+    NumberLiteral, StringLiteral, TupleLiteral,
+)
+from ..symbols import PineType
+from .. import signatures as sigs
+from .. import tv_input_choices as tv_in
+from .contracts import FixnanCallSite, FuncInfo, SecurityCallInfo, TACallSite
+from .tables import (
+    BAR_FIELDS, TA_CLASS_MAP, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
+    TA_TUPLE_RETURNS,
+)
+
+
+class CallHandlers:
+    """``_handle_*_call`` dispatch + bookkeeping for analyzer call-sites.
+
+    Mixed into ``Analyzer``; not meant to be instantiated standalone.
+    See the module docstring for the host-class state contract."""
+
+    # ------------------------------------------------------------------
+    # TA call handling
+    # ------------------------------------------------------------------
+
+    def _merge_ta_args(self, func_name: str, node: FuncCall) -> list:
+        """Merge positional args and kwargs into a unified positional list."""
+        param_names = sigs.get_param_names("ta", func_name)
+        if param_names is None and func_name == "sum":
+            param_names = sigs.get_param_names("math", "sum")
+        if param_names is None or not node.kwargs:
+            return list(node.args)
+
+        # Start with positional args
+        merged = list(node.args)
+        # Fill in kwargs at their expected positions
+        for i, pname in enumerate(param_names):
+            if pname in node.kwargs:
+                # Extend list if needed
+                while len(merged) <= i:
+                    merged.append(None)
+                if merged[i] is None:
+                    merged[i] = node.kwargs[pname]
+        # Remove trailing Nones
+        while merged and merged[-1] is None:
+            merged.pop()
+        return merged
+
+    def _handle_ta_call(self, func_name: str, node: FuncCall) -> PineType:
+        """Handle ta.* function calls."""
+        # Visit all args for side effects (series detection, etc.)
+        for arg in node.args:
+            self._visit(arg)
+        for val in node.kwargs.values():
+            self._visit(val)
+
+        # ta.pivot_point_levels is a free runtime function (not a stateful
+        # indicator), but its codegen lowers to use `_s_high[1]`, `_s_low[1]`,
+        # `_s_close[1]` so the pivot is calculated from the PREVIOUS bar's
+        # HLC (matching Pine v6 semantics where `developing` defaults to
+        # false). Register the bar-field history series here so that the
+        # codegen emits the corresponding `Series<double> _s_high/...` members
+        # and pushes them at the top of every on_bar tick.
+        if func_name == "pivot_point_levels":
+            self._series_bar_fields.add("high")
+            self._series_bar_fields.add("low")
+            self._series_bar_fields.add("close")
+            return PineType.FLOAT  # actual array<float> handled by type inference
+
+        # ta.vwap(source, anchor, stdev_mult) → 3-arg bands form.
+        # When called with 3 args (or anchor/stdev_mult kwargs), remap to the
+        # internal "vwap_bands" key which maps to ta::VWAPBands (returns tuple).
+        if func_name == "vwap":
+            param_names_v = ["source", "anchor", "stdev_mult"]
+            merged_v = list(node.args)
+            for i, pname in enumerate(param_names_v):
+                if pname in node.kwargs:
+                    while len(merged_v) <= i:
+                        merged_v.append(None)
+                    if merged_v[i] is None:
+                        merged_v[i] = node.kwargs[pname]
+            if len(merged_v) >= 3:
+                func_name = "vwap_bands"
+
+        if func_name not in TA_CLASS_MAP:
+            return PineType.FLOAT
+
+        # Merge positional + kwargs into a unified arg list
+        all_args = self._merge_ta_args(func_name, node)
+
+        # ta.tr(handle_na) — TV v6 default for handle_na is false. When the
+        # caller omits the arg, inject the explicit ``false`` so the C++
+        # TR ctor receives an unambiguous compile-time literal at the
+        # initializer-list site (`_ta_tr_1(false)`).
+        if func_name == "tr" and not all_args:
+            default_arg = BoolLiteral(value=False)
+            self._visit(default_arg)
+            all_args = [default_arg]
+
+        if func_name == "vwap" and not all_args:
+            default_src = Identifier(name="close")
+            self._visit(default_src)
+            self._series_bar_fields.add("close")
+            all_args = [default_src]
+
+        # Handle ta.highest(length) / ta.lowest(length) with 1 arg:
+        # single arg is the length, source defaults to high/low respectively.
+        # Remap so all_args = [default_source, length_arg].
+        _DEFAULT_SOURCE = {"highest": "high", "lowest": "low"}
+        if func_name in _DEFAULT_SOURCE and len(all_args) == 1:
+            default_src = Identifier(name=_DEFAULT_SOURCE[func_name])
+            self._visit(default_src)
+            self._series_bar_fields.add(_DEFAULT_SOURCE[func_name])
+            all_args = [default_src, all_args[0]]
+
+        self._ta_counter += 1
+        class_name = TA_CLASS_MAP[func_name]
+        member_name = f"_ta_{func_name}_{self._ta_counter}"
+        returns_tuple = func_name in TA_TUPLE_RETURNS
+
+        # vwap_bands special dispatch: ta.vwap(source, anchor, stdev_mult)
+        # ctor receives stdev_mult only; compute receives source only.
+        # The anchor arg (index 1) is the Pine-level "when to reset" series;
+        # our VWAPBands wrapper uses UTC-day boundaries matching the daily
+        # anchor default, so anchor is intentionally ignored in codegen.
+        if func_name == "vwap_bands":
+            ctor_args: list[str] = []
+            if len(all_args) >= 3 and all_args[2] is not None:
+                ctor_args = [self._expr_to_str(all_args[2])]
+            compute_args: list = []
+            if all_args and all_args[0] is not None:
+                compute_args = [all_args[0]]
+            is_static = self._global_scope and all(self._is_static_expression(arg) for arg in compute_args)
+            site = TACallSite(
+                member_name=member_name,
+                class_name=class_name,
+                ctor_args=ctor_args,
+                compute_args=compute_args,
+                returns_tuple=returns_tuple,
+                node=node,
+                is_static=is_static,
+            )
+            self._ta_call_sites.append(site)
+            return PineType.FLOAT
+
+        # Determine constructor args
+        ctor_args: list[str] = []
+        effective_multi_ctor = TA_MULTI_CTOR.copy()
+        if func_name in ("pivothigh", "pivotlow") and len(all_args) == 3:
+            effective_multi_ctor[func_name] = [1, 2]
+
+        if func_name in TA_NO_CTOR:
+            pass
+        elif func_name in effective_multi_ctor:
+            for idx in effective_multi_ctor[func_name]:
+                if idx < len(all_args) and all_args[idx] is not None:
+                    ctor_args.append(self._expr_to_str(all_args[idx]))
+        elif func_name in TA_PERIOD_ARG:
+            idx = TA_PERIOD_ARG[func_name]
+            if idx < len(all_args) and all_args[idx] is not None:
+                ctor_args.append(self._expr_to_str(all_args[idx]))
+
+        # Determine compute args (all args that aren't ctor args)
+        compute_args: list = []
+        ctor_indices = set()
+        if func_name in effective_multi_ctor:
+            ctor_indices = set(effective_multi_ctor[func_name])
+        elif func_name in TA_PERIOD_ARG:
+            ctor_indices = {TA_PERIOD_ARG[func_name]}
+
+        for i, arg in enumerate(all_args):
+            if i not in ctor_indices and arg is not None:
+                compute_args.append(arg)
+
+        is_static = self._global_scope and all(self._is_static_expression(arg) for arg in compute_args)
+        site = TACallSite(
+            member_name=member_name,
+            class_name=class_name,
+            ctor_args=ctor_args,
+            compute_args=compute_args,
+            returns_tuple=returns_tuple,
+            node=node,
+            is_static=is_static,
+        )
+        self._ta_call_sites.append(site)
+
+        return PineType.FLOAT
+
+    def _handle_request_call(self, func_name: str, node: FuncCall) -> PineType:
+        """Handle request.* function calls."""
+        if func_name == "security":
+            param_names = ["symbol", "timeframe", "expression", "gaps", "lookahead",
+                           "ignore_invalid_symbol", "currency"]
+            all_args = list(node.args)
+            for i, pname in enumerate(param_names):
+                if pname in node.kwargs:
+                    while len(all_args) <= i:
+                        all_args.append(None)
+                    all_args[i] = node.kwargs[pname]
+
+            tf_node = all_args[1] if len(all_args) > 1 else None
+            expr_node = all_args[2] if len(all_args) > 2 else None
+
+            # Visit non-expression args first (symbol, tf, gaps, lookahead)
+            for arg in node.args:
+                if arg is not None and arg is not expr_node:
+                    self._visit(arg)
+            for k, val in node.kwargs.items():
+                if val is not None and val is not expr_node:
+                    self._visit(val)
+
+            # Track TA sites created by the expression
+            ta_start = len(self._ta_call_sites)
+            if expr_node is not None:
+                self._visit(expr_node)
+            ta_end = len(self._ta_call_sites)
+            security_ta_range = (ta_start, ta_end) if ta_end > ta_start else None
+
+            # Assign ID and record the call
+            self._security_calls = getattr(self, "_security_calls", [])
+            sec_id = len(self._security_calls)
+
+            returns_tuple = isinstance(expr_node, TupleLiteral)
+            tuple_size = len(expr_node.elements) if returns_tuple else 0
+
+            gaps_node = all_args[3] if len(all_args) > 3 else None
+            lookahead_node = all_args[4] if len(all_args) > 4 else None
+
+            mutable_globals = tuple(sorted(self._collect_security_mutable_globals(expr_node)))
+            self._security_calls.append(SecurityCallInfo(
+                sec_id=sec_id,
+                timeframe=tf_node,
+                expression=expr_node,
+                returns_tuple=returns_tuple,
+                tuple_size=tuple_size,
+                gaps=gaps_node,
+                lookahead=lookahead_node,
+                ta_range=security_ta_range,
+                depends_on_mutable_globals=bool(mutable_globals),
+                mutable_globals=mutable_globals,
+            ))
+
+            return PineType.FLOAT
+
+        if func_name == "security_lower_tf":
+            return self._handle_request_security_lower_tf(node)
+
+        # Fallback for other request.*
+        for arg in node.args:
+            self._visit(arg)
+        for val in node.kwargs.values():
+            self._visit(val)
+        return PineType.FLOAT
+
+    def _handle_request_security_lower_tf(self, node: FuncCall) -> PineType:
+        """Lower ``request.security_lower_tf(symbol, timeframe, expression, ...)``.
+
+        TV signature differs from ``request.security``: there is no ``gaps``
+        or ``lookahead`` keyword (lower-TF emulation pins both off), and
+        the result is an ``array<T>`` with one element per synthesised
+        sub-bar of the current chart bar instead of a scalar T.
+
+        We piggy-back on the existing ``SecurityCallInfo`` plumbing — same
+        ``sec_id`` allocation, same TA-binding-stack collection, same
+        mutable-global discovery — but flip ``is_lower_tf_array=True`` so
+        the codegen knows to emit a ``std::vector<T>`` accumulator that
+        gets cleared on sub-bar 0 and pushed-to per sub-bar.
+
+        UDT / color / string element types are deliberately rejected here
+        with a precise diagnostic; the runtime path only knows how to
+        accumulate ``double`` / ``int`` / ``bool``."""
+        param_names = ["symbol", "timeframe", "expression",
+                       "ignore_invalid_symbol", "currency",
+                       "ignore_invalid_timeframe", "calc_bars_count"]
+
+        unknown = set(node.kwargs) - set(param_names)
+        if unknown:
+            self._error(
+                "request.security_lower_tf has unknown parameter(s): "
+                + ", ".join(sorted(unknown))
+                + ". Supported parameters: " + ", ".join(param_names),
+                node.loc,
+            )
+
+        all_args = list(node.args)
+        for i, pname in enumerate(param_names):
+            if pname in node.kwargs:
+                while len(all_args) <= i:
+                    all_args.append(None)
+                all_args[i] = node.kwargs[pname]
+
+        tf_node = all_args[1] if len(all_args) > 1 else None
+        expr_node = all_args[2] if len(all_args) > 2 else None
+
+        if expr_node is None:
+            self._error(
+                "request.security_lower_tf requires an expression argument",
+                node.loc,
+            )
+
+        if isinstance(expr_node, TupleLiteral):
+            self._error(
+                "request.security_lower_tf does not support tuple expressions yet. "
+                "Issue separate request.security_lower_tf calls for each series.",
+                node.loc,
+            )
+
+        for arg in node.args:
+            if arg is not None and arg is not expr_node:
+                self._visit(arg)
+        for k, val in node.kwargs.items():
+            if val is not None and val is not expr_node:
+                self._visit(val)
+
+        ta_start = len(self._ta_call_sites)
+        expr_pine_type = PineType.FLOAT
+        if expr_node is not None:
+            expr_pine_type = self._visit(expr_node)
+        ta_end = len(self._ta_call_sites)
+        security_ta_range = (ta_start, ta_end) if ta_end > ta_start else None
+
+        # Cache the resolved element type on the call node so the
+        # ``_type_spec_from_expr`` pass can map ``request.security_lower_tf``
+        # to ``array<T>`` without re-visiting the expression (which would
+        # double-allocate TA call sites for expressions like ``ta.ema``).
+        cached_anns = getattr(node, "annotations", None) or {}
+        cached_anns["lower_tf_element_pine_type"] = expr_pine_type
+        node.annotations = cached_anns
+
+        if expr_pine_type not in (PineType.FLOAT, PineType.INT, PineType.BOOL,
+                                   PineType.NA, PineType.UNKNOWN):
+            element_label = {
+                PineType.STRING: "string",
+                PineType.COLOR: "color",
+            }.get(expr_pine_type, str(expr_pine_type))
+            self._error(
+                "request.security_lower_tf element type '" + element_label
+                + "' is not yet supported. Supported element types: float, int, bool. "
+                "UDT / color / string element types are out of scope.",
+                node.loc,
+            )
+
+        self._security_calls = getattr(self, "_security_calls", [])
+        sec_id = len(self._security_calls)
+
+        mutable_globals = tuple(sorted(self._collect_security_mutable_globals(expr_node)))
+        self._security_calls.append(SecurityCallInfo(
+            sec_id=sec_id,
+            timeframe=tf_node,
+            expression=expr_node,
+            returns_tuple=False,
+            tuple_size=0,
+            gaps=None,
+            lookahead=None,
+            ta_range=security_ta_range,
+            depends_on_mutable_globals=bool(mutable_globals),
+            mutable_globals=mutable_globals,
+            is_lower_tf_array=True,
+        ))
+
+        # ``request.security_lower_tf`` returns an array; the value-level
+        # PineType remains UNKNOWN here so callers fall through to
+        # ``_type_spec_from_expr`` for the structured ``array<T>`` spec.
+        return PineType.UNKNOWN
+
+    def _handle_strategy_call(self, func_name: str, node: FuncCall) -> PineType:
+        """Handle strategy.* function calls."""
+        for arg in node.args:
+            self._visit(arg)
+        for val in node.kwargs.values():
+            self._visit(val)
+        if func_name in ("convert_to_account", "convert_to_symbol", "default_entry_qty"):
+            return PineType.FLOAT
+        return PineType.VOID
+
+    # ------------------------------------------------------------------
+    # Input call handling
+    # ------------------------------------------------------------------
+
+    def _handle_input_call(self, node: FuncCall) -> PineType:
+        """Handle input() calls without qualifier."""
+        # First arg is defval
+        if node.args:
+            defval = node.args[0]
+            self._visit(defval)
+            # Infer type from defval
+            if isinstance(defval, NumberLiteral):
+                if isinstance(defval.value, float):
+                    return PineType.FLOAT
+                return PineType.INT
+            if isinstance(defval, StringLiteral):
+                return PineType.STRING
+            if isinstance(defval, BoolLiteral):
+                return PineType.BOOL
+            if isinstance(defval, Identifier):
+                # input(close) => source input
+                self._validate_plain_input_source(defval, node)
+                sym = self._symbols.resolve(defval.name)
+                if sym:
+                    return sym.pine_type
+                return PineType.FLOAT
+        # Check kwargs for defval
+        if "defval" in node.kwargs:
+            defval = node.kwargs["defval"]
+            self._visit(defval)
+            if isinstance(defval, Identifier):
+                self._validate_plain_input_source(defval, node)
+            if isinstance(defval, NumberLiteral):
+                if isinstance(defval.value, float):
+                    return PineType.FLOAT
+                return PineType.INT
+            if isinstance(defval, StringLiteral):
+                return PineType.STRING
+            if isinstance(defval, BoolLiteral):
+                return PineType.BOOL
+
+        # Visit remaining args
+        for arg in node.args[1:]:
+            self._visit(arg)
+        for val in node.kwargs.values():
+            self._visit(val)
+
+        return PineType.FLOAT  # default
+
+    def _merge_input_params(self, member: str | None, node: FuncCall) -> dict[str, Any]:
+        """Positional + kwargs merged like codegen (for input.* validation)."""
+        if member is None:
+            param_names = sigs.get_param_names(None, "input")
+        else:
+            param_names = sigs.get_param_names("input", member)
+        if not param_names:
+            return {}
+        merged: list[Any] = list(node.args)
+        for i, pname in enumerate(param_names):
+            if pname in node.kwargs:
+                while len(merged) <= i:
+                    merged.append(None)
+                if i >= len(merged) or merged[i] is None:
+                    merged[i] = node.kwargs[pname]
+        out: dict[str, Any] = {}
+        for i, pname in enumerate(param_names):
+            if i < len(merged) and merged[i] is not None:
+                out[pname] = merged[i]
+        for k, v in node.kwargs.items():
+            if k not in out:
+                out[k] = v
+        return out
+
+    def _input_enum_type_name(self, node: FuncCall) -> str | None:
+        """If this is input.enum(...) with Enum.member defval, return the enum type name."""
+        callee = node.callee
+        if not isinstance(callee, MemberAccess):
+            return None
+        if not isinstance(callee.object, Identifier) or callee.object.name != "input":
+            return None
+        if callee.member != "enum":
+            return None
+        merged = self._merge_input_params("enum", node)
+        dv = merged.get("defval")
+        if dv is None and node.args:
+            dv = node.args[0]
+        if isinstance(dv, MemberAccess) and isinstance(dv.object, Identifier):
+            return dv.object.name
+        return None
+
+    def _validate_plain_input_source(self, defval: ASTNode, node: FuncCall) -> None:
+        """Warn when plain input() uses a series defval unlike TV built-ins."""
+        if isinstance(defval, Identifier):
+            self._warn_if_unknown_source_id(defval.name, defval, node)
+
+    def _validate_input_member_tv(self, member: str, node: FuncCall) -> None:
+        """TradingView-style const checks for input.* (warnings only)."""
+        merged = self._merge_input_params(member, node)
+        defval = merged.get("defval")
+        if defval is None and node.args:
+            defval = node.args[0]
+
+        if member == "source" and defval is not None:
+            if isinstance(defval, Identifier):
+                self._warn_if_unknown_source_id(defval.name, defval, node)
+            else:
+                self._warn(
+                    "input.source defval is not a native chart series (open, high, low, close, …); "
+                    "complex indicators or expressions are not supported in PineForge.",
+                    self._input_diag_loc(node, defval),
+                )
+            return
+
+        if member == "timeframe" and isinstance(defval, StringLiteral):
+            if not tv_in.is_valid_timeframe_string(defval.value):
+                self._warn(
+                    f"input.timeframe defval {defval.value!r} is not a typical Pine timeframe string.",
+                    self._input_diag_loc(node, defval),
+                )
+            return
+
+        if member == "session" and isinstance(defval, StringLiteral):
+            if not tv_in.is_plausible_session_string(defval.value):
+                self._warn(
+                    f"input.session defval {defval.value!r} may be invalid (expected e.g. "
+                    "'24x7', '0930-1600', or weekday flags).",
+                    self._input_diag_loc(node, defval),
+                )
+            return
+
+        if member == "string":
+            opts = merged.get("options")
+            if isinstance(opts, TupleLiteral):
+                literals: list[str] = []
+                non_const = False
+                for el in opts.elements:
+                    if isinstance(el, StringLiteral):
+                        literals.append(el.value)
+                    else:
+                        non_const = True
+                        break
+                if not non_const and literals and isinstance(defval, StringLiteral):
+                    if defval.value not in literals:
+                        self._warn(
+                            "input.string defval is not among the options list values.",
+                            self._input_diag_loc(node, defval),
+                        )
+            return
+
+        if member == "enum" and defval is not None:
+            if isinstance(defval, MemberAccess) and isinstance(defval.object, Identifier):
+                ename = defval.object.name
+                emem = defval.member
+                members = self._enum_defs.get(ename)
+                if members is None:
+                    self._error(
+                        f"Enum '{ename}' must be declared above this input.enum() call "
+                        "(or the name is misspelled).",
+                        self._input_diag_loc(node, defval),
+                    )
+                if emem not in members:
+                    self._warn(
+                        f"input.enum defval {ename}.{emem} is not a member of enum {ename}.",
+                        self._input_diag_loc(node, defval),
+                    )
+
+    def _handle_input_member_call(self, member: str, node: FuncCall) -> PineType:
+        """Handle input.int(), input.float(), etc."""
+        for arg in node.args:
+            self._visit(arg)
+        for val in node.kwargs.values():
+            self._visit(val)
+
+        self._validate_input_member_tv(member, node)
+
+        type_map = {
+            "int": PineType.INT,
+            "float": PineType.FLOAT,
+            "bool": PineType.BOOL,
+            "string": PineType.STRING,
+            "source": PineType.FLOAT,
+            "color": PineType.COLOR,
+            "enum": PineType.INT,
+            "session": PineType.STRING,
+            "timeframe": PineType.STRING,
+            "time": PineType.INT,
+            "symbol": PineType.STRING,
+            "price": PineType.FLOAT,
+            "text_area": PineType.STRING,
+        }
+        return type_map.get(member, PineType.FLOAT)
+
+    def _check_input_call(self, node: FuncCall) -> tuple[PineType, bool, Any] | None:
+        """Check if a FuncCall is an input call and extract default value.
+        Returns (type, is_const, const_value) or None.
+        """
+        callee = node.callee
+
+        if isinstance(callee, Identifier) and callee.name == "input":
+            # input(defval, ...)
+            defval = self._extract_defval(node)
+            ptype = self._handle_input_call(node)
+            return (ptype, True, defval)
+
+        if isinstance(callee, MemberAccess):
+            if isinstance(callee.object, Identifier) and callee.object.name == "input":
+                member = callee.member
+                defval = self._extract_defval(node)
+                ptype = self._handle_input_member_call(member, node)
+                return (ptype, True, defval)
+
+        return None
+
+    def _extract_defval(self, node: FuncCall) -> Any:
+        """Extract the default value from an input call."""
+        # First positional arg is typically defval
+        if node.args:
+            first = node.args[0]
+            return self._extract_literal_value(first)
+        if "defval" in node.kwargs:
+            return self._extract_literal_value(node.kwargs["defval"])
+        return None
+
+    # ------------------------------------------------------------------
+    # matrix method dispatch
+    # ------------------------------------------------------------------
+
+    def _handle_matrix_method(self, member: str, recv_spec) -> PineType:
+        """Map a matrix.<member>(receiver, ...) call to its PineType.
+
+        ``recv_spec`` is the receiver's :class:`TypeSpec` (kind ``"matrix"``).
+        ``_type_spec_from_expr`` (in ``analyzer/types.py``) already returns
+        the correct structured ``TypeSpec`` for matrix-method calls so codegen
+        downstream is unaffected; this helper exists so the smaller
+        :class:`PineType` enum surface used by ``_visit_FuncCall`` and
+        ``_visit_VarDecl`` no longer collapses element types to ``VOID``.
+
+        Phase D Task 2: previously the general MemberAccess arm in
+        :meth:`_visit_FuncCall` returned ``PineType.VOID`` for matrix-method
+        calls, so ``v = m.get(0, 0)`` typed ``v`` as ``VOID`` even on
+        ``matrix<int>``.
+        """
+        from ..symbols import TypeSpec
+
+        if recv_spec is None or recv_spec.kind != "matrix":
+            return PineType.VOID
+
+        elem: TypeSpec | None = recv_spec.element
+
+        # Element-typed return paths
+        if member == "get":
+            return self._element_pine_type(elem)
+        if member in ("row", "col"):
+            # Element type is preserved via TypeSpec.array(elem); the legacy
+            # PineType slot can't represent array<T>, so fall back to a
+            # reasonable scalar PineType (UNKNOWN is a poor fit because
+            # downstream defaults to FLOAT for UNKNOWN).
+            return PineType.VOID
+
+        # Scalar-return methods (numeric matrix only — codegen rejects
+        # these on non-float matrices via MATRIX_NUMERIC_ONLY).
+        if member in ("det", "trace", "rank", "sum", "avg", "min", "max", "mode"):
+            return PineType.FLOAT
+        if member == "elements_count":
+            return PineType.INT
+        if member in (
+            "is_square", "is_identity", "is_diagonal", "is_antidiagonal",
+            "is_symmetric", "is_antisymmetric", "is_triangular",
+            "is_stochastic", "is_binary", "is_zero",
+        ):
+            return PineType.BOOL
+        if member in ("rows", "columns"):
+            return PineType.INT
+
+        # Mutators / matrix-returning methods don't carry a usable scalar
+        # PineType; type_spec on the LHS Symbol is what codegen reads for
+        # those cases.
+        return PineType.VOID
+
+    @staticmethod
+    def _element_pine_type(elem) -> PineType:
+        """Element ``TypeSpec`` -> ``PineType`` for matrix.get() / array.get().
+
+        Mirrors :meth:`TypeHelper._pine_type_to_spec` (inverse direction).
+        Returns ``PineType.VOID`` when the element has no clean PineType
+        slot (UDT / nested collection) -- callers should consult ``type_spec``
+        / ``udt_type_name`` on the resulting Symbol instead.
+        """
+        if elem is None:
+            return PineType.VOID
+        if elem.kind == "primitive":
+            mapping = {
+                "int": PineType.INT,
+                "float": PineType.FLOAT,
+                "bool": PineType.BOOL,
+                "string": PineType.STRING,
+                "color": PineType.COLOR,
+            }
+            return mapping.get(elem.name or "", PineType.VOID)
+        # UDT, array, map, matrix: PineType enum can't represent these.
+        # _visit_VarDecl's type_spec / udt_type_name path covers the gap.
+        return PineType.VOID
+
+    # ------------------------------------------------------------------
+    # fixnan handling
+    # ------------------------------------------------------------------
+
+    def _handle_fixnan_call(self, node: FuncCall) -> PineType:
+        """Handle fixnan() calls."""
+        arg_type = PineType.FLOAT
+        for arg in node.args:
+            arg_type = self._visit(arg)
+
+        self._fixnan_counter += 1
+        site = FixnanCallSite(
+            member_name=f"_prev_fixnan_{self._fixnan_counter}",
+            pine_type=arg_type,
+        )
+        self._fixnan_sites.append(site)
+
+        return arg_type
+
+    # ------------------------------------------------------------------
+    # User-defined function calls
+    # ------------------------------------------------------------------
+
+    def _handle_user_func_call(self, func_name: str, node: FuncCall) -> PineType:
+        """Handle calls to user-defined functions."""
+        func_def = self._func_defs[func_name]
+
+        # Visit the call args
+        arg_types = []
+        for arg in node.args:
+            arg_types.append(self._visit(arg))
+
+        # Determine param types from call-site args
+        param_types = arg_types[:len(func_def.params)]
+        while len(param_types) < len(func_def.params):
+            param_types.append(PineType.UNKNOWN)
+
+        # Determine return type: re-analyze the function body with known param types
+        # For now, use the cached return type from initial analysis
+        return_type = self._func_return_types.get(func_name, PineType.FLOAT)
+
+        # If the return type was UNKNOWN or VOID, infer from param types
+        if return_type in (PineType.UNKNOWN, PineType.VOID):
+            if any(t == PineType.STRING for t in param_types):
+                return_type = PineType.STRING
+            elif any(t == PineType.FLOAT for t in param_types):
+                return_type = PineType.FLOAT
+            elif any(t == PineType.INT for t in param_types):
+                return_type = PineType.INT
+
+        # If this function has series params, ensure bar-field arguments
+        # passed at the call site are registered as series_bar_fields so that
+        # the codegen can create Series<double> members for them.
+        func_sv = self._func_series_vars.get(func_name, set())
+        if func_sv:
+            for p_idx, param_name in enumerate(func_def.params):
+                if param_name in func_sv and p_idx < len(node.args):
+                    arg = node.args[p_idx]
+                    if isinstance(arg, Identifier) and arg.name in BAR_FIELDS:
+                        self._series_bar_fields.add(arg.name)
+
+        # Per-call-site cloning: if this function has TA calls or series vars,
+        # track call sites so codegen can create per-call-site variants.
+        # This prevents shared state corruption when the function is called
+        # multiple times per bar.
+        has_ta = func_name in self._func_ta_ranges
+        has_series = func_name in self._func_series_vars or func_name in self._func_var_members
+        if has_ta or has_series:
+            cs_idx = self._func_call_site_count.get(func_name, 0)
+            self._func_call_site_count[func_name] = cs_idx + 1
+            self._func_call_cs_map[id(node)] = (func_name, cs_idx)
+
+            # Build parameter -> call-site argument string mapping
+            param_arg_map: dict[str, str] = {}
+            for p_idx, param_name in enumerate(func_def.params):
+                if p_idx < len(node.args):
+                    param_arg_map[param_name] = self._expr_to_str(node.args[p_idx])
+
+            # Clone TA call sites (only if function has TA ranges)
+            if has_ta:
+                start, end = self._func_ta_ranges[func_name]
+
+                def _subst_params(arg: str, pmap: dict[str, str]) -> str:
+                    """Substitute parameter names in an expression string.
+
+                    Handles both exact matches ('len' -> 'len3') and parameter
+                    names within expressions ('len / 2' -> 'len3 / 2').
+                    """
+                    import re
+                    result = arg
+                    # Sort by length descending to avoid partial replacements
+                    for param, value in sorted(pmap.items(), key=lambda x: len(x[0]), reverse=True):
+                        result = re.sub(rf'\b{re.escape(param)}\b', value, result)
+                    return result
+
+                if cs_idx == 0:
+                    # First call site: save original param-based ctor_args for future cloning,
+                    # then resolve to actual call-site values
+                    for i in range(start, end):
+                        site = self._ta_call_sites[i]
+                        if not hasattr(site, '_orig_ctor_args'):
+                            site._orig_ctor_args = site.ctor_args[:]
+                        site.ctor_args = [_subst_params(a, param_arg_map) for a in site._orig_ctor_args]
+                else:
+                    # Subsequent call sites: clone using saved original param names,
+                    # substituted with this call site's arguments
+                    for i in range(start, end):
+                        orig = self._ta_call_sites[i]
+                        orig_args = getattr(orig, '_orig_ctor_args', orig.ctor_args)
+                        resolved_ctor = [_subst_params(a, param_arg_map) for a in orig_args]
+                        cloned = TACallSite(
+                            member_name=f"{orig.member_name}_cs{cs_idx}",
+                            class_name=orig.class_name,
+                            ctor_args=resolved_ctor,
+                            compute_args=orig.compute_args[:],
+                            returns_tuple=orig.returns_tuple,
+                            node=orig.node,
+                            is_static=orig.is_static,
+                        )
+                        self._ta_call_sites.append(cloned)
+
+        # Create or update FuncInfo
+        is_tuple = self._func_returns_tuple.get(func_name, False)
+        tuple_count = self._func_tuple_element_count.get(func_name, 0)
+        # Forward UDT-return inference (set in _visit_FuncDef) so codegen can
+        # emit the struct return type. Probe: udt-method-probe-20.
+        udt_ret = self._func_udt_return_types.get(func_name)
+        existing = [fi for fi in self._func_infos if fi.name == func_name]
+        if not existing:
+            fi = FuncInfo(
+                name=func_name,
+                param_types=param_types,
+                return_type=return_type,
+                node=func_def,
+                returns_tuple=is_tuple,
+                tuple_element_count=tuple_count,
+                udt_return_type=udt_ret,
+            )
+            self._func_infos.append(fi)
+        else:
+            # Update with better type info if available
+            fi = existing[0]
+            if fi.return_type in (PineType.UNKNOWN, PineType.VOID) and return_type not in (PineType.UNKNOWN, PineType.VOID):
+                fi.return_type = return_type
+            for i, pt in enumerate(param_types):
+                if i < len(fi.param_types) and fi.param_types[i] == PineType.UNKNOWN:
+                    fi.param_types[i] = pt
+            if fi.udt_return_type is None and udt_ret is not None:
+                fi.udt_return_type = udt_ret
+
+        return return_type

@@ -1,0 +1,144 @@
+name: Release
+
+# Manual release: bump VERSION, build + push a multi-arch Docker image to
+# GHCR, then commit + tag + create a GitHub Release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semver bump applied to VERSION file."
+        required: true
+        type: choice
+        default: patch
+        options: [patch, minor, major]
+      override:
+        description: "Optional explicit version (overrides bump). Leave blank to auto-bump."
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "Skip image push + tag; only show diff + new version."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # commit + tag + create release
+  packages: write   # push image to GHCR
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}   # ghcr.io/pineforge-4pass/pineforge-codegen-oss
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      BUMP:     ${{ inputs.bump }}
+      OVERRIDE: ${{ inputs.override }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+          # PAT (RELEASE_PAT) needed because the branch ruleset on `main`
+          # blocks GITHUB_TOKEN pushes. PAT runs as a user with admin role
+          # → bypass list match. Falls back to GITHUB_TOKEN if unset.
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Compute new version
+        id: ver
+        run: |
+          set -euo pipefail
+          cur=$(tr -d '[:space:]' < VERSION)
+          if [ -n "$OVERRIDE" ]; then
+            new="$OVERRIDE"
+          else
+            IFS='.' read -r maj min pat <<< "$cur"
+            case "$BUMP" in
+              patch) pat=$((pat+1)) ;;
+              minor) min=$((min+1)); pat=0 ;;
+              major) maj=$((maj+1)); min=0; pat=0 ;;
+              *) echo "::error::bad bump '$BUMP'"; exit 1 ;;
+            esac
+            new="${maj}.${min}.${pat}"
+          fi
+          if ! [[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+].+)?$ ]]; then
+            echo "::error::computed '$new' not semver"; exit 1
+          fi
+          if [ "$new" = "$cur" ]; then
+            echo "::error::version unchanged ($cur)"; exit 1
+          fi
+          lower=$(printf '%s\n%s\n' "$cur" "$new" | sort -V | head -1)
+          if [ "$lower" = "$new" ] && [ "$lower" != "$cur" ]; then
+            echo "::error::downgrade refused: $cur -> $new"; exit 1
+          fi
+          echo "cur=$cur" >> "$GITHUB_OUTPUT"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "Bump $cur -> $new"
+
+      - name: Write VERSION
+        env:
+          NEW_VERSION: ${{ steps.ver.outputs.new }}
+        run: printf '%s\n' "$NEW_VERSION" > VERSION
+
+      - name: Show diff
+        run: git --no-pager diff
+
+      - name: Set up QEMU
+        if: ${{ !inputs.dry_run }}
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
+
+      - name: Set up Buildx
+        if: ${{ !inputs.dry_run }}
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      - name: Log in to GHCR
+        if: ${{ !inputs.dry_run }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build first so a failure leaves `main` untouched (no orphan version
+      # bump). Tag + release only on a successful push.
+      - name: Build + push multi-arch image
+        if: ${{ !inputs.dry_run }}
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:v${{ steps.ver.outputs.new }}
+            ${{ env.IMAGE }}:latest
+          provenance: false
+
+      - name: Commit + tag + push
+        if: ${{ !inputs.dry_run }}
+        env:
+          NEW_VERSION: ${{ steps.ver.outputs.new }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add VERSION
+          git commit -m "release: v${NEW_VERSION}"
+          git tag "v${NEW_VERSION}"
+          git push origin HEAD --tags
+
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.ver.outputs.new }}
+        run: |
+          gh release create "v${NEW_VERSION}" \
+            --title "v${NEW_VERSION}" \
+            --generate-notes \
+            --notes-start-tag "$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo '')" \
+            --notes "Docker image: \`docker pull ${IMAGE}:v${NEW_VERSION}\`"
