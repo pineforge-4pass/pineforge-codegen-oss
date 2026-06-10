@@ -28,6 +28,53 @@ BAR_FIELDS = {
     "low": "current_bar_.low", "volume": "current_bar_.volume",
 }
 
+# struct-tm field extraction expressions for the time/date builtins. Shared
+# between the bare variable forms (``hour`` -> BAR_BUILTINS below) and the
+# function forms (``hour(time[, tz])`` in visit_call.py) so the two cannot
+# drift apart numerically.
+TIME_FIELD_EXPRS = {
+    "year":       "tm_buf.tm_year + 1900",
+    "month":      "tm_buf.tm_mon + 1",
+    "dayofmonth": "tm_buf.tm_mday",
+    "dayofweek":  "tm_buf.tm_wday + 1",
+    "hour":       "tm_buf.tm_hour",
+    "minute":     "tm_buf.tm_min",
+    "second":     "tm_buf.tm_sec",
+    "weekofyear": "(tm_buf.tm_yday + 7 - ((tm_buf.tm_wday + 6) % 7)) / 7",
+}
+
+
+def tz_time_field_lambda(field_expr: str, ts_arg: str, tz_arg: str) -> str:
+    """Inline C++ lambda decomposing a Unix-ms timestamp in a timezone.
+
+    UTC / "" / "Etc/UTC" stays on the cheap ``gmtime_r`` fast path (matching
+    the engine's ``_decompose_bar_time``); anything else takes a
+    mutex-guarded setenv+``localtime_r`` block, mirroring
+    ``pine_tz::ScopedTimezone`` (src/timezone.cpp) which is not exposed via
+    any public ``<pineforge/...>`` header today.
+    """
+    return (
+        "[&]() -> int { "
+        f"std::string _tz = ({tz_arg}); "
+        f"time_t _secs = (time_t)(({ts_arg}) / 1000); "
+        "struct tm tm_buf; "
+        "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") { "
+        "gmtime_r(&_secs, &tm_buf); "
+        "} else { "
+        "static std::mutex _pf_tz_mu; "
+        "std::lock_guard<std::mutex> _pf_tz_lock(_pf_tz_mu); "
+        "const char* _old = std::getenv(\"TZ\"); "
+        "std::string _old_tz = _old ? _old : \"\"; bool _had_old = (_old != nullptr); "
+        "::setenv(\"TZ\", _tz.c_str(), 1); ::tzset(); "
+        "localtime_r(&_secs, &tm_buf); "
+        "if (_had_old) { ::setenv(\"TZ\", _old_tz.c_str(), 1); } "
+        "else { ::unsetenv(\"TZ\"); } ::tzset(); "
+        "} "
+        f"return {field_expr}; "
+        "}()"
+    )
+
+
 BAR_BUILTINS = {
     "bar_index": "bar_index_",
     "time": "current_bar_.timestamp",
@@ -42,15 +89,20 @@ BAR_BUILTINS = {
     "hlc3": "((current_bar_.high + current_bar_.low + current_bar_.close) / 3.0)",
     "hlcc4": "((current_bar_.high + current_bar_.low + current_bar_.close + current_bar_.close) / 4.0)",
     "ohlc4": "((current_bar_.open + current_bar_.high + current_bar_.low + current_bar_.close) / 4.0)",
-    # Time/date extraction from bar timestamp (UTC).
-    "hour": "_bar_hour()",
-    "minute": "_bar_minute()",
-    "second": "_bar_second()",
-    "dayofmonth": "_bar_dayofmonth()",
-    "dayofweek": "_bar_dayofweek()",
-    "month": "_bar_month()",
-    "year": "_bar_year()",
-    "weekofyear": "_bar_weekofyear()",
+    # Time/date extraction from the bar timestamp. Pine v6 specifies the
+    # EXCHANGE timezone (syminfo.timezone) for the bare variable forms, so
+    # they route through the same timezone-aware lambda as the function
+    # forms ``hour(time[, tz])`` instead of the engine's UTC-only
+    # ``_bar_hour()`` helpers. For UTC-exchange data (the crypto corpus,
+    # SymInfo's constructor default) the lambda takes the gmtime_r fast
+    # path and is value-identical to the old emission.
+    **{
+        name: tz_time_field_lambda(
+            TIME_FIELD_EXPRS[name], "current_bar_.timestamp", "syminfo_.timezone"
+        )
+        for name in ("hour", "minute", "second", "dayofmonth", "dayofweek",
+                     "month", "year", "weekofyear")
+    },
 }
 
 BAR_SERIES_PUSH = {
@@ -308,9 +360,12 @@ ADJUSTMENT_MAP = {"none": "0", "dividends": "1", "splits": "2"}
 
 # display.* (plot_display) constants — ints for C++. TV uses these in chart
 # settings; the backtest ignores them. Unknown member falls back to "all" (0).
+# The integer codes are inert downstream (no engine consumer); they only need
+# to be distinct so constant-equality comparisons behave.
 DISPLAY_MAP = {
     "all": "0", "none": "1", "pane": "2",
     "data_window": "3", "status_line": "4", "price_scale": "5",
+    "pine_screener": "6",
 }
 
 # order.* sort-direction constants — emitted as std::string literals. Unknown
@@ -359,8 +414,23 @@ ARRAY_METHODS = {
     "range":     lambda a, args: f"(*std::max_element({a}.begin(),{a}.end())-*std::min_element({a}.begin(),{a}.end()))",
     "every":     lambda a, args: f"std::all_of({a}.begin(),{a}.end(),[](double v){{return v!=0.0;}})",
     "some":      lambda a, args: f"std::any_of({a}.begin(),{a}.end(),[](double v){{return v!=0.0;}})",
-    "stdev":     lambda a, args: f"[&](){{ double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); return std::sqrt(s/{a}.size()); }}()",
-    "variance":  lambda a, args: f"[&](){{ double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); return s/{a}.size(); }}()",
+    # stdev/variance honor the optional 2nd ``biased`` arg (Pine v6:
+    # biased=true → population (default), false → sample / n-1). The no-arg
+    # form keeps the original population emission byte-identical.
+    "stdev":     lambda a, args: (
+        f"[&](){{ double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); "
+        f"double _d=({args[0]})?(double){a}.size():((double){a}.size()-1.0); "
+        f"return _d>0?std::sqrt(s/_d):na<double>(); }}()"
+        if args else
+        f"[&](){{ double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); return std::sqrt(s/{a}.size()); }}()"
+    ),
+    "variance":  lambda a, args: (
+        f"[&](){{ double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); "
+        f"double _d=({args[0]})?(double){a}.size():((double){a}.size()-1.0); "
+        f"return _d>0?s/_d:na<double>(); }}()"
+        if args else
+        f"[&](){{ double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); return s/{a}.size(); }}()"
+    ),
     "median":    lambda a, args: f"[&](){{ auto c={a}; std::sort(c.begin(),c.end()); int n=c.size(); return n%2?c[n/2]:(c[n/2-1]+c[n/2])/2.0; }}()",
     "mode":      lambda a, args: f"[&](){{ std::unordered_map<double,int> m; for(auto v:{a})m[v]++; double best=0; int bc=0; for(auto&[v,c]:m)if(c>bc||(c==bc&&v<best)){{bc=c;best=v;}} return best; }}()",
     "percentile_linear_interpolation": lambda a, args: f"[&](){{ auto c={a}; std::sort(c.begin(),c.end()); double k=({args[0]}/100.0)*c.size()-0.5; int i=std::max(0,(int)k); double f=k-i; if(i+1>=(int)c.size()) return c.back(); return c[i]*(1-f)+c[i+1]*f; }}()",

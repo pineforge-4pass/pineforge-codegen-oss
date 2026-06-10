@@ -1426,9 +1426,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if ns == "order":
                 return PineType.INT
 
-            # format.* constants
+            # format.* constants — Pine ``const string`` ("mintick",
+            # "percent", ...). Codegen emits them as std::string literals
+            # (consumed by pine_str_tostring), so bare reads must type STRING
+            # for the declared C++ variable to match.
             if ns == "format":
-                return PineType.INT
+                return PineType.STRING
 
             # text.* constants (align_left, align_right, etc.)
             if ns == "text":

@@ -218,6 +218,45 @@ UNSUPPORTED_NAMESPACES: dict[str, str] = {
 UNSUPPORTED_MEMBERS: dict[tuple[str, str], str] = {
     ("chart", "left_visible_bar_time"):  "chart.left_visible_bar_time has no meaning in a batch backtest (no viewport).",
     ("chart", "right_visible_bar_time"): "chart.right_visible_bar_time has no meaning in a batch backtest (no viewport).",
+    ("chart", "bg_color"): "chart.bg_color has no meaning in a batch backtest (no chart theme).",
+    ("chart", "fg_color"): "chart.fg_color has no meaning in a batch backtest (no chart theme).",
+}
+
+# Constant-only namespaces whose members are drawing/visual style constants
+# (or call-scoped option constants). They are legitimately consumed as
+# ARGUMENTS to parse-and-skip visual calls (plot, plotshape, hline,
+# label.new, table.cell, ...), inside the strategy() declaration, and — for
+# barmerge.* — as request.security gaps/lookahead values. Outside those
+# contexts codegen falls through to ``std::string("<member>")`` while the
+# analyzer types the read INT: a silent type mismatch that at best surfaces
+# as a cryptic C++ error. Reject loudly when the member access survives into
+# non-visual code paths (see ``_const_arg_ctx_depth``).
+_CONST_NS_VISUAL_MSG = (
+    "is a visual/style constant with no runtime value in PineForge "
+    "backtests; it is only accepted as an argument to visual calls "
+    "(plot, plotshape, hline, label.new, table.cell, ...), which "
+    "PineForge parses and skips."
+)
+UNSUPPORTED_CONST_NAMESPACES: dict[str, str] = {
+    "extend":   _CONST_NS_VISUAL_MSG,
+    "font":     _CONST_NS_VISUAL_MSG,
+    "hline":    _CONST_NS_VISUAL_MSG,
+    "location": _CONST_NS_VISUAL_MSG,
+    "plot":     _CONST_NS_VISUAL_MSG,
+    "scale":    _CONST_NS_VISUAL_MSG,
+    "shape":    _CONST_NS_VISUAL_MSG,
+    "text":     _CONST_NS_VISUAL_MSG,
+    "xloc":     _CONST_NS_VISUAL_MSG,
+    "yloc":     _CONST_NS_VISUAL_MSG,
+    "barmerge": (
+        "is only valid as the gaps/lookahead argument of "
+        "request.security(...); it has no runtime value as a free "
+        "expression in PineForge."
+    ),
+    "alert": (
+        "is only valid as the freq argument of alert(...); it has no "
+        "runtime value as a free expression in PineForge."
+    ),
 }
 
 # Namespaces whose variable members have no batch-mode data source.
@@ -313,13 +352,21 @@ def _resolve_member_chain(node: ASTNode) -> str | None:
 class SupportChecker:
     """AST walker that produces Diagnostic objects for unsupported features."""
 
-    # syminfo fields that emit na<T>() due to missing data; warn when used in
-    # conditional context (if-condition or ternary condition) because the
-    # condition will always evaluate to false/na.
-    _SYMINFO_SILENT_GAP_FIELDS: frozenset[str] = frozenset({
-        "sector", "industry", "isin",
-        "expiration_date", "current_contract", "mincontract",
-    })
+    # syminfo fields that emit na<T>() (or route through the runtime metadata
+    # map, which returns na until a feed injects a value) due to missing data;
+    # warn when used in conditional context (if-condition or ternary
+    # condition) because the condition will always evaluate to false/na.
+    # Derived from the emission table so new na-accept fields cannot drift
+    # out of the warning: every SYMINFO_MEMBER_MAP entry whose emission is an
+    # ``na<T>()`` literal or a ``get_syminfo_metadata(...)`` lookup is a
+    # silent gap (sector/industry/isin/expiration_date/current_contract/
+    # mincontract/root/pricescale/minmove + employees/shareholders/
+    # shares_outstanding_*/recommendations_*/target_price_*).
+    _SYMINFO_SILENT_GAP_FIELDS: frozenset[str] = frozenset(
+        member
+        for member, emission in SYMINFO_MEMBER_MAP.items()
+        if "na<" in emission or "get_syminfo_metadata" in emission
+    )
 
     def __init__(self, ast: Program, filename: str = "<input>") -> None:
         self._ast = ast
@@ -333,6 +380,12 @@ class SupportChecker:
         self._user_methods: set[str] = set()
         # Track whether we are inside an if/ternary condition expression.
         self._in_conditional_depth: int = 0
+        # Track whether we are inside an argument subtree that legitimately
+        # consumes constant-namespace members: parse-and-skip visual calls
+        # (plot, label.new, ...), the strategy() declaration, and
+        # request.security (barmerge.* gaps/lookahead values). While > 0 the
+        # UNSUPPORTED_CONST_NAMESPACES rejection is suppressed.
+        self._const_arg_ctx_depth: int = 0
 
     # -- Public API --
 
@@ -412,6 +465,20 @@ class SupportChecker:
             method(node)
             return
         self._visit_children(node)
+
+    def _visit_children_const_ok(self, node: ASTNode) -> None:
+        """Visit children with constant-namespace member reads allowed.
+
+        Used for the argument subtrees of parse-and-skip visual calls,
+        the strategy() declaration, and request.security — the contexts
+        where ``plot.style_*`` / ``text.align_*`` / ``barmerge.*`` /
+        ``alert.freq_*`` constants are legitimate.
+        """
+        self._const_arg_ctx_depth += 1
+        try:
+            self._visit_children(node)
+        finally:
+            self._const_arg_ctx_depth -= 1
 
     def _visit_children(self, node: ASTNode) -> None:
         for value in vars(node).values():
@@ -528,7 +595,9 @@ class SupportChecker:
                 f"{kind}() declarations are not supported; PineForge runs strategies only.",
                 hint="Replace the declaration with strategy(...) and add explicit entry/exit calls.",
             )
-        self._visit_children(node)
+        # strategy(...) kwargs legitimately carry constant-namespace members
+        # (e.g. scale=scale.right, format=format.price).
+        self._visit_children_const_ok(node)
 
     def _visit_VarDecl(self, node: VarDecl) -> None:
         if node.is_varip:
@@ -688,17 +757,19 @@ class SupportChecker:
                     hint="Use strategy.close(...) for market exits.",
                 )
 
-        # request.security strictness.
+        # request.security strictness. Children are visited with constant-
+        # namespace reads allowed: barmerge.* gaps/lookahead values are
+        # validated above by _check_request_security and consumed by codegen.
         if full == "request.security":
             self._check_request_security(node)
-            self._visit_children(node)
+            self._visit_children_const_ok(node)
             return
         # request.security_lower_tf — analyzer/codegen handle parameter validation
         # and element-type rejection (UDT/color/string). Still validate the
         # timeframe literal here so codegen catches malformed TF strings early.
         if full == "request.security_lower_tf":
             self._check_request_security_lower_tf_tf(node)
-            self._visit_children(node)
+            self._visit_children_const_ok(node)
             return
         if ns == "request":
             self._err(
@@ -812,20 +883,41 @@ class SupportChecker:
 
         # Drawing / charting / alert namespaces — codegen drops silently. Warn,
         # don't error: many strategies include these for the TradingView UI.
+        # Their argument subtrees legitimately carry constant-namespace
+        # members (plot.style_*, text.align_*, alert.freq_*, ...), so visit
+        # children with those reads allowed.
         if ns is None and name in SKIP_FUNC_NAMES:
             self._warn(
                 node,
                 f"{name}(...) has no effect in PineForge backtests (visual only).",
             )
+            self._visit_children_const_ok(node)
+            return
         if ns is not None and ns in SKIP_NAMESPACES:
             self._warn(
                 node,
                 f"{full}(...) has no effect in PineForge backtests (visual only).",
             )
+            self._visit_children_const_ok(node)
+            return
 
         self._visit_children(node)
 
     def _visit_Identifier(self, node: Identifier) -> None:
+        # ``export`` is a Pine v6 library keyword the lexer treats as a plain
+        # identifier. Library scripts already reject at library(); a stray
+        # ``export`` in a strategy script would otherwise only die at the
+        # codegen unknown-read guard with a generic message.
+        if node.name == "export":
+            self._err(
+                node,
+                "'export' is a Pine library keyword; PineForge runs "
+                "strategies only and does not support exported "
+                "functions/types.",
+                hint="Remove the 'export' keyword (and inline any library "
+                     "code into the strategy script).",
+            )
+            return
         if node.name in DIVERGENT_VARS:
             self._warn(
                 node,
@@ -887,6 +979,26 @@ class SupportChecker:
             node.object.name,
             node,
             lambda k, v: f"{k}.{node.member}: {v}",
+        ):
+            return
+        # Constant-only namespace members (plot.style_*, text.align_*,
+        # barmerge.*, alert.freq_*, ...) used as FREE EXPRESSIONS. Inside
+        # parse-and-skip visual call arguments / strategy() / request.security
+        # the read is legitimate and ``_const_arg_ctx_depth`` suppresses this.
+        if (
+            self._const_arg_ctx_depth == 0
+            and isinstance(node.object, Identifier)
+            and self._reject_if_in(
+                UNSUPPORTED_CONST_NAMESPACES,
+                node.object.name,
+                node,
+                lambda k, v: f"{k}.{node.member} {v}",
+                hint=(
+                    "Constant-namespace members cannot flow into strategy "
+                    "logic; codegen would emit a string literal while the "
+                    "analyzer types the read as int."
+                ),
+            )
         ):
             return
         if isinstance(node.object, Identifier) and node.object.name == "syminfo":

@@ -663,7 +663,8 @@ class TestMathKwargs:
 
     def test_math_round_to_mintick_kwargs(self):
         cpp = _generate(_pine('x = math.round_to_mintick(x=100.123)'))
-        assert "syminfo_mintick_" in cpp
+        # Lowered to the engine method (NaN/mintick<=0 guarded).
+        assert "round_to_mintick(100.123)" in cpp
 
     def test_math_sum_kwargs_redirects_to_ta(self):
         """math.sum(source, length) should use math::Sum (rolling window)."""

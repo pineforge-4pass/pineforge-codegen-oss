@@ -1,0 +1,288 @@
+"""Emission tests for the 2026-06 audit fixes (items A4/A5, B8-B17, C18)."""
+import pytest
+
+from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError
+
+PRELUDE = '//@version=6\nstrategy("T")\n'
+
+
+def _gen(body: str) -> str:
+    return transpile(PRELUDE + body)
+
+
+# ---------------------------------------------------------------------------
+# A4 — display.pine_screener gets a distinct constant
+# ---------------------------------------------------------------------------
+
+def test_display_pine_screener_distinct_value():
+    cpp = _gen("d = display.pine_screener\nplot(close)\n")
+    assert "= 6;" in cpp  # distinct from display.all (0)
+
+
+# ---------------------------------------------------------------------------
+# A5 — bare ta.<name> property reads without a call site reject loudly
+# ---------------------------------------------------------------------------
+
+def test_bare_ta_property_read_rejected():
+    with pytest.raises(CompileError, match=r"ta\.rsi"):
+        _gen("x = ta.rsi\n")
+
+
+def test_ta_property_indicators_still_work():
+    cpp = _gen("x = ta.obv\nplot(x)\n")
+    assert "_ta_obv_" in cpp
+
+
+# ---------------------------------------------------------------------------
+# B8 — /= and %= compound assignment semantics
+# ---------------------------------------------------------------------------
+
+def test_compound_divide_is_always_float():
+    cpp = _gen("var a = 10.0\na /= 3\nplot(a)\n")
+    assert "a = ((double)(a) / (double)(3));" in cpp
+    assert "a /= 3" not in cpp
+
+
+def test_compound_modulo_is_fmod():
+    cpp = _gen("var a = 10.0\na %= 3\nplot(a)\n")
+    assert "a = std::fmod((double)(a), (double)(3));" in cpp
+    assert "a %= 3" not in cpp
+
+
+def test_compound_add_unchanged():
+    cpp = _gen("var a = 10.0\na += 3\nplot(a)\n")
+    assert "a += 3;" in cpp
+
+
+# ---------------------------------------------------------------------------
+# B9 — str.replace 4-arg occurrence form
+# ---------------------------------------------------------------------------
+
+def test_str_replace_occurrence_form():
+    cpp = _gen('s = str.replace("aXbXc", "X", "-", 1)\nplot(close)\n')
+    assert "_occ" in cpp
+    assert "while((p=s.find(t,p))!=std::string::npos)" in cpp
+
+
+def test_str_replace_three_arg_unchanged():
+    cpp = _gen('s = str.replace("aXbXc", "X", "-")\nplot(close)\n')
+    assert "_occ" not in cpp
+    assert "s.find(" in cpp
+
+
+# ---------------------------------------------------------------------------
+# B10 — timestamp() arity handling
+# ---------------------------------------------------------------------------
+
+def test_timestamp_numeric_form_works():
+    cpp = _gen("t = timestamp(2020, 1, 2)\nplot(close)\n")
+    assert "timegm" in cpp
+
+
+def test_timestamp_tz_form_works():
+    cpp = _gen('t = timestamp("GMT+2", 2020, 1, 2)\nplot(close)\n')
+    assert "mktime" in cpp
+
+
+@pytest.mark.parametrize("call", [
+    "timestamp()",
+    "timestamp(2020)",
+    "timestamp(2020, 1)",
+])
+def test_timestamp_short_numeric_arity_rejected(call):
+    with pytest.raises(CompileError, match="timestamp"):
+        _gen(f"t = {call}\nplot(close)\n")
+
+
+def test_timestamp_datestring_literal_parsed_at_transpile_time():
+    # 2020-02-20T15:30:00 UTC = 1582212600000 ms (was silently 1970 epoch).
+    cpp = _gen('t = timestamp("2020-02-20T15:30:00")\nplot(close)\n')
+    assert "1582212600000LL" in cpp
+
+
+def test_timestamp_datestring_dd_mmm_yyyy_parsed():
+    # Pine reference example form, no tz = GMT+0.
+    cpp = _gen('t = timestamp("20 Jul 2021 00:00 +0300")\nplot(close)\n')
+    assert "1626728400000LL" in cpp
+
+
+def test_timestamp_unparseable_datestring_rejected():
+    with pytest.raises(CompileError, match="could not parse"):
+        _gen('t = timestamp("not a date")\nplot(close)\n')
+
+
+def test_timestamp_non_literal_datestring_rejected():
+    # Loud reject (either the literal-required or the arity message,
+    # depending on how the analyzer types the argument).
+    with pytest.raises(CompileError, match="timestamp"):
+        _gen('s = syminfo.ticker\nt = timestamp(s)\nplot(close)\n')
+
+
+def test_timestamp_tz_missing_day_rejected():
+    with pytest.raises(CompileError, match="timestamp"):
+        _gen('t = timestamp("GMT+2", 2020, 1)\nplot(close)\n')
+
+
+# ---------------------------------------------------------------------------
+# B11 — string(x) / int(x) casts
+# ---------------------------------------------------------------------------
+
+def test_string_cast_numeric():
+    cpp = _gen("s = string(close)\nplot(close)\n")
+    assert "std::to_string(current_bar_.close)" in cpp
+
+
+def test_string_cast_string_passthrough():
+    cpp = _gen('a = syminfo.ticker\ns = string(a)\nplot(close)\n')
+    assert "std::to_string(a)" not in cpp
+
+
+def test_string_cast_bool():
+    cpp = _gen("b = close > open\ns = string(b)\nplot(close)\n")
+    assert 'std::string("true")' in cpp
+    assert 'std::string("false")' in cpp
+
+
+def test_int_cast_propagates_na():
+    cpp = _gen("i = int(close)\nplot(close)\n")
+    assert "is_na(_pf_v) ? na<int>() : (int)_pf_v" in cpp
+
+
+# ---------------------------------------------------------------------------
+# B12 — strategy.openprofit_percent uses realized equity
+# ---------------------------------------------------------------------------
+
+def test_openprofit_percent_uses_current_equity():
+    cpp = _gen("x = strategy.openprofit_percent\nplot(x)\n")
+    assert "open_profit(current_bar_.close) / current_equity()" in cpp
+    assert "open_profit(current_bar_.close) / initial_capital_" not in cpp
+
+
+# ---------------------------------------------------------------------------
+# B13 — syminfo.country ISO codes
+# ---------------------------------------------------------------------------
+
+def test_country_lookup_is_iso():
+    cpp = _gen("c = syminfo.country\nplot(close)\n")
+    assert '{"LSE", "GB"}' in cpp
+    assert '{"AQUIS", "GB"}' in cpp
+    assert '"UK"' not in cpp
+    # Non-ISO pseudo-codes removed: pan-EU / global crypto venues return na.
+    assert '"GLOBAL"' not in cpp
+    assert '"EURONEXT"' not in cpp
+    assert '"BINANCE"' not in cpp
+
+
+# ---------------------------------------------------------------------------
+# B14 — math.round_to_mintick uses the engine method
+# ---------------------------------------------------------------------------
+
+def test_round_to_mintick_uses_engine_method():
+    cpp = _gen("y = math.round_to_mintick(close)\nplot(y)\n")
+    assert "round_to_mintick(current_bar_.close)" in cpp
+    assert "std::round(current_bar_.close / syminfo_mintick_)" not in cpp
+
+
+# ---------------------------------------------------------------------------
+# B15 — array.stdev / array.variance biased argument
+# ---------------------------------------------------------------------------
+
+def test_array_stdev_biased_arg():
+    cpp = _gen(
+        "arr = array.new<float>(0)\narray.push(arr, close)\n"
+        "v = array.stdev(arr, false)\nplot(v)\n"
+    )
+    assert "_d=(false)?" in cpp.replace(" ", "").replace("\n", "") or "_d=(false)" in cpp
+
+
+def test_array_stdev_no_arg_unchanged():
+    cpp = _gen(
+        "arr = array.new<float>(0)\narray.push(arr, close)\n"
+        "v = array.stdev(arr)\nplot(v)\n"
+    )
+    assert "_d=" not in cpp
+    assert "std::sqrt(s/arr.size())" in cpp
+
+
+def test_array_variance_biased_arg():
+    cpp = _gen(
+        "arr = array.new<float>(0)\narray.push(arr, close)\n"
+        "v = array.variance(arr, false)\nplot(v)\n"
+    )
+    assert "_d=" in cpp
+
+
+# ---------------------------------------------------------------------------
+# B16/B17 — array.join / copy / slice honor the element type
+# ---------------------------------------------------------------------------
+
+def test_array_join_string_elements():
+    cpp = _gen(
+        'sa = array.new<string>(0)\narray.push(sa, "a")\n'
+        's = array.join(sa, ",")\nplot(close)\n'
+    )
+    assert "r+=sa[i];" in cpp
+    assert "std::to_string(sa[i])" not in cpp
+
+
+def test_array_join_numeric_elements():
+    cpp = _gen(
+        "fa = array.new<float>(0)\narray.push(fa, close)\n"
+        's = array.join(fa, ",")\nplot(close)\n'
+    )
+    assert "std::to_string(fa[i])" in cpp
+
+
+def test_array_copy_int_elements():
+    cpp = _gen(
+        "ia = array.new<int>(3, 0)\nib = array.copy(ia)\nplot(close)\n"
+    )
+    assert "std::vector<int>(ia)" in cpp
+
+
+def test_array_slice_string_elements():
+    cpp = _gen(
+        'sa = array.new<string>(0)\narray.push(sa, "a")\narray.push(sa, "b")\n'
+        "sb = array.slice(sa, 0, 1)\nplot(close)\n"
+    )
+    assert "std::vector<std::string>(sa.begin()" in cpp
+
+
+# ---------------------------------------------------------------------------
+# C18 — bare time variables use the exchange timezone path
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("var,field", [
+    ("hour", "tm_buf.tm_hour"),
+    ("minute", "tm_buf.tm_min"),
+    ("second", "tm_buf.tm_sec"),
+    ("dayofmonth", "tm_buf.tm_mday"),
+    ("dayofweek", "tm_buf.tm_wday + 1"),
+    ("month", "tm_buf.tm_mon + 1"),
+    ("year", "tm_buf.tm_year + 1900"),
+])
+def test_bare_time_vars_use_exchange_timezone(var, field):
+    cpp = _gen(f"x = {var}\nplot(close)\n")
+    assert f"_bar_{var}()" not in cpp
+    assert "syminfo_.timezone" in cpp
+    assert field in cpp
+
+
+def test_bare_and_function_form_share_emission():
+    cpp = _gen("a = hour\nb = hour(time)\nplot(close)\n")
+    # Both forms route through the same tz-aware lambda body.
+    assert cpp.count("tm_buf.tm_hour") == 2
+    assert "_bar_hour()" not in cpp
+
+
+# ---------------------------------------------------------------------------
+# format.* members now type as STRING for bare reads
+# ---------------------------------------------------------------------------
+
+def test_format_member_bare_read_types_string():
+    cpp = _gen("f = format.mintick\nplot(close)\n")
+    # Global member declared std::string (was double — C++ type mismatch).
+    assert 'std::string f' in cpp
+    assert 'f = std::string("mintick");' in cpp
+    assert "double f" not in cpp

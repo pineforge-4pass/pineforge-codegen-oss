@@ -288,10 +288,11 @@ class StmtVisitor:
                 lines.append(f"{pad}{cpp_type} {safe} = {cpp_val};")
             return
 
-        # Array variable declarations: array.new<T>(), array.from(), array.new_float() etc.
+        # Array variable declarations: array.new<T>(), array.from(),
+        # array.new_float() etc., plus array-returning copy/slice.
         if isinstance(node.value, FuncCall):
             func_name, namespace = self._resolve_callee(node.value.callee)
-            if namespace == "array" and func_name in ("new", "new_float", "new_int", "new_bool", "new_string", "from"):
+            if namespace == "array" and func_name in ("new", "new_float", "new_int", "new_bool", "new_string", "from", "copy", "slice"):
                 self._array_vars.add(node.name)
                 spec = self._type_spec_from_expr(node.value) or self._array_spec_for_name(node.name)
                 self._collection_types.setdefault(node.name, spec)
@@ -406,6 +407,25 @@ class StmtVisitor:
             cpp_type = self._type_for_decl(node)
             lines.append(f"{pad}{cpp_type} {safe} = {cpp_val};")
 
+    @staticmethod
+    def _compound_assign_rhs(target_read: str, op: str, val_cpp: str) -> str | None:
+        """RHS for a compound assignment that must NOT lower to the C++
+        compound operator.
+
+        Pine v6 ``/`` is always-float (int/int included) and ``%`` is
+        fmod-like — the binary-operator lowering in visit_expr casts both
+        sides to double / uses std::fmod. ``a /= b`` and ``a %= b`` must
+        match those semantics (C++ ``/=`` would do integer division on int
+        operands; ``%=`` does not even compile for doubles). Returns None
+        for operators where the native C++ compound form is correct
+        (+=, -=, *=).
+        """
+        if op == "/=":
+            return f"((double)({target_read}) / (double)({val_cpp}))"
+        if op == "%=":
+            return f"std::fmod((double)({target_read}), (double)({val_cpp}))"
+        return None
+
     def _visit_assignment(self, node: Assignment, lines: list[str], pad: str) -> None:
         if isinstance(node.value, FuncCall) and self._is_skip_expr(node.value):
             return
@@ -442,7 +462,11 @@ class StmtVisitor:
             if node.op == ":=":
                 lines.append(f"{pad}{target_cpp} = {val_cpp};")
             else:
-                lines.append(f"{pad}{target_cpp} {node.op} {val_cpp};")
+                rhs = self._compound_assign_rhs(target_cpp, node.op, val_cpp)
+                if rhs is not None:
+                    lines.append(f"{pad}{target_cpp} = {rhs};")
+                else:
+                    lines.append(f"{pad}{target_cpp} {node.op} {val_cpp};")
             return
 
         safe = self._safe_name(target_name)
@@ -455,9 +479,14 @@ class StmtVisitor:
             if node.op == ":=":
                 lines.append(f"{pad}{safe}.update({val_cpp});")
             else:
-                # Compound assignment: x += y → x.update(x[0] + y)
-                op_char = node.op[0]  # e.g., "+" from "+="
-                lines.append(f"{pad}{safe}.update({safe}[0] {op_char} {self._visit_expr(node.value)});")
+                rhs = self._compound_assign_rhs(f"{safe}[0]", node.op, val_cpp)
+                if rhs is not None:
+                    # x /= y → x.update((double)x[0] / (double)y); x %= y → fmod
+                    lines.append(f"{pad}{safe}.update({rhs});")
+                else:
+                    # Compound assignment: x += y → x.update(x[0] + y)
+                    op_char = node.op[0]  # e.g., "+" from "+="
+                    lines.append(f"{pad}{safe}.update({safe}[0] {op_char} {val_cpp});")
         elif target_name in self._var_names:
             if node.op == ":=" and target_name in self._matrix_specs and isinstance(node.value, FuncCall):
                 rhs_fn, rhs_ns = self._resolve_callee(node.value.callee)
@@ -482,13 +511,21 @@ class StmtVisitor:
             if node.op == ":=":
                 lines.append(f"{pad}{safe} = {val_cpp};")
             else:
-                lines.append(f"{pad}{safe} {node.op} {val_cpp};")
+                rhs = self._compound_assign_rhs(safe, node.op, val_cpp)
+                if rhs is not None:
+                    lines.append(f"{pad}{safe} = {rhs};")
+                else:
+                    lines.append(f"{pad}{safe} {node.op} {val_cpp};")
         else:
             val_cpp = self._visit_expr(node.value)
             if node.op == ":=":
                 lines.append(f"{pad}{safe} = {val_cpp};")
             else:
-                lines.append(f"{pad}{safe} {node.op} {val_cpp};")
+                rhs = self._compound_assign_rhs(safe, node.op, val_cpp)
+                if rhs is not None:
+                    lines.append(f"{pad}{safe} = {rhs};")
+                else:
+                    lines.append(f"{pad}{safe} {node.op} {val_cpp};")
 
     def _visit_tuple_assign(self, node: TupleAssign, lines: list[str], pad: str) -> None:
         site = self._get_ta_site(node.value)

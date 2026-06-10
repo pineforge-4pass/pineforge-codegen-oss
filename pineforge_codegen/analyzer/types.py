@@ -132,6 +132,17 @@ class TypeHelper:
                     first = self._visit(value.args[0])
                     return TypeSpec.array(self._pine_type_to_spec(first))
                 return TypeSpec.array(TypeSpec.primitive("float"))
+            # Functional-form array element/copy accessors: the receiver is
+            # the first argument (``array.copy(arr)``), mirroring the
+            # method-form handling below (``arr.copy()``).
+            if (ns == "array" and value.args
+                    and func in ("copy", "slice", "get", "first", "last",
+                                 "pop", "shift", "remove")):
+                arg_spec = self._type_spec_from_expr(value.args[0])
+                if arg_spec is not None and arg_spec.kind == "array":
+                    if func in ("copy", "slice"):
+                        return arg_spec
+                    return arg_spec.element
             if ns == "matrix" and func == "new":
                 if targs:
                     elem = self._type_spec_from_hint(targs[0]) or TypeSpec.udt(targs[0])

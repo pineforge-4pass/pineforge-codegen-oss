@@ -7,7 +7,7 @@ engine changes:
 - ``_pf_derive_main_tickerid(tickerid)``  — strip futures suffix from tickerid
   e.g., ``"CME_MINI:ES1!"`` → ``"CME_MINI:ES"``, ``"NASDAQ:AAPL"`` → ``"NASDAQ:AAPL"``
 - ``_pf_derive_country(tickerid)``         — lookup country by exchange prefix
-  e.g., ``"NASDAQ:AAPL"`` → ``"US"``, ``"LSE:BP"`` → ``"UK"``
+  e.g., ``"NASDAQ:AAPL"`` → ``"US"``, ``"LSE:BP"`` → ``"GB"`` (ISO 3166-1)
 
 These are emitted as ``static inline`` free functions before the
 ``GeneratedStrategy`` class definition. They depend only on ``<string>``
@@ -15,7 +15,12 @@ and ``<regex>`` (both already pulled in by the standard includes block).
 """
 
 # Prefix → country lookup table used for ``syminfo.country`` derivation.
-# Mirrors Pine v6 semantics best-effort; not an exhaustive list.
+# Mirrors Pine v6 semantics best-effort; not an exhaustive list. All values
+# MUST be ISO 3166-1 alpha-2 codes (Pine returns ISO codes: LSE → "GB", not
+# "UK"). Prefixes with no single ISO country (pan-European EURONEXT, global
+# crypto venues BINANCE/KRAKEN/BYBIT/OKX/BITMEX/DERIBIT) are intentionally
+# absent — the helper returns na<std::string>() for them, matching TV's na
+# for symbols without a listing country.
 PREFIX_TO_COUNTRY: dict[str, str] = {
     "NASDAQ": "US",
     "NYSE": "US",
@@ -28,24 +33,17 @@ PREFIX_TO_COUNTRY: dict[str, str] = {
     "CBOT": "US",
     "COMEX": "US",
     "OTC": "US",
-    "LSE": "UK",
-    "AQUIS": "UK",
+    "LSE": "GB",
+    "AQUIS": "GB",
     "TSE": "JP",
     "OSE": "JP",
     "HKEX": "HK",
     "SGX": "SG",
     "ASX": "AU",
-    "EURONEXT": "EU",
     "XETRA": "DE",
     "BSE": "IN",
     "NSE": "IN",
-    "BINANCE": "GLOBAL",
     "COINBASE": "US",
-    "KRAKEN": "GLOBAL",
-    "BYBIT": "GLOBAL",
-    "OKX": "GLOBAL",
-    "BITMEX": "GLOBAL",
-    "DERIBIT": "GLOBAL",
     "UPBIT": "KR",
     "KRX": "KR",
     "KOSPI": "KR",

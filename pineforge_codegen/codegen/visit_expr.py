@@ -359,7 +359,12 @@ class ExprVisitor:
                 if node.member == "openprofit":
                     return "open_profit(current_bar_.close)"
                 if node.member == "openprofit_percent":
-                    return "((open_profit(current_bar_.close) / initial_capital_) * 100.0)"
+                    # Pine: openPL / realizedEquity * 100. current_equity()
+                    # is the engine's realized equity (initial capital +
+                    # closed-trade net profit); guard the zero denominator
+                    # like the engine's *_percent accessors do.
+                    return ("((current_equity() != 0.0) ? "
+                            "((open_profit(current_bar_.close) / current_equity()) * 100.0) : 0.0)")
                 if node.member == "grossprofit":
                     return "gross_profit()"
                 if node.member == "grossloss":
@@ -440,8 +445,28 @@ class ExprVisitor:
                             if node.member == "vwap":
                                 return f"(is_first_tick_ ? {site.member_name}.compute(current_bar_.close, current_bar_.volume, current_bar_.timestamp) : {site.member_name}.recompute(current_bar_.close, current_bar_.volume, current_bar_.timestamp))"
                             return f"(is_first_tick_ ? {site.member_name}.compute({TA_IMPLICIT_COMPUTE_FULL[node.member]}) : {site.member_name}.recompute({TA_IMPLICIT_COMPUTE_FULL[node.member]}))"
-                    # Fallback: no call site found — treat as string
-                    return f'std::string("{node.member}")'
+                    # No registered call site for this TA property read —
+                    # the old fallback emitted std::string("<name>"), a
+                    # silent type mismatch. Reject loudly instead.
+                    self._codegen_error(
+                        node,
+                        f"ta.{node.member} property read could not be bound "
+                        f"to a TA call site.",
+                        hint=f"Use the function form ta.{node.member}(...) "
+                             f"instead of the bare property read.",
+                    )
+                # Any other bare ta.<member> property read (e.g. ``x = ta.rsi``
+                # without parentheses) has no value to bind — Pine v6 only
+                # defines property forms for tr/obv/accdist/nvi/pvi/pvt/wad/
+                # wvad/iii/vwap. The old fallthrough emitted
+                # ``std::string("<member>")``. Reject loudly.
+                self._codegen_error(
+                    node,
+                    f"ta.{node.member} is not readable as a bare property in "
+                    f"PineForge.",
+                    hint=f"Call the function form ta.{node.member}(...) with "
+                         f"its arguments instead.",
+                )
             if ns == "chart":
                 # PineForge batch engine always runs on standard OHLCV bars.
                 if node.member == "is_standard":
@@ -596,6 +621,9 @@ class ExprVisitor:
                         return "0"
                     # strategy.closedtrades.first_index, strategy.opentrades.capital_held
                     if sub == "closedtrades" and node.member == "first_index":
+                        # Hardcoded 0 is correct until the engine implements
+                        # trade-list capping (Pine only advances first_index
+                        # when the 9000-trade cap drops old trades).
                         return "0"
                     if sub == "opentrades" and node.member == "capital_held":
                         return "open_trades_capital_held()"

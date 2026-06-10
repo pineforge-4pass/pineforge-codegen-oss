@@ -155,9 +155,44 @@ from .tables import (
     SKIP_NAMESPACES,
     SKIP_VAR_TYPES,
     STR_FUNC_MAP,
+    TIME_FIELD_EXPRS,
     _merge_kwargs,
     _merge_kwargs_with_defaults,
+    tz_time_field_lambda,
 )
+
+
+def _parse_pine_datestring_ms(text: str) -> int | None:
+    """Parse a Pine ``timestamp(dateString)`` literal to Unix milliseconds.
+
+    Pine v6 accepts ISO-8601 strings ("2025-01-01", "2011-10-10T14:48:00",
+    with optional offset) and the "DD MMM YYYY hh:mm:ss ±HHMM" /
+    "MMM DD YYYY ..." forms. A dateString without a time zone is GMT+0 per
+    the Pine reference. Returns None when the string cannot be parsed.
+    """
+    from datetime import datetime, timezone
+
+    txt = text.strip()
+    dt = None
+    try:
+        dt = datetime.fromisoformat(txt)
+    except ValueError:
+        for fmt in (
+            "%d %b %Y %H:%M:%S %z", "%d %b %Y %H:%M %z",
+            "%d %b %Y %H:%M:%S", "%d %b %Y %H:%M", "%d %b %Y",
+            "%b %d %Y %H:%M:%S %z", "%b %d %Y %H:%M %z",
+            "%b %d %Y %H:%M:%S", "%b %d %Y %H:%M", "%b %d %Y",
+        ):
+            try:
+                dt = datetime.strptime(txt, fmt)
+                break
+            except ValueError:
+                continue
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
 
 
 class CallVisitor:
@@ -499,23 +534,22 @@ class CallVisitor:
         # weekofyear(time[, tz]).
         #
         # Pine v6 exposes these names as BOTH variables (current bar) AND
-        # functions (arbitrary timestamp). The variable form is wired by
-        # ``BAR_BUILTINS`` in codegen/tables.py to ``_bar_year()`` etc. The
-        # function form has no public runtime helper, so we inline the
-        # gmtime_r-based calculation that mirrors ``BacktestEngine::
-        # _decompose_bar_time()`` (see include/pineforge/engine.hpp) so the
-        # numbers agree across both forms.
+        # functions (arbitrary timestamp). Both forms now share the same
+        # timezone-aware emission: the variable form is wired by
+        # ``BAR_BUILTINS`` in codegen/tables.py to
+        # ``tz_time_field_lambda(..., current_bar_.timestamp,
+        # syminfo_.timezone)`` and the function form below uses the same
+        # builder, so the numbers agree across both forms.
         #
         # Timezone handling (per Pine v6 reference docs):
         # - Bare form ``hour(time)`` defaults its tz argument to
         #   ``syminfo.timezone`` — the SYMBOL/EXCHANGE timezone, NOT the
         #   chart's display timezone. For the corpus' ETH-USDT crypto data
         #   this is ``"UTC"`` (the ``SymInfo`` constructor default), which
-        #   keeps the lambda on the cheap ``gmtime_r`` fast path. The
-        #   variable form ``hour`` is wired directly to ``_bar_hour()`` /
-        #   ``_decompose_bar_time()`` (engine.hpp), which is hardcoded to
-        #   ``gmtime_r`` and therefore matches the function-form default
-        #   for the same exchange TZ.
+        #   keeps the lambda on the cheap ``gmtime_r`` fast path —
+        #   value-identical to the engine's ``_bar_hour()`` /
+        #   ``_decompose_bar_time()`` (engine.hpp) UTC helpers the variable
+        #   form used to bind to.
         #
         #   Pre-fix the harness's ``strategy_set_chart_timezone`` clobbered
         #   ``syminfo_.timezone`` with the chart display TZ, which silently
@@ -529,26 +563,16 @@ class CallVisitor:
         # - Two-arg form ``hour(time, tz)`` always overrides syminfo with
         #   the explicit tz argument. Same setenv+localtime_r block as the
         #   1-arg fallback.
-        _BAR_TIME_FUNC_EXPR = {
-            "year":       "tm_buf.tm_year + 1900",
-            "month":      "tm_buf.tm_mon + 1",
-            "dayofmonth": "tm_buf.tm_mday",
-            "dayofweek":  "tm_buf.tm_wday + 1",
-            "hour":       "tm_buf.tm_hour",
-            "minute":     "tm_buf.tm_min",
-            "second":     "tm_buf.tm_sec",
-            "weekofyear": "(tm_buf.tm_yday + 7 - ((tm_buf.tm_wday + 6) % 7)) / 7",
-        }
         if (
             namespace is None
-            and func_name in _BAR_TIME_FUNC_EXPR
+            and func_name in TIME_FIELD_EXPRS
             and (node.args or node.kwargs)
         ):
             params = sigs.get_param_names(None, func_name)
             args = _merge_kwargs(node.args, node.kwargs, params, self._visit_expr)
             ts_arg = args[0] if args else "current_bar_.timestamp"
             tz_arg = args[1] if len(args) > 1 else None
-            field_expr = _BAR_TIME_FUNC_EXPR[func_name]
+            field_expr = TIME_FIELD_EXPRS[func_name]
             if tz_arg is None:
                 # 1-arg form — fall back to ``syminfo.timezone`` per TV
                 # docs (the EXCHANGE TZ, default "UTC" for the corpus'
@@ -559,30 +583,11 @@ class CallVisitor:
                 # mutex-guarded setenv+localtime_r block as the 2-arg
                 # form.
                 tz_arg = "syminfo_.timezone"
-            # 2-arg form — honor the tz argument. Uses an inline setenv+
-            # localtime_r guarded by a function-local static mutex, mirroring
-            # ``pine_tz::ScopedTimezone`` (src/timezone.cpp) which is not
-            # exposed via any public ``<pineforge/...>`` header today.
-            return (
-                "[&]() -> int { "
-                f"std::string _tz = ({tz_arg}); "
-                f"time_t _secs = (time_t)(({ts_arg}) / 1000); "
-                "struct tm tm_buf; "
-                "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") { "
-                "gmtime_r(&_secs, &tm_buf); "
-                "} else { "
-                "static std::mutex _pf_tz_mu; "
-                "std::lock_guard<std::mutex> _pf_tz_lock(_pf_tz_mu); "
-                "const char* _old = std::getenv(\"TZ\"); "
-                "std::string _old_tz = _old ? _old : \"\"; bool _had_old = (_old != nullptr); "
-                "::setenv(\"TZ\", _tz.c_str(), 1); ::tzset(); "
-                "localtime_r(&_secs, &tm_buf); "
-                "if (_had_old) { ::setenv(\"TZ\", _old_tz.c_str(), 1); } "
-                "else { ::unsetenv(\"TZ\"); } ::tzset(); "
-                "} "
-                f"return {field_expr}; "
-                "}()"
-            )
+            # 2-arg form — honor the tz argument. The shared
+            # ``tz_time_field_lambda`` (codegen/tables.py) also backs the
+            # bare variable forms (``hour`` etc. via BAR_BUILTINS), so the
+            # numbers agree across both forms.
+            return tz_time_field_lambda(field_expr, ts_arg, tz_arg)
 
         # time(timeframe) or time(timeframe, session[, tz])
         if func_name == "time" and namespace is None and (node.args or node.kwargs):
@@ -614,6 +619,43 @@ class CallVisitor:
                     is_tz_first = True
 
             if is_tz_first:
+                # A single string argument is the timestamp(dateString)
+                # overload, NOT the timezone-first form. It used to fall
+                # through with year=1970 defaults — silently wrong. Pine
+                # dateString is a const string, so parse it at transpile
+                # time (common as the input.time defval); reject loudly when
+                # it is not a literal or does not parse.
+                if len(node.args) == 1:
+                    if isinstance(node.args[0], StringLiteral):
+                        ms = _parse_pine_datestring_ms(node.args[0].value)
+                        if ms is None:
+                            self._codegen_error(
+                                node,
+                                f"timestamp(dateString): could not parse "
+                                f"'{node.args[0].value}'.",
+                                hint="Supported forms: ISO-8601 "
+                                     "(\"2025-01-01[THH:MM:SS][±HH:MM]\") and "
+                                     "\"DD MMM YYYY [hh:mm[:ss]] [±HHMM]\" / "
+                                     "\"MMM DD YYYY ...\"; no time zone = "
+                                     "GMT+0.",
+                            )
+                        return f"{ms}LL"
+                    self._codegen_error(
+                        node,
+                        "timestamp(dateString) requires a literal string in "
+                        "PineForge (Pine v6 dateString is a const string).",
+                        hint="Use a string literal, or timestamp(year, month, "
+                             "day[, hour, minute, second]).",
+                    )
+                # timezone-first form requires year, month, and day.
+                if len(node.args) < 4:
+                    self._codegen_error(
+                        node,
+                        "timestamp(timezone, ...) requires year, month, and "
+                        "day arguments.",
+                        hint="Pine v6 signature: timestamp(timezone, year, "
+                             "month, day[, hour, minute, second]).",
+                    )
                 args = [self._visit_expr(a) for a in node.args]
                 tz = args[0]
                 yr = args[1] if len(args) > 1 else "1970"
@@ -655,35 +697,47 @@ class CallVisitor:
                     f"}}()"
                 )
             else:
-                args = [self._visit_expr(a) for a in node.args]
-                if len(args) >= 1:
-                    if len(args) == 1:
-                        return "0"
-                    yr = args[0]
-                    mo = args[1] if len(args) > 1 else "1"
-                    dy = args[2] if len(args) > 2 else "1"
-                    hr = args[3] if len(args) > 3 else "0"
-                    mn = args[4] if len(args) > 4 else "0"
-                    sc = args[5] if len(args) > 5 else "0"
-                    return (
-                        f"[&]() -> int64_t {{ "
-                        f"int _yr = ({yr}); int _mo = ({mo}); int _dy = ({dy}); "
-                        f"int _hr = ({hr}); int _min = ({mn}); int _sc = ({sc}); "
-                        f"static thread_local int _last_yr = -1, _last_mo = -1, _last_dy = -1, _last_hr = -1, _last_min = -1, _last_sc = -1; "
-                        f"static thread_local int64_t _last_res = -1; "
-                        f"if (_last_res != -1 && _last_yr == _yr && _last_mo == _mo && _last_dy == _dy && _last_hr == _hr && _last_min == _min && _last_sc == _sc) {{ "
-                        f"return _last_res; "
-                        f"}} "
-                        f"struct tm t = {{}}; "
-                        f"t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
-                        f"t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
-                        f"int64_t _res = (int64_t)timegm(&t) * 1000; "
-                        f"_last_yr = _yr; _last_mo = _mo; _last_dy = _dy; _last_hr = _hr; _last_min = _min; _last_sc = _sc; "
-                        f"_last_res = _res; "
-                        f"return _res; "
-                        f"}}()"
+                # Numeric form requires year, month, and day (hour/minute/
+                # second default to 0). Anything shorter used to emit "0".
+                merged = _merge_kwargs(
+                    node.args, node.kwargs,
+                    sigs.get_param_names(None, "timestamp"),
+                    lambda a: a,
+                )
+                if len(merged) < 3 or any(a is None for a in merged[:3]):
+                    self._codegen_error(
+                        node,
+                        f"timestamp(...) with {len(merged)} argument(s) is "
+                        f"not supported — year, month, and day are required.",
+                        hint="Pine v6 signature: timestamp(year, month, day"
+                             "[, hour, minute, second]); the dateString "
+                             "overload is not supported in PineForge.",
                     )
-                return "0"
+                args = [self._visit_expr(a) for a in merged]
+                yr = args[0]
+                mo = args[1] if len(args) > 1 else "1"
+                dy = args[2] if len(args) > 2 else "1"
+                hr = args[3] if len(args) > 3 else "0"
+                mn = args[4] if len(args) > 4 else "0"
+                sc = args[5] if len(args) > 5 else "0"
+                return (
+                    f"[&]() -> int64_t {{ "
+                    f"int _yr = ({yr}); int _mo = ({mo}); int _dy = ({dy}); "
+                    f"int _hr = ({hr}); int _min = ({mn}); int _sc = ({sc}); "
+                    f"static thread_local int _last_yr = -1, _last_mo = -1, _last_dy = -1, _last_hr = -1, _last_min = -1, _last_sc = -1; "
+                    f"static thread_local int64_t _last_res = -1; "
+                    f"if (_last_res != -1 && _last_yr == _yr && _last_mo == _mo && _last_dy == _dy && _last_hr == _hr && _last_min == _min && _last_sc == _sc) {{ "
+                    f"return _last_res; "
+                    f"}} "
+                    f"struct tm t = {{}}; "
+                    f"t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
+                    f"t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
+                    f"int64_t _res = (int64_t)timegm(&t) * 1000; "
+                    f"_last_yr = _yr; _last_mo = _mo; _last_dy = _dy; _last_hr = _hr; _last_min = _min; _last_sc = _sc; "
+                    f"_last_res = _res; "
+                    f"return _res; "
+                    f"}}()"
+                )
 
         # barssince() — unsupported. Defensive: support_checker rejects bare
         # barssince(...) with a hint to use ta.barssince(...). Reaching here
@@ -696,13 +750,27 @@ class CallVisitor:
 
         # Type cast functions: int(x), float(x), bool(x), string(x)
         if func_name == "int" and namespace is None and node.args:
-            return f"(int)({self._visit_expr(node.args[0])})"
+            # Pine int(na) → na (int form). Evaluate once, propagate na via
+            # the engine's int sentinel instead of collapsing NaN to 0.
+            x = self._visit_expr(node.args[0])
+            return (f"[&](){{ double _pf_v = (double)({x}); "
+                    f"return is_na(_pf_v) ? na<int>() : (int)_pf_v; }}()")
         if func_name == "float" and namespace is None and node.args:
             return f"(double)({self._visit_expr(node.args[0])})"
         if func_name == "bool" and namespace is None and node.args:
             return f"(bool)({self._visit_expr(node.args[0])})"
         if func_name == "string" and namespace is None and node.args:
-            return f"std::to_string({self._visit_expr(node.args[0])})"
+            # Pine string(x) cast — same emission as str.tostring(x), with
+            # string passthrough and TV-style "true"/"false" for bools
+            # (std::to_string would reject strings / render bools as 0/1).
+            arg = node.args[0]
+            inferred = self._infer_type(arg)
+            if inferred == "std::string":
+                return self._visit_expr(arg)
+            if inferred == "bool":
+                visited = self._visit_expr(arg)
+                return f'(({visited}) ? std::string("true") : std::string("false"))'
+            return self._visit_str_call("tostring", node)
 
         # ta.pivot_point_levels — free function, not a stateful indicator
         if namespace == "ta" and func_name == "pivot_point_levels":
@@ -1226,6 +1294,18 @@ class CallVisitor:
             return f'pine_str_format_time({ts}, {fmt}, {tz})'
 
         if func_name == "replace":
+            if len(args) >= 4:
+                # 4-arg form: replace the Nth occurrence (0-based, per Pine
+                # spec). Out-of-range / negative occurrence → original string.
+                return (
+                    f'[&](){{ std::string s={args[0]}; std::string t={args[1]}; '
+                    f'std::string r={args[2]}; int _occ=(int)({args[3]}); '
+                    f'if(t.empty()||_occ<0) return s; '
+                    f'size_t p=0; int _i=0; '
+                    f'while((p=s.find(t,p))!=std::string::npos){{ '
+                    f'if(_i==_occ){{ s.replace(p,t.length(),r); break; }} '
+                    f'p+=t.length(); _i++; }} return s; }}()'
+                )
             if len(args) >= 3:
                 return f'[&](){{ std::string s={args[0]}; auto p=s.find({args[1]}); if(p!=std::string::npos) s.replace(p,{args[1]}.length(),{args[2]}); return s; }}()'
             return 'std::string("")'
@@ -1241,8 +1321,10 @@ class CallVisitor:
         if func_name == "round" and len(args) == 2:
             return f"(std::round({args[0]} * std::pow(10.0, {args[1]})) / std::pow(10.0, {args[1]}))"
         if func_name == "round_to_mintick":
+            # Engine method (engine.hpp): NaN- and mintick<=0-guarded,
+            # unlike the previous inlined unguarded std::round.
             x = args[0] if args else "0.0"
-            return f"(std::round({x} / syminfo_mintick_) * syminfo_mintick_)"
+            return f"round_to_mintick({x})"
         if func_name == "todegrees":
             x = args[0] if args else "0.0"
             return f"({x} * 180.0 / M_PI)"

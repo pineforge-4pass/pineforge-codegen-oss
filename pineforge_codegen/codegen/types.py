@@ -209,6 +209,17 @@ class TypeInferer:
                 if func_name == "from" and node.args:
                     return TypeSpec.array(self._type_spec_from_expr(node.args[0]) or TypeSpec.primitive("float"))
                 return TypeSpec.array(TypeSpec.primitive("float"))
+            # Functional-form array element/copy accessors: the receiver is
+            # the first argument (``array.copy(arr)``), mirroring the
+            # method-form handling below (``arr.copy()``).
+            if (namespace == "array" and node.args
+                    and func_name in ("copy", "slice", "get", "first", "last",
+                                      "pop", "shift", "remove")):
+                arg_spec = self._type_spec_from_expr(node.args[0])
+                if arg_spec is not None and arg_spec.kind == "array":
+                    if func_name in ("copy", "slice"):
+                        return arg_spec
+                    return arg_spec.element
             if namespace == "map" and func_name == "new":
                 key = self._type_spec_from_hint_name(targs[0]) if len(targs) > 0 else TypeSpec.primitive("string")
                 val = self._type_spec_from_hint_name(targs[1]) if len(targs) > 1 else TypeSpec.primitive("float")
@@ -471,6 +482,10 @@ class TypeInferer:
                 return "std::string"
             if namespace == "ta" and func_name == "pivot_point_levels":
                 return "std::vector<double>"
+            # array.join returns string in both the functional and the
+            # method-call forms.
+            if namespace == "array" and func_name == "join":
+                return "std::string"
             if isinstance(node.callee, MemberAccess):
                 member_name = func_name or node.callee.member
                 recv_spec = self._type_spec_from_expr(node.callee.object)
@@ -508,6 +523,10 @@ class TypeInferer:
             ename = node.object.name
             if ename in self._enum_defs and node.member in self._enum_defs[ename]:
                 return "int"
+            # format.* constants emit std::string literals (consumed by
+            # pine_str_tostring); bare reads must declare std::string.
+            if ename == "format":
+                return "std::string"
             # syminfo.* type inference: look up in SYMINFO_MEMBER_MAP
             # and derive C++ type from the expression (na<T>() or function call).
             if ename == "syminfo":
