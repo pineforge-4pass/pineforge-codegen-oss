@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "pineforge-codegen"
 # Version sourced from /VERSION (single source of truth). Bumped by
-# .github/workflows/deploy-worker.yml. Versioning lockstep with engine
+# .github/workflows/release.yml. Versioning lockstep with engine
 # ABI per README table.
 dynamic = ["version"]
 description = "PineScript v6 to C++ transpiler that targets the pineforge-engine runtime."
@@ -24,6 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Office/Business :: Financial",
 ]
 # Pure-Python; the only runtime-side coupling is the C ABI shape this
