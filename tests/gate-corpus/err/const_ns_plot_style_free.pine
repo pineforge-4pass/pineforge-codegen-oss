@@ -1,0 +1,3 @@
+//@version=6
+strategy("T")
+p = plot.style_line

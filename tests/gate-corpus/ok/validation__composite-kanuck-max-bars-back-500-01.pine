@@ -1,0 +1,67 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe kanuck-probe-03-max-bars-back-500 — deep-history reference chain
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolates `max_bars_back=500`. The engine surface under test is
+// the runtime's deep-history buffer: a chain that combines `ta.sma(close,
+// 400)`, `ta.rsi(close[200], 14)`, and a raw `close[450]` reference forces
+// the runtime to retain at least 500 bars of every series touched. Verifies
+// that the engine handles the deep buffer without truncation artefacts and
+// matches TradingView's broker emulator on the bars where these terms first
+// become non-na.
+//
+// Validation goal: bit-exact entries on `close > close[450]` (long) and
+// `close < close[450]` (short) — a state-flipping condition off the
+// deep-history buffer that fires many times across the 36k-bar window.
+// `ta.sma(close, 400)` and `ta.rsi(close[200], 14)` are computed on
+// every bar (and would also be plotted in TV) so the engine still has
+// to retain the 500-bar buffer for those terms — they are the deep-
+// history terms under test even though they no longer gate entries.
+// (The earlier triple-AND form is statistically far too rare on 15m
+// crypto to produce a meaningful trade-list parity check.)
+// Pass = identical trade list vs TradingView.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe kanuck-probe-03-max-bars-back-500", shorttitle="PF_kan03_MBB",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false,
+     max_bars_back=500)
+
+// ---- inputs --------------------------------------------------------
+int i_sma_len    = input.int(400, "Long SMA length",         minval=50)
+int i_rsi_offset = input.int(200, "RSI source offset",       minval=1)
+int i_deep_lag   = input.int(450, "Close-reference lookback", minval=1)
+
+// ---- deep-history terms -------------------------------------------
+// All three are computed every bar and force the runtime to retain
+// the 500-bar buffer. `long_sma` and `deep_rsi` are the corroborating
+// deep-buffer terms; `deep_close` is the entry trigger.
+float long_sma   = ta.sma(close, i_sma_len)
+float deep_rsi   = ta.rsi(close[i_rsi_offset], 14)
+float deep_close = close[i_deep_lag]
+
+// Plot the corroborating deep-history terms so the engine has to keep
+// them resolved even though they no longer gate entries.
+plot(long_sma, "deep SMA", color=color.new(color.blue,   0))
+plot(deep_rsi, "deep RSI", color=color.new(color.purple, 0), display=display.data_window)
+
+// ---- composite condition ------------------------------------------
+bool deep_ready = not na(long_sma) and not na(deep_rsi) and not na(deep_close)
+
+bool long_trigger  = deep_ready and close > deep_close
+bool short_trigger = deep_ready and close < deep_close
+
+// ---- order routing -------------------------------------------------
+if long_trigger and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="deep-history long")
+
+if short_trigger and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="deep-history short")

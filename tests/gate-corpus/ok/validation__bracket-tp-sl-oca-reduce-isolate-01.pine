@@ -1,0 +1,64 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 97a — TP/SL OCA-reduce bracket (isolated from probe 97)
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolate the OCA-reduce bracket surface from probe 97. Drops
+// the gap/range-expansion gate, drops the pending stop entry, drops the
+// max_intraday_filled_orders cap. Uses a plain dual-MA crossover to
+// trigger entries so the bracket is the only non-trivial surface under
+// test. If TV vs engine diverge here, the OCA-reduce bracket math
+// (TP+SL share an OCA group; when one fills, the other auto-reduces by
+// filled qty) is the bug locus.
+//
+// Validation goal: bit-exact trade list. Pass = identical exits because
+// OCA-reduce arithmetic at the mintick boundary matches TV.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full
+// window matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy
+// properties: leave defaults. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe 97a - tp/sl bracket isolate", shorttitle="PF_p97a_BRK",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false, calc_on_order_fills=false)
+
+// ---- inputs --------------------------------------------------------
+int i_fast    = input.int(9,  "Fast MA",         minval=2)
+int i_slow    = input.int(21, "Slow MA",         minval=3)
+int i_tp_ticks = input.int(10, "Take profit (ticks)", minval=1)
+int i_sl_ticks = input.int(10, "Stop loss (ticks)",   minval=1)
+
+// ---- entry signal: dual MA cross ----------------------------------
+float fast = ta.sma(close, i_fast)
+float slow = ta.sma(close, i_slow)
+bool  go_long  = ta.crossover(fast, slow)
+bool  go_short = ta.crossunder(fast, slow)
+
+if go_long and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, comment="ma cross up")
+
+if go_short and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, comment="ma cross dn")
+
+// ---- bracket: TP + SL sharing an OCA reduce group ------------------
+float pos_qty   = math.abs(strategy.position_size)
+int   pos_dir   = strategy.position_size > 0 ? 1 : (strategy.position_size < 0 ? -1 : 0)
+float entry_px  = strategy.position_avg_price
+float tp_px     = entry_px + pos_dir * i_tp_ticks * syminfo.mintick
+float sl_px     = entry_px - pos_dir * i_sl_ticks * syminfo.mintick
+
+bool  in_position = pos_qty > 0
+exit_dir = pos_dir > 0 ? strategy.short : strategy.long
+
+if in_position
+    strategy.order("BracketTP", exit_dir, qty=pos_qty, limit=tp_px,
+         oca_name="bracket97a", oca_type=strategy.oca.reduce, comment="TP")
+    strategy.order("BracketSL", exit_dir, qty=pos_qty, stop=sl_px,
+         oca_name="bracket97a", oca_type=strategy.oca.reduce, comment="SL")
+else
+    strategy.cancel("BracketTP")
+    strategy.cancel("BracketSL")

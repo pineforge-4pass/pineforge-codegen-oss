@@ -1,0 +1,21 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TV golden 45 - percent-of-equity sizing plus cash commission
+//
+// Purpose: isolate default_qty_type=strategy.percent_of_equity and cash_per_order commission.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF TV golden 45 - commission sizing", shorttitle="PF_G45_SIZE", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.cash_per_order, commission_value=1.5, slippage=0,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=25, pyramiding=1,
+     process_orders_on_close=false)
+
+if hour == 8 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, comment="default percent sizing")
+
+if hour == 12 and minute == 15 and strategy.position_size > 0
+    strategy.close("L", comment="sizing close")

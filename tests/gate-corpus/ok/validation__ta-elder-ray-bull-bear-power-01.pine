@@ -1,0 +1,45 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 11 — Elder Ray bull/bear power
+// Purpose: parity test for ta.ema() + (high|low - ema) bull/bear power chain
+// with `[1]`-history rising/falling memory and trend-EMA gate.
+//
+//@version=6
+strategy("Elder Ray Index", overlay=false, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === Inputs ===
+emaLen = input.int(13, "EMA Length", minval=1)
+
+// === Elder Ray: Bull/Bear Power ===
+emaVal    = ta.ema(close, emaLen)
+bullPower = high - emaVal
+bearPower = low - emaVal
+
+// === Trend filter ===
+emaTrend = ta.ema(close, 50)
+upTrend  = close > emaTrend
+dnTrend  = close < emaTrend
+
+// === Signals ===
+// Long: uptrend + bear power negative but rising
+longCond  = upTrend and bearPower < 0 and bearPower > bearPower[1]
+// Short: downtrend + bull power positive but falling
+shortCond = dnTrend and bullPower > 0 and bullPower < bullPower[1]
+
+// === Strategy ===
+if longCond
+    strategy.entry("Long", strategy.long)
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+// === Exit ===
+if strategy.position_size > 0 and bearPower > 0 and bearPower < bearPower[1]
+    strategy.close("Long")
+if strategy.position_size < 0 and bullPower < 0 and bullPower > bullPower[1]
+    strategy.close("Short")
+
+plot(bullPower, "Bull Power", color=color.green, style=plot.style_histogram)
+plot(bearPower, "Bear Power", color=color.red, style=plot.style_histogram)
+hline(0, "Zero")

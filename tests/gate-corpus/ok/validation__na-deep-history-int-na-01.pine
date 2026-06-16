@@ -1,0 +1,51 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// na-chain probe 01 — deep history + int-NA + na->bool cast
+//
+// Purpose: surface int-NA undefined behavior and `nz` chain truncation.
+// We feed `ta.rsi` a `na`-gated source, request history depth >= 500,
+// keep `nz` only at the leaf, use `time(session)` to produce out-of-session
+// `na<int64>` values, and then cast `na` through to a bool used by the
+// entry condition. If the C++ runtime's int-NA sentinel collides with
+// `INT_MIN` in any reduction path, the trade list will diverge from TV.
+//
+// Trade shape: long-only. Every bar we compute a session-gated RSI on a
+// source that is `na` outside session, only `nz`'d at the very last step
+// (so intermediate RSI internals see `na`). Entry on RSI cross-up of 30
+// AND non-na session id; exit on cross-down of 70.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to tv_trades.csv.
+//@version=6
+strategy("PF na-chain probe 01 - deep history int na", shorttitle="NA_p01_INT", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false,
+     max_bars_back=500)
+
+// Out-of-session producer: time(timeframe, session, timezone) returns na<int64> outside the window
+int sessId = time(timeframe.period, "0930-1600", "America/New_York")
+
+// Gated source — na outside session; nz only at the leaf
+float gatedSrc = na(sessId) ? na : close
+
+// Deep history reach (500 bars back) on the gated source
+float deepRef = nz(gatedSrc[499], close)
+
+// Mix gated + deep-history into RSI; nz applied at leaf only
+float src = nz(gatedSrc, deepRef)
+float rsiVal = ta.rsi(src, 14)
+
+// na -> bool cast path
+bool sessOk = not na(sessId)
+
+bool entryCond = ta.crossover(rsiVal, 30.0) and sessOk
+bool exitCond  = ta.crossunder(rsiVal, 70.0)
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if exitCond and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

@@ -1,0 +1,34 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TV golden 47 - request.security gaps_on
+//
+// Purpose: isolate barmerge.gaps_on with lookahead_off on a 15m chart requesting 60m data.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF TV golden 47 - security gaps on", shorttitle="PF_G47_GAPS", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+h60Gap = request.security(syminfo.tickerid, "60", close,
+     gaps=barmerge.gaps_on, lookahead=barmerge.lookahead_off)
+
+var float lastHtfClose = na
+bool hasHtfValue = not na(h60Gap)
+bool rollUp = false
+bool rollDown = false
+
+if hasHtfValue
+    rollUp := not na(lastHtfClose) and h60Gap > lastHtfClose
+    rollDown := not na(lastHtfClose) and h60Gap < lastHtfClose
+    lastHtfClose := h60Gap
+
+if rollUp and strategy.position_size == 0
+    strategy.entry("GAP_UP", strategy.long, qty=1, comment="gap roll up")
+
+if rollDown and strategy.position_size > 0
+    strategy.close("GAP_UP", comment="gap roll down")

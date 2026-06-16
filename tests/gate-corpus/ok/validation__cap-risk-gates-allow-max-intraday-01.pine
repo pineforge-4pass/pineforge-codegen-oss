@@ -1,0 +1,36 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TV golden 46 - strategy.risk gates
+//
+// Purpose: isolate allow_entry_in, max_position_size, and max_intraday_filled_orders.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF TV golden 46 - risk gates", shorttitle="PF_G46_RISK", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=10,
+     process_orders_on_close=false)
+
+strategy.risk.allow_entry_in(strategy.direction.long)
+strategy.risk.max_position_size(2)
+strategy.risk.max_intraday_filled_orders(3)
+
+// Use fixed UTC-style clock pulses on the crypto 24x7 feed. The short attempt
+// should be blocked by allow_entry_in; the third long should be constrained by risk.
+if hour == 0 and minute == 15
+    strategy.entry("L1", strategy.long, qty=1, comment="first long")
+
+if hour == 0 and minute == 30
+    strategy.entry("L2", strategy.long, qty=1, comment="second long")
+
+if hour == 0 and minute == 45
+    strategy.entry("L3", strategy.long, qty=1, comment="third long")
+
+if hour == 1 and minute == 0
+    strategy.entry("S_BLOCKED", strategy.short, qty=1, comment="blocked short")
+
+if hour == 3 and minute == 0 and strategy.position_size != 0
+    strategy.close_all(comment="daily reset")

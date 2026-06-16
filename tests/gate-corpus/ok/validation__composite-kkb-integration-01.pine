@@ -1,0 +1,68 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe kkb-probe-integration — Kalman + breakout + margin-100%
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: composes the three surfaces isolated by `kkb-probe-01..03`
+// (1-D Kalman filter, EMA-mid + ATR breakout band, `margin_long=100,
+// margin_short=100` broker-emulator semantics) into one strategy. Long
+// when Kalman trends up AND price breaks the upper band; short when
+// Kalman trends down AND price breaks the lower band. Exit when the
+// opposite breakout fires. Verifies that the runtime carries Kalman
+// state correctly while the broker emulator enforces full-margin sizing.
+//
+// Validation goal: bit-exact trade list against TradingView's broker
+// emulator on the reference 15-minute ETH-USDT-USDT feed.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe kkb-probe-integration", shorttitle="PF_kkbINT",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false,
+     margin_long=100, margin_short=100)
+
+// ---- inputs --------------------------------------------------------
+float i_q        = input.float(0.001, "Process variance Q",     minval=0.0, step=0.0005)
+float i_r        = input.float(0.1,   "Measurement variance R", minval=0.0001, step=0.01)
+int   i_band_len = input.int(20,    "Band EMA length", minval=2)
+int   i_atr_len  = input.int(14,    "ATR length",      minval=2)
+float i_atr_mult = input.float(1.5, "ATR multiplier",  minval=0.1, step=0.1)
+
+// ---- Kalman state -------------------------------------------------
+var float x = na
+var float p = 1.0
+
+float x_pred = nz(x[1], close)
+float p_pred = nz(p[1], 1.0) + i_q
+float k_gain = p_pred / (p_pred + i_r)
+x := x_pred + k_gain * (close - x_pred)
+p := (1 - k_gain) * p_pred
+
+bool kalman_bull = x > nz(x[1], x)
+bool kalman_bear = x < nz(x[1], x)
+
+// ---- breakout band ------------------------------------------------
+float band  = ta.ema(close, i_band_len)
+float vol   = ta.atr(i_atr_len)
+float upper = band + vol * i_atr_mult
+float lower = band - vol * i_atr_mult
+
+bool break_up   = ta.crossover(close,  upper)
+bool break_down = ta.crossunder(close, lower)
+
+// ---- composed gates -----------------------------------------------
+bool go_long  = kalman_bull and break_up
+bool go_short = kalman_bear and break_down
+
+// ---- order routing -------------------------------------------------
+if go_long and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="integ long")
+
+if go_short and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="integ short")

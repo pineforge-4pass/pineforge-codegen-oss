@@ -1,0 +1,36 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Parity probe: ES futures point-value PnL multiplier + 0.25-tick snap.
+//
+// Purpose: Isolate the per-instrument PnL scaling on a real CME futures
+// contract. CME_MINI:ES1! has syminfo.pointvalue = 50 (USD per index
+// point per contract) and syminfo.mintick = 0.25. With 1-contract fixed
+// sizing, cash_per_contract commission ($2.10/contract) and slippage=1
+// tick, every closed trade's gross PnL must equal
+// (exit_px - entry_px) * 50 and fills must snap to 0.25 boundaries.
+// Plain SMA(9)/SMA(21) cross drives flat-to-long/long-to-flat so the
+// trade set is deterministic and the PnL multiplier is the only moving
+// part vs. the default crypto (pointvalue=1, mintick=0.01) behaviour.
+
+//@version=6
+strategy("ES point-value 9/21 SMA cross",
+     initial_capital=1000000,
+     currency=currency.USD,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=2.10,
+     slippage=1,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     pyramiding=1,
+     process_orders_on_close=false)
+
+fast = ta.sma(close, 9)
+slow = ta.sma(close, 21)
+
+if ta.crossover(fast, slow)
+    strategy.entry("L", strategy.long)
+
+if ta.crossunder(fast, slow)
+    strategy.close("L")

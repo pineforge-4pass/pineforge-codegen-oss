@@ -1,0 +1,49 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 88 - three-way exit set once at entry (scalping-like)
+//
+// Purpose: isolate the exit-side divergence in a community-style scalping
+// strategy. Probe 50 already covers same-bar stop+limit+trail_points fills,
+// but it RE-ISSUES strategy.exit on every bar while in position
+// (`if strategy.position_size > 0`). The scalping shape instead calls
+// strategy.exit ONCE next to strategy.entry — the exit's stop, limit, and
+// trail_points values are captured from the entry-bar atr/close and never
+// updated. This probe mirrors that shape exactly so any divergence between
+// TV and the engine maps cleanly to the "exit set once + carried across
+// multiple bars" path rather than the "exit reset each bar" path that
+// probe 50 covers.
+//
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 88 - 3-way exit set once", shorttitle="PF_P88_EX3SET", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// Tick-sized trail (~$0.20 for ETH at mintick 0.01) matches scalping's
+// trail_points=atr semantics — atr is implicitly cast to int and ends up
+// as a small tick count rather than the human-readable atr in price units.
+trailTicks = 20
+
+// Long entry once a day, with the 3-way exit captured at entry close.
+if hour == 8 and minute == 0 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+    strategy.exit("LX", "L",
+         stop=close * 0.99,
+         limit=close * 1.02,
+         trail_points=trailTicks,
+         comment="3-way set once")
+
+// Short entry once a day, far enough from the long window to avoid bracket
+// interference. Same 3-way exit captured at entry close.
+if hour == 20 and minute == 0 and strategy.position_size == 0
+    strategy.entry("S", strategy.short, qty=1, comment="entry short")
+    strategy.exit("SX", "S",
+         stop=close * 1.01,
+         limit=close * 0.98,
+         trail_points=trailTicks,
+         comment="3-way set once")

@@ -1,0 +1,23 @@
+// TV_RUN_NEEDED: tv_trades.csv missing — capture in TradingView:
+//   Symbol: ETHUSDT.P (Binance USDT-M Perpetual)  TF: 15m  Range: 2024-01-01..2024-06-01
+//   Save List of Trades → tv_trades.csv in this directory.
+
+//@version=6
+strategy("VWAP Bands Mean Reversion 2σ", overlay=true,
+         default_qty_type=strategy.fixed, default_qty_value=1,
+         initial_capital=100000, currency=currency.USD)
+
+// VWAP Bands (3-tuple form): daily anchor, 2-sigma bands.
+// Pine v6 ta.vwap(source, anchor, stdev_mult) returns [vwap, upper, lower].
+[vw, upper_band, lower_band] = ta.vwap(close, timeframe.change("1D"), 2.0)
+
+// Mean-reversion strategy:
+//   Entry:  close crosses below lower_band (price below -2σ VWAP band)
+//   Exit:   close crosses above vwap (price reverts to mean)
+long_condition  = ta.crossunder(close, lower_band)
+exit_condition  = ta.crossover(close, vw)
+
+if long_condition
+    strategy.entry("long", strategy.long)
+if exit_condition
+    strategy.close("long")

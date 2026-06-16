@@ -1,0 +1,62 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 14 — method return drives strategy.entry directly
+//
+// Purpose: ``if signal.shouldEnterLong()`` must evaluate the UDT
+// method, then immediately invoke ``strategy.entry`` only when the
+// returned bool is true. The C++ runtime must guarantee evaluation
+// happens once per bar inside the if-condition, not duplicated by
+// the order block. Conversely the method's side effects (mutating
+// internal counters) must persist exactly once.
+//
+// Trade shape: long + short. Signal toggles direction based on EMA
+// regime; methods both decide the signal AND maintain a debounce
+// counter to prevent flip-flopping in the same direction within 5 bars.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 14 - method drives entry", shorttitle="UDT_p14_ENT", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Signal
+    int last_long_bar = -1000
+    int last_short_bar = -1000
+    int debounce = 5
+
+method shouldEnterLong(Signal self, bool cross) =>
+    bool spaced = (bar_index - self.last_long_bar) >= self.debounce
+    bool ok = cross and spaced
+    if ok
+        self.last_long_bar := bar_index
+    ok
+
+method shouldEnterShort(Signal self, bool cross) =>
+    bool spaced = (bar_index - self.last_short_bar) >= self.debounce
+    bool ok = cross and spaced
+    if ok
+        self.last_short_bar := bar_index
+    ok
+
+var Signal sig = Signal.new(-1000, -1000, 5)
+
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+bool xUp   = ta.crossover(emaFast, emaSlow)
+bool xDown = ta.crossunder(emaFast, emaSlow)
+
+if sig.shouldEnterLong(xUp)
+    if strategy.position_size < 0
+        strategy.close("S", comment="flip to long")
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+
+if sig.shouldEnterShort(xDown)
+    if strategy.position_size > 0
+        strategy.close("L", comment="flip to short")
+    strategy.entry("S", strategy.short, qty=1, comment="entry short")

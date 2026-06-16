@@ -1,0 +1,44 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Pyramid carry probe 01 — deferred flip across close_all
+//
+// Purpose: pyramiding=4 with alternating market and stop entries,
+// punctuated by `strategy.close_all` mid-session. Tests deferred-
+// flip carry: when a stop entry queued the prior bar would flip
+// the position, but `close_all` fires the same bar, the runtime
+// must correctly sequence (close-then-flip vs flip-then-close)
+// across the pyramid stack.
+//
+// Trade shape: alternating long market entries (RSI cross-up) and
+// short stop entries (break of prior low) up to pyramiding=4. Once
+// per session (hour==21, minute==45) we close_all, expecting any
+// pending stop entries queued by previous bar to carry into the
+// next bar after the flat reset.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Manual TV capture later.
+//@version=6
+strategy("PF Pyramid carry 01 - deferred flip", shorttitle="PYR_p01_FLIP", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=4,
+     process_orders_on_close=false)
+
+rsiVal  = ta.rsi(close, 14)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+atrVal  = ta.atr(14)
+
+bool longCond  = ta.crossover(emaFast, emaSlow) and rsiVal < 70
+bool shortStop = ta.crossunder(rsiVal, 50)
+
+if longCond
+    strategy.entry("L", strategy.long, qty=1, comment="add long market")
+
+if shortStop
+    strategy.entry("S", strategy.short, qty=1, stop=low - atrVal * 0.25, comment="flip short stop")
+
+if hour == 21 and minute == 45
+    strategy.close_all(comment="session close_all")

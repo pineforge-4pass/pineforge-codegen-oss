@@ -1,0 +1,27 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe 09 — typed-matrix-01 trigger MINUS matrix bool ops
+//
+// Purpose: typed-matrix-probe-01 uses RSI(14) > 60 entry and RSI(14) < 45
+// exit, gated additionally by a matrix.transpose round-trip + hotCount counter.
+// This probe ISOLATES just the RSI > 60 / RSI < 45 trigger pair, no matrix.
+// If this is excellent and typed-matrix-01 still drifts, root cause is in
+// matrix.new<bool> / matrix.set / matrix.get / matrix.transpose dispatch
+// (the X7 typed-matrix codepath).
+//@version=6
+strategy("PF TA isolate 09 - RSI>60 entry, RSI<45 exit", shorttitle="TAI_09_RSI60_45",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+rsiVal = ta.rsi(close, 14)
+bool entryCond = not na(rsiVal) and rsiVal > 55.0   // mirrors typed-matrix-01's `rsiVal > 55.0` second gate
+bool exitCond  = not na(rsiVal) and rsiVal < 45.0
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if exitCond and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

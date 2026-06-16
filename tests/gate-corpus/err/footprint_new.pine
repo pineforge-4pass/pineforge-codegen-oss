@@ -1,0 +1,3 @@
+//@version=6
+strategy("T")
+fp = footprint.new(10)

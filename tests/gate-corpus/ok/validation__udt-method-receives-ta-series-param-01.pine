@@ -1,0 +1,57 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 12 — method receives ta.* result as a parameter
+//
+// Purpose: method parameters can be ``series float`` values from
+// ``ta.*`` indicators. The C++ runtime must accept them as plain
+// ``double`` arguments, not produce a per-callsite TA materialization.
+// (Note: TA functions themselves are kept at GLOBAL scope per Pine
+// best practice; only the resulting series is passed to the method.)
+//
+// Trade shape: long-only. ``filter.confirms(rsi, ema, atr)`` evaluates
+// a multi-criteria condition and returns bool; entry uses it directly.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 12 - ta param", shorttitle="UDT_p12_TAP", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Filter
+    float rsi_min = 40.0
+    float rsi_max = 90.0
+    float atr_min = 0.0
+
+method confirms(Filter self, float rsi, float ema, float atr) =>
+    bool rsiOk = rsi >= self.rsi_min and rsi <= self.rsi_max
+    bool emaOk = close > ema
+    bool atrOk = atr > self.atr_min
+    rsiOk and emaOk and atrOk
+
+var Filter filt = Filter.new(40.0, 90.0, 0.0)
+
+float rsiVal = ta.rsi(close, 14)
+float emaVal = ta.ema(close, 21)
+float atrVal = ta.atr(14)
+
+// Compute ta.crossover/crossunder at global scope BEFORE the method
+// call. C++ ``&&`` is short-circuit and ``ta.crossover()`` requires
+// per-bar evaluation to maintain its internal state — putting the
+// method call first would skip the TA update on bars where the
+// method returns false.
+bool xUp   = ta.crossover(close, emaVal)
+bool xDown = ta.crossunder(close, emaVal)
+
+bool entryCond = xUp and filt.confirms(rsiVal, emaVal, atrVal)
+bool exitCond  = xDown
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if exitCond and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

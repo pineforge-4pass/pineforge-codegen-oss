@@ -1,0 +1,54 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// VCP probe 05 — candle-position volume delta + cumulative sum
+//
+// Purpose: isolate the cumulative-volume-delta half of the VCP integration
+// probe family. That family synthesises buy/sell volume from candle position
+// with a tiny
+// epsilon in the denominator (``high - low + 0.0001``) to avoid
+// division-by-zero on doji bars, computes the per-bar delta, and
+// then runs a 10-bar rolling ``math.sum`` on top. ``cumDelta`` then
+// gates ``volumeBullish`` / ``volumeBearish`` (which feed the volume
+// confluence). Two candidate sources of TV/engine drift here:
+//   (1) the doji-epsilon arithmetic on bars where ``high == low``
+//       (extremely rare on ETH 15m but possible);
+//   (2) the rolling ``math.sum`` window precision over 10 bars.
+//
+// This probe routes a trivial entry/exit through ONLY the cumulative
+// delta. Any TV/engine drift here is attributable to candle-position
+// buy/sell synthesis and the 10-bar ``math.sum``, NOT to VCP's other
+// filters.
+//
+// Trade shape: long-only, pyramiding=1. Enter long on cumDelta crossing
+// ABOVE zero (was <= 0 last bar, > 0 this bar). Close on cumDelta
+// crossing BELOW zero.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("VCP probe 05 - cumulative vol delta", shorttitle="VCP_p05",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- buy/sell volume — IDENTICAL to VCP (incl. 0.0001 epsilon) ----
+float buyVolume  = close > open ? volume : volume * (close - low) / (high - low + 0.0001)
+float sellVolume = close < open ? volume : volume * (high - close) / (high - low + 0.0001)
+float volumeDelta = buyVolume - sellVolume
+
+// ---- 10-bar cumulative delta (matches VCP line 309) ----------------
+float cumDelta = math.sum(volumeDelta, 10)
+
+bool crossUp   = cumDelta > 0 and cumDelta[1] <= 0
+bool crossDown = cumDelta < 0 and cumDelta[1] >= 0
+
+// ---- trivial entry / exit ------------------------------------------
+if crossUp and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="cumDelta cross-up")
+
+if crossDown and strategy.position_size > 0
+    strategy.close("L", comment="cumDelta cross-down exit")

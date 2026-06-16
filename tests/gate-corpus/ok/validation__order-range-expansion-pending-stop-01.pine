@@ -1,0 +1,55 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 97c — range-expansion gated pending stop entry (isolated from probe 97)
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolate the range-expansion predicate + pending stop entry
+// lifecycle from probe 97. Drops bracket, drops cap. Uses
+// `strategy.entry(..., stop=high[1])` for long arm and
+// `strategy.entry(..., stop=low[1])` for short arm, gated by an
+// ATR-relative range expansion test on the previous bar. Cancels the
+// pending stop when the gate negates. If TV vs engine diverge here,
+// either the range-expansion arithmetic (atr[1] history access) or
+// the pending-stop placement / next-bar cancel lifecycle is the bug.
+//
+// Validation goal: bit-exact trade list. Pass = same set of bars trigger
+// pending stop entries, same set get cancelled before fill, same fills.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full
+// window matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy
+// properties: leave defaults. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe 97c - range-expansion pending-stop isolate", shorttitle="PF_p97c_RNG",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false, calc_on_order_fills=false)
+
+// ---- inputs --------------------------------------------------------
+int   i_atr_len  = input.int(14, "ATR length",            minval=1)
+float i_atr_mult = input.float(1.0, "Range/ATR threshold", minval=0.1)
+
+// ---- range-expansion detection (mirrors probe 97 logic) ------------
+float prev_range = high[1] - low[1]
+float atr_now    = ta.atr(i_atr_len)
+float atr_prev   = atr_now[1]
+bool  expansion  = not na(atr_prev) and prev_range > atr_prev * i_atr_mult
+
+bool prev_up   = close[1] > open[1]
+bool prev_down = close[1] < open[1]
+
+bool arm_long  = expansion and prev_up
+bool arm_short = expansion and prev_down
+
+// ---- pending stop entries; cancelled when arm negates --------------
+if arm_long
+    strategy.entry("LongOnRng", strategy.long, stop=high[1])
+else
+    strategy.cancel("LongOnRng")
+
+if arm_short
+    strategy.entry("ShortOnRng", strategy.short, stop=low[1])
+else
+    strategy.cancel("ShortOnRng")

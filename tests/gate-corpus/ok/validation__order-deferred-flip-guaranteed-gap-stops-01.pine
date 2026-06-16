@@ -1,0 +1,63 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 95 - multi-cycle deferred-flip growth, sub-bar-precision-free
+//
+// Purpose: isolate whether the residual probes 52/63 PnL divergence is
+// the deferred-flip growth rule itself or sub-bar fill precision.
+//
+// Probe 52 exercises the same mechanic but its SE/LE stops are placed at
+// ``high[1] + tick`` / ``low[1] - tick``, which makes the fire price
+// depend on TradingView's intra-bar 1m magnifier path. This probe replaces
+// those stops with EXTREME levels (``high * 10`` for the short stop,
+// ``low * 0.1`` for the long stop) that are GUARANTEED to gap through at
+// the next bar's open — the fill price is always ``open``, regardless of
+// any sub-bar path. Cross events are also time-based (deterministic),
+// not EMA-derived, eliminating EMA precision drift.
+//
+// Each UTC day fires two cycles (down at 8:00, up at 14:00). The growth
+// chain steps up by 1 every cycle (long N -> short N+1 -> long N+2 ...).
+// A weekly forced-flat at Monday 00:00 caps the chain length at 14
+// cycles per week so the position notional stays well below
+// initial_capital — without this, an unbounded chain on a 365-day
+// window grows past TV's broker capital cap (~qty 288 with 1M capital)
+// and TV starts splitting positions in ways unrelated to the
+// deferred-flip rule we're testing.
+//
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 95 - multi-cycle open-guaranteed stops", shorttitle="PF_P95_OG",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+isDown = hour == 8 and minute == 0
+isUp = hour == 14 and minute == 0
+
+// Stop levels engineered so the fill price is always ``open`` of the next
+// bar. SE short fires when ``low <= stop`` -> stop = ``high * 10`` is
+// always >= low, fill = min(open, stop) = open.
+// LE long fires when ``high >= stop``  -> stop = ``low * 0.1`` is always
+// <= high, fill = max(open, stop) = open.
+shortStop = high * 10.0
+longStop = low * 0.1
+
+if isDown
+    strategy.entry("SE", strategy.short, qty=1, stop=shortStop, comment="open-guaranteed short")
+    strategy.cancel("LE")
+
+if isUp
+    strategy.entry("LE", strategy.long, qty=1, stop=longStop, comment="open-guaranteed long")
+    strategy.cancel("SE")
+
+if isDown and strategy.position_size > 0
+    strategy.close("LE", comment="flip flat long")
+
+if isUp and strategy.position_size < 0
+    strategy.close("SE", comment="flip flat short")
+
+if dayofweek == 2 and hour == 0 and minute == 0 and strategy.position_size != 0
+    strategy.close_all(comment="weekly reset")

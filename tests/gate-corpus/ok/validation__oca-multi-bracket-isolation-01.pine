@@ -1,0 +1,46 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// OCA probe 02 — multi-bracket via strategy.exit (internal CANCEL)
+//
+// Purpose: two strategy.exit brackets attached to same long entry,
+// different ATR widths + different oca_name. Tests cross-bracket
+// isolation: tight bracket fills first → only its own TP/SL cancel,
+// the wider bracket continues running. Pine v6 strategy.exit uses
+// internal OCA-CANCEL between TP and SL within the SAME oca_name.
+// Different oca_name → independent.
+//
+// strategy.exit is close-only → no leaked-short trap.
+//
+// Trade shape: long-only RSI/EMA confluence, qty=2 entry, two brackets
+// each qty=1.
+//
+// TV setup: 15m chart, ETH-USDT-USDT.
+//@version=6
+strategy("PF OCA probe 02 - multi-bracket isolation", shorttitle="OCA_p02_MGP", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=2, pyramiding=1,
+     process_orders_on_close=false)
+
+rsiVal  = ta.rsi(close, 14)
+atrVal  = ta.atr(14)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+bool entryCond = ta.crossover(emaFast, emaSlow) and rsiVal < 60
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=2, comment="entry")
+
+if strategy.position_size > 0
+    entry = strategy.position_avg_price
+    // Bracket A: tight ATR — hits more often
+    strategy.exit("X_A", from_entry="L", qty=1,
+         limit=entry + atrVal * 1.0, stop=entry - atrVal * 1.0,
+         oca_name="GRP_A")
+    // Bracket B: wider ATR — independent group
+    strategy.exit("X_B", from_entry="L", qty=1,
+         limit=entry + atrVal * 2.0, stop=entry - atrVal * 2.0,
+         oca_name="GRP_B")

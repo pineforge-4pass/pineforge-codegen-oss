@@ -1,0 +1,27 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TV golden 40 - bracket exit TP/SL
+//
+// Purpose: isolate strategy.exit(limit, stop) on a simple periodic long entry.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF TV golden 40 - bracket TP/SL", shorttitle="PF_G40_BRACKET", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+enterLong = hour == 0 and minute == 15 and strategy.position_size == 0
+
+if enterLong
+    strategy.entry("L", strategy.long, qty=1, comment="periodic long")
+
+if strategy.position_size > 0
+    entry = strategy.position_avg_price
+    strategy.exit("LX", "L", limit=entry * 1.004, stop=entry * 0.996, comment="bracket")
+
+if strategy.position_size > 0 and hour == 6 and minute == 15
+    strategy.close("L", comment="timeout")

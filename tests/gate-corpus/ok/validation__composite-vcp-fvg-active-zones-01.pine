@@ -1,0 +1,96 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// VCP probe 02 — Fair Value Gap detection + active-zone iteration
+//
+// Purpose: isolate the FVG half of the VCP integration probe family. That
+// family defines an FVG as a 3-bar imbalance gated by an ATR-fraction
+// minimum size, then keeps every active gap in a parallel
+// ``array<float>`` / ``array<bool>`` triple (tops / bottoms / bullish
+// flag) capped at 30. On every bar it iterates ALL active zones to
+// compute ``inBullFVG`` / ``inBearFVG`` for the current candle. That zone
+// iteration is what gates VCP's structure-confluence bonus (``+1`` to
+// structScore when in zone + matching structureDirection).
+//
+// This probe replicates the FVG state machine VERBATIM — same gap
+// conditions, same ATR multiplier (0.3), same array<float> retention,
+// same per-bar containment loop — and routes a trivial entry/exit
+// through it. Any TV/engine drift here is attributable to FVG state
+// management (push/shift cap, per-bar containment loop, atr-mult
+// minimum size) and NOT to the rest of VCP's stack.
+//
+// Trade shape: long-only, pyramiding=1. Enter long when the current
+// bar's HL range overlaps an active BULL FVG (i.e. ``inBullFVG``
+// becomes true while flat). Close the long when an active BEAR FVG
+// is touched.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("VCP probe 02 - fvg zones", shorttitle="VCP_p02",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false,
+     max_boxes_count=300)
+
+// ---- ATR (literal length 14, matching VCP line 187) ----------------
+float atrVal = ta.atr(14)
+
+// ---- FVG detection — IDENTICAL conditions to VCP -------------------
+bool bullFVG = low > high[2] and close[1] > open[1]
+bool bearFVG = high < low[2] and close[1] < open[1]
+
+float minFVGSize = atrVal * 0.3
+
+// ---- FVG storage (mirror of VCP's parallel arrays) -----------------
+var array<float> fvgTops    = array.new<float>()
+var array<float> fvgBottoms = array.new<float>()
+var array<bool>  fvgBullish = array.new<bool>()
+
+float fvgTop    = na
+float fvgBottom = na
+
+if bullFVG and (low - high[2]) >= minFVGSize
+    fvgTop    := low
+    fvgBottom := high[2]
+    array.push(fvgTops, fvgTop)
+    array.push(fvgBottoms, fvgBottom)
+    array.push(fvgBullish, true)
+
+if bearFVG and (low[2] - high) >= minFVGSize
+    fvgTop    := low[2]
+    fvgBottom := high
+    array.push(fvgTops, fvgTop)
+    array.push(fvgBottoms, fvgBottom)
+    array.push(fvgBullish, false)
+
+while array.size(fvgTops) > 30
+    array.shift(fvgTops)
+    array.shift(fvgBottoms)
+    array.shift(fvgBullish)
+
+// ---- per-bar containment loop — IDENTICAL pattern to VCP -----------
+bool inBullFVG = false
+bool inBearFVG = false
+
+if array.size(fvgTops) > 0
+    for i = 0 to array.size(fvgTops) - 1
+        float fTop    = array.get(fvgTops, i)
+        float fBottom = array.get(fvgBottoms, i)
+        bool  isBull  = array.get(fvgBullish, i)
+
+        if low <= fTop and high >= fBottom
+            if isBull
+                inBullFVG := true
+            else
+                inBearFVG := true
+
+// ---- trivial entry / exit ------------------------------------------
+if inBullFVG and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="bull-fvg touch")
+
+if inBearFVG and strategy.position_size > 0
+    strategy.close("L", comment="bear-fvg touch exit")

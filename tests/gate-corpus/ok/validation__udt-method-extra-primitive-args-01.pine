@@ -1,0 +1,42 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 03 — extra primitive args (int / float / bool)
+//
+// Purpose: UDT methods can take additional primitive parameters after
+// ``self``. The C++ runtime must lower the signature to
+// ``_udt_Box_score(Box& self, int n, double mult, bool flip)`` and
+// pass arguments in the right order (positional + kwargs supported).
+// Drift here means parameter binding for non-self args is broken.
+//
+// Trade shape: bracketed long entry whose offset depends on ATR(n)
+// scaled by the method's ``mult`` and ``flip`` parameters.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 03 - extra args", shorttitle="UDT_p03_ARGS", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Cfg
+    float base = 100.0
+    float bias = 0.0
+
+method offset(Cfg self, int n, float mult, bool flip) =>
+    int sign = flip ? -1 : 1
+    self.base + (mult * float(n) * float(sign)) + self.bias
+
+var Cfg cfg = Cfg.new(0.0, 0.0)
+cfg.base := close
+
+float upOff   = cfg.offset(5, 0.10, false)
+float downOff = cfg.offset(n=5, mult=0.10, flip=true)
+
+if ta.crossover(close, ta.sma(close, 20)) and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+    strategy.exit("LX", "L", limit=upOff, stop=downOff, comment="bracket long")

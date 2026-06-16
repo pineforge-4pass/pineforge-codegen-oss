@@ -1,0 +1,36 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// TA recompute probe 02 — untested TA classes under magnifier
+//
+// Purpose: exercise three TA classes the C++ gap report flagged as
+// having zero save/restore coverage: ALMA, Parabolic SAR, and rolling
+// Correlation. Magnifier is ON to drive the recompute paths on every
+// sub-bar tick. Drift here points at first-emission landmines in
+// classes whose internal state has never been round-tripped.
+//
+// Trade shape: long-only. Entry when ALMA crosses up through close,
+// SAR flips below price, and price/volume correlation is positive.
+// Exit on SAR flip back above close.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, magnifier ON in TV settings.
+// Export trades to trades.csv.
+//@version=6
+strategy("PF TA recompute probe 02 - untested classes", shorttitle="TArec_p02_UNT", overlay=true,
+     initial_capital=1000000, currency=currency.USD, use_bar_magnifier=true,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+almaVal  = ta.alma(close, 14, 0.85, 6)
+sarVal   = ta.sar(0.02, 0.02, 0.2)
+corrVal  = ta.correlation(close, volume, 20)
+
+bool bullEntry = ta.crossover(close, almaVal) and sarVal < close and corrVal > 0.0
+bool bearExit  = sarVal > close
+
+if bullEntry and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if bearExit and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

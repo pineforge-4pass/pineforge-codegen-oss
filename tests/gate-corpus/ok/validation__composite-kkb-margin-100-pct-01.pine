@@ -1,0 +1,46 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe kkb-probe-03-margin-100-pct — margin_long/margin_short=100%
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolates the broker-emulator's margin/sizing semantics under
+// `margin_long=100, margin_short=100`. The engine surface under test is
+// strategy declaration argument propagation through to per-bar position
+// sizing — at 100% margin the broker should require full notional cover
+// for every fill. The strategy itself is a trivial dual-SMA cross so the
+// only differentiator vs other probes is the margin declaration.
+//
+// Validation goal: bit-exact entries on `ta.crossover(ta.sma(close,5),
+// ta.sma(close,20))` and exits on the symmetric cross-under, against
+// TradingView's broker emulator with the same margin settings.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe kkb-probe-03-margin-100-pct", shorttitle="PF_kkb03_MGN",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false,
+     margin_long=100, margin_short=100)
+
+// ---- inputs --------------------------------------------------------
+int i_fast = input.int(5,  "Fast SMA length", minval=2)
+int i_slow = input.int(20, "Slow SMA length", minval=3)
+
+// ---- dual SMA ------------------------------------------------------
+float fast = ta.sma(close, i_fast)
+float slow = ta.sma(close, i_slow)
+
+bool cross_up   = ta.crossover(fast,  slow)
+bool cross_down = ta.crossunder(fast, slow)
+
+// ---- order routing -------------------------------------------------
+if cross_up and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="ma cross up")
+
+if cross_down and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="ma cross down")

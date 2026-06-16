@@ -1,0 +1,33 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 14 — VWMA vs SMA divergence
+// Purpose: parity test for ta.vwma() (volume-weighted MA) against ta.sma() with
+// zero-cross of their difference as the entry trigger.
+//
+//@version=6
+strategy("VWMA vs SMA Divergence", overlay=true, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === Inputs ===
+len = input.int(20, "Length", minval=5)
+
+// === VWMA vs SMA ===
+vwmaVal = ta.vwma(close, len)
+smaVal  = ta.sma(close, len)
+
+// === Divergence: VWMA > SMA = volume-weighted buying pressure ===
+vwmaDiff = vwmaVal - smaVal
+
+// === Signals ===
+longCond  = ta.crossover(vwmaDiff, 0)
+shortCond = ta.crossunder(vwmaDiff, 0)
+
+// === Strategy ===
+if longCond
+    strategy.entry("Long", strategy.long)
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+plot(vwmaVal, "VWMA", color=color.blue, linewidth=2)
+plot(smaVal, "SMA", color=color.orange, linewidth=2)

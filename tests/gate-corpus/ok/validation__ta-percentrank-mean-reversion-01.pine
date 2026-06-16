@@ -1,0 +1,43 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 25 — percent-rank mean reversion
+// Purpose: parity test for ta.percentrank() over price-change series with
+// extreme-then-rising / extreme-then-falling reversion entries.
+//
+//@version=6
+strategy("Percent Rank Reversion", overlay=false, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === Inputs ===
+prLen  = input.int(50, "Percentile Rank Length", minval=10)
+obPR   = input.float(90, "Overbought PR")
+osPR   = input.float(10, "Oversold PR")
+
+// === Percent Rank of price changes ===
+priceChange = close - close[1]
+pr = ta.percentrank(priceChange, prLen)
+
+// === Smoothed signal ===
+prSmooth = ta.sma(pr, 5)
+
+// === Mean reversion signals ===
+longCond  = pr < osPR and pr > pr[1]
+shortCond = pr > obPR and pr < pr[1]
+
+if longCond
+    strategy.entry("Long", strategy.long)
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+// === Exit at middle ===
+if strategy.position_size > 0 and pr > 50
+    strategy.close("Long")
+if strategy.position_size < 0 and pr < 50
+    strategy.close("Short")
+
+plot(pr, "Percent Rank", color=color.blue)
+plot(prSmooth, "Smooth PR", color=color.orange)
+hline(obPR, "OB", color=color.red)
+hline(osPR, "OS", color=color.green)
+hline(50, "Mid", color=color.gray)

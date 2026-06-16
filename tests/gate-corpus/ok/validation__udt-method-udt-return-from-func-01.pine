@@ -1,0 +1,67 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 20 (stretch) — user function returns a UDT, then
+// methods are called on the returned value
+//
+// **EXPECTED-FAIL probe (C++ runtime gap)**: validation/38 already
+// flags "UDT returns from user functions" as a known gap. This probe
+// surfaces the concrete clang errors:
+//   1. ``build_sample(...) =>`` is emitted with return type
+//      ``double`` even though its body returns ``Sample.new(...)``.
+//      Clang rejects "no viable conversion from Sample to double".
+//   2. The caller binding ``Sample s = build_sample(...)`` then has
+//      ``s`` typed as ``double`` (from the function's return type),
+//      so ``s.score()`` becomes member-access on a double.
+// When the analyzer infers UDT returns for user-defined functions
+// and threads the type back through to the call site's symbol table,
+// this probe should compile.
+//
+// Purpose: ``f() => Sample.new(...)`` returns a UDT instance; the
+// caller binds it to a local and immediately calls a method on it.
+// The C++ runtime must lower the user function's return type as the
+// matching struct (e.g. ``Sample``) and the call site as
+// ``_udt_Sample_score(_tmp)``.
+//
+// Trade shape (when fixed): long-only EMA crossover gated on score
+// returned via the user function -> method chain.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 20 - udt from user func", shorttitle="UDT_p20_UFR", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Sample
+    float price = na
+    float rsi = na
+    float weight = 1.0
+
+method score(Sample self) =>
+    if na(self.price) or na(self.rsi)
+        0.0
+    else
+        // Signed RSI deviation from 50, weighted. Can be negative.
+        (self.rsi - 50.0) * 0.1 * self.weight
+
+build_sample(float price, float rsi, float weight) =>
+    Sample.new(price, rsi, weight)
+
+float rsiVal = ta.rsi(close, 14)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+Sample s = build_sample(close, rsiVal, 1.0)
+float sc = s.score()
+
+// Gate: RSI must be > ~60 (sc > 1.0 => rsi - 50 > 10). Filters
+// crossovers in weak momentum.
+if ta.crossover(emaFast, emaSlow) and sc > 1.0 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if ta.crossunder(emaFast, emaSlow) and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

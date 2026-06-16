@@ -1,0 +1,80 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe pineforge-analyzer — multi-mode parity exporter
+// Purpose: parity test for a single strategy that switches among four entry
+// shapes (clock_pulse / htf_60_roll / htf_d_high1 / bar_stair) via an
+// input.string mode selector, used to spot-check engine timing per-shape.
+//
+// PineForge analyzer — run on the SAME symbol + timeframe + date range as repo OHLCV.
+// Export List of trades → compare with scripts/diff_tv_vs_engine.py or validate_detailed_report.py
+//
+// Multiple mode exports: name files trades-<mode>.csv and set inputs.json "Analysis mode" +
+// "tv_trades_csv" to match, OR run: uv run python scripts/diff_pineforge_analyzer_modes.py
+//
+// Modes (input):
+//   clock_pulse — periodic 1-bar long trades (bar index + timestamp ruler vs engine)
+//   htf_60_roll   — ta.change(D-60 close) entries (HTF close alignment)
+//   htf_d_high1   — daily high[1] break (request.security + series[1] gate; same class as mtf-probe-04)
+//   bar_stair     — close > close[1] > close[2] (Series [k] chain smoke test)
+//
+// Chart: match PineForge input_tf (e.g. 15m for ETHUSDT 15m CSV). Commission/slippage 0.
+// TV “List of trades” naive times: if you export with chart/sessions in UTC+8, set inputs.json
+// tv_trades_csv_tz to "utc_plus_8" (repo default for parity tooling).
+//
+// clock_pulse: UTC 00:15 entry / 00:30 exit (15m) — aligns with TV labels 08:15/08:30 when
+// tv_trades_csv_tz is utc_plus_8. PineForge engine still defers bare MARKET fills one bar when
+// process_orders_on_close=false, so trade timestamps/prices vs TV CSV need same-bar fill fix in
+// runtime for full pairwise parity.
+//@version=6
+strategy("PF Analyzer (PineForge)", shorttitle="PF_analyze", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+mode = input.string("clock_pulse", "Analysis mode",
+     options = ["clock_pulse", "htf_60_roll", "htf_d_high1", "bar_stair"])
+// Legacy input kept for saved layouts; clock_pulse ignores it (was bar_index % stepBars).
+stepBars = input.int(96, "clock_pulse: unused (legacy bar step)", minval = 2)
+
+// --- clock_pulse: long 00:15 UTC bar, exit 00:30 UTC (15m chart); skip first bar ---
+inPulse = bar_index > 0 and hour == 0 and minute == 15
+exitPulse = bar_index > 0 and hour == 0 and minute == 30
+
+// --- htf_60_roll ---
+h60 = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+roll60 = ta.change(h60) != 0
+
+// --- htf_d_high1 (same logic family as validation/mtf-probe-04-daily-prev-high) ---
+dH1 = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+crossUp = close > dH1 and close[1] <= dH1[1]
+exitD = close < dH1 * 0.995 and strategy.position_size > 0
+
+// --- bar_stair ---
+stair = close > close[1] and close[1] > close[2]
+
+if mode == "clock_pulse"
+    if exitPulse
+        strategy.close("C")
+    if inPulse
+        strategy.entry("C", strategy.long, qty=1)
+
+if mode == "htf_60_roll"
+    if roll60 and strategy.position_size == 0
+        strategy.entry("R", strategy.long, qty=1)
+    if roll60[1] and strategy.position_size != 0
+        strategy.close("R")
+
+if mode == "htf_d_high1"
+    if crossUp and strategy.position_size == 0
+        strategy.entry("L", strategy.long, qty=1)
+    if exitD
+        strategy.close("L")
+
+if mode == "bar_stair"
+    if stair and strategy.position_size == 0
+        strategy.entry("S", strategy.long, qty=1)
+    if not stair and strategy.position_size > 0
+        strategy.close("S")

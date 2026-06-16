@@ -1,0 +1,75 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// MTF probe 10 — HTF confluence gate with STATIC bracket exit
+//
+// Purpose: isolate the MTF-state half of the VCP integration probe family's
+// failure mode. That family gates entries on 1H htf trend confluence
+// (request.security) and also re-issues a trailing stop every bar via
+// repeated strategy.exit
+// calls. This probe keeps ONLY the HTF confluence half — the bracket
+// exit is set ONCE at entry and never touched again — so any TV/engine
+// drift here is attributable to MTF state evaluation timing alone.
+// The companion probe (mtf-probe-11-htf-bracket-manual-trail) keeps the
+// same HTF gate but adds the per-bar manual trailing stop. Compare the
+// two: if probe 10 matches and probe 11 doesn't, the gap is in the
+// manual-trail pattern; if both fail, the gap is in HTF confluence.
+//
+// Trade shape: long-only, pyramiding=1. Enter when 15m EMA(9) crosses
+// above EMA(21) AND the 1H htf close is above its 1H EMA(20). Exit
+// via a static stop + ATR-multiple take-profit set at entry — NEVER
+// re-issued. Bracket prices are captured into ``var float`` slots
+// at entry time, so the engine's strategy.exit pending-order pruning
+// can't be confused by per-bar recomputation.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("MTF probe 10 - HTF bracket static", shorttitle="MTF_p10",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs ---------------------------------------------------------
+string i_htf       = input.timeframe("60",  "Higher Timeframe")
+int    i_htf_ema   = input.int(20,          "HTF EMA Length",   minval=2, maxval=200)
+int    i_fast_ema  = input.int(9,           "Fast EMA Length",  minval=2, maxval=50)
+int    i_slow_ema  = input.int(21,          "Slow EMA Length",  minval=3, maxval=100)
+int    i_atr_len   = input.int(14,          "ATR Length",       minval=2, maxval=50)
+float  i_stop_mult = input.float(2.0,       "Stop ATR mult",    minval=0.5, maxval=5.0, step=0.1)
+float  i_tp_mult   = input.float(4.0,       "Take-profit ATR mult", minval=0.5, maxval=10.0, step=0.1)
+
+// ---- 15m series -----------------------------------------------------
+float emaFast = ta.ema(close, i_fast_ema)
+float emaSlow = ta.ema(close, i_slow_ema)
+float atrVal  = ta.atr(i_atr_len)
+
+// ---- HTF confluence (1H by default) --------------------------------
+// Pre-compute the htf EMA at global scope so request.security pulls a
+// stable expression (same pattern VCP uses for its mtf checks). Engine
+// must materialize this with lookahead_off semantics so we never see a
+// future htf-bar value.
+float _htfEmaSeries = ta.ema(close, i_htf_ema)
+float htfClose = request.security(syminfo.tickerid, i_htf,
+     close, barmerge.gaps_off, barmerge.lookahead_off)
+float htfEma   = request.security(syminfo.tickerid, i_htf,
+     _htfEmaSeries, barmerge.gaps_off, barmerge.lookahead_off)
+bool  htfBull  = not na(htfClose) and not na(htfEma) and htfClose > htfEma
+
+// ---- entry ---------------------------------------------------------
+bool longSig = ta.crossover(emaFast, emaSlow) and htfBull
+
+// Static bracket levels captured at entry. Initialized to na so they
+// can't fire pre-entry; once set, never recomputed.
+var float entryStop = na
+var float entryTP   = na
+
+if longSig and strategy.position_size == 0 and not na(atrVal)
+    entryStop := close - atrVal * i_stop_mult
+    entryTP   := close + atrVal * i_tp_mult
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+    strategy.exit("LX", "L", stop=entryStop, limit=entryTP,
+         comment="static bracket")

@@ -1,0 +1,34 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 37 — str.lower / str.match rule-string parser
+// Purpose: parity test for input-string parsing via `str.match` regex tests
+// driving boolean rule flags that gate signal composition.
+//
+//@version=6
+strategy("Regex String Filter", overlay=false, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+rules = input.string("MACD=LONG,RSI>50", "Rule Set")
+lrules = str.lower(rules)
+useRsi = false
+useMacd = false
+
+if str.match(lrules, "rsi>50") != ""
+    useRsi := true
+if str.match(lrules, "macd=long") != ""
+    useMacd := true
+
+rsiVal = ta.rsi(close, 14)
+[macdLine, sigLine, _] = ta.macd(close, 12, 26, 9)
+
+longCond = true
+if useRsi and rsiVal <= 50
+    longCond := false
+if useMacd and macdLine <= sigLine
+    longCond := false
+
+if longCond
+    strategy.entry("Long", strategy.long)
+else
+    strategy.close("Long")

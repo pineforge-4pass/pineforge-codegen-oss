@@ -1,0 +1,83 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Parity probe 02 — CHoCH / BOS structural-break isolator
+//
+// Purpose: isolate the VCP integration probe family's bullConfluence /
+// _bosLong gating, which depends on market-structure events
+// (Break-of-Structure ``bosUp``/``bosDown`` and Change-of-Character
+// ``chochUp``/``chochDown``). That family fires one extra long entry on
+// 2025-05-12 12:15 UTC because chochUp = TRUE there
+// in the engine — its prior-bar bosDown at 11:45 flipped structureDir to
+// -1, then close=2542.93 > prevSwingHigh=2526.61 satisfied chochUp.
+// vcp-probe-01 already shows ``ta.pivothigh/pivotlow`` match TV
+// bit-for-bit, so the disagreement must come from how
+// lastSwingHigh/Low and prevSwingHigh/Low evolve through the
+// pivot-update side effects, or from the inequality direction in the
+// bos/choch booleans. This probe puts the entire VCP-style swing-tracking
+// scaffold on its own and trades ONLY on those four boolean events
+// (one-bar holding period) so the trade list itself becomes the diff
+// against TV.
+//
+// Trade shape: pyramiding=0, single-contract, exit on the next bar
+// after entry so each row in the trade export is exactly one
+// bos_up / bos_dn / choch_up / choch_dn firing. No FVG, no MTF, no
+// confluence stack — pure swing-state logic.
+//
+// TV setup: 15m chart on BINANCE:ETHUSDT.P, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export "List of Trades" to
+// ``tv_trades.csv`` in this folder.
+//@version=6
+strategy("Parity probe 02 - choch/bos isolator", shorttitle="par_p02", overlay=true, initial_capital=1000000, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0, process_orders_on_close=false)
+
+// ---- inputs (mirror VCP defaults) ----------------------------------
+int i_pivot = input.int(5, "Pivot Strength", minval=2, maxval=20)
+
+// ---- swing tracking (BYTE-IDENTICAL to the VCP integration probe family) -----
+float pivotHigh = ta.pivothigh(high, i_pivot, i_pivot)
+float pivotLow  = ta.pivotlow(low,   i_pivot, i_pivot)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+var float prevSwingHigh = na
+var float prevSwingLow  = na
+var int   structureDirection = 0
+
+if not na(pivotHigh)
+    prevSwingHigh := lastSwingHigh
+    lastSwingHigh := pivotHigh
+
+if not na(pivotLow)
+    prevSwingLow := lastSwingLow
+    lastSwingLow := pivotLow
+
+bool bosUp     = not na(lastSwingHigh) and close > lastSwingHigh and structureDirection <= 0
+bool bosDown   = not na(lastSwingLow)  and close < lastSwingLow  and structureDirection >= 0
+bool chochUp   = not na(prevSwingHigh) and close > prevSwingHigh and structureDirection < 0
+bool chochDown = not na(prevSwingLow)  and close < prevSwingLow  and structureDirection > 0
+
+if bosUp or chochUp
+    structureDirection := 1
+if bosDown or chochDown
+    structureDirection := -1
+
+// ---- one-bar trades on every structural event ----------------------
+// We ENTRY-on-event and CLOSE-on-next-bar so each event is bracketed
+// into a single trade row in the export. Exporting the event TYPE
+// (long entry vs short entry) plus the timestamp lets us diff
+// engine vs TV with no other state to confound the comparison.
+bool any_bull_event = bosUp   or chochUp
+bool any_bear_event = bosDown or chochDown
+
+if any_bull_event and strategy.position_size == 0
+    string c_bu = bosUp ? "bosUp" : "chochUp"
+    strategy.entry("BU", strategy.long, comment=c_bu)
+
+if any_bear_event and strategy.position_size == 0
+    string c_bd = bosDown ? "bosDown" : "chochDown"
+    strategy.entry("BD", strategy.short, comment=c_bd)
+
+// Exit at next bar's open (process_orders_on_close=false default)
+if strategy.position_size != 0 and bar_index > strategy.opentrades.entry_bar_index(0)
+    strategy.close_all(comment="event flatten")

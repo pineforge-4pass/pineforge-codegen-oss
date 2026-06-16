@@ -1,0 +1,36 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 65 - same-id entry and close on same bar
+//
+// Purpose: determine how TV resolves a same-pass same-id entry + close when an
+// existing position with that id is already open.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 65 - same id entry close", shorttitle="PF_P65_ENTCLOSE", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+if hour == 0 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="open long")
+
+if hour == 0 and minute == 45 and strategy.position_size > 0
+    strategy.entry("L", strategy.long, qty=1, comment="same-pass add long")
+    strategy.close("L", comment="same-pass close long")
+
+if hour == 6 and minute == 15 and strategy.position_size != 0
+    strategy.close_all(comment="cleanup long")
+
+if hour == 12 and minute == 15 and strategy.position_size == 0
+    strategy.entry("S", strategy.short, qty=1, comment="open short")
+
+if hour == 12 and minute == 45 and strategy.position_size < 0
+    strategy.entry("S", strategy.short, qty=1, comment="same-pass add short")
+    strategy.close("S", comment="same-pass close short")
+
+if hour == 18 and minute == 15 and strategy.position_size != 0
+    strategy.close_all(comment="cleanup short")

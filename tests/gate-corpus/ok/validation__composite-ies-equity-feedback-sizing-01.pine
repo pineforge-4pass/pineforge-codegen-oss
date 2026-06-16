@@ -1,0 +1,95 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// IES probe 08 — equity-feedback dynamic position sizing (rev 2)
+//
+// Purpose: isolate the IES integration probe family's equity-feedback
+// sizing loop, which is architecturally distinct from every other IES
+// component because the `qty=` argument depends on `strategy.equity` —
+// itself a function of every prior trade's PnL. Any single drift earlier
+// in the trade tape permanently changes the sequence of qty values from
+// that bar forward, even if the entry/exit boundary decisions agree:
+//
+//   account_risk = strategy.equity * (i_risk_pct/100) * regime_size_mult * quality_mult
+//   long_risk    = atr_val * adaptive_stop_mult
+//   qty          = account_risk / long_risk
+//
+// Design note (rev 2): the previous revision used
+// ``ta.crossover(close, ema(close, 20))`` as the entry trigger, which made
+// the trade list sensitive to TV's chart-history-driven EMA seed
+// (TV's chart had bars before our OHLCV CSV starts, so its EMA was
+// already-converged at bar 0 of our reference; the engine seeded fresh
+// from OHLCV bar 0). That gave a 6-hour shift on the very first
+// crossover and cascaded into wildly different qty/equity tapes —
+// conflating warmup mismatch with the actual equity-feedback contract
+// under test. This rev replaces the trigger with a TIME-OF-DAY gate
+// (`hour == 0 and minute == 15`, fires once per UTC day) so engine and
+// TV ALWAYS agree on which bars trigger entries. Any remaining
+// engine↔TV drift is then attributable solely to the equity-feedback
+// arithmetic.
+//
+// Trade shape: enter long at chart 00:15 each day; exit via static
+// ATR-multiple stop+target. `pyramiding=1`, `default_qty_type=
+// strategy.fixed`, and the `qty=` argument override the default
+// per-entry. If TV and engine agree on entry timestamps but disagree
+// on PnL or final equity, the equity-feedback compounding is the gap.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export "List of trades" → trades.csv.
+//@version=6
+strategy("PF IES probe 08 - equity sizing", shorttitle="IES_p08_SIZE", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// ---- inputs (mirrored from IES sizing block) -----------------------
+float i_risk_pct       = input.float(1.0, "Risk Per Trade %",     minval=0.1, maxval=5.0, step=0.1)
+float i_atr_stop_mult  = input.float(2.0, "ATR Stop Multiplier",  minval=1.0, maxval=5.0, step=0.5)
+float i_atr_tp_mult    = input.float(4.0, "ATR Target Multiplier",minval=1.0, maxval=10.0,step=0.5)
+float i_adx_trend      = input.float(25,  "ADX Trend Threshold",  minval=15,  maxval=40)
+float i_trend_mult     = input.float(1.2, "Trending Size Mult",   minval=0.5, maxval=2.0, step=0.1)
+float i_neutral_mult   = input.float(1.0, "Neutral Size Mult",    minval=0.5, maxval=2.0, step=0.1)
+float i_quality_mult   = input.float(1.15,"Quality Mult (fixed)", minval=1.0, maxval=1.5, step=0.05)
+
+// ---- regime gate (single boundary; full ADX is in ies-probe-01) ----
+[plus_di, minus_di, adx_val] = ta.dmi(14, 14)
+bool trending_regime = adx_val >= i_adx_trend
+
+// ---- adaptive multiplier (collapsed to two branches) ---------------
+float regime_size_mult = trending_regime ? i_trend_mult : i_neutral_mult
+
+// ---- ATR + stop/target distances -----------------------------------
+float atr_val = ta.atr(14)
+float long_risk = atr_val * i_atr_stop_mult
+
+// ---- equity-feedback qty (THE thing under test) --------------------
+float account_risk       = strategy.equity * (i_risk_pct / 100.0) * regime_size_mult * i_quality_mult
+float long_position_size = long_risk > 0 ? account_risk / long_risk : 0.0
+
+// ---- TIME-OF-DAY entry gate (deterministic across engines) ---------
+// Once-per-UTC-day at 00:15. The same bar fires in TV and engine, so any
+// trade-list drift is the equity-feedback arithmetic itself, not the
+// triggering indicator's warmup-driven seed mismatch.
+bool long_entry = hour == 0 and minute == 15
+     and strategy.position_size == 0
+     and not na(atr_val)
+     and not na(adx_val)
+
+var float entryStop = na
+var float entryTP   = na
+
+if long_entry
+    entryStop := close - atr_val * i_atr_stop_mult
+    entryTP   := close + atr_val * i_atr_tp_mult
+    strategy.entry("L", strategy.long, qty=long_position_size, comment="dyn qty long")
+    strategy.exit("LX", "L", stop=entryStop, limit=entryTP, comment="bracket")
+
+// @pf-trace ies_equity=strategy.equity
+// @pf-trace ies_accountRisk=account_risk
+// @pf-trace ies_longRisk=long_risk
+// @pf-trace ies_qty=long_position_size
+// @pf-trace ies_longEntry=long_entry
+// @pf-trace ies_atr=atr_val
+// @pf-trace ies_adx=adx_val

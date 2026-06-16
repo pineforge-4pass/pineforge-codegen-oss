@@ -1,0 +1,85 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe kanuck-probe-integration — KAMA + tick + deep-history composition
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: composes the three surfaces isolated by `kanuck-probe-01..03`
+// (KAMA stateful smoothing, `calc_on_every_tick=true` per-tick counter,
+// `max_bars_back=500` deep-history reference chain) into one strategy.
+// Verifies the runtime handles all three runtime modes simultaneously
+// without state corruption between them. The engine surfaces under test
+// are: KAMA recurrence, per-tick counter under `calc_on_every_tick=true`,
+// and deep-history retention under `max_bars_back=500`.
+//
+// Entries fire on `ta.crossover(close, kama)` gated by the tick-counter
+// modulo (probes 01 + 02). The deep-history terms (`ta.sma(close, 400)`,
+// `ta.rsi(close[200], 14)`, `close[450]`) are computed on every bar so
+// the runtime has to retain the 500-bar buffer (probe 03 surface) but
+// they no longer ALSO gate entries — the earlier four-AND composition
+// fired far too rarely on 15m crypto for parity to be meaningful.
+//
+// Validation goal: bit-exact trade list against TradingView's broker
+// emulator on the reference 15-minute ETH-USDT-USDT feed.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe kanuck-probe-integration", shorttitle="PF_kanINT",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false,
+     calc_on_every_tick=true, max_bars_back=500)
+
+// ---- inputs --------------------------------------------------------
+int i_kama_len   = input.int(14,  "KAMA length",         minval=2)
+int i_kama_fast  = input.int(2,   "KAMA fast end",       minval=1)
+int i_kama_slow  = input.int(30,  "KAMA slow end",       minval=2)
+int i_step       = input.int(2,   "Tick-counter modulo", minval=1)
+int i_sma_len    = input.int(400, "Long SMA length",     minval=50)
+int i_rsi_offset = input.int(200, "RSI source offset",   minval=1)
+int i_deep_lag   = input.int(450, "Close-reference lag", minval=1)
+
+// ---- KAMA (manual recurrence; v6 has no ta.kama built-in) ----------
+float change_n  = math.abs(close - close[i_kama_len])
+float vol_sum   = math.sum(math.abs(close - close[1]), i_kama_len)
+float er        = vol_sum > 0 ? change_n / vol_sum : 0.0
+float fast_sc   = 2.0 / (i_kama_fast + 1)
+float slow_sc   = 2.0 / (i_kama_slow + 1)
+float sc        = math.pow(er * (fast_sc - slow_sc) + slow_sc, 2)
+var float kama  = na
+kama := na(kama[1]) ? close : kama[1] + sc * (close - kama[1])
+
+// ---- per-evaluation tick counter ----------------------------------
+var int tick_counter = 0
+tick_counter += 1
+bool gate = (tick_counter % i_step) == 0
+
+// ---- deep-history terms (computed every bar; force 500-bar buffer) -
+float long_sma   = ta.sma(close, i_sma_len)
+float deep_rsi   = ta.rsi(close[i_rsi_offset], 14)
+float deep_close = close[i_deep_lag]
+bool  deep_ready = not na(long_sma) and not na(deep_rsi) and not na(deep_close)
+
+// Plot the corroborating deep-history terms so the engine has to keep
+// them resolved even though they no longer gate entries.
+plot(long_sma,   "deep SMA", color=color.new(color.blue,   0))
+plot(deep_rsi,   "deep RSI", color=color.new(color.purple, 0), display=display.data_window)
+plot(deep_close, "deep ref", color=color.new(color.gray,   0), display=display.data_window)
+
+// ---- composed signals ---------------------------------------------
+bool kama_up   = ta.crossover(close, kama)
+bool kama_down = ta.crossunder(close, kama)
+
+bool go_long  = deep_ready and kama_up   and gate
+bool go_short = deep_ready and kama_down and gate
+
+// ---- order routing -------------------------------------------------
+if go_long and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="integ long")
+
+if go_short and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="integ short")

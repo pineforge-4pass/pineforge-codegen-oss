@@ -1,0 +1,44 @@
+// TV_RUN_NEEDED: tv_trades.csv missing — capture in TradingView:
+//   Symbol: AAPL  TF: 30m  Range: 2024-01-01..2024-06-01
+//   Save List of Trades → tv_trades.csv in this directory.
+//
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Parity probe: time_tradingday — daily trade-counter reset
+//
+// Purpose: Verify that ta.change(time_tradingday) fires exactly once per
+// NYSE RTH session open (09:30 ET), resetting a daily trade counter.
+// Counter even → go long; counter odd → close position.
+//
+// Uses AAPL on 30 m bars with the default NYSE session ("0930-1600:23456")
+// so that time_tradingday advances at each new RTH open.
+
+//@version=6
+strategy("time_tradingday daily reset counter",
+         overlay=true,
+         default_qty_type=strategy.fixed,
+         default_qty_value=1,
+         initial_capital=10000,
+         commission_type=strategy.commission.percent,
+         commission_value=0.0)
+
+// Count how many entries (long+flat signals) we have fired today.
+// Reset at each new trading day.
+var int daily_counter = 0
+
+bool new_trading_day = ta.change(time_tradingday) != 0
+
+if new_trading_day
+    daily_counter := 0
+
+// Even counter → long entry; odd counter → close.
+if daily_counter % 2 == 0
+    if strategy.position_size == 0
+        strategy.entry("L", strategy.long)
+        daily_counter += 1
+else
+    if strategy.position_size > 0
+        strategy.close("L")
+        daily_counter += 1

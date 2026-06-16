@@ -1,0 +1,99 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 4ema-rsi-probe-integration — quad-EMA + RSI pullback + bar window
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: composes the cross-surface combination of the four-EMA stack
+// (probe 01) and the RSI shallow-pullback latch (probe 02) plus the
+// fixed-bar forced-exit counter from probe 03. The session-window gate
+// from probe 03 is intentionally NOT composed in (binary session test
+// stays standalone in probe 03). Original deep RSI bands (dip < 40,
+// recover > 50) almost never co-occur with a same-bar bullish four-EMA
+// stack on 15m crypto — by the time RSI dips that deep the trend has
+// flipped — so this integration uses a shallow pullback band (dip
+// below ~48, recover above ~52) that triggers far more frequently
+// inside an existing stack regime. The engine surfaces under test are
+// the stacking predicate, the var-bool RSI arm-and-fire latch, and
+// the var-int bars-in-trade counter that closes the trade at exactly N.
+//
+// Validation goal: bit-exact trade list against TradingView's broker
+// emulator on the reference 15-minute ETH-USDT-USDT feed. Long when
+// stack is bullish AND RSI long-pullback fires; short symmetric;
+// forced exit after N bars regardless of state.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe 4ema-rsi-probe-integration", shorttitle="PF_4emaINT",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int    i_xs = input.int(8,   "EMA xs length", minval=2)
+int    i_s  = input.int(21,  "EMA s length",  minval=3)
+int    i_m  = input.int(55,  "EMA m length",  minval=5)
+int    i_l  = input.int(200, "EMA l length",  minval=10)
+int    i_rsi_len     = input.int(14,   "RSI length",  minval=2)
+float  i_dip_lo      = input.float(48, "Long pullback band",  minval=10, maxval=50)
+float  i_pop_lo      = input.float(52, "Long recovery line",  minval=40, maxval=70)
+float  i_dip_hi      = input.float(52, "Short pullback band", minval=50, maxval=90)
+float  i_pop_hi      = input.float(48, "Short recovery line", minval=30, maxval=60)
+int    i_expiry_bars = input.int(8,    "Forced exit after N bars", minval=1)
+
+// ---- four-EMA fan + stack-order predicates -------------------------
+float ema_xs = ta.ema(close, i_xs)
+float ema_s  = ta.ema(close, i_s)
+float ema_m  = ta.ema(close, i_m)
+float ema_l  = ta.ema(close, i_l)
+
+bool stack_bull = ema_xs > ema_s and ema_s > ema_m and ema_m > ema_l
+bool stack_bear = ema_xs < ema_s and ema_s < ema_m and ema_m < ema_l
+
+// ---- RSI arm-and-fire latches -------------------------------------
+float r = ta.rsi(close, i_rsi_len)
+
+var bool long_armed  = false
+var bool short_armed = false
+
+if r < i_dip_lo
+    long_armed := true
+if r > i_dip_hi
+    short_armed := true
+
+bool long_fire  = long_armed  and ta.crossover(r,  i_pop_lo)
+bool short_fire = short_armed and ta.crossunder(r, i_pop_hi)
+
+if long_fire
+    long_armed := false
+if short_fire
+    short_armed := false
+
+// ---- composed entry signals ---------------------------------------
+bool go_long  = stack_bull and long_fire
+bool go_short = stack_bear and short_fire
+
+// ---- bars-in-trade counter ----------------------------------------
+var int bars_in_trade = 0
+if strategy.position_size != 0
+    bars_in_trade += 1
+else
+    bars_in_trade := 0
+
+bool expiry_due = strategy.position_size != 0 and bars_in_trade >= i_expiry_bars
+
+// ---- order routing ------------------------------------------------
+// Allow direction flips (long when flat or short, short when flat or long)
+// so the integration trade list stays dense enough for parity comparison.
+if go_long and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="integ long")
+
+if go_short and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="integ short")
+
+if expiry_due
+    strategy.close_all(comment="integ bar expiry")

@@ -56,8 +56,6 @@ pineforge_codegen/**/*.cpp
 # ─── Node / TypeScript ─────────────────────────────────────────────────────
 node_modules/
 **/node_modules/
-package-lock.json
-**/package-lock.json
 yarn.lock
 pnpm-lock.yaml
 npm-debug.log*
@@ -120,3 +118,6 @@ temp/
 # cloud/mcp-local/ was extracted to a public repo:
 #   https://github.com/fullpass-4pass/pineforge-codegen-mcp
 # Don't bring it back here.
+
+# ─── Gate output ───────────────────────────────────────────────────────────
+/release.json

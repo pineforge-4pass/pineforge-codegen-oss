@@ -1,0 +1,26 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe 04 — close crosses HMA(55)
+//
+// Purpose: isolate ta.hma(close, 55). HMA internally uses
+//   wma(2*wma(src, n/2) - wma(src, n), sqrt(n)).
+// Validates engine WMA partial-window seed + nested WMA composition + sqrt
+// rounding (sqrt(55) = 7.416... → floor 7).
+//
+// Targets gap probe in a community-style market-structure-shift strategy
+// which uses HMA(close, 55).
+//@version=6
+strategy("PF TA isolate 04 - close x HMA(55)", shorttitle="TAI_04_HMA55",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+h = ta.hma(close, 55)
+
+if ta.crossover(close, h)
+    strategy.entry("L", strategy.long, comment="close cross up HMA55")
+if ta.crossunder(close, h)
+    strategy.entry("S", strategy.short, comment="close cross dn HMA55")

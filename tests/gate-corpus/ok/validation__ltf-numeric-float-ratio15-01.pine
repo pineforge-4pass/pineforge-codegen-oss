@@ -1,0 +1,49 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Lower-TF probe 01 — numeric float array, ratio=15 (15m -> 1m)
+//
+// Purpose: smallest acceptance probe for ``request.security_lower_tf``
+// returning ``array<float>``. On a 15m chart we pull 1-minute closes
+// (15 sub-bars per chart bar) and reduce by sum to a synthetic
+// "intra-bar momentum" that an EMA cross gates entries on. Drives the
+// LTF sub-bar-index synthesis path and the numeric-array reduce parity
+// vs script-side computations.
+//
+// Trade shape: long-only. Entry when EMA9>EMA21 AND the sum of the 15
+// sub-bar closes diverges from 15*close (i.e. intrabar drift is
+// non-trivial). Exit on EMA cross-under. Produces ~15-40 trades per
+// 36k-bar window depending on ETH volatility regime.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export trade list to tv_trades.csv.
+//@version=6
+strategy("PF lower-tf probe 01 - float ratio15", shorttitle="LTF_p01_F15", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// LTF call: 1-minute closes from 15m chart -> array<float> length 15.
+ltfCloses = request.security_lower_tf(syminfo.tickerid, "1", close)
+
+// Reduce sum-of-LTF closes; null-safe via array.size guard.
+float ltfSum = 0.0
+if array.size(ltfCloses) > 0
+    for i = 0 to array.size(ltfCloses) - 1
+        ltfSum := ltfSum + array.get(ltfCloses, i)
+
+// Synthetic drift: how far the sub-bar sum is from 15*close.
+float drift = ltfSum - 15.0 * close
+
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+bool entryCond = ta.crossover(emaFast, emaSlow) and math.abs(drift) > close * 0.001
+bool exitCond  = ta.crossunder(emaFast, emaSlow)
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="ltf-entry")
+if exitCond and strategy.position_size > 0
+    strategy.close("L", comment="ltf-exit")

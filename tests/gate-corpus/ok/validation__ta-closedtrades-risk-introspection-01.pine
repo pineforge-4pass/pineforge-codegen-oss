@@ -1,0 +1,37 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 35 — strategy.closedtrades / strategy.risk introspection
+// Purpose: parity test for `strategy.risk.max_drawdown(...)` plus
+// `strategy.closedtrades` / `strategy.closedtrades.profit(N)` lookback driving
+// per-trade qty sizing.
+//
+//@version=6
+strategy("Advanced Trade Metrics", overlay=true, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+strategy.risk.max_drawdown(20, strategy.percent_of_equity)
+
+// Basic Donchian breakout
+hh = ta.highest(high, 20)
+ll = ta.lowest(low, 20)
+
+// Risk sizing based on past performance
+qty = 1.0
+if strategy.closedtrades > 0
+    last_profit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if last_profit < 0
+        qty := 0.5
+    else
+        qty := 2.0
+
+if close > hh[1]
+    strategy.entry("Long", strategy.long, qty=qty)
+if close < ll[1]
+    strategy.entry("Short", strategy.short, qty=qty)
+
+if strategy.opentrades > 0
+    open_dd = strategy.opentrades.max_drawdown(0)
+    if open_dd > 1000
+        strategy.close("Long")
+        strategy.close("Short")

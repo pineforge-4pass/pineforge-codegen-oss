@@ -1,0 +1,57 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 39 — request.security parity baseline
+// Purpose: parity test for one-trade-per-HTF-close-change pattern using
+// `request.security(..., "60", close, lookahead=barmerge.lookahead_off)` and
+// `ta.change(htfClose) != 0` as the sole entry trigger.
+//
+// ══════════════════════════════════════════════════════════════════════════════
+// Request.security parity — TV export vs PineForge
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Detail
+// ------
+// One **closed** long per **HTF close change** (15m chart → `request.security` 60m `close`,
+// `lookahead_off`). Compare your TradingView “List of trades” CSV to PineForge’s backtest
+// on the **same** OHLCV window (e.g. `data/ohlcv_ETH-USDT-USDT_15m.csv`).
+//
+// TradingView setup (match PineForge validation feed)
+// --------------------------------------------------
+// • Chart: **15m** (must match the CSV bar size you use in PineForge).
+// • Symbol: **same** as OHLCV (e.g. ETHUSDT perpetual on Binance if that is your feed).
+// • Strategy settings: **Initial capital** 1e6, **Order size** fixed **1** contract/share,
+//   **Commission** 0%, **Slippage** 0, **Pyramiding** 1 (below).
+// • Deep backtest: on. Export **List of trades** CSV after running.
+//
+// What each trade is
+// ------------------
+// • **Entry**: bar where `ta.change(request.security(..., "60", close)) != 0` (new completed 1h close vs prior bar).
+// • **Exit**: next bar (or forced flat on last historical bar so the last roll still closes).
+//
+// If TV trade count vs PineForge differs, the gap is usually HTF bucket alignment, data feed,
+// or session — not the pytest HTF ratio reference (see `tests/test_request_security_htf_reference.py`).
+//
+// ══════════════════════════════════════════════════════════════════════════════
+
+//@version=6
+strategy("PineForge RS parity [15m→60m close]", shorttitle="PF_RS_60m", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+float htfClose = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+
+bool htfRoll = ta.change(htfClose) != 0
+
+// Enter long on each HTF close roll; exit on the following bar (closed trade = comparable row in export).
+if htfRoll
+    strategy.entry("HTF_ROLL", strategy.long, qty=1, comment="roll")
+
+if htfRoll[1]
+    strategy.close("HTF_ROLL", comment="roll+1")
+
+if barstate.islast and strategy.position_size > 0
+    strategy.close("HTF_ROLL", comment="last bar flat")

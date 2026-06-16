@@ -1,0 +1,39 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// OCA probe 01 — strategy.exit bracket (internal CANCEL semantics)
+//
+// Purpose: pin strategy.exit's built-in OCA-CANCEL bracket behavior.
+// Pine v6 strategy.exit does not expose oca_type; the TP/SL pair it
+// places is internally OCA-CANCEL (one fills → other cancels in same
+// or next bar). This probe verifies engine bracket cancel timing
+// matches TV.
+//
+// strategy.exit is intrinsically close-only, so once position is flat
+// any unfilled bracket auto-cancels — no leaked-short trap.
+//
+// Trade shape: long-only RSI<30 cross-up, qty=1, ATR-wide bracket so
+// volatile bars routinely sweep both sides.
+//
+// TV setup: 15m chart, ETH-USDT-USDT.
+//@version=6
+strategy("PF OCA probe 01 - exit bracket cancel", shorttitle="OCA_p01_3WAY", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+rsiVal = ta.rsi(close, 14)
+atrVal = ta.atr(14)
+
+bool entryCond = ta.crossover(rsiVal, 30)
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry")
+
+if strategy.position_size > 0
+    entry = strategy.position_avg_price
+    strategy.exit("X", from_entry="L", qty=1,
+         limit=entry + atrVal * 1.5, stop=entry - atrVal * 1.5,
+         oca_name="GRP")

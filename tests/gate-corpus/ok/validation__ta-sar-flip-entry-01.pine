@@ -1,0 +1,60 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 101 — parabolic SAR flip entries
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: exercises `ta.sar(start, increment, max)` — a deeply
+// stateful indicator whose acceleration factor RAMPS within a trend
+// (start → start+inc → start+2*inc → ... up to max) and RESETS to
+// `start` on every flip. Reproducing the TV trade list requires the
+// engine's SAR to (a) seed its initial trend the same way TV does
+// (typically from the first directional bar), (b) ramp the AF on
+// the same bars, and (c) flip on the same close-vs-SAR cross. Any
+// drift in any of those three points cascades. This probe routes
+// entries through the flip event itself (SAR moves from above the
+// close to below = bullish flip; symmetric for bearish), which
+// makes the trade list a direct readout of flip-bar agreement.
+//
+// Validation goal: bit-exact trade list against TradingView's broker
+// emulator on the reference 15m feed. Pass = every flip-driven
+// entry fires on the same bar TradingView places it.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full
+// window matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy
+// properties: leave defaults from script header. Export "List of
+// trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe 101 - parabolic sar flip", shorttitle="PF_p101_SAR",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+float i_start = input.float(0.02, "SAR start",     minval=0.001, maxval=1.0, step=0.01)
+float i_inc   = input.float(0.02, "SAR increment", minval=0.001, maxval=1.0, step=0.01)
+float i_max   = input.float(0.20, "SAR max AF",    minval=0.01,  maxval=1.0, step=0.01)
+
+// ---- SAR + flip detection -----------------------------------------
+float sar_val = ta.sar(i_start, i_inc, i_max)
+
+// SAR sits BELOW price when trend is up, ABOVE price when trend is
+// down. Flip events: prior bar SAR was on opposite side of close.
+bool sar_below_now    = sar_val      < close
+bool sar_below_prior  = sar_val[1]   < close[1]
+
+bool bull_flip = sar_below_now and not sar_below_prior
+bool bear_flip = not sar_below_now and sar_below_prior
+
+// ---- entries on flip ----------------------------------------------
+if bull_flip and strategy.position_size <= 0
+    if strategy.position_size < 0
+        strategy.close("S", comment="flip flat")
+    strategy.entry("L", strategy.long, comment="sar bull flip")
+
+if bear_flip and strategy.position_size >= 0
+    if strategy.position_size > 0
+        strategy.close("L", comment="flip flat")
+    strategy.entry("S", strategy.short, comment="sar bear flip")

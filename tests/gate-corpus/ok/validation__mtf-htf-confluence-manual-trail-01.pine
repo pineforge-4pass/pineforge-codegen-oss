@@ -1,0 +1,77 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// MTF probe 11 — HTF confluence gate with MANUAL TRAILING stop
+//
+// Purpose: companion to mtf-probe-10. Keeps the exact same HTF confluence
+// gate so any drift between probe 10 and probe 11 isolates the manual
+// trailing-stop / per-bar strategy.exit re-issue pattern that VCP uses.
+//
+// The trailing implementation matches VCP's:
+//   * a ``var float`` trail slot is updated each bar to the higher of
+//     (close - atr * trailMult) and the previous trail (so it only
+//     ratchets up for longs);
+//   * ``strategy.exit("LX", "L", stop=trail, limit=tp)`` is called every
+//     bar while in position with the freshly-updated trail.
+// The engine must recognize that a strategy.exit re-issue with the same
+// id+from_entry replaces the previous pending order rather than fanning
+// out into multiple sibling exits — and the consumed-partial-id guard
+// must NOT spuriously cancel valid full exits when the same id re-issues
+// with a different stop.
+//
+// Trade shape: long-only, pyramiding=1. Same entry signal as probe 10.
+// Exit via a static TP and a per-bar manual trail.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("MTF probe 11 - HTF bracket manual trail", shorttitle="MTF_p11",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs ---------------------------------------------------------
+string i_htf         = input.timeframe("60", "Higher Timeframe")
+int    i_htf_ema     = input.int(20,         "HTF EMA Length",     minval=2, maxval=200)
+int    i_fast_ema    = input.int(9,          "Fast EMA Length",    minval=2, maxval=50)
+int    i_slow_ema    = input.int(21,         "Slow EMA Length",    minval=3, maxval=100)
+int    i_atr_len     = input.int(14,         "ATR Length",         minval=2, maxval=50)
+float  i_stop_mult   = input.float(2.0,      "Initial Stop ATR mult",   minval=0.5, maxval=5.0, step=0.1)
+float  i_tp_mult     = input.float(4.0,      "Take-profit ATR mult",    minval=0.5, maxval=10.0, step=0.1)
+float  i_trail_mult  = input.float(2.0,      "Manual Trail ATR mult",   minval=0.5, maxval=5.0, step=0.1)
+
+// ---- 15m series -----------------------------------------------------
+float emaFast = ta.ema(close, i_fast_ema)
+float emaSlow = ta.ema(close, i_slow_ema)
+float atrVal  = ta.atr(i_atr_len)
+
+// ---- HTF confluence (identical to probe 10) ------------------------
+float _htfEmaSeries = ta.ema(close, i_htf_ema)
+float htfClose = request.security(syminfo.tickerid, i_htf,
+     close, barmerge.gaps_off, barmerge.lookahead_off)
+float htfEma   = request.security(syminfo.tickerid, i_htf,
+     _htfEmaSeries, barmerge.gaps_off, barmerge.lookahead_off)
+bool  htfBull  = not na(htfClose) and not na(htfEma) and htfClose > htfEma
+
+// ---- entry + per-bar manual trailing ------------------------------
+bool longSig = ta.crossover(emaFast, emaSlow) and htfBull
+
+var float entryTP   = na
+var float trailStop = na
+
+if longSig and strategy.position_size == 0 and not na(atrVal)
+    entryTP   := close + atrVal * i_tp_mult
+    trailStop := close - atrVal * i_stop_mult
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+
+// Manual trailing — ratchet trailStop higher each bar and re-issue
+// the strategy.exit so the engine pending-order replaces in place.
+if strategy.position_size > 0 and not na(atrVal)
+    float candidate = close - atrVal * i_trail_mult
+    if not na(trailStop) and candidate > trailStop
+        trailStop := candidate
+    strategy.exit("LX", "L", stop=trailStop, limit=entryTP,
+         comment="manual trail")

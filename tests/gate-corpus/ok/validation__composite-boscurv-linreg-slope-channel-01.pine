@@ -1,0 +1,64 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe bos-curv-probe-02-curved-channel — slope-warped linreg+ATR channel
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolates a non-linear channel computed from `ta.linreg` plus
+// per-bar slope and `ta.atr` width. The engine surfaces under test are
+// `ta.linreg` (least-squares regression over a rolling window evaluated at
+// two offsets to derive a slope), `ta.atr` (RMA chain), and the curved
+// upper/lower band:
+//
+//     mid    = ta.linreg(close, len, 0)
+//     slope  = ta.linreg(close, len, 0) - ta.linreg(close, len, 1)
+//     width  = ta.atr(atr_len) * mult
+//     upper  = mid + width + slope * curve_offset
+//     lower  = mid - width + slope * curve_offset
+//
+// The slope term curves the band asymmetrically vs a flat linreg envelope.
+// Verifies that engine vs TV agree on the regression coefficients at every
+// bar and on the slope-difference numerics.
+//
+// Validation goal: bit-exact entries when `close` crosses above the
+// curved upper band (long) or below the curved lower band (short).
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe bos-curv-probe-02-curved-channel", shorttitle="PF_bos02_CRV",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int   i_lr_len      = input.int(50,    "Linreg length",   minval=10)
+int   i_atr_len     = input.int(14,    "ATR length",      minval=2)
+float i_atr_mult    = input.float(2.0, "ATR multiplier",  minval=0.1, step=0.1)
+float i_curve_offset = input.float(5.0, "Slope curve offset", step=0.5)
+
+// ---- linreg + slope ------------------------------------------------
+float mid    = ta.linreg(close, i_lr_len, 0)
+float lr_lag = ta.linreg(close, i_lr_len, 1)
+float slope  = mid - lr_lag
+
+// ---- ATR width -----------------------------------------------------
+float width = ta.atr(i_atr_len) * i_atr_mult
+
+// ---- curved bands --------------------------------------------------
+float upper = mid + width + slope * i_curve_offset
+float lower = mid - width + slope * i_curve_offset
+
+// ---- crosses -------------------------------------------------------
+bool cross_up   = ta.crossover(close, upper)
+bool cross_down = ta.crossunder(close, lower)
+
+// ---- order routing -------------------------------------------------
+if cross_up and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="curve cross up")
+
+if cross_down and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="curve cross down")

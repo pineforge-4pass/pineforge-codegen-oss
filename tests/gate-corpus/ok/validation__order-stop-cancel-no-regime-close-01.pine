@@ -1,0 +1,47 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 94 — re-issued stop entry + paired cancel, NO regime close
+//
+// Purpose: probe 52 reproduces TV's |old|+qty growth quirk and adds
+// repeated ``strategy.close(opposite_id)`` blocks that fire on regime
+// change. This probe strips those regime closes so only the
+// ``strategy.entry`` re-issuance and ``strategy.cancel(opposite)``
+// remain. The flip then has to come from the stop entry firing
+// against an existing opposite position (no regime close to reset
+// position to flat first).
+//
+// If qty in TV's export grows like probe 52 (1, 2, 3, 4, ...): the
+// trigger lives in the (re-issue + cancel + flip-via-stop) combination,
+// and regime closes are irrelevant. The engine fix can ignore them.
+//
+// If qty stays 1 (or 2 for clean flips): the regime close is part of
+// the trigger -- in which case the discriminator involves
+// ``strategy.close`` interacting with the next-bar pending stop.
+//
+// Trade shape: alternating MA crossover that places long stops when
+// fast > slow and short stops when fast < slow, each side cancelling
+// the opposite pending id every bar. NO ``strategy.close`` calls.
+//
+// TV setup: 15m chart, ETH-USDT-USDT. Properties dialog: Pyramiding=1,
+// Order size = 1 contract. Export trades.csv.
+//@version=6
+strategy("PF probe 94 - stop entry cancel no regime close", shorttitle="PF_P94_NORC", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+fast = ta.ema(close, 8)
+slow = ta.ema(close, 21)
+
+longStop = high[1]
+shortStop = low[1]
+
+if fast > slow
+    strategy.entry("LE", strategy.long, stop=longStop, comment="live long stop")
+    strategy.cancel("SE")
+else
+    strategy.entry("SE", strategy.short, stop=shortStop, comment="live short stop")
+    strategy.cancel("LE")

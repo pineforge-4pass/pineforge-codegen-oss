@@ -1,0 +1,19 @@
+// TV_RUN_NEEDED: tv_trades.csv missing — capture in TradingView:
+//   Symbol: SPY  TF: 5m  Range: 2024-01-02..2024-03-29
+//   Save List of Trades → tv_trades.csv in this directory.
+
+//@version=6
+strategy("Session islastbar flatten", overlay=true,
+         default_qty_type=strategy.fixed, default_qty_value=1)
+
+// Enter on SMA crossover within session; flatten all positions on the
+// last bar of the session (session.islastbar) to avoid overnight holds.
+
+if session.ismarket
+    if ta.crossover(ta.sma(close, 9), ta.sma(close, 21))
+        strategy.entry("Long", strategy.long)
+
+// Flatten on last session bar — session.islastbar_regular == session.islastbar
+// in engine (single session string; see session_time.hpp limitation comment).
+if session.islastbar
+    strategy.close_all()

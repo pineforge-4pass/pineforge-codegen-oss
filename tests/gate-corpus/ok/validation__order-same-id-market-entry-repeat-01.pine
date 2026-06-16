@@ -1,0 +1,30 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 64 - same-id market entry repeat
+//
+// Purpose: determine whether repeated same-id strategy.entry market calls on
+// the same bar create one order, modify one order, or multiple entries.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 64 - same id market repeat", shorttitle="PF_P64_SAMEENTRY", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=3,
+     process_orders_on_close=false)
+
+if hour == 0 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="first same-id")
+    strategy.entry("L", strategy.long, qty=1, comment="second same-id")
+
+if hour == 1 and minute == 15 and strategy.position_size > 0
+    strategy.close("L", comment="close same-id")
+
+if hour == 12 and minute == 15 and strategy.position_size == 0
+    strategy.entry("S", strategy.short, qty=1, comment="first same-id short")
+    strategy.entry("S", strategy.short, qty=1, comment="second same-id short")
+
+if hour == 13 and minute == 15 and strategy.position_size < 0
+    strategy.close("S", comment="close same-id short")

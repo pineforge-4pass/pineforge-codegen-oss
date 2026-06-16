@@ -1,0 +1,3 @@
+//@version=6
+strategy("T")
+strategy.not_a_real_function(1)

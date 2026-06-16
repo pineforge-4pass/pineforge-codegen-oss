@@ -1,0 +1,55 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 07 — method called inside a for loop
+//
+// Purpose: the C++ runtime must dispatch a UDT method once per loop
+// iteration, with the same receiver instance, accumulating side
+// effects in self. If the codegen accidentally hoists the call or
+// re-initializes the receiver, the accumulator drifts.
+//
+// Trade shape: long-only. ``acc.add(price)`` is called in a 5-iter
+// loop over the most recent 5 closes; we enter long when the
+// computed mean exceeds the slow EMA.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 07 - method in for", shorttitle="UDT_p07_FOR", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Acc
+    float total = 0.0
+    int n = 0
+
+method add(Acc self, float v) =>
+    self.total := self.total + v
+    self.n := self.n + 1
+    self.total
+
+method mean(Acc self) =>
+    self.n > 0 ? self.total / float(self.n) : 0.0
+
+method reset(Acc self) =>
+    self.total := 0.0
+    self.n := 0
+    0
+
+var Acc acc = Acc.new(0.0, 0)
+
+int _r = acc.reset()
+for i = 0 to 4
+    float _t = acc.add(close[i])
+
+float avg5 = acc.mean()
+emaSlow = ta.ema(close, 21)
+
+if avg5 > emaSlow and ta.crossover(close, emaSlow) and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if ta.crossunder(close, emaSlow) and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

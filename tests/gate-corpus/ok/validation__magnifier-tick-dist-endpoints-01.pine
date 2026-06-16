@@ -1,0 +1,44 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Magnifier distribution probe 01-endpoints — ENDPOINTS
+//
+// Purpose: cycle the 6 magnifier tick distributions across sibling
+// dirs to pin tick-density divergence on intra-bar fills (gap X3,
+// C++#11 — 11/12 codepaths cold). Pine source is identical for all
+// six dirs; only the harness/build override switches the
+// MagnifierDistribution enum to ENDPOINTS. TV always uses ENDPOINTS,
+// so non-ENDPOINTS variants are documented expected divergence.
+//
+// Trade shape: long-only EMA(9/21) crossover entry plus a protective
+// stop placed midway between bar open and high. The stop sits inside
+// the bar intra-bar range, so whether it fires before the close
+// depends on tick density — exactly the codepath we want to observe.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, magnifier ON. For ENDPOINTS the
+// TV export is the parity baseline; for the other 5 the harness
+// override produces the comparison. Export trades to trades.csv.
+//@version=6
+strategy("PF magnifier dist probe 01-endpoints ENDPOINTS", shorttitle="MAG_END", overlay=true,
+     initial_capital=1000000, currency=currency.USD, use_bar_magnifier=true,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// Mid-bar entry on EMA crossover; protective stop placed between bar
+// open and high so intra-bar tick distribution decides whether the
+// stop fires before the bar close.
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+bool entryCond = ta.crossover(emaFast, emaSlow)
+bool exitCond  = ta.crossunder(emaFast, emaSlow)
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+    float stopLvl = open + (high - open) * 0.5
+    strategy.exit("X", from_entry="L", stop=stopLvl, comment="mid-bar stop")
+
+if exitCond and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

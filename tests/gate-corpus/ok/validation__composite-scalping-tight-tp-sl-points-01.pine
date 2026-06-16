@@ -1,0 +1,63 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe scalping-probe-01-tight-tp-sl-points — small-points TP/SL via strategy.exit
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolates the tight-bracket exit surface used by scalp strategies.
+// Entry is a trivial fast EMA cross (5 vs 13). The bracket is placed via
+// `strategy.exit("Brk", from_entry=..., stop=sl_px, limit=tp_px)` with
+// absolute prices computed from the entry fill (TP = +15 ticks, SL = -7
+// ticks via `syminfo.mintick`). The engine surface under test is the
+// `strategy.exit` mintick-aligned price arithmetic and TP-vs-SL fill
+// priority within a single bar — when both TP and SL straddle the bar's
+// range, TV resolves with a fixed open→high/low/close path that the engine
+// must reproduce.
+//
+// Validation goal: bit-exact trade list against TradingView's broker emulator
+// on the reference 15-minute ETH-USDT-USDT feed. Every bracket fill must
+// match TV in side, price, and timing.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe scalping-probe-01-tight-tp-sl-points", shorttitle="PF_SC01_BRK",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int i_fast    = input.int(5,  "Fast EMA",        minval=2, maxval=50)
+int i_slow    = input.int(13, "Slow EMA",        minval=3, maxval=100)
+int i_tp_tk   = input.int(15, "Take profit (ticks)", minval=1)
+int i_sl_tk   = input.int(7,  "Stop loss (ticks)",   minval=1)
+
+// ---- fast EMA cross trigger ----------------------------------------
+float ema_fast = ta.ema(close, i_fast)
+float ema_slow = ta.ema(close, i_slow)
+
+bool long_signal  = ta.crossover(ema_fast,  ema_slow)
+bool short_signal = ta.crossunder(ema_fast, ema_slow)
+
+// ---- entries -------------------------------------------------------
+if long_signal
+    strategy.entry("L", strategy.long, qty=1, comment="scalp long")
+
+if short_signal
+    strategy.entry("S", strategy.short, qty=1, comment="scalp short")
+
+// ---- bracket exits anchored on entry fill --------------------------
+float entry_px = strategy.position_avg_price
+
+if strategy.position_size > 0
+    float tp_px = entry_px + i_tp_tk * syminfo.mintick
+    float sl_px = entry_px - i_sl_tk * syminfo.mintick
+    strategy.exit("Brk", from_entry="L", stop=sl_px, limit=tp_px)
+
+if strategy.position_size < 0
+    float tp_px = entry_px - i_tp_tk * syminfo.mintick
+    float sl_px = entry_px + i_sl_tk * syminfo.mintick
+    strategy.exit("Brk", from_entry="S", stop=sl_px, limit=tp_px)

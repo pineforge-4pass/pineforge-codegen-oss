@@ -1,0 +1,34 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Isolates: US-equity regular-trading-hours (RTH) session gating combined with
+// overnight gap handling on a 5m intraday feed. Plain RSI(14) oversold/overbought
+// crosses (30/70) drive entries, but every order is gated by session.ismarket so
+// only bars inside NYSE/NASDAQ regular hours (09:30–16:00 ET) can trade. This
+// exercises the exchange-tz (America/New_York) vs chart-tz day boundary, the RTH
+// session filter, and how the engine treats the overnight gap between the prior
+// 16:00 close and the next 09:30 open (RSI series continuity across the gap).
+
+//@version=6
+strategy("Symbol equity RTH + overnight gaps AAPL", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// RSI(14) on close — series spans the overnight gap continuously (no per-day
+// reset), so the cross can latch on the first RTH bar after the gap.
+rsiVal = ta.rsi(close, 14)
+
+// Only act on bars inside regular trading hours. session.ismarket is backed by
+// syminfo.session, injected by the harness via runtime_overrides.session =
+// "0930-1600" with timezone America/New_York.
+inRth = session.ismarket
+
+// Oversold cross up 30 → long; overbought cross down 70 → flat. Gated by RTH.
+if inRth and ta.crossover(rsiVal, 30)
+    strategy.entry("Long", strategy.long)
+
+if inRth and ta.crossunder(rsiVal, 70)
+    strategy.close("Long")

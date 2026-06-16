@@ -1,0 +1,27 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 59 - market close fill basis
+//
+// Purpose: isolate strategy.close(id) fill timing with process_orders_on_close=false.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 59 - market close fill basis", shorttitle="PF_P59_CLOSE", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+if hour == 3 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="long")
+
+if hour == 5 and minute == 15 and strategy.position_size > 0
+    strategy.close("L", comment="market close long")
+
+if hour == 15 and minute == 15 and strategy.position_size == 0
+    strategy.entry("S", strategy.short, qty=1, comment="short")
+
+if hour == 17 and minute == 15 and strategy.position_size < 0
+    strategy.close("S", comment="market close short")

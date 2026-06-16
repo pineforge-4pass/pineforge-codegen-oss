@@ -1,0 +1,32 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 70 - exit and close same pass
+//
+// Purpose: compare source-order behavior when a price-based strategy.exit and
+// market strategy.close target the same open entry in the same pass.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 70 - exit close same pass", shorttitle="PF_P70_EXITCLOSE", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+if hour == 0 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="long")
+
+if hour == 0 and minute == 45 and strategy.position_size > 0
+    entry = strategy.position_avg_price
+    strategy.exit("X", "L", limit=entry * 1.02, stop=entry * 0.98, comment="exit first")
+    strategy.close("L", comment="close second")
+
+if hour == 6 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L2", strategy.long, qty=1, comment="long2")
+
+if hour == 6 and minute == 45 and strategy.position_size > 0
+    entry = strategy.position_avg_price
+    strategy.close("L2", comment="close first")
+    strategy.exit("X2", "L2", limit=entry * 1.02, stop=entry * 0.98, comment="exit second")

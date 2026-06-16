@@ -1,0 +1,60 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 11 — method body uses [] history on globals
+//
+// Purpose: a method that references ``close[N]``, ``high[N]`` etc.
+// inside its body must compile, and the C++ runtime must serve the
+// per-bar series ring buffer correctly when accessed through a UDT
+// method (not just inline). The history offset is driven by a UDT
+// field (``self.lookback``) so the call site exercises both UDT
+// member access AND series history within a single expression.
+// Pine treats UDT field history (``self.x[1]``) as not supported in
+// PineForge — this probe deliberately uses GLOBAL series history,
+// which is supported.
+//
+// Naming note: TradingView's CE10236 requires the first method
+// argument (``self``) to be referenced in the body — otherwise
+// it should be a plain function. Both methods here read
+// ``self.lookback`` so they pass the check.
+//
+// Trade shape: long-only. ``trend.changeRate()`` returns
+// ``(close - close[lookback]) / close[lookback]``; ``trend.swingRange()``
+// returns ``high[lookback] - low[lookback]``. Entry fires when
+// changeRate > 1% and EMA cross.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 11 - history in method", shorttitle="UDT_p11_HIST", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Trend
+    int lookback = 3
+
+method changeRate(Trend self) =>
+    float ref = close[self.lookback]
+    ref == 0.0 ? 0.0 : (close - ref) / ref
+
+method swingRange(Trend self) =>
+    float hi = high[self.lookback]
+    float lo = low[self.lookback]
+    hi - lo
+
+var Trend trend = Trend.new(3)
+
+float r = trend.changeRate()
+float swing = trend.swingRange()
+
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+if ta.crossover(emaFast, emaSlow) and r > 0.01 and swing > 0 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if ta.crossunder(emaFast, emaSlow) and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

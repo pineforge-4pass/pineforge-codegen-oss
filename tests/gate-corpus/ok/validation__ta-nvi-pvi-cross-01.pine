@@ -1,0 +1,26 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe — Negative/Positive Volume Index (ta.nvi / ta.pvi).
+// Isolates the two cumulative volume-conditioned built-in SERIES properties
+// ta.nvi and ta.pvi. Both update only on bars where volume falls (NVI) or
+// rises (PVI) vs the prior bar — a stateful path with no TradingView-parity
+// coverage in the corpus. Long when PVI crosses over its EMA(255); short when
+// NVI crosses under its EMA(255).
+//@version=6
+strategy("PF TA isolate - NVI/PVI vs EMA255 cross", shorttitle="TAI_NVIPVI",
+     overlay=false, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+pvi = ta.pvi
+nvi = ta.nvi
+pviEma = ta.ema(pvi, 255)
+nviEma = ta.ema(nvi, 255)
+
+if ta.crossover(pvi, pviEma)
+    strategy.entry("L", strategy.long, comment="pvi cross up")
+if ta.crossunder(nvi, nviEma)
+    strategy.entry("S", strategy.short, comment="nvi cross dn")

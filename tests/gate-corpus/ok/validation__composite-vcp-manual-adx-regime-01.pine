@@ -1,0 +1,73 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// VCP probe 06 — manual ADX regime detection
+//
+// Purpose: isolate the regime-filter half of the VCP integration probe
+// family. That family does NOT use ``ta.dmi`` — it builds DI/ADX BY HAND
+// from ``ta.change(high)`` /
+// ``ta.change(low)`` plus a chain of ``ta.rma`` smoothings on plusDM /
+// minusDM / true range / dx. That manual chain is a likely source of
+// TV/engine drift because:
+//   (1) ``ta.change(high)`` produces ``na`` on bar 0; the plusDM /
+//       minusDM ternaries explicitly carry the ``na`` (``na(upMove) ?
+//       na : ...``);
+//   (2) ``ta.rma`` is Wilder's smoothing (alpha = 1/length), which is
+//       seeded differently across implementations (some use SMA seed,
+//       some use first-non-na, some use 0);
+//   (3) the ``adxValue = ta.rma(dx, adxLen)`` final pass adds another
+//       length of warm-up, so any seed drift compounds.
+// VCP then derives ``regime.isTrending = adxValue > 25`` and
+// ``regime.trend = plusDI > minusDI ? 1 : -1`` and uses both to gate
+// long/short entries via ``regimeAllowsLong`` / ``regimeAllowsShort``.
+//
+// This probe routes a trivial entry/exit through ONLY VCP's manual
+// ADX. Any TV/engine drift here is attributable to the
+// ``ta.rma``-of-``ta.tr`` / DI / DX / ADX chain at length 14, NOT
+// to other VCP filters.
+//
+// Trade shape: long-only, pyramiding=1. Enter long on the bar that
+// regime FIRST becomes "trending bull" (``isTrending and trend > 0``
+// rising-edge). Close the long when the regime exits "trending bull".
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("VCP probe 06 - adx regime", shorttitle="VCP_p06",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- ATR for the volatility ratio (literal 14, matches VCP) -------
+float atrVal = ta.atr(14)
+
+// ---- Manual ADX — IDENTICAL formula to VCP lines 419-428 ----------
+int adxLen = 14
+float upMove   = ta.change(high)
+float downMove = -ta.change(low)
+float plusDM   = na(upMove)   ? na : (upMove   > downMove and upMove   > 0 ? upMove   : 0)
+float minusDM  = na(downMove) ? na : (downMove > upMove   and downMove > 0 ? downMove : 0)
+float trueRange = ta.rma(ta.tr, adxLen)
+float plusDI    = 100 * ta.rma(plusDM,  adxLen) / trueRange
+float minusDI   = 100 * ta.rma(minusDM, adxLen) / trueRange
+float dx        = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+float adxValue  = ta.rma(dx, adxLen)
+
+bool isTrending = adxValue > 25
+int  trend      = plusDI > minusDI ? 1 : -1
+float volatility = atrVal / close * 100
+
+// ---- regime rising / falling edge ----------------------------------
+bool trendingBull = isTrending and trend > 0
+bool regimeBullStart = trendingBull and not trendingBull[1]
+bool regimeBullEnd   = not trendingBull and trendingBull[1]
+
+// ---- trivial entry / exit ------------------------------------------
+if regimeBullStart and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="adx trending-bull start")
+
+if regimeBullEnd and strategy.position_size > 0
+    strategy.close("L", comment="adx trending-bull end exit")

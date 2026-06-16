@@ -1,0 +1,41 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// MTF probe 09 — daily HTF EMA(26) warmup behaviour
+//
+// Purpose: pin down the HTF TA-chain warmup discrepancy spotted in probe 08.
+// Probe 08 confirmed steady-state agreement across three concurrent TFs +
+// user-defined function inside request.security; the only divergence was the
+// very first long entry — engine fired ~2 weeks before TradingView. The
+// likely cause is the seed/early values of `ta.ema(close, 26)` aggregated on
+// the daily timeframe (slowest standard MACD component).
+//
+// This probe strips the strategy down to a single daily HTF + a single TA
+// chain. Trades fire on rising/falling daily EMA, so any difference in seed
+// or NA propagation manifests as extra/early/missing trades in the first
+// ~26 daily bars of the dataset. After warmup the two should agree exactly.
+//
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF MTF probe 09 - daily EMA warmup", shorttitle="MTF_p09_DEMA", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+float htfEma = request.security(syminfo.tickerid, "D", ta.ema(close, 26), lookahead=barmerge.lookahead_off)
+
+bool emaRising  = not na(htfEma) and not na(htfEma[1]) and htfEma > htfEma[1]
+bool emaFalling = not na(htfEma) and not na(htfEma[1]) and htfEma < htfEma[1]
+
+if emaRising and strategy.position_size <= 0
+    if strategy.position_size < 0
+        strategy.close("S", comment="flip to long")
+    strategy.entry("L", strategy.long, comment="daily EMA rising")
+
+if emaFalling and strategy.position_size >= 0
+    if strategy.position_size > 0
+        strategy.close("L", comment="flip to short")
+    strategy.entry("S", strategy.short, comment="daily EMA falling")

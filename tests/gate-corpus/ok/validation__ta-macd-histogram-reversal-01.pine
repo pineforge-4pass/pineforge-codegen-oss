@@ -1,0 +1,32 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 01 — MACD histogram reversal
+// Purpose: parity test for ta.macd() tuple-return + crossover-driven entry.
+//
+//@version=6
+strategy("MACD Histogram Reversal", overlay=false, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === Inputs ===
+fastLen   = input.int(12, "Fast Length", minval=1)
+slowLen   = input.int(26, "Slow Length", minval=1)
+signalLen = input.int(9, "Signal Length", minval=1)
+src       = input.source(close, "Source")
+
+// === MACD Calculation (tuple return) ===
+[macdLine, signalLine, histLine] = ta.macd(src, fastLen, slowLen, signalLen)
+
+// === Signal: MACD line crosses signal line ===
+longCond  = ta.crossover(macdLine, signalLine)
+shortCond = ta.crossunder(macdLine, signalLine)
+
+// === Entries ===
+if longCond
+    strategy.entry("Long", strategy.long)
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+plot(histLine, "Histogram", style=plot.style_histogram, color=histLine >= 0 ? color.green : color.red)
+plot(macdLine, "MACD", color=color.blue)
+plot(signalLine, "Signal", color=color.orange)

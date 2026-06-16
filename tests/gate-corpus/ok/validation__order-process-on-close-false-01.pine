@@ -1,0 +1,35 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Process-orders probe 01 — process_orders_on_close=false (TV default)
+//
+// Purpose: pin TV-default order processing semantics. With
+// process_orders_on_close=false, a market entry submitted on the
+// signal bar must fill at the NEXT bar's open. Companion fixture
+// process-orders-probe-02 has identical logic with =true; cross-
+// compare reveals next-bar-open shift.
+//
+// Trade shape: simple long-only EMA crossover gated by RSI<70,
+// exit on EMA cross-under. ≥10 cycles over 36k bars.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Manual TV capture later.
+//@version=6
+strategy("PF process-orders 01 - on_close=false", shorttitle="POC_p01_FALSE", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+rsiVal  = ta.rsi(close, 14)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+bool entryCond = ta.crossover(emaFast, emaSlow) and rsiVal < 70
+bool exitCond  = ta.crossunder(emaFast, emaSlow)
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry")
+if exitCond and strategy.position_size > 0
+    strategy.close("L", comment="exit")

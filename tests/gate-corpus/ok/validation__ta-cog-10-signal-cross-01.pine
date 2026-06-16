@@ -1,0 +1,25 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe — COG(10) vs its EMA(5) signal cross.
+// Isolates ta.cog (Ehlers Center of Gravity oscillator):
+//   cog = -sum(src[i] * (i+1)) / sum(src[i]) over a length window.
+// COG is a SMA-weighted ratio with the distinctive negative sign and the
+// 1-based position weighting; this probe adjudicates the engine's COG window
+// seeding, weight indexing, and divide-by-sum normalization against a TV
+// export. The EMA(5) signal cross is the trigger only.
+//@version=6
+strategy("PF TA isolate - COG(10) signal cross", shorttitle="TAI_COG",
+     overlay=false, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+cog = ta.cog(close, 10)
+sig = ta.ema(cog, 5)
+
+if ta.crossover(cog, sig)
+    strategy.entry("L", strategy.long, comment="cog cross up")
+if ta.crossunder(cog, sig)
+    strategy.entry("S", strategy.short, comment="cog cross dn")

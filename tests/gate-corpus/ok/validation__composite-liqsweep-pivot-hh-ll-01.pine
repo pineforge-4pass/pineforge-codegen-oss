@@ -1,0 +1,58 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe liquidity-sweep-probe-01-pivot-swing — directional swing-structure
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolates pivot-high/low detection plus a higher-high / lower-low
+// directional confirm. The engine surfaces under test are `ta.pivothigh` /
+// `ta.pivotlow` and the cross-bar `var float` previous-swing tracking used
+// to classify each newly confirmed pivot as a higher-high, lower-high,
+// higher-low, or lower-low. Entries fire on the rising edge of a confirmed
+// higher-high (long) or lower-low (short).
+//
+// Validation goal: bit-exact entries on confirmed HH/LL events. Pass =
+// identical trade list vs TradingView's broker emulator.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe liquidity-sweep-probe-01-pivot-swing", shorttitle="PF_lsp01_SWG",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int i_left  = input.int(5, "Pivot left bars",  minval=1)
+int i_right = input.int(5, "Pivot right bars", minval=1)
+
+// ---- pivot detection ----------------------------------------------
+float ph = ta.pivothigh(high, i_left, i_right)
+float pl = ta.pivotlow(low,   i_left, i_right)
+
+// ---- last-confirmed swings ----------------------------------------
+var float last_ph = na
+var float prev_ph = na
+var float last_pl = na
+var float prev_pl = na
+
+if not na(ph)
+    prev_ph := last_ph
+    last_ph := ph
+if not na(pl)
+    prev_pl := last_pl
+    last_pl := pl
+
+// ---- HH / LL events -----------------------------------------------
+bool higher_high = not na(ph) and not na(prev_ph) and ph > prev_ph
+bool lower_low   = not na(pl) and not na(prev_pl) and pl < prev_pl
+
+// ---- order routing -------------------------------------------------
+if higher_high and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="hh long")
+
+if lower_low and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="ll short")

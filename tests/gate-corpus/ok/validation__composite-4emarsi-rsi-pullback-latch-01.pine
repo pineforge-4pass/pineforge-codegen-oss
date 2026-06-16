@@ -1,0 +1,61 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 4ema-rsi-probe-02-rsi-pullback — RSI dip-and-recover trigger
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolates a two-state RSI pullback gate. The engine surfaces under
+// test are `ta.rsi` (Wilder smoothing via `ta.rma`) and a cross-bar `var
+// bool` latch that arms on a deep pullback and fires when RSI recovers
+// through the midline. The latch is the parity-relevant piece — it depends
+// on bar-by-bar evaluation order and on `ta.rsi`'s recursive smoothing
+// matching the TV reference exactly.
+//
+// Validation goal: bit-exact long-entry list when RSI dips below the lower
+// band and then crosses back above the midline; symmetric for shorts. Pass
+// = identical trade list vs TradingView's broker emulator.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe 4ema-rsi-probe-02-rsi-pullback", shorttitle="PF_4ema02_RSI",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int   i_rsi_len  = input.int(14,   "RSI length",       minval=2)
+float i_dip_lo   = input.float(40, "Long pullback band",  minval=10, maxval=50)
+float i_pop_lo   = input.float(50, "Long recovery line",  minval=40, maxval=60)
+float i_dip_hi   = input.float(60, "Short pullback band", minval=50, maxval=90)
+float i_pop_hi   = input.float(50, "Short recovery line", minval=40, maxval=60)
+
+// ---- RSI base ------------------------------------------------------
+float r = ta.rsi(close, i_rsi_len)
+
+// ---- arm-and-fire latches (cross-bar) ------------------------------
+var bool long_armed  = false
+var bool short_armed = false
+
+if r < i_dip_lo
+    long_armed := true
+if r > i_dip_hi
+    short_armed := true
+
+bool long_fire  = long_armed  and ta.crossover(r,  i_pop_lo)
+bool short_fire = short_armed and ta.crossunder(r, i_pop_hi)
+
+if long_fire
+    long_armed := false
+if short_fire
+    short_armed := false
+
+// ---- trivial entries on fire events --------------------------------
+if long_fire and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="rsi pullback long")
+
+if short_fire and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="rsi pullback short")

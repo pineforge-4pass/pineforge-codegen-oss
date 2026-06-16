@@ -1,0 +1,44 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Parity probe 05 — explicit qty at small fraction of equity (no margin pressure)
+//
+// Purpose: parity-probe-03 has qty = strategy.equity / close (≈100% of
+// equity per trade), which puts every entry RIGHT at the 1× margin
+// boundary; tiny slippage between signal-bar close and fill-bar open
+// then flips margin OK ↔ FAIL. parity-probe-04 routes the same intent
+// through TV's auto-sizing path. THIS probe takes the explicit-qty
+// path BUT sizes at 10% of equity, so the margin check is satisfied
+// by an order of magnitude. Engine and TV should agree on EVERY
+// Monday entry — count_delta = 0%, PnL p90 = 0%. Any divergence here
+// is therefore NOT margin-related: it's some other rule (pyramiding,
+// position-size cap, broker-emulator gating, etc.) that the rest of
+// the parity probes have not yet isolated.
+//
+// Same trigger / exit shape as parity-probe-03 so the only difference
+// under test is the qty's relationship to available equity.
+//
+// TV setup: 15m chart on BINANCE:ETHUSDT.P, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export "List of Trades" to
+// ``tv_trades.csv`` in this folder.
+//@version=6
+strategy("Parity probe 05 - small equity fraction", shorttitle="par_p05", overlay=true, initial_capital=1000000, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0, process_orders_on_close=false)
+
+// ---- engine -------------------------------------------------------
+// Wall-clock entry trigger: 00:00 UTC every Monday.
+bool fire = dayofweek == 2 and hour == 0 and minute == 0 and strategy.position_size == 0
+
+// qty encodes 10% of strategy.equity / close — well under the 1×
+// margin boundary at all times. Round to 3 decimals so the exported
+// CSV is bit-stable across re-runs.
+float qty_dyn = math.round(strategy.equity / close * 100) / 1000
+
+if fire and qty_dyn > 0
+    strategy.entry("E", strategy.long, qty=qty_dyn, comment="qty = 10% equity / close")
+
+// Exit at next bar's open so each entry maps to a single trade row
+// whose Size (qty) reveals 10 × strategy.equity at the entry bar
+// (because the divisor is 100, but the rounding is /1000).
+if strategy.position_size > 0 and bar_index > strategy.opentrades.entry_bar_index(0)
+    strategy.close("E", comment="next-bar flatten")

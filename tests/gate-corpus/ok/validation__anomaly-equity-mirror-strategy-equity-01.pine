@@ -1,0 +1,56 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Parity probe 03 — strategy.equity per-bar mirror
+//
+// Purpose: isolate the IES integration probe family's PnL drift (2.54% on
+// the strict thresholds, sole strategy below the strong tier). The drift
+// occurs because every entry sizes via ``strategy.equity * i_risk_pct *
+// regime_size_mult * quality_mult / risk_per_unit``, and tiny IIR-warmup
+// deltas in ATR/ADX (engine has 5 months of warmup OHLCV vs TV's full
+// chart history) compound across thousands of trades into a $29k equity
+// gap by 2026-04-21 — at which point per-bar regime and risk match TV
+// bit-for-bit but the qty is locked at engine_equity / TV_equity ≈
+// 0.9731. The disagreement therefore lives in strategy.equity itself.
+//
+// This probe sets ``qty = strategy.equity / close`` at every periodic
+// entry and immediately flattens on the next bar, so the exported
+// ``Size (qty)`` column reads back ``strategy.equity / close`` at each
+// trade's bar. Comparing engine vs TV row-by-row pinpoints the FIRST
+// trade where strategy.equity diverges (i.e., where the cascade
+// starts) and quantifies the divergence rate at every point afterward.
+//
+// Trade shape: long-only, pyramiding=0, no commission/slippage so the
+// only mover of strategy.equity between trades is the prior trade's
+// realised P&L plus the open position's mark-to-market. The 100-bar
+// period spaces trades far enough apart that the prior trade always
+// closes before the next entry computes its qty.
+//
+// TV setup: 15m chart on BINANCE:ETHUSDT.P, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export "List of Trades" to
+// ``tv_trades.csv`` in this folder.
+//@version=6
+strategy("Parity probe 03 - equity mirror", shorttitle="par_p03", overlay=true, initial_capital=1000000, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0, process_orders_on_close=false)
+
+// ---- engine -------------------------------------------------------
+// Wall-clock entry trigger: 00:00 UTC every Monday. Using a
+// timestamp-based rule (not bar_index) so engine and TV fire on the
+// SAME absolute bars; bar_index-based triggers shift by the warmup
+// prefix and break verify_corpus.py's align-by-time stage. Pine's
+// `dayofweek.monday` constant is integer 2 (Sun=1, Mon=2, ..., Sat=7);
+// the engine's codegen does not yet expose `dayofweek.*` namespace
+// constants, so the literal is inlined here.
+bool fire = dayofweek == 2 and hour == 0 and minute == 0 and strategy.position_size == 0
+
+// qty encodes strategy.equity at this bar; round to 3 decimals so
+// the exported CSV is bit-stable across re-runs.
+float qty_dyn = math.round(strategy.equity / close * 1000) / 1000
+
+if fire and qty_dyn > 0
+    strategy.entry("E", strategy.long, qty=qty_dyn, comment="qty = equity/close")
+
+// Exit at next bar's open so each entry maps to a single trade row
+// whose Size (qty) reveals strategy.equity at the entry bar.
+if strategy.position_size > 0 and bar_index > strategy.opentrades.entry_bar_index(0)
+    strategy.close("E", comment="next-bar flatten")

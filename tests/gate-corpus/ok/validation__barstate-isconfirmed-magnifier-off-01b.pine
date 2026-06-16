@@ -1,0 +1,41 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Barstate-magnifier probe 01b — barstate.isconfirmed, magnifier OFF
+//
+// Purpose: baseline counterpart to 01a. Same Pine logic, magnifier
+// OFF. The fill bar list must match 01a exactly; any divergence
+// implicates magnifier sub-bar handling of barstate.isconfirmed.
+//
+// Trade shape: long-only. EMA(9/21) crossover signal latches when
+// detected; entry executes only on the bar whose close is confirmed
+// (barstate.isconfirmed). Exit on opposite cross also confirmed.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, magnifier OFF. Export trades to
+// trades.csv. Compare against 01a/trades.csv for bar-identical fills.
+//@version=6
+strategy("PF barstate-magnifier probe 01b - isconfirmed OFF", shorttitle="BSM_01b_OFF", overlay=true,
+     initial_capital=1000000, currency=currency.USD, use_bar_magnifier=false,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+var bool pendingLong = false
+var bool pendingExit = false
+
+if ta.crossover(emaFast, emaSlow)
+    pendingLong := true
+if ta.crossunder(emaFast, emaSlow)
+    pendingExit := true
+
+if barstate.isconfirmed and pendingLong and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="confirmed long")
+    pendingLong := false
+
+if barstate.isconfirmed and pendingExit and strategy.position_size > 0
+    strategy.close("L", comment="confirmed exit")
+    pendingExit := false

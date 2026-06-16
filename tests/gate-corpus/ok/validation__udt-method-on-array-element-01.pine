@@ -1,0 +1,98 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 19 (stretch) — array<UDT> push + element method
+//
+// **EXPECTED-FAIL probe (C++ runtime gap)**: validation/38 already
+// flags ``array<UDT>`` and "UDT methods on array elements" as known
+// gaps. This probe surfaces the concrete clang errors:
+//   1. Non-var ``Sample current = Sample.new(close, rsiVal)`` is
+//      lowered as ``Sample current = 0.0;`` — the constructor call
+//      is dropped and a default-constructed double is assigned to
+//      a struct slot, which clang rejects.
+//   2. ``array.get(window, i)`` returns ``std::vector<Sample>::value_type``
+//      but the codegen tracks the bound variable ``s`` as ``double``,
+//      so ``s.score()`` lowers to ``s::score()`` — namespace dispatch
+//      instead of method dispatch on a struct instance.
+// When the codegen learns to (a) honour explicit UDT type
+// annotations on non-var vars, and (b) propagate element types from
+// ``array<UDT>::get`` into the local symbol table, this probe should
+// compile.
+//
+// Purpose: array<UDT> stores struct instances; calling a method on an
+// element pulled with ``arr.get(i)`` must dispatch to the correct
+// ``_udt_TypeName_method(...)`` and the result must reflect the
+// element's current field values, not a default-constructed copy.
+//
+// Trade shape (when fixed): long-only. We push a ``Sample`` with
+// ``(close, rsi)`` once per bar and keep a sliding window of 5.
+// We exercise BOTH access patterns of ``array<UDT>``:
+//   - iterate the window with ``for i = 0 to len-1`` and call
+//     ``s.score()`` on each element, summing into ``total`` so the
+//     UDT method dispatches once per loop iteration,
+//   - read the newest element directly with ``array.get(window, len-1)``
+//     and call ``newest.score()`` for the entry filter.
+// Entry gate uses the LATEST element's score (rsi-rising momentum)
+// rather than the window average, so it actually fires when EMA
+// crosses up at the start of an uptrend (the avg-score gate at
+// ``> 1.0`` fired zero times in the original draft because RSI
+// is typically below 60 at the moment of a fresh crossover up).
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 19 - array of UDT method", shorttitle="UDT_p19_AUDT", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Sample
+    float price = na
+    float rsi = na
+
+method score(Sample self) =>
+    if na(self.price) or na(self.rsi)
+        0.0
+    else
+        // Signed deviation from neutral RSI. Range ~[-5, +5].
+        (self.rsi - 50.0) * 0.1
+
+var array<Sample> window = array.new<Sample>()
+
+float rsiVal = ta.rsi(close, 14)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+Sample current = Sample.new(close, rsiVal)
+array.push(window, current)
+if array.size(window) > 5
+    array.shift(window)
+
+// Pattern 1: iterate the window and dispatch s.score() per iteration.
+float total = 0.0
+int len = array.size(window)
+for i = 0 to len - 1
+    Sample s = array.get(window, i)
+    total := total + s.score()
+
+float avgScore = len > 0 ? total / float(len) : 0.0
+
+// Pattern 2: index a specific element (newest), dispatch its method.
+float latestScore = 0.0
+if len > 0
+    Sample newest = array.get(window, len - 1)
+    latestScore := newest.score()
+
+// Entry gate uses BOTH method-dispatch results.
+//   - latestScore > 0  => current RSI > 50 (bullish momentum NOW)
+//   - avgScore > -0.5  => mean RSI of last 5 bars > 45 (gentle floor)
+// The conjunction filters trades to crossovers that coincide with a
+// recent run of bullish RSI.
+bool entryCond = ta.crossover(emaFast, emaSlow) and latestScore > 0.0 and avgScore > -0.5
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if ta.crossunder(emaFast, emaSlow) and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

@@ -1,0 +1,26 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// MTF probe 06 — sum of volume on 60m (aggregated series inside security)
+// Purpose: parity test for non-OHLC `volume` series passed through
+// `request.security` and a parallel `ta.sma(volume, 20)` HTF feed for
+// spike-vs-baseline detection.
+//
+//@version=6
+strategy("PF MTF probe 06 — 60m volume sum", shorttitle="MTF_p06", overlay=false,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+float htfVol = request.security(syminfo.tickerid, "60", volume, lookahead=barmerge.lookahead_off)
+float htfVolSma = request.security(syminfo.tickerid, "60", ta.sma(volume, 20), lookahead=barmerge.lookahead_off)
+
+bool spike = htfVol > htfVolSma * 2.0
+
+if spike and strategy.position_size == 0
+    strategy.entry("V", strategy.long, qty=1)
+
+if not spike and strategy.position_size > 0
+    strategy.close("V")

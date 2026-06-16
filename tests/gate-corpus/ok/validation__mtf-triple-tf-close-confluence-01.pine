@@ -1,0 +1,39 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// MTF probe 07 — triple HTF close confluence (60m + 240m + D)
+//
+// Purpose: isolate alignment of THREE simultaneous request.security feeds.
+// Existing MTF probes cover one HTF feed (03/04/05/06) or a single dual-TF
+// pair (02). The IES integration probe family queries three different HTFs
+// at once and produced ~2x trades vs TradingView; this probe escalates to
+// three TFs with the
+// simplest possible expression (`close`) so any divergence here points to
+// the multi-feed layout itself rather than to a derived TA expression.
+//
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF MTF probe 07 - triple TF close", shorttitle="MTF_p07_3TF", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+float h60  = request.security(syminfo.tickerid, "60",  close, lookahead=barmerge.lookahead_off)
+float h240 = request.security(syminfo.tickerid, "240", close, lookahead=barmerge.lookahead_off)
+float hD   = request.security(syminfo.tickerid, "D",   close, lookahead=barmerge.lookahead_off)
+
+bool allUp   = h60 > h60[1] and h240 > h240[1] and hD > hD[1]
+bool allDown = h60 < h60[1] and h240 < h240[1] and hD < hD[1]
+
+if allUp and strategy.position_size <= 0
+    if strategy.position_size < 0
+        strategy.close("S", comment="flip to long")
+    strategy.entry("L", strategy.long, comment="3-TF close up")
+
+if allDown and strategy.position_size >= 0
+    if strategy.position_size > 0
+        strategy.close("L", comment="flip to short")
+    strategy.entry("S", strategy.short, comment="3-TF close down")

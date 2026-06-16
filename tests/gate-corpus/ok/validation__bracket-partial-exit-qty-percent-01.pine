@@ -1,0 +1,28 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TV golden 41 - partial exit with qty_percent
+//
+// Purpose: isolate strategy.exit(..., qty_percent=50) and remaining-position handling.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF TV golden 41 - partial qty percent", shorttitle="PF_G41_PARTIAL", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=2, pyramiding=1,
+     process_orders_on_close=false)
+
+enterLong = hour == 1 and minute == 15 and strategy.position_size == 0
+
+if enterLong
+    strategy.entry("L", strategy.long, qty=2, comment="two lots")
+
+if strategy.position_size > 0
+    entry = strategy.position_avg_price
+    strategy.exit("HALF_TP", "L", limit=entry * 1.003, qty_percent=50, comment="half tp")
+    strategy.exit("REST_SL", "L", stop=entry * 0.994, comment="rest stop")
+
+if strategy.position_size > 0 and hour == 9 and minute == 15
+    strategy.close("L", comment="timeout")

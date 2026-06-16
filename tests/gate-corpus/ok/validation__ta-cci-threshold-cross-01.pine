@@ -1,0 +1,39 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 06 — CCI momentum cross
+// Purpose: parity test for ta.cci() and crossover/under against fixed
+// overbought/oversold thresholds.
+//
+//@version=6
+strategy("CCI Momentum", overlay=false, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === Inputs ===
+cciLen   = input.int(20, "CCI Length", minval=5)
+obLevel  = input.int(100, "Overbought")
+osLevel  = input.int(-100, "Oversold")
+
+// === CCI Calculation ===
+cciVal = ta.cci(close, cciLen)
+
+// === Signals ===
+longCond  = ta.crossover(cciVal, osLevel)
+shortCond = ta.crossunder(cciVal, obLevel)
+
+// === Strategy ===
+if longCond
+    strategy.entry("Long", strategy.long)
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+// Exit on zero cross
+if strategy.position_size > 0 and ta.crossunder(cciVal, 0)
+    strategy.close("Long")
+if strategy.position_size < 0 and ta.crossover(cciVal, 0)
+    strategy.close("Short")
+
+plot(cciVal, "CCI", color=color.blue)
+hline(obLevel, "Overbought", color=color.red)
+hline(osLevel, "Oversold", color=color.green)
+hline(0, "Zero", color=color.gray)

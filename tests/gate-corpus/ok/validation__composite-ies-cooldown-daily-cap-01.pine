@@ -1,0 +1,72 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// IES probe 07 — `var int` cooldown counter + daily-trade-limit reset
+//
+// Purpose: isolate the IES integration probe family's two trade-frequency
+// state machines. That family uses a `var int bars_since_trade = 999`
+// counter that increments every bar and resets to 0 on entry, gated
+// against `i_cooldown`. It also keeps a `var int daily_trades = 0` cap
+// reset on every new day:
+//
+//   var int bars_since_trade = 999
+//   bars_since_trade := bars_since_trade + 1
+//
+//   var int daily_trades = 0
+//   bool new_day = ta.change(time("D")) != 0
+//   if new_day
+//       daily_trades := 0
+//
+// The cooldown read happens BEFORE the entry decision; the reset and
+// `daily_trades += 1` happen on the same bar AFTER the entry fires.
+// That ordering plus the `ta.change(time("D"))` boundary detection
+// (which depends on how the engine groups 15m bars into UTC days vs
+// how TV does) are the two numerical edges this probe pins down.
+//
+// Trade shape: long-only EMA crossover, gated by both counters. Exit
+// on cross-under. The cooldown is set high enough (15 bars ≈ 3.75 h)
+// to actively gate signals; the daily cap is set low enough (3) to
+// truncate at least some signal-rich days. Either gate misbehaving
+// will show up as extra/missing trades vs TV.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export "List of trades" → trades.csv.
+//@version=6
+strategy("PF IES probe 07 - cooldown + daily cap", shorttitle="IES_p07_COOL", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int i_fast_ema   = input.int(9,  "Fast EMA",        minval=2, maxval=50)
+int i_slow_ema   = input.int(21, "Slow EMA",        minval=3, maxval=100)
+int i_cooldown   = input.int(15, "Cooldown bars",   minval=0, maxval=200)
+int i_max_trades = input.int(3,  "Max trades / day",minval=1, maxval=50)
+
+// ---- cooldown counter (IES exact pattern) --------------------------
+var int bars_since_trade = 999
+bars_since_trade := bars_since_trade + 1
+
+// ---- daily trade cap with UTC-day boundary -------------------------
+var int daily_trades = 0
+bool new_day = ta.change(time("D")) != 0
+if new_day
+    daily_trades := 0
+
+// ---- trivial entry signal (EMA crossover) --------------------------
+float emaFast = ta.ema(close, i_fast_ema)
+float emaSlow = ta.ema(close, i_slow_ema)
+
+bool raw_long_signal = ta.crossover(emaFast, emaSlow) and strategy.position_size == 0
+bool cooldown_ok     = bars_since_trade >= i_cooldown
+bool daily_cap_ok    = daily_trades < i_max_trades
+
+if raw_long_signal and cooldown_ok and daily_cap_ok
+    strategy.entry("L", strategy.long, qty=1, comment="long w/ cooldown")
+    bars_since_trade := 0
+    daily_trades := daily_trades + 1
+
+if ta.crossunder(emaFast, emaSlow) and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

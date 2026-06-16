@@ -1,0 +1,48 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 98 — inside-bar engulfing entries
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: exercises the simplest relational price-pattern surface — a
+// 1-bar inside-range gate (`high < high[1] and low > low[1]`) plus the
+// candle-direction tiebreaker (`close > open` vs `close < open`). Every
+// term references the prior bar via the `[1]` history operator on raw
+// OHLC series, so any engine that mishandles the boundary between
+// "current-bar value" and "prior-bar value" — or that resolves OHLC
+// history with a different lag than TradingView — will desync trade
+// timestamps here.
+//
+// Validation goal: bit-exact trade list against TradingView's broker
+// emulator on the reference 15m feed. Pass = every long/short entry
+// fires on the same bar TradingView places it.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full
+// window matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy
+// properties: leave defaults from script header. Export "List of
+// trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe 98 - inside-bar engulf", shorttitle="PF_p98_INBAR",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inside-bar relational pattern ---------------------------------
+bool inside_bar = high < high[1] and low > low[1]
+
+// ---- candle-direction tiebreaker -----------------------------------
+bool bull_inside = inside_bar and close > open
+bool bear_inside = inside_bar and close < open
+
+// ---- entries on next bar's open ------------------------------------
+if bull_inside and strategy.position_size <= 0
+    if strategy.position_size < 0
+        strategy.close("S", comment="flip flat")
+    strategy.entry("L", strategy.long, comment="bull inside-bar")
+
+if bear_inside and strategy.position_size >= 0
+    if strategy.position_size > 0
+        strategy.close("L", comment="flip flat")
+    strategy.entry("S", strategy.short, comment="bear inside-bar")

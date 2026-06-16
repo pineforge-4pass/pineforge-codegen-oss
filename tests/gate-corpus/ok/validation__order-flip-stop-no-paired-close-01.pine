@@ -1,0 +1,37 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 92 — flip via stop entry, NO paired strategy.close
+//
+// Purpose: probe 72 reproduces TV's |old|+qty growth quirk. Probe 72 places
+// ``strategy.entry("S", short, stop=...)`` AND ``strategy.close("L")`` on the
+// same bar. This probe removes the paired ``strategy.close`` so only the
+// stop entry remains. If qty in TV's export is still 2 for the post-flip
+// short round trip, the paired close is NOT the trigger -- the stop-entry
+// flip alone causes growth. If qty stays 1, the paired
+// (entry-stop + market-close-same-bar) is the discriminator.
+//
+// Trade shape: open long at 0:15 (market, fresh from flat). Place short
+// stop at 0:45 — the stop level is just below the bar low so it almost
+// always fires next bar. NO strategy.close call. Cleanup short at 12:00.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Properties dialog: Pyramiding=1,
+// Order size = 1 contract. Export the trade list to trades.csv in this
+// folder.
+//@version=6
+strategy("PF probe 92 - flip stop no paired close", shorttitle="PF_P92_NOCLOSE", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+if hour == 0 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="open long")
+
+if hour == 0 and minute == 45 and strategy.position_size > 0
+    strategy.entry("S", strategy.short, qty=1, stop=low - syminfo.mintick, comment="flip via stop")
+
+if hour == 12 and minute == 0 and strategy.position_size != 0
+    strategy.close_all(comment="cleanup")

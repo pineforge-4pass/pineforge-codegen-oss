@@ -1,0 +1,16 @@
+{
+  "name": "pineforge-codegen-gate",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Node-side conformance gate tooling for pineforge-codegen (not published).",
+  "scripts": {
+    "gate": "node gate/run-gate.mjs",
+    "gate:full": "GATE_FULL=1 node gate/run-gate.mjs",
+    "gate:selftest": "node gate/selftest.mjs"
+  },
+  "devDependencies": {
+    "pyodide": "314.0.0",
+    "tar": "^7.4.3"
+  }
+}

@@ -1,0 +1,35 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 56 - trailing activation and offset path
+//
+// Purpose: isolate legal trailing-stop behavior with trail_points + trail_offset
+// and no stop/limit siblings. Uses larger tick distances than probe 51 to avoid
+// tiny activation noise and focus on the activation/offset path.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 56 - trailing activation path", shorttitle="PF_P56_TRAILPATH", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+trailPts = input.float(800.0, "Trail Points", minval=1.0)
+trailOff = input.float(400.0, "Trail Offset", minval=1.0)
+
+if hour == 9 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="trail path long")
+
+if hour == 15 and minute == 15 and strategy.position_size == 0
+    strategy.entry("S", strategy.short, qty=1, comment="trail path short")
+
+if strategy.position_size > 0
+    strategy.exit("LX", "L", trail_points=trailPts, trail_offset=trailOff, comment="trail path long")
+
+if strategy.position_size < 0
+    strategy.exit("SX", "S", trail_points=trailPts, trail_offset=trailOff, comment="trail path short")
+
+if strategy.position_size != 0 and hour == 23 and minute == 45
+    strategy.close_all(comment="timeout")

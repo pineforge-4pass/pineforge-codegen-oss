@@ -1,0 +1,59 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 4ema-rsi-probe-01-quad-ema-stack — four-EMA stacking order check
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolates a four-tier EMA fan and the strict-ordering predicate
+// derived from it. The engine surface under test is the parallel evaluation
+// of four `ta.ema` chains at different lengths and the boolean-chain
+// composition (`a > b and b > c and c > d`) used to gate entries. Multi-EMA
+// stacks are common in trend-following strategies; if the engine's EMA
+// recurrence drifts even fractionally on the longest length, the stack
+// predicate flips on a different bar and the entry list desyncs.
+//
+// Validation goal: bit-exact entries on the rising edge of a fully bullish
+// stack (`ema_xs > ema_s > ema_m > ema_l`) and exits on the rising edge of
+// a fully bearish stack. Pass = identical trade list vs TradingView.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe 4ema-rsi-probe-01-quad-ema-stack", shorttitle="PF_4ema01_STK",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int i_xs = input.int(8,   "EMA xs length", minval=2)
+int i_s  = input.int(21,  "EMA s length",  minval=3)
+int i_m  = input.int(55,  "EMA m length",  minval=5)
+int i_l  = input.int(200, "EMA l length",  minval=10)
+
+// ---- four-EMA fan --------------------------------------------------
+float ema_xs = ta.ema(close, i_xs)
+float ema_s  = ta.ema(close, i_s)
+float ema_m  = ta.ema(close, i_m)
+float ema_l  = ta.ema(close, i_l)
+
+// ---- stack-order predicates ----------------------------------------
+bool stack_bull = ema_xs > ema_s
+     and ema_s  > ema_m
+     and ema_m  > ema_l
+bool stack_bear = ema_xs < ema_s
+     and ema_s  < ema_m
+     and ema_m  < ema_l
+
+// ---- rising-edge gates ---------------------------------------------
+bool bull_edge = stack_bull and not stack_bull[1]
+bool bear_edge = stack_bear and not stack_bear[1]
+
+// ---- trivial entries on the stack-edge transitions -----------------
+if bull_edge and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="stack bull edge")
+
+if bear_edge and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="stack bear edge")

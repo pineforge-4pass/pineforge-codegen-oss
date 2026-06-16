@@ -1,0 +1,40 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 60 - pyramiding close by id grouping
+//
+// Purpose: isolate how strategy.close(id) reports trades when multiple entries
+// with the same id have accumulated under pyramiding.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 60 - pyramiding close id", shorttitle="PF_P60_PYRCLOSE", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=3,
+     process_orders_on_close=false)
+
+if hour == 0 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="lot 1")
+
+if hour == 0 and minute == 30 and strategy.position_size > 0
+    strategy.entry("L", strategy.long, qty=1, comment="lot 2")
+
+if hour == 0 and minute == 45 and strategy.position_size > 0
+    strategy.entry("L", strategy.long, qty=1, comment="lot 3")
+
+if hour == 1 and minute == 15 and strategy.position_size > 0
+    strategy.close("L", comment="close all L")
+
+if hour == 12 and minute == 15 and strategy.position_size == 0
+    strategy.entry("S", strategy.short, qty=1, comment="short lot 1")
+
+if hour == 12 and minute == 30 and strategy.position_size < 0
+    strategy.entry("S", strategy.short, qty=1, comment="short lot 2")
+
+if hour == 12 and minute == 45 and strategy.position_size < 0
+    strategy.entry("S", strategy.short, qty=1, comment="short lot 3")
+
+if hour == 13 and minute == 15 and strategy.position_size < 0
+    strategy.close("S", comment="close all S")

@@ -1,0 +1,51 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 01 — scalar-return method (foundational dispatch)
+//
+// Purpose: smallest possible UDT method probe. The C++ runtime must
+// emit a free function ``_udt_Box_score(Box& self)`` that returns a
+// scalar, then call it with ``_udt_Box_score(b)`` from on_bar(). Any
+// drift here points at the basic UDT method dispatch, not at any
+// downstream nesting.
+//
+// Trade shape: long-only. Each bar we store ``ta.rsi`` into the UDT's
+// ``bias`` field, then ``b.score()`` returns ``self.k * (self.bias - 50)``
+// — a signed RSI offset. Entry only fires when EMA crosses up AND the
+// score is meaningfully bullish (>5, i.e. RSI > ~53), which filters
+// out crossovers in weak momentum and produces a trade list that
+// differs from a plain crossover baseline.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 01 - scalar return", shorttitle="UDT_p01_SCAL", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Box
+    float k = 1.0
+    float bias = 50.0
+
+method score(Box self) =>
+    self.k * (self.bias - 50.0)
+
+var Box b = Box.new(1.0, 50.0)
+
+rsiVal  = ta.rsi(close, 14)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+b.bias := rsiVal
+
+bool entryCond = ta.crossover(emaFast, emaSlow) and b.score() > 5.0
+bool exitCond  = ta.crossunder(emaFast, emaSlow)
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if exitCond and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

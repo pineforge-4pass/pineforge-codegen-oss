@@ -1,0 +1,61 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 17 — method returns tuple, caller destructures
+//
+// **EXPECTED-FAIL probe (C++ runtime gap)**: tuple-return inference
+// for UDT methods is broken in two places. The method body returns
+// ``[stopPx, limitPx, self.base_qty]`` but the analyzer infers the
+// method's return type as scalar ``double`` (clang: "no viable
+// conversion from tuple<...> to function return type 'double'").
+// The destructuring assignment ``[stopL, limitL, qtyL] = br.levels(...)``
+// also fails to declare the local variables — they're referenced
+// but never bound. Tuple returns + destructuring already work for
+// regular Pine user functions; the gap is specifically in the UDT
+// method codegen path.
+//
+// Purpose: Pine allows ``[a, b, c]`` tuple returns and ``[x, y, z] = expr``
+// destructuring. The C++ runtime must lower the method's return as
+// ``std::tuple<...>`` and the destructuring as ``std::tie(...)`` or
+// equivalent at the call site.
+//
+// Trade shape (when fixed): long + short. Method returns
+// ``[stop, limit, qty]``; caller destructures and feeds straight
+// into entry + bracketed exit.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 17 - tuple return", shorttitle="UDT_p17_TUP", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Bracket
+    float stop_mult = 1.5
+    float limit_mult = 3.0
+    float base_qty = 1.0
+
+method levels(Bracket self, float price, float atr, bool isLong) =>
+    float stopPx  = isLong ? price - self.stop_mult * atr : price + self.stop_mult * atr
+    float limitPx = isLong ? price + self.limit_mult * atr : price - self.limit_mult * atr
+    [stopPx, limitPx, self.base_qty]
+
+var Bracket br = Bracket.new(1.5, 3.0, 1.0)
+
+float atrVal = ta.atr(14)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+if ta.crossover(emaFast, emaSlow) and strategy.position_size == 0
+    [stopL, limitL, qtyL] = br.levels(close, atrVal, true)
+    strategy.entry("L", strategy.long, qty=qtyL, comment="entry long")
+    strategy.exit("LX", "L", stop=stopL, limit=limitL, comment="bracket long")
+
+if ta.crossunder(emaFast, emaSlow) and strategy.position_size == 0
+    [stopS, limitS, qtyS] = br.levels(close, atrVal, false)
+    strategy.entry("S", strategy.short, qty=qtyS, comment="entry short")
+    strategy.exit("SX", "S", stop=stopS, limit=limitS, comment="bracket short")

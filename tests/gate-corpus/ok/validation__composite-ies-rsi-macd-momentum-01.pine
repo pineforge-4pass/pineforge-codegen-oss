@@ -1,0 +1,88 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// IES probe 03 — RSI(14) + rsi[3] direction + MACD(12,26,9) histogram
+//
+// Purpose: isolate the IES integration probe family's momentum layer.
+// That family synthesises a 0-3 "momentum score" per side from three terms:
+//
+//   rsi_bullish      = rsi > 55                          (RSI threshold)
+//   rsi_momentum_up  = rsi > rsi[3]                      (RSI 3-bar memory)
+//   macd_bullish     = macd_hist > 0 and > macd_hist[1]  (MACD hist memory)
+//
+// Both `rsi[3]` and `macd_hist[1]` are series-history references whose value
+// on the boundary bar can disagree between the engine and TV if the inner
+// ta.* chain warms up differently or if the [N] indexer is computed before
+// vs after the current-bar value is materialised. MACD histogram is a
+// triple-EMA chain (ema(12) − ema(26) → ema(9) → diff) so any 1-tick early
+// drift propagates into the [1] memory.
+//
+// Trade shape: long when `momentum_bull_score >= 2` rises through 2 (i.e.
+// the boundary crossing into bullish-2-of-3); short when bear score crosses
+// into 2. Entry on rising-edge through threshold, flip on opposite. This
+// preserves IES's "2-of-3 rule" exactly while shedding the rest of the
+// strategy.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export "List of trades" → trades.csv.
+//@version=6
+strategy("PF IES probe 03 - rsi+macd momentum", shorttitle="IES_p03_MOM", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// ---- inputs (mirrored from IES) ------------------------------------
+int   i_rsi_len   = input.int(14,   "RSI Period",       minval=5,  maxval=30)
+float i_rsi_bull  = input.float(55, "RSI Bullish Level",minval=50, maxval=70)
+float i_rsi_bear  = input.float(45, "RSI Bearish Level",minval=30, maxval=50)
+int   i_macd_fast = input.int(12,   "MACD Fast",        minval=5,  maxval=20)
+int   i_macd_slow = input.int(26,   "MACD Slow",        minval=15, maxval=50)
+int   i_macd_sig  = input.int(9,    "MACD Signal",      minval=3,  maxval=15)
+
+// ---- RSI + 3-bar direction memory ----------------------------------
+float rsi = ta.rsi(close, i_rsi_len)
+bool rsi_bullish     = rsi > i_rsi_bull
+bool rsi_bearish     = rsi < i_rsi_bear
+bool rsi_momentum_up = rsi > rsi[3]
+bool rsi_momentum_dn = rsi < rsi[3]
+
+// ---- MACD histogram (IES's exact pattern, inline rather than UDF) --
+float macd_line   = ta.ema(close,     i_macd_fast) - ta.ema(close, i_macd_slow)
+float macd_signal = ta.ema(macd_line, i_macd_sig)
+float macd_hist   = macd_line - macd_signal
+
+bool macd_bullish = macd_hist > 0 and macd_hist > macd_hist[1]
+bool macd_bearish = macd_hist < 0 and macd_hist < macd_hist[1]
+
+// ---- 2-of-3 momentum scores ---------------------------------------
+int momentum_bull_score = 0
+if rsi_bullish
+    momentum_bull_score += 1
+if rsi_momentum_up
+    momentum_bull_score += 1
+if macd_bullish
+    momentum_bull_score += 1
+
+int momentum_bear_score = 0
+if rsi_bearish
+    momentum_bear_score += 1
+if rsi_momentum_dn
+    momentum_bear_score += 1
+if macd_bearish
+    momentum_bear_score += 1
+
+// ---- enter on rising-edge through 2-of-3 ---------------------------
+bool long_entry  = momentum_bull_score >= 2 and momentum_bull_score[1] < 2 and strategy.position_size <= 0
+bool short_entry = momentum_bear_score >= 2 and momentum_bear_score[1] < 2 and strategy.position_size >= 0
+
+if long_entry
+    if strategy.position_size < 0
+        strategy.close("S", comment="flip")
+    strategy.entry("L", strategy.long, qty=1, comment="mom 2of3 long")
+
+if short_entry
+    if strategy.position_size > 0
+        strategy.close("L", comment="flip")
+    strategy.entry("S", strategy.short, qty=1, comment="mom 2of3 short")

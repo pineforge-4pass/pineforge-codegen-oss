@@ -1,0 +1,55 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// VCP probe 01 — pivot detection at strength 5
+//
+// Purpose: isolate the market-structure half of the VCP integration probe
+// family. That family detects
+// swing highs/lows with ``ta.pivothigh(high, pivotStrength, pivotStrength)``
+// and ``ta.pivotlow(low, pivotStrength, pivotStrength)`` at the default
+// ``pivotStrength = 5``. Those pivots seed BOS / CHoCH structure flips,
+// which then gate every entry. If TV and the engine disagree on WHEN a
+// strength-5 pivot confirms (or its value), VCP's structureDirection
+// flips on different bars and the whole confluence stack desyncs.
+//
+// This probe routes a trivial entry/exit through ONLY the pivot pair —
+// no FVG, no MTF, no RSI, no volume — so any TV/engine drift here is
+// attributable to ``ta.pivothigh`` / ``ta.pivotlow`` left-bar+right-bar
+// confirmation precision at strength 5.
+//
+// Trade shape: long-only, pyramiding=1. Enter long on the bar that
+// confirms a strength-5 pivot LOW (buy-the-dip on the confirmation
+// bar). Close the long on the next confirmed strength-5 pivot HIGH.
+// Both are computed with the EXACT VCP pivot signature.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("VCP probe 01 - pivot strength 5", shorttitle="VCP_p01",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs (mirror VCP's defaults) --------------------------------
+int i_pivot = input.int(5, "Pivot Strength", minval=2, maxval=20)
+
+// ---- pivot detection — IDENTICAL signature to VCP ------------------
+float pivotHigh = ta.pivothigh(high, i_pivot, i_pivot)
+float pivotLow  = ta.pivotlow(low,   i_pivot, i_pivot)
+
+// Confirmation events: na/non-na rising edges. ta.pivothigh returns
+// the pivot price ``i_pivot`` bars AFTER the actual swing bar (i.e.
+// once enough right-bars exist). VCP keys structureDirection off
+// exactly these events.
+bool pivotHighConfirmed = not na(pivotHigh)
+bool pivotLowConfirmed  = not na(pivotLow)
+
+// ---- trivial entry / exit ------------------------------------------
+if pivotLowConfirmed and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="pivot low entry")
+
+if pivotHighConfirmed and strategy.position_size > 0
+    strategy.close("L", comment="pivot high exit")

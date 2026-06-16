@@ -1,0 +1,54 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe kanuck-probe-01-kama-state — KAMA stateful adaptive smoothing
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolates a hand-rolled KAMA (Kaufman Adaptive MA) recurrence
+// (v6 ships no `ta.kama` built-in, so the math runs explicitly through
+// `math.abs`, `math.sum`, and a `var float` state carrier). The smoothing
+// constant changes per-bar based on an efficiency ratio derived from
+// `length` price changes; engine surface under test is the bar-by-bar
+// `kama := kama[1] + sc * (close - kama[1])` update through regime
+// transitions where the SC swings fastest.
+//
+// Validation goal: bit-exact entries on `ta.crossover(close, kama)` and
+// exits on `ta.crossunder(close, kama)`. Pass = identical trade list vs
+// TradingView.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe kanuck-probe-01-kama-state", shorttitle="PF_kan01_KAMA",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int i_kama_len  = input.int(14, "KAMA length",   minval=2)
+int i_kama_fast = input.int(2,  "KAMA fast end", minval=1)
+int i_kama_slow = input.int(30, "KAMA slow end", minval=2)
+
+// ---- KAMA (manual recurrence; v6 has no ta.kama built-in) ----------
+float change_n  = math.abs(close - close[i_kama_len])
+float vol_sum   = math.sum(math.abs(close - close[1]), i_kama_len)
+float er        = vol_sum > 0 ? change_n / vol_sum : 0.0
+float fast_sc   = 2.0 / (i_kama_fast + 1)
+float slow_sc   = 2.0 / (i_kama_slow + 1)
+float sc        = math.pow(er * (fast_sc - slow_sc) + slow_sc, 2)
+var float kama  = na
+kama := na(kama[1]) ? close : kama[1] + sc * (close - kama[1])
+
+// ---- crosses -------------------------------------------------------
+bool cross_up   = ta.crossover(close, kama)
+bool cross_down = ta.crossunder(close, kama)
+
+// ---- order routing -------------------------------------------------
+if cross_up and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="kama cross up")
+
+if cross_down and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="kama cross down")

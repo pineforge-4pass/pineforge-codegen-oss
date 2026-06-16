@@ -1,0 +1,98 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 18 (stretch) — method body calls another method
+// on the same UDT
+//
+// Purpose: a UDT method can invoke a sibling method on ``self`` —
+// e.g. ``method refresh(Box self) => self.update(close); self.normalize()``.
+// The C++ runtime must resolve the inner ``self.update`` and
+// ``self.normalize`` to the right ``_udt_Box_update(self, ...)``
+// free-function calls and pass ``self`` (the reference) through.
+// Stretch probe: this is a deeper nesting than the basic dispatch
+// tests in test_udt_methods.py — the chain here is
+//   refreshAndScore -> feed
+//   refreshAndScore -> zscore -> mean
+//   refreshAndScore -> zscore -> variance -> mean
+// so ``self`` has to thread through three live frames.
+//
+// Design note (rev 2): the previous revision used a CUMULATIVE Stat
+// (``self.sum`` / ``self.sumsq`` / ``self.n`` accumulating from bar 0).
+// That made the trade list sensitive to chart history — TV's chart
+// reaches further back than our reference OHLCV CSV's warmup region,
+// so the cumulative variance — and therefore the entry gate ``z > 1``
+// — diverged by months between the engine and TV. This rev keeps the
+// same multi-level method-calls-method surface but routes Pine's
+// bounded-window ``ta.sma`` / ``ta.stdev`` THROUGH the method chain
+// instead of accumulating an unbounded stat. The engine's UDT
+// dispatch is still the contract under test (probe 21 covers the
+// shallow variant); the math is just bounded so the trade list is
+// reproducible from the OHLCV CSV alone — any TV/engine drift here
+// is attributable to nested-method dispatch and not to pre-CSV
+// chart history.
+//
+// Trade shape: long-only EMA crossover. Each bar we call
+// ``stat.refreshAndScore(close, sma, sd)`` which internally calls
+// ``self.feed(close, sma, sd)`` and then ``self.zscore()``;
+// ``zscore`` itself dispatches into ``self.mean()`` and
+// ``self.variance()`` (which dispatches into ``self.mean()`` again).
+// Entry fires on z > 1 with EMA crossover, exit on the opposing cross.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 18 - method calls method", shorttitle="UDT_p18_M2M", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Stat
+    float last  = na
+    float xMean = na
+    float xSd   = na
+    int   n     = 0
+
+method feed(Stat self, float v, float m, float s) =>
+    self.last  := v
+    self.xMean := m
+    self.xSd   := s
+    self.n     := self.n + 1
+    self.n
+
+method mean(Stat self) =>
+    self.xMean
+
+// Calls ``mean`` only to keep the nested-dispatch contract live —
+// the actual variance comes from the externally-provided sd.
+method variance(Stat self) =>
+    float _m = self.mean()
+    self.xSd * self.xSd
+
+method zscore(Stat self) =>
+    float m  = self.mean()
+    float v2 = self.variance()
+    float sd = math.sqrt(v2)
+    na(sd) or sd == 0.0 ? 0.0 : (self.last - m) / sd
+
+method refreshAndScore(Stat self, float v, float m, float s) =>
+    int _ = self.feed(v, m, s)
+    self.zscore()
+
+var Stat stat = Stat.new(na, na, na, 0)
+
+int   statLen = 50
+float smaVal  = ta.sma(close, statLen)
+float sdVal   = ta.stdev(close, statLen)
+
+float z = stat.refreshAndScore(close, smaVal, sdVal)
+
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+if ta.crossover(emaFast, emaSlow) and z > 1.0 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if ta.crossunder(emaFast, emaSlow) and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

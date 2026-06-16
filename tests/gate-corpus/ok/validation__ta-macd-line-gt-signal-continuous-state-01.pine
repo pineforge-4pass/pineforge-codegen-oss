@@ -1,0 +1,23 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe 07 — MACD line > signal continuous-state pattern
+//
+// Purpose: contrast vs probe 03 (ta.crossover MACD vs signal — event trigger).
+// This probe uses VALUE-comparison (`macd > sig`) every bar with the
+// continuous-state pattern. Isolates the MACD path of validation/37-regex.
+//@version=6
+strategy("PF TA isolate 07 - MACD > sig continuous", shorttitle="TAI_07_MACDGTSIG",
+     overlay=false, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+[macd, sig, _hist] = ta.macd(close, 12, 26, 9)
+bool cond = macd > sig
+
+if cond
+    strategy.entry("L", strategy.long, comment="macd > sig")
+else
+    strategy.close("L", comment="macd <= sig")

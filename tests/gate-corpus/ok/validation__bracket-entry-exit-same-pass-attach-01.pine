@@ -1,0 +1,27 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 71 - entry and exit same pass
+//
+// Purpose: determine whether a price-based strategy.exit can attach to a
+// strategy.entry created earlier in the same Pine execution pass.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 71 - entry exit same pass", shorttitle="PF_P71_ENTEXIT", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+if hour == 8 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry with bracket")
+    strategy.exit("X", "L", limit=close * 1.005, stop=close * 0.995, comment="same-pass bracket")
+
+if hour == 16 and minute == 15 and strategy.position_size == 0
+    strategy.entry("S", strategy.short, qty=1, comment="short entry with bracket")
+    strategy.exit("XS", "S", limit=close * 0.995, stop=close * 1.005, comment="same-pass short bracket")
+
+if strategy.position_size != 0 and hour == 23 and minute == 45
+    strategy.close_all(comment="timeout")

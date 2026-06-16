@@ -1,0 +1,22 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe — TSI(25,13) vs its EMA(13) signal cross.
+// Isolates ta.tsi (double-smoothed momentum). One of the volume/state TA
+// built-ins with ZERO TradingView-parity coverage in the corpus; the engine's
+// TSI carries a known x100-scaling suspect that only a TV export can adjudicate.
+//@version=6
+strategy("PF TA isolate - TSI(25,13) signal cross", shorttitle="TAI_TSI",
+     overlay=false, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+tsi = ta.tsi(close, 25, 13)
+sig = ta.ema(tsi, 13)
+
+if ta.crossover(tsi, sig)
+    strategy.entry("L", strategy.long, comment="tsi cross up")
+if ta.crossunder(tsi, sig)
+    strategy.entry("S", strategy.short, comment="tsi cross dn")

@@ -1,0 +1,59 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 09 — method body uses math.* functions
+//
+// Purpose: validate that the C++ runtime resolves ``math.abs``,
+// ``math.max``, ``math.min``, ``math.round``, and ``math.sqrt`` from
+// inside a UDT method body, not just at the global scope. This shakes
+// out mistakes where the analyzer registers math.* call-sites only
+// when seen at top level.
+//
+// Trade shape: bracketed long entry whose stop/limit prices are
+// computed by ``bx.clampedStop/Limit(price, atr)`` returning a
+// sanitized (rounded, clamped) value via two methods.
+//
+// Naming note: the variable holding the Box instance is named ``bx``,
+// not ``box``. ``box`` is a built-in PineScript drawing namespace
+// (``box.new``, ``box.set_*``, ...) and TradingView rejects bare
+// identifier ``box`` with CE10093 ("Invalid object name: box.
+// Namespaces of built-ins cannot be used."), even though PineForge
+// accepts it.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 09 - math in method", shorttitle="UDT_p09_MATH", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Box
+    float min_offset = 1.0
+    float max_offset = 50.0
+
+method clampedStop(Box self, float price, float atr) =>
+    float raw = math.abs(atr) * 1.5
+    float clamped = math.max(self.min_offset, math.min(self.max_offset, raw))
+    math.round(price - clamped)
+
+method clampedLimit(Box self, float price, float atr) =>
+    float raw = math.sqrt(math.abs(atr)) * 5.0
+    float clamped = math.max(self.min_offset, math.min(self.max_offset, raw))
+    math.round(price + clamped)
+
+var Box bx = Box.new(1.0, 50.0)
+
+float atrVal = ta.atr(14)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+if ta.crossover(emaFast, emaSlow) and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+    strategy.exit("LX", "L",
+         stop=bx.clampedStop(close, atrVal),
+         limit=bx.clampedLimit(close, atrVal),
+         comment="bracket long")

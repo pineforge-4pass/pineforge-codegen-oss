@@ -1,0 +1,64 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 06 — method called inside switch arms
+//
+// Purpose: switch arms must dispatch to the correct UDT method call
+// only when the matching arm is taken. The C++ runtime emits switch
+// arms as if/else if blocks, so this overlaps with probe 05 but adds
+// the switch-with-expression form (string discriminator). A bug here
+// would mean the wrong arm runs (or all arms run) for a given regime.
+//
+// Trade shape: long-only. The regime string controls which UDT
+// method updates internal state; we enter long when bull streak
+// reaches 3.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 06 - method in switch", shorttitle="UDT_p06_SW", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Counters
+    int bull_run = 0
+    int bear_run = 0
+    int flat_run = 0
+
+method bumpBull(Counters self) =>
+    self.bull_run := self.bull_run + 1
+    self.bear_run := 0
+    self.flat_run := 0
+    self.bull_run
+
+method bumpBear(Counters self) =>
+    self.bear_run := self.bear_run + 1
+    self.bull_run := 0
+    self.flat_run := 0
+    self.bear_run
+
+method bumpFlat(Counters self) =>
+    self.flat_run := self.flat_run + 1
+    self.bull_run := 0
+    self.bear_run := 0
+    self.flat_run
+
+var Counters c = Counters.new(0, 0, 0)
+
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+string regime = emaFast > emaSlow * 1.001 ? "bull" : emaFast < emaSlow * 0.999 ? "bear" : "flat"
+
+int active = switch regime
+    "bull" => c.bumpBull()
+    "bear" => c.bumpBear()
+    => c.bumpFlat()
+
+if regime == "bull" and c.bull_run >= 3 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if regime == "bear" and c.bear_run >= 3 and strategy.position_size > 0
+    strategy.close("L", comment="exit long")
