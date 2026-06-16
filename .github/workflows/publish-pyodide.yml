@@ -2,8 +2,9 @@ name: Publish codegen-pyodide
 
 # Builds @pineforge/codegen-pyodide from the GATE-VALIDATED archive and publishes
 # it via npm OIDC Trusted Publishing (mirrors pineforge-codegen-mcp/publish.yml).
-# DRY-RUN by default: nothing ships until (1) a one-time manual bootstrap publish
-# + trusted-publisher config for this new package, and (2) you set dry_run=false.
+# Auto-release: a `v*` tag push (e.g. created by release.yml) publishes for real,
+# gate-blocked. workflow_dispatch defaults to a DRY RUN (set dry_run=false to
+# publish manually). Publishing only happens after the gate passes.
 on:
   workflow_dispatch:
     inputs:
@@ -64,13 +65,16 @@ jobs:
       - name: Assemble the package
         run: node scripts/build-npm-package.mjs
 
-      - name: Publish (dry-run unless explicitly disabled)
+      - name: Publish (real on tag push or dispatch dry_run=false; dry-run otherwise)
         working-directory: npm
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "false" ]; then
+          if [ "$EVENT" = "push" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ]; }; then
             echo "Publishing for real (--access=public)"
             npm publish --access=public
           else
-            echo "DRY RUN (set workflow_dispatch input dry_run=false to publish)"
+            echo "DRY RUN (a v* tag push or dispatch with dry_run=false publishes for real)"
             npm publish --dry-run --access=public
           fi
