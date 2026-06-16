@@ -121,3 +121,9 @@ temp/
 
 # ─── Gate output ───────────────────────────────────────────────────────────
 /release.json
+
+# @pineforge/codegen-pyodide built payload (assembled at publish time)
+/npm/pineforge_codegen-*.tar.gz
+/npm/pineforge_codegen/
+/npm/tables.json
+/npm/release.json

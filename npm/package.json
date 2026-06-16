@@ -1,0 +1,32 @@
+{
+  "name": "@pineforge/codegen-pyodide",
+  "version": "0.7.0",
+  "description": "Gate-validated Pyodide payload for the PineScript v6 -> C++ transpiler: archive (run in Pyodide), unpacked source, introspected tables, and release metadata.",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./tables.json": "./tables.json",
+    "./release.json": "./release.json"
+  },
+  "files": [
+    "index.mjs",
+    "pineforge_codegen-*.tar.gz",
+    "pineforge_codegen/**/*",
+    "tables.json",
+    "release.json"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "pyodide": "314.0.0"
+  },
+  "keywords": ["pinescript", "transpiler", "pyodide", "codegen"],
+  "homepage": "https://github.com/pineforge-4pass/pineforge-codegen-oss",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pineforge-4pass/pineforge-codegen-oss.git"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0"
+}
