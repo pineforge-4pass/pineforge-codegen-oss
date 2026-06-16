@@ -1,0 +1,78 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 21 — bounded-window method-calls-method
+// Purpose: parity test for nested UDT-method dispatch (a method body invokes
+// a sibling method on `self`) where the underlying numeric chain is bounded
+// (ta.sma + ta.stdev), so the trade list is reproducible from the OHLCV CSV
+// alone — drift here isolates dispatch semantics, not history coverage.
+//
+// Companion / replacement coverage for probe 18. Probe 18 also tests
+// "method body invokes a sibling method on ``self``", but it does so
+// via a CUMULATIVE Stat (sum / sumsq / n) that depends on chart
+// history. That makes the trade list sensitive to how far back the
+// TV chart extends vs how far back our OHLCV CSV reaches — when the
+// two diverge the engine takes different ``z > 1`` decisions even
+// though the dispatch itself is correct (probe 18 currently sits at
+// ~86% match against TV for exactly that reason).
+//
+// This probe keeps the same surface contract (refresh → feed →
+// zscore, all method-on-self calls) but routes Pine's bounded-window
+// ta.sma / ta.stdev THROUGH the method chain instead of accumulating
+// an unbounded stat. The trade list is therefore reproducible from
+// the OHLCV CSV alone — any TV/engine drift here is attributable
+// to nested-method dispatch (the contract under test) and not to
+// pre-CSV chart history.
+//
+// Trade shape: long-only EMA crossover. Each bar we call
+// ``stat.refreshAndScore(close, sma, sd)`` which internally calls
+// ``self.feed(close, sma, sd)`` and returns ``self.zscore()``.
+// Entry fires on z > 1 with crossover, exit on the opposing cross.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 21 - windowed method chain", shorttitle="UDT_p21_WMC", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// State only stores the latest snapshot — no cumulative accumulator.
+type Stat
+    float last = na
+    float mean = na
+    float sd   = na
+    int   n    = 0
+
+method feed(Stat self, float v, float m, float s) =>
+    self.last := v
+    self.mean := m
+    self.sd   := s
+    self.n    := self.n + 1
+    self.n
+
+method zscore(Stat self) =>
+    na(self.sd) or self.sd == 0.0 ? 0.0 : (self.last - self.mean) / self.sd
+
+method refreshAndScore(Stat self, float v, float m, float s) =>
+    int _ = self.feed(v, m, s)
+    self.zscore()
+
+var Stat stat = Stat.new(na, na, na, 0)
+
+int   statLen = 50
+float smaVal  = ta.sma(close, statLen)
+float sdVal   = ta.stdev(close, statLen)
+
+float z = stat.refreshAndScore(close, smaVal, sdVal)
+
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+if ta.crossover(emaFast, emaSlow) and z > 1.0 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if ta.crossunder(emaFast, emaSlow) and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

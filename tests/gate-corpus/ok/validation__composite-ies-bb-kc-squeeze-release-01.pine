@@ -1,0 +1,62 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// IES probe 05 — BB / KC squeeze release detection
+//
+// Purpose: isolate the IES integration probe family's volatility-squeeze
+// gate. That family computes Bollinger Bands (sma+stdev) and Keltner
+// Channels (ema+atr) at length 20 in parallel, then tracks
+// `squeeze_on = bb_lower > kc_lower and bb_upper < kc_upper`. The release
+// event is a one-bar pulse:
+//
+//   squeeze_release = squeeze_on[1] and not squeeze_on
+//
+// That `squeeze_on[1]` reference is exactly the kind of derived-bool
+// history reference where engine vs TV can drift — the boolean is a
+// derived series produced from four parallel TA chains (sma, stdev, ema,
+// atr) and any one of those warming up differently in the early bars
+// flips the boundary value of `squeeze_on` for one or two bars.
+//
+// Trade shape: long-only — enter on `squeeze_release` (one-bar pulse);
+// exit when close crosses below the KC basis (ema(close,20)). This keeps
+// the entry trigger laser-focused on the squeeze_release boundary while
+// leaving exit logic trivial.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export "List of trades" → trades.csv.
+//@version=6
+strategy("PF IES probe 05 - bb/kc squeeze", shorttitle="IES_p05_SQZ", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// ---- inputs (mirrored from IES) ------------------------------------
+int   i_bb_len  = input.int(20,    "BB Length", minval=10, maxval=50)
+float i_bb_mult = input.float(2.0, "BB Mult",   minval=1.0, maxval=3.0, step=0.1)
+int   i_kc_len  = input.int(20,    "KC Length", minval=10, maxval=50)
+float i_kc_mult = input.float(1.5, "KC Mult",   minval=1.0, maxval=3.0, step=0.1)
+
+// ---- Bollinger Bands (sma + stdev*mult) ----------------------------
+float bb_basis = ta.sma(close, i_bb_len)
+float bb_dev   = ta.stdev(close, i_bb_len) * i_bb_mult
+float bb_upper = bb_basis + bb_dev
+float bb_lower = bb_basis - bb_dev
+
+// ---- Keltner Channels (ema + atr*mult) -----------------------------
+float kc_basis = ta.ema(close, i_kc_len)
+float kc_range = ta.atr(i_kc_len) * i_kc_mult
+float kc_upper = kc_basis + kc_range
+float kc_lower = kc_basis - kc_range
+
+// ---- squeeze + release boundary ------------------------------------
+bool squeeze_on      = bb_lower > kc_lower and bb_upper < kc_upper
+bool squeeze_release = squeeze_on[1] and not squeeze_on
+
+// ---- enter on the release pulse, exit on KC-basis cross-under ------
+if squeeze_release and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="squeeze release")
+
+if ta.crossunder(close, kc_basis) and strategy.position_size > 0
+    strategy.close("L", comment="kc basis lost")

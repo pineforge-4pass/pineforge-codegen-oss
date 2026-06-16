@@ -1,0 +1,66 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe trendmaster-probe-02-multi-tier-ma — three-tier EMA stack with state-change entries
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolates the multi-tier EMA stack-state surface used by trend
+// strategies. Three EMAs (21, 55, 200) define a stack: bullish when
+// `ema21 > ema55 > ema200`, bearish on the symmetric inversion, neutral
+// otherwise. A `var int stack_state` tracks the regime and entries fire
+// only on TRANSITIONS into bull or bear (the rising edge of the state).
+// The engine surface under test is (a) three concurrent `ta.ema` recursions
+// at different lengths — long warmup convergence to TV, (b) state-machine
+// edge detection across bars, (c) the prior-state comparison ordering
+// constraint mirrored from probe 03 of the market-shift family.
+//
+// Validation goal: bit-exact trade list against TradingView's broker emulator
+// on the reference 15-minute ETH-USDT-USDT feed.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe trendmaster-probe-02-multi-tier-ma", shorttitle="PF_TM02_STACK",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int i_fast = input.int(21,  "EMA fast",   minval=3,  maxval=100)
+int i_mid  = input.int(55,  "EMA mid",    minval=10, maxval=200)
+int i_slow = input.int(200, "EMA slow",   minval=50, maxval=500)
+
+// ---- three-tier EMA stack -----------------------------------------
+float ema_fast = ta.ema(close, i_fast)
+float ema_mid  = ta.ema(close, i_mid)
+float ema_slow = ta.ema(close, i_slow)
+
+bool stack_bull = ema_fast > ema_mid and ema_mid > ema_slow
+bool stack_bear = ema_fast < ema_mid and ema_mid < ema_slow
+
+// ---- state machine + edge detector --------------------------------
+var int stack_state = 0
+var int prev_state  = 0
+
+if stack_bull
+    stack_state := 1
+else if stack_bear
+    stack_state := -1
+else
+    stack_state := 0
+
+bool long_edge  = stack_state ==  1 and prev_state !=  1
+bool short_edge = stack_state == -1 and prev_state != -1
+
+// ---- routing -------------------------------------------------------
+if long_edge and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="stack bull edge")
+
+if short_edge and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="stack bear edge")
+
+// Update prev_state AFTER comparisons + entries — last statement.
+prev_state := stack_state

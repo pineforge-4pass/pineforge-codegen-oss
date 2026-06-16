@@ -1,0 +1,98 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 97 — TP/SL bracket on gap-driven stop entries with OCA reduce
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: exercises four engine surfaces in one cycle:
+//   1. `strategy.entry(..., stop=)` placing a pending stop entry, then
+//      `strategy.cancel` clearing it on the next bar if the trigger
+//      condition no longer holds (tests pending-order lifecycle across bars).
+//   2. `strategy.order` placing a TP + SL pair sharing an OCA group with
+//      `strategy.oca.reduce` — when one fills, the other should be reduced
+//      by the filled qty automatically.
+//   3. Range-expansion detection: previous bar's range exceeds an
+//      ATR-multiple threshold. We use ATR-relative range expansion instead
+//      of a literal price gap (`open > high[1]`) because true gaps are
+//      vanishingly rare on 24/7 crypto data — the surface under test is
+//      pending stop placement gated on a per-bar predicate, not the
+//      semantics of the predicate itself.
+//   4. `strategy.risk.max_intraday_filled_orders` caps activity per
+//      intraday session.
+//
+// Validation goal: bit-exact trade-list match against TradingView's broker
+// emulator on the reference 15-minute ETH-USDT-USDT feed. Verifies pending
+// stop entries that survive a single bar (filled when price breaks through
+// `high[1]`/`low[1]`), the OCA reduce-mode bracket arithmetic at the
+// minimum-tick boundary, and the intraday-cap gate.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full
+// window matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy
+// "Properties" → leave defaults from the script header. Export "List of
+// trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe 97 - tp/sl gap reversal oca", shorttitle="PF_p97_TPSL_OCA",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false, calc_on_order_fills=false)
+
+// ---- inputs --------------------------------------------------------
+int   i_tp_ticks   = input.int(10,  "Take profit (ticks)",  minval=1)
+int   i_sl_ticks   = input.int(10,  "Stop loss (ticks)",    minval=1)
+int   i_max_fills  = input.int(5,   "Max intraday filled orders", minval=1)
+int   i_atr_len    = input.int(14,  "ATR length",                minval=1)
+float i_atr_mult   = input.float(1.0, "Range/ATR threshold",     minval=0.1)
+
+strategy.risk.max_intraday_filled_orders(i_max_fills)
+
+// ---- range-expansion detection -------------------------------------
+// Previous bar's range vs prior ATR. When the previous bar was wider
+// than the average bar, place pending stop entries above/below it. This
+// preserves the pending-stop + cancel-on-next-bar lifecycle that the
+// engine surface requires while firing far more often than literal
+// price gaps on 24/7 crypto data.
+float prev_range = high[1] - low[1]
+float atr_now    = ta.atr(i_atr_len)
+float atr_prev   = atr_now[1]
+bool  expansion  = not na(atr_prev) and prev_range > atr_prev * i_atr_mult
+
+// Direction of the previous bar drives the side: previous up-bar →
+// pending long stop above its high; previous down-bar → pending short
+// stop below its low. Symmetric to the original gap-up/gap-down split.
+bool prev_up   = close[1] > open[1]
+bool prev_down = close[1] < open[1]
+
+bool arm_long  = expansion and prev_up
+bool arm_short = expansion and prev_down
+
+// ---- pending stop entries, cancelled when trigger lifts ------------
+if arm_long
+    strategy.entry("LongOnGap", strategy.long, stop=high[1])
+else
+    strategy.cancel("LongOnGap")
+
+if arm_short
+    strategy.entry("ShortOnGap", strategy.short, stop=low[1])
+else
+    strategy.cancel("ShortOnGap")
+
+// ---- bracket: TP + SL sharing an OCA reduce group ------------------
+float pos_qty   = math.abs(strategy.position_size)
+int   pos_dir   = strategy.position_size > 0 ? 1 : (strategy.position_size < 0 ? -1 : 0)
+float entry_px  = strategy.position_avg_price
+float tp_px     = entry_px + pos_dir * i_tp_ticks * syminfo.mintick
+float sl_px     = entry_px - pos_dir * i_sl_ticks * syminfo.mintick
+
+bool  in_position = pos_qty > 0
+exit_dir = pos_dir > 0 ? strategy.short : strategy.long
+
+if in_position
+    strategy.order("BracketTP", exit_dir, qty=pos_qty, limit=tp_px,
+         oca_name="bracket97", oca_type=strategy.oca.reduce, comment="TP")
+    strategy.order("BracketSL", exit_dir, qty=pos_qty, stop=sl_px,
+         oca_name="bracket97", oca_type=strategy.oca.reduce, comment="SL")
+else
+    strategy.cancel("BracketTP")
+    strategy.cancel("BracketSL")

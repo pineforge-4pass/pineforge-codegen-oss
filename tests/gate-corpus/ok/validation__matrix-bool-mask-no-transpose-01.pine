@@ -1,0 +1,38 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe 11 — matrix.new<bool>(24,7) mask without transpose
+// Purpose: parity test for `var matrix.new<bool>(24, 7, false)` cell mutation
+// (`matrix.set(mask, h, d, true)`) and a 24×7 nested-loop `matrix.get`
+// hot-count, with NO matrix.transpose() in the path.
+//
+//@version=6
+strategy("PF TA isolate 11 - mask only no transpose", shorttitle="TAI_11_MASK", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+var matrix<bool> mask = matrix.new<bool>(24, 7, false)
+rsiVal = ta.rsi(close, 14)
+int h = hour(time)
+int d = dayofweek(time) - 1
+
+if not na(rsiVal) and rsiVal > 60.0 and h >= 0 and h < 24 and d >= 0 and d < 7
+    matrix.set(mask, h, d, true)
+
+bool sample = matrix.get(mask, h < 24 ? h : 0, d >= 0 and d < 7 ? d : 0)
+int hotCount = 0
+for i = 0 to 23
+    for j = 0 to 6
+        if matrix.get(mask, i, j)
+            hotCount += 1
+
+bool entryCond = hotCount >= 6 and rsiVal > 55.0 and sample
+bool exitCond  = not na(rsiVal) and rsiVal < 45.0
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if exitCond and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

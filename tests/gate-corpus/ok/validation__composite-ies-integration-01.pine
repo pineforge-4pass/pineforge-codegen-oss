@@ -1,0 +1,236 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// IES probe 09 — integration probe (regime + bias + momentum + pressure
+//                + cooldown, composed in a clean-room layered design)
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: composes the surfaces already isolated in ies-probe-01..08 in
+// a single strategy so that engine/TV agreement on the COMPONENT probes
+// can be cross-checked against agreement on a representative composition.
+// The four numerical layers are:
+//   (1) regime — manual ADX / DI / ATR-ratio chain (probe 01).
+//   (2) bias   — 21/55/200 EMA stack with a 0–70 bias score (probe 02).
+//   (3) momentum — RSI(14) + RSI[3] direction + MACD histogram + memory
+//                  gives a 0–3 score per side (probe 03).
+//   (4) pressure — candle-position with double-EMA smoothing + state
+//                  ladder + momentum threshold (probe 04).
+// Each layer contributes points to a `bull_total` / `bear_total` int.
+// Long entry fires when bull_total >= 5 AND regime == 1 (trending) AND
+// the cooldown counter (probe 07) has elapsed; short symmetric. The
+// composition is the author's; the per-layer math mirrors the surfaces
+// isolated by the component probes (NOT the original IES source).
+//
+// Validation goal: integration parity. If probes 01–07 each pass
+// individually, but this composition disagrees with TradingView, the
+// gap is attributable to interaction between the layers (bar-resolution
+// ordering, ta-on-ta seeding under stress) rather than any single layer.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full
+// window matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy
+// properties: leave defaults from script header. Export "List of
+// trades" → tv_trades.csv.
+//@version=6
+strategy("PF IES probe 09 - integration", shorttitle="IES_p09_INT",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// =====================================================================
+// inputs (one block per layer; defaults match component probes)
+// =====================================================================
+// regime layer
+int   i_adx_len     = input.int(14,   "ADX period",            minval=5,  maxval=30)
+float i_adx_trend   = input.float(25, "ADX trend threshold",   minval=15, maxval=40)
+int   i_atr_len     = input.int(14,   "ATR period",            minval=5,  maxval=30)
+float i_vol_exp     = input.float(1.4,"Vol expansion",         minval=1.1,maxval=2.0, step=0.1)
+float i_vol_con     = input.float(0.6,"Vol contraction",       minval=0.3,maxval=0.9, step=0.1)
+// bias layer
+int   i_ma_fast     = input.int(21,   "Bias fast EMA",         minval=5,  maxval=50)
+int   i_ma_slow     = input.int(55,   "Bias slow EMA",         minval=20, maxval=200)
+int   i_ma_trend    = input.int(200,  "Bias trend EMA",        minval=50, maxval=500)
+float i_bias_thresh = input.float(30, "Bias score threshold",  minval=10, maxval=70)
+// momentum layer
+int   i_rsi_len     = input.int(14,   "RSI period",            minval=5,  maxval=30)
+float i_rsi_bull    = input.float(55, "RSI bullish level",     minval=50, maxval=70)
+float i_rsi_bear    = input.float(45, "RSI bearish level",     minval=30, maxval=50)
+int   i_macd_fast   = input.int(12,   "MACD fast",             minval=5,  maxval=20)
+int   i_macd_slow   = input.int(26,   "MACD slow",             minval=15, maxval=50)
+int   i_macd_sig    = input.int(9,    "MACD signal",           minval=3,  maxval=15)
+// pressure layer
+int   i_press_len   = input.int(14,   "Pressure period",       minval=5,  maxval=50)
+int   i_press_smo   = input.int(5,    "Pressure smoothing",    minval=1,  maxval=20)
+int   i_press_mom   = input.int(10,   "Pressure momentum",     minval=3,  maxval=30)
+float i_press_thr   = input.float(0.05,"Pressure mom thresh",  minval=0.01,maxval=0.2, step=0.01)
+// cooldown layer
+int   i_cooldown    = input.int(8,    "Cooldown bars",         minval=0,  maxval=200)
+
+// =====================================================================
+// layer 1 — regime (manual ADX + ATR-ratio classification)
+// =====================================================================
+f_adx_chain(int len) =>
+    float tr_v   = ta.tr(true)
+    float p_dm   = math.max(high - high[1], 0)
+    float m_dm   = math.max(low[1] - low,   0)
+    if p_dm > m_dm
+        m_dm := 0
+    else
+        p_dm := 0
+    float s_tr   = ta.rma(tr_v, len)
+    float s_p    = ta.rma(p_dm, len)
+    float s_m    = ta.rma(m_dm, len)
+    float p_di_v = s_tr > 0 ? 100 * s_p / s_tr : 0
+    float m_di_v = s_tr > 0 ? 100 * s_m / s_tr : 0
+    float di_sum = p_di_v + m_di_v
+    float dx_v   = di_sum > 0 ? 100 * math.abs(p_di_v - m_di_v) / di_sum : 0
+    float adx_v  = ta.rma(dx_v, len)
+    [adx_v, p_di_v, m_di_v]
+
+[adx_v, p_di_v, m_di_v] = f_adx_chain(i_adx_len)
+float atr_v     = ta.atr(i_atr_len)
+float atr_avg   = ta.sma(atr_v, i_atr_len * 3)
+float vol_ratio = atr_avg > 0 ? atr_v / atr_avg : 1.0
+
+int regime = 0
+if vol_ratio >= i_vol_exp and adx_v < i_adx_trend
+    regime := 3
+else if adx_v >= i_adx_trend
+    regime := 1
+else if vol_ratio <= i_vol_con
+    regime := 2
+
+bool trending = regime == 1
+bool di_bull  = p_di_v > m_di_v
+bool di_bear  = m_di_v > p_di_v
+
+// =====================================================================
+// layer 2 — bias (triple-EMA stack score)
+// =====================================================================
+float ma_fast  = ta.ema(close, i_ma_fast)
+float ma_slow  = ta.ema(close, i_ma_slow)
+float ma_trend = ta.ema(close, i_ma_trend)
+
+bool stack_up   = ma_fast > ma_slow and ma_slow > ma_trend
+bool stack_dn   = ma_fast < ma_slow and ma_slow < ma_trend
+bool above_str  = close > ma_fast and close > ma_slow
+bool below_str  = close < ma_fast and close < ma_slow
+
+float bull_bias = 0.0
+if stack_up
+    bull_bias += 30
+if above_str
+    bull_bias += 20
+if close > ma_trend
+    bull_bias += 20
+
+float bear_bias = 0.0
+if stack_dn
+    bear_bias += 30
+if below_str
+    bear_bias += 20
+if close < ma_trend
+    bear_bias += 20
+
+bool bias_bull = bull_bias >= i_bias_thresh
+bool bias_bear = bear_bias >= i_bias_thresh
+
+// =====================================================================
+// layer 3 — momentum (RSI + RSI[3] direction + MACD histogram memory)
+// =====================================================================
+float rsi_v       = ta.rsi(close, i_rsi_len)
+bool  rsi_bull    = rsi_v > i_rsi_bull
+bool  rsi_bear    = rsi_v < i_rsi_bear
+bool  rsi_mom_up  = rsi_v > rsi_v[3]
+bool  rsi_mom_dn  = rsi_v < rsi_v[3]
+
+float macd_line   = ta.ema(close,   i_macd_fast) - ta.ema(close, i_macd_slow)
+float macd_sig    = ta.ema(macd_line, i_macd_sig)
+float macd_hist   = macd_line - macd_sig
+bool  macd_bull   = macd_hist > 0 and macd_hist > macd_hist[1]
+bool  macd_bear   = macd_hist < 0 and macd_hist < macd_hist[1]
+
+int mom_bull = 0
+if rsi_bull
+    mom_bull += 1
+if rsi_mom_up
+    mom_bull += 1
+if macd_bull
+    mom_bull += 1
+
+int mom_bear = 0
+if rsi_bear
+    mom_bear += 1
+if rsi_mom_dn
+    mom_bear += 1
+if macd_bear
+    mom_bear += 1
+
+bool mom_bull_ok = mom_bull >= 2
+bool mom_bear_ok = mom_bear >= 2
+
+// =====================================================================
+// layer 4 — pressure gauge (candle position + double-EMA smoothing)
+// =====================================================================
+float bar_range = high - low
+float raw_press = bar_range > 0 ? (close - low) / bar_range : 0.5
+float press_r   = ta.ema(raw_press, i_press_len)
+float press_s   = ta.ema(press_r,   i_press_smo)
+float press_mom = press_s - press_s[i_press_mom]
+
+bool press_bull = press_s > 0.5 + i_press_thr or press_mom >  i_press_thr
+bool press_bear = press_s < 0.5 - i_press_thr or press_mom < -i_press_thr
+
+// =====================================================================
+// composite scoring (bull_total / bear_total) — author's design
+// each layer contributes one or two points; cooldown gates fires
+// =====================================================================
+int bull_total = 0
+if trending and di_bull
+    bull_total += 2
+if bias_bull
+    bull_total += 1
+if mom_bull_ok
+    bull_total += 1
+if press_bull
+    bull_total += 1
+
+int bear_total = 0
+if trending and di_bear
+    bear_total += 2
+if bias_bear
+    bear_total += 1
+if mom_bear_ok
+    bear_total += 1
+if press_bear
+    bear_total += 1
+
+// =====================================================================
+// cooldown counter (var-int across-bar carry, identical to probe 07)
+// =====================================================================
+var int bars_since_trade = 999
+bars_since_trade := bars_since_trade + 1
+bool cooldown_ok = bars_since_trade >= i_cooldown
+
+// =====================================================================
+// entries — long requires bull_total >= 5 AND trending; short symmetric
+// =====================================================================
+bool long_entry  = bull_total >= 5 and trending and cooldown_ok and strategy.position_size <= 0
+bool short_entry = bear_total >= 5 and trending and cooldown_ok and strategy.position_size >= 0
+
+if long_entry
+    if strategy.position_size < 0
+        strategy.close("S", comment="flip")
+    strategy.entry("L", strategy.long, comment="composite long")
+    bars_since_trade := 0
+
+if short_entry
+    if strategy.position_size > 0
+        strategy.close("L", comment="flip")
+    strategy.entry("S", strategy.short, comment="composite short")
+    bars_since_trade := 0
+
+// exit when regime falls out of trending
+if not trending and strategy.position_size != 0
+    strategy.close_all(comment="regime exit")

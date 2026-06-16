@@ -1,0 +1,50 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 89 - trail_points without trail_offset, alongside stop+limit
+//
+// Purpose: figure out what TradingView's broker actually does with
+// `trail_points` when `trail_offset` is missing. TV's parser rejects
+// strategy.exit if it has ONLY `trail_points`, so the legal way to use
+// `trail_points` without an explicit `trail_offset` is alongside `stop`
+// and/or `limit` — exactly the exit shape used by a community-style
+// scalping strategy. This probe mirrors that shape with controlled,
+// fixed-percent stop and limit far from entry so the trail (or TV's
+// interpretation of it) is the only thing that can fire on the entry
+// bar's intra-bar path.
+//
+// trail_points=8 matches the int(atr)≈8 captured at the scalping shape's
+// failing entry bar (trade 1); engine fires at entry+$0.08 (activation
+// level) and TV fires at entry+$0.97. probe 88 already proved engine + TV
+// agree 100% with trailTicks=20 in the same shape, so this probe
+// specifically dials trailTicks down to 8 to see whether the gap is a
+// small-trail edge case or something deeper about activation handling.
+//
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 89 - trail_points 8 + far stop/limit",
+     shorttitle="PF_P89_TRAIL8", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+trailTicks = 8
+
+if hour == 8 and minute == 0 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+    strategy.exit("LX", "L",
+         stop=close * 0.95,
+         limit=close * 1.05,
+         trail_points=trailTicks,
+         comment="trail8 + far stop/limit")
+
+if hour == 20 and minute == 0 and strategy.position_size == 0
+    strategy.entry("S", strategy.short, qty=1, comment="entry short")
+    strategy.exit("SX", "S",
+         stop=close * 1.05,
+         limit=close * 0.95,
+         trail_points=trailTicks,
+         comment="trail8 + far stop/limit")

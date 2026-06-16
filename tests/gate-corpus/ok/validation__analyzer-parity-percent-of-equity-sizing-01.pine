@@ -1,0 +1,42 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Parity probe 04 — strategy.percent_of_equity sizing
+//
+// Purpose: parity-probe-03 (explicit qty = strategy.equity / close) shows
+// engine takes 31 Mondays that TV silently rejects. The hypothesis is
+// that TV's broker emulator applies an additional margin / equity rule
+// that engine misses, but it's also possible the explicit-qty + margin
+// path differs from TV's auto-sizing. This probe routes the SAME
+// equity-feedback contract through Pine's NATIVE
+// ``default_qty_type=strategy.percent_of_equity`` path, which lets TV's
+// internal sizing engine choose qty itself instead of the user
+// computing it. If engine matches TV exactly here, the bug is purely in
+// how the engine handles user-provided ``qty=`` arguments. If engine
+// STILL diverges, the bug is in the broader margin / equity rule.
+//
+// Trade shape: long-only, default_qty_type=percent_of_equity, qty
+// argument OMITTED so TV's sizing engine takes over. Same Monday
+// 00:00 UTC trigger and 1-bar exit as parity-probe-03.
+//
+// TV setup: 15m chart on BINANCE:ETHUSDT.P, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export "List of Trades" to
+// ``tv_trades.csv`` in this folder.
+//@version=6
+strategy("Parity probe 04 - percent_of_equity sizing", shorttitle="par_p04", overlay=true, initial_capital=1000000, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.percent_of_equity, default_qty_value=99, pyramiding=0, process_orders_on_close=false)
+
+// ---- engine -------------------------------------------------------
+// Wall-clock entry trigger: 00:00 UTC every Monday. Identical timing to
+// parity-probe-03 so the only difference under test is the sizing path
+// (auto vs explicit-qty).
+bool fire = dayofweek == 2 and hour == 0 and minute == 0 and strategy.position_size == 0
+
+if fire
+    // No qty= argument: TV uses default_qty_type=percent_of_equity
+    // with default_qty_value=99 (i.e., 99% of equity per entry).
+    strategy.entry("E", strategy.long, comment="auto-sized 99% equity")
+
+// Exit at next bar's open so each entry maps to a single trade row.
+if strategy.position_size > 0 and bar_index > strategy.opentrades.entry_bar_index(0)
+    strategy.close("E", comment="next-bar flatten")

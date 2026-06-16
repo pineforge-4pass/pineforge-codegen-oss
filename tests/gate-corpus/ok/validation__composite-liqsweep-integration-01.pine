@@ -1,0 +1,89 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe liquidity-sweep-probe-integration — swing + sweep + reentry
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: composes the three surfaces isolated by
+// `liquidity-sweep-probe-01..03` (pivot-confirmed HH/LL swing structure,
+// sweep-bar wick-pierce-and-close-back, one-bar-wait reentry on
+// continuation) into one strategy. Long entries require a recent
+// higher-high context AND a sweep-of-lows AND a one-bar-delayed
+// continuation candle; short symmetric. Verifies that the engine carries
+// pivot, sweep, and latch state correctly across many bars.
+//
+// Validation goal: bit-exact trade list against TradingView's broker
+// emulator on the reference 15-minute ETH-USDT-USDT feed.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe liquidity-sweep-probe-integration", shorttitle="PF_lspINT",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int i_left  = input.int(5, "Pivot left bars",  minval=1)
+int i_right = input.int(5, "Pivot right bars", minval=1)
+
+// ---- pivot detection ----------------------------------------------
+float ph = ta.pivothigh(high, i_left, i_right)
+float pl = ta.pivotlow(low,   i_left, i_right)
+
+// ---- swing state (last + previous) --------------------------------
+var float last_ph = na
+var float prev_ph = na
+var float last_pl = na
+var float prev_pl = na
+
+if not na(ph)
+    prev_ph := last_ph
+    last_ph := ph
+if not na(pl)
+    prev_pl := last_pl
+    last_pl := pl
+
+// ---- structural-direction flags (latched until next confirmed pivot)
+var bool struct_bull = false
+var bool struct_bear = false
+
+if not na(ph) and not na(prev_ph)
+    if ph > prev_ph
+        struct_bull := true
+        struct_bear := false
+if not na(pl) and not na(prev_pl)
+    if pl < prev_pl
+        struct_bear := true
+        struct_bull := false
+
+// ---- sweep detection ----------------------------------------------
+bool sweep_high = not na(last_ph) and high > last_ph and close < last_ph
+bool sweep_low  = not na(last_pl) and low  < last_pl and close > last_pl
+
+// ---- one-bar wait latches -----------------------------------------
+var int wait_long  = 0
+var int wait_short = 0
+
+if sweep_low and struct_bull
+    wait_long := 1
+else if wait_long > 0
+    wait_long := wait_long - 1
+
+if sweep_high and struct_bear
+    wait_short := 1
+else if wait_short > 0
+    wait_short := wait_short - 1
+
+bool fire_long  = wait_long  == 0 and wait_long[1]  == 1 and close > open
+bool fire_short = wait_short == 0 and wait_short[1] == 1 and close < open
+
+// ---- order routing -------------------------------------------------
+if fire_long and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="integ long")
+
+if fire_short and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="integ short")

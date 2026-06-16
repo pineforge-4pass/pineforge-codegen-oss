@@ -1,0 +1,35 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 52 - stop entry plus opposite cancel
+//
+// Purpose: isolate the Parabolic SAR pattern of placing one stop entry and
+// cancelling the opposite pending id on confirmed bars.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 52 - stop entry cancel", shorttitle="PF_P52_CANCEL", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+fast = ta.ema(close, 8)
+slow = ta.ema(close, 21)
+
+longStop = high[1]
+shortStop = low[1]
+
+if fast > slow
+    strategy.entry("LE", strategy.long, stop=longStop, comment="live long stop")
+    strategy.cancel("SE")
+else
+    strategy.entry("SE", strategy.short, stop=shortStop, comment="live short stop")
+    strategy.cancel("LE")
+
+if strategy.position_size > 0 and fast < slow
+    strategy.close("LE", comment="flip flat long")
+
+if strategy.position_size < 0 and fast > slow
+    strategy.close("SE", comment="flip flat short")

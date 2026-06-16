@@ -1,0 +1,54 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// leverage-margin-call-perp-5x-01 — forced-liquidation / margin-call probe.
+//
+// Purpose: isolate TradingView's broker-emulator FORCED LIQUIDATION
+// (margin call) behavior for an IN-POSITION long held through an adverse
+// move at 5x leverage. The strategy declaration sets
+// `margin_long=20, margin_short=20` (20% required margin == 5x leverage).
+// A single, oversized long is entered once near the start of the feed and
+// then NEVER exited by the script. If price falls far enough that the
+// position's losses exhaust the posted margin, TradingView's emulator
+// injects a "Margin Call" exit row that the script itself never issued.
+//
+// The PineForge engine currently has no in-position liquidation path: it
+// holds the entry indefinitely and produces no margin-call exit. This
+// probe is EXPECTED TO EXPOSE that gap — the divergence (TV emits a
+// Margin Call exit, engine does not) is the finding, not a bug to mask.
+// When exporting TV's List of Trades, be sure to capture the rows whose
+// Type / Signal is "Margin Call" (TV labels the forced exit explicitly).
+//
+// Logic is intentionally minimal: one large fixed-qty long on the first
+// bar after warmup, sized so that a routine adverse 15m perp move at 5x
+// can wipe the margin. No exit, no pyramiding beyond the single entry.
+//
+// TV setup: 15m chart on BINANCE:ETHUSDT.P (Binance USDT-M perpetual).
+// Set the Strategy Tester margin to 20% long / 20% short to match the
+// `margin_long=20, margin_short=20` declaration (TV reads these from the
+// script header, but verify the Properties tab shows 20/20). Export
+// "List of Trades" — INCLUDING the Margin Call row — to tv_trades.csv.
+//@version=6
+strategy("leverage-margin-call-perp-5x-01", shorttitle="lev_mc5x",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false,
+     margin_long=20, margin_short=20)
+
+// ---- one early, oversized long held with NO exit --------------------
+// Enter once: first bar at/after bar_index 50 (post-warmup) while flat.
+// qty is sized to ~5x notional of initial_capital so a modest adverse
+// move exhausts the 20% margin and triggers TV's forced liquidation.
+bool fire = bar_index >= 50 and strategy.position_size == 0 and strategy.closedtrades == 0
+
+// Notional target ≈ 5 × initial_capital; qty = target_notional / close.
+float target_notional = 5000000.0
+float qty_lev = math.round(target_notional / close * 1000) / 1000
+
+if fire and qty_lev > 0
+    strategy.entry("LEV", strategy.long, qty=qty_lev, comment="5x held long, no exit")
+
+// No strategy.close / strategy.exit anywhere: the only way this position
+// can leave the book is TradingView's forced-liquidation (Margin Call).

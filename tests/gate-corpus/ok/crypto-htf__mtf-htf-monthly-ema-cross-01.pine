@@ -1,0 +1,26 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF MTF-isolate probe — monthly ("M") HTF EMA(6) via request.security.
+// Isolates CALENDAR-MONTH aggregation: unlike "60"/"240"/"D" (fixed-width
+// HTF buckets), the "M" timeframe rolls on variable-length calendar months
+// (28–31 days, DST-agnostic). This exercises the engine's HTF bucket-boundary
+// detection for irregular periods end-to-end. The HTF EMA(6) is computed
+// INSIDE the request.security context so EMA state advances once per closed
+// month, then is held flat across every intraday bar of that month. Trades
+// fire when the LTF close crosses the held monthly EMA — any month-boundary
+// or roll/seed drift surfaces as extra/early/missing crossings.
+//@version=6
+strategy("PF MTF isolate - monthly EMA(6) cross", shorttitle="MTF_MEMA",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+float mema = request.security(syminfo.tickerid, "M", ta.ema(close, 6), lookahead=barmerge.lookahead_off)
+
+if ta.crossover(close, mema)
+    strategy.entry("L", strategy.long, comment="close x-over monthly EMA")
+if ta.crossunder(close, mema)
+    strategy.entry("S", strategy.short, comment="close x-under monthly EMA")

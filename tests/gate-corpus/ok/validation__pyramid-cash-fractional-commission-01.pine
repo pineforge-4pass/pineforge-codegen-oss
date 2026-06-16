@@ -1,0 +1,37 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Pyramid carry probe 02 — cash sizing + fractional commission
+//
+// Purpose: default_qty_type=cash with cash_per_contract commission
+// over fractional contract sizes. Each pyramid add re-evaluates
+// cash → contract conversion at current price; commission is
+// charged per (fractional) contract. Drives rounding-drift
+// parity-anomaly between TV and runtime.
+//
+// Trade shape: pyramiding=3, long-only entries on EMA cross-up
+// gated by RSI band; cash size 50000 yields fractional contract
+// counts at ETH prices ($1k–$5k typical). Each session-end
+// (hour==23, minute==45) closes all. ≥10 cycles over 36k bars.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Manual TV capture later.
+//@version=6
+strategy("PF Pyramid carry 02 - cash fractional", shorttitle="PYR_p02_CASH", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.05, slippage=0,
+     default_qty_type=strategy.cash, default_qty_value=50000, pyramiding=3,
+     process_orders_on_close=false)
+
+rsiVal  = ta.rsi(close, 14)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+bool entryCond = ta.crossover(emaFast, emaSlow) and rsiVal > 40 and rsiVal < 70
+
+if entryCond
+    strategy.entry("L", strategy.long, comment="cash add")
+
+if hour == 23 and minute == 45
+    strategy.close_all(comment="session close")

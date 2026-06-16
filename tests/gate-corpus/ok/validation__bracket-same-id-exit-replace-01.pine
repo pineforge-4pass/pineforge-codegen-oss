@@ -1,0 +1,27 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 67 - same-id exit replacement
+//
+// Purpose: determine whether repeated strategy.exit calls with the same id
+// replace the pending bracket or create multiple exits.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 67 - same id exit replace", shorttitle="PF_P67_EXITREPL", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+if hour == 8 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="long for exit replace")
+
+if strategy.position_size > 0
+    entry = strategy.position_avg_price
+    strategy.exit("X", "L", limit=entry * 1.01, stop=entry * 0.99, comment="first exit")
+    strategy.exit("X", "L", limit=entry * 1.003, stop=entry * 0.997, comment="replacement exit")
+
+if strategy.position_size > 0 and hour == 16 and minute == 15
+    strategy.close("L", comment="timeout")

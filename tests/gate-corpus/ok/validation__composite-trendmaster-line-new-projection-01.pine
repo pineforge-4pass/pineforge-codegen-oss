@@ -1,0 +1,92 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe trendmaster-probe-01-trend-line-projection — line.new() chain stress with projection entry
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolates the `line.new()` drawing-object chain surface used by
+// trend-line strategies that draw a fresh line on every confirmed pivot
+// pair. Each new pivot connects the previous-pivot bar to the current
+// pivot bar with `line.new(x1, y1, x2, y2)`, where x coordinates are
+// `bar_index` offsets. `max_lines_count=500` caps the visible chain;
+// older lines are auto-dropped by TV. The engine surface under test is
+// (a) parsing `line.new` and the `max_lines_count` script header field,
+// (b) bar_index arithmetic for line endpoints, (c) computing a slope
+// projection from the most recent line and using it as an entry trigger.
+// Drawing primitives have no PnL effect on TV — the entry is driven off
+// the SLOPE arithmetic, which the engine must evaluate identically.
+//
+// Validation goal: bit-exact trade list against TradingView's broker emulator
+// on the reference 15-minute ETH-USDT-USDT feed. If the engine doesn't draw
+// lines but evaluates the slope projection correctly, parity still holds —
+// only the slope math feeds the entry.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe trendmaster-probe-01-trend-line-projection", shorttitle="PF_TM01_LINE",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false, max_lines_count=500)
+
+// ---- inputs --------------------------------------------------------
+int i_pivot = input.int(5, "Pivot strength", minval=2, maxval=20)
+
+// ---- pivot detection ----------------------------------------------
+float ph = ta.pivothigh(high, i_pivot, i_pivot)
+float pl = ta.pivotlow(low,   i_pivot, i_pivot)
+
+// ---- track last + previous confirmed pivot for line drawing ------
+// last_* = most recent confirmed pivot, prev_* = the one before that.
+var float last_ph_y = na
+var int   last_ph_x = na
+var float prev_ph_y = na
+var int   prev_ph_x = na
+var float last_pl_y = na
+var int   last_pl_x = na
+var float prev_pl_y = na
+var int   prev_pl_x = na
+
+// On confirm, ph/pl carry the pivot value; the actual swing bar is
+// `i_pivot` bars back. Roll last_* into prev_* before overwriting.
+if not na(ph)
+    int cur_x = bar_index - i_pivot
+    if not na(last_ph_y) and not na(last_ph_x)
+        line.new(last_ph_x, last_ph_y, cur_x, ph, color=color.red)
+    prev_ph_y := last_ph_y
+    prev_ph_x := last_ph_x
+    last_ph_y := ph
+    last_ph_x := cur_x
+
+if not na(pl)
+    int cur_x = bar_index - i_pivot
+    if not na(last_pl_y) and not na(last_pl_x)
+        line.new(last_pl_x, last_pl_y, cur_x, pl, color=color.green)
+    prev_pl_y := last_pl_y
+    prev_pl_x := last_pl_x
+    last_pl_y := pl
+    last_pl_x := cur_x
+
+// ---- slope-extrapolated reference at current bar -----------------
+float ref_lo = na
+if not na(prev_pl_y) and not na(prev_pl_x) and not na(last_pl_y) and not na(last_pl_x) and last_pl_x != prev_pl_x
+    float slope = (last_pl_y - prev_pl_y) / (last_pl_x - prev_pl_x)
+    ref_lo := last_pl_y + slope * (bar_index - last_pl_x)
+
+float ref_hi = na
+if not na(prev_ph_y) and not na(prev_ph_x) and not na(last_ph_y) and not na(last_ph_x) and last_ph_x != prev_ph_x
+    float slope = (last_ph_y - prev_ph_y) / (last_ph_x - prev_ph_x)
+    ref_hi := last_ph_y + slope * (bar_index - last_ph_x)
+
+// ---- entries on slope-projection cross ----------------------------
+bool long_signal  = not na(ref_lo) and ta.crossover(close,  ref_lo)
+bool short_signal = not na(ref_hi) and ta.crossunder(close, ref_hi)
+
+if long_signal and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="proj long")
+
+if short_signal and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="proj short")

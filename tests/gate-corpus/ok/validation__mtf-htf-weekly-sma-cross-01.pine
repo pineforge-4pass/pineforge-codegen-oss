@@ -1,0 +1,24 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF MTF probe — Weekly ("W") HTF SMA(10) close-cross.
+// Isolates calendar WEEK aggregation end-to-end: ta.sma(close,10) is computed
+// INSIDE request.security(..., "W", ...) so the SMA state runs on the weekly
+// HTF series, then the LTF close crosses that weekly SMA. The "W" timeframe
+// forces ISO Monday-based week-boundary bucketing in the engine; this is the
+// only corpus probe driving trades off a calendar-WEEK security() chain, so a
+// TV export adjudicates the week-open alignment + HTF→LTF roll-forward.
+//@version=6
+strategy("PF MTF probe - weekly SMA(10) cross", shorttitle="MTF_WSMA", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+float wsma = request.security(syminfo.tickerid, "W", ta.sma(close, 10), lookahead=barmerge.lookahead_off)
+
+if ta.crossover(close, wsma)
+    strategy.entry("L", strategy.long, comment="close x up weekly SMA")
+if ta.crossunder(close, wsma)
+    strategy.entry("S", strategy.short, comment="close x dn weekly SMA")

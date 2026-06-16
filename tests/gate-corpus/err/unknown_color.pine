@@ -1,0 +1,3 @@
+//@version=6
+strategy("T")
+c = color.not_real(close)

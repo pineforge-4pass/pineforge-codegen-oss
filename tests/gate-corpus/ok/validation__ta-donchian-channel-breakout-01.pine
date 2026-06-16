@@ -1,0 +1,42 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 10 — Donchian channel breakout
+// Purpose: parity test for ta.highest / ta.lowest band construction with the
+// `[1]`-shifted entry comparison (yesterday's channel, today's close).
+//
+//@version=6
+strategy("Donchian Channel Breakout", overlay=true, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === Inputs ===
+entryLen = input.int(20, "Entry Channel Length", minval=5)
+exitLen  = input.int(10, "Exit Channel Length", minval=3)
+
+// === Donchian Channels ===
+entryUpper = ta.highest(high, entryLen)
+entryLower = ta.lowest(low, entryLen)
+entryMid   = (entryUpper + entryLower) / 2
+
+exitUpper  = ta.highest(high, exitLen)
+exitLower  = ta.lowest(low, exitLen)
+
+// === Breakout signals ===
+longCond  = close > entryUpper[1]
+shortCond = close < entryLower[1]
+
+// === Strategy ===
+if longCond
+    strategy.entry("Long", strategy.long)
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+// === Exit on opposite channel ===
+if strategy.position_size > 0 and close < exitLower[1]
+    strategy.close("Long")
+if strategy.position_size < 0 and close > exitUpper[1]
+    strategy.close("Short")
+
+plot(entryUpper, "Entry Upper", color=color.green)
+plot(entryLower, "Entry Lower", color=color.red)
+plot(entryMid, "Mid", color=color.gray)

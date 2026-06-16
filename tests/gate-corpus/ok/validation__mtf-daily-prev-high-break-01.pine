@@ -1,0 +1,32 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// MTF probe 04 — Daily high[1] vs 15m close (classic “HTF level” gate)
+// Purpose: parity test for `request.security(..., "D", high[1], lookahead_off)`
+// — the `[1]` history reference INSIDE the security call must resolve on the
+// HTF bar, not the LTF chart bar.
+//
+// request.security(..., "D", high[1])
+//
+// Strict TV↔engine parity checklist:
+// - Use the same symbol feed as data/ohlcv_ETH-USDT-USDT_15m.csv (Binance USDT-M ETH).
+// - Match chart date range to the OHLCV file; TV “List of trades” must cover that window.
+// - Set validate_detailed_report / inputs.json: tv_trades_csv_tz = "utc" if chart TZ was UTC
+//   when exporting trades, else "utc_plus_8" (default). Mismatch causes ±8h pairing errors.
+//@version=6
+strategy("PF MTF probe 04 — D high[1] break", shorttitle="MTF_p04", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+float dHigh1 = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+
+bool crossUp = close > dHigh1 and close[1] <= dHigh1[1]
+
+if crossUp and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1)
+
+if close < dHigh1 * 0.995 and strategy.position_size > 0
+    strategy.close("L")

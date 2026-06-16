@@ -1,0 +1,62 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 99 — Keltner channel breakout
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: exercises a compact composite of three v6 surfaces in one
+// strategy — `ta.ema(close, 20)` for the channel midline, `ta.atr(10)`
+// for the half-width, and `ta.crossover` / `ta.crossunder` of close
+// against the upper/lower band for the entry/exit triggers. The
+// channel construction `mid ± atr * mult` is a TA-on-TA expression;
+// any tiny seed drift in either the EMA or the ATR shifts the band,
+// which in turn shifts WHICH bar the close-vs-band cross resolves on.
+//
+// Validation goal: bit-exact trade list against TradingView's broker
+// emulator on the reference 15m feed. Pass = every entry/exit fires
+// on the same bar TradingView places it.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full
+// window matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy
+// properties: leave defaults from script header. Export "List of
+// trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe 99 - keltner channel break", shorttitle="PF_p99_KCH",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int   i_ema_len = input.int(20,  "Channel EMA length", minval=2,  maxval=200)
+int   i_atr_len = input.int(10,  "Channel ATR length", minval=2,  maxval=100)
+float i_mult    = input.float(2.0, "Channel multiple", minval=0.5, maxval=10.0, step=0.1)
+
+// ---- channel construction -----------------------------------------
+float mid_line = ta.ema(close, i_ema_len)
+float half_w   = ta.atr(i_atr_len) * i_mult
+float upper    = mid_line + half_w
+float lower    = mid_line - half_w
+
+// ---- entries / exits on cross of close vs band --------------------
+bool long_break  = ta.crossover(close,  upper)
+bool short_break = ta.crossunder(close, lower)
+bool long_exit   = ta.crossunder(close, mid_line)
+bool short_exit  = ta.crossover(close,  mid_line)
+
+if long_break and strategy.position_size <= 0
+    if strategy.position_size < 0
+        strategy.close("S", comment="flip flat")
+    strategy.entry("L", strategy.long, comment="upper break")
+
+if short_break and strategy.position_size >= 0
+    if strategy.position_size > 0
+        strategy.close("L", comment="flip flat")
+    strategy.entry("S", strategy.short, comment="lower break")
+
+if long_exit and strategy.position_size > 0
+    strategy.close("L", comment="back to mid")
+
+if short_exit and strategy.position_size < 0
+    strategy.close("S", comment="back to mid")

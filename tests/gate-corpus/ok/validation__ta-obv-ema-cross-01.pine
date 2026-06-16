@@ -1,0 +1,24 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe — On-Balance Volume (ta.obv) vs its EMA(21) signal cross.
+// Isolates ta.obv, the cumulative volume-flow SERIES built-in (used WITHOUT
+// parens, as a property — obv = ta.obv). OBV is an unbounded running sum that
+// adds/subtracts the full bar volume on every close tick, so the raw magnitude
+// and the cumulative-from-first-bar seeding are exactly the kind of thing that
+// only a TradingView export can adjudicate against the engine's ta::OBV.
+//@version=6
+strategy("PF TA isolate - OBV EMA(21) cross", shorttitle="TAI_OBV",
+     overlay=false, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+obv = ta.obv
+sig = ta.ema(obv, 21)
+
+if ta.crossover(obv, sig)
+    strategy.entry("L", strategy.long, comment="obv cross up")
+if ta.crossunder(obv, sig)
+    strategy.entry("S", strategy.short, comment="obv cross dn")

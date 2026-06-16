@@ -1,0 +1,51 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// TA recompute probe 01 — MTF RSI + MACD + BBands
+//
+// Purpose: force per-class TA save/restore on every MTF tick. RSI,
+// MACD-histogram and Bollinger Bands middle are evaluated INSIDE
+// separate request.security callables on the 1H timeframe from a 15m
+// chart. Each MTF advance makes the runtime push/pop the TA series
+// state for three different classes within the same security context
+// — drift here points at per-class saved-state corruption (C++ gap
+// #5).
+//
+// Trade shape: long-only. Entry when all three HTF oscillators agree
+// bullish: RSI > 55, MACD histogram > 0, close > BB middle. Exit on
+// any disagreement. Combined-agreement gate keeps trade count modest
+// and pins the consensus bar.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export trades to trades.csv.
+//@version=6
+strategy("PF TA recompute probe 01 - MTF RSI MACD BB", shorttitle="TArec_p01_MTF", overlay=true,
+     initial_capital=1000000, currency=currency.USD, use_bar_magnifier=false,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+f_rsi(series float src, int len) =>
+    ta.rsi(src, len)
+
+f_macd_hist(series float src, int fast, int slow, int sig) =>
+    float macdLine = ta.ema(src, fast) - ta.ema(src, slow)
+    float sigLine  = ta.ema(macdLine, sig)
+    macdLine - sigLine
+
+f_bb_mid(series float src, int len) =>
+    ta.sma(src, len)
+
+float htfRsi  = request.security(syminfo.tickerid, "60", f_rsi(close, 14), lookahead=barmerge.lookahead_off)
+float htfHist = request.security(syminfo.tickerid, "60", f_macd_hist(close, 12, 26, 9), lookahead=barmerge.lookahead_off)
+float htfBbM  = request.security(syminfo.tickerid, "60", f_bb_mid(close, 20), lookahead=barmerge.lookahead_off)
+float htfClose = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+
+bool bullAgree = htfRsi > 55.0 and htfHist > 0.0 and htfClose > htfBbM
+bool bearAgree = htfRsi < 45.0 or htfHist < 0.0 or htfClose < htfBbM
+
+if bullAgree and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if bearAgree and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

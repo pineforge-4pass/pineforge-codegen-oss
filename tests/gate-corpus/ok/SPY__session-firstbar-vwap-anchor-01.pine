@@ -1,0 +1,29 @@
+// TV_RUN_NEEDED: tv_trades.csv missing — capture in TradingView:
+//   Symbol: SPY  TF: 5m  Range: 2024-01-02..2024-03-29
+//   Save List of Trades → tv_trades.csv in this directory.
+
+//@version=6
+strategy("Session isfirstbar VWAP anchor", overlay=true,
+         default_qty_type=strategy.fixed, default_qty_value=1)
+
+// Anchor VWAP to the first bar of each trading session using session.isfirstbar.
+// Buy when close crosses above session VWAP; sell when it crosses below.
+
+var float cum_pv  = 0.0
+var float cum_vol = 0.0
+
+if session.isfirstbar
+    cum_pv  := 0.0
+    cum_vol := 0.0
+
+if session.ismarket
+    cum_pv  := cum_pv  + hlc3 * volume
+    cum_vol := cum_vol + volume
+
+session_vwap = cum_vol > 0 ? cum_pv / cum_vol : close
+
+if session.ismarket
+    if ta.crossover(close, session_vwap)
+        strategy.entry("Long", strategy.long)
+    if ta.crossunder(close, session_vwap)
+        strategy.close("Long")

@@ -1,0 +1,56 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe wunder-scalper-probe-02-alert-message-templates — alert() with TV placeholder strings
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolates the `alert(...)` hook surface that WunderTrading-style
+// bots use to forward signals to an external broker. Entries are driven by
+// a short-period EMA cross; on each cross the script also emits an
+// `alert("...", alert.freq_once_per_bar)` call carrying TV-side placeholder
+// strings (`{{strategy.order.action}}`, `{{ticker}}`). These placeholders
+// are TV broker substitutions — they do not affect the trade list or the
+// engine's order routing. If the engine doesn't process `alert()` at all,
+// trade-list parity still holds because alerts and orders are independent
+// surfaces. The probe's value is to confirm the engine PARSES `alert()`
+// without erroring and produces the same orders as a script without the
+// alert calls.
+//
+// Caveat: TV-side template substitution (`{{...}}`) is performed by the
+// alert delivery system, not by Pine. The engine is not expected to
+// substitute these strings — only to accept the literal text and not raise.
+//
+// Validation goal: bit-exact trade list against TradingView's broker emulator
+// on the reference 15-minute ETH-USDT-USDT feed. Trade list parity is the
+// pass criterion; alert message contents are out of scope.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe wunder-scalper-probe-02-alert-message-templates", shorttitle="PF_WS02_ALRT",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int i_fast = input.int(5,  "Fast EMA", minval=2, maxval=50)
+int i_slow = input.int(13, "Slow EMA", minval=3, maxval=100)
+
+// ---- direction signal ---------------------------------------------
+float ema_fast = ta.ema(close, i_fast)
+float ema_slow = ta.ema(close, i_slow)
+
+bool long_signal  = ta.crossover(ema_fast,  ema_slow)
+bool short_signal = ta.crossunder(ema_fast, ema_slow)
+
+// ---- entries + alert hooks ----------------------------------------
+if long_signal
+    strategy.entry("L", strategy.long, qty=1, comment="alert long")
+    alert("{{strategy.order.action}} {{ticker}} long", alert.freq_once_per_bar)
+
+if short_signal
+    strategy.entry("S", strategy.short, qty=1, comment="alert short")
+    alert("{{strategy.order.action}} {{ticker}} short", alert.freq_once_per_bar)

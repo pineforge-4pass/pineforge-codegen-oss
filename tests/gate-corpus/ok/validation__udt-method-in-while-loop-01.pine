@@ -1,0 +1,58 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 08 — method called inside a while loop
+//
+// Purpose: while-loop dispatch with bounded iteration. The C++ runtime
+// must call the UDT method on every loop iteration until the
+// termination condition flips. A break from the loop must stop
+// dispatching. Combined with mutating-self this validates the loop
+// guard is evaluated against the post-mutation state, not a stale
+// snapshot.
+//
+// Trade shape: long-only. ``ramp.tick()`` walks backward through the
+// last 10 bars: each iteration looks at ``close[counter-1]`` vs
+// ``open[counter-1]``, increments ``green_count`` if the bar was
+// green, and decrements the counter. Entry fires only when at least
+// 7 of the last 10 bars were green AND there is an EMA cross — a
+// real momentum filter that meaningfully narrows the trade list.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 08 - method in while", shorttitle="UDT_p08_WHL", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Ramp
+    int counter = 0
+    int green_count = 0
+
+method tick(Ramp self) =>
+    int idx = self.counter - 1
+    bool greenBar = idx >= 0 and close[idx] > open[idx]
+    if greenBar
+        self.green_count := self.green_count + 1
+    self.counter := self.counter - 1
+    self.counter
+
+var Ramp ramp = Ramp.new(0, 0)
+
+ramp.counter := 10
+ramp.green_count := 0
+int safety = 0
+while ramp.counter > 0 and safety < 12
+    int _c = ramp.tick()
+    safety := safety + 1
+
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+if ramp.green_count >= 7 and ta.crossover(emaFast, emaSlow) and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if ta.crossunder(emaFast, emaSlow) and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

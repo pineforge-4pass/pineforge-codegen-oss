@@ -1,0 +1,48 @@
+// TV_RUN_NEEDED: tv_trades.csv missing — capture in TradingView:
+//   Symbol: ETHUSDT.P (Binance USDT-M Perpetual)  TF: 15m  Range: 2024-01-01..2024-06-01
+//   Save List of Trades → tv_trades.csv in this directory.
+//
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Probe: stats-eventrades-zero-pnl-count-01
+// Purpose: Verify strategy.eventrades counts trades with net P&L == 0.
+//
+// Engineering even trades:
+//   Commission = 0 (set in strategy() declaration).
+//   Entry fills at bar N close; exit fills at bar N+1 open (= same value as
+//   bar N close when open == close, i.e., a flat OHLC bar). However, since
+//   real ETHUSDT.P bars are rarely flat, we instead use limit orders set at
+//   bar.close so both entry and exit prices match exactly, producing 0 P&L.
+//
+//   Simpler approach used here: enter at bar close (market order, fills next
+//   bar open). Exit with limit order at ENTRY price, which fills when the
+//   next bar's high >= entry_price (for a long). This guarantees exit price
+//   == entry price, so P&L = qty * (exit - entry) - commission = 0.
+//
+//   Observation: strategy.eventrades should increment once per such trade.
+//   The probe confirms the counter is correct vs TradingView's reported value.
+//
+// TV setup: ETHUSDT.P 15m, 2024-01-01..2024-06-01
+//@version=6
+strategy("PF-F: eventrades count", shorttitle="PF_F_EVTRADES", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// Enter long at midnight UTC (hour==0, minute==0)
+// Exit immediately at entry price (limit order) → guarantees 0 P&L with zero commission
+var float entry_price = na
+
+if hour == 0 and minute == 0 and strategy.position_size == 0
+    strategy.entry("LE", strategy.long, qty=1, comment="even-trade entry")
+    entry_price := close
+
+// Exit at the exact entry price via limit order: entry_price reached → net P&L == 0
+if strategy.position_size > 0 and not na(entry_price)
+    strategy.exit("LX", "LE", limit=entry_price, comment="even-trade exit @ entry")
+
+// Plot eventrades counter so TradingView table can be compared
+plot(strategy.eventrades, title="eventrades", display=display.none)

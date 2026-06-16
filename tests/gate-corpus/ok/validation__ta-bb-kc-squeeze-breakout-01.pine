@@ -1,0 +1,57 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 02 — BB / KC squeeze breakout
+// Purpose: parity test for ta.bb() + ta.kc() tuple returns and the BB-inside-KC
+// squeeze-state derivation.
+//
+//@version=6
+strategy("BB Squeeze Breakout", overlay=true, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === Inputs ===
+bbLen  = input.int(20, "BB Length", minval=5)
+bbMult = input.float(2.0, "BB Multiplier", step=0.1)
+kcLen  = input.int(20, "KC Length", minval=5)
+kcMult = input.float(1.5, "KC Multiplier", step=0.1)
+src    = input.source(close, "Source")
+
+// === Bollinger Bands (tuple) ===
+[bbMid, bbUpper, bbLower] = ta.bb(src, bbLen, bbMult)
+
+// === Keltner Channels (tuple) — now using ta.kc() directly ===
+[kcMid, kcUpper, kcLower] = ta.kc(src, kcLen, kcMult)
+
+// === Squeeze detection: BB inside KC ===
+sqzOn  = bbLower > kcLower and bbUpper < kcUpper
+sqzOff = bbLower < kcLower or bbUpper > kcUpper
+
+// === Momentum ===
+mom = ta.linreg(src - bbMid, bbLen, 0)
+
+// === Track squeeze state ===
+var bool wasSqueezed = false
+if sqzOn
+    wasSqueezed := true
+
+// === Squeeze fires when BB expands outside KC ===
+sqzFired = wasSqueezed and sqzOff
+
+// === Entry signals ===
+if sqzFired and mom > 0
+    strategy.entry("Long", strategy.long)
+    wasSqueezed := false
+if sqzFired and mom < 0
+    strategy.entry("Short", strategy.short)
+    wasSqueezed := false
+
+// === Exit on opposite momentum ===
+if strategy.position_size > 0 and mom < 0
+    strategy.close("Long")
+if strategy.position_size < 0 and mom > 0
+    strategy.close("Short")
+
+plot(bbUpper, "BB Upper", color=color.blue)
+plot(bbLower, "BB Lower", color=color.blue)
+plot(kcUpper, "KC Upper", color=color.orange)
+plot(kcLower, "KC Lower", color=color.orange)

@@ -1,0 +1,87 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// IES probe 01 — manual ADX/DI chain + ATR-ratio regime classification
+//
+// Purpose: isolate the IES integration probe family's bespoke regime detector.
+// That family does NOT use the built-in `ta.dmi`; instead it rolls its own
+// DI flow through `ta.rma`:
+//
+//   plus_dm  = max(high - high[1], 0); minus_dm = max(low[1] - low, 0)
+//   if plus_dm > minus_dm: minus_dm := 0  else: plus_dm := 0
+//   smooth_tr/plus/minus = ta.rma(...,14)
+//   plus_di / minus_di / dx (DI-sum normalisation) → adx = ta.rma(dx, 14)
+//
+// It then classifies regime ∈ {0,1,2,3} from `adx >= 25` and an ATR-ratio
+// gate (`atr(14) / sma(atr(14),42)` against 1.4 / 0.6). That ratio compares
+// current ATR to a 42-bar SMA of ATR — a TA-on-TA chain that often diverges
+// across engines on the early bars when the inner ATR is still warming up.
+//
+// This probe keeps ONLY that calculation surface and entries on the rising
+// edge of `regime == 1` (trending). Exits when `regime != 1`. If the engine
+// disagrees here, the IES regime gate (which feeds bias_score, regime_size_mult,
+// adaptive stop multiplier, and the +2 trending bonus to bull_total) is the
+// numerical edge to chase.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export "List of trades" → trades.csv.
+//@version=6
+strategy("PF IES probe 01 - adx regime", shorttitle="IES_p01_REG", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// ---- inputs (mirrored from IES) ------------------------------------
+int   i_adx_len   = input.int(14,   "ADX Period",          minval=5,  maxval=30)
+float i_adx_trend = input.float(25, "Trend Threshold",     minval=15, maxval=40)
+int   i_atr_len   = input.int(14,   "ATR Period",          minval=5,  maxval=30)
+float i_vol_exp   = input.float(1.4,"Volatility Expansion",minval=1.1,maxval=2.0, step=0.1)
+float i_vol_con   = input.float(0.6,"Volatility Contraction",minval=0.3,maxval=0.9, step=0.1)
+
+// ---- IES's exact f_adx_calc UDF ------------------------------------
+f_adx_calc(int len) =>
+    float tr_val   = ta.tr(true)
+    float plus_dm  = math.max(high - high[1], 0)
+    float minus_dm = math.max(low[1] - low, 0)
+    if plus_dm > minus_dm
+        minus_dm := 0
+    else
+        plus_dm := 0
+    float smooth_tr    = ta.rma(tr_val,   len)
+    float smooth_plus  = ta.rma(plus_dm,  len)
+    float smooth_minus = ta.rma(minus_dm, len)
+    float plus_di  = smooth_tr > 0 ? 100 * smooth_plus  / smooth_tr : 0
+    float minus_di = smooth_tr > 0 ? 100 * smooth_minus / smooth_tr : 0
+    float di_sum   = plus_di + minus_di
+    float dx       = di_sum > 0 ? 100 * math.abs(plus_di - minus_di) / di_sum : 0
+    float adx_val  = ta.rma(dx, len)
+    [adx_val, plus_di, minus_di]
+
+[adx, plus_di, minus_di] = f_adx_calc(i_adx_len)
+
+// ---- ATR-ratio volatility gate -------------------------------------
+float atr_val   = ta.atr(i_atr_len)
+float atr_ma    = ta.sma(atr_val, i_atr_len * 3)
+float vol_ratio = atr_ma > 0 ? atr_val / atr_ma : 1.0
+
+// ---- regime classification (IES exact ladder) ----------------------
+int regime = 0
+if vol_ratio >= i_vol_exp and adx < i_adx_trend
+    regime := 3
+else if adx >= i_adx_trend
+    regime := 1
+else if vol_ratio <= i_vol_con
+    regime := 2
+
+bool trending_regime = regime == 1
+
+// ---- trivial entry on rising edge of trending regime ---------------
+bool long_entry = trending_regime and not trending_regime[1] and strategy.position_size == 0
+bool long_exit  = not trending_regime and strategy.position_size > 0
+
+if long_entry
+    strategy.entry("L", strategy.long, qty=1, comment="trending ON")
+if long_exit
+    strategy.close("L", comment="trending OFF")

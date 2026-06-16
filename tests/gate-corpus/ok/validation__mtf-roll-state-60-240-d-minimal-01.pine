@@ -1,0 +1,36 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 54 - minimal MTF roll state
+//
+// Purpose: isolate request.security state across 60m, 240m, and D contexts,
+// without the large community strategy filters.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 54 - MTF roll state", shorttitle="PF_P54_MTF", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+h60 = request.security(syminfo.tickerid, "60", close, lookahead=barmerge.lookahead_off)
+h240 = request.security(syminfo.tickerid, "240", close, lookahead=barmerge.lookahead_off)
+dHigh1 = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+
+roll60 = ta.change(h60) != 0
+roll240 = ta.change(h240) != 0
+dailyBreak = close > dHigh1 and close[1] <= dHigh1[1]
+
+if roll60 and h60 > h60[1] and h240 >= h240[1] and strategy.position_size == 0
+    strategy.entry("R60", strategy.long, qty=1, comment="60 up with 240 state")
+
+if roll240 and h240 < h240[1] and strategy.position_size > 0
+    strategy.close("R60", comment="240 down close")
+
+if dailyBreak and strategy.position_size == 0
+    strategy.entry("D", strategy.long, qty=1, comment="daily high break")
+
+if strategy.position_size > 0 and close < dHigh1 * 0.995
+    strategy.close_all(comment="daily ref close")

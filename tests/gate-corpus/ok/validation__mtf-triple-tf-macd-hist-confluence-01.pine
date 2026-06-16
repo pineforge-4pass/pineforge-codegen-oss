@@ -1,0 +1,47 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// MTF probe 08 — triple HTF MACD histogram via user-defined function
+//
+// Purpose: replicate the IES integration probe family's bias pattern in the
+// smallest possible strategy. That family wraps MACD histogram in
+// `f_macd_hist(src, fast, slow, sig)` and calls it inside three
+// request.security feeds (60m, 240m, D), then counts how many HTF buckets
+// are bullish/bearish for entry. This combines "user-defined function
+// inside request.security" + "three concurrent HTFs" + "ta.ema chain".
+// MTF probes 03/05 cover ta.* inside security at a single HTF; probe 07
+// covers three HTFs with a flat expression. probe 08 covers the full
+// triple-HTF user-function shape so the engine vs TV gap can be attributed
+// to one of these specific axes.
+//
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF MTF probe 08 - triple TF MACD hist", shorttitle="MTF_p08_3MACD", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+f_macd_hist(series float src, int fast, int slow, int sig) =>
+    float macd_val = ta.ema(src, fast) - ta.ema(src, slow)
+    float macd_sig = ta.ema(macd_val, sig)
+    macd_val - macd_sig
+
+float h1 = request.security(syminfo.tickerid, "60",  f_macd_hist(close, 12, 26, 9), lookahead=barmerge.lookahead_off)
+float h2 = request.security(syminfo.tickerid, "240", f_macd_hist(close, 12, 26, 9), lookahead=barmerge.lookahead_off)
+float h3 = request.security(syminfo.tickerid, "D",   f_macd_hist(close, 12, 26, 9), lookahead=barmerge.lookahead_off)
+
+bool allBull = h1 > 0 and h2 > 0 and h3 > 0
+bool allBear = h1 < 0 and h2 < 0 and h3 < 0
+
+if allBull and strategy.position_size <= 0
+    if strategy.position_size < 0
+        strategy.close("S", comment="flip to long")
+    strategy.entry("L", strategy.long, comment="3-TF MACD bull")
+
+if allBear and strategy.position_size >= 0
+    if strategy.position_size > 0
+        strategy.close("L", comment="flip to short")
+    strategy.entry("S", strategy.short, comment="3-TF MACD bear")

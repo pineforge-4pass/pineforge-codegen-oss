@@ -1,0 +1,38 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 69 - entry and cancel same pass
+//
+// Purpose: compare source-order behavior for strategy.entry(... stop=...) and
+// strategy.cancel(id) in the same Pine execution pass.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 69 - entry cancel same pass", shorttitle="PF_P69_ENTCANCEL", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+if hour == 2 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, stop=high + syminfo.mintick, comment="entry first cancel second")
+    strategy.cancel("L")
+
+if hour == 4 and minute == 15 and strategy.position_size == 0
+    strategy.cancel("L2")
+    strategy.entry("L2", strategy.long, stop=high + syminfo.mintick, comment="cancel first entry second")
+
+if hour == 6 and minute == 15 and strategy.position_size > 0
+    strategy.close_all(comment="long cleanup")
+
+if hour == 14 and minute == 15 and strategy.position_size == 0
+    strategy.entry("S", strategy.short, stop=low - syminfo.mintick, comment="short entry first cancel second")
+    strategy.cancel("S")
+
+if hour == 16 and minute == 15 and strategy.position_size == 0
+    strategy.cancel("S2")
+    strategy.entry("S2", strategy.short, stop=low - syminfo.mintick, comment="short cancel first entry second")
+
+if hour == 18 and minute == 15 and strategy.position_size < 0
+    strategy.close_all(comment="short cleanup")

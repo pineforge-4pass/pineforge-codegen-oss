@@ -1,0 +1,32 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF symbol/FX 5-decimal probe — plain SMA(20) vs SMA(50) crossover on a
+// 5-dp forex instrument (OANDA:EURUSD, mintick 0.00001). Isolates two things
+// the ETH-USDT feed cannot exercise:
+//   1. 5-decimal price scale (prices ~1.0xxxx, not ~1800), so any latent
+//      assumption about price magnitude / tick granularity surfaces.
+//   2. Sub-pip slippage rounding: slippage=2 ticks * mintick 0.00001 = 0.00002
+//      added/subtracted at fill, which must round to the 5th decimal exactly.
+// strategy.close on the opposite signal keeps the position flat-or-long/flat-
+// or-short with no pyramiding, so each fill is a clean single-leg adjudication.
+//@version=6
+strategy("PF FX 5dp - SMA20/50 cross", shorttitle="FX5DP",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=2,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+fast = ta.sma(close, 20)
+slow = ta.sma(close, 50)
+
+longCond  = ta.crossover(fast, slow)
+shortCond = ta.crossunder(fast, slow)
+
+if longCond
+    strategy.close("S", comment="close short")
+    strategy.entry("L", strategy.long, comment="sma cross up")
+if shortCond
+    strategy.close("L", comment="close long")
+    strategy.entry("S", strategy.short, comment="sma cross dn")

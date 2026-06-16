@@ -1,0 +1,64 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe market-shift-probe-01-shift-state — bull/bear regime state machine on pivot breaks
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolates the regime state machine surface used by structural-shift
+// strategies. A `var int market_state` holds three values (0 neutral, 1 bull,
+// -1 bear). Transitions happen only when price closes through the most recent
+// confirmed pivot high (→ bull) or pivot low (→ bear). The engine surface
+// under test is cross-bar `var` state mutation gated by `ta.pivothigh` /
+// `ta.pivotlow` confirmation plus simple price-vs-level breakthrough. No
+// orders depend on bracket arithmetic here — this probe routes a trivial
+// flat-flip entry directly off `market_state` so any TV/engine drift is
+// attributable to the pivot tracking + state mutation, nothing else.
+//
+// Validation goal: bit-exact trade list against TradingView's broker emulator
+// on the reference 15-minute ETH-USDT-USDT feed. Long when state flips to 1,
+// short when state flips to -1.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe market-shift-probe-01-shift-state", shorttitle="PF_MS01_STATE",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int i_pivot = input.int(5, "Pivot strength (left=right)", minval=2, maxval=20)
+
+// ---- pivot tracking ------------------------------------------------
+float ph = ta.pivothigh(high, i_pivot, i_pivot)
+float pl = ta.pivotlow(low,   i_pivot, i_pivot)
+
+// Hold the most-recently confirmed pivot levels across bars.
+var float last_ph = na
+var float last_pl = na
+
+if not na(ph)
+    last_ph := ph
+if not na(pl)
+    last_pl := pl
+
+// ---- regime state machine ------------------------------------------
+var int market_state = 0
+
+bool break_up   = not na(last_ph) and close > last_ph
+bool break_down = not na(last_pl) and close < last_pl
+
+if break_up
+    market_state := 1
+else if break_down
+    market_state := -1
+
+// ---- trivial flat/flip routing off the state -----------------------
+if market_state ==  1 and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="state bull")
+
+if market_state == -1 and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="state bear")

@@ -1,0 +1,79 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// IES probe 04 — candle-position pressure with double-EMA smoothing
+//
+// Purpose: isolate the IES integration probe family's "pressure gauge" — a
+// flow proxy built from the candle's close-position-in-range, then
+// double-smoothed:
+//
+//   raw_buy = (high - low) > 0 ? (close - low) / (high - low) : 0.5
+//   pressure_ratio  = ta.ema(raw_buy, 14)
+//   pressure_smooth = ta.ema(pressure_ratio, 5)
+//   pressure_momentum = pressure_smooth - pressure_smooth[10]
+//
+// Two failure modes can drift here. (1) Zero-range bars in the OHLCV CSV:
+// the ternary returns 0.5, but a tiny float-rounding gap (e.g. high == low
+// in the CSV but high > low post-magnifier) will quietly switch branches.
+// (2) The ema-of-ema chain seeds differently: the inner ta.ema(raw_buy,14)
+// has its own warmup, and the outer ta.ema(...,5) re-smoothes its output
+// — that compounds early-bar disagreement between TV and the engine.
+//
+// IES's pressure_state ladder fires `pressure_bull` when state >= 1 OR
+// momentum > 0.05. This probe replicates that exactly and enters long on
+// the rising edge of pressure_bull, exits on rising edge of pressure_bear.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export "List of trades" → trades.csv.
+//@version=6
+strategy("PF IES probe 04 - pressure gauge", shorttitle="IES_p04_PRESS", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// ---- inputs (mirrored from IES) ------------------------------------
+int   i_pressure_len    = input.int(14,    "Pressure Period",    minval=5,  maxval=50)
+int   i_pressure_smooth = input.int(5,     "Pressure Smoothing", minval=1,  maxval=20)
+int   i_pressure_mom    = input.int(10,    "Pressure Momentum",  minval=3,  maxval=30)
+float i_pressure_high   = input.float(0.7, "Extreme Buy Level",  minval=0.5,maxval=0.9, step=0.05)
+float i_pressure_low    = input.float(0.3, "Extreme Sell Level", minval=0.1,maxval=0.5, step=0.05)
+float i_pressure_thresh = input.float(0.05,"Momentum Threshold", minval=0.01,maxval=0.2, step=0.01)
+
+// ---- candle-position pressure with zero-range fallback -------------
+float range_val = high - low
+float raw_buy   = range_val > 0 ? (close - low) / range_val : 0.5
+
+// ---- double-EMA smoothing chain ------------------------------------
+float pressure_ratio    = ta.ema(raw_buy,        i_pressure_len)
+float pressure_smooth   = ta.ema(pressure_ratio, i_pressure_smooth)
+float pressure_momentum = pressure_smooth - pressure_smooth[i_pressure_mom]
+
+// ---- IES's exact pressure_state ladder -----------------------------
+int pressure_state = 0
+if pressure_smooth >= i_pressure_high
+    pressure_state := 2
+else if pressure_smooth > 0.5 + i_pressure_thresh
+    pressure_state := 1
+else if pressure_smooth <= i_pressure_low
+    pressure_state := -2
+else if pressure_smooth < 0.5 - i_pressure_thresh
+    pressure_state := -1
+
+bool pressure_bull = pressure_state >=  1 or pressure_momentum >  i_pressure_thresh
+bool pressure_bear = pressure_state <= -1 or pressure_momentum < -i_pressure_thresh
+
+// ---- enter on rising edge of bull/bear pressure --------------------
+bool long_entry  = pressure_bull and not pressure_bull[1] and strategy.position_size <= 0
+bool short_entry = pressure_bear and not pressure_bear[1] and strategy.position_size >= 0
+
+if long_entry
+    if strategy.position_size < 0
+        strategy.close("S", comment="flip")
+    strategy.entry("L", strategy.long, qty=1, comment="pressure bull")
+
+if short_entry
+    if strategy.position_size > 0
+        strategy.close("L", comment="flip")
+    strategy.entry("S", strategy.short, qty=1, comment="pressure bear")

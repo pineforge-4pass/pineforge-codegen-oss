@@ -1,0 +1,32 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 63 - dual stop cancel rotation
+//
+// Purpose: isolate alternating long/short stop entries with explicit cancel of
+// the opposite id, matching the order-lifecycle shape in parabolic-asr/52 while
+// removing EMA/SAR state.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 63 - dual stop cancel rotation", shorttitle="PF_P63_DUALCANCEL", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+useLongStop = hour < 12
+
+if useLongStop
+    strategy.entry("LE", strategy.long, stop=high + syminfo.mintick, comment="rotating long stop")
+    strategy.cancel("SE")
+else
+    strategy.entry("SE", strategy.short, stop=low - syminfo.mintick, comment="rotating short stop")
+    strategy.cancel("LE")
+
+if strategy.position_size > 0 and not useLongStop
+    strategy.close("LE", comment="long regime close")
+
+if strategy.position_size < 0 and useLongStop
+    strategy.close("SE", comment="short regime close")

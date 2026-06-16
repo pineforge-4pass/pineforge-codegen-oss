@@ -1,0 +1,38 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 68 - entry and close same pass
+//
+// Purpose: compare source-order behavior when strategy.entry and strategy.close
+// for the same id are issued in the same Pine execution pass.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 68 - entry close same pass", shorttitle="PF_P68_ENTCLOSE", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+if hour == 0 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry first")
+    strategy.close("L", comment="close second")
+
+if hour == 6 and minute == 15 and strategy.position_size == 0
+    strategy.close("L2", comment="close first")
+    strategy.entry("L2", strategy.long, qty=1, comment="entry second")
+
+if hour == 7 and minute == 15 and strategy.position_size > 0
+    strategy.close_all(comment="cleanup")
+
+if hour == 12 and minute == 15 and strategy.position_size == 0
+    strategy.entry("S", strategy.short, qty=1, comment="short entry first")
+    strategy.close("S", comment="short close second")
+
+if hour == 18 and minute == 15 and strategy.position_size == 0
+    strategy.close("S2", comment="short close first")
+    strategy.entry("S2", strategy.short, qty=1, comment="short entry second")
+
+if hour == 19 and minute == 15 and strategy.position_size < 0
+    strategy.close_all(comment="short cleanup")

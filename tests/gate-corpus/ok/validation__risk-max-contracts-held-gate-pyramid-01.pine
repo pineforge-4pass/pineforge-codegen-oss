@@ -1,0 +1,32 @@
+// TV_RUN_NEEDED: tv_trades.csv missing — capture in TradingView:
+//   Symbol: ETHUSDT.P (Binance USDT-M Perpetual)  TF: 15m  Range: 2024-01-01..2024-06-01
+//   Save List of Trades → tv_trades.csv in this directory.
+//
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Probe: risk-max-contracts-held-gate-pyramid-01
+// Purpose: Verify strategy.max_contracts_held_all gates further pyramid entries.
+//   Enters long up to pyramiding=5 contracts via hourly pulses.
+//   Once max_contracts_held_all >= 5, no further entries are placed.
+//   Exits all at end of each daily session.
+//
+// TV setup: ETHUSDT.P 15m, 2024-01-01..2024-06-01
+//@version=6
+strategy("PF-F: max_contracts_held gate", shorttitle="PF_F_MCH", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=10,
+     process_orders_on_close=false)
+
+// Gate further pyramid entries once lifetime max position size reached 5
+bool gate_open = strategy.max_contracts_held_all < 5
+
+// Enter long at the start of each UTC hour (minute==0), capped by gate
+if minute == 0 and gate_open
+    strategy.entry("LE", strategy.long, qty=1, comment="pyramid-add")
+
+// Exit all positions at end of each UTC day (hour==23, minute==45)
+if hour == 23 and minute == 45 and strategy.position_size != 0
+    strategy.close_all(comment="daily-exit")

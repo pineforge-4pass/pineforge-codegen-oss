@@ -1,0 +1,16 @@
+// TV_RUN_NEEDED: tv_trades.csv missing — capture in TradingView:
+//   Symbol: QQQ  TF: 5m  Range: 2024-01-02..2024-03-29
+//   Save List of Trades → tv_trades.csv in this directory.
+
+//@version=6
+strategy("Session ispremarket NASDAQ gate", overlay=true,
+         default_qty_type=strategy.fixed, default_qty_value=1)
+
+// Enter long during premarket (04:00–09:30 ET) on bullish momentum;
+// flatten at market open.
+if session.ispremarket
+    if close > open
+        strategy.entry("PreLong", strategy.long)
+
+if session.ismarket
+    strategy.close_all()

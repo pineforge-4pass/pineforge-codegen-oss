@@ -1,0 +1,37 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Magnifier distribution probe 08a — ENDPOINTS, RSI-cross entry
+//
+// Purpose: pair with 08b (UNIFORM) to pin tick-density divergence on
+// intra-bar fills using an RSI(14) cross-50 entry. Stop placed
+// mid-bar so the magnifier sample sequence selects the fill bar.
+// 08a is the TV-parity baseline (TV uses ENDPOINTS); 08b runs the
+// same Pine through the harness with UNIFORM and the diff is the
+// observed tick-density signal.
+//
+// Trade shape: long-only RSI(14) cross-up through 50; mid-bar
+// protective stop at (open+high)/2. Exit on RSI cross-down through 50.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, magnifier ON. Export trades to
+// trades.csv.
+//@version=6
+strategy("PF magnifier dist probe 08a - ENDPOINTS RSI cross", shorttitle="MAG_08a_END", overlay=true,
+     initial_capital=1000000, currency=currency.USD, use_bar_magnifier=true,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+rsiVal = ta.rsi(close, 14)
+
+bool entryCond = ta.crossover(rsiVal, 50.0)
+bool exitCond  = ta.crossunder(rsiVal, 50.0)
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+    float stopLvl = (open + high) * 0.5
+    strategy.exit("X", from_entry="L", stop=stopLvl, comment="mid-bar stop")
+
+if exitCond and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

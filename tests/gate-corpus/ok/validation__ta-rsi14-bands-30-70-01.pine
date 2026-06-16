@@ -1,0 +1,26 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe 02 — RSI(14) bands 30/70
+//
+// Purpose: isolate ta.rsi(close, 14) at threshold extrema (30 oversold, 70
+// overbought). Targets the same RSI math as probe 01 but with mean-reversion
+// trade shape (long on RSI cross-up through 30, short on RSI cross-down
+// through 70), so signal frequency differs. Cross-checks that engine RSI matches
+// TV at low-volatility deep-band crossings (typed-matrix-01 uses RSI > 60 / < 45
+// internally, this probe shifts the threshold band wider).
+//@version=6
+strategy("PF TA isolate 02 - RSI(14) bands 30/70", shorttitle="TAI_02_RSI3070",
+     overlay=false, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+rsi = ta.rsi(close, 14)
+
+// Mean-reversion: long on cross-up out of oversold, short on cross-down out of overbought.
+if ta.crossover(rsi, 30.0)
+    strategy.entry("L", strategy.long, comment="rsi cross up 30")
+if ta.crossunder(rsi, 70.0)
+    strategy.entry("S", strategy.short, comment="rsi cross dn 70")

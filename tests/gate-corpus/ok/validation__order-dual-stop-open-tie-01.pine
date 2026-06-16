@@ -1,0 +1,30 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 83 - dual stop open/tie
+//
+// Purpose: isolate dual stop entries whose trigger levels are both effectively
+// marketable on the next bar open. This tests open-phase/source-order behavior.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 83 - dual stop open tie", shorttitle="PF_P83_OPENTIE", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+if hour == 4 and minute == 45 and strategy.position_size == 0
+    strategy.entry("LE", strategy.long, stop=close, comment="long stop at close")
+    strategy.entry("SE", strategy.short, stop=close, comment="short stop at close")
+
+if strategy.position_size != 0 and hour == 8 and minute == 15
+    strategy.close_all(comment="flat after open tie")
+
+if hour == 16 and minute == 45 and strategy.position_size == 0
+    strategy.entry("SE2", strategy.short, stop=close, comment="short first at close")
+    strategy.entry("LE2", strategy.long, stop=close, comment="long second at close")
+
+if strategy.position_size != 0 and hour == 20 and minute == 15
+    strategy.close_all(comment="flat after reverse tie")

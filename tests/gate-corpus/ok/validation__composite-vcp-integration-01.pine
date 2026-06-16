@@ -1,0 +1,195 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// VCP probe 08 — integration probe (pivot + FVG + RSI divergence + vol
+//                z-anomaly + cumulative delta + ADX regime + NY session,
+//                composed in a clean-room layered design)
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: composes the surfaces already isolated in vcp-probe-01..07 in
+// a single strategy so engine/TV agreement on each component probe can
+// be cross-checked against agreement on a representative composition.
+// The seven layers exercised here are:
+//   (1) pivot       — ta.pivothigh / ta.pivotlow at strength 5 (probe 01).
+//   (2) FVG         — 3-bar imbalance + ATR-fraction min size + active-zone
+//                     array iteration (probe 02).
+//   (3) RSI div     — smoothed RSI(14)→EMA(3) with 5-bar memory (probe 03).
+//   (4) vol z       — (volume - sma) / stdev anomaly threshold (probe 04).
+//   (5) cum delta   — candle-position buy/sell volume + 10-bar sum (probe 05).
+//   (6) ADX regime  — manual DI/ADX chain via ta.rma (probe 06).
+//   (7) session     — NY 0800-1600 with DST-aware tz (probe 07).
+// Long entry requires (a) confirmed pivot LOW carried as breakout level
+// AND close > carried pivot HIGH, (b) currently inside a bull FVG zone,
+// (c) bullish vol-z anomaly OR cum-delta cross-up, (d) trending bull
+// ADX regime, (e) NY session active. Short symmetric. The composition
+// is the author's; the per-layer math mirrors the surfaces isolated by
+// the component probes (NOT the original VCP source).
+//
+// Validation goal: integration parity. If probes 01–07 each pass
+// individually but this composition disagrees with TradingView, the
+// gap is attributable to interaction between the layers (state ordering,
+// per-bar containment loops touching arrays under load, ta-on-ta
+// seeding) rather than any single layer.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full
+// window matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy
+// properties: leave defaults from script header. Export "List of
+// trades" → tv_trades.csv.
+//@version=6
+strategy("VCP probe 08 - integration", shorttitle="VCP_p08_INT",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false,
+     max_boxes_count=300)
+
+// =====================================================================
+// inputs (one per layer; defaults match component probes)
+// =====================================================================
+int    i_pivot      = input.int(5, "Pivot strength",                 minval=2,  maxval=20)
+float  i_fvg_atr    = input.float(0.3,"FVG min size (atr fraction)", minval=0.05,maxval=2.0, step=0.05)
+int    i_rsi_len    = input.int(14,"RSI length",                     minval=5,  maxval=30)
+int    i_vol_ma_len = input.int(20,"Volume MA length",               minval=5,  maxval=50)
+float  i_vol_z      = input.float(2.0,"Volume z threshold",          minval=1.0, maxval=4.0, step=0.1)
+int    i_cd_sum     = input.int(10,"Cum-delta window",               minval=2,  maxval=50)
+int    i_adx_len    = input.int(14,"ADX length",                     minval=5,  maxval=30)
+float  i_adx_thr    = input.float(25,"ADX trend threshold",          minval=15, maxval=40)
+string i_session    = input.session("0800-1600", "Active session")
+string i_tz         = input.string("America/New_York", "Timezone",
+     options=["America/New_York", "Europe/London", "Asia/Tokyo", "UTC"])
+
+// =====================================================================
+// shared building blocks
+// =====================================================================
+float atr_v = ta.atr(14)
+
+// =====================================================================
+// layer 1 — pivot detection + carried last-confirmed levels
+// =====================================================================
+float ph_v = ta.pivothigh(high, i_pivot, i_pivot)
+float pl_v = ta.pivotlow(low,   i_pivot, i_pivot)
+
+var float last_ph = na
+var float last_pl = na
+if not na(ph_v)
+    last_ph := ph_v
+if not na(pl_v)
+    last_pl := pl_v
+
+bool pivot_break_up = not na(last_ph) and close > last_ph
+bool pivot_break_dn = not na(last_pl) and close < last_pl
+
+// =====================================================================
+// layer 2 — FVG zones (parallel array trio + per-bar containment loop)
+// =====================================================================
+bool bull_fvg_event = low > high[2] and close[1] > open[1]
+bool bear_fvg_event = high < low[2] and close[1] < open[1]
+float fvg_min_w = atr_v * i_fvg_atr
+
+var array<float> z_top   = array.new<float>()
+var array<float> z_bot   = array.new<float>()
+var array<bool>  z_isb   = array.new<bool>()
+
+if bull_fvg_event and (low - high[2]) >= fvg_min_w
+    array.push(z_top, low)
+    array.push(z_bot, high[2])
+    array.push(z_isb, true)
+
+if bear_fvg_event and (low[2] - high) >= fvg_min_w
+    array.push(z_top, low[2])
+    array.push(z_bot, high)
+    array.push(z_isb, false)
+
+while array.size(z_top) > 30
+    array.shift(z_top)
+    array.shift(z_bot)
+    array.shift(z_isb)
+
+bool in_bull_fvg = false
+bool in_bear_fvg = false
+if array.size(z_top) > 0
+    for k = 0 to array.size(z_top) - 1
+        float t = array.get(z_top, k)
+        float b = array.get(z_bot, k)
+        bool  s = array.get(z_isb, k)
+        if low <= t and high >= b
+            if s
+                in_bull_fvg := true
+            else
+                in_bear_fvg := true
+
+// =====================================================================
+// layer 3 — smoothed-RSI divergence (kept as a bias hint, not required)
+// =====================================================================
+float rsi_v      = ta.rsi(close, i_rsi_len)
+float rsi_smooth = ta.ema(rsi_v, 3)
+bool  rsi_div_bull = rsi_smooth < 40 and close > close[5] and rsi_smooth > rsi_smooth[5]
+bool  rsi_div_bear = rsi_smooth > 60 and close < close[5] and rsi_smooth < rsi_smooth[5]
+
+// =====================================================================
+// layer 4 — volume z-score anomaly
+// =====================================================================
+float vol_ma  = ta.sma(volume, i_vol_ma_len)
+float vol_std = ta.stdev(volume, 20)
+float vol_z   = vol_std > 0 ? (volume - vol_ma) / vol_std : 0
+bool  vol_anom_bull = math.abs(vol_z) > i_vol_z and close > open
+bool  vol_anom_bear = math.abs(vol_z) > i_vol_z and close < open
+
+// =====================================================================
+// layer 5 — cumulative volume delta (candle-position synthesis + sum)
+// =====================================================================
+float buy_vol  = close > open ? volume : volume * (close - low) / (high - low + 0.0001)
+float sell_vol = close < open ? volume : volume * (high - close) / (high - low + 0.0001)
+float vol_d    = buy_vol - sell_vol
+float cum_d    = math.sum(vol_d, i_cd_sum)
+bool  cd_up    = cum_d > 0
+bool  cd_dn    = cum_d < 0
+
+// =====================================================================
+// layer 6 — manual ADX regime (matches probe 06)
+// =====================================================================
+float up_mv   = ta.change(high)
+float dn_mv   = -ta.change(low)
+float p_dm_v  = na(up_mv) ? na : (up_mv > dn_mv and up_mv > 0 ? up_mv : 0)
+float m_dm_v  = na(dn_mv) ? na : (dn_mv > up_mv and dn_mv > 0 ? dn_mv : 0)
+float tr_smo  = ta.rma(ta.tr, i_adx_len)
+float p_di_v  = tr_smo > 0 ? 100 * ta.rma(p_dm_v, i_adx_len) / tr_smo : 0
+float m_di_v  = tr_smo > 0 ? 100 * ta.rma(m_dm_v, i_adx_len) / tr_smo : 0
+float dx_v    = (p_di_v + m_di_v) > 0 ? 100 * math.abs(p_di_v - m_di_v) / (p_di_v + m_di_v) : 0
+float adx_v   = ta.rma(dx_v, i_adx_len)
+bool  trending_bull = adx_v > i_adx_thr and p_di_v > m_di_v
+bool  trending_bear = adx_v > i_adx_thr and m_di_v > p_di_v
+
+// =====================================================================
+// layer 7 — NY session gate
+// =====================================================================
+bool in_session = not na(time(timeframe.period, i_session, i_tz))
+
+// =====================================================================
+// composition — long requires pivot break up + bull fvg + (vol-anomaly
+// bull OR cum-delta up) + trending bull + session active. Short symmetric.
+// rsi divergences feed nothing here on purpose (kept as a tap point in
+// case a future revision wants to gate on them).
+// =====================================================================
+bool long_setup =
+     pivot_break_up and in_bull_fvg and (vol_anom_bull or cd_up)
+     and trending_bull and in_session
+
+bool short_setup =
+     pivot_break_dn and in_bear_fvg and (vol_anom_bear or cd_dn)
+     and trending_bear and in_session
+
+if long_setup and strategy.position_size <= 0
+    if strategy.position_size < 0
+        strategy.close("S", comment="flip flat")
+    strategy.entry("L", strategy.long, comment="vcp confluence long")
+
+if short_setup and strategy.position_size >= 0
+    if strategy.position_size > 0
+        strategy.close("L", comment="flip flat")
+    strategy.entry("S", strategy.short, comment="vcp confluence short")
+
+// session-end exit: flatten on the falling edge of the session window
+if not in_session and in_session[1] and strategy.position_size != 0
+    strategy.close_all(comment="session end")

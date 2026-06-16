@@ -1,0 +1,57 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// VCP probe 03 — smoothed-RSI divergence detection
+//
+// Purpose: isolate the momentum half of the VCP integration probe family.
+// That family smooths RSI through an EMA(3) and then derives both
+// ``momBullish`` / ``momBearish`` regime flags AND a divergence pair
+// ``rsiDivBull`` / ``rsiDivBear`` keyed off ``close[5]`` and
+// ``rsiSmooth[5]``. That 5-bar history-reference of an EMA-of-RSI is the
+// most-likely place for a numerical drift to creep in — even a single
+// epsilon error in the EMA(3) seed shifts every divergence event by a bar.
+//
+// This probe routes a trivial entry/exit through ONLY the smoothed-RSI
+// divergence pair, with the EXACT VCP expressions and the VCP defaults
+// (``rsiLength = 14``, EMA smoothing length 3, divergence lookback 5,
+// ``rsiOverbought = 70`` / ``rsiOversold = 30`` not used here — only
+// the 60/40 divergence thresholds). Any TV/engine drift here is
+// attributable to ``ta.ema(ta.rsi(close, 14), 3)`` precision and the
+// 5-bar history references the divergence formula uses, NOT to other
+// VCP filters.
+//
+// Trade shape: long-only, pyramiding=1. Enter long on bullish RSI
+// divergence (smoothed RSI < 40 with rising RSI vs falling 5-bar
+// price reference, EXACT VCP wording flipped to a ``close > close[5]``
+// constructive divergence). Close the long on bearish RSI divergence
+// (smoothed RSI > 60 with falling RSI vs rising 5-bar price reference,
+// VCP's exact ``rsiDivBear``).
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("VCP probe 03 - rsi smooth divergence", shorttitle="VCP_p03",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs (mirror VCP defaults) ----------------------------------
+int i_rsi = input.int(14, "RSI Length", minval=5, maxval=30)
+
+// ---- smoothed RSI — IDENTICAL formula to VCP -----------------------
+float rsiValue  = ta.rsi(close, i_rsi)
+float rsiSmooth = ta.ema(rsiValue, 3)
+
+// ---- divergence flags — IDENTICAL expressions to VCP --------------
+bool rsiDivBull = rsiSmooth < 40 and close > close[5] and rsiSmooth > rsiSmooth[5]
+bool rsiDivBear = rsiSmooth > 60 and close < close[5] and rsiSmooth < rsiSmooth[5]
+
+// ---- trivial entry / exit ------------------------------------------
+if rsiDivBull and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="rsi div bull")
+
+if rsiDivBear and strategy.position_size > 0
+    strategy.close("L", comment="rsi div bear exit")

@@ -1,0 +1,60 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 103 — slow stochastic %K/%D crossover
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: exercises `ta.stoch(close, high, low, length)` (which
+// returns the raw fast %K) plus the standard slow-stochastic
+// smoothing chain: `slowK = ta.sma(rawK, smooth)` and then
+// `slowD = ta.sma(slowK, dLen)` (D is an SMA of the slow K, not of
+// the raw K — otherwise slowK and D would be the same series and
+// never cross). Trade trigger uses `ta.crossover` / `ta.crossunder`
+// of slowK against slowD, with a band gate to avoid entries at
+// extreme overbought/oversold. The engine surface under test is the
+// stacked-SMA recurrence and `ta.crossover`/`ta.crossunder` ordering
+// against TradingView's reference.
+//
+// Validation goal: bit-exact trade list against TradingView's broker
+// emulator on the reference 15m feed. Pass = every long/short entry
+// fires on the same bar TradingView places it.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full
+// window matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy
+// properties: leave defaults from script header. Export "List of
+// trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe 103 - stoch slow cross", shorttitle="PF_p103_STO",
+     overlay=false, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int i_k_len   = input.int(14, "Stoch %K length",     minval=1, maxval=100)
+int i_smooth  = input.int(3,  "Slow %K smoothing",   minval=1, maxval=20)
+int i_d_len   = input.int(3,  "%D smoothing",        minval=1, maxval=20)
+
+// ---- raw %K from ta.stoch, then slow-smoothed --------------------
+// ta.stoch in v6 returns the raw fast %K. Slow-stochastic recipe:
+//   slowK = SMA(rawK, smooth)         (3 by default)
+//   slowD = SMA(slowK, dLen)          (3 by default)
+// D is computed from slowK, NOT from rawK, so the two series can
+// actually cross.
+float raw_k  = ta.stoch(close, high, low, i_k_len)
+float slow_k = ta.sma(raw_k,  i_smooth)
+float slow_d = ta.sma(slow_k, i_d_len)
+
+// ---- crossover entries with band gate ------------------------------
+// Band gate prevents entries at extreme readings (long while already
+// at overbought ≥ 80, short while at oversold ≤ 20). Entries flip
+// position so longs and shorts can alternate.
+bool bull_cross = ta.crossover(slow_k,  slow_d) and slow_k < 80
+bool bear_cross = ta.crossunder(slow_k, slow_d) and slow_k > 20
+
+if bull_cross
+    strategy.entry("L", strategy.long, comment="slowK cross above D")
+
+if bear_cross
+    strategy.entry("S", strategy.short, comment="slowK cross below D")

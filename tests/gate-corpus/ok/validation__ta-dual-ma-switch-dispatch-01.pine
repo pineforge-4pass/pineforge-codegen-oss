@@ -1,0 +1,42 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 17 — dual-MA with `switch` MA-type dispatch
+// Purpose: parity test for a user-defined function whose body is a `switch`
+// over MA family (ema/sma/wma/hma), dispatched dynamically per call.
+//
+//@version=6
+strategy("Dual MA with Switch", overlay=true, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === Inputs ===
+maType  = input.string("EMA", "MA Type", options=["EMA", "SMA", "WMA", "HMA"])
+fastLen = input.int(10, "Fast Length", minval=2)
+slowLen = input.int(30, "Slow Length", minval=5)
+src     = input.source(close, "Source")
+
+// === User-defined function with switch ===
+getMA(source, length) =>
+    switch maType
+        "EMA" => ta.ema(source, length)
+        "SMA" => ta.sma(source, length)
+        "WMA" => ta.wma(source, length)
+        "HMA" => ta.hma(source, length)
+        => ta.sma(source, length)
+
+// === Calculate MAs ===
+fastMA = getMA(src, fastLen)
+slowMA = getMA(src, slowLen)
+
+// === Signals ===
+longCond  = ta.crossover(fastMA, slowMA)
+shortCond = ta.crossunder(fastMA, slowMA)
+
+// === Strategy ===
+if longCond
+    strategy.entry("Long", strategy.long)
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+plot(fastMA, "Fast", color=color.blue, linewidth=2)
+plot(slowMA, "Slow", color=color.red, linewidth=2)

@@ -1,0 +1,73 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe trendmaster-probe-04-trend-entry-gate — composite trend+momentum+structure gate
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolates the composite-gate entry surface used by trend
+// strategies that require multiple confluence factors before firing. Three
+// independent predicates are AND-combined:
+//
+//   trend     = ema21 > ema55                              (long bias)
+//   momentum  = ta.rsi(close, 14) > 55                     (momentum confirm)
+//   structure = close > ta.highest(high, 20)[1]            (20-bar breakout)
+//
+// All three must be true on the same bar. Short is the symmetric inversion.
+// The engine surface under test is the boolean conjunction of three
+// different ta.* recursion families on a single bar — any single drift
+// (EMA, RSI, or rolling-highest) flips the gate to false and a trade goes
+// missing.
+//
+// Validation goal: bit-exact trade list against TradingView's broker emulator
+// on the reference 15-minute ETH-USDT-USDT feed.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe trendmaster-probe-04-trend-entry-gate", shorttitle="PF_TM04_GATE",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int   i_fast      = input.int(21, "Trend EMA fast", minval=3,  maxval=100)
+int   i_slow      = input.int(55, "Trend EMA slow", minval=10, maxval=200)
+int   i_rsi_len   = input.int(14, "RSI length",     minval=2,  maxval=50)
+float i_rsi_lo    = input.float(55, "RSI long threshold",  minval=50, maxval=80)
+float i_rsi_hi    = input.float(45, "RSI short threshold", minval=20, maxval=50)
+int   i_break_len = input.int(20, "Breakout window", minval=5,  maxval=200)
+
+// ---- predicate 1: trend -------------------------------------------
+float ema_fast = ta.ema(close, i_fast)
+float ema_slow = ta.ema(close, i_slow)
+bool trend_bull = ema_fast > ema_slow
+bool trend_bear = ema_fast < ema_slow
+
+// ---- predicate 2: momentum ----------------------------------------
+float r = ta.rsi(close, i_rsi_len)
+bool mom_bull = r > i_rsi_lo
+bool mom_bear = r < i_rsi_hi
+
+// ---- predicate 3: structure (prior-bar breakout reference) -------
+// History access on chained ta.* calls hits a transpiler limitation;
+// assign to a series-float carrier first, then take [1].
+float hi_now   = ta.highest(high, i_break_len)
+float lo_now   = ta.lowest(low,   i_break_len)
+float break_hi = hi_now[1]
+float break_lo = lo_now[1]
+bool struct_bull = close > break_hi
+bool struct_bear = close < break_lo
+
+// ---- composite gate -----------------------------------------------
+bool go_long  = trend_bull and mom_bull and struct_bull
+bool go_short = trend_bear and mom_bear and struct_bear
+
+// ---- routing -------------------------------------------------------
+if go_long and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, qty=1, comment="gate long")
+
+if go_short and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, qty=1, comment="gate short")

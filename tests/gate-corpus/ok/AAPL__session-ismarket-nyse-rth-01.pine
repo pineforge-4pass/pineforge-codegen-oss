@@ -1,0 +1,16 @@
+// TV_RUN_NEEDED: tv_trades.csv missing — capture in TradingView:
+//   Symbol: AAPL  TF: 5m  Range: 2024-01-02..2024-03-29
+//   Save List of Trades → tv_trades.csv in this directory.
+
+//@version=6
+strategy("Session ismarket NYSE RTH gate", overlay=true,
+         default_qty_type=strategy.fixed, default_qty_value=1)
+
+// Only trade when inside NYSE regular trading hours (09:30–16:00 ET).
+// session.ismarket uses syminfo.session which the validator injects via
+// syminfo_overrides → session = "0930-1600".
+if session.ismarket
+    if ta.crossover(ta.sma(close, 9), ta.sma(close, 21))
+        strategy.entry("Long", strategy.long)
+    if ta.crossunder(ta.sma(close, 9), ta.sma(close, 21))
+        strategy.close("Long")

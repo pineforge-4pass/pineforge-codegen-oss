@@ -1,0 +1,56 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// VCP probe 07 — session/timezone gate (America/New_York 0800-1600)
+//
+// Purpose: isolate the session-filter half of the VCP integration probe
+// family. That family gates
+// every entry on ``inActiveSession = not na(time(timeframe.period,
+// "0800-1600", "America/New_York"))``. That single ``time()`` call
+// folds two independent sources of TV/engine drift into one boolean:
+//   (1) the session-string parser ("0800-1600" must include 16:00:00
+//       UTC of America/New_York for the right window of bars);
+//   (2) the timezone resolver — DST transitions mean the wall-clock
+//       08:00 maps to UTC 12:00 (EST) or 13:00 (EDT) depending on
+//       the date, so any engine that hardcodes a single offset will
+//       drift on the daylight-saving boundaries inside the OHLCV
+//       window.
+//
+// This probe routes a trivial entry/exit through ONLY the session
+// gate. Any TV/engine drift here is attributable to the
+// ``time(timeframe.period, "0800-1600", "America/New_York")`` call
+// (session-string parsing + DST-aware timezone offset), NOT to other
+// VCP filters.
+//
+// Trade shape: long-only, pyramiding=1. Enter long on the rising edge
+// of the NY session (``inSession`` true this bar, false last bar).
+// Close the long on the falling edge (session ends at NY 16:00).
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("VCP probe 07 - session ny", shorttitle="VCP_p07",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs (mirror VCP defaults) ----------------------------------
+string i_session = input.session("0800-1600", "Active Trading Session")
+string i_tz      = input.string("America/New_York", "Timezone",
+     options=["America/New_York", "Europe/London", "Asia/Tokyo", "UTC"])
+
+// ---- session gate — IDENTICAL call to VCP line 413 ----------------
+bool inSession = not na(time(timeframe.period, i_session, i_tz))
+
+bool sessionStart = inSession and not inSession[1]
+bool sessionEnd   = not inSession and inSession[1]
+
+// ---- trivial entry / exit ------------------------------------------
+if sessionStart and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="ny session open")
+
+if sessionEnd and strategy.position_size > 0
+    strategy.close("L", comment="ny session close exit")

@@ -1,0 +1,39 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Parity probe 06 — explicit qty at 50% of equity (moderate margin pressure)
+//
+// Purpose: bisect the margin-tolerance regime between parity-probe-03
+// (100% equity, hits the boundary every entry, 31 engine extras vs TV)
+// and parity-probe-05 (10% equity, no margin pressure expected).
+//
+// At 50% of equity, qty * fill_price ≈ 0.5 × equity at every entry —
+// no slippage-driven margin overshoot is ever possible (next bar's
+// open would have to ~double the prior close). If engine and TV
+// AGREE on every Monday here too, then TV's "extra rejections" in
+// probe-03 are SOLELY a strict-margin behavior at the 1× boundary
+// and the engine's tolerance / scale-down policy is the only knob
+// that needs adjustment to close the IES gap. If engine and TV
+// DISAGREE here, there is some other equity / position-size rule
+// in TV's broker emulator that we have not yet modeled, and probe-04
+// (auto-sizing path) will tell us whether that rule is shared by
+// the implicit-qty code path or unique to explicit qty.
+//
+// TV setup: 15m chart on BINANCE:ETHUSDT.P, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export "List of Trades" to
+// ``tv_trades.csv`` in this folder.
+//@version=6
+strategy("Parity probe 06 - 50% equity sizing", shorttitle="par_p06", overlay=true, initial_capital=1000000, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0, process_orders_on_close=false)
+
+// ---- engine -------------------------------------------------------
+bool fire = dayofweek == 2 and hour == 0 and minute == 0 and strategy.position_size == 0
+
+// qty encodes 50% of strategy.equity / close.
+float qty_dyn = math.round(strategy.equity * 0.5 / close * 1000) / 1000
+
+if fire and qty_dyn > 0
+    strategy.entry("E", strategy.long, qty=qty_dyn, comment="qty = 50% equity / close")
+
+if strategy.position_size > 0 and bar_index > strategy.opentrades.entry_bar_index(0)
+    strategy.close("E", comment="next-bar flatten")

@@ -1,0 +1,21 @@
+// TV_RUN_NEEDED: tv_trades.csv missing — capture in TradingView:
+//   Symbol: ETHUSDT.P (Binance USDT-M Perpetual)  TF: 15m  Range: 2024-01-01..2024-06-01
+//   Save List of Trades → tv_trades.csv in this directory.
+
+//@version=6
+strategy("VWAP Bands Breakout 1σ", overlay=true,
+         default_qty_type=strategy.fixed, default_qty_value=1,
+         initial_capital=100000, currency=currency.USD)
+
+// VWAP Bands (3-tuple form): daily anchor, 1-sigma bands.
+// Entry: close breaks above upper_band (upside momentum beyond +1σ).
+// Exit:  close drops back below vwap (mean reversion signal).
+[vw, upper_band, lower_band] = ta.vwap(close, timeframe.change("1D"), 1.0)
+
+long_condition = ta.crossover(close, upper_band)
+exit_condition = ta.crossunder(close, vw)
+
+if long_condition
+    strategy.entry("long", strategy.long)
+if exit_condition
+    strategy.close("long")

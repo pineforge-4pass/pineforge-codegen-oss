@@ -1,0 +1,25 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// MTF probe 05 — RSI(14) on 60m series inside request.security
+// Purpose: parity test for `ta.rsi(close, 14)` evaluated INSIDE
+// `request.security(..., "60", ...)` with 50-line crossover entries on the
+// HTF RSI series.
+//
+//@version=6
+strategy("PF MTF probe 05 — 60m RSI(14)", shorttitle="MTF_p05", overlay=false,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+float htfRsi = request.security(syminfo.tickerid, "60", ta.rsi(close, 14), lookahead=barmerge.lookahead_off)
+
+bool longCond = ta.crossover(htfRsi, 50)
+bool shortCond = ta.crossunder(htfRsi, 50)
+
+if longCond
+    strategy.entry("L", strategy.long, qty=1)
+if shortCond and strategy.position_size > 0
+    strategy.close("L")

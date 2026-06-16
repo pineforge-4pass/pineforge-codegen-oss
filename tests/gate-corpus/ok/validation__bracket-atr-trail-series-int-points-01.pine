@@ -1,0 +1,57 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 91 - atr-based trail_points with fixed-time entries
+//
+// Purpose: isolate whether the residual ~80 drifts from a community-style
+// scalping strategy (after the trail_points-ceil fix in commit 9e838c0)
+// come from the atr-based variable trail_points, or from that strategy's
+// specific momentum-based entry pattern.
+//
+// Probes 88/89/90 all passed 100% with CONSTANT trail_points (8 or 20).
+// This probe keeps everything else the same as probe 90 but switches
+// trail_points to `atr` (series, varies per entry) — exactly like the
+// scalping shape. Stop and limit also become atr-based (atrMult=1.2 short
+// stop, *2 limit) to fully mirror the scalping shape.
+//
+// If probe 91 matches TV: the atr-based trail is fine, and trade-23-style
+// drifts are tied to the scalping shape's entry timing
+// (post-strong-bull-candle).
+// If probe 91 diverges: there's a bug in how engine handles a series-int
+// trail_points compared to a constant — most likely the timing of the
+// atr capture inside strategy.exit.
+//
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 91 - atr trail fixed entry",
+     shorttitle="PF_P91_ATRTRAIL", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+atrLen = 14
+atrMult = 1.2
+atr = ta.atr(atrLen)
+
+if hour == 8 and minute == 0 and strategy.position_size == 0
+    longStop  = close - atr * atrMult
+    longLimit = close + (close - longStop) * 2
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+    strategy.exit("LX", "L",
+         stop=longStop,
+         limit=longLimit,
+         trail_points=atr,
+         comment="atr trail long")
+
+if hour == 20 and minute == 0 and strategy.position_size == 0
+    shortStop  = close + atr * atrMult
+    shortLimit = close - (shortStop - close) * 2
+    strategy.entry("S", strategy.short, qty=1, comment="entry short")
+    strategy.exit("SX", "S",
+         stop=shortStop,
+         limit=shortLimit,
+         trail_points=atr,
+         comment="atr trail short")

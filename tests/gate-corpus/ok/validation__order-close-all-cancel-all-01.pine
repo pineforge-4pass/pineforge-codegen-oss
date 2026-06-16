@@ -1,0 +1,33 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TV golden 43 - cancel_all and close_all
+//
+// Purpose: isolate global pending-order cancellation and global position close.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF TV golden 43 - cancel all close all", shorttitle="PF_G43_ALL", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=2,
+     process_orders_on_close=false)
+
+// These pending orders should be removed before they can reasonably fill.
+if hour == 4 and minute == 15
+    strategy.entry("PENDING_L", strategy.long, qty=1, limit=close * 0.80, comment="pending low")
+    strategy.entry("PENDING_S", strategy.short, qty=1, limit=close * 1.20, comment="pending high")
+
+if hour == 4 and minute == 30
+    strategy.cancel_all()
+
+// Open two entries, then flatten the whole position with close_all.
+if hour == 5 and minute == 15 and strategy.position_size == 0
+    strategy.entry("A", strategy.long, qty=1, comment="first")
+
+if hour == 5 and minute == 45 and strategy.position_size > 0
+    strategy.entry("B", strategy.long, qty=1, comment="second")
+
+if hour == 6 and minute == 15 and strategy.position_size != 0
+    strategy.close_all(comment="global flat", immediately=true)

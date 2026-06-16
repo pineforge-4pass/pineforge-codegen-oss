@@ -1,0 +1,41 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Magnifier distribution probe 07 — volume-weighted ON
+//
+// Purpose: exercise the magnifier volume-weighted code path with a
+// stop placed mid-bar so the chosen tick distribution and the volume
+// weighting jointly decide the fill. Pine cannot toggle
+// volume_weighted itself (no Pine v6 keyword); the harness must call
+// strategy_set_magnifier_volume_weighted(true) before run(). TV does
+// not expose volume weighting in the same form, so divergence vs the
+// TV export is expected and should be filed as parity-anomaly.
+//
+// Trade shape: long-only EMA(9/21) crossover entry plus a protective
+// stop at exactly the bar midpoint (open+high)/2. Whether the stop
+// fires before close depends on volume-weighted tick density.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, magnifier ON. Export trades to
+// trades.csv as the volume-weighted-OFF baseline; the volume-weighted
+// ON run is harness-only.
+//@version=6
+strategy("PF magnifier dist probe 07 - volume weighted ON", shorttitle="MAG_VWT", overlay=true,
+     initial_capital=1000000, currency=currency.USD, use_bar_magnifier=true,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+bool entryCond = ta.crossover(emaFast, emaSlow)
+bool exitCond  = ta.crossunder(emaFast, emaSlow)
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+    float stopLvl = (open + high) * 0.5
+    strategy.exit("X", from_entry="L", stop=stopLvl, comment="mid-bar stop")
+
+if exitCond and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

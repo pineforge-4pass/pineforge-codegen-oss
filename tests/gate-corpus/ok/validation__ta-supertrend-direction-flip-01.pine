@@ -1,0 +1,65 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 104 — supertrend direction flip
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: exercises `ta.supertrend(factor, atrPeriod)` — a v6
+// built-in that returns a `[trail, dir]` tuple. The `dir` value is
+// `-1` when supertrend is below price (uptrend) and `+1` when above
+// (downtrend); a flip happens when the close crosses the trailing
+// stop. Reproducing the TV trade list requires the engine to
+// match TV on (a) the ATR seeding inside the supertrend call
+// (Wilder smoothing, length 10), (b) the trailing-stop carry-state
+// across bars, and (c) the dir polarity convention (TV's is
+// `-1 = up, +1 = down`). This probe routes entries through the
+// `dir` flip event so the trade list is a direct readout of
+// flip-bar agreement.
+//
+// Validation goal: bit-exact trade list against TradingView's broker
+// emulator on the reference 15m feed. Pass = every flip-driven
+// entry fires on the same bar TradingView places it.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full
+// window matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy
+// properties: leave defaults from script header. Export "List of
+// trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe 104 - supertrend flip", shorttitle="PF_p104_ST",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+float i_factor   = input.float(3.0, "Supertrend factor",     minval=0.5, maxval=10.0, step=0.1)
+int   i_atr_len  = input.int(10,    "Supertrend ATR length", minval=2,   maxval=100)
+
+// ---- supertrend tuple ---------------------------------------------
+[st_trail, st_dir] = ta.supertrend(i_factor, i_atr_len)
+
+// dir convention: -1 = up (price above trail), +1 = down. Flip events
+// compare current dir to prior-bar dir captured in a `var int` carrier
+// rather than `st_dir[1]` history access — the latter exercises a
+// codegen path on tuple-destructured int members that is currently
+// not supported by the transpiler. The validation surface (ta.supertrend
+// tuple return + flip-driven entry) is unchanged.
+var float prev_dir = 0.0
+bool bull_flip = st_dir == -1 and prev_dir ==  1
+bool bear_flip = st_dir ==  1 and prev_dir == -1
+
+// ---- entries on flip ----------------------------------------------
+if bull_flip and strategy.position_size <= 0
+    if strategy.position_size < 0
+        strategy.close("S", comment="flip flat")
+    strategy.entry("L", strategy.long, comment="st bull flip")
+
+if bear_flip and strategy.position_size >= 0
+    if strategy.position_size > 0
+        strategy.close("L", comment="flip flat")
+    strategy.entry("S", strategy.short, comment="st bear flip")
+
+// Carry current dir for the next bar's flip comparison. Must be the
+// last write so the comparisons above see the prior bar's value.
+prev_dir := st_dir

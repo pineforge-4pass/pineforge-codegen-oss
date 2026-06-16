@@ -1,0 +1,55 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 15 — method outputs feed strategy.exit prices
+//
+// Purpose: ``strategy.exit(stop=, limit=)`` must accept the result of
+// a UDT method call as the price level. The C++ runtime must evaluate
+// the method exactly once per call site and pass the materialized
+// double through to the runtime's exit handler. This also exercises
+// the ``Box& self`` reference path when the method's body reads state
+// initialized at entry time.
+//
+// Trade shape: long-only. At entry we capture entry price + atr into
+// the bracket UDT, then on every bar while in position we recompute
+// stop and limit via methods (so they "set once at entry, but expressed
+// each bar as a function of the captured snapshot"). Mirrors
+// validation/88's "exit set once at entry" shape but through methods.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 15 - exit prices via method", shorttitle="UDT_p15_EXP", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Bracket
+    float entry_px = na
+    float entry_atr = na
+    float stop_mult = 1.5
+    float limit_mult = 3.0
+
+method stopPrice(Bracket self) =>
+    self.entry_px - self.entry_atr * self.stop_mult
+
+method limitPrice(Bracket self) =>
+    self.entry_px + self.entry_atr * self.limit_mult
+
+var Bracket br = Bracket.new(na, na, 1.5, 3.0)
+
+float atrVal = ta.atr(14)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+if ta.crossover(emaFast, emaSlow) and strategy.position_size == 0
+    br.entry_px := close
+    br.entry_atr := atrVal
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+    strategy.exit("LX", "L",
+         stop=br.stopPrice(),
+         limit=br.limitPrice(),
+         comment="bracket from method")

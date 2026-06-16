@@ -1,0 +1,50 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 10 — method body uses na/nz/fixnan
+//
+// Purpose: a method whose self has float fields seeded to ``na`` must
+// behave the same way as inline code. ``na(x)``, ``nz(x, fb)``, and
+// ``fixnan(x)`` lower to runtime helpers (``is_na``, conditional
+// fallback, persistent state). The C++ runtime must not break when
+// these helpers are evaluated on a UDT field through ``self.field``.
+//
+// Trade shape: long-only on EMA crossover. The signal is gated by
+// ``s.safeRatio()`` which uses na/nz to fold across an undefined
+// initial state without spurious early entries.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 10 - na nz in method", shorttitle="UDT_p10_NA", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Sample
+    float prev = na
+    float ratio = na
+
+method safeRatio(Sample self, float curr) =>
+    float p = nz(self.prev, curr)
+    float r = p == 0.0 ? 1.0 : curr / p
+    self.prev := curr
+    self.ratio := r
+    na(self.ratio) ? 1.0 : self.ratio
+
+var Sample s = Sample.new(na, na)
+
+float r = s.safeRatio(close)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+bool entryCond = ta.crossover(emaFast, emaSlow) and r > 1.0 and not na(r)
+bool exitCond  = ta.crossunder(emaFast, emaSlow)
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if exitCond and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

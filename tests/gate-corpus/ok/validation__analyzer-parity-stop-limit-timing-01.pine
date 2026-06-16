@@ -1,0 +1,54 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Parity probe 01 — strategy.exit stop/limit fill-bar timing
+//
+// Purpose: isolate the bar-boundary semantics of strategy.exit's stop=
+// and limit= orders. A community-style reverse-on-signal scalper shows a
+// consistent pattern where the engine fires Exit-{long,short} ONE 15m bar
+// earlier than TV across ~9 of its 14 mismatched exits (e.g. engine 18:00
+// vs TV 18:15 on 2025-05-03). The hypothesis is that the engine evaluates
+// the stop / limit on the SAME bar as the entry (intra-bar trigger using
+// that bar's high/low), while TV defers evaluation to the NEXT bar's open
+// onward. Without an isolator, the signal-side cascade in that strategy
+// makes it impossible to attribute the drift.
+//
+// This probe routes a deterministic entry every i_period bars with an
+// ATR-derived stop and limit, then lets strategy.exit handle both. No
+// MTF, no signals, no regime filter — every exit row in the export is
+// either a stop fill, a limit fill, or a forced flatten. Comparing the
+// engine's exit timestamps against TV's row-by-row exposes the timing
+// semantic directly, with no other moving parts to confound it.
+//
+// Trade shape: long-only, single contract, pyramiding=0,
+// process_orders_on_close=false (TV default), no commission/slippage.
+//
+// TV setup: 15m chart on BINANCE:ETHUSDT.P, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the strategy tester's
+// "List of Trades" CSV to ``tv_trades.csv`` in this folder.
+//@version=6
+strategy("Parity probe 01 - stop/limit timing", shorttitle="par_p01", overlay=true, initial_capital=1000000, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int   i_atr_len = input.int(14,  "ATR Length")
+float i_stop_x  = input.float(1.0, "Stop = N x ATR", minval=0.1)
+float i_tp_x    = input.float(2.0, "TP   = N x ATR", minval=0.1)
+
+// ---- engine -------------------------------------------------------
+float atr_val = ta.atr(i_atr_len)
+
+// Wall-clock entry trigger: 00:00 and 12:00 UTC every day. We use
+// the bar's UTC time (not bar_index) so engine and TV fire on the
+// SAME absolute bars regardless of how many warmup bars precede
+// each side's chart-bar-0. bar_index-based triggers would shift the
+// firing bar by the warmup-prefix length and produce zero matches
+// in `verify_corpus.py`'s align-by-time stage.
+bool at_entry_window = (hour == 0 or hour == 12) and minute == 0
+bool fire = at_entry_window and strategy.position_size == 0 and not na(atr_val)
+
+if fire
+    float stop_lvl = close - atr_val * i_stop_x
+    float tp_lvl   = close + atr_val * i_tp_x
+    strategy.entry("L", strategy.long, comment="periodic entry")
+    strategy.exit("X", from_entry="L", stop=stop_lvl, limit=tp_lvl, comment_loss="stop fill", comment_profit="tp fill")

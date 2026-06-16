@@ -1,0 +1,45 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 97b — max_intraday_filled_orders cap (isolated from probe 97)
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolate `strategy.risk.max_intraday_filled_orders(N)` from
+// probe 97. Drops bracket, drops gap/range gate, drops pending stop
+// entries. Uses a plain dual-MA crossover with market entries; the cap
+// is the only non-trivial surface under test. If TV vs engine diverge
+// here, the cap counter (when it increments, when it resets, what it
+// counts as a "filled order") is the bug locus.
+//
+// Validation goal: bit-exact trade list. Pass = identical entries
+// because the cap counter increments + day-rollover boundary match TV.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full
+// window matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy
+// properties: leave defaults. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe 97b - intraday cap isolate", shorttitle="PF_p97b_CAP",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false, calc_on_order_fills=false)
+
+// ---- inputs --------------------------------------------------------
+int i_fast      = input.int(5,  "Fast MA",                     minval=2)
+int i_slow      = input.int(13, "Slow MA",                     minval=3)
+int i_max_fills = input.int(5,  "Max intraday filled orders",  minval=1)
+
+strategy.risk.max_intraday_filled_orders(i_max_fills)
+
+// ---- entry signal: dual MA cross (no bracket, no gap, no cap-aware logic)
+float fast = ta.sma(close, i_fast)
+float slow = ta.sma(close, i_slow)
+bool  go_long  = ta.crossover(fast, slow)
+bool  go_short = ta.crossunder(fast, slow)
+
+if go_long and strategy.position_size <= 0
+    strategy.entry("L", strategy.long, comment="ma cross up")
+
+if go_short and strategy.position_size >= 0
+    strategy.entry("S", strategy.short, comment="ma cross dn")

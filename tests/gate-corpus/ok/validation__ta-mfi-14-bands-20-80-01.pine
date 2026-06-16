@@ -1,0 +1,24 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe — MFI(hlc3, 14) crossing static 20 / 80 bands.
+// Isolates ta.mfi (Money Flow Index): a volume-weighted RSI variant whose
+// .compute() takes an explicit source AND an implicitly-appended volume.
+// Long on cross UP through oversold 20, short on cross DOWN through
+// overbought 80. Static int bands make the trigger entirely dependent on the
+// MFI value itself, so any TV-parity drift implicates the money-flow /
+// positive-negative-flow accumulation, not the band logic.
+//@version=6
+strategy("PF TA isolate - MFI(14) bands 20/80", shorttitle="TAI_MFI",
+     overlay=false, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+mfi = ta.mfi(hlc3, 14)
+
+if ta.crossover(mfi, 20)
+    strategy.entry("L", strategy.long, comment="mfi x up 20")
+if ta.crossunder(mfi, 80)
+    strategy.entry("S", strategy.short, comment="mfi x dn 80")

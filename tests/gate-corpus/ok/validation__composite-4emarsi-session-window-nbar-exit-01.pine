@@ -1,0 +1,60 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 4ema-rsi-probe-03-binary-bar-window — session window + N-bar expiry
+// Clean-room: written from validation goal, not from source.
+//
+// Purpose: isolates a binary-options-style fixed-bar exit combined with an
+// intraday session-window gate. The engine surfaces under test are
+// `time(timeframe.period, sessionSpec)` for the entry-gating window and a
+// `var int` bars-in-trade counter that forces an exit after N bars. This
+// validates that the engine's session-time evaluation and per-bar trade-age
+// counter both align with TradingView's broker emulator at the boundary
+// bars (open of session, last bar of trade).
+//
+// Validation goal: bit-exact entries that occur ONLY inside the session
+// window, and bit-exact forced exits exactly N bars after entry regardless
+// of any other condition. Pass = identical trade list vs TradingView.
+//
+// TV setup: 15m chart, ETH-USDT-USDT (Binance USDT-M Perpetual). Full window
+// matching corpus/data/ohlcv_ETH-USDT-USDT_15m.csv. Strategy properties:
+// leave defaults from script header. Export "List of trades" → tv_trades.csv.
+//@version=6
+strategy("PF probe 4ema-rsi-probe-03-binary-bar-window", shorttitle="PF_4ema03_WIN",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=1, process_orders_on_close=false)
+
+// ---- inputs --------------------------------------------------------
+int    i_expiry_bars = input.int(8, "Forced exit after N bars", minval=1)
+string i_session     = input.session("1000-2200", "Entry session (UTC)")
+
+// ---- session gate (UTC reference; chart timezone overrides display) -
+bool in_window = not na(time(timeframe.period, i_session, "UTC"))
+
+// ---- trivial momentum trigger inside the window --------------------
+float fast = ta.ema(close, 5)
+float slow = ta.ema(close, 20)
+bool  long_trigger  = ta.crossover(fast, slow)  and in_window
+bool  short_trigger = ta.crossunder(fast, slow) and in_window
+
+// ---- bars-in-trade counter ----------------------------------------
+var int bars_in_trade = 0
+if strategy.position_size != 0
+    bars_in_trade += 1
+else
+    bars_in_trade := 0
+
+bool expiry_due = strategy.position_size != 0 and bars_in_trade >= i_expiry_bars
+
+// ---- order routing -------------------------------------------------
+if long_trigger and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="window long")
+
+if short_trigger and strategy.position_size == 0
+    strategy.entry("S", strategy.short, qty=1, comment="window short")
+
+if expiry_due
+    strategy.close_all(comment="bar-window expiry")

@@ -1,0 +1,66 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// IES probe 06 — pivot-tracked liquidity sweep detection
+//
+// Purpose: isolate the IES integration probe family's structure / sweep
+// layer. That family detects pivots with `ta.pivothigh(high, 10, 5)` and
+// `ta.pivotlow(low, 10, 5)` (left=10, right=5), tracks the most-recent
+// confirmed pivot in `var float last_swing_high / last_swing_low`, then
+// flags a "sweep" when price pierces that pivot intra-bar but closes back
+// the other side:
+//
+//   sweep_high = high  > last_swing_high and close < last_swing_high
+//   sweep_low  = low   < last_swing_low  and close > last_swing_low
+//
+// Two numerical edges live here. (1) `ta.pivothigh/low` confirms a pivot
+// `right` bars *after* the candidate, so the pivot stamp is delayed —
+// engine vs TV must agree on exactly which bar receives the non-na
+// pivothigh value. (2) The `var float` hand-off is a cumulative state
+// machine that depends on every prior pivot in the dataset; any single
+// missed/extra pivot permanently shifts the sweep boundary going forward.
+//
+// Trade shape: enter long on `sweep_low` (a stop-hunt reversal up); flip
+// to short on `sweep_high`. No exit logic beyond the flip — keeps the
+// number of trades equal to the number of detected sweeps.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export "List of trades" → trades.csv.
+//@version=6
+strategy("PF IES probe 06 - pivot sweep", shorttitle="IES_p06_SWP", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// ---- inputs (mirrored from IES) ------------------------------------
+int i_swing_left  = input.int(10, "Swing Left Bars",  minval=3, maxval=30)
+int i_swing_right = input.int(5,  "Swing Right Bars", minval=2, maxval=15)
+
+// ---- pivots (left/right asymmetric to match IES) -------------------
+float swing_high = ta.pivothigh(high, i_swing_left, i_swing_right)
+float swing_low  = ta.pivotlow(low,   i_swing_left, i_swing_right)
+
+// ---- var-state pivot memory (IES exact pattern) --------------------
+var float last_swing_high = na
+var float last_swing_low  = na
+
+if not na(swing_high)
+    last_swing_high := swing_high
+if not na(swing_low)
+    last_swing_low := swing_low
+
+// ---- sweep detection: pierce intra-bar, close back through ---------
+bool sweep_high = not na(last_swing_high) and high > last_swing_high and close < last_swing_high
+bool sweep_low  = not na(last_swing_low)  and low  < last_swing_low  and close > last_swing_low
+
+if sweep_low and strategy.position_size <= 0
+    if strategy.position_size < 0
+        strategy.close("S", comment="flip")
+    strategy.entry("L", strategy.long, qty=1, comment="sweep low → long")
+
+if sweep_high and strategy.position_size >= 0
+    if strategy.position_size > 0
+        strategy.close("L", comment="flip")
+    strategy.entry("S", strategy.short, qty=1, comment="sweep high → short")

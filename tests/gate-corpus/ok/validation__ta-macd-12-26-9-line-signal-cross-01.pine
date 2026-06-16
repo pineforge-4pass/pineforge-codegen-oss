@@ -1,0 +1,26 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe 03 — MACD(12, 26, 9) signal cross
+//
+// Purpose: isolate ta.macd(close, 12, 26, 9). MACD = EMA(12) - EMA(26); signal
+// = EMA(macd, 9). Validates EMA chain (depth 2) and tuple-return dispatch.
+// Distinct from existing validation/01-macd-histogram probe by trade shape
+// (this one uses crossover/crossunder of macd vs signal directly; that one uses
+// histogram-zero crossings).
+//
+// Targets gap probe `validation/37-regex-string-filter` MACD path.
+//@version=6
+strategy("PF TA isolate 03 - MACD(12,26,9) signal cross", shorttitle="TAI_03_MACDX",
+     overlay=false, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+[macd, sig, _hist] = ta.macd(close, 12, 26, 9)
+
+if ta.crossover(macd, sig)
+    strategy.entry("L", strategy.long, comment="macd cross up")
+if ta.crossunder(macd, sig)
+    strategy.entry("S", strategy.short, comment="macd cross dn")

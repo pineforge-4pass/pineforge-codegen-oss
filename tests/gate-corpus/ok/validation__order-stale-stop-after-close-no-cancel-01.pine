@@ -1,0 +1,29 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 77 - dual-side stop windows with close and no cancel
+//
+// Purpose: isolate stale opposite pending stops around market closes. This is
+// closer to probe 58 than probe 76 because positions are explicitly closed,
+// but it avoids four-bar repeated modification windows.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 77 - stale stop after close", shorttitle="PF_P77_STALESTOP", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+if hour == 2 and minute == 15 and strategy.position_size == 0
+    strategy.entry("LE", strategy.long, stop=high + syminfo.mintick, comment="long stop")
+
+if hour == 6 and minute == 15 and strategy.position_size > 0
+    strategy.close("LE", comment="long close")
+
+if hour == 14 and minute == 15 and strategy.position_size == 0
+    strategy.entry("SE", strategy.short, stop=low - syminfo.mintick, comment="short stop")
+
+if hour == 18 and minute == 15 and strategy.position_size < 0
+    strategy.close("SE", comment="short close")

@@ -1,0 +1,64 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 04 — default parameters and kwargs
+//
+// **EXPECTED-FAIL probe (C++ runtime gap)**: UDT method default
+// values are NOT materialized at the call site. PineForge currently
+// emits ``_udt_Cfg_threshold(Cfg& self, double mult, double base)``
+// but lowers ``cfg.threshold()`` and ``cfg.threshold(2.0)`` with too
+// few arguments — clang errors with "too few arguments to function
+// call". When the codegen learns to substitute declared defaults
+// for missing args (and to thread kwargs through the merged-arg
+// helper for UDT methods), this probe should compile.
+//
+// Purpose: UDT methods may declare default values on extra parameters
+// and callers may invoke them positionally, by kwarg, or omit defaults
+// entirely. The C++ runtime must materialize defaults at the call
+// site (PineScript has no overloading) and the codegen must merge
+// kwargs in declaration order.
+//
+// Trade shape (when fixed): long-only EMA crossover. We probe three
+// call styles — ``cfg.threshold()``, ``cfg.threshold(atrVal)``, and
+// ``cfg.threshold(mult=2.0, base=rsiVal)`` — and feed each result
+// into the entry gate. Because the second and third call sites
+// inject series values (atr, rsi) the resulting ``trigger`` actually
+// varies bar-to-bar and the gate filters trades non-trivially.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 04 - default param", shorttitle="UDT_p04_DEF", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Cfg
+    float factor = 1.0
+
+method threshold(Cfg self, float mult = 1.0, float base = 0.0) =>
+    base + self.factor * mult
+
+var Cfg cfg = Cfg.new(1.5)
+
+rsiVal  = ta.rsi(close, 14)
+atrVal  = ta.atr(14)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+float t0 = cfg.threshold()                          // 0   + 1.5 * 1     = 1.5
+float t1 = cfg.threshold(atrVal)                    // 0   + 1.5 * atr   (varies)
+float t2 = cfg.threshold(mult=2.0, base=rsiVal)     // rsi + 1.5 * 2     (varies)
+
+float trigger = t0 + t1 + t2
+
+bool entryCond = ta.crossover(emaFast, emaSlow) and trigger > 80.0 and t1 > t0
+bool exitCond  = ta.crossunder(emaFast, emaSlow)
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if exitCond and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

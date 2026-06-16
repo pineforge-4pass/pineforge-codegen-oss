@@ -1,0 +1,82 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// IES probe 02 — 21/55/200 EMA stack + composite bias score
+//
+// Purpose: isolate the IES integration probe family's "bias_score" layer.
+// That family stacks three EMAs
+// (21/55/200) and synthesises a 0-to-100-ish bias score from four binary
+// gates:
+//
+//   ma_bullish            = ma_fast > ma_slow and ma_slow > ma_trend  (+30)
+//   price_above_structure = close > ma_fast and close > ma_slow       (+20)
+//   close_above_trend     = close > ma_trend                          (+20)
+//   plus_di > minus_di                                                (+30)
+//
+// `bullish_bias = bias_score >= 30` is then a major contributor to bull_total
+// (3 of the 14 max points). This probe drops the DI half (covered by
+// ies-probe-01) and tests ONLY the EMA-stack arithmetic plus the bool [1]
+// history reference used to find rising-edges of `bullish_bias`. The 200-EMA
+// is the longest TA chain in IES; its early-bar warmup behaviour and
+// 21/55/200 ordering are the most likely numerical edges in this layer.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export "List of trades" → trades.csv.
+//@version=6
+strategy("PF IES probe 02 - three-ema bias", shorttitle="IES_p02_BIAS", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// ---- inputs (mirrored from IES) ------------------------------------
+int   i_ma_fast      = input.int(21,   "Fast MA",        minval=5,  maxval=50)
+int   i_ma_slow      = input.int(55,   "Slow MA",        minval=20, maxval=200)
+int   i_ma_trend     = input.int(200,  "Trend MA",       minval=50, maxval=500)
+float i_bias_thresh  = input.float(30, "Bias Threshold", minval=10, maxval=60)
+
+// ---- the three EMAs IES stacks -------------------------------------
+float ma_fast  = ta.ema(close, i_ma_fast)
+float ma_slow  = ta.ema(close, i_ma_slow)
+float ma_trend = ta.ema(close, i_ma_trend)
+
+// ---- bias gates (DI half intentionally dropped — see ies-probe-01) -
+bool ma_bullish            = ma_fast > ma_slow and ma_slow > ma_trend
+bool ma_bearish            = ma_fast < ma_slow and ma_slow < ma_trend
+bool price_above_structure = close > ma_fast and close > ma_slow
+bool price_below_structure = close < ma_fast and close < ma_slow
+
+// ---- composite scores (no DI; max is 70 instead of IES's 100) ------
+float bias_score = 0.0
+if ma_bullish
+    bias_score += 30
+if price_above_structure
+    bias_score += 20
+if close > ma_trend
+    bias_score += 20
+
+float bear_bias_score = 0.0
+if ma_bearish
+    bear_bias_score += 30
+if price_below_structure
+    bear_bias_score += 20
+if close < ma_trend
+    bear_bias_score += 20
+
+bool bullish_bias = bias_score      >= i_bias_thresh
+bool bearish_bias = bear_bias_score >= i_bias_thresh
+
+// ---- entries on rising edge of bias (tests bool [1] history) -------
+bool long_entry  = bullish_bias and not bullish_bias[1] and strategy.position_size <= 0
+bool short_entry = bearish_bias and not bearish_bias[1] and strategy.position_size >= 0
+
+if long_entry
+    if strategy.position_size < 0
+        strategy.close("S", comment="flip")
+    strategy.entry("L", strategy.long, qty=1, comment="bias rising long")
+
+if short_entry
+    if strategy.position_size > 0
+        strategy.close("L", comment="flip")
+    strategy.entry("S", strategy.short, qty=1, comment="bias rising short")

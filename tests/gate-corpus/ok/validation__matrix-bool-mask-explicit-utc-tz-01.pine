@@ -1,0 +1,60 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe 10 — typed-matrix-01 with explicit hour(time, "UTC")
+//
+// Purpose: typed-matrix-probe-01-bool-regime-mask uses bare `hour(time)` and
+// `dayofweek(time)`, which Pine resolves to `syminfo.timezone` (the EXCHANGE
+// timezone, NOT the chart display TZ). For BINANCE:ETHUSDT.P, TV may report
+// syminfo.timezone as "UTC" or a non-UTC value depending on TV's symbol
+// metadata — engine defaults to "UTC" via its constructor.
+//
+// This probe pins both sides to "UTC" by passing the timezone explicitly.
+// Pine v6: `hour(time, tz_arg)` honours the explicit `tz_arg` regardless of
+// syminfo or chart TZ.
+//
+// Diagnostic:
+//   excellent → bug in typed-matrix-01 is engine syminfo_.timezone vs TV
+//               syminfo.timezone for BINANCE:ETHUSDT.P. Fix: validator
+//               passes BINANCE's syminfo.timezone (whatever TV reports) to
+//               engine via syminfo_, separately from chart_timezone_.
+//   strong/moderate → bug is in matrix bool dispatch (set/get/transpose) or
+//               hotCount accumulator, NOT TZ-related.
+//@version=6
+strategy("PF TA isolate 10 - typed-matrix UTC", shorttitle="TAI_10_TM_UTC",
+     overlay=true, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+var matrix<bool> mask = matrix.new<bool>(24, 7, false)
+
+rsiVal = ta.rsi(close, 14)
+
+int h = hour(time, "UTC")
+int d = dayofweek(time, "UTC") - 1  // 0..6
+
+if not na(rsiVal) and rsiVal > 60.0 and h >= 0 and h < 24 and d >= 0 and d < 7
+    matrix.set(mask, h, d, true)
+
+var matrix<bool> mT  = matrix.new<bool>(7, 24, false)
+var matrix<bool> mTT = matrix.new<bool>(24, 7, false)
+mT  := matrix.transpose(mask)
+mTT := matrix.transpose(mT)
+
+bool sample = matrix.get(mTT, h < 24 ? h : 0, d >= 0 and d < 7 ? d : 0)
+
+int hotCount = 0
+for i = 0 to 23
+    for j = 0 to 6
+        if matrix.get(mTT, i, j)
+            hotCount += 1
+
+bool entryCond = hotCount >= 6 and rsiVal > 55.0 and sample
+bool exitCond  = not na(rsiVal) and rsiVal < 45.0
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if exitCond and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

@@ -1,0 +1,41 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 62 - same-id stop cross before modify
+//
+// Purpose: isolate whether an already-touched pending stop entry fills before
+// later same-id modifications can replace it.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 62 - stop cross before modify", shorttitle="PF_P62_STOPCROSS", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// First submit a stop close to the current market, then submit a farther stop
+// with the same id on the next setup bar if no position exists yet.
+longFirst = hour == 3 and minute == 15 and strategy.position_size == 0
+longModify = hour == 3 and minute == 30 and strategy.position_size == 0
+shortFirst = hour == 15 and minute == 15 and strategy.position_size == 0
+shortModify = hour == 15 and minute == 30 and strategy.position_size == 0
+
+if longFirst
+    strategy.entry("LE", strategy.long, stop=close, comment="touchable long stop")
+
+if longModify
+    strategy.entry("LE", strategy.long, stop=high + syminfo.mintick, comment="modified long stop")
+
+if shortFirst
+    strategy.entry("SE", strategy.short, stop=close, comment="touchable short stop")
+
+if shortModify
+    strategy.entry("SE", strategy.short, stop=low - syminfo.mintick, comment="modified short stop")
+
+if strategy.position_size > 0 and hour == 6 and minute == 15
+    strategy.close("LE", comment="long close")
+
+if strategy.position_size < 0 and hour == 18 and minute == 15
+    strategy.close("SE", comment="short close")

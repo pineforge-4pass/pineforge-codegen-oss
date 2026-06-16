@@ -1,0 +1,27 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe 01 — RSI(14) crosses 50
+//
+// Purpose: isolate ta.rsi(close, 14) seed + Wilder smoothing. No other indicators,
+// no risk mgmt, no MTF, no session filters. Any TV/engine drift on this probe is
+// either (a) RSI math drift OR (b) OHLCV input drift between TV chart and shipped
+// data/ohlcv_ETH-USDT-USDT_15m_warmup6m.csv. Use README's first-bar-OHLC check
+// before exporting trades to disambiguate.
+//
+// Trade shape: long when RSI(14) crosses up through 50, short when it crosses
+// down through 50. Position flips on opposite signal. Single-direction at a time.
+//@version=6
+strategy("PF TA isolate 01 - RSI(14) cross 50", shorttitle="TAI_01_RSI50",
+     overlay=false, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+rsi = ta.rsi(close, 14)
+
+if ta.crossover(rsi, 50.0)
+    strategy.entry("L", strategy.long, comment="rsi cross up 50")
+if ta.crossunder(rsi, 50.0)
+    strategy.entry("S", strategy.short, comment="rsi cross dn 50")

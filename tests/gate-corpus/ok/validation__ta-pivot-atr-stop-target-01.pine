@@ -1,0 +1,46 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 28 — pivot-anchored ATR stop/target
+// Purpose: parity test for ta.pivothigh / ta.pivotlow detection paired with
+// `var float lastPvtH/L` retention and ATR-multiple stop & target sizing.
+//
+//@version=6
+strategy("Swing Pivot ATR", overlay=true, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === Inputs ===
+pivotLen = input.int(5, "Pivot Length", minval=2)
+atrLen   = input.int(14, "ATR Length", minval=1)
+atrMult  = input.float(1.5, "ATR SL Multiplier", step=0.1)
+tpMult   = input.float(2.0, "ATR TP Multiplier", step=0.1)
+
+// === Pivots ===
+pvtHigh = ta.pivothigh(high, pivotLen, pivotLen)
+pvtLow  = ta.pivotlow(low, pivotLen, pivotLen)
+atrVal  = ta.atr(atrLen)
+
+// === Track last pivot levels ===
+var float lastPvtH = na
+var float lastPvtL = na
+
+if not na(pvtHigh)
+    lastPvtH := pvtHigh
+if not na(pvtLow)
+    lastPvtL := pvtLow
+
+// === Breakout of pivot levels ===
+longCond  = not na(lastPvtH) and close > lastPvtH and close[1] <= lastPvtH
+shortCond = not na(lastPvtL) and close < lastPvtL and close[1] >= lastPvtL
+
+// === Strategy with exit targets ===
+if longCond
+    strategy.entry("Long", strategy.long)
+    strategy.exit("XL", "Long", stop=close - atrVal * atrMult, limit=close + atrVal * tpMult)
+
+if shortCond
+    strategy.entry("Short", strategy.short)
+    strategy.exit("XS", "Short", stop=close + atrVal * atrMult, limit=close - atrVal * tpMult)
+
+plot(lastPvtH, "Last Pivot High", color=color.red, style=plot.style_stepline)
+plot(lastPvtL, "Last Pivot Low", color=color.green, style=plot.style_stepline)

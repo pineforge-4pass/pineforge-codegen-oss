@@ -1,0 +1,186 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 38 — UDT regime-stack stress (mirrors probe 30's score logic)
+// Purpose: parity test for `enum`, flat `type` UDTs, and `var <UDT>` per-field
+// `:=` mutation patterns supported by the engine.
+//
+//@version=6
+// UDT-heavy validation strategy for PineForge.
+//
+// Mirrors logic in validation/30-multi-indicator-score (RSI + EMA + BB score, same entries/exits)
+// so you can export trades.csv from TradingView with identical inputs and compare bar-for-bar.
+//
+// PineForge note (2026):
+// - Mutate var UDTs with per-field `:=` (`rsiL.contrib := ...`). Whole-struct reassignment
+//   (`rsiL := RsiLayer.new(...)`) mis-compiles.
+// - Pass `input.int` / scalars into `ta.*` lengths — UDT fields (e.g. `cfg.rsi_len`) are not yet
+//   valid `simple` length arguments for the transpiler.
+// - Avoid UDT methods, nested UDT fields, array<UDT>, and UDT returns from user functions.
+strategy("UDT Regime Stack (PF stress)", overlay=true, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// --- Enums (inputs + bookkeeping) ---
+enum Aggression
+    conservative = "Conservative"
+    balanced = "Balanced"
+    aggressive = "Aggressive"
+
+// --- User-defined types (flat structs; no nested UDT fields) ---
+type LayerInputs
+    int rsi_len = 14
+    int ma_len = 20
+    int bb_len = 20
+    float bb_mult = 2.0
+
+type RsiLayer
+    float value = na
+    int contrib = 0
+
+type TrendLayer
+    float ema = na
+    int contrib = 0
+
+type BbLayer
+    float mid = na
+    float upper = na
+    float lower = na
+    int contrib = 0
+
+type ScoreSnapshot
+    int rsi_c = 0
+    int trend_c = 0
+    int bb_c = 0
+
+type VolContext
+    float atr = na
+    float atr_ma = na
+    float ratio = 1.0
+
+type OhlcBar
+    float o = na
+    float h = na
+    float l = na
+    float c = na
+
+type SessionScratch
+    bool in_session = true
+    int bar_streak = 0
+
+type GateState
+    bool vol_ok = true
+    bool map_ok = true
+
+// --- Inputs ---
+rsiLen = input.int(14, "RSI Length", minval=1)
+maLen = input.int(20, "MA Length", minval=1)
+bbLen = input.int(20, "BB Length", minval=5)
+bbMult = input.float(2.0, "BB Mult", step=0.1)
+profile = input.enum(Aggression.balanced, "Stress profile")
+
+// Frozen config in a UDT (inputs are stable; var initializes once)
+var LayerInputs cfg = LayerInputs.new(rsiLen, maLen, bbLen, bbMult)
+
+// Map-backed thresholds (same numeric gates as the multi-indicator reference; profile kept for codegen stress)
+var float thr_long = 2.0
+var float thr_short = -2.0
+var gateMap = map.new<string, float>()
+if barstate.isfirst
+    gateMap.put("long", 2.0)
+    gateMap.put("short", -2.0)
+    gateMap.put("exit_long", 0.0)
+    gateMap.put("exit_short", 0.0)
+
+switch profile
+    Aggression.conservative =>
+        thr_long := nz(gateMap.get("long"), 2.0)
+        thr_short := nz(gateMap.get("short"), -2.0)
+    Aggression.balanced =>
+        thr_long := nz(gateMap.get("long"), 2.0)
+        thr_short := nz(gateMap.get("short"), -2.0)
+    Aggression.aggressive =>
+        thr_long := nz(gateMap.get("long"), 2.0)
+        thr_short := nz(gateMap.get("short"), -2.0)
+    =>
+        thr_long := nz(gateMap.get("long"), 2.0)
+        thr_short := nz(gateMap.get("short"), -2.0)
+
+// --- Indicators (use input scalars for ta.* lengths; PineForge does not yet support UDT fields as `simple` lengths) ---
+rsiVal = ta.rsi(close, rsiLen)
+emaVal = ta.ema(close, maLen)
+[bbMid, bbUpper, bbLower] = ta.bb(close, bbLen, bbMult)
+atrVal = ta.atr(14)
+atrMa = ta.sma(atrVal, 20)
+atrRatio = atrMa > 0 ? atrVal / atrMa : 1.0
+
+// Keep cfg UDT aligned with inputs (for inspection / parity with TradingView inputs)
+cfg.rsi_len := rsiLen
+cfg.ma_len := maLen
+cfg.bb_len := bbLen
+cfg.bb_mult := bbMult
+
+// --- Pack bar state into UDTs (mutate fields each bar; do not replace the whole struct) ---
+var RsiLayer rsiL = RsiLayer.new(na, 0)
+var TrendLayer trL = TrendLayer.new(na, 0)
+var BbLayer bbL = BbLayer.new(na, na, na, 0)
+var ScoreSnapshot snap = ScoreSnapshot.new(0, 0, 0)
+var VolContext vol = VolContext.new(na, na, 1.0)
+var OhlcBar curBar = OhlcBar.new(na, na, na, na)
+var SessionScratch sess = SessionScratch.new(true, 0)
+var GateState gates = GateState.new(true, true)
+
+rsiL.value := rsiVal
+rsiL.contrib := rsiVal > 50 ? 1 : rsiVal < 50 ? -1 : 0
+trL.ema := emaVal
+trL.contrib := close > emaVal ? 1 : -1
+bbL.mid := bbMid
+bbL.upper := bbUpper
+bbL.lower := bbLower
+bbL.contrib := close > bbMid ? 1 : -1
+vol.atr := atrVal
+vol.atr_ma := atrMa
+vol.ratio := atrRatio
+curBar.o := open
+curBar.h := high
+curBar.l := low
+curBar.c := close
+
+// Soft volatility gate (always true here; exercises UDT fields without changing reference signals)
+gates.vol_ok := vol.ratio < 25.0
+gates.map_ok := gateMap.contains("long") and gateMap.contains("short")
+
+score = rsiL.contrib + trL.contrib + bbL.contrib
+snap.rsi_c := rsiL.contrib
+snap.trend_c := trL.contrib
+snap.bb_c := bbL.contrib
+
+// --- Session / streak scratch (deterministic; does not affect orders) ---
+sess.in_session := true
+// Use series `close` for history; UDT fields do not support [] in PineForge yet.
+sess.bar_streak := bar_index > 0 and close == close[1] ? sess.bar_streak + 1 : 0
+
+// --- Signals (match validation 30: threshold crossings on net score) ---
+// `score[1]` is `na` on the first bar; do not treat `prevScore` as 0 or the first bar fires longs.
+var int prevScore = na
+longCond = gates.vol_ok and gates.map_ok and score >= thr_long and not na(prevScore) and prevScore < thr_long
+shortCond = gates.vol_ok and gates.map_ok and score <= thr_short and not na(prevScore) and prevScore > thr_short
+
+if longCond
+    strategy.entry("Long", strategy.long)
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+exitL = nz(gateMap.get("exit_long"), 0.0)
+exitS = nz(gateMap.get("exit_short"), 0.0)
+if strategy.position_size > 0 and score <= exitL
+    strategy.close("Long")
+if strategy.position_size < 0 and score >= exitS
+    strategy.close("Short")
+
+prevScore := score
+
+plot(emaVal, "EMA", color=color.blue)
+plot(bbUpper, "BB Upper", color=color.gray)
+plot(bbLower, "BB Lower", color=color.gray)
+// plotchar `char` must be a const string (not `str.tostring` / series string) — CE10123
+plotchar(ta.crossover(score, thr_long) ? high : na, "Long cross", "▲", location=location.abovebar, color=color.teal, size=size.tiny)

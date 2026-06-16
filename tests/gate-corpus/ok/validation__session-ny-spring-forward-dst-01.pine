@@ -1,0 +1,40 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// session-dst probe 01 — NY spring-forward weekend
+//
+// Purpose: pin session-time + DST behavior. The NY equity session
+// (09:30-16:00 America/New_York) crosses a spring-forward weekend in the
+// corpus window. We count time-window entries pre/post DST and verify
+// that `time(session)` returns `na<int64>` on Sunday (no NY session).
+// Surfaces: tz-db version drift, ScopedTimezone mutex contention,
+// DST hour-skip handling.
+//
+// Trade shape: long-only. Entry at first in-session bar of each day
+// (session_id transitions from na -> non-na), exit at last in-session
+// bar (transitions non-na -> na). Counts both pre- and post-DST entries
+// on a 15m chart so we get >=10 closed trades over the corpus window.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. The window must include the second
+// Sunday of March for spring-forward coverage. Export trade list to
+// tv_trades.csv.
+//@version=6
+strategy("PF session-dst probe 01 - NY spring forward", shorttitle="SDST_p01_NY", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+int sessId    = time(timeframe.period, "0930-1600", "America/New_York")
+bool inSess    = not na(sessId)
+bool wasInSess = not na(sessId[1])
+
+bool sessOpen  = inSess and not wasInSess
+bool sessClose = wasInSess and not inSess
+
+if sessOpen and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="session open")
+if sessClose and strategy.position_size > 0
+    strategy.close("L", comment="session close")

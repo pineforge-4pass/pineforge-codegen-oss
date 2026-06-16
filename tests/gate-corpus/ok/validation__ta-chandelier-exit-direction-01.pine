@@ -1,0 +1,45 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 12 — Chandelier-Exit direction tracker
+// Purpose: parity test for ta.atr × ta.highest/lowest band + `var int direction`
+// stateful flip tracking.
+//
+//@version=6
+strategy("Chandelier Exit", overlay=true, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === Inputs ===
+atrLen  = input.int(22, "ATR Length", minval=1)
+atrMult = input.float(3.0, "ATR Multiplier", step=0.1)
+lookback = input.int(22, "Lookback", minval=1)
+
+// === ATR ===
+atrVal = ta.atr(atrLen)
+
+// === Chandelier Exit levels ===
+highestHigh = ta.highest(high, lookback)
+lowestLow   = ta.lowest(low, lookback)
+
+chandLong  = highestHigh - atrVal * atrMult
+chandShort = lowestLow + atrVal * atrMult
+
+// === Track direction with var ===
+var int direction = 0
+
+if close > chandShort[1]
+    direction := 1
+if close < chandLong[1]
+    direction := -1
+
+// === Entry on direction change ===
+longCond  = direction == 1 and direction[1] != 1
+shortCond = direction == -1 and direction[1] != -1
+
+if longCond
+    strategy.entry("Long", strategy.long)
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+plot(chandLong, "Chandelier Long", color=color.green, linewidth=2)
+plot(chandShort, "Chandelier Short", color=color.red, linewidth=2)

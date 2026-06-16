@@ -1,0 +1,51 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 16 — var-instance method calls accumulate across bars
+//
+// Purpose: ``var Counter c = ...`` initializes once on the first bar.
+// All subsequent method calls on ``c`` must operate on that same C++
+// struct instance. If the codegen accidentally re-initializes the
+// receiver per bar, the streak resets every bar. The probe asserts
+// the cumulative ``c.green_streak`` is detectable as a series.
+//
+// Trade shape: long-only. Enter on green-streak >= 4 (4 consecutive
+// up bars). Exit on first red bar.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 16 - var instance streak", shorttitle="UDT_p16_VAR", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Counter
+    int green_streak = 0
+    int red_streak = 0
+    int total_greens = 0
+    int total_reds = 0
+
+method observe(Counter self, bool isGreen) =>
+    if isGreen
+        self.green_streak := self.green_streak + 1
+        self.red_streak := 0
+        self.total_greens := self.total_greens + 1
+    else
+        self.red_streak := self.red_streak + 1
+        self.green_streak := 0
+        self.total_reds := self.total_reds + 1
+    self.green_streak
+
+var Counter c = Counter.new(0, 0, 0, 0)
+
+bool isGreen = close > open
+int gs = c.observe(isGreen)
+
+if gs >= 4 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if c.red_streak >= 1 and strategy.position_size > 0
+    strategy.close("L", comment="exit long")

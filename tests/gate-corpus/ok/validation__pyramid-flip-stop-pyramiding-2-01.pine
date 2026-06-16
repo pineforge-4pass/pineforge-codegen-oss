@@ -1,0 +1,46 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 93 — same as probe 72 but with pyramiding=2
+//
+// Purpose: probe 72 (pyramiding=1) reproduces TV's |old|+qty growth quirk
+// with qty alternating 1/2. validation/57 (pyramiding=2) does NOT show
+// growth despite using stop-entry flips. This probe holds probe 72's
+// pattern constant and changes only the pyramiding value to 2 to test
+// whether pyramiding=1 is part of the trigger condition.
+//
+// If qty in TV's export stays 1 (or 2 for legitimate flips that don't
+// grow further across days), pyramiding=1 is part of the trigger and the
+// engine fix can scope to "pyramiding==1 priced-entry flips". If qty
+// still grows like probe 72, pyramiding is irrelevant.
+//
+// Trade shape: identical to probe 72 (open long at 0:15, place opposite
+// stop at 0:45 with paired close, cleanup short at 12:00) except
+// ``pyramiding=2``.
+//
+// TV setup: 15m chart, ETH-USDT-USDT. Properties dialog: Pyramiding=2,
+// Order size = 1 contract. Export trades.csv.
+//@version=6
+strategy("PF probe 93 - flip stop pyramiding 2", shorttitle="PF_P93_PYR2", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=2,
+     process_orders_on_close=false)
+
+if hour == 0 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="open long")
+
+if hour == 0 and minute == 45 and strategy.position_size > 0
+    strategy.entry("S", strategy.short, qty=1, stop=low - syminfo.mintick, comment="opposite stop first")
+    strategy.close("L", comment="close long second")
+
+if hour == 6 and minute == 15 and strategy.position_size == 0
+    strategy.entry("L2", strategy.long, qty=1, comment="open long2")
+
+if hour == 6 and minute == 45 and strategy.position_size > 0
+    strategy.close("L2", comment="close long first")
+    strategy.entry("S2", strategy.short, qty=1, stop=low - syminfo.mintick, comment="opposite stop second")
+
+if hour == 12 and minute == 15 and strategy.position_size < 0
+    strategy.close_all(comment="cleanup short")

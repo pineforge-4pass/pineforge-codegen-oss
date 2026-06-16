@@ -1,0 +1,31 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 61 - same-id stop raise only
+//
+// Purpose: isolate repeated strategy.entry calls with the same id where a stop
+// order is only moved farther in the same direction before it fills.
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 61 - same id stop raise", shorttitle="PF_P61_STOPRAISE", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+longSetup = hour == 2 and (minute == 15 or minute == 30 or minute == 45) and strategy.position_size == 0
+shortSetup = hour == 14 and (minute == 15 or minute == 30 or minute == 45) and strategy.position_size == 0
+
+if longSetup
+    strategy.entry("LE", strategy.long, stop=high + syminfo.mintick, comment="raised long stop")
+
+if shortSetup
+    strategy.entry("SE", strategy.short, stop=low - syminfo.mintick, comment="lowered short stop")
+
+if strategy.position_size > 0 and hour == 6 and minute == 15
+    strategy.close("LE", comment="long close")
+
+if strategy.position_size < 0 and hour == 18 and minute == 15
+    strategy.close("SE", comment="short close")

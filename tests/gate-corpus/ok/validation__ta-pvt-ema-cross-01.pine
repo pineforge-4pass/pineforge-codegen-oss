@@ -1,0 +1,26 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe — PVT vs its EMA(21) signal cross.
+// Isolates ta.pvt (Price-Volume Trend), a cumulative volume-state SERIES
+// built-in: pvt += volume * (close - close[1]) / close[1], seeded from the
+// first valid bar. It is one of the running volume accumulators (alongside
+// ta.obv/accdist/nvi/pvi) and its cumulative seeding + division-by-prev-close
+// path has no TradingView-parity coverage in the corpus. Crossing the raw
+// cumulative PVT against a 21-EMA of itself drives the only logic so any
+// drift is attributable to the ta.pvt series alone.
+//@version=6
+strategy("PF TA isolate - PVT EMA(21) cross", shorttitle="TAI_PVT",
+     overlay=false, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+pvt = ta.pvt
+sig = ta.ema(pvt, 21)
+
+if ta.crossover(pvt, sig)
+    strategy.entry("L", strategy.long, comment="pvt cross up")
+if ta.crossunder(pvt, sig)
+    strategy.entry("S", strategy.short, comment="pvt cross dn")

@@ -1,0 +1,44 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// Lower-TF probe 02 — bool array element type
+//
+// Purpose: ``request.security_lower_tf`` returning ``array<bool>``.
+// Asserts the LTF synthesis path handles non-numeric element types
+// (bool storage / count_true reduce). On 15m we pull 1m bars and tag
+// each as bullish (close>open); entry triggers when at least 9 of 15
+// sub-bars are bullish — i.e. >60% intrabar bull dominance.
+//
+// Trade shape: long-only. Entry on bull-bar majority + EMA filter; exit
+// on bull-majority break (count <= 6). Yields ~20-50 trades on 36k bar
+// ETH-USDT 15m window.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export trade list to tv_trades.csv.
+//@version=6
+strategy("PF lower-tf probe 02 - bool array", shorttitle="LTF_p02_BOOL", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+// 1m bull-bar flags from 15m chart.
+ltfBullArr = request.security_lower_tf(syminfo.tickerid, "1", close > open)
+
+int bullCount = 0
+if array.size(ltfBullArr) > 0
+    for i = 0 to array.size(ltfBullArr) - 1
+        if array.get(ltfBullArr, i)
+            bullCount := bullCount + 1
+
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+bool entryCond = bullCount >= 9 and emaFast > emaSlow
+bool exitCond  = bullCount <= 6 or emaFast < emaSlow
+
+if entryCond and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="bull-majority")
+if exitCond and strategy.position_size > 0
+    strategy.close("L", comment="bull-broken")

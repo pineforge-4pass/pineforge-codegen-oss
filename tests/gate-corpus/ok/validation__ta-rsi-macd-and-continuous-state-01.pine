@@ -1,0 +1,33 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe 08 — RSI > 50 AND MACD > sig (37-regex without str.match)
+//
+// Purpose: this is `validation/37-regex-string-filter` with str.match REMOVED.
+// useRsi and useMacd are hard-coded true. Same continuous-state entry/close
+// pattern. If 37-regex is moderate but this is excellent, the bug is in
+// engine's str.match() implementation or in the codegen path that lowers
+// str.match. If this also drifts, the bug is in the AND-combination of two
+// value-comparison conds OR in continuous-state pattern (cf probe 06).
+//@version=6
+strategy("PF TA isolate 08 - RSI>50 AND MACD>sig", shorttitle="TAI_08_AND",
+     overlay=false, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+rsiVal = ta.rsi(close, 14)
+[macdLine, sigLine, _] = ta.macd(close, 12, 26, 9)
+
+// Mirror 37-regex's branchy formulation exactly (don't simplify the AND)
+bool longCond = true
+if rsiVal <= 50
+    longCond := false
+if macdLine <= sigLine
+    longCond := false
+
+if longCond
+    strategy.entry("Long", strategy.long, comment="Long")
+else
+    strategy.close("Long")

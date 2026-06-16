@@ -1,0 +1,22 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF TA-isolate probe — Williams %R (14) crossing the -80 / -20 bands.
+// Isolates ta.wpr(length): %R = (highest(high,len) - close) / (highest - lowest) * -100,
+// a -100..0 oscillator with close/high/lowest implicit sources. Drives entries off the
+// classic oversold/overbought band crosses so a TV export can adjudicate the engine's
+// %R range, sign, and rolling highest/lowest window alignment.
+//@version=6
+strategy("PF TA isolate - WPR(14) bands", shorttitle="TAI_WPR",
+     overlay=false, initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+w = ta.wpr(14)
+
+if ta.crossover(w, -80.0)
+    strategy.entry("L", strategy.long, comment="wpr cross up -80")
+if ta.crossunder(w, -20.0)
+    strategy.entry("S", strategy.short, comment="wpr cross dn -20")

@@ -1,0 +1,49 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 90 - narrow stop+limit alongside trail (scalping-distances)
+//
+// Purpose: investigate the 80 trades from a community-style scalping
+// strategy that still drift by $0.50+ even after the trail_points-ceil fix
+// (e.g. trade 23 at 2025-04-26 00:15 UTC, where engine fires trail at
+// activation 1791.12 and TV fires at 1792.00 — Δ=$0.88).
+//
+// Probe 88 (trailTicks=20, far stop/limit at ±1-2%) and probe 89
+// (trailTicks=8, far stop/limit at ±5%) both match TV 100%. That scalping
+// shape's stop and limit are MUCH narrower — atr-based, so roughly
+// entry±$5..$15. This probe pins trailTicks=8 (matching probe 89) but
+// moves the stop and limit close to entry like that scalping shape
+// (±$10/$20) to see whether the path-priority resolution on the entry bar
+// changes when stop/limit are reachable on the same bar's path even though
+// only the trail's activation level is actually crossed.
+//
+// TV setup: 15m chart, same symbol/window as data/ohlcv_ETH-USDT-USDT_15m.csv.
+// Export TradingView "List of trades" to trades.csv in this folder.
+//@version=6
+strategy("PF probe 90 - narrow stop/limit + trail8",
+     shorttitle="PF_P90_NARROW", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+trailTicks = 8
+stopDist = 10.0
+limitDist = 20.0
+
+if hour == 8 and minute == 0 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+    strategy.exit("LX", "L",
+         stop=close - stopDist,
+         limit=close + limitDist,
+         trail_points=trailTicks,
+         comment="narrow stop/limit + trail8")
+
+if hour == 20 and minute == 0 and strategy.position_size == 0
+    strategy.entry("S", strategy.short, qty=1, comment="entry short")
+    strategy.exit("SX", "S",
+         stop=close + stopDist,
+         limit=close - limitDist,
+         trail_points=trailTicks,
+         comment="narrow stop/limit + trail8")

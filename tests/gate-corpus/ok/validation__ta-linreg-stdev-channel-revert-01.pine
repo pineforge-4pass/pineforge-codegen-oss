@@ -1,0 +1,40 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 08 — linear-regression channel mean-reversion
+// Purpose: parity test for ta.linreg() + ta.stdev() band construction and
+// inside-bar reversal entry.
+//
+//@version=6
+strategy("Linear Regression Channel", overlay=true, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === Inputs ===
+regLen    = input.int(50, "Regression Length", minval=10)
+devMult   = input.float(2.0, "Deviation Multiplier", step=0.1)
+
+// === Linear Regression ===
+regLine   = ta.linreg(close, regLen, 0)
+regDev    = ta.stdev(close, regLen) * devMult
+upperBand = regLine + regDev
+lowerBand = regLine - regDev
+
+// === Mean reversion signals ===
+longCond  = close < lowerBand and close > close[1]
+shortCond = close > upperBand and close < close[1]
+
+// === Strategy ===
+if longCond
+    strategy.entry("Long", strategy.long)
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+// === Exit at regression line (mean) ===
+if strategy.position_size > 0 and close > regLine
+    strategy.close("Long")
+if strategy.position_size < 0 and close < regLine
+    strategy.close("Short")
+
+plot(regLine, "Regression", color=color.yellow, linewidth=2)
+plot(upperBand, "Upper", color=color.red)
+plot(lowerBand, "Lower", color=color.green)

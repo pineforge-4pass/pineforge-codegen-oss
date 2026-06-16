@@ -1,0 +1,50 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 21 — KAMA-style adaptive MA via user-defined efficiency-ratio function
+// Purpose: parity test for a user-defined function (`calcEfficiencyRatio`) that
+// chains math.abs + math.sum and a `[length]` history reference inside the body.
+//
+//@version=6
+strategy("Adaptive MA Function", overlay=true, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === Inputs ===
+len     = input.int(14, "Length", minval=2)
+fastLen = input.int(2, "Fast Alpha Period", minval=1)
+slowLen = input.int(30, "Slow Alpha Period", minval=5)
+
+// === User-defined function: Kaufman Adaptive MA (KAMA-style) ===
+calcEfficiencyRatio(src, length) =>
+    direction = math.abs(src - src[length])
+    volatilitySum = math.sum(math.abs(src - src[1]), length)
+    er = volatilitySum != 0 ? direction / volatilitySum : 0
+    er
+
+// === Calculate KAMA ===
+er = calcEfficiencyRatio(close, len)
+
+fastAlpha = 2.0 / (fastLen + 1)
+slowAlpha = 2.0 / (slowLen + 1)
+
+// Scaled smoothing constant
+sc = math.pow(er * (fastAlpha - slowAlpha) + slowAlpha, 2)
+
+// KAMA
+var float kama = close
+kama := nz(kama[1]) + sc * (close - nz(kama[1]))
+
+// === Trend direction ===
+kamaUp   = kama > kama[1]
+kamaDown = kama < kama[1]
+
+// === Signals ===
+longCond  = kamaUp and not kamaUp[1]
+shortCond = kamaDown and not kamaDown[1]
+
+if longCond
+    strategy.entry("Long", strategy.long)
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+plot(kama, "KAMA", color=kamaUp ? color.green : color.red, linewidth=2)

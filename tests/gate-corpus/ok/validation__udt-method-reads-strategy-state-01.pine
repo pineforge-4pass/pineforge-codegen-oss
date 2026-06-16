@@ -1,0 +1,53 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// UDT method probe 13 — method reads strategy.* state
+//
+// Purpose: a UDT method may read ``strategy.position_size``,
+// ``strategy.equity``, ``strategy.netprofit``, and
+// ``strategy.initial_capital`` from inside its body. The C++ runtime
+// exposes these as engine accessors; the codegen must lower the
+// dotted member access correctly when seen inside a method body, not
+// just at top level.
+//
+// Trade shape: long-only EMA crossover. ``risk.allowsEntry()`` reads
+// strategy state to decide if a new entry is permitted: must be
+// flat, must be at least ``cooldown_bars`` bars after the last exit,
+// and current drawdown must be smaller than 5% of starting capital.
+// The cooldown + drawdown gates are real filters and produce a
+// trade list distinct from a plain crossover baseline.
+//
+// TV setup: 15m chart, ETH-USDT-USDT, same window as
+// data/ohlcv_ETH-USDT-USDT_15m.csv. Export the trade list to trades.csv
+// in this folder.
+//@version=6
+strategy("PF UDT probe 13 - strategy state in method", shorttitle="UDT_p13_STR", overlay=true,
+     initial_capital=1000000, currency=currency.USD,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     process_orders_on_close=false)
+
+type Risk
+    int cooldown_bars = 5
+    int last_exit_bar = -1000
+    float max_drawdown_pct = 0.05
+
+method allowsEntry(Risk self) =>
+    bool flatOk     = strategy.position_size == 0
+    bool cooldownOk = (bar_index - self.last_exit_bar) >= self.cooldown_bars
+    float ddLimit   = strategy.initial_capital * self.max_drawdown_pct
+    bool ddOk       = strategy.netprofit >= -ddLimit
+    bool equityOk   = strategy.equity > 0.0
+    flatOk and cooldownOk and ddOk and equityOk
+
+var Risk risk = Risk.new(5, -1000, 0.05)
+
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+if ta.crossover(emaFast, emaSlow) and risk.allowsEntry()
+    strategy.entry("L", strategy.long, qty=1, comment="entry long")
+if ta.crossunder(emaFast, emaSlow) and strategy.position_size > 0
+    strategy.close("L", comment="exit long")
+    risk.last_exit_bar := bar_index

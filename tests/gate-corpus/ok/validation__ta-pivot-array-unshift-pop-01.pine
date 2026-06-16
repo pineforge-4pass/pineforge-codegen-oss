@@ -1,0 +1,62 @@
+// This Pine Script® code is licensed under Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
+// © PineForge contributors 2026
+//
+// PF probe 19 — pivot-array breakout with array.unshift / pop maintenance
+// Purpose: parity test for ta.pivothigh / ta.pivotlow detection paired with a
+// bounded `var array<float>` retention buffer (unshift on new pivot, pop when
+// over capacity).
+//
+//@version=6
+strategy("Pivot Array Breakout", overlay=true, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// === Inputs ===
+pivotLen  = input.int(5, "Pivot Length", minval=2)
+maxPivots = input.int(5, "Max Stored Pivots", minval=2)
+
+// === Arrays to track pivot levels ===
+var array<float> resistanceLevels = array.new<float>(0)
+var array<float> supportLevels    = array.new<float>(0)
+
+// === Detect pivots ===
+pvtHigh = ta.pivothigh(high, pivotLen, pivotLen)
+pvtLow  = ta.pivotlow(low, pivotLen, pivotLen)
+
+// === Store new pivots ===
+if not na(pvtHigh)
+    array.unshift(resistanceLevels, pvtHigh)
+    if array.size(resistanceLevels) > maxPivots
+        array.pop(resistanceLevels)
+
+if not na(pvtLow)
+    array.unshift(supportLevels, pvtLow)
+    if array.size(supportLevels) > maxPivots
+        array.pop(supportLevels)
+
+// === Use most recent pivot as key level ===
+var float keyRes = na
+var float keySup = na
+
+if array.size(resistanceLevels) > 0
+    keyRes := array.get(resistanceLevels, 0)
+if array.size(supportLevels) > 0
+    keySup := array.get(supportLevels, 0)
+
+// === Breakout signals ===
+longCond  = not na(keyRes) and close > keyRes and close[1] <= keyRes
+shortCond = not na(keySup) and close < keySup and close[1] >= keySup
+
+// === Strategy ===
+if longCond
+    strategy.entry("Long", strategy.long)
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+// === Exit ===
+if strategy.position_size > 0 and not na(keySup) and close < keySup
+    strategy.close("Long")
+if strategy.position_size < 0 and not na(keyRes) and close > keyRes
+    strategy.close("Short")
+
+plot(keyRes, "Resistance", color=color.red, style=plot.style_stepline)
+plot(keySup, "Support", color=color.green, style=plot.style_stepline)
