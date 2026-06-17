@@ -127,3 +127,5 @@ temp/
 /npm/pineforge_codegen/
 /npm/tables.json
 /npm/release.json
+/npm/transpile.worker.mjs
+/npm/glue.py
