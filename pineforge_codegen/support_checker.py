@@ -205,8 +205,12 @@ STRATEGY_EXIT_PRICE_PARAMS: frozenset[str] = frozenset({
 })
 
 # Implementable but currently silent in codegen -> reject loudly.
+#
+# max_bars_back was here ("silently dropped") but is now WIRED: codegen sizes
+# every Series<T> ring buffer to the requested depth via the engine's
+# ``Series<T>(int max_len)`` ctor (include/pineforge/series.hpp). It is no
+# longer rejected — see CodeGen._compute_max_bars_back_cap.
 NOT_YET_FUNC: dict[str, str] = {
-    "max_bars_back":            "max_bars_back is silently dropped by the codegen.",
     "timeframe.from_seconds":   "timeframe.from_seconds is not yet implemented; codegen would emit 'false' and silently produce wrong TF strings.",
 }
 

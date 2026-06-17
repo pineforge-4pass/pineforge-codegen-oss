@@ -227,9 +227,15 @@ def test_str_format_time_supported():
     assert _errors(src) == []
 
 
-def test_max_bars_back_rejected():
+def test_max_bars_back_accepted():
+    """max_bars_back is WIRED now (sizes the Series<T> ring buffer via the
+    engine's Series<T>(int max_len) ctor) — it is no longer rejected."""
     src = PRELUDE + "max_bars_back(close, 500)\n"
-    _expect_error(src, "max_bars_back")
+    assert _errors(src) == [], "max_bars_back is wired and must not be rejected"
+
+
+def test_max_bars_back_not_in_not_yet():
+    assert "max_bars_back" not in NOT_YET_FUNC
 
 
 def test_bare_barssince_rejected():

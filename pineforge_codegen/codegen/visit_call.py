@@ -444,6 +444,11 @@ class CallVisitor:
             return "0"
         if func_name in SKIP_FUNC_NAMES and namespace is None:
             return "0"
+        # max_bars_back(var, num): a history-depth DIRECTIVE, not a value.
+        # Its effect is captured in CodeGen._compute_max_bars_back_cap (which
+        # sizes every Series<T> ring buffer), so the call itself emits nothing.
+        if func_name == "max_bars_back" and namespace is None:
+            return "0"
 
         # request.* calls
         if namespace == "request":

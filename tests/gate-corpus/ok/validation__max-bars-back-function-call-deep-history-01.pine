@@ -1,0 +1,23 @@
+//@version=6
+// Purpose: anchor the now-WIRED max_bars_back(var, num) FUNCTION-call form in
+// the conformance gate. The directive sizes the engine's Series<T> ring buffer
+// (Series<T>(int max_len), include/pineforge/series.hpp) so the deep-history
+// reference close[300] retains real data instead of slipping out as na.
+strategy("Max Bars Back Function Call", overlay=true, max_bars_back=200)
+
+// Function-call form: raise the per-var retention well past the default 500
+// AND past the kwarg above, so codegen must take the MAX (1000).
+max_bars_back(close, 1000)
+
+deepRef = close[300]
+sma = ta.sma(close, 50)
+
+longCond = not na(deepRef) and close > sma and close > deepRef
+shortCond = not na(deepRef) and close < sma and close < deepRef
+
+if longCond
+    strategy.entry("L", strategy.long)
+if shortCond
+    strategy.close("L")
+
+plot(sma)
