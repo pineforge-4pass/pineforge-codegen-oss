@@ -6,3 +6,15 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  # The conformance-gate / npm-package tooling (pyodide pinned to PYODIDE_TARGET,
+  # tar caret range) — get reviewable bump PRs. NOTE: a pyodide bump must move
+  # PYODIDE_TARGET in lockstep (the gate validates against it), so review these.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  # Python dev deps (pytest).
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
