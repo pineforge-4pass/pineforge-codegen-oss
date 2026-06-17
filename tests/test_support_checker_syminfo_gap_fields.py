@@ -1,10 +1,14 @@
-"""Conditional-use warnings for ALL na-accept syminfo fields (audit item A7).
+"""Silent-gap warnings for ALL na-accept syminfo fields (audit item A7).
 
 ``_SYMINFO_SILENT_GAP_FIELDS`` used to cover only 6 fields; the metadata-
 backed fields (employees, shareholders, shares_outstanding_*,
 recommendations_*, target_price_*) and the na-literal fields (root,
-pricescale, minmove) silently returned na with NO warning when used in a
-condition. The set is now derived from SYMINFO_MEMBER_MAP so it cannot drift.
+pricescale, minmove) silently returned na with NO warning. The set is now
+derived from SYMINFO_MEMBER_MAP so it cannot drift.
+
+The warning used to fire ONLY inside an if/ternary condition, so a field read
+directly in a plain expression (``x = syminfo.pricescale * 2``) slipped out as
+na with no signal. The gate now fires for EVERY read — conditional AND plain.
 """
 import pytest
 
@@ -20,7 +24,7 @@ def _diags(src: str):
     return SupportChecker(ast).check()
 
 
-def _warnings_for(field: str):
+def _conditional_warnings_for(field: str):
     src = (
         '//@version=6\n'
         'strategy("T")\n'
@@ -30,6 +34,23 @@ def _warnings_for(field: str):
         d for d in _diags(src)
         if d.level == Level.WARNING and f"syminfo.{field}" in d.message
     ]
+
+
+def _plain_warnings_for(field: str):
+    """Field read in a plain (non-conditional) expression."""
+    src = (
+        '//@version=6\n'
+        'strategy("T")\n'
+        f'x = syminfo.{field}\n'
+    )
+    return [
+        d for d in _diags(src)
+        if d.level == Level.WARNING and f"syminfo.{field}" in d.message
+    ]
+
+
+# Back-compat alias for the original helper name.
+_warnings_for = _conditional_warnings_for
 
 
 NA_ACCEPT_FIELDS = [
@@ -52,9 +73,37 @@ NA_ACCEPT_FIELDS = [
 
 @pytest.mark.parametrize("field", NA_ACCEPT_FIELDS)
 def test_conditional_use_warns(field):
-    assert _warnings_for(field), (
+    assert _conditional_warnings_for(field), (
         f"syminfo.{field} in a condition must emit a silent-gap warning"
     )
+
+
+@pytest.mark.parametrize("field", NA_ACCEPT_FIELDS)
+def test_plain_expression_use_warns(field):
+    """A silent-gap field read OUTSIDE any conditional must warn too — the
+    bug was that such reads slipped out as na with no signal."""
+    warns = _plain_warnings_for(field)
+    assert warns, (
+        f"syminfo.{field} in a plain expression must emit a silent-gap warning"
+    )
+    # Stays a WARNING (not escalated to ERROR).
+    assert all(d.level == Level.WARNING for d in warns)
+
+
+def test_plain_arithmetic_use_warns():
+    """The exact shape from the bug report: field used directly in a number."""
+    src = (
+        '//@version=6\n'
+        'strategy("T")\n'
+        'x = syminfo.pricescale * 2.0\n'
+    )
+    warns = [
+        d for d in _diags(src)
+        if d.level == Level.WARNING and "syminfo.pricescale" in d.message
+    ]
+    assert warns, "syminfo.pricescale * 2.0 must warn (read flows out as na)"
+    errs = [d for d in _diags(src) if d.level == Level.ERROR]
+    assert errs == [], "silent-gap fields warn, they do not error"
 
 
 @pytest.mark.parametrize("field", ["mintick", "tickerid", "currency", "timezone"])

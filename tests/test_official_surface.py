@@ -397,6 +397,46 @@ def test_intentionally_rejected_cases_raise_compile_error(body):
 
 
 # ---------------------------------------------------------------------------
+# max_bars_back: now a SUPPORTED directive (was NOT_YET / silently dropped).
+# The engine's Series<T>(int max_len) ring buffer (include/pineforge/series.hpp)
+# is the wiring point: codegen sizes every Series<T> to the requested depth.
+# ---------------------------------------------------------------------------
+
+def test_max_bars_back_strategy_kwarg_sizes_series():
+    """strategy(..., max_bars_back=N) sizes the Series ring buffers to N."""
+    cpp = transpile(
+        '//@version=6\nstrategy("T", max_bars_back=1234)\nx = close[400]\nplot(x)\n'
+    )
+    assert "Series<double> _s_close{1234};" in cpp, (
+        "max_bars_back kwarg must size the bar-field Series ring buffer"
+    )
+
+
+def test_max_bars_back_function_call_sizes_series():
+    """The bare max_bars_back(var, N) function is accepted and sizes Series."""
+    cpp = transpile(
+        '//@version=6\nstrategy("T")\nmax_bars_back(close, 2048)\nx = close[400]\nplot(x)\n'
+    )
+    assert "Series<double> _s_close{2048};" in cpp
+
+
+def test_max_bars_back_takes_max_across_directives():
+    cpp = transpile(
+        '//@version=6\nstrategy("T", max_bars_back=300)\n'
+        'max_bars_back(close, 5000)\nx = close[400]\nplot(x)\n'
+    )
+    assert "Series<double> _s_close{5000};" in cpp
+
+
+def test_no_max_bars_back_leaves_series_at_engine_default():
+    """Absent the directive, Series declarations keep the bare form (engine
+    default 500) so directive-free output is byte-identical to before."""
+    cpp = transpile('//@version=6\nstrategy("T")\nx = close[10]\nplot(x)\n')
+    assert "Series<double> _s_close;" in cpp
+    assert "_s_close{" not in cpp
+
+
+# ---------------------------------------------------------------------------
 # Hard-reject table sanity
 # ---------------------------------------------------------------------------
 

@@ -12,6 +12,14 @@ const GLUE = `__GLUE__`;
 const post = (m) => self.postMessage(m);
 let transpileJson = null;
 
+// Hex-encode the SHA-256 of an ArrayBuffer using the worker's WebCrypto.
+async function sha256Hex(buf) {
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 async function init() {
   try {
     const pyodide = await loadPyodide({ indexURL: "/pyodide/" });
@@ -21,6 +29,19 @@ async function init() {
     const archiveRes = await fetch(`/pyodide/${manifest.archive}`);
     if (!archiveRes.ok) throw new Error(`fetch /pyodide/${manifest.archive}: ${archiveRes.status}`);
     const buf = await archiveRes.arrayBuffer();
+    // Defensive integrity check: verify the archive bytes against the manifest's
+    // sha256 BEFORE unpacking/running. Verify-if-present — older manifests that
+    // predate the sha256 field are accepted unchanged (forward/backward compat).
+    if (manifest.sha256) {
+      const actual = await sha256Hex(buf);
+      if (actual !== manifest.sha256) {
+        post({
+          type: "init-error",
+          error: `codegen archive sha256 mismatch — expected ${manifest.sha256} got ${actual}`,
+        });
+        return;
+      }
+    }
     pyodide.unpackArchive(buf, "gztar", { extractDir: "/codegen" });
     pyodide.runPython(GLUE);
     const fn = pyodide.globals.get("transpile_json");

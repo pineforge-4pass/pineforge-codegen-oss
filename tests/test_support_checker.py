@@ -16,6 +16,7 @@ from pineforge_codegen.support_checker import (
     HARD_REJECT_FUNC,
     HARD_REJECT_NAMESPACE,
     DIVERGENT_VARS,
+    DIVERGENT_VARS_ERROR,
     NOT_YET_FUNC,
     SECURITY_ALLOWED_PARAMS,
 )
@@ -63,16 +64,75 @@ def test_indicator_decl_rejected():
 
 
 # ---------------------------------------------------------------------------
-# Divergent built-in variables — warn, don't reject
+# Divergent built-in variables — most WARN; the mis-alias subset ERRORs
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("var_name", sorted(DIVERGENT_VARS))
+_DIVERGENT_WARN_ONLY = sorted(set(DIVERGENT_VARS) - DIVERGENT_VARS_ERROR)
+
+
+@pytest.mark.parametrize("var_name", _DIVERGENT_WARN_ONLY)
 def test_divergent_variables_warn(var_name: str):
     src = PRELUDE + f"x = {var_name}\n"
     assert _errors(src) == [], f"{var_name} should warn, not error"
     warns = _warnings(src)
     assert any("diverges" in d.message for d in warns), \
         f"expected divergence warning for {var_name}, got {[d.message for d in warns]}"
+
+
+@pytest.mark.parametrize("var_name", sorted(DIVERGENT_VARS_ERROR))
+def test_divergent_mis_alias_variables_error(var_name: str):
+    """last_bar_index / time_close are silent mis-aliases -> ERROR (rejected)."""
+    src = PRELUDE + f"x = {var_name}\n"
+    errs = _errors(src)
+    assert errs, f"{var_name} is a silent mis-alias and must ERROR, not warn"
+    assert any("diverges" in d.message for d in errs), \
+        f"expected divergence error for {var_name}, got {[d.message for d in errs]}"
+    # and it must NOT also be a warning (single diagnostic, escalated)
+    assert not any("diverges" in d.message for d in _warnings(src)), \
+        f"{var_name} should be ERROR-only, not also WARNING"
+
+
+def test_last_bar_index_errors():
+    _expect_error(PRELUDE + "x = last_bar_index\n", "last_bar_index")
+
+
+def test_time_close_errors():
+    _expect_error(PRELUDE + "x = time_close\n", "time_close")
+
+
+def test_bar_index_still_warns():
+    src = PRELUDE + "x = bar_index\n"
+    assert _errors(src) == [], "bar_index must remain a WARNING, not ERROR"
+    assert any("diverges" in d.message for d in _warnings(src))
+
+
+def test_timenow_still_warns():
+    src = PRELUDE + "x = timenow\n"
+    assert _errors(src) == [], "timenow must remain a WARNING, not ERROR"
+    assert any("diverges" in d.message for d in _warnings(src))
+
+
+def test_divergent_error_subset_is_subset():
+    assert DIVERGENT_VARS_ERROR <= set(DIVERGENT_VARS)
+    assert "bar_index" not in DIVERGENT_VARS_ERROR
+    assert "timenow" not in DIVERGENT_VARS_ERROR
+    assert {"last_bar_index", "time_close"} == set(DIVERGENT_VARS_ERROR)
+
+
+def test_time_close_function_call_not_flagged_as_divergent_var():
+    """The session-aware ``time_close(...)`` FUNCTION is distinct from the
+    bare ``time_close`` variable and must not trip the divergent-var ERROR."""
+    src = PRELUDE + 'tc = time_close("D")\n'
+    assert _errors(src) == [], (
+        "time_close(...) is a supported function; only the bare variable "
+        "should be rejected"
+    )
+    assert not any("diverges" in d.message for d in _warnings(src))
+
+
+def test_time_close_session_function_call_not_flagged():
+    src = PRELUDE + 'int tc = time_close(timeframe.period, "0930-1600", "UTC")\n'
+    assert _errors(src) == []
 
 
 # ---------------------------------------------------------------------------
@@ -167,9 +227,15 @@ def test_str_format_time_supported():
     assert _errors(src) == []
 
 
-def test_max_bars_back_rejected():
+def test_max_bars_back_accepted():
+    """max_bars_back is WIRED now (sizes the Series<T> ring buffer via the
+    engine's Series<T>(int max_len) ctor) — it is no longer rejected."""
     src = PRELUDE + "max_bars_back(close, 500)\n"
-    _expect_error(src, "max_bars_back")
+    assert _errors(src) == [], "max_bars_back is wired and must not be rejected"
+
+
+def test_max_bars_back_not_in_not_yet():
+    assert "max_bars_back" not in NOT_YET_FUNC
 
 
 def test_bare_barssince_rejected():
@@ -608,12 +674,16 @@ def test_syminfo_isin_conditional_warns():
     assert any("isin" in d.message and "returns na" in d.message for d in warns)
 
 
-def test_syminfo_sector_non_conditional_no_warn():
-    """Using syminfo.sector outside a conditional should NOT produce silent-gap warning."""
+def test_syminfo_sector_non_conditional_warns():
+    """A silent-gap field used OUTSIDE a conditional must ALSO warn now — the
+    field still slips out as na, so the read deserves the same signal as a
+    conditional use (previously it was silently dropped)."""
     src = PRELUDE + 'x = syminfo.sector\n'
     warns = _warnings(src)
-    assert not any("returns na" in d.message for d in warns), \
-        f"Unexpected silent-gap warning outside conditional: {[d.message for d in warns]}"
+    assert any("sector" in d.message and "returns na" in d.message for d in warns), \
+        f"Expected silent-gap warning for plain syminfo.sector, got: {[d.message for d in warns]}"
+    # Stays a WARNING, never escalated to ERROR.
+    assert _errors(src) == []
 
 
 # ---------------------------------------------------------------------------

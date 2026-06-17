@@ -469,6 +469,79 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._register_global_aggregate_member_types()
         self._uses_matrix = self._detect_matrix_usage()
 
+        # max_bars_back: the per-variable history depth the engine's Series<T>
+        # ring buffer should retain. Pine exposes this two ways — the
+        # ``strategy(..., max_bars_back=N)`` kwarg (global) and the
+        # ``max_bars_back(var, N)`` function (per-var). The engine's
+        # ``Series<T>(int max_len)`` ctor (default 500, include/pineforge/
+        # series.hpp) is the wiring point: reads past the retained depth return
+        # na, so honoring the directive means constructing each Series with a
+        # capacity >= the requested depth. We take the MAX requested N and apply
+        # it (via ``_series_decl_suffix`` -> ``{N}``) to the directly-declared
+        # ``Series<T>`` members — a safe superset of Pine's per-var semantics
+        # (it never retains LESS than Pine, so any history access that succeeds
+        # in Pine succeeds here). ``None`` => no directive => keep the engine
+        # default 500 (emit a bare ``Series<T>`` with no ctor arg, so
+        # directive-free output is byte-identical to before).
+        #
+        # KNOWN LIMITATION: the lazily-constructed security-helper map series
+        # (``_security_helper_series_``, the ``std::unordered_map<std::string,
+        # Series<double>>`` ~line 971) do NOT pick up the cap. Their entries are
+        # default-constructed on first ``operator[]`` access, so they always use
+        # the engine default 500 regardless of the requested ``N``. A
+        # max_bars_back directive larger than 500 is therefore not honored for
+        # history reads off security-helper series.
+        self._max_bars_back_cap: int | None = self._compute_max_bars_back_cap()
+
+    @staticmethod
+    def _int_literal_value(node: ASTNode | None) -> int | None:
+        """Return the integer value of a (possibly unary-minus) NumberLiteral,
+        or None if ``node`` is not an integer literal expression."""
+        if isinstance(node, UnaryOp) and node.op == "-":
+            inner = CodeGen._int_literal_value(node.operand)
+            return -inner if inner is not None else None
+        if isinstance(node, NumberLiteral) and isinstance(node.value, int):
+            return node.value
+        if isinstance(node, NumberLiteral) and isinstance(node.value, float):
+            # Pine accepts ``max_bars_back=5e2`` style; accept integral floats.
+            return int(node.value) if node.value.is_integer() else None
+        return None
+
+    def _compute_max_bars_back_cap(self) -> int | None:
+        """Scan the AST for max_bars_back directives (strategy() kwarg AND the
+        bare function call) and return the largest positive integer requested,
+        or None if none is present / none is a usable literal."""
+        ast = getattr(self.ctx, "ast", None)
+        if ast is None:
+            return None
+        caps: list[int] = []
+        for node in self._walk_ast(ast):
+            if isinstance(node, StrategyDecl):
+                val = self._int_literal_value(node.kwargs.get("max_bars_back"))
+                if val is not None and val > 0:
+                    caps.append(val)
+            elif (
+                isinstance(node, FuncCall)
+                and isinstance(node.callee, Identifier)
+                and node.callee.name == "max_bars_back"
+            ):
+                # max_bars_back(var, num) — second positional arg, or the
+                # ``num=`` kwarg, is the depth.
+                num_node = None
+                if len(node.args) >= 2:
+                    num_node = node.args[1]
+                elif "num" in node.kwargs:
+                    num_node = node.kwargs["num"]
+                val = self._int_literal_value(num_node)
+                if val is not None and val > 0:
+                    caps.append(val)
+        return max(caps) if caps else None
+
+    def _series_decl_suffix(self) -> str:
+        """C++ constructor-arg suffix for Series<T> member declarations. Empty
+        (engine default 500) unless a max_bars_back directive raised the cap."""
+        return f"{{{self._max_bars_back_cap}}}" if self._max_bars_back_cap else ""
+
     def _register_global_aggregate_member_types(self) -> None:
         """Infer matrix/array/map class members for global non-var declarations from RHS AST.
 
@@ -802,6 +875,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         lines: list[str] = []
 
+        # Series<T> ctor-arg suffix from any max_bars_back directive (empty when
+        # absent, so directive-free output is byte-identical to before).
+        _mbb = self._series_decl_suffix()
+
         # 1. Includes
         self._emit_includes(lines)
 
@@ -875,7 +952,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     self._security_ohlc_hist_fields_by_sec.get(sec_id, ())
                 ):
                     lines.append(
-                        f"    Series<double> {self._security_ohlc_hist_series_cpp(sec_id, field)};"
+                        f"    Series<double> {self._security_ohlc_hist_series_cpp(sec_id, field)}{_mbb};"
                     )
                 continue
             if returns_tuple and tuple_size and tuple_size > 0 and isinstance(expr_node, TupleLiteral):
@@ -896,7 +973,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 lines.append(f"    double _req_sec_{sec_id} = na<double>();")
             for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
                 lines.append(
-                    f"    Series<double> {self._security_ohlc_hist_series_cpp(sec_id, field)};"
+                    f"    Series<double> {self._security_ohlc_hist_series_cpp(sec_id, field)}{_mbb};"
                 )
 
         if self._security_calls:
@@ -911,7 +988,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 state_name = self._security_state_name(info["sec_id"], name)
                 cpp_type = self._security_cpp_type_for_mutable(name, ginfo)
                 if getattr(ginfo, "is_series", False):
-                    lines.append(f"    Series<{cpp_type}> {state_name};")
+                    lines.append(f"    Series<{cpp_type}> {state_name}{_mbb};")
                 else:
                     default = self._default_for_type(cpp_type)
                     lines.append(f"    {cpp_type} {state_name} = {default};")
@@ -938,7 +1015,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 4. Series members for bar field history
         for field_name in sorted(self.ctx.series_bar_fields):
-            lines.append(f"    Series<double> _s_{field_name};")
+            lines.append(f"    Series<double> _s_{field_name}{_mbb};")
 
         # 5. var/varip members (deduplicate by name)
         seen_var_members: set[str] = set()
@@ -987,7 +1064,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if cpp_type == "int" and self._is_int64_builtin_init(name):
                 cpp_type = "int64_t"
             if name in self.ctx.series_vars:
-                lines.append(f"    Series<{cpp_type}> {safe};")
+                lines.append(f"    Series<{cpp_type}> {safe}{_mbb};")
             else:
                 lines.append(f"    {cpp_type} {safe};")
 
@@ -996,7 +1073,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if name not in self._var_names:
                 safe = self._safe_name(name)
                 cpp_type = self._series_type_for(name)
-                lines.append(f"    Series<{cpp_type}> {safe};")
+                lines.append(f"    Series<{cpp_type}> {safe}{_mbb};")
 
         # 7. Fixnan members
         for site in self.ctx.fixnan_sites:
@@ -1009,9 +1086,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # Determine type: int for count vars, double for float vars
             if member in ("closedtrades", "opentrades", "wintrades", "losstrades",
                           "eventrades"):
-                lines.append(f"    Series<int> {svar};")
+                lines.append(f"    Series<int> {svar}{_mbb};")
             else:
-                lines.append(f"    Series<double> {svar};")
+                lines.append(f"    Series<double> {svar}{_mbb};")
 
         # 8b. Global-scope non-var declarations as class members
         #     (so user-defined functions can reference them)
@@ -1063,7 +1140,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     if self._safe_name(vname) == orig_safe:
                         cpp_type = PINE_TYPE_TO_CPP.get(ptype, "double")
                         if vname in self.ctx.series_vars:
-                            lines.append(f"    Series<{cpp_type}> {cloned_safe};")
+                            lines.append(f"    Series<{cpp_type}> {cloned_safe}{_mbb};")
                         elif vname in self._matrix_specs:
                             lines.append(f"    {self._type_spec_to_cpp(self._matrix_specs[vname])} {cloned_safe};")
                         elif vname in self._array_vars:
@@ -1078,7 +1155,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     # Non-var series var
                     if orig_safe in [self._safe_name(n) for n in self.ctx.series_vars]:
                         cpp_type = self._series_type_for(orig_safe)
-                        lines.append(f"    Series<{cpp_type}> {cloned_safe};")
+                        lines.append(f"    Series<{cpp_type}> {cloned_safe}{_mbb};")
                     else:
                         lines.append(f"    double {cloned_safe} = 0.0;")
 
