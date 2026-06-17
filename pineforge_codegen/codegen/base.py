@@ -185,19 +185,31 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # This ensures sub-function series vars get cloned for the parent's call sites.
         func_var_originals: dict[str, list[str]] = {}  # func_name -> list of original var names
 
-        # First, collect all function-scoped series vars (union across all functions)
-        all_func_scoped_series: set[str] = set()
+        # First, collect all function-scoped series vars (union across all functions).
+        # Use an ordered, de-duplicated list (NOT a set): set iteration order is
+        # PYTHONHASHSEED-randomized, and this order reaches emitted C++ member
+        # declarations via ``orig_names`` -> ``func_var_originals`` ->
+        # ``_func_cs_var_remap``. ``ctx.func_series_vars`` is a dict whose VALUES
+        # are themselves sets (analyzer stores ``dict[str, set]``), so we must
+        # iterate each value in ``sorted`` order to be hash-seed independent.
+        all_func_scoped_series: list[str] = []
         for svars in ctx.func_series_vars.values():
-            all_func_scoped_series.update(svars)
-        # Also include function-scoped var_members
-        all_func_scoped_vars: set[str] = set()
+            for sv in sorted(svars):
+                if sv not in all_func_scoped_series:
+                    all_func_scoped_series.append(sv)
+        # Also include function-scoped var_members (same ordered-list rationale).
+        # ``ctx.func_var_members`` values are lists (already insertion-ordered).
+        all_func_scoped_vars: list[str] = []
         for vlist in ctx.func_var_members.values():
             for n, _, _ in vlist:
-                all_func_scoped_vars.add(n)
+                if n not in all_func_scoped_vars:
+                    all_func_scoped_vars.append(n)
 
         # For each function with call-site cloning (has TA ranges or is called multiple times),
-        # include ALL function-scoped series/var vars that could be used in its body
-        for fname in set(ctx.func_call_site_counts.keys()):
+        # include ALL function-scoped series/var vars that could be used in its body.
+        # Iterate the dict directly (insertion-ordered) rather than ``set(...keys())``,
+        # which would randomize the order of emitted clones across hash seeds.
+        for fname in ctx.func_call_site_counts:
             total_cs = ctx.func_call_site_counts[fname]
             if total_cs <= 1:
                 continue  # No cloning needed for single-call-site functions
@@ -207,9 +219,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 for n, _, _ in ctx.func_var_members[fname]:
                     if n not in orig_names:
                         orig_names.append(n)
-            # Include function's own series vars
+            # Include function's own series vars (set -> sorted for determinism)
             if fname in ctx.func_series_vars:
-                for sv in ctx.func_series_vars[fname]:
+                for sv in sorted(ctx.func_series_vars[fname]):
                     if sv not in orig_names:
                         orig_names.append(sv)
             # Include series vars from sub-functions (they share the same class members)

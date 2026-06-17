@@ -27,3 +27,43 @@ export function compareResults(name, native, browser) {
   }
   return null;
 }
+
+// Expected verdict for a corpus branch: "ok/*" fixtures must transpile
+// successfully (result.ok === true), "err/*" fixtures must be rejected
+// (result.ok === false). Anything else — the wrong verdict, an unparseable
+// payload, or an unexpected (non-CompileError) exception — is a gate failure
+// even when native and wasm agree (two identical crashes must NOT pass).
+//
+// This is intentionally separate from compareResults so the gate enforces BOTH
+// (a) native↔wasm parity and (b) the right answer. `side` is {json} or
+// {unexpected}; `expectOk` is true for "ok", false for "err".
+function verdictOf(side) {
+  if (!side) return { kind: "missing" };
+  if (side.unexpected) return { kind: "unexpected", detail: side.unexpected };
+  try {
+    const v = JSON.parse(side.json);
+    if (typeof v.ok !== "boolean") return { kind: "malformed", detail: side.json };
+    return { kind: "verdict", ok: v.ok };
+  } catch {
+    return { kind: "malformed", detail: side.json };
+  }
+}
+
+// Returns a failure string if either side does not match the expected verdict
+// for the fixture's branch, or null if both sides produced the expected verdict.
+export function checkExpectedVerdict(name, expectOk, native, browser) {
+  for (const [label, side] of [["native", native], ["pyodide", browser]]) {
+    const r = verdictOf(side);
+    if (r.kind === "missing") return `${name}: ${label} produced no result`;
+    if (r.kind === "unexpected") {
+      return `${name}: ${label} threw an unexpected exception (expected ok=${expectOk}): ${r.detail}`;
+    }
+    if (r.kind === "malformed") {
+      return `${name}: ${label} returned a malformed result (expected ok=${expectOk}): ${r.detail}`;
+    }
+    if (r.ok !== expectOk) {
+      return `${name}: ${label} verdict ok=${r.ok} but corpus dir expects ok=${expectOk}`;
+    }
+  }
+  return null;
+}

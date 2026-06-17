@@ -36,8 +36,9 @@ jobs:
   release:
     runs-on: ubuntu-latest
     env:
-      BUMP:     ${{ inputs.bump }}
-      OVERRIDE: ${{ inputs.override }}
+      BUMP:          ${{ inputs.bump }}
+      OVERRIDE:      ${{ inputs.override }}
+      PYTHONHASHSEED: "0"   # deterministic gate runtime (match gate.yml)
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
@@ -83,7 +84,22 @@ jobs:
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"   # match the gate's runtime
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: "22"
+
+      # Conformance gate (BLOCKING): the differential parity gate must pass
+      # before anything is built, published, or tagged. A gate-broken codegen
+      # fails the release here — nothing reaches PyPI, no tag is pushed (so the
+      # tag->npm trigger never fires), and no GitHub Release is created.
+      - name: Run conformance gate (blocking)
+        run: |
+          python -m pip install -e .
+          npm ci
+          npm run gate:selftest
+          npm run gate:full
 
       - name: Build sdist + wheel
         run: |
@@ -91,8 +107,16 @@ jobs:
           python -m build
           ls -l dist/
 
-      # Commit + tag before publishing so a tag always corresponds to a built
-      # artifact set; the GitHub Release (with files) comes after PyPI succeeds.
+      # Publish to PyPI BEFORE the tag is pushed. The tag push triggers
+      # publish-pyodide.yml (npm), so PyPI must land first — otherwise a PyPI
+      # failure would leave npm shipping a version PyPI never got.
+      - name: Publish to PyPI
+        if: ${{ !inputs.dry_run }}
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
+
+      # Commit + tag + push AFTER PyPI succeeds. The `git push --tags` triggers
+      # publish-pyodide.yml for npm (which re-runs the gate — defense in depth),
+      # so the tag only exists once the gate passed and PyPI published.
       - name: Commit + tag + push
         if: ${{ !inputs.dry_run }}
         env:
@@ -104,10 +128,6 @@ jobs:
           git commit -m "release: v${NEW_VERSION}"
           git tag "v${NEW_VERSION}"
           git push origin HEAD --tags
-
-      - name: Publish to PyPI
-        if: ${{ !inputs.dry_run }}
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
 
       - name: Create GitHub Release
         if: ${{ !inputs.dry_run }}

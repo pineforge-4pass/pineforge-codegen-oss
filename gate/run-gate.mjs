@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { compareResults } from "./compare.mjs";
+import { checkExpectedVerdict, compareResults } from "./compare.mjs";
 
 const require = createRequire(import.meta.url);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -79,8 +79,14 @@ async function main() {
   });
   const native = JSON.parse(oracleOut);
 
-  // 4. Pyodide side + compare.
+  // 4. Pyodide side + compare. The gate enforces TWO independent properties:
+  //    (a) native↔wasm parity (compareResults) and
+  //    (b) the EXPECTED verdict by corpus dir (checkExpectedVerdict): ok/* must
+  //        succeed, err/* must be rejected. A purely differential check would
+  //        let two identical crashes — or an ok/ fixture that erroneously errors
+  //        — slip through; (b) closes that gap.
   const mismatches = [];
+  const verdictFailures = [];
   for (const { name, src } of items) {
     let browser;
     try {
@@ -90,6 +96,9 @@ async function main() {
     }
     const m = compareResults(name, native[name], browser);
     if (m) mismatches.push(m);
+    const expectOk = name.startsWith("ok/");
+    const v = checkExpectedVerdict(name, expectOk, native[name], browser);
+    if (v) verdictFailures.push(v);
   }
 
   // 5. release.json (versions derived from the loaded Pyodide lock).
@@ -106,11 +115,16 @@ async function main() {
   writeFileSync(join(ROOT, "release.json"), JSON.stringify(release, null, 2) + "\n");
   console.log("gate: release.json ->", JSON.stringify(release));
 
-  if (mismatches.length) {
-    console.error(`gate: ${mismatches.length} MISMATCH(es):\n` + mismatches.join("\n"));
+  if (mismatches.length || verdictFailures.length) {
+    if (mismatches.length) {
+      console.error(`gate: ${mismatches.length} PARITY MISMATCH(es):\n` + mismatches.join("\n"));
+    }
+    if (verdictFailures.length) {
+      console.error(`gate: ${verdictFailures.length} VERDICT FAILURE(s) (wrong ok/err result):\n` + verdictFailures.join("\n"));
+    }
     process.exit(1);
   }
-  console.log(`gate: PARITY OK over ${items.length} fixtures`);
+  console.log(`gate: PARITY OK over ${items.length} fixtures (verdicts asserted: ok/* succeed, err/* rejected)`);
 }
 
 main().catch((e) => {
