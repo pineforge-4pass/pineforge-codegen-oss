@@ -14,7 +14,9 @@
     "pineforge_codegen-*.tar.gz",
     "pineforge_codegen/**/*",
     "tables.json",
-    "release.json"
+    "release.json",
+    "transpile.worker.mjs",
+    "glue.py"
   ],
   "engines": {
     "node": ">=20"

@@ -31,7 +31,7 @@ const release = JSON.parse(readFileSync(RELEASE, "utf8"));
 if (release.codegen !== VERSION) fail(`release.json codegen ${release.codegen} != VERSION ${VERSION}`);
 
 // 1. Clean payload (keep tracked manifest + index).
-for (const p of ["pineforge_codegen", "tables.json", "release.json"]) {
+for (const p of ["pineforge_codegen", "tables.json", "release.json", "glue.py", "transpile.worker.mjs"]) {
   rmSync(join(NPM, p), { recursive: true, force: true });
 }
 const versionedArchive = `pineforge_codegen-${VERSION}.tar.gz`;
@@ -54,6 +54,12 @@ const tablesJson = execFileSync("python3", [join(ROOT, "scripts", "dump-tables.p
   encoding: "utf8",
 });
 writeFileSync(join(NPM, "tables.json"), tablesJson);
+
+// --- canonical glue + generated module worker (single source: gate/glue.py) ---
+const glueSrc = readFileSync(join(ROOT, "gate", "glue.py"), "utf8");
+writeFileSync(join(NPM, "glue.py"), glueSrc);
+const workerTemplate = readFileSync(join(ROOT, "scripts", "worker-template.mjs"), "utf8");
+writeFileSync(join(NPM, "transpile.worker.mjs"), workerTemplate.replace("__GLUE__", glueSrc));
 
 // 5. Sync npm/package.json version from VERSION.
 const pkgPath = join(NPM, "package.json");
