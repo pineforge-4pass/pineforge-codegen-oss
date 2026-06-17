@@ -477,11 +477,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # series.hpp) is the wiring point: reads past the retained depth return
         # na, so honoring the directive means constructing each Series with a
         # capacity >= the requested depth. We take the MAX requested N and apply
-        # it to every Series declaration — a safe superset of Pine's per-var
-        # semantics (it never retains LESS than Pine, so any history access that
-        # succeeds in Pine succeeds here). ``None`` => no directive => keep the
-        # engine default 500 (emit a bare ``Series<T>`` with no ctor arg, so
+        # it (via ``_series_decl_suffix`` -> ``{N}``) to the directly-declared
+        # ``Series<T>`` members — a safe superset of Pine's per-var semantics
+        # (it never retains LESS than Pine, so any history access that succeeds
+        # in Pine succeeds here). ``None`` => no directive => keep the engine
+        # default 500 (emit a bare ``Series<T>`` with no ctor arg, so
         # directive-free output is byte-identical to before).
+        #
+        # KNOWN LIMITATION: the lazily-constructed security-helper map series
+        # (``_security_helper_series_``, the ``std::unordered_map<std::string,
+        # Series<double>>`` ~line 971) do NOT pick up the cap. Their entries are
+        # default-constructed on first ``operator[]`` access, so they always use
+        # the engine default 500 regardless of the requested ``N``. A
+        # max_bars_back directive larger than 500 is therefore not honored for
+        # history reads off security-helper series.
         self._max_bars_back_cap: int | None = self._compute_max_bars_back_cap()
 
     @staticmethod
