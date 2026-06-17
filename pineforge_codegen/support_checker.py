@@ -10,9 +10,14 @@ Buckets:
 * HARD_REJECT_FUNC / HARD_REJECT_NAMESPACE - calls that have no PineForge
   semantics at all (e.g. ``request.financial``, ``ticker.*``).
 * DIVERGENT_VARS - built-in variables whose PineForge value diverges from
-  TradingView (e.g. ``bar_index`` depends on data window, ``last_bar_index``
-  is wrongly aliased in codegen). Reported as WARNING — these often appear
-  in visual or logging code that does not affect trade outcomes.
+  TradingView. Most are reported as WARNING (e.g. ``bar_index`` depends on the
+  data window, ``timenow`` is not wall-clock) — these often appear in visual or
+  logging code that does not affect trade outcomes. A subset
+  (DIVERGENT_VARS_ERROR: ``last_bar_index`` aliased to the *current* bar index,
+  ``time_close`` aliased to the bar *open* timestamp) are silent MIS-ALIASES:
+  they produce a plausible-looking but wrong value that flows straight into
+  trade logic, so a backtest would be silently wrong. Those are escalated to
+  ERROR (rejected) rather than merely warned.
 * NOT_YET - calls the runtime could support but the transpiler does not yet
   emit (e.g. ``max_bars_back``, bare ``barssince``).
 * request.security - only ``symbol`` / ``timeframe`` / ``expression`` allowed,
@@ -131,15 +136,24 @@ HARD_REJECT_NAMESPACE: dict[str, str] = {
 }
 
 # Built-in variables whose PineForge value diverges from TradingView semantics.
-# Demoted to WARNING — many real strategies use bar_index / time_close in
-# logging or visual logic that does not affect trade outcomes. The checker
-# still flags divergence so users see the risk.
+# Most are reported as WARNING — many real strategies use bar_index / timenow in
+# logging or visual logic that does not affect trade outcomes. The checker still
+# flags divergence so users see the risk.
+#
+# DIVERGENT_VARS_ERROR is a SUBSET that is escalated to ERROR (rejected): these
+# are silent MIS-ALIASES, not merely data-window divergences. They return a
+# plausible value that is the WRONG quantity (last_bar_index -> current bar
+# index; time_close -> bar OPEN timestamp) and that value flows directly into
+# trade logic, so the backtest would be silently wrong. A WARNING is not enough.
 DIVERGENT_VARS: dict[str, str] = {
     "bar_index":      "bar_index depends on the data window; PineForge and TradingView produce different values for the same script.",
-    "last_bar_index": "last_bar_index is incorrectly aliased to the current bar index in PineForge codegen.",
+    "last_bar_index": "last_bar_index is aliased to the CURRENT bar index in PineForge codegen (not the index of the last bar); backtest would be silently wrong — rejected.",
     "timenow":        "timenow is aliased to the current bar timestamp in PineForge; it is not real wall-clock time.",
-    "time_close":     "time_close is aliased to the bar open timestamp in PineForge; it does not represent the bar close time.",
+    "time_close":     "time_close is aliased to the bar OPEN timestamp in PineForge; it does not represent the bar close time; backtest would be silently wrong — rejected.",
 }
+
+# Subset of DIVERGENT_VARS escalated from WARNING to ERROR (see comment above).
+DIVERGENT_VARS_ERROR: frozenset[str] = frozenset({"last_bar_index", "time_close"})
 
 BARSTATE_APPROX_VARS: dict[str, str] = {
     "barstate.islast": "barstate.islast is always false in PineForge batch backtests.",
@@ -386,6 +400,12 @@ class SupportChecker:
         # request.security (barmerge.* gaps/lookahead values). While > 0 the
         # UNSUPPORTED_CONST_NAMESPACES rejection is suppressed.
         self._const_arg_ctx_depth: int = 0
+        # id()s of Identifier/MemberAccess nodes that are the *callee* of a
+        # FuncCall. A divergent built-in NAME used as a call target (e.g. the
+        # session-aware ``time_close("D")`` function, which is distinct from the
+        # bare ``time_close`` variable) must NOT be flagged as a divergent
+        # variable read. Populated as _visit_FuncCall descends into children.
+        self._callee_node_ids: set[int] = set()
 
     # -- Public API --
 
@@ -628,6 +648,12 @@ class SupportChecker:
 
     def _visit_FuncCall(self, node: FuncCall) -> None:
         ns, name = _qualified_name(node.callee)
+
+        # Mark the callee so the generic child-walk does not treat a divergent
+        # built-in *function* name (e.g. ``time_close("D")``) as a divergent
+        # *variable* read. The call's own semantics are validated here.
+        if node.callee is not None:
+            self._callee_node_ids.add(id(node.callee))
 
         if ns is None and name is None:
             self._visit_children(node)
@@ -918,8 +944,9 @@ class SupportChecker:
                      "code into the strategy script).",
             )
             return
-        if node.name in DIVERGENT_VARS:
-            self._warn(
+        if node.name in DIVERGENT_VARS and id(node) not in self._callee_node_ids:
+            emit = self._err if node.name in DIVERGENT_VARS_ERROR else self._warn
+            emit(
                 node,
                 f"{node.name} diverges from TradingView semantics in PineForge.",
                 hint=DIVERGENT_VARS[node.name],
@@ -945,8 +972,13 @@ class SupportChecker:
 
     def _visit_MemberAccess(self, node: MemberAccess) -> None:
         chain = _resolve_member_chain(node)
-        if chain is not None and chain in DIVERGENT_VARS:
-            self._warn(
+        if (
+            chain is not None
+            and chain in DIVERGENT_VARS
+            and id(node) not in self._callee_node_ids
+        ):
+            emit = self._err if chain in DIVERGENT_VARS_ERROR else self._warn
+            emit(
                 node,
                 f"{chain} diverges from TradingView semantics in PineForge.",
                 hint=DIVERGENT_VARS[chain],
