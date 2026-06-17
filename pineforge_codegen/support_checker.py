@@ -1036,14 +1036,21 @@ class SupportChecker:
         if isinstance(node.object, Identifier) and node.object.name == "syminfo":
             if node.member not in SUPPORTED_SYMINFO:
                 self._err(node, f"syminfo.{node.member} is not implemented in PineForge runtime.")
-            elif (
-                self._in_conditional_depth > 0
-                and node.member in self._SYMINFO_SILENT_GAP_FIELDS
-            ):
+            elif node.member in self._SYMINFO_SILENT_GAP_FIELDS:
+                # These fields silently return na in current PineForge. Warn on
+                # EVERY read — not just inside an if/ternary condition — because
+                # a field used directly in a plain expression (e.g. ``x =
+                # syminfo.pricescale * 2``) slips out as na with no signal too.
+                # The conditional phrasing is kept where it applies.
+                extra = (
+                    " condition will always be false."
+                    if self._in_conditional_depth > 0
+                    else " any expression using it will be na."
+                )
                 self._warn(
                     node,
-                    f"syminfo.{node.member} returns na in current PineForge; "
-                    "condition will always be false. "
+                    f"syminfo.{node.member} returns na in current PineForge;"
+                    f"{extra} "
                     "Will be backfilled by pineforge-data product.",
                 )
         self._visit_children(node)

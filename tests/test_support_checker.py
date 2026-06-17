@@ -668,12 +668,16 @@ def test_syminfo_isin_conditional_warns():
     assert any("isin" in d.message and "returns na" in d.message for d in warns)
 
 
-def test_syminfo_sector_non_conditional_no_warn():
-    """Using syminfo.sector outside a conditional should NOT produce silent-gap warning."""
+def test_syminfo_sector_non_conditional_warns():
+    """A silent-gap field used OUTSIDE a conditional must ALSO warn now — the
+    field still slips out as na, so the read deserves the same signal as a
+    conditional use (previously it was silently dropped)."""
     src = PRELUDE + 'x = syminfo.sector\n'
     warns = _warnings(src)
-    assert not any("returns na" in d.message for d in warns), \
-        f"Unexpected silent-gap warning outside conditional: {[d.message for d in warns]}"
+    assert any("sector" in d.message and "returns na" in d.message for d in warns), \
+        f"Expected silent-gap warning for plain syminfo.sector, got: {[d.message for d in warns]}"
+    # Stays a WARNING, never escalated to ERROR.
+    assert _errors(src) == []
 
 
 # ---------------------------------------------------------------------------
