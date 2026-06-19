@@ -52,6 +52,45 @@ def test_source_type():
     assert inp["type"] == "source"
 
 
+def test_plain_input_int_form_type():
+    r = _full("len = input(10, \"Xi\")\n")
+    inp = next(i for i in r["inputs"] if i["title"] == "Xi")
+    assert inp["type"] == "int"
+    assert inp["default"] == 10
+
+
+def test_plain_input_float_form_type():
+    r = _full("f = input(1.5, \"Xf\")\n")
+    inp = next(i for i in r["inputs"] if i["title"] == "Xf")
+    assert inp["type"] == "float"
+    assert inp["default"] == 1.5
+
+
+def test_plain_input_bool_form_type():
+    r = _full("b = input(true, \"Xb\")\n")
+    inp = next(i for i in r["inputs"] if i["title"] == "Xb")
+    assert inp["type"] == "bool"
+    assert inp["default"] is True
+
+
+def test_plain_input_string_form_type():
+    r = _full("s = input(\"a\", \"Xs\")\n")
+    inp = next(i for i in r["inputs"] if i["title"] == "Xs")
+    assert inp["type"] == "string"
+    assert inp["default"] == "a"
+
+
+def test_non_const_minval_bound_omitted():
+    # minval bound referencing a prior const-assigned identifier is non-literal
+    # at the call site -> "min" omitted, no crash, other facets unaffected.
+    r = _full("somevar = 2\nlen = input.int(14, \"Len\", minval=somevar, maxval=200, step=2)\n")
+    inp = next(i for i in r["inputs"] if i["title"] == "Len")
+    assert inp["default"] == 14
+    assert "min" not in inp
+    assert inp["max"] == 200
+    assert inp["step"] == 2
+
+
 def test_zero_inputs():
     r = _full("a = close + 1\n")
     assert r["inputs"] == []

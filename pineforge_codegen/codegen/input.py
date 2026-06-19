@@ -276,15 +276,34 @@ class InputHelper:
             names, merged = self._merged_args(node, func_name, namespace)
             title = self._get_input_title(node, var_name=stmt.name)
             default_node = self._get_input_default(node)
-            type_key = func_name if namespace == "input" else "string"
+            default_val = (
+                self._literal_or_none(default_node)
+                if default_node is not None
+                else None
+            )
+            if namespace == "input":
+                form_type = self._FORM_TYPE.get(func_name, "string")
+            else:
+                # Plain ``input(...)``: Pine types the result by its defval.
+                # The codegen already emits the matching scalar getter, so the
+                # manifest must mirror that — infer from the resolved default's
+                # Python type. ``bool`` MUST be tested before ``int`` because
+                # ``isinstance(True, int)`` is True. A None/non-literal default
+                # falls back to "string".
+                if isinstance(default_val, bool):
+                    form_type = "bool"
+                elif isinstance(default_val, int):
+                    form_type = "int"
+                elif isinstance(default_val, float):
+                    form_type = "float"
+                elif isinstance(default_val, str):
+                    form_type = "string"
+                else:
+                    form_type = "string"
             entry: dict = {
                 "title": title,
-                "type": self._FORM_TYPE.get(type_key, "string"),
-                "default": (
-                    self._literal_or_none(default_node)
-                    if default_node is not None
-                    else None
-                ),
+                "type": form_type,
+                "default": default_val,
             }
             # Pull min/max/step/options by signature param name; emit only
             # const literals so the override form never references a runtime
