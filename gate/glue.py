@@ -9,13 +9,13 @@ import sys
 if "/codegen" not in sys.path:
     sys.path.insert(0, "/codegen")
 
-from pineforge_codegen import transpile
+from pineforge_codegen import transpile_full
 from pineforge_codegen.errors import CompileError
 
 
 def transpile_json(source: str) -> str:
     try:
-        cpp = transpile(source)
+        full = transpile_full(source)
     except CompileError as e:
         diags = []
         for d in e.diagnostics:
@@ -32,4 +32,4 @@ def transpile_json(source: str) -> str:
                 entry["endCol"] = end_col
             diags.append(entry)
         return json.dumps({"ok": False, "error": str(e), "diagnostics": diags})
-    return json.dumps({"ok": True, "cpp": cpp})
+    return json.dumps({"ok": True, "cpp": full["cpp"], "inputs": full["inputs"], "strategyParams": full["strategyParams"]})
