@@ -51,3 +51,42 @@ def transpile(pine_source: str, *, check_support: bool = True, filename: str = "
     # ``if (trace_enabled_) { trace(...); ... }`` block.
     ctx.pf_trace_pragmas = pragmas
     return CodeGen(ctx).generate()
+
+
+def transpile_full(pine_source: str, *, check_support: bool = True,
+                   filename: str = "<input>") -> dict:
+    """Transpile like :func:`transpile`, plus the host-UI input manifest.
+
+    Runs ONE pipeline pass (Lexer -> Parser -> support check -> Analyzer ->
+    CodeGen.generate) and returns the generated C++ alongside the data the
+    cloud Studio needs to auto-build a backtest "override params" form:
+
+    - ``cpp``: the generated C++ source (identical to :func:`transpile`).
+    - ``inputs``: a list of ``InputDef`` dicts (one per top-level
+      ``var = input.*(...)`` declaration). Each has ``title`` / ``type`` /
+      ``default`` and optionally ``min`` / ``max`` / ``step`` / ``options``
+      (omitted when the corresponding signature argument is absent or
+      references a non-const value). See
+      :meth:`CodeGen.extract_input_manifest`.
+    - ``strategyParams``: the literal ``strategy(...)`` kwargs the analyzer
+      surfaced (e.g. ``initial_capital``, ``pyramiding``).
+
+    Args mirror :func:`transpile`.
+
+    Returns:
+        ``{"cpp": str, "inputs": list[dict], "strategyParams": dict}``.
+    """
+    pragmas = extract_pf_trace_pragmas(pine_source)
+    tokens = Lexer(pine_source, filename=filename).tokenize()
+    ast = Parser(tokens, source=pine_source, filename=filename).parse()
+    if check_support:
+        check_support_or_raise(ast, filename=filename)
+    ctx = Analyzer(ast, filename=filename).analyze()
+    ctx.pf_trace_pragmas = pragmas
+    gen = CodeGen(ctx)
+    cpp = gen.generate()
+    return {
+        "cpp": cpp,
+        "inputs": gen.extract_input_manifest(),
+        "strategyParams": dict(ctx.strategy_params),
+    }

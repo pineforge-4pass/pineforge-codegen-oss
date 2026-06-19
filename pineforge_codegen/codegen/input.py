@@ -15,12 +15,31 @@ Mixin contract — host class must provide:
 
 from __future__ import annotations
 
-from ..ast_nodes import FuncCall, Identifier, MemberAccess, StringLiteral
+from ..ast_nodes import (
+    BoolLiteral,
+    FuncCall,
+    Identifier,
+    MemberAccess,
+    NumberLiteral,
+    StringLiteral,
+    VarDecl,
+)
 from .. import signatures as sigs
 
 
 class InputHelper:
     """``input.*`` call analysis helpers — defaults, titles, getter dispatch, enum guard."""
+
+    # Maps the input function short-name -> the form-facing type tag emitted in
+    # the input manifest (consumed by the host UI's override form). ``price``
+    # is a float slider, ``time`` an int timestamp; everything string-like
+    # collapses to "string".
+    _FORM_TYPE = {
+        "int": "int", "float": "float", "bool": "bool", "string": "string",
+        "source": "source", "enum": "enum", "price": "float", "time": "int",
+        "color": "string", "timeframe": "string", "session": "string",
+        "symbol": "string", "text_area": "string",
+    }
 
     def _is_input_call(self, node: FuncCall) -> bool:
         """True if ``node`` is an ``input(...)`` or ``input.<type>(...)`` call."""
@@ -187,3 +206,106 @@ class InputHelper:
                 f"{ename}.{dv.member} is not a member of enum {ename} "
                 "(internal: Analyzer should reject this first)"
             )
+
+    # ------------------------------------------------------------------
+    # Input manifest extraction (host UI override-form source of truth)
+    # ------------------------------------------------------------------
+
+    def _literal_or_none(self, node):
+        """Return a JSON scalar for a *const* literal AST node, else None.
+
+        ``None`` signals non-const (an identifier, computed expression, …) so
+        callers can omit a bound/option that references a runtime value.
+        Enum member refs (``Dir.Up``) collapse to the ``"Dir.Up"`` string tag.
+        """
+        if isinstance(node, StringLiteral):
+            return node.value
+        # BoolLiteral must be checked before NumberLiteral: a Pine ``true`` is a
+        # BoolLiteral (not a NumberLiteral), but guarding the order keeps intent
+        # explicit and future-proof against bool/int node overlap.
+        if isinstance(node, BoolLiteral):
+            return node.value
+        if isinstance(node, NumberLiteral):
+            return node.value
+        # enum member ref like ``Dir.Up`` -> "Dir.Up" (string tag)
+        if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
+            return f"{node.object.name}.{node.member}"
+        return None
+
+    def _merged_args(self, node: FuncCall, func_name, namespace):
+        """Merge positional args + kwargs into signature-positional order.
+
+        Returns ``(param_names | None, merged_list)``. Mirrors the merge logic
+        in :meth:`_get_input_title` / :meth:`_get_input_default` so manifest
+        extraction reads bounds/options off the same positions codegen does.
+        """
+        if namespace == "input" and func_name in sigs.INPUT_FUNCTIONS:
+            names = sigs.get_param_names("input", func_name)
+        elif func_name == "input" and namespace is None:
+            names = sigs.get_param_names(None, "input")
+        else:
+            names = None
+        merged = list(node.args)
+        if names:
+            for i, pname in enumerate(names):
+                if pname in node.kwargs:
+                    while len(merged) <= i:
+                        merged.append(None)
+                    if merged[i] is None:
+                        merged[i] = node.kwargs[pname]
+        return names, merged
+
+    def extract_input_manifest(self) -> list[dict]:
+        """Walk top-level ``var = input.*(...)`` decls into an InputDef list.
+
+        Each entry: ``{title, type, default[, min, max, step, options]}``. The
+        optional keys are emitted only when the corresponding signature
+        argument is a const literal; a bound/option referencing a non-literal
+        is omitted (never crashes). One pass over ``self.ctx.ast.body``.
+        """
+        out: list[dict] = []
+        for stmt in self.ctx.ast.body:
+            if not (
+                isinstance(stmt, VarDecl)
+                and isinstance(stmt.value, FuncCall)
+                and self._is_input_call(stmt.value)
+            ):
+                continue
+            node = stmt.value
+            func_name, namespace = self._resolve_callee(node.callee)
+            names, merged = self._merged_args(node, func_name, namespace)
+            title = self._get_input_title(node, var_name=stmt.name)
+            default_node = self._get_input_default(node)
+            type_key = func_name if namespace == "input" else "string"
+            entry: dict = {
+                "title": title,
+                "type": self._FORM_TYPE.get(type_key, "string"),
+                "default": (
+                    self._literal_or_none(default_node)
+                    if default_node is not None
+                    else None
+                ),
+            }
+            # Pull min/max/step/options by signature param name; emit only
+            # const literals so the override form never references a runtime
+            # value it can't reproduce.
+            if names:
+                idx = {n: i for i, n in enumerate(names)}
+                for key, pname in (("min", "minval"), ("max", "maxval"), ("step", "step")):
+                    i = idx.get(pname)
+                    if i is not None and i < len(merged) and merged[i] is not None:
+                        v = self._literal_or_none(merged[i])
+                        # bool is an int subclass — exclude it from numeric bounds
+                        if isinstance(v, (int, float)) and not isinstance(v, bool):
+                            entry[key] = v
+                oi = idx.get("options")
+                if oi is not None and oi < len(merged) and merged[oi] is not None:
+                    opts_node = merged[oi]
+                    elems = getattr(opts_node, "elements", None)
+                    if elems is not None:
+                        vals = [self._literal_or_none(e) for e in elems]
+                        # any non-const element -> omit the whole options list
+                        if vals and all(isinstance(v, str) for v in vals):
+                            entry["options"] = vals
+            out.append(entry)
+        return out
