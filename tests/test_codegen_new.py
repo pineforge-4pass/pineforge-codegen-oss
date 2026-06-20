@@ -43,6 +43,40 @@ strategy("Test")
     assert "run_backtest" in cpp  # backward compat
 
 
+def test_run_backtest_full_routes_to_tf_aware_run_when_only_script_tf_set():
+    """Regression: a chosen script_tf must not be silently ignored.
+
+    The cloud caller passes ``input_tf=""`` (auto-detect) with a concrete
+    ``script_tf`` (e.g. "240"). The old ``run_backtest_full`` guard required
+    BOTH timeframes present (``!itf.empty() && !stf.empty() && itf != stf``),
+    so an empty input_tf made ``needs_full_run`` false and the strategy ran
+    on raw 1m bars — the chosen script_tf was dropped and no aggregation
+    happened. The fix over-approximates: route through the TF-aware overload
+    whenever ANY TF/magnifier knob is set.
+
+    This pins the emitted guard so the regression cannot silently return.
+    ``run_backtest_full`` is emitted for every strategy (no security calls
+    needed), so a bare strategy exercises the shim guard. The precalc-gating
+    ``run(...)`` overload is only emitted when there is a static TA call
+    site (``ta.sma`` here), so the body uses one to cover both guards.
+    """
+    cpp = _generate('//@version=6\nstrategy("T")\nx = ta.sma(close, 14)\nplot(x)\n')
+
+    # The C ABI shim guard must fire on a non-empty script_tf alone.
+    assert "bool needs_full_run = (bar_magnifier != 0)" in cpp
+    assert "|| !itf.empty() || !stf.empty();" in cpp
+    # The old AND-of-both-TFs guard must be gone.
+    assert "!itf.empty() && !stf.empty() && itf != stf" not in cpp
+
+    # The run(...) overload that gates precalc must also route dynamically
+    # whenever either TF is set (not only when both differ).
+    assert (
+        "bool needs_dynamic = bar_magnifier || !input_tf.empty() || !script_tf.empty();"
+        in cpp
+    )
+    assert "!input_tf.empty() && !script_tf.empty() && input_tf != script_tf" not in cpp
+
+
 # === Task 9: Basic structure and translations ===
 
 
