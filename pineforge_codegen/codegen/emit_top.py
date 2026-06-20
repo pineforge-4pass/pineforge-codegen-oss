@@ -611,17 +611,27 @@ class TopLevelEmitter:
             lines.append("                   static_cast<MagnifierDistribution>(magnifier_dist));")
         else:
             # The magnifier-aware run() overload handles ratio=1 (no
-            # aggregation) and empty itf/stf (auto-detect) on its own, so
-            # we only need to fall back to the simple ``run(bars, n)``
-            # path when the caller explicitly opted out of magnifier AND
-            # there is no timeframe aggregation in play. Previously the
-            # short-circuit ``itf.empty() || stf.empty() || itf == stf``
-            # silently dropped the bar_magnifier flag whenever the host
-            # passed empty TFs (the validator's default) — turning every
-            # magnifier-opt-in run into a non-magnifier run and producing
-            # 0.21% exit-price drift on the magnifier-distribution probes.
+            # aggregation), empty itf (auto-detect from bar timestamps),
+            # and empty stf (default-to-input) entirely on its own, so we
+            # route through it whenever ANY TF/magnifier knob is set. We
+            # only fall back to the simple ``run(bars, n)`` path when the
+            # caller passed NO magnifier AND NO timeframe at all.
+            #
+            # The previous guard ``(!itf.empty() && !stf.empty() && itf != stf)``
+            # required BOTH timeframes to be present before aggregating.
+            # The cloud caller passes ``input_tf=""`` (auto-detect) with a
+            # concrete ``script_tf="240"``; that made the guard false and
+            # the chosen ``script_tf`` was silently ignored — the strategy
+            # ran on raw 1m bars with no aggregation. It also dropped the
+            # bar_magnifier flag whenever the host passed empty TFs,
+            # producing 0.21% exit-price drift on the magnifier probes.
+            #
+            # Over-approximating to ``!itf.empty() || !stf.empty()`` is
+            # always correct: the TF-aware overload is a no-op when the
+            # ratio resolves to 1, so the only thing lost in that case is
+            # the precalc optimization — never correctness.
             lines.append("        bool needs_full_run = (bar_magnifier != 0)")
-            lines.append("            || (!itf.empty() && !stf.empty() && itf != stf);")
+            lines.append("            || !itf.empty() || !stf.empty();")
             lines.append("        if (!needs_full_run) {")
             lines.append("            strat->run(bars, n);")
             lines.append("        } else {")
@@ -865,7 +875,7 @@ class TopLevelEmitter:
         lines.append("             bool bar_magnifier = false,")
         lines.append("             int magnifier_samples = 4,")
         lines.append("             MagnifierDistribution magnifier_dist = MagnifierDistribution::ENDPOINTS) {")
-        lines.append("        bool needs_dynamic = bar_magnifier || (!input_tf.empty() && !script_tf.empty() && input_tf != script_tf);")
+        lines.append("        bool needs_dynamic = bar_magnifier || !input_tf.empty() || !script_tf.empty();")
         lines.append("        if (needs_dynamic) {")
         lines.append("            _use_precalc = false;")
         lines.append("        } else {")
