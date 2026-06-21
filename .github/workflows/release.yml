@@ -40,12 +40,24 @@ jobs:
       OVERRIDE:      ${{ inputs.override }}
       PYTHONHASHSEED: "0"   # deterministic gate runtime (match gate.yml)
     steps:
+      # Org GitHub App token (no PAT — never expires). Authorizes BOTH the
+      # release commit/tag push to protected main (the App is a bypass actor on
+      # the org ruleset) AND the downstream hub dispatch. Scoped to this repo +
+      # the hub. Minted first so checkout can push with it.
+      - name: Mint org App token
+        id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.PINEFORGE_APP_ID }}
+          private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
+          owner: pineforge-4pass
+          repositories: pineforge-codegen-oss,pineforge-release
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
-          # PAT (RELEASE_PAT) needed if a branch ruleset on `main` blocks
-          # GITHUB_TOKEN pushes. Falls back to GITHUB_TOKEN if unset.
-          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          # App token bypasses the main ruleset for the release commit/tag push.
+          token: ${{ steps.app.outputs.token }}
 
       - name: Compute new version
         id: ver
@@ -132,8 +144,8 @@ jobs:
       - name: Create GitHub Release
         if: ${{ !inputs.dry_run }}
         env:
-          # Org disables write for the default Actions token; use the admin PAT.
-          GH_TOKEN:    ${{ secrets.RELEASE_PAT }}
+          # Org disables write for the default Actions token; use the App token.
+          GH_TOKEN:    ${{ steps.app.outputs.token }}
           NEW_VERSION: ${{ steps.ver.outputs.new }}
         run: |
           gh release create "v${NEW_VERSION}" \
@@ -145,18 +157,8 @@ jobs:
       # Notify the pineforge-release hub: it bumps its CODEGEN_VERSION pin,
       # rebuilds the combined image, and fans out to the MCPs. FAIL LOUD (no
       # continue-on-error) — a dropped notify means downstream never picks up the
-      # new codegen. Credential is the org GitHub App (no PAT; minted at runtime,
-      # never expires). Runs AFTER the PyPI publish so the version is installable.
-      - name: Mint org App token (hub dispatch)
-        id: app
-        if: ${{ !inputs.dry_run }}
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.PINEFORGE_APP_ID }}
-          private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
-          owner: pineforge-4pass
-          repositories: pineforge-release
-
+      # new codegen. Uses the App token minted above (no PAT). Runs AFTER the
+      # PyPI publish so the version is installable.
       - name: Dispatch codegen-release -> pineforge-release
         if: ${{ !inputs.dry_run }}
         env:
