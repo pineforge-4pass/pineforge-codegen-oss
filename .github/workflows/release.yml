@@ -141,3 +141,32 @@ jobs:
             --generate-notes \
             --notes "Install: \`pip install pineforge-codegen==${NEW_VERSION}\`" \
             dist/*
+
+      # Notify the pineforge-release hub: it bumps its CODEGEN_VERSION pin,
+      # rebuilds the combined image, and fans out to the MCPs. FAIL LOUD (no
+      # continue-on-error) — a dropped notify means downstream never picks up the
+      # new codegen. Credential is the org GitHub App (no PAT; minted at runtime,
+      # never expires). Runs AFTER the PyPI publish so the version is installable.
+      - name: Mint org App token (hub dispatch)
+        id: app
+        if: ${{ !inputs.dry_run }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.PINEFORGE_APP_ID }}
+          private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
+          owner: pineforge-4pass
+          repositories: pineforge-release
+
+      - name: Dispatch codegen-release -> pineforge-release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN:    ${{ steps.app.outputs.token }}
+          NEW_VERSION: ${{ steps.ver.outputs.new }}
+          RUN_ID:      ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh api repos/pineforge-4pass/pineforge-release/dispatches \
+            -f event_type=codegen-release \
+            -F "client_payload[version]=${NEW_VERSION}" \
+            -F "client_payload[run_id]=${RUN_ID}"
+          echo "dispatched codegen-release -> pineforge-release (${NEW_VERSION})"
