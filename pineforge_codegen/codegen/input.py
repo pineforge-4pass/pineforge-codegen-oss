@@ -156,6 +156,27 @@ class InputHelper:
             return "get_input_int"
         return "get_input_double"
 
+    def _is_source_input(self, node: FuncCall) -> bool:
+        """True if an ``input.*`` call yields a *live per-bar source series*.
+
+        Covers both ``input.source(<native series>)`` and a bare
+        ``input(<native series>)`` — in Pine v6 ``input(close)`` is the
+        source-input overload and behaves like ``input.source(close)``,
+        returning a series that tracks ``close`` every bar (not a constant
+        frozen at the first bar). The defval is restricted to the native
+        OHLCV series the engine can resolve at runtime (the same set
+        ``input.source`` is restricted to); a bare ``input(14)`` /
+        ``input(\"x\")`` / ``input(true)`` stays a frozen scalar."""
+        func_name, namespace = self._resolve_callee(node.callee)
+        if namespace == "input" and func_name == "source":
+            return True
+        if func_name == "input" and namespace is None:
+            default = self._get_input_default(node)
+            if (isinstance(default, Identifier)
+                    and default.name in self._NATIVE_SOURCE_SERIES):
+                return True
+        return False
+
     def _source_defval_to_base_series(self, default) -> str:
         """Map an input.source defval (close/high/hl2/…) to its engine base
         source series member (``_src_close_`` …). Falls back to
@@ -175,8 +196,10 @@ class InputHelper:
         series and we read its current value; a subscripted source var is
         already tracked as a series var by the analyzer so ``src[1]`` lowers
         to a Series subscript. Every other input type routes through the
-        scalar getter table."""
-        if namespace == "input" and func_name == "source":
+        scalar getter table. A bare ``input(<native series>)`` is the Pine
+        source-input overload and is rendered identically to
+        ``input.source``."""
+        if self._is_source_input(node):
             default = self._get_input_default(node)
             base = self._source_defval_to_base_series(default)
             return f'get_input_source("{title}", {base})[0]'

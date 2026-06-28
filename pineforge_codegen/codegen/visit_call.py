@@ -920,6 +920,11 @@ class CallVisitor:
                     if f_cpp_type == "int" and "na<double>" in val:
                         val = val.replace("na<double>()", "0")
                     field_inits.append(f".{f.name} = {val}")
+            # Mark the constructed object non-na (the struct's ``__pf_na`` is the
+            # last declared field, so this designator stays in declaration order).
+            # A bare default-constructed UDT keeps ``__pf_na = true`` (na); only a
+            # real ``.new(...)`` flips it false so ``na(obj)`` reports correctly.
+            field_inits.append(".__pf_na = false")
             return f"{namespace}{{{', '.join(field_inits)}}}"
 
         # UDT copy: TypeName.copy(obj)
