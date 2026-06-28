@@ -19,6 +19,11 @@ Activation contract (env vars):
   ``/opt/homebrew/include/eigen3`` if present, else
   ``/usr/local/include/eigen3``. Skips the test when no Eigen tree is
   resolvable.
+* ``PINEFORGE_GENERATED_INCLUDE`` — optional path to the include dir holding
+  the CMake-generated ``pineforge/version.h``. Auto-resolved when unset:
+  the engine include itself, then any ``build*/include`` beside the engine
+  checkout, then a stub synthesized from ``version.h.in`` + ``VERSION`` — so
+  the syntax check works even without a configured CMake build.
 * ``CXX`` — compiler binary; defaults to ``g++``.
 
 If any of the above is missing, the calling test is skipped via
@@ -91,9 +96,68 @@ def _resolve_compiler() -> str | None:
     return shutil.which(name)
 
 
+def _synthesize_version_header(engine_inc: Path, template: Path) -> Path | None:
+    """Render ``version.h.in`` into a temp include dir so -fsyntax-only resolves
+    ``<pineforge/version.h>`` even with no CMake build. The macros are pure
+    version strings (no ABI/structural effect), so values from the ``VERSION``
+    file with an ``unknown`` git sha are sufficient for a syntax check."""
+    version = "0.0.0"
+    vf = engine_inc.parent / "VERSION"
+    if vf.is_file():
+        version = (vf.read_text().strip() or version).splitlines()[0]
+    major, minor, patch = (version.split(".") + ["0", "0", "0"])[:3]
+    repl = {
+        "PINEFORGE_VERSION_MAJOR": major,
+        "PINEFORGE_VERSION_MINOR": minor,
+        "PINEFORGE_VERSION_PATCH": patch,
+        "PINEFORGE_VERSION_MMP": version,
+        "PINEFORGE_VERSION_FULL": version,
+        "PINEFORGE_VERSION_GIT_SHA": "unknown",
+    }
+    text = template.read_text()
+    for key, val in repl.items():
+        text = text.replace(f"@{key}@", val)
+    if "@" in text:  # an unsubstituted placeholder would be invalid C++
+        return None
+    out = Path(tempfile.gettempdir()) / "pineforge_codegen_genhdr" / "include"
+    (out / "pineforge").mkdir(parents=True, exist_ok=True)
+    (out / "pineforge" / "version.h").write_text(text)
+    return out
+
+
+def _resolve_generated_include(engine_inc: Path | None) -> Path | None:
+    """Resolve a dir that supplies the CMake-generated ``<pineforge/version.h>``.
+
+    ``version.h`` is generated from ``include/pineforge/version.h.in`` into a
+    build tree, so a fresh source checkout's ``include/`` does not contain it.
+    Resolve it generically so the syntax check does not fail on the very first
+    include. Order: (1) already present on the engine include path -> nothing to
+    add; (2) ``PINEFORGE_GENERATED_INCLUDE`` override; (3) any ``build*/include``
+    beside the engine checkout; (4) a synthesized stub from ``version.h.in``.
+    Returns a dir to add with ``-I`` (or ``None`` when already resolvable).
+    """
+    if engine_inc is None:
+        return None
+    if (engine_inc / "pineforge" / "version.h").is_file():
+        return None
+    candidates: list[Path] = []
+    env = os.environ.get("PINEFORGE_GENERATED_INCLUDE", "")
+    if env:
+        candidates.append(Path(env).expanduser())
+    candidates.extend(sorted(engine_inc.parent.glob("build*/include")))
+    for cand in candidates:
+        if (cand / "pineforge" / "version.h").is_file():
+            return cand.resolve()
+    template = engine_inc / "pineforge" / "version.h.in"
+    if template.is_file():
+        return _synthesize_version_header(engine_inc, template)
+    return None
+
+
 _ENGINE_INC = _resolve_engine_include()
 _EIGEN_INC = _resolve_eigen_include()
 _COMPILER = _resolve_compiler()
+_GENERATED_INC = _resolve_generated_include(_ENGINE_INC)
 
 
 def have_compile_env() -> bool:
@@ -150,8 +214,12 @@ def compile_cpp(cpp_source: str, *, label: str = "snippet") -> None:
             "-fsyntax-only",
             "-I", str(_ENGINE_INC),
             "-I", str(_EIGEN_INC),
-            cpp_path,
         ]
+        if _GENERATED_INC is not None:
+            # Supplies the CMake-generated <pineforge/version.h> (absent from a
+            # fresh source checkout's include/).
+            cmd += ["-I", str(_GENERATED_INC)]
+        cmd.append(cpp_path)
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=60,
         )
