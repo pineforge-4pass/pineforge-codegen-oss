@@ -160,9 +160,12 @@ def test_unknown_request_function_rejected():
     _expect_error(src, "Only request.security")
 
 
-def test_color_from_gradient_rejected():
+def test_color_from_gradient_warns_not_rejected():
+    # Cosmetic charting helper: no backtest-logic effect. Warned (no-op),
+    # not rejected; codegen emits a default color.
     src = PRELUDE + "c = color.from_gradient(close, 0, 100, color.red, color.green)\n"
-    _expect_error(src, "color.from_gradient")
+    assert not _errors(src)
+    assert any("from_gradient" in w.message for w in _warnings(src))
 
 
 def test_unknown_color_function_rejected():
@@ -282,18 +285,23 @@ def test_request_security_lookahead_off_kwarg_passes():
     assert _errors(src) == []
 
 
-def test_request_security_lookahead_on_kwarg_rejected():
+def test_request_security_lookahead_on_kwarg_warns():
+    # lookahead_on is engine-supported (base.py forwards the flag, emit_top.py
+    # registers it, engine_security.cpp dispatches the partial HTF eval). It is
+    # allowed but flagged as a data-sensitive parity warning, not rejected.
     src = (PRELUDE +
            'a = request.security(syminfo.tickerid, "60", close, '
            'lookahead=barmerge.lookahead_on)\n')
-    _expect_error(src, "lookahead_on")
+    assert _errors(src) == []
+    assert any("lookahead_on" in d.message for d in _warnings(src))
 
 
-def test_request_security_lookahead_on_positional_rejected():
+def test_request_security_lookahead_on_positional_warns():
     src = (PRELUDE +
            'a = request.security(syminfo.tickerid, "60", close, '
            'barmerge.gaps_off, barmerge.lookahead_on)\n')
-    _expect_error(src, "lookahead_on")
+    assert _errors(src) == []
+    assert any("lookahead_on" in d.message for d in _warnings(src))
 
 
 def test_request_security_gaps_barmerge_kwarg_passes():

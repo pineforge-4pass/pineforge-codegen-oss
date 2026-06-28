@@ -6,12 +6,15 @@ from pineforge_codegen.support_checker import SupportChecker
 from pineforge_codegen.errors import CompileError
 
 
-def test_bare_color_cast_rejected():
+def test_bare_color_cast_warns_not_rejected():
+    # Bare color(...) cast is cosmetic (no backtest-logic effect): warned
+    # (no-op), not rejected; codegen emits a default color.
     src = '''//@version=6
 strategy("t")
 x = color(close)
 '''
     tokens = Lexer(src).tokenize()
     ast = Parser(tokens).parse()
-    with pytest.raises(CompileError, match=r"\bcolor\b"):
-        SupportChecker(ast).check_or_raise()
+    SupportChecker(ast).check_or_raise()  # must not raise
+    diags = SupportChecker(ast).check()
+    assert any("color" in d.message for d in diags)

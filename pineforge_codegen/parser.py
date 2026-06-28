@@ -501,6 +501,16 @@ class Parser:
               and self._current().value not in ("na",)):
             # Complex type: array<float>, table, etc.
             type_hint = self._parse_type_hint_string()
+        elif (self._current().type == TokenType.IDENT
+              and self._peek().type == TokenType.LBRACKET
+              and self._peek(2).type == TokenType.RBRACKET):
+            # Postfix-array of a non-primitive / UDT element type, e.g.
+            # ``var line[] lines = ...`` or ``var store[] xs = ...``. The
+            # empty ``[]`` can only form a type here (a subscript index would
+            # be non-empty), so this is unambiguously ``array<T>``. Without
+            # this branch the ``[]`` is left unconsumed, the name fails to
+            # parse, and the whole declaration is silently dropped.
+            type_hint = self._parse_type_hint_string()
 
         name_tok = self._consume(TokenType.IDENT)
         self._consume(TokenType.EQUALS)

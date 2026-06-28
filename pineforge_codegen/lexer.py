@@ -273,9 +273,16 @@ class Lexer:
                 self._read_token()
             if not self._at_end() and self.source[self.pos] == "\n":
                 self._advance()
-            # If parens closed on this line, emit NEWLINE so parser sees end of statement
+            # If parens closed on this line, end the statement UNLESS the line
+            # ends with a continuation token (e.g. trailing operator), in which
+            # case the next line continues the same logical line.
             if self.paren_depth == 0 and emitted_in_parens:
-                self._emit(TokenType.NEWLINE, "\\n", self.line - 1, self.col)
+                last_token = self.tokens[-1] if self.tokens else None
+                if last_token and last_token.type in self.CONTINUATION_TOKENS:
+                    self._in_continuation = True
+                else:
+                    self._in_continuation = False
+                    self._emit(TokenType.NEWLINE, "\\n", self.line - 1, self.col)
             return
 
         # Indentation handling
@@ -290,9 +297,24 @@ class Lexer:
         else:
             indent_level = len(raw) // 4
 
+        # Operator-first line continuation: when a line *begins* with a binary
+        # / ternary operator that cannot start a statement (e.g. ``? x``,
+        # ``: y``, ``+ z``, ``and w``), it continues the previous logical line
+        # even though that line did not *end* with an operator (the break was
+        # placed before the operator instead of after it). Suppress this line's
+        # INDENT/DEDENT and drop the NEWLINE that ended the prior line so the
+        # parser sees one contiguous expression. Only applies outside parens
+        # and when not already in an end-of-line continuation.
+        starts_with_cont_op = (
+            not self._in_continuation
+            and self._line_starts_with_continuation_op()
+        )
+        if starts_with_cont_op and self.tokens and self.tokens[-1].type == TokenType.NEWLINE:
+            self.tokens.pop()
+
         # If we're in a continuation (previous line ended with an operator),
         # suppress INDENT/DEDENT — the indentation is cosmetic, not structural
-        if not self._in_continuation:
+        if not self._in_continuation and not starts_with_cont_op:
             current_indent = self.indent_stack[-1]
             if indent_level > current_indent:
                 self.indent_stack.append(indent_level)
@@ -328,6 +350,49 @@ class Lexer:
                 self._emit(TokenType.NEWLINE, "\\n", self.line - 1, self.col)
         else:
             self._in_continuation = False
+
+    def _line_starts_with_continuation_op(self) -> bool:
+        """True when the upcoming line content begins with a binary/ternary
+        operator that can never begin a statement, so the line is a
+        continuation of the previous logical line.
+
+        Called with ``self.pos`` positioned at the first non-whitespace
+        character of the line. Deliberately conservative: ``-`` is excluded
+        (ambiguous leading unary minus) and ``.`` is excluded (``.5`` is a
+        leading-dot number, not member access). The included operators
+        (``? : + * / % == != > < >= <= and or``) cannot legally start a Pine
+        statement, so suppressing the line break for them never merges two
+        independent statements that previously parsed."""
+        src = self.source
+        p = self.pos
+        n = len(src)
+        if p >= n:
+            return False
+        c = src[p]
+        c2 = src[p + 1] if p + 1 < n else ""
+        # Two-character comparison operators.
+        if c2 == "=" and c in ("=", "!", ">", "<"):
+            return True
+        # ':' ternary-else continuation, but not ':=' (reassignment).
+        if c == ":" and c2 != "=":
+            return True
+        # Single-character operators that cannot start a statement.
+        if c in "?+*%><":
+            return True
+        # '/' division continuation, but never '//' (comment).
+        if c == "/" and c2 != "/":
+            return True
+        # 'and' / 'or' keyword continuation (require a word boundary so names
+        # like ``android`` / ``organic`` are not misread).
+        def _kw(word: str) -> bool:
+            end = p + len(word)
+            if src[p:end] != word:
+                return False
+            nxt = src[end] if end < n else ""
+            return not (nxt.isalnum() or nxt == "_")
+        if _kw("and") or _kw("or"):
+            return True
+        return False
 
     def _advance_to(self, target: int) -> None:
         while self.pos < target and self.pos < len(self.source):

@@ -439,6 +439,13 @@ class CallVisitor:
         if namespace == "color":
             return self._visit_color_call(func_name, node)
 
+        # Bare color(...) cast (cosmetic). The engine has no color-cast helper
+        # and colors have no backtest-logic effect, so emit a benign default
+        # color (0 = na color, matching the color.new / from_gradient
+        # fallbacks). The support checker warns on this construct.
+        if namespace is None and func_name == "color" and func_name not in self._func_names:
+            return "0"
+
         # Skip visual/unsupported namespace calls
         if namespace in SKIP_NAMESPACES or namespace in SKIP_VAR_TYPES:
             return "0"
