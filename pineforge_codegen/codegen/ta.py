@@ -295,4 +295,7 @@ class TaSiteHelper:
             return True
         except ValueError:
             pass
-        return val in ("true", "false", "0", "0.0", "na<double>()")
+        return val in (
+            "true", "false", "0", "0.0",
+            "na<double>()", "na<int>()", "na<int64_t>()", "na<bool>()",
+        )

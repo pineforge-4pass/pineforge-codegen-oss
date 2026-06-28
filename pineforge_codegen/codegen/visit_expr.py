@@ -717,6 +717,31 @@ class ExprVisitor:
                     if series_name not in self._strategy_series_vars:
                         self._strategy_series_vars.add(series_name)
                     return f"{series_name}[{idx}]"
+        # History reference applied directly to an inline call result, e.g.
+        # ``ta.highest(high, 10)[1]`` or ``f()[2]``. In Pine the call yields a
+        # series, so ``[k]`` reads its value k bars ago — but the call lowers to
+        # a freshly-computed C++ scalar, and ``scalar[k]`` is not subscriptable.
+        # Materialize the result into a self-contained history buffer: a static
+        # ``Series<T>`` that pushes (new bar) / updates (intrabar) the value
+        # exactly once per evaluation — same semantics as every other series in
+        # the strategy — and read ``[k]`` off it. The inner call is emitted once
+        # so its own stateful indicator is not double-stepped, and the buffer
+        # clears itself on run-start (``is_first_tick_ && bar_index_ == 0``) so a
+        # reused strategy handle (parameter sweep) does not leak prior-run history.
+        if isinstance(node.object, FuncCall):
+            inner = self._visit_expr(node.object)
+            cpp_t = self._infer_type(node.object)
+            if cpp_t not in ("double", "int", "bool"):
+                cpp_t = "double"
+            return (
+                f"([&]() -> {cpp_t} {{ "
+                f"static thread_local Series<{cpp_t}> _hist_call; "
+                f"if (is_first_tick_ && bar_index_ == 0) _hist_call.clear(); "
+                f"{cpp_t} _hv = ({inner}); "
+                f"if (is_first_tick_) _hist_call.push(_hv); "
+                f"else _hist_call.update(_hv); "
+                f"return _hist_call[(int)({idx})]; }}())"
+            )
         obj = self._visit_expr(node.object)
         # If subscripting a non-series variable (e.g., function parameter),
         # src[0] → src (current value), src[N>0] → src (can't access history)

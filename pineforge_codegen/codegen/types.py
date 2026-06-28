@@ -357,7 +357,12 @@ class TypeInferer:
 
     def _series_type_for(self, name: str) -> str:
         """C++ element type for a series variable's history buffer."""
-        if self._is_int64_builtin_init(name):
+        from .tables import INT64_BUILTINS
+        # A bare int64 bar builtin used as a history series (``time[1]``) needs an
+        # int64_t buffer: epoch-ms overflow int32 and the na sentinel would be
+        # misdetected. ``_is_int64_builtin_init`` only matches user vars whose
+        # init RHS is such a builtin, so also match the builtin name directly.
+        if name in INT64_BUILTINS or self._is_int64_builtin_init(name):
             return "int64_t"
         sym = self.ctx.symbols.resolve(name)
         if sym is not None:
@@ -473,8 +478,15 @@ class TypeInferer:
                     return "std::string"
                 if func_name == "bool":
                     return "bool"
-                if func_name in ("int", "color", "time"):
+                if func_name == "int":
                     return "int"
+                # ``input.time`` returns an epoch-MS timestamp and ``input.color``
+                # a packed ARGB int — both use the ``get_input_int64`` getter
+                # (input.py), so their storage must be ``int64_t`` or the value
+                # truncates under int32 (e.g. a date-window bound flips sign and
+                # the guard is permanently false).
+                if func_name in ("color", "time"):
+                    return "int64_t"
                 return "double"
             if namespace == "str":
                 if func_name == "split":

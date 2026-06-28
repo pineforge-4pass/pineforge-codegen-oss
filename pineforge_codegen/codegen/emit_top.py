@@ -187,6 +187,23 @@ class TopLevelEmitter:
                 return True
         return False
 
+    def _typed_na_init(self, cpp_val: str, name: str, ptype) -> str:
+        """Re-type a bare ``na<double>()`` initializer to match a non-double
+        member's C++ type. A ``var int x = na`` resolves its RHS to
+        ``na<double>()`` (a quiet NaN); constructing/pushing that into an int or
+        bool member is a NaN->int conversion (UB) that yields garbage and defeats
+        ``is_na<T>()`` (which checks the type sentinel, e.g. INT_MIN). Returns the
+        value unchanged unless it is exactly ``na<double>()`` and the member type
+        is non-double."""
+        if cpp_val != "na<double>()":
+            return cpp_val
+        cpp_type = PINE_TYPE_TO_CPP.get(ptype, "double")
+        if cpp_type == "int" and self._is_int64_builtin_init(name):
+            cpp_type = "int64_t"
+        if cpp_type == "double":
+            return cpp_val
+        return f"na<{cpp_type}>()"
+
     def _emit_constructor(self, lines: list[str]) -> None:
         init_parts: list[str] = []
         # TA members with ctor args
@@ -226,6 +243,7 @@ class TopLevelEmitter:
                 continue
             if name not in self.ctx.series_vars:
                 cpp_val = self._resolve_known(init_expr)
+                cpp_val = self._typed_na_init(cpp_val, name, ptype)
                 if self._is_compile_time_value(cpp_val):
                     init_parts.append(f"{safe}({cpp_val})")
         # Strategy params that map to engine members
@@ -394,6 +412,25 @@ class TopLevelEmitter:
             lines.append(f"        if (is_first_tick_) _s_{field_name}.push({push_expr});")
             lines.append(f"        else _s_{field_name}.update({push_expr});")
 
+        # a1. Push history-referenced scalar bar builtins (time[n], bar_index[n],
+        #     hl2[n], …). They land in ``series_vars`` and are declared as Series
+        #     members (base.py section 6) but — unlike user series vars (pushed at
+        #     their assignment) and bar fields (pushed above) — have no push site,
+        #     so ``[n]`` would read an unfed buffer (the na sentinel) on every bar.
+        #     Push each from its scalar lowering. A builtin whose lowering is a
+        #     self-referential call (e.g. ``time_close`` -> ``time_close()``) is
+        #     skipped — the call would resolve to the shadowing Series member.
+        from .tables import BAR_BUILTINS
+        for _bname in sorted(self.ctx.series_vars):
+            if _bname in self._var_names:
+                continue
+            _bexpr = BAR_BUILTINS.get(_bname)
+            if _bexpr is None or f"{_bname}(" in _bexpr:
+                continue
+            _bsafe = self._safe_name(_bname)
+            lines.append(f"        if (is_first_tick_) {_bsafe}.push({_bexpr});")
+            lines.append(f"        else {_bsafe}.update({_bexpr});")
+
         # a2. Push strategy series
         for svar in sorted(self._strategy_series_vars):
             member = svar.replace("_strat_", "")
@@ -447,6 +484,7 @@ class TopLevelEmitter:
                     continue
                 if name in self.ctx.series_vars:
                     cpp_val = self._resolve_known(init_expr)
+                    cpp_val = self._typed_na_init(cpp_val, name, ptype)
                     lines.append(f"            {safe}.push({cpp_val});")
                     # Also init cloned copies for per-call-site function variants
                     init_emitted: set[str] = set()

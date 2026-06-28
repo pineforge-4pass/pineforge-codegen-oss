@@ -382,14 +382,14 @@ ORDER_DIRECTION_MAP = {
 
 # Methods called as ``array.method(arr, ...)`` or ``arr.method(...)``.
 ARRAY_METHODS = {
-    "get":       lambda a, args: f"{a}[{args[0]}]",
-    "set":       lambda a, args: f"{a}[{args[0]}] = {args[1]}",
+    "get":       lambda a, args: f"{a}[({args[0]})]",
+    "set":       lambda a, args: f"{a}[({args[0]})] = {args[1]}",
     "push":      lambda a, args: f"{a}.push_back({args[0]})",
     "unshift":   lambda a, args: f"{a}.insert({a}.begin(), {args[0]})",
     "insert":    lambda a, args: f"{a}.insert({a}.begin() + (int)({args[0]}), {args[1]})",
     "pop":       lambda a, args: f"[&](){{ auto v={a}.back(); {a}.pop_back(); return v; }}()",
     "shift":     lambda a, args: f"[&](){{ auto v={a}.front(); {a}.erase({a}.begin()); return v; }}()",
-    "remove":    lambda a, args: f"[&](){{ auto v={a}[{args[0]}]; {a}.erase({a}.begin()+(int)({args[0]})); return v; }}()",
+    "remove":    lambda a, args: f"[&](){{ auto v={a}[({args[0]})]; {a}.erase({a}.begin()+(int)({args[0]})); return v; }}()",
     "first":     lambda a, args: f"{a}.front()",
     "last":      lambda a, args: f"{a}.back()",
     "size":      lambda a, args: f"(double){a}.size()",
@@ -435,7 +435,7 @@ ARRAY_METHODS = {
     "mode":      lambda a, args: f"[&](){{ std::unordered_map<double,int> m; for(auto v:{a})m[v]++; double best=0; int bc=0; for(auto&[v,c]:m)if(c>bc||(c==bc&&v<best)){{bc=c;best=v;}} return best; }}()",
     "percentile_linear_interpolation": lambda a, args: f"[&](){{ auto c={a}; std::sort(c.begin(),c.end()); double k=({args[0]}/100.0)*c.size()-0.5; int i=std::max(0,(int)k); double f=k-i; if(i+1>=(int)c.size()) return c.back(); return c[i]*(1-f)+c[i+1]*f; }}()",
     "percentile_nearest_rank": lambda a, args: f"[&](){{ auto c={a}; std::sort(c.begin(),c.end()); int r=(int)std::ceil(({args[0]}/100.0)*c.size()); return c[std::min(r-1,(int)c.size()-1)]; }}()",
-    "percentrank": lambda a, args: f"[&](){{ if({a}.size()<=1) return na<double>(); double v={a}[{args[0]}]; if(std::isnan(v)) return na<double>(); int le=0; for(auto x:{a}) if(!std::isnan(x) && x<=v) le++; return (double)(le-1)/({a}.size()-1)*100.0; }}()",
+    "percentrank": lambda a, args: f"[&](){{ if({a}.size()<=1) return na<double>(); double v={a}[({args[0]})]; if(std::isnan(v)) return na<double>(); int le=0; for(auto x:{a}) if(!std::isnan(x) && x<=v) le++; return (double)(le-1)/({a}.size()-1)*100.0; }}()",
     "abs":       lambda a, args: f"[&](){{ std::vector<double> r; for(auto v:{a})r.push_back(std::abs(v)); return r; }}()",
     "join":      lambda a, args: "[&](){{ std::string r; for(size_t i=0;i<{arr}.size();i++){{ if(i>0)r+={sep}; r+=std::to_string({arr}[i]); }} return r; }}()".format(arr=a, sep=args[0] if args else 'std::string(",")'),
     "standardize": lambda a, args: f"[&](){{ double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); s=std::sqrt(s/{a}.size()); std::vector<double> r; for(auto v:{a})r.push_back(s==0?1.0:(v-m)/s); return r; }}()",

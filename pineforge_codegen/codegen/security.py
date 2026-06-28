@@ -1232,6 +1232,37 @@ class SecurityEmitter:
 
             self._emit_security_rebinds(sec_id, info, lines, ta_results, indent=2, emitted_lines=lines)
             emit_security_ta(post_rebind_ta_indices)
+            returns_tuple = item.get("returns_tuple", False)
+            tuple_size = item.get("tuple_size", 0)
+            if (
+                returns_tuple
+                and tuple_size
+                and tuple_size > 0
+                and isinstance(expr_node, TupleLiteral)
+            ):
+                # A tuple body destructures into per-element scalar members
+                # ``_req_sec_{sec_id}_{i}`` (declared in ``base.py`` and reset in
+                # ``clear_security``). Assign each element individually rather
+                # than building the whole ``TupleLiteral`` (which lowers to an
+                # ``std::make_tuple(...)`` against the non-existent aggregate
+                # member ``_req_sec_{sec_id}``).
+                for i, el in enumerate(expr_node.elements):
+                    el_cpp = self._build_security_expr(
+                        sec_id,
+                        el,
+                        None,
+                        ta_results,
+                        security_mutable_names=security_mutable_names,
+                        emitted_lines=lines,
+                    )
+                    lines.append(f"        _req_sec_{sec_id}_{i} = {el_cpp};")
+                for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
+                    lines.append(
+                        f"        {self._security_ohlc_hist_series_cpp(sec_id, field)}.push(bar.{field});"
+                    )
+                lines.append("    }")
+                lines.append("")
+                continue
             expr_cpp = self._build_security_expr(
                 sec_id,
                 expr_node,

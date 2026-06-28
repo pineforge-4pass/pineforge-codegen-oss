@@ -189,7 +189,7 @@ public:
         covReady = ((!(is_na(cov11)) && !(is_na(cov12))) && !(is_na(cov22)));
         lam = na<double>();
         if (covReady) {
-            lam = ((((double)m.eigenvalues().size() > 0)) ? (m.eigenvalues()[0]) : (na<double>()));
+            lam = ((((double)m.eigenvalues().size() > 0)) ? (m.eigenvalues()[(0)]) : (na<double>()));
         }
         lamSma = (is_first_tick_ ? _ta_sma_6.compute(lam) : _ta_sma_6.recompute(lam));
         if ((((covReady && !(is_na(lam))) && !(is_na(lamSma))) && (is_first_tick_ ? _ta_crossover_7.compute(lam, lamSma) : _ta_crossover_7.recompute(lam, lamSma)))) {
