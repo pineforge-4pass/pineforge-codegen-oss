@@ -100,7 +100,6 @@ from ..ast_nodes import (
 )
 from ..symbols import TypeSpec
 from .tables import (
-    SKIP_VAR_TYPES,
     TA_RETURNS_BOOL,
     TA_TUPLE_FIELDS,
     MATRIX_RETURNING_METHODS,
@@ -356,16 +355,19 @@ class StmtVisitor:
                     lines.append(f"{pad}{cpp_type} {safe};")
                 return
 
-        # Skip visual function assignments — but still emit declaration for
-        # table function results since the var may be used later
+        # Visual/drawing function assignments (line.new, label.new, box.new,
+        # table.new, ...) are no-ops in a backtest, but the assigned variable may
+        # still be referenced later (e.g. pushed into an array<line>, or used as a
+        # handle by sibling set_* calls). Emit a default-valued local declaration
+        # so those references compile; the value is inert. Global members are
+        # already declared at class scope, so only locals need this. (Previously
+        # only `table` results were declared, which dropped loop-local line/label
+        # handles and produced "use of undeclared identifier".)
         if isinstance(node.value, FuncCall) and self._is_skip_expr(node.value):
-            func_name, namespace = self._resolve_callee(node.value.callee)
-            if namespace in SKIP_VAR_TYPES:
-                # Emit var with default value so references don't fail
-                if not is_global_member:
-                    cpp_type = self._type_for_decl(node)
-                    default = "0" if cpp_type in ("int", "double") else ('std::string("")' if cpp_type == "std::string" else "false")
-                    lines.append(f"{pad}{cpp_type} {safe} = {default};")
+            if not is_global_member:
+                cpp_type = self._type_for_decl(node)
+                default = "0" if cpp_type in ("int", "double") else ('std::string("")' if cpp_type == "std::string" else "false")
+                lines.append(f"{pad}{cpp_type} {safe} = {default};")
             return
 
         # TA call
