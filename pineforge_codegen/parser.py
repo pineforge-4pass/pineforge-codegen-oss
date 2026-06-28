@@ -197,6 +197,13 @@ class Parser:
             # Check that the IDENT is followed by = (not == ) to confirm declaration
             if self._peek(2).type == TokenType.EQUALS:
                 return self._parse_typed_decl()
+        # Postfix-array type-annotated declaration: float[] x = ..., int[] x = ...
+        if (cur.type in TYPE_KEYWORDS
+                and self._peek().type == TokenType.LBRACKET
+                and self._peek(2).type == TokenType.RBRACKET
+                and self._peek(3).type == TokenType.IDENT
+                and self._peek(4).type == TokenType.EQUALS):
+            return self._parse_typed_decl()
 
         # IDENT-prefixed type-annotated declaration: ``Sample s = ...``,
         # ``array<Sample> arr = ...``, ``matrix<float> m = ...`` — when the
@@ -393,35 +400,42 @@ class Parser:
         return self._set_loc(node, start_tok)
 
     def _parse_type_hint_string(self) -> str:
-        """Parse primitive, UDT, array<T>, or map<K,V> type hints."""
+        """Parse primitive, UDT, array<T>, map<K,V>, or postfix-array (``T[]``) hints."""
         base = self._advance().value
-        if not self._check(TokenType.LT):
-            return base
-
-        parts: list[str] = []
-        depth = 0
-        self._advance()  # <
-        while not self._at_end():
-            tok = self._current()
-            if tok.type == TokenType.LT:
-                depth += 1
-                parts.append("<")
-                self._advance()
-                continue
-            if tok.type == TokenType.GT:
-                if depth == 0:
+        if self._check(TokenType.LT):
+            parts: list[str] = []
+            depth = 0
+            self._advance()  # <
+            while not self._at_end():
+                tok = self._current()
+                if tok.type == TokenType.LT:
+                    depth += 1
+                    parts.append("<")
                     self._advance()
-                    break
-                depth -= 1
-                parts.append(">")
+                    continue
+                if tok.type == TokenType.GT:
+                    if depth == 0:
+                        self._advance()
+                        break
+                    depth -= 1
+                    parts.append(">")
+                    self._advance()
+                    continue
+                if tok.type == TokenType.COMMA:
+                    parts.append(",")
+                else:
+                    parts.append(str(tok.value))
                 self._advance()
-                continue
-            if tok.type == TokenType.COMMA:
-                parts.append(",")
-            else:
-                parts.append(str(tok.value))
-            self._advance()
-        return f"{base}<{''.join(parts)}>"
+            base = f"{base}<{''.join(parts)}>"
+
+        # Pine postfix-array shorthand: `float[]` == `array<float>`, `T[]` == `array<T>`.
+        # Without this the trailing `[ ]` is left unconsumed, the following name
+        # fails to parse, and the whole declaration is silently dropped.
+        while self._check(TokenType.LBRACKET) and self._peek().type == TokenType.RBRACKET:
+            self._advance()  # [
+            self._advance()  # ]
+            base = f"array<{base}>"
+        return base
 
     def _parse_template_args(self) -> list[str]:
         """Parse and return generic args after a member name, e.g. new<K,V>()."""
@@ -561,24 +575,24 @@ class Parser:
                        TokenType.TYPE_BOOL, TokenType.TYPE_STRING}
         params = []
         while not self._check(TokenType.RPAREN):
-            # Pine: series float x / series int x — one parameter (not "series" + "x")
-            if self._check(TokenType.IDENT) and self._current().value == "series":
-                self._advance()  # consume 'series'
-                if self._current().type in TYPE_TOKENS:
-                    self._advance()  # float, int, ...
-                param_name = self._consume(TokenType.IDENT).value
-                if self._check(TokenType.EQUALS):
-                    self._advance()
-                    self._parse_expression()
-                params.append(param_name)
-                self._match(TokenType.COMMA)
-                continue
-            # Handle optional type annotation: type param (e.g., int len, float src)
+            # Consume optional Pine parameter type qualifiers, e.g. `series float x`,
+            # `simple string maType`, `const int n`. Each is one qualifier in front
+            # of the (optional) type and the name — NOT a separate parameter.
+            while self._check(TokenType.IDENT) and self._current().value in (
+                "series",
+                "simple",
+                "const",
+            ):
+                self._advance()
+            # Handle optional type annotation: type param (e.g., int len, float src,
+            # string s). Built-in types are dedicated tokens; user-defined types are
+            # IDENTs and handled by the "next is IDENT" check below.
             if self._current().type in TYPE_TOKENS:
                 self._advance()  # skip the type annotation
             param_name = self._consume(TokenType.IDENT).value
             if self._check(TokenType.IDENT):
-                # 'param_name' was actually a type name parsed as IDENT, next is real name
+                # 'param_name' was actually a (user-defined) type name parsed as IDENT,
+                # next is the real name.
                 param_name = self._consume(TokenType.IDENT).value
             # Skip default value: param = expr
             if self._check(TokenType.EQUALS):

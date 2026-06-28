@@ -340,3 +340,59 @@ def test_parse_basic_strategy(pine_file):
     prog = _parse(src)
     assert isinstance(prog, Program)
     assert len(prog.body) > 0
+
+
+# === Regression: UDF param qualifiers + postfix-array declarations ===
+
+def test_udf_param_simple_qualifier_is_one_param():
+    """`simple string m` is a single qualified param, not two params."""
+    prog = _parse(
+        "//@version=6\nstrategy(\"t\")\n"
+        "ma(float s, int l, simple string m) =>\n    ta.ema(s, l)\n"
+    )
+    fdef = next(s for s in prog.body if isinstance(s, FuncDef))
+    assert fdef.params == ["s", "l", "m"]
+
+
+def test_udf_param_series_and_const_qualifiers():
+    prog = _parse(
+        "//@version=6\nstrategy(\"t\")\n"
+        "f(series float a, const int b, simple bool c) =>\n    a\n"
+    )
+    fdef = next(s for s in prog.body if isinstance(s, FuncDef))
+    assert fdef.params == ["a", "b", "c"]
+
+
+def test_postfix_array_decl_var_keyword():
+    """`var float[] x = ...` must register a VarDecl (was silently dropped)."""
+    prog = _parse(
+        "//@version=6\nstrategy(\"t\")\n"
+        "var float[] qp = array.from(0.1, 0.2, 0.3)\n"
+    )
+    decl = next((s for s in prog.body if isinstance(s, VarDecl) and s.name == "qp"), None)
+    assert decl is not None
+    assert decl.is_var is True
+    assert "array<float>" in (decl.type_hint or "")
+
+
+def test_postfix_array_decl_bare():
+    prog = _parse(
+        "//@version=6\nstrategy(\"t\")\n"
+        "int[] xs = array.new_int(3, 0)\n"
+    )
+    decl = next((s for s in prog.body if isinstance(s, VarDecl) and s.name == "xs"), None)
+    assert decl is not None
+    assert "array<int>" in (decl.type_hint or "")
+
+
+def test_postfix_array_and_simple_qualifier_transpile():
+    """End-to-end: both fixed forms transpile to C++ without error."""
+    from pineforge_codegen import transpile
+    cpp = transpile(
+        "//@version=6\nstrategy(\"t\")\n"
+        "ma(float s, int l, simple string m) =>\n    ta.ema(s, l)\n"
+        "var float[] qp = array.from(0.1, 0.2, 0.3)\n"
+        "if close > 0\n    plot(ma(qp.get(0), 10, \"EMA\"))\n"
+    )
+    assert "ma_cs0(double source" not in cpp  # no spurious 'simple' param split
+    assert len(cpp.splitlines()) > 10
