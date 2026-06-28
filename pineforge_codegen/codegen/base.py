@@ -1258,7 +1258,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if isinstance(val, (int, float)):
                 return str(val)
             if isinstance(val, str):
-                return f'std::string("{val}")'
+                return f'std::string("{self._cpp_string_escape(val)}")'
         # Also resolve bar field references
         if arg_str in BAR_FIELDS:
             return BAR_FIELDS[arg_str]

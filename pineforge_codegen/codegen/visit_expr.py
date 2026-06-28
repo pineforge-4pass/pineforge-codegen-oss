@@ -180,7 +180,7 @@ class ExprVisitor:
         if isinstance(node, NumberLiteral):
             return str(node.value)
         if isinstance(node, StringLiteral):
-            return f'std::string("{node.value}")'
+            return f'std::string("{self._cpp_string_escape(node.value)}")'
         if isinstance(node, BoolLiteral):
             return "true" if node.value else "false"
         if isinstance(node, NaLiteral):
