@@ -475,8 +475,17 @@ class ExprVisitor:
                 if node.member in ("is_heikinashi", "is_kagi", "is_linebreak",
                                    "is_pnf", "is_range", "is_renko"):
                     return "false"
-                # Defensive: support_checker.UNSUPPORTED_MEMBERS should already have
-                # rejected any unhandled chart.* member. Reaching here is a bug.
+                # Cosmetic / chart-only reads with no batch-mode value (theme
+                # colors, viewport bar times). The support checker warns on
+                # these (COSMETIC_MEMBERS); emit a benign default (0 = na color /
+                # epoch 0). They have no backtest-logic effect.
+                if node.member in ("fg_color", "bg_color",
+                                   "left_visible_bar_time",
+                                   "right_visible_bar_time"):
+                    return "0"
+                # Defensive: support_checker (COSMETIC_MEMBERS / UNSUPPORTED_MEMBERS)
+                # should already have warned/rejected any unhandled chart.* member.
+                # Reaching here is a bug.
                 raise ValueError(
                     f"codegen: unhandled chart.{node.member} — analyzer should have rejected. "
                     f"Add a handler above or extend UNSUPPORTED_MEMBERS."

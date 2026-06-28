@@ -59,9 +59,10 @@ def test_alert_freq_free_expression_rejected():
 
 
 @pytest.mark.parametrize("member", ["bg_color", "fg_color"])
-def test_chart_colors_rejected(member):
-    with pytest.raises(CompileError, match=f"chart.{member}"):
-        transpile(PRELUDE + f"c = chart.{member}\n")
+def test_chart_colors_warn_not_rejected(member):
+    # Cosmetic chart-theme reads: no backtest-logic effect. Transpile (no-op),
+    # not rejected; codegen emits a default color.
+    transpile(PRELUDE + f"c = chart.{member}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -108,14 +109,17 @@ def test_request_security_barmerge_kwargs_still_transpile():
     transpile(src)
 
 
-def test_request_security_lookahead_on_still_rejected():
-    # The per-kwarg validation must keep working under the new suppression.
+def test_request_security_lookahead_on_now_supported():
+    # lookahead_on is engine-supported: it transpiles (no CompileError) and
+    # registers the HTF request with the lookahead flag set true. The per-kwarg
+    # value-shape validation still rejects non-barmerge values (see
+    # test_request_security_bad_gaps_still_rejected).
     src = PRELUDE + (
         'htf = request.security(syminfo.tickerid, "60", close, '
         "lookahead=barmerge.lookahead_on)\n"
     )
-    with pytest.raises(CompileError, match="lookahead_on"):
-        transpile(src)
+    out = transpile(src)
+    assert "input_tf_, true, false)" in out
 
 
 def test_request_security_bad_gaps_still_rejected():

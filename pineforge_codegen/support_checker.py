@@ -80,6 +80,10 @@ SUPPORTED_MATRIX: frozenset[str] = frozenset(set(MATRIX_METHODS) | {"new"})
 SUPPORTED_SYMINFO: frozenset[str] = frozenset(SYMINFO_MEMBER_MAP)
 SUPPORTED_COLOR_CONST: frozenset[str] = frozenset(COLOR_CONST_MAP)
 SUPPORTED_COLOR_FUNC: frozenset[str] = frozenset({"new", "rgb", "r", "g", "b", "t"})
+# Cosmetic color builders with no backtest-logic effect. Warned (not rejected);
+# codegen emits a benign default color (0 = na color). color.from_gradient is a
+# charting/plot helper that only tints visual output.
+COSMETIC_COLOR_FUNC: frozenset[str] = frozenset({"from_gradient"})
 SUPPORTED_TIMEFRAME_FUNC: frozenset[str] = frozenset({"change", "in_seconds"})
 SUPPORTED_RUNTIME_FUNC: frozenset[str] = frozenset({"error"})
 # log.* helpers wired into pine_log_{info,warning,error} by codegen/visit_call.
@@ -96,7 +100,6 @@ HARD_REJECT_FUNC: dict[str, str] = {
     "request.seed":              "External seed data feeds not available in PineForge.",
     "request.quandl":            "External Quandl data not available in PineForge.",
     "request.currency_rate":     "Currency conversion data not available in PineForge.",
-    "color.from_gradient":       "Charting helpers not available in PineForge backtests.",
     # ticker.* chart-type modifiers and cross-symbol constructors — hard reject
     "ticker.heikinashi":         (
         "ticker.heikinashi() chart-type modifier / cross-symbol construction not supported — "
@@ -215,10 +218,17 @@ NOT_YET_FUNC: dict[str, str] = {
 }
 
 # Bare (no-namespace) function names that codegen has no handler for.
-# Without a handler, the generic emitter at visit_call.py:912 would
-# produce e.g. `color(arg)` — an undeclared C++ symbol. Reject loudly.
-UNSUPPORTED_BARE_FUNCS: dict[str, str] = {
-    "color": "Bare color(...) cast is not supported. Use color.new(c, alpha) or color.rgb(r, g, b, transp).",
+# Without a handler, the generic emitter at visit_call.py:912 would produce an
+# undeclared C++ symbol. Reject loudly. (Currently empty — the bare color(...)
+# cast moved to COSMETIC_BARE_FUNCS below.)
+UNSUPPORTED_BARE_FUNCS: dict[str, str] = {}
+
+# Bare (no-namespace) cosmetic casts with no backtest-logic effect. Warned
+# (not rejected); codegen emits a benign default. ``color(x)`` is a Pine color
+# cast — colors never affect trade logic, so codegen emits a default color
+# (0 = na color) and the strategy keeps running.
+COSMETIC_BARE_FUNCS: dict[str, str] = {
+    "color": "color(...) cast has no effect in PineForge backtests (visual only); it emits a default color.",
 }
 
 # Whole namespaces with NO codegen support. Any call into one of these
@@ -230,14 +240,19 @@ UNSUPPORTED_NAMESPACES: dict[str, str] = {
     "volume_row": "volume_row.* is not supported in PineForge batch backtests; same reason as footprint.*.",
 }
 
-# Member-access references with no batch-mode equivalent. Codegen would
-# silently emit "false" (visit_expr.py chart.* fallthrough) which
-# becomes epoch 0 in time arithmetic. Reject loudly.
-UNSUPPORTED_MEMBERS: dict[tuple[str, str], str] = {
-    ("chart", "left_visible_bar_time"):  "chart.left_visible_bar_time has no meaning in a batch backtest (no viewport).",
-    ("chart", "right_visible_bar_time"): "chart.right_visible_bar_time has no meaning in a batch backtest (no viewport).",
-    ("chart", "bg_color"): "chart.bg_color has no meaning in a batch backtest (no chart theme).",
-    ("chart", "fg_color"): "chart.fg_color has no meaning in a batch backtest (no chart theme).",
+# Member-access references with no batch-mode equivalent. Reject loudly.
+# (Currently empty — the chart.* cosmetic reads moved to COSMETIC_MEMBERS.)
+UNSUPPORTED_MEMBERS: dict[tuple[str, str], str] = {}
+
+# Cosmetic / chart-only member reads with no backtest-logic effect. Warned
+# (not rejected); codegen emits the benign default — chart.* falls through
+# SKIP_NAMESPACES in visit_expr.py to ``0`` (and the analyzer types chart.* as
+# COLOR, so the 0 lands in an int color slot and compiles cleanly).
+COSMETIC_MEMBERS: dict[tuple[str, str], str] = {
+    ("chart", "left_visible_bar_time"):  "chart.left_visible_bar_time has no meaning in a batch backtest (no viewport); emits 0.",
+    ("chart", "right_visible_bar_time"): "chart.right_visible_bar_time has no meaning in a batch backtest (no viewport); emits 0.",
+    ("chart", "bg_color"): "chart.bg_color has no meaning in a batch backtest (no chart theme); emits a default color.",
+    ("chart", "fg_color"): "chart.fg_color has no meaning in a batch backtest (no chart theme); emits a default color.",
 }
 
 # Constant-only namespaces whose members are drawing/visual style constants
@@ -692,9 +707,15 @@ class SupportChecker:
             self._visit_children(node)
             return
 
-        # Bare-function rejections (e.g. `color(arg)` cast). Codegen would
-        # otherwise fall through to the generic emit at visit_call.py:912 and
-        # produce an undeclared C++ symbol.
+        # Bare cosmetic casts (e.g. `color(na)` -> default color). No backtest
+        # effect; warn and let codegen emit a benign default color.
+        if ns is None and name in COSMETIC_BARE_FUNCS:
+            self._warn(node, COSMETIC_BARE_FUNCS[name])
+            self._visit_children(node)
+            return
+
+        # Bare-function rejections. Codegen would otherwise fall through to the
+        # generic emit at visit_call.py:912 and produce an undeclared C++ symbol.
         if ns is None and self._reject_if_in(
             UNSUPPORTED_BARE_FUNCS,
             name,
@@ -865,6 +886,16 @@ class SupportChecker:
             self._err(node, f"timeframe.{name}(...) is not implemented in PineForge runtime.")
             self._visit_children(node)
             return
+        if ns == "color" and name in COSMETIC_COLOR_FUNC:
+            # Cosmetic color builder (e.g. color.from_gradient): no backtest
+            # effect. Warn and let codegen emit a default color (0).
+            self._warn(
+                node,
+                f"color.{name}(...) has no effect in PineForge backtests "
+                f"(visual only); it emits a default color.",
+            )
+            self._visit_children(node)
+            return
         if ns == "color" and name not in SUPPORTED_COLOR_FUNC:
             self._err(node, f"color.{name}(...) is not implemented in PineForge runtime.")
             self._visit_children(node)
@@ -1001,7 +1032,21 @@ class SupportChecker:
             lambda k, v: f"{k}.{node.member}: {v}",
         ):
             return
-        # Specific unsupported (namespace, member) pairs (e.g. chart.left_visible_bar_time).
+        # Cosmetic / chart-only member reads (chart.fg_color/bg_color/visible
+        # bar times). No backtest-logic effect; warn and let codegen emit the
+        # benign default (chart.* -> 0 via SKIP_NAMESPACES in visit_expr.py).
+        if (
+            isinstance(node.object, Identifier)
+            and (node.object.name, node.member) in COSMETIC_MEMBERS
+        ):
+            self._warn(
+                node,
+                f"{node.object.name}.{node.member}: "
+                f"{COSMETIC_MEMBERS[(node.object.name, node.member)]}",
+            )
+            self._visit_children(node)
+            return
+        # Specific unsupported (namespace, member) pairs.
         if isinstance(node.object, Identifier) and self._reject_if_in(
             UNSUPPORTED_MEMBERS,
             (node.object.name, node.member),
@@ -1134,10 +1179,25 @@ class SupportChecker:
                 hint="Codegen only recognizes the barmerge.lookahead_* literal; other values are silently treated as lookahead_off.",
             )
         if self._is_barmerge_member(lookahead_node, "lookahead_on"):
-            self._err(
+            # lookahead_on is supported by codegen + engine: base.py forwards
+            # the flag into _security_eval_info, emit_top.py registers it via
+            # register_security_eval(..., lookahead_on=true), and the engine
+            # (engine_security.cpp) dispatches the partial HTF eval and gates
+            # the per-bucket series slot on it. The completed-HTF value becomes
+            # visible from the HTF bucket's first chart bar (TV's forward-look).
+            # We emit a WARNING (not ERROR) because lookahead_on is inherently
+            # data-sensitive: with a 0-offset HTF expression it exposes the
+            # in-progress bucket's value (TV's documented repaint), whereas the
+            # safe non-repainting idiom pairs it with a [1] offset
+            # (e.g. close[1]) to read only completed prior buckets.
+            self._warn(
                 lookahead_node,
-                "request.security lookahead_on is not supported in PineForge paid parity mode.",
-                hint="Use barmerge.lookahead_off. lookahead_on can expose future/partial HTF values and is highly data-sensitive.",
+                "request.security lookahead_on changes HTF timing: the completed "
+                "higher-timeframe value is exposed from the bucket's first chart "
+                "bar. PineForge emits this (engine-supported) but results differ "
+                "from lookahead_off and, with a 0-offset HTF expression, repaint "
+                "future data.",
+                hint="The safe non-repainting form pairs lookahead_on with a [1] offset (e.g. close[1]) to read only completed prior HTF bars.",
             )
 
         # Data-adjustment kwargs: codegen emits a numeric constant but the

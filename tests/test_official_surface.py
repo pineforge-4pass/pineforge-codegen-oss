@@ -179,8 +179,9 @@ KNOWN_REQUEST_OMISSIONS = frozenset({
 # that the engine does not currently expose; both layers omit it.
 KNOWN_TIMEFRAME_OMISSIONS = frozenset({"from_seconds"})
 
-# color.from_gradient is a charting helper; PineForge has no plotter so
-# it is hard-rejected (see HARD_REJECT_FUNC).
+# color.from_gradient is a charting/plot helper; PineForge has no plotter so
+# it is a cosmetic no-op (warned via COSMETIC_COLOR_FUNC) — not in
+# SUPPORTED_COLOR_FUNC, hence still an "omission" from the supported set.
 KNOWN_COLOR_OMISSIONS = frozenset({"from_gradient"})
 
 
@@ -244,8 +245,9 @@ def test_supported_color_matches_official_minus_from_gradient():
         f"missing: {sorted(expected - SUPPORTED_COLOR_FUNC)}, "
         f"extra: {sorted(SUPPORTED_COLOR_FUNC - expected)}"
     )
-    assert "color.from_gradient" in HARD_REJECT_FUNC, (
-        "color.from_gradient must remain in HARD_REJECT_FUNC with a clear hint."
+    assert "color.from_gradient" not in HARD_REJECT_FUNC, (
+        "color.from_gradient is now a cosmetic no-op (warned via "
+        "COSMETIC_COLOR_FUNC), not a hard reject."
     )
 
 
@@ -370,8 +372,6 @@ INTENTIONALLY_REJECTED = [
     # Neither side of trade accessors has 'direction' in Pine v6.
     'x = strategy.closedtrades.direction(0)',
     'x = strategy.opentrades.direction(0)',
-    # color.from_gradient is a charting helper.
-    'x = color.from_gradient(50.0, 0.0, 100.0, color.red, color.green)',
     # external request feeds.
     'x = request.financial(syminfo.tickerid, "TOTAL_REVENUE", "FQ")',
     'x = request.dividends(syminfo.tickerid, dividends.gross)',
@@ -443,7 +443,7 @@ def test_no_max_bars_back_leaves_series_at_engine_default():
 EXPECTED_HARD_REJECT_FUNCS = {
     "request.financial", "request.dividends", "request.earnings",
     "request.splits", "request.seed", "request.quandl",
-    "request.currency_rate", "color.from_gradient",
+    "request.currency_rate",
 }
 
 
