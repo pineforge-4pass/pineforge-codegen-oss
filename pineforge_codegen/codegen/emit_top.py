@@ -182,8 +182,7 @@ class TopLevelEmitter:
         for node in self._walk_ast(self.ctx.ast):
             if not isinstance(node, FuncCall):
                 continue
-            func_name, namespace = self._resolve_callee(node.callee)
-            if namespace == "input" and func_name == "source":
+            if self._is_source_input(node):
                 return True
         return False
 
@@ -240,6 +239,11 @@ class TopLevelEmitter:
             seen_ctor_vars.add(name)
             safe = self._safe_name(name)
             if name in self._array_vars or name in self._map_vars:
+                continue
+            # UDT-typed var members (``var SDZone z = na``) default-construct to
+            # na via the struct's in-class ``__pf_na = true``; a ctor init like
+            # ``z(na<double>())`` would not type-match the struct member.
+            if name in self._udt_var_types and self._udt_var_types[name] in self._udt_defs:
                 continue
             if name not in self.ctx.series_vars:
                 cpp_val = self._resolve_known(init_expr)
@@ -528,7 +532,7 @@ class TopLevelEmitter:
                     func_name_i, namespace_i = self._resolve_callee(stmt.value.callee)
                     is_static_global_input = (
                         stmt.name in self._global_member_vars
-                        and func_name_i != "source"
+                        and not self._is_source_input(stmt.value)
                         and stmt.name not in self._array_vars
                         and stmt.name not in getattr(self, "_matrix_specs", {})
                         and stmt.name not in getattr(self, "_map_vars", {})

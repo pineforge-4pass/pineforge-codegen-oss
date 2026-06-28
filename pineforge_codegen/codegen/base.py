@@ -902,8 +902,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 else:
                     default = self._default_for_spec(spec)
                 lines.append(f"    {cpp_type} {f.name} = {default};")
+            # NA sentinel (always the last data member). A default-constructed
+            # UDT - ``var T x = na``, an array fill slot, ``T.copy()`` no-arg -
+            # is na; the ``T.new(...)`` lowering sets this false. This lets
+            # ``na(udtVar)`` lower to the ``is_na(const T&)`` overload below
+            # instead of failing because no ``is_na`` accepts a struct.
+            lines.append(f"    bool __pf_na = true;")
             lines.append(f"    static {type_name} create() {{ return {type_name}{{}}; }}")
             lines.append("};")
+            lines.append(f"inline bool is_na(const {type_name}& _z) {{ return _z.__pf_na; }}")
             lines.append("")
 
         # 1c. Enum constants + string tables for str.tostring(enumVar)
@@ -1048,13 +1055,22 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 self._map_vars.add(name)
                 lines.append(f"    {self._type_spec_to_cpp(self._map_spec_for_name(name))} {safe};")
                 continue
-            # Detect UDT vars: init_str like "TypeName.new(...)"
+            # Detect UDT vars. Two signals: (1) the analyzer recorded an
+            # explicit UDT type annotation in ``_udt_var_types`` - this is the
+            # ONLY signal when the initializer is ``na`` (``var SDZone z = na``),
+            # where the inferred ``ptype`` is NA->double; (2) the init_str is a
+            # ``TypeName.new(...)`` constructor. Without (1) the member would
+            # decl as ``double`` and the later ``z = SDZone{...}`` would not
+            # compile (assigning SDZone to double).
             init_s = str(init_str)
-            udt_type = None
-            for udt_name in self._udt_defs:
-                if init_s.startswith(f"{udt_name}.new"):
-                    udt_type = udt_name
-                    break
+            udt_type = self._udt_var_types.get(name)
+            if udt_type not in self._udt_defs:
+                udt_type = None
+            if udt_type is None:
+                for udt_name in self._udt_defs:
+                    if init_s.startswith(f"{udt_name}.new"):
+                        udt_type = udt_name
+                        break
             if udt_type:
                 lines.append(f"    {udt_type} {safe};")
                 continue
