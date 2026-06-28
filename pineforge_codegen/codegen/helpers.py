@@ -33,6 +33,31 @@ CPP_RESERVED = {
 }
 
 
+# Bare C++ identifiers that ``strategy.*`` (and a few other) read-only
+# accessors lower to as zero-arg free-function calls — e.g.
+# ``strategy.grossprofit`` -> ``gross_profit()`` (see codegen/visit_expr.py
+# and codegen/emit_top.py). A user variable emitted with one of these names
+# becomes a class member that shadows the engine accessor, so the codegen
+# would emit ``gross_profit = gross_profit();`` and clang rejects the call
+# ("called object type 'double' is not a function"). Escaping such user
+# identifiers in ``_safe_name`` keeps the two namespaces disjoint; the
+# accessor call strings are emitted verbatim and never routed through
+# ``_safe_name``, so they are unaffected. Keep in sync with the accessor
+# lowerings if new bare-call accessors are added.
+BUILTIN_ACCESSOR_NAMES = {
+    "signed_position_size", "position_entry_name",
+    "count_wintrades", "count_losstrades", "eventrades",
+    "net_profit", "gross_profit", "gross_loss",
+    "grossprofit_percent", "grossloss_percent",
+    "max_contracts_held_all", "max_contracts_held_long",
+    "max_contracts_held_short", "max_drawdown_percent", "max_runup_percent",
+    "avg_trade", "avg_trade_percent", "avg_winning_trade", "avg_losing_trade",
+    "avg_winning_trade_percent", "avg_losing_trade_percent",
+    "margin_liquidation_price", "open_profit", "current_equity",
+    "open_trades_capital_held",
+}
+
+
 class NamingHelper:
     """Identifier escaping, callee resolution, and a generic AST walker.
 
@@ -56,7 +81,7 @@ class NamingHelper:
 
     def _safe_name(self, name: str) -> str:
         """Rename identifiers that collide with C++ reserved words."""
-        if name in CPP_RESERVED:
+        if name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES:
             return f"_{name}_"
         return name
 

@@ -544,7 +544,20 @@ class StmtVisitor:
                 if name == "_":
                     continue
                 if i < len(fields):
-                    lines.append(f"{pad}double {name} = {result_var}.{fields[i]};")
+                    field_expr = f"{result_var}.{fields[i]}"
+                    # A history-referenced destructured name (e.g.
+                    # ``[v, dir] = ta.supertrend(...)`` with ``dir[1]`` used
+                    # later) is tracked in ``series_vars`` and declared as a
+                    # ``Series<T>`` class member. Pushing into that member keeps
+                    # its history buffer advancing so ``dir[n]`` resolves; a
+                    # fresh ``double`` local would shadow the member and make
+                    # ``dir[n]`` a scalar subscript (clang error). Non-series
+                    # destructured names keep the plain scalar declaration.
+                    if name in self.ctx.series_vars:
+                        safe = self._safe_name(name)
+                        lines.append(f"{pad}{safe}.push({field_expr});")
+                    else:
+                        lines.append(f"{pad}double {name} = {field_expr};")
             return
 
         # User-defined function returning a tuple: use C++17 structured bindings
