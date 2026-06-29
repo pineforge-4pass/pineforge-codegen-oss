@@ -102,6 +102,7 @@ _DRAWING_SUPPORTED_BY_NS: dict[str, frozenset[str]] = {
     "line": SUPPORTED_LINE, "box": SUPPORTED_BOX,
     "label": SUPPORTED_LABEL, "linefill": SUPPORTED_LINEFILL,
 }
+_DRAWING_TYPE_NAMES: frozenset[str] = frozenset({"line", "box", "label", "linefill"})
 SUPPORTED_COLOR_CONST: frozenset[str] = frozenset(COLOR_CONST_MAP)
 SUPPORTED_COLOR_FUNC: frozenset[str] = frozenset({"new", "rgb", "r", "g", "b", "t"})
 # Cosmetic color builders with no backtest-logic effect. Warned (not rejected);
@@ -435,6 +436,17 @@ class SupportChecker:
         self._user_enums: set[str] = set()
         self._user_funcs: set[str] = set()
         self._user_methods: set[str] = set()
+        # Drawing lifecycle gap guard (spec L.3/U.7): only bare identifiers are
+        # promoted to Series<T> by analyzer/base.py::_visit_Subscript. A history
+        # read on a drawing handle nested in a UDT field (``p.a[1]``) or on a
+        # tuple element known to be a drawing handle (``la[1]`` after
+        # ``[la, lb] = makePair()``) would otherwise silently read the current
+        # bar. Track enough lightweight declaration information to reject those
+        # shapes before codegen.
+        self._udt_drawing_fields: dict[str, set[str]] = {}
+        self._var_udt_types: dict[str, str] = {}
+        self._drawing_tuple_vars: set[str] = set()
+        self._func_tuple_drawing_returns: dict[str, list[bool]] = {}
         # Track whether we are inside an if/ternary condition expression.
         self._in_conditional_depth: int = 0
         # Track whether we are inside an argument subtree that legitimately
@@ -470,12 +482,70 @@ class SupportChecker:
         for stmt in ast.body:
             if isinstance(stmt, TypeDecl):
                 self._user_types.add(stmt.name)
+                drawing_fields = {
+                    field.name
+                    for field in stmt.fields
+                    if self._type_name_contains_drawing(field.type_name)
+                }
+                if drawing_fields:
+                    self._udt_drawing_fields[stmt.name] = drawing_fields
             elif isinstance(stmt, EnumDecl):
                 self._user_enums.add(stmt.name)
             elif isinstance(stmt, FuncDef):
                 self._user_funcs.add(stmt.name)
+                tuple_returns = self._single_expr_tuple_drawing_mask(stmt)
+                if tuple_returns:
+                    self._func_tuple_drawing_returns[stmt.name] = tuple_returns
             elif isinstance(stmt, MethodDef):
                 self._user_methods.add(stmt.name)
+
+    @staticmethod
+    def _type_name_contains_drawing(type_name: str | None) -> bool:
+        if not type_name:
+            return False
+        compact = str(type_name).replace(" ", "")
+        if compact.endswith("[]"):
+            compact = f"array<{compact[:-2]}>"
+        if compact in _DRAWING_TYPE_NAMES:
+            return True
+        return any(f"<{drawing}>" in compact for drawing in _DRAWING_TYPE_NAMES)
+
+    @staticmethod
+    def _is_literal_zero_subscript(node: Subscript) -> bool:
+        return isinstance(node.index, NumberLiteral) and node.index.value == 0
+
+    def _expr_is_drawing_handle(self, expr: ASTNode | None) -> bool:
+        if isinstance(expr, FuncCall):
+            ns, name = _qualified_name(expr.callee)
+            if ns in _DRAWING_TYPE_NAMES and name in {"new", "copy"}:
+                return True
+            if ns == "linefill" and name in {"get_line1", "get_line2"}:
+                return True
+        if isinstance(expr, Identifier):
+            return expr.name in self._drawing_tuple_vars
+        if isinstance(expr, Ternary):
+            return self._expr_is_drawing_handle(expr.true_val) or self._expr_is_drawing_handle(expr.false_val)
+        return False
+
+    def _single_expr_tuple_drawing_mask(self, fn: FuncDef) -> list[bool] | None:
+        if not fn.is_single_expr or len(fn.body) != 1:
+            return None
+        stmt = fn.body[0]
+        expr = stmt.expr if isinstance(stmt, ExprStmt) else None
+        if not isinstance(expr, TupleLiteral):
+            return None
+        mask = [self._expr_is_drawing_handle(item) for item in expr.elements]
+        return mask if any(mask) else None
+
+    def _tuple_assign_drawing_mask(self, value: ASTNode | None) -> list[bool] | None:
+        if isinstance(value, TupleLiteral):
+            mask = [self._expr_is_drawing_handle(item) for item in value.elements]
+            return mask if any(mask) else None
+        if isinstance(value, FuncCall):
+            ns, name = _qualified_name(value.callee)
+            if ns is None and name in self._func_tuple_drawing_returns:
+                return self._func_tuple_drawing_returns[name]
+        return None
 
     # -- Diagnostic emission --
 
@@ -663,6 +733,12 @@ class SupportChecker:
         self._visit_children_const_ok(node)
 
     def _visit_VarDecl(self, node: VarDecl) -> None:
+        if node.type_hint in self._user_types:
+            self._var_udt_types[node.name] = node.type_hint
+        elif isinstance(node.value, FuncCall):
+            ns, name = _qualified_name(node.value.callee)
+            if name == "new" and ns in self._user_types:
+                self._var_udt_types[node.name] = ns
         if node.is_varip:
             self._err(
                 node,
@@ -679,6 +755,11 @@ class SupportChecker:
         self._visit_children(node)
 
     def _visit_TupleAssign(self, node: TupleAssign) -> None:
+        drawing_mask = self._tuple_assign_drawing_mask(node.value)
+        if drawing_mask:
+            for idx, name in enumerate(node.names):
+                if idx < len(drawing_mask) and drawing_mask[idx]:
+                    self._drawing_tuple_vars.add(name)
         if isinstance(node.value, FuncCall):
             ns, name = _qualified_name(node.value.callee)
             if ns == "ta" and name == "stoch":
@@ -687,6 +768,40 @@ class SupportChecker:
                     "ta.stoch(...) returns a single series in PineForge; tuple destructuring is not supported.",
                     hint="Use k = ta.stoch(...) and compute smoothing separately if needed.",
                 )
+        self._visit_children(node)
+
+    def _visit_Subscript(self, node: Subscript) -> None:
+        # Best-effort defensive guard for the silent-wrong shapes called out in
+        # spec L.3/U.7. This is not a full expression type checker; it catches
+        # the known dangerous surface (UDT vars with drawing fields, and tuple
+        # destructured drawing handles) without trying to prove every nested or
+        # parameter-passed UDT expression. Literal [0] is current-bar in Pine and
+        # safe to leave to codegen's existing current-value behavior.
+        if self._is_literal_zero_subscript(node):
+            self._visit_children(node)
+            return
+        if isinstance(node.object, MemberAccess) and isinstance(node.object.object, Identifier):
+            var_name = node.object.object.name
+            udt_name = self._var_udt_types.get(var_name)
+            if udt_name is not None and node.object.member in self._udt_drawing_fields.get(udt_name, set()):
+                self._err(
+                    node,
+                    "History references on UDT drawing fields are not supported in PineForge.",
+                    hint=(
+                        f"{var_name}.{node.object.member}[...] would be read as the current-bar field, "
+                        "not prior-bar history. Copy the field to a bare drawing variable first, "
+                        "or remove the history reference."
+                    ),
+                )
+        elif isinstance(node.object, Identifier) and node.object.name in self._drawing_tuple_vars:
+            self._err(
+                node,
+                "History references on tuple-destructured drawing handles are not supported in PineForge.",
+                hint=(
+                    f"{node.object.name}[...] is a drawing handle from tuple destructuring; "
+                    "PineForge cannot historize that tuple element safely."
+                ),
+            )
         self._visit_children(node)
 
     def _visit_FuncCall(self, node: FuncCall) -> None:

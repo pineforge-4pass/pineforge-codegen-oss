@@ -484,6 +484,93 @@ def test_label_geometry_accepted_visual_setter_warns():
     assert _errors(PRELUDE + 'lb = label.new(bar_index, high, "x")\nlabel.bogus(lb)\n')
 
 
+def test_udt_drawing_field_history_rejected():
+    src = PRELUDE + """
+type DrawState
+    line ln = na
+var DrawState d = DrawState.new()
+d.ln := line.new(bar_index, close, bar_index + 1, close)
+prev = d.ln[1]
+"""
+    _expect_error(src, "UDT drawing fields")
+
+
+def test_udt_array_drawing_field_history_rejected():
+    src = PRELUDE + """
+type DrawState
+    array<line> lines = na
+var DrawState d = DrawState.new(array.new<line>())
+prev = d.lines[1]
+"""
+    _expect_error(src, "UDT drawing fields")
+
+
+def test_udt_bracket_array_drawing_field_history_rejected():
+    src = PRELUDE + """
+type DrawState
+    line[] lines = na
+var DrawState d = DrawState.new(array.new<line>())
+prev = d.lines[1]
+"""
+    _expect_error(src, "UDT drawing fields")
+
+
+def test_udt_drawing_field_current_bar_zero_allowed():
+    src = PRELUDE + """
+type DrawState
+    line ln = na
+var DrawState d = DrawState.new()
+d.ln := line.new(bar_index, close, bar_index + 1, close)
+same = d.ln[0]
+"""
+    assert _errors(src) == []
+
+
+def test_udt_non_drawing_field_history_allowed():
+    src = PRELUDE + """
+type State
+    float n = 0.0
+var State d = State.new()
+prev = d.n[1]
+"""
+    assert _errors(src) == []
+
+
+def test_tuple_destructured_drawing_handle_history_rejected():
+    src = PRELUDE + """
+makePair() => [line.new(bar_index, close, bar_index + 1, close), line.new(bar_index, open, bar_index + 1, open)]
+[la, lb] = makePair()
+prev = la[1]
+"""
+    _expect_error(src, "tuple-destructured drawing handles")
+
+
+def test_tuple_literal_drawing_handle_history_rejected():
+    src = PRELUDE + """
+[la, lb] = [line.new(bar_index, close, bar_index + 1, close), line.new(bar_index, open, bar_index + 1, open)]
+prev = lb[1]
+"""
+    _expect_error(src, "tuple-destructured drawing handles")
+
+
+def test_tuple_ternary_drawing_handle_history_rejected():
+    src = PRELUDE + """
+makePair() => [close > open ? line.new(bar_index, close, bar_index + 1, close) : na, line.new(bar_index, open, bar_index + 1, open)]
+[la, lb] = makePair()
+prev = la[1]
+"""
+    _expect_error(src, "tuple-destructured drawing handles")
+
+
+def test_numeric_tuple_element_history_still_allowed():
+    src = PRELUDE + """
+makePair() => [close, open]
+[a, b] = makePair()
+prev = a[1]
+"""
+    assert _errors(src) == []
+
+
 # ---------------------------------------------------------------------------
 # Identifier-resolution edge cases
 # ---------------------------------------------------------------------------
