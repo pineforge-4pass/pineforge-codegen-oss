@@ -55,6 +55,10 @@ from .codegen import (
     SKIP_FUNC_NAMES, SKIP_NAMESPACES,
     BAR_BUILTINS, BAR_FIELDS,
 )
+from .codegen.drawing import (
+    LINE_METHODS, LINE_NOOP, BOX_METHODS, BOX_NOOP,
+    LABEL_METHODS, LABEL_NOOP, LINEFILL_METHODS, LINEFILL_NOOP,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +82,26 @@ SUPPORTED_ARRAY: frozenset[str] = frozenset(set(ARRAY_METHODS) | {"new", "new_fl
 SUPPORTED_MAP: frozenset[str] = frozenset(set(MAP_METHODS) | {"new"})
 SUPPORTED_MATRIX: frozenset[str] = frozenset(set(MATRIX_METHODS) | {"new"})
 SUPPORTED_SYMINFO: frozenset[str] = frozenset(SYMINFO_MEMBER_MAP)
+# Drawing-objects-as-data (spec §4.5). Geometry methods are REAL (route to the
+# per-type arena); *_NOOP visual setters are accepted no-ops (Level.WARNING).
+# Any line/box/label/linefill method NOT in these sets rejects loudly so an
+# unknown drawing method is not silently emitted. ``table``/``polyline`` are
+# intentionally absent — they stay in SKIP_NAMESPACES (no-op, never reclassified).
+SUPPORTED_LINE: frozenset[str] = frozenset(LINE_METHODS | LINE_NOOP | {"new"})
+SUPPORTED_BOX: frozenset[str] = frozenset(BOX_METHODS | BOX_NOOP | {"new"})
+SUPPORTED_LABEL: frozenset[str] = frozenset(LABEL_METHODS | LABEL_NOOP | {"new"})
+SUPPORTED_LINEFILL: frozenset[str] = frozenset(LINEFILL_METHODS | LINEFILL_NOOP | {"new"})
+SUPPORTED_CHART_POINT: frozenset[str] = frozenset(
+    {"new", "now", "from_index", "from_time", "copy"}
+)
+# Visual no-op drawing setters (warn, don't reject) keyed by namespace.
+_DRAWING_NOOP_BY_NS: dict[str, frozenset[str]] = {
+    "line": LINE_NOOP, "box": BOX_NOOP, "label": LABEL_NOOP, "linefill": LINEFILL_NOOP,
+}
+_DRAWING_SUPPORTED_BY_NS: dict[str, frozenset[str]] = {
+    "line": SUPPORTED_LINE, "box": SUPPORTED_BOX,
+    "label": SUPPORTED_LABEL, "linefill": SUPPORTED_LINEFILL,
+}
 SUPPORTED_COLOR_CONST: frozenset[str] = frozenset(COLOR_CONST_MAP)
 SUPPORTED_COLOR_FUNC: frozenset[str] = frozenset({"new", "rgb", "r", "g", "b", "t"})
 # Cosmetic color builders with no backtest-logic effect. Warned (not rejected);
@@ -940,6 +964,34 @@ class SupportChecker:
         if ns == "matrix" and name not in SUPPORTED_MATRIX:
             self._err(node, f"matrix.{name}(...) is not implemented in PineForge runtime.")
             self._visit_children(node)
+            return
+
+        # Drawing-objects-as-data (line/box/label/linefill). Geometry methods
+        # are REAL data; *_NOOP visual setters are accepted no-ops (warned);
+        # any OTHER drawing method rejects loudly. Args carry constant-namespace
+        # members (xloc.*, yloc.*, text.align_*, style consts), so children are
+        # visited with const reads allowed. NOTE: user methods on a drawing var
+        # (egoigor ``ln.slope()``) have ns="ln" (the receiver), NOT a DRAWING_NS,
+        # so they are never gated here.
+        if ns in _DRAWING_SUPPORTED_BY_NS:
+            if name not in _DRAWING_SUPPORTED_BY_NS[ns]:
+                self._err(node, f"{ns}.{name}(...) is not implemented in PineForge runtime.")
+                self._visit_children(node)
+                return
+            if name in _DRAWING_NOOP_BY_NS[ns]:
+                self._warn(
+                    node,
+                    f"{ns}.{name}(...) is a visual no-op in PineForge backtests "
+                    f"(drawing geometry is data; color/style/size are dropped).",
+                )
+            self._visit_children_const_ok(node)
+            return
+        if ns == "chart.point":
+            if name not in SUPPORTED_CHART_POINT:
+                self._err(node, f"chart.point.{name}(...) is not implemented in PineForge runtime.")
+                self._visit_children(node)
+                return
+            self._visit_children_const_ok(node)
             return
 
         # Drawing / charting / alert namespaces — codegen drops silently. Warn,

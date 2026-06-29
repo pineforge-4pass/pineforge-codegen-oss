@@ -44,6 +44,8 @@ from .tables import (
     ARRAY_METHODS,
     BAR_BUILTINS,
     BAR_FIELDS,
+    DRAWING_NS,
+    DRAWING_TYPE_TO_CPP,
     PINE_TYPE_TO_CPP,
     TA_RETURNS_BOOL,
 )
@@ -100,6 +102,12 @@ class TypeInferer:
                 return TypeSpec.map(key, val)
         if name in self._udt_defs:
             return TypeSpec.udt(name)
+        # Drawing-objects-as-data (spec §4.1 / P3): scalar ``line``/``box``/
+        # ``label``/``linefill``/``chart.point`` hints carry the handle identity
+        # via a udt TypeSpec. (``array<line>`` already resolves via the array
+        # fallback above.) Drawing names are NOT in _udt_defs.
+        if name in DRAWING_TYPE_TO_CPP:
+            return TypeSpec.udt(name)
         return None
 
     def _type_spec_to_cpp(self, spec: TypeSpec | None) -> str:
@@ -110,6 +118,11 @@ class TypeInferer:
             return {"float": "double", "int": "int", "bool": "bool",
                     "string": "std::string", "color": "int"}.get(spec.name or "float", "double")
         if spec.kind == "udt" and spec.name:
+            # Drawing handle structs (P1): map BEFORE the _udt_defs check so
+            # array<line> -> std::vector<Line> and scalar line -> Line instead
+            # of the old collapse to double / unknown-type-name.
+            if spec.name in DRAWING_TYPE_TO_CPP:
+                return DRAWING_TYPE_TO_CPP[spec.name]
             return spec.name if spec.name in self._udt_defs else "double"
         if spec.kind == "array":
             return f"std::vector<{self._type_spec_to_cpp(spec.element)}>"
@@ -143,6 +156,10 @@ class TypeInferer:
         UDTs would otherwise fall through to ``0`` which is type-incompatible.
         """
         if spec is not None and spec.kind == "udt" and spec.name:
+            # Drawing handle default (P2): brace-init the C++ struct name
+            # (Line{} = na handle), NOT the lowercase Pine name (line{}).
+            if spec.name in DRAWING_TYPE_TO_CPP:
+                return f"{DRAWING_TYPE_TO_CPP[spec.name]}{{}}"
             return f"{spec.name}{{}}"
         cpp_type = self._type_spec_to_cpp(spec)
         if cpp_type.startswith("std::vector") or cpp_type.startswith("std::unordered_map"):
@@ -179,6 +196,12 @@ class TypeInferer:
                 return self._collection_types[node.name]
             if node.name in self._udt_var_types:
                 return TypeSpec.udt(self._udt_var_types[node.name])
+            # Drawing-typed method/function parameter (L.6d / U.5): a ``line ln``
+            # method receiver registers in _udt_param_udt so its body getters
+            # resolve to the drawing udt and dispatch through the §4.3 path.
+            _pu = getattr(self, "_udt_param_udt", None)
+            if _pu and node.name in _pu and _pu[node.name] in DRAWING_TYPE_TO_CPP:
+                return TypeSpec.udt(_pu[node.name])
             sym = self.ctx.symbols.resolve(node.name)
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return sym.type_spec
@@ -191,6 +214,15 @@ class TypeInferer:
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
             targs = self._template_args_from_call(node)
+            # Drawing-objects-as-data return typing (spec §4.5 DRAWING_RETURN_SPECS):
+            # *.new / *.copy -> handle of the self-type; linefill.get_line* -> line.
+            if namespace in DRAWING_NS:
+                if func_name in ("new", "copy"):
+                    return TypeSpec.udt(namespace)
+                if namespace == "linefill" and func_name in ("get_line1", "get_line2"):
+                    return TypeSpec.udt("line")
+            if self._is_chart_point_callee(node.callee):
+                return TypeSpec.udt("chart.point")
             if namespace == "str" and func_name == "split":
                 return TypeSpec.array(TypeSpec.primitive("string"))
             if namespace == "array" and func_name in (
@@ -249,6 +281,14 @@ class TypeInferer:
                         return recv_spec.element
                     if func_name == "eigenvalues":
                         return TypeSpec.array(TypeSpec.primitive("float"))
+                # Drawing method-form: ``a.copy()`` -> same handle type;
+                # ``lf.get_line1()`` -> line. (L-N6 alias-vs-copy typing.)
+                if (recv_spec is not None and recv_spec.kind == "udt"
+                        and recv_spec.name in DRAWING_TYPE_TO_CPP):
+                    if func_name == "copy":
+                        return recv_spec
+                    if recv_spec.name == "linefill" and func_name in ("get_line1", "get_line2"):
+                        return TypeSpec.udt("line")
         return None
 
     # ------------------------------------------------------------------
@@ -345,6 +385,22 @@ class TypeInferer:
             if node.type_hint in self._udt_defs:
                 return node.type_hint
             return PINE_TYPE_TO_CPP.get(node.type_hint, "double")
+        # Drawing handle local (L-N6): a hintless local whose RHS resolves to a
+        # drawing udt must declare as the handle struct, not the analyzer's
+        # scalar default. Covers ``ln = arr.get(i)``, alias ``b = a``, field read
+        # ``lvl.ln``, and ``c = a.copy()``. Also records _udt_var_types so later
+        # uses (``ln.set_x2(...)`` / ``ln.slope()``) resolve to the drawing udt.
+        if getattr(self, "_uses_drawing", False):
+            rhs_spec = self._type_spec_from_expr(node.value)
+            if (rhs_spec is not None and rhs_spec.kind == "udt"
+                    and rhs_spec.name in DRAWING_TYPE_TO_CPP):
+                self._udt_var_types.setdefault(node.name, rhs_spec.name)
+                return DRAWING_TYPE_TO_CPP[rhs_spec.name]
+            # Scalar drawing getter local (get_text -> std::string, etc.).
+            if isinstance(node.value, FuncCall):
+                _dret = self._drawing_call_return_cpp(node.value)
+                if _dret is not None:
+                    return _dret
         sym = self.ctx.symbols.resolve(node.name)
         if sym is not None:
             inferred = self._infer_type(node.value)
@@ -467,6 +523,12 @@ class TypeInferer:
             return "double"
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            # Drawing scalar getter return type (get_text -> std::string,
+            # get_x* -> int64_t, get_y*/get_price/get_top/get_bottom -> double).
+            if getattr(self, "_uses_drawing", False):
+                _dret = self._drawing_call_return_cpp(node)
+                if _dret is not None:
+                    return _dret
             if func_name in ("time", "time_close") and namespace is None and node.args:
                 return "int64_t"
             if func_name == "timestamp" and namespace is None:

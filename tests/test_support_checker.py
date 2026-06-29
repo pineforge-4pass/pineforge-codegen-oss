@@ -471,11 +471,17 @@ def test_plot_emits_warning_not_error():
     assert any("visual only" in d.message for d in _warnings(src))
 
 
-def test_label_namespace_emits_warning_not_error():
-    src = PRELUDE + 'label.new(bar_index, high, "x")\n'
-    # bar_index now warns (divergent); label.new also warns (visual).
-    warnings = _warnings(src)
-    assert any("visual only" in d.message for d in warnings)
+def test_label_geometry_accepted_visual_setter_warns():
+    # Drawing-objects-as-data: label.new is REAL geometry (a label in the
+    # per-type arena) — accepted, no hard error and no "visual only" warning.
+    assert _errors(PRELUDE + 'label.new(bar_index, high, "x")\n') == []
+    # A pure-visual setter (label.set_color) is the part that is a no-op: it is
+    # accepted but warned, never rejected.
+    src2 = PRELUDE + 'lb = label.new(bar_index, high, "x")\nlabel.set_color(lb, color.red)\n'
+    assert _errors(src2) == []
+    assert any("visual no-op" in d.message for d in _warnings(src2))
+    # An UNKNOWN drawing method rejects loudly (not silently emitted).
+    assert _errors(PRELUDE + 'lb = label.new(bar_index, high, "x")\nlabel.bogus(lb)\n')
 
 
 # ---------------------------------------------------------------------------

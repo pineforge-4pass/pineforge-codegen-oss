@@ -263,15 +263,44 @@ PINE_TYPE_TO_CPP = {
     PineType.STRING: "std::string", PineType.NA: "double",
     PineType.UNKNOWN: "double", PineType.VOID: "double",
     PineType.COLOR: "int",
+    # Drawing-objects-as-data: the value-view handle structs (see
+    # drawing.hpp). Explicit-hint decls (``var line x``), UDT-method drawing
+    # params, and ``_type_for_decl`` resolve through here.
+    "line": "Line", "box": "Box", "label": "Label",
+    "linefill": "Linefill", "chart.point": "ChartPoint",
+}
+
+# ---------------------------------------------------------------------------
+# Drawing-objects-as-data (spec §4.1)
+# ---------------------------------------------------------------------------
+# Pine drawing type name -> C++ handle struct (pineforge/drawing.hpp).
+# ``table`` / ``polyline`` are DELIBERATELY absent — they stay 100% no-op
+# (kept in SKIP_NAMESPACES / SKIP_VAR_TYPES / _DRAWING_TYPES_INIT).
+DRAWING_TYPE_TO_CPP = {
+    "line": "Line", "box": "Box", "label": "Label",
+    "linefill": "Linefill", "chart.point": "ChartPoint",
+}
+# Function-call namespaces routed to the per-type arena dispatch.
+DRAWING_NS = {"line", "box", "label", "linefill"}
+# Constant member reads (``line.style_solid`` -> "0"). chart.point/linefill
+# carry no style constants.
+DRAWING_STYLE_NS = {"line", "box", "label"}
+# Per-type arena member name on the generated strategy.
+DRAWING_ARENA = {
+    "line": "_pf_lines_", "box": "_pf_boxes_",
+    "label": "_pf_labels_", "linefill": "_pf_linefills_",
 }
 
 SKIP_FUNC_NAMES = {
     "plot", "plotshape", "plotchar", "plotcandle", "plotbar", "plotarrow",
     "fill", "hline", "barcolor", "bgcolor", "alert", "alertcondition",
 }
+# line / box / label / linefill REMOVED — they now route to real drawing
+# codegen (gated on _uses_drawing). table / polyline / chart / display / size
+# / position stay no-op.
 SKIP_NAMESPACES = {
-    "table", "label", "line", "box", "polyline", "chart",
-    "linefill", "display", "size", "position",
+    "table", "polyline", "chart",
+    "display", "size", "position",
 }
 SKIP_VAR_TYPES = {"table"}
 

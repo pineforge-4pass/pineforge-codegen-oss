@@ -111,6 +111,7 @@ from .tables import (
     COLOR_CONST_MAP,
     DAYOFWEEK_MAP,
     DISPLAY_MAP,
+    DRAWING_STYLE_NS,
     ON_OFF_INHERIT_MAP,
     ORDER_DIRECTION_MAP,
     SKIP_NAMESPACES,
@@ -588,6 +589,14 @@ class ExprVisitor:
             if ns == "color":
                 if node.member in COLOR_CONST_MAP:
                     return COLOR_CONST_MAP[node.member]
+                return "0"
+            # Drawing style/visual CONSTANT member reads (line.style_solid,
+            # box.style_dashed, label.style_label_left, ...). These namespaces
+            # left SKIP_NAMESPACES (their FuncCall forms now route to the arena),
+            # but their constant members only ever feed dropped visual kwargs, so
+            # they still lower to "0". The function names arrive as FuncCalls
+            # (visit_call), never here. See spec §4.4.
+            if ns in DRAWING_STYLE_NS:
                 return "0"
             if ns in SKIP_NAMESPACES:
                 return "0"

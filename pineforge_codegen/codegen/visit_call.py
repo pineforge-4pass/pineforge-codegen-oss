@@ -141,10 +141,13 @@ from ..ast_nodes import (
 )
 from ..symbols import TypeSpec
 from .. import signatures as sigs
+from .drawing import ALL_DRAWING_METHODS
 from .tables import (
     ARRAY_METHODS,
     BAR_FIELDS,
     BAR_SERIES_PUSH,
+    DRAWING_NS,
+    DRAWING_TYPE_TO_CPP,
     MAP_METHODS,
     MATH_FUNC_MAP,
     MATRIX_METHODS,
@@ -226,6 +229,32 @@ class CallVisitor:
                     )
                     rest = [self._visit_expr(a) for a in rest_nodes]
                     return f"{fn_cpp}({', '.join([recv_e] + rest)})"
+
+        # Drawing method dispatch (spec §4.3 / L.1). A KNOWN drawing method on a
+        # receiver that resolves to a drawing udt — gated on the METHOD NAME
+        # FIRST so a user method (egoigor's ``ln.slope()``, already routed by the
+        # block above) is never captured here. This single check covers all
+        # receiver shapes (identifier ``ln.set_x2(v)``, obj.field
+        # ``d.fld.set_y2(v)``, and arbitrary-expr ``d.upln.get(0).delete()``), so
+        # it precedes the obj.field.method / identifier branches below AND the
+        # generic ``delete`` -> ``_delete_`` rewrites + _resolve_callee.
+        if isinstance(callee, MemberAccess) and callee.member in ALL_DRAWING_METHODS:
+            recv_spec = self._type_spec_from_expr(callee.object)
+            if (recv_spec is not None and recv_spec.kind == "udt"
+                    and recv_spec.name in DRAWING_TYPE_TO_CPP):
+                return self._emit_drawing_method(
+                    recv_spec.name, callee.member, callee.object,
+                    list(node.args), node,
+                )
+
+        # chart.point.now/new/from_index/from_time/copy — REAL data (a ChartPoint
+        # aggregate). Routed here BEFORE the obj.field.method receiver logic,
+        # which would otherwise mis-treat ``chart.point`` as a receiver object
+        # and raise on the ``chart.point`` member read (chart ∈ SKIP_NAMESPACES).
+        if self._is_chart_point_callee(callee):
+            cp_func, _cp_ns = self._resolve_callee(callee)
+            return self._emit_chart_point(cp_func, node)
+
         # obj.field.method(args) — must not lower to namespace::method (loses receiver chain).
         if isinstance(callee, MemberAccess):
             obj = callee.object
@@ -445,6 +474,16 @@ class CallVisitor:
         # fallbacks). The support checker warns on this construct.
         if namespace is None and func_name == "color" and func_name not in self._func_names:
             return "0"
+
+        # Drawing-objects-as-data namespace-functional form (spec §4.3 form 1):
+        # line.new(...) / line.get_y2(ln) / box.set_top(b, v) / linefill.new(...)
+        # MUST precede the SKIP_NAMESPACES early-return (these namespaces were
+        # removed from SKIP_NAMESPACES). chart.point.* resolves to namespace
+        # "chart", so it is matched by callee shape instead.
+        if namespace in DRAWING_NS:
+            return self._emit_drawing_namespace_call(namespace, func_name, node)
+        if self._is_chart_point_callee(callee):
+            return self._emit_chart_point(func_name, node)
 
         # Skip visual/unsupported namespace calls
         if namespace in SKIP_NAMESPACES or namespace in SKIP_VAR_TYPES:

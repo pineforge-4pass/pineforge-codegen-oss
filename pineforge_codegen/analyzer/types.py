@@ -45,6 +45,12 @@ from ..ast_nodes import (
 )
 from ..symbols import PineType, TypeSpec
 
+# Drawing-objects-as-data type names (spec §4.1). Defined locally — the
+# analyzer must not import from ``codegen`` (codegen imports analyzer, so the
+# reverse would be a cycle). Mirrors codegen.tables.DRAWING_TYPE_TO_CPP keys.
+_DRAWING_TYPE_NAMES = frozenset({"line", "box", "label", "linefill", "chart.point"})
+_DRAWING_NS = frozenset({"line", "box", "label", "linefill"})
+
 
 class TypeHelper:
     """Pine type-hint / expression inference.
@@ -100,6 +106,13 @@ class TypeHelper:
                 return TypeSpec.map(key, val)
         if hint in self._udt_fields:
             return TypeSpec.udt(hint)
+        # Drawing-objects-as-data (P3): scalar ``line``/``box``/``label``/
+        # ``linefill``/``chart.point`` carry the handle identity via a udt
+        # TypeSpec. Without this the analyzer field-spec filter (base.py ~847)
+        # erases a scalar drawing field, collapsing it to double. Drawing names
+        # are NOT in _udt_fields.
+        if hint in _DRAWING_TYPE_NAMES:
+            return TypeSpec.udt(hint)
         return None
 
     def _template_args_from_call(self, node: FuncCall) -> list[str]:
@@ -116,6 +129,17 @@ class TypeHelper:
             func = cal.member if isinstance(cal, MemberAccess) else None
             ns = cal.object.name if isinstance(cal, MemberAccess) and isinstance(cal.object, Identifier) else None
             targs = self._template_args_from_call(value)
+            # Drawing-objects-as-data return typing: *.new / *.copy -> handle of
+            # the self-type; linefill.get_line* -> line; chart.point.* -> point.
+            if ns in _DRAWING_NS:
+                if func in ("new", "copy"):
+                    return TypeSpec.udt(ns)
+                if ns == "linefill" and func in ("get_line1", "get_line2"):
+                    return TypeSpec.udt("line")
+            if (isinstance(cal, MemberAccess) and isinstance(cal.object, MemberAccess)
+                    and isinstance(cal.object.object, Identifier)
+                    and cal.object.object.name == "chart" and cal.object.member == "point"):
+                return TypeSpec.udt("chart.point")
             if ns == "array" and func in ("new", "new_float", "new_int", "new_bool", "new_string", "from"):
                 if func == "new_float":
                     return TypeSpec.array(TypeSpec.primitive("float"))
@@ -194,6 +218,13 @@ class TypeHelper:
                         return recv_spec.element
                     if func == "eigenvalues":
                         return TypeSpec.array(TypeSpec.primitive("float"))
+                # Drawing method-form: a.copy() -> same handle; lf.get_line*() -> line.
+                if (recv_spec is not None and recv_spec.kind == "udt"
+                        and recv_spec.name in _DRAWING_TYPE_NAMES):
+                    if func == "copy":
+                        return recv_spec
+                    if recv_spec.name == "linefill" and func in ("get_line1", "get_line2"):
+                        return TypeSpec.udt("line")
         if isinstance(value, Identifier):
             sym = self._symbols.resolve(value.name)
             if sym is not None and sym.type_spec is not None:
