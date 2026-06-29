@@ -98,6 +98,8 @@ class SecurityEmitter:
             if (name in self._known_vars and name not in self._input_backed_vars
                     and isinstance(self._known_vars[name], str)):
                 return self._known_vars[name], None
+            if name in self._input_backed_vars and name in self._input_var_to_call:
+                return None, self._visit_expr(self._input_var_to_call[name])
             # class-scope resolvable (global / input member)?
             if self._ident_is_resolvable(name):
                 try:

@@ -149,6 +149,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_ta_ranges: dict[str, tuple[int, int]] = {}  # func_name -> (start, end) indices
         self._func_call_site_count: dict[str, int] = {}  # func_name -> count
         self._func_call_cs_map: dict[int, tuple[str, int]] = {}  # call_node_id -> (func_name, cs_idx)
+        # Authoritative clone-name map: (func_name, cs_idx) -> {orig_member_name:
+        # cloned_member_name}. The codegen rebuilds its TA remap from the
+        # ``{orig}_cs{cs_idx}`` formula by default, but a TA site reached through
+        # MULTIPLE enclosing functions (e.g. a helper cloned both directly and via
+        # a range-widened outer function) can collide on that formula. When the
+        # analyzer must disambiguate a clone's member name, it records the actual
+        # chosen name here so the codegen consumes it verbatim instead of
+        # re-deriving a colliding name. Empty for the common (no-collision) case,
+        # keeping generated output byte-identical.
+        self._func_cs_ta_clone_names: dict[tuple[str, int], dict[str, str]] = {}
+        # All TA member names minted so far (base + clones), for O(1) collision
+        # detection when minting a new clone.
+        self._ta_member_names: set[str] = set()
         # UDT field definitions: type_name -> {field_name: PineType}
         self._udt_fields: dict[str, dict[str, PineType]] = {}
         # var_name -> UDT type for variables holding UDT instances
@@ -164,6 +177,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._current_top_level_stmt: ASTNode | None = None
         self._global_scope = True
         self._static_vars: set[str] = set()
+        # Stack of enclosing user-function param-name sets, pushed while visiting
+        # a FuncDef body. Lets a nested user-func call detect when it substitutes
+        # a TA ctor length with one of the OUTER function's params, so the outer
+        # call site can re-substitute (e.g. f_bbwp(_bbwLen) -> f_basisMa(_len)).
+        self._enclosing_func_params: list[set[str]] = []
+        # Set of TA-site indices a nested user-func call rewrote in terms of the
+        # current enclosing function's params (None when not inside a FuncDef body).
+        self._nested_ta_touched: set | None = None
 
         # Pre-populate builtins
         self._populate_builtins()
@@ -272,6 +293,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             func_ta_ranges=self._func_ta_ranges,
             func_call_cs_map=self._func_call_cs_map,
             func_call_site_counts=self._func_call_site_count,
+            func_cs_ta_clone_names=self._func_cs_ta_clone_names,
             udt_defs=self._udt_fields,
             enum_defs=self._enum_defs,
             enum_member_strings=self._enum_member_strings,
@@ -899,16 +921,28 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         body_type = PineType.VOID
         old_global = self._global_scope
         self._global_scope = False
+        self._enclosing_func_params.append(set(node.params))
+        self._nested_ta_touched = set()
         try:
             for stmt in node.body:
                 body_type = self._visit(stmt)
         finally:
             self._global_scope = old_global
+            self._enclosing_func_params.pop()
+            nested_touched = self._nested_ta_touched
+            self._nested_ta_touched = None
 
-        # Record TA range for this function
+        # Record TA range for this function. Widen to cover any nested-callee TA
+        # sites whose ctor args were rewritten in terms of THIS function's params
+        # (e.g. f_basisMa's sites parameterized by f_bbwp's _bbwLen), so resolving
+        # this function at its call site re-substitutes those nested sites too.
         ta_end = len(self._ta_call_sites)
-        if ta_end > ta_start:
-            self._func_ta_ranges[node.name] = (ta_start, ta_end)
+        lo, hi = ta_start, ta_end
+        if nested_touched:
+            lo = min(lo, min(nested_touched))
+            hi = max(hi, max(nested_touched) + 1)
+        if hi > lo:
+            self._func_ta_ranges[node.name] = (lo, hi)
 
         self._symbols.exit_scope()
 
