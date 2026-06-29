@@ -100,6 +100,7 @@ from ..ast_nodes import (
 )
 from ..symbols import TypeSpec
 from .tables import (
+    ARRAY_NEW_CTORS,
     TA_RETURNS_BOOL,
     TA_TUPLE_FIELDS,
     MATRIX_RETURNING_METHODS,
@@ -291,7 +292,7 @@ class StmtVisitor:
         # array.new_float() etc., plus array-returning copy/slice.
         if isinstance(node.value, FuncCall):
             func_name, namespace = self._resolve_callee(node.value.callee)
-            if namespace == "array" and func_name in ("new", "new_float", "new_int", "new_bool", "new_string", "from", "copy", "slice"):
+            if namespace == "array" and func_name in ARRAY_NEW_CTORS | {"new", "from", "copy", "slice"}:
                 self._array_vars.add(node.name)
                 spec = self._type_spec_from_expr(node.value) or self._array_spec_for_name(node.name)
                 self._collection_types.setdefault(node.name, spec)
@@ -402,11 +403,11 @@ class StmtVisitor:
             return
 
         # General declaration
-        cpp_val = self._visit_expr(node.value)
+        cpp_type = self._type_for_decl(node) if not is_global_member else None
+        cpp_val = self._visit_rhs_value(node.value, node.name, target_cpp_type=cpp_type)
         if is_global_member:
             lines.append(f"{pad}{safe} = {cpp_val};")
         else:
-            cpp_type = self._type_for_decl(node)
             lines.append(f"{pad}{cpp_type} {safe} = {cpp_val};")
 
     @staticmethod
@@ -509,7 +510,7 @@ class StmtVisitor:
                             f"expected {self._type_spec_to_cpp(lhs_spec)}, "
                             f"got {self._type_spec_to_cpp(rhs_spec)}",
                         )
-            val_cpp = self._visit_expr(node.value)
+            val_cpp = self._visit_rhs_value(node.value, target_name)
             if node.op == ":=":
                 lines.append(f"{pad}{safe} = {val_cpp};")
             else:
@@ -519,7 +520,7 @@ class StmtVisitor:
                 else:
                     lines.append(f"{pad}{safe} {node.op} {val_cpp};")
         else:
-            val_cpp = self._visit_expr(node.value)
+            val_cpp = self._visit_rhs_value(node.value, target_name)
             if node.op == ":=":
                 lines.append(f"{pad}{safe} = {val_cpp};")
             else:
@@ -726,6 +727,12 @@ class StmtVisitor:
                 if isinstance(stmt, ExprStmt):
                     # Check if it's a skip expr
                     if self._is_skip_expr(stmt.expr):
+                        return
+                    # A void drawing setter / delete / visual-noop cannot be the
+                    # branch's value (it lowers to a void C++ call) — emit it as
+                    # a statement and leave ``target`` at its default.
+                    if self._call_is_void(stmt.expr):
+                        self._visit_stmt(stmt, lines, indent)
                         return
                     cpp = self._visit_expr(stmt.expr)
                     pad = "    " * indent

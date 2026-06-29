@@ -65,6 +65,21 @@ class FuncInfo:
     # ``Sample s = build_sample(...)`` then ``s.score()`` dispatches
     # correctly. Probe: data/validation/udt-method-probe-20-udt-return-from-func.
     udt_return_type: str | None = None
+    # Parallel to ``node.params``; each entry is a ``TypeSpec`` (or ``None``)
+    # carrying UDT / drawing-handle / precise-scalar typing that the coarse
+    # ``param_types`` (PineType) cannot represent. Populated from the
+    # function's declared parameter type hints (authoritative) and, for
+    # untyped params, from the call-site argument type. The codegen prefers
+    # this over ``param_types`` when emitting each parameter's C++ type so a
+    # ``pivot hi`` parameter emits as ``pivot hi`` (not ``double hi``) and an
+    # untyped ``s`` used as a string emits as ``std::string s``.
+    param_type_specs: list = field(default_factory=list)
+    # ``TypeSpec`` of the function's return value when it is a collection the
+    # coarse ``return_type`` (PineType) cannot represent — today this covers
+    # array-returning functions (``buildPDLevels() => array.from(...)`` ->
+    # ``std::vector<double>``). UDT / drawing-handle returns use
+    # ``udt_return_type``; tuple returns use ``returns_tuple``.
+    return_type_spec: Any = None
 
 
 @dataclass
@@ -107,6 +122,12 @@ class SecurityCallInfo:
     depends_on_mutable_globals: bool = False
     mutable_globals: tuple[str, ...] = ()
     is_lower_tf_array: bool = False
+    # Name of the user function whose body contains this call ("" at global
+    # scope). A ``request.security(sym, tf, ...)`` whose ``tf`` is that
+    # function's parameter cannot be resolved at class scope (the security
+    # evaluator is a class method, not the function body) — the codegen resolves
+    # such a param-tf from the function's call sites instead.
+    containing_func: str = ""
 
 
 @dataclass
@@ -145,6 +166,8 @@ class AnalyzerContext:
     # Per-function var_members + series_vars (used when emitting per-function call-site variants):
     func_var_members: dict = field(default_factory=dict)
     func_series_vars: dict = field(default_factory=dict)
+    # Per-function array-return TypeSpec (see FuncInfo.return_type_spec).
+    func_return_type_specs: dict = field(default_factory=dict)
     # var_name -> UDT type name for variables instantiated via TypeName.new(...)
     udt_var_types: dict[str, str] = field(default_factory=dict)
     # var_name -> structured collection/UDT type metadata

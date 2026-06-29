@@ -20,8 +20,7 @@ reads only attributes established by ``CodeGen.__init__`` (``_uses_drawing``,
 from __future__ import annotations
 
 from ..ast_nodes import FuncCall, Identifier, MemberAccess
-from .tables import DRAWING_TYPE_TO_CPP, DRAWING_ARENA
-
+from .tables import DRAWING_TYPE_TO_CPP, DRAWING_ARENA, ARRAY_VOID_METHODS as _ARRAY_VOID_METHODS
 
 # ---------------------------------------------------------------------------
 # Canonical Pine v6 constructor param-name lists (positional order).
@@ -442,6 +441,63 @@ class DrawingVisitor:
         if dtype is None:
             return None
         return _DRAWING_GETTER_RET.get((dtype, method))
+
+    def _drawing_call_is_void(self, node) -> bool:
+        """True if ``node`` is a drawing call that lowers to a VOID C++
+        expression (setters, ``delete``, visual-noop) — i.e. it cannot be used
+        as a return value / RHS. Constructors (``new``), ``copy`` and getters
+        return a value. Used by UDF last-expression lowering so a function whose
+        final statement is e.g. ``label.set_text(lb, ...)`` emits it as a
+        statement instead of ``return pf_label_set_text(...);``.
+        """
+        if not isinstance(node, FuncCall) or not isinstance(node.callee, MemberAccess):
+            return False
+        method = node.callee.member
+        _fn, ns = self._resolve_callee(node.callee)
+        from .tables import DRAWING_NS
+        dtype = None
+        if ns in DRAWING_NS:
+            dtype = ns
+        else:
+            recv_spec = self._type_spec_from_expr(node.callee.object)
+            if (recv_spec is not None and recv_spec.kind == "udt"
+                    and recv_spec.name in DRAWING_TYPE_TO_CPP):
+                dtype = recv_spec.name
+        if dtype is None:
+            return False
+        if method in ("new", "copy"):
+            return False                      # constructors / copy return a handle
+        if (dtype, method) in _DRAWING_GETTER_RET:
+            return False                      # getters return a scalar
+        geometry, noop = DRAWING_METHODS_BY_TYPE.get(dtype, (frozenset(), frozenset()))
+        # any other recognised drawing method is a setter / delete / visual-noop
+        return method in geometry or method in noop
+
+    def _call_is_void(self, node) -> bool:
+        """True if ``node`` is a call that lowers to a VOID (or non-scalar) C++
+        expression and so cannot be used as a function's return value / RHS.
+
+        Covers drawing setters/delete/visual-noop (delegated to
+        ``_drawing_call_is_void``) AND the Pine array MUTATOR methods whose C++
+        lowering is void / an iterator (``array.push/insert/clear/set/fill/
+        sort/reverse/concat/unshift``) — a function ending in
+        ``array.clear(x)`` returns void in Pine, so it must emit as a statement
+        with a default return, not ``return x.clear();``.
+        """
+        if self._drawing_call_is_void(node):
+            return True
+        if not isinstance(node, FuncCall) or not isinstance(node.callee, MemberAccess):
+            return False
+        method = node.callee.member
+        _fn, ns = self._resolve_callee(node.callee)
+        if method not in _ARRAY_VOID_METHODS:
+            return False
+        # array.<method>(arr, ...) namespace form OR arr.<method>(...) method
+        # form on a std::vector receiver.
+        if ns == "array":
+            return True
+        recv_spec = self._type_spec_from_expr(node.callee.object)
+        return recv_spec is not None and recv_spec.kind == "array"
 
     # ------------------------------------------------------------------
     # _uses_drawing detection + arena caps

@@ -291,6 +291,28 @@ DRAWING_ARENA = {
     "label": "_pf_labels_", "linefill": "_pf_linefills_",
 }
 
+# Pine typed array constructors for drawing handles — ``array.new_line(...)``
+# is the typed alias of ``array.new<line>(...)`` (and likewise for box/label/
+# linefill). Maps the constructor name to the drawing element type name, so the
+# element TypeSpec resolves to the C++ handle struct (Line/Box/Label/Linefill).
+ARRAY_DRAWING_NEW_CTORS = {
+    "new_line": "line", "new_box": "box",
+    "new_label": "label", "new_linefill": "linefill",
+}
+# Pine array methods whose C++ lowering is void (or a non-scalar iterator) and
+# whose Pine semantics is mutate-in-place: a function whose body ends in one of
+# these returns void, so the codegen must emit it as a statement + default
+# return rather than ``return arr.clear();`` / ``return arr.insert(...);``.
+ARRAY_VOID_METHODS = frozenset({
+    "push", "unshift", "insert", "clear", "set", "fill",
+    "sort", "reverse", "concat",
+})
+# All recognised ``array.new_*`` scalar+drawing constructor names (``new`` itself
+# is template-form and handled separately).
+ARRAY_NEW_CTORS = frozenset(
+    {"new_float", "new_int", "new_bool", "new_string"} | set(ARRAY_DRAWING_NEW_CTORS)
+)
+
 SKIP_FUNC_NAMES = {
     "plot", "plotshape", "plotchar", "plotcandle", "plotbar", "plotarrow",
     "fill", "hline", "barcolor", "bgcolor", "alert", "alertcondition",

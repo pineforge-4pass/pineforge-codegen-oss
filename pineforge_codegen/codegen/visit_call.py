@@ -143,6 +143,7 @@ from ..symbols import TypeSpec
 from .. import signatures as sigs
 from .drawing import ALL_DRAWING_METHODS
 from .tables import (
+    ARRAY_DRAWING_NEW_CTORS,
     ARRAY_METHODS,
     BAR_FIELDS,
     BAR_SERIES_PUSH,
@@ -443,7 +444,7 @@ class CallVisitor:
 
         # Array operations — emit proper C++ vector operations
         if namespace == "array":
-            if func_name in ("new", "new_float", "new_int", "new_bool", "new_string"):
+            if func_name in ("new", "new_float", "new_int", "new_bool", "new_string") or func_name in ARRAY_DRAWING_NEW_CTORS:
                 spec = self._type_spec_from_expr(node) or TypeSpec.array(TypeSpec.primitive("float"))
                 cpp_type = self._type_spec_to_cpp(spec)
                 init_default = self._default_for_spec(spec.element if spec.element is not None else TypeSpec.primitive("float"))
@@ -954,10 +955,19 @@ class CallVisitor:
                 elif f.default:
                     val = self._visit_expr(f.default)
                 if val is not None:
-                    # Fix narrowing: cast na<double>() to correct type for int fields
+                    # Fix narrowing: brace-init (``T{.field = v}``) disallows
+                    # narrowing. Pine ``int`` UDT fields are emitted as
+                    # ``int64_t`` (see base.py) but are initialised from
+                    # ``na<double>()`` / doubles in places, so cast to the
+                    # field's type. ``na<double>()`` for an int field → 0.
                     f_cpp_type = self._type_spec_to_cpp(field_specs.get(f.name) or self._type_spec_from_hint_name(f.type_name))
-                    if f_cpp_type == "int" and "na<double>" in val:
-                        val = val.replace("na<double>()", "0")
+                    if f_cpp_type == "int":
+                        f_cpp_type = "int64_t"
+                    if f_cpp_type == "int64_t":
+                        if "na<double>" in val:
+                            val = val.replace("na<double>()", "na<int64_t>()")
+                        else:
+                            val = f"(int64_t)({val})"
                     field_inits.append(f".{f.name} = {val}")
             # Mark the constructed object non-na (the struct's ``__pf_na`` is the
             # last declared field, so this designator stays in declaration order).

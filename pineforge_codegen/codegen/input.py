@@ -206,7 +206,21 @@ class InputHelper:
         default = self._get_input_default(node)
         default_cpp = self._visit_expr(default) if default is not None else "0"
         getter = self._input_type_to_getter(func_name, namespace)
+        default_cpp = self._coerce_string_input_default(getter, default_cpp)
         return f'{getter}("{title}", {default_cpp})'
+
+    def _coerce_string_input_default(self, getter: str, default_cpp: str) -> str:
+        """String getters take a ``std::string`` default. An unresolved default
+        (e.g. ``input.string(size.tiny, ...)`` where ``size.tiny`` lowers to
+        ``0``) would pass a null char* and crash ``strlen`` inside the getter,
+        so coerce any non-string default to a safe empty string. (Label size is
+        a visual no-op in the backtest, so the exact default does not affect
+        trading logic.)"""
+        if getter == "get_input_string":
+            stripped = default_cpp.strip()
+            if not stripped.startswith("std::string(") and not stripped.startswith('"'):
+                return 'std::string("")'
+        return default_cpp
 
     def _enforce_enum_declared_before_input_enum(self, node: FuncCall) -> None:
         """Mirror the analyzer: ``input.enum(Enum.member)`` requires Enum to be defined above the call.

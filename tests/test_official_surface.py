@@ -160,7 +160,10 @@ OFFICIAL_STRATEGY_RISK = frozenset({
 # are visual-only; PineForge has no drawing runtime so they cannot be
 # stored in a usable array.
 KNOWN_ARRAY_VISUAL_OMISSIONS = frozenset({
-    "new_box", "new_color", "new_label", "new_line", "new_linefill",
+    # Drawing handle arrays (array.new_line/box/label/linefill) are now REAL
+    # supported (std::vector<Line/Box/Label/Linefill>) — only the purely visual
+    # color/table array ctors remain unsupported no-ops.
+    "new_color",
     "new_table",
 })
 

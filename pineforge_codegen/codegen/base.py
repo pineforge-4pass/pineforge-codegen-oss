@@ -184,6 +184,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Set of var/series member names that belong to user functions (need cloning)
         self._func_var_members_set: set[str] = set()
         self._precalc_loop_active: bool = False
+        # Names of ``var`` members that live in a FUNCTION scope (not global).
+        # These are initialized once-per-function-variant on first call (a
+        # function-local static equivalent), NOT in the constructor / on_bar
+        # preamble. See ``_emit_func_var_init_block``.
+        self._func_local_var_names: set[str] = set()
+        for _vlist in ctx.func_var_members.values():
+            for _n, _, _ in _vlist:
+                self._func_local_var_names.add(_n)
 
         # Build per-function var/series name lists for cloning.
         # For each function with call-site variants, collect ALL function-scoped
@@ -397,15 +405,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lookahead_node = item.get("lookahead_node")
             ta_range = item.get("ta_range")
 
-            tf_str = None
-            if isinstance(tf_node, StringLiteral):
-                tf_str = tf_node.value
-            elif (isinstance(tf_node, Identifier)
-                  and tf_node.name in self._known_vars
-                  and tf_node.name not in self._input_backed_vars):
-                val = self._known_vars[tf_node.name]
-                if isinstance(val, str):
-                    tf_str = val
+            # Resolve the timeframe: a literal/const/global gives a static tf;
+            # a function-parameter tf is resolved from the call sites (the
+            # evaluator is a class method, so the param is not in scope there).
+            tf_str, tf_expr = self._resolve_security_tf(
+                tf_node, item.get("containing_func", ""))
 
             is_lookahead_on = False
             if lookahead_node is not None:
@@ -456,6 +460,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._security_eval_info.append({
                 "sec_id": sec_id,
                 "tf": tf_str,
+                "tf_expr": tf_expr,
                 "tf_node": tf_node,
                 "gaps_on": is_gaps_on,
                 "lookahead_on": is_lookahead_on,
@@ -911,6 +916,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     continue
                 spec = field_specs.get(f.name) or self._type_spec_from_hint_name(f.type_name)
                 cpp_type = self._type_spec_to_cpp(spec)
+                # Pine ``int`` is 64-bit (it routinely holds UNIX-ms timestamps
+                # and large bar indices); emit UDT int fields as ``int64_t`` so a
+                # field initialised from ``time``/``current_bar_.timestamp`` does
+                # not truncate / narrow-init.
+                if cpp_type == "int":
+                    cpp_type = "int64_t"
                 if f.default:
                     default = self._visit_expr(f.default)
                 else:
@@ -1206,6 +1217,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                             lines.append(f"    {self._type_spec_to_cpp(self._array_spec_for_name(vname))} {cloned_safe};")
                         elif vname in self._map_vars:
                             lines.append(f"    {self._type_spec_to_cpp(self._map_spec_for_name(vname))} {cloned_safe};")
+                        elif vname in self._udt_var_types:
+                            # Drawing handle / UDT var clone must match the
+                            # original's type (Line/Label/Box/<UDT>), not the
+                            # coarse PineType default (double) — otherwise the
+                            # clone can't hold the handle and drawing access on
+                            # it reads a garbage / na id.
+                            udt_t = self._udt_var_types[vname]
+                            handle_cpp = DRAWING_TYPE_TO_CPP.get(udt_t, udt_t)
+                            lines.append(f"    {handle_cpp} {cloned_safe} = {handle_cpp}{{}};")
                         else:
                             lines.append(f"    {cpp_type} {cloned_safe};")
                         found = True
@@ -1232,6 +1252,24 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 9. _var_initialized flag
         if self.ctx.var_members:
             lines.append("    bool _var_initialized = false;")
+
+        # 9a. Per-function-variant ``var`` init flags. A function-scoped
+        #     ``var`` (Pine "init once" semantics) is a function-local static:
+        #     its initializer runs on the FIRST call to that function variant
+        #     (with the first bar's values the function actually sees) and the
+        #     result persists for the strategy's lifetime. Each clone (cs0,
+        #     cs1, ...) is an independent instance with its own flag.
+        #     ``func_var_members`` is keyed by the plain Pine function name
+        #     (``fi.name``), so this matches both plain UDFs and UDT methods.
+        for fi in self.ctx.func_infos:
+            if fi.name not in self.ctx.func_var_members:
+                continue
+            total_cs = self.ctx.func_call_site_counts.get(fi.name, 0)
+            if total_cs > 0:
+                for cs_idx in range(total_cs):
+                    lines.append(f"    bool _fvinit_{self._func_safe_name(fi.name)}_cs{cs_idx} = false;")
+            else:
+                lines.append(f"    bool _fvinit_{self._func_safe_name(fi.name)} = false;")
 
         # 9b. _ta_initialized_ flag for runtime TA re-sizing (first on_bar only).
         if self.ctx.ta_call_sites:

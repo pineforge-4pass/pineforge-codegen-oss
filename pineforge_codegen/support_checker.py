@@ -50,7 +50,7 @@ from .tv_input_choices import INPUT_SOURCE_SERIES_IDS
 from .analyzer import TA_CLASS_MAP
 from .codegen import (
     MATH_FUNC_MAP, STR_FUNC_MAP,
-    ARRAY_METHODS, MAP_METHODS, MATRIX_METHODS,
+    ARRAY_METHODS, ARRAY_DRAWING_NEW_CTORS, MAP_METHODS, MATRIX_METHODS,
     SYMINFO_MEMBER_MAP, COLOR_CONST_MAP,
     SKIP_FUNC_NAMES, SKIP_NAMESPACES,
     BAR_BUILTINS, BAR_FIELDS,
@@ -78,7 +78,7 @@ SUPPORTED_MATH: frozenset[str] = frozenset(
 )
 SUPPORTED_STR: frozenset[str] = frozenset(set(STR_FUNC_MAP) | {"format_time"})
 SUPPORTED_INPUT: frozenset[str] = frozenset(sigs.INPUT_FUNCTIONS)
-SUPPORTED_ARRAY: frozenset[str] = frozenset(set(ARRAY_METHODS) | {"new", "new_float", "new_int", "new_bool", "new_string", "from"})
+SUPPORTED_ARRAY: frozenset[str] = frozenset(set(ARRAY_METHODS) | {"new", "new_float", "new_int", "new_bool", "new_string", "from"} | set(ARRAY_DRAWING_NEW_CTORS))
 SUPPORTED_MAP: frozenset[str] = frozenset(set(MAP_METHODS) | {"new"})
 SUPPORTED_MATRIX: frozenset[str] = frozenset(set(MATRIX_METHODS) | {"new"})
 SUPPORTED_SYMINFO: frozenset[str] = frozenset(SYMINFO_MEMBER_MAP)
