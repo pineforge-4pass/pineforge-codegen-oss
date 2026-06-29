@@ -255,7 +255,12 @@ TA_TUPLE_FIELDS = {
 # must be promoted to ``int64_t`` so the ``na`` sentinel (``INT64_MIN``)
 # survives — narrowing to 32-bit ``int`` collapses it to ``0`` and breaks
 # ``is_na<int>`` detection.
-INT64_BUILTINS = {"time", "time_close", "timestamp", "time_tradingday"}
+INT64_BUILTINS = {"time", "time_close", "timenow", "timestamp", "time_tradingday"}
+
+# Subset of INT64_BUILTINS spelled as a bare identifier (no call args) in Pine.
+# ``entryTime := time`` parses the RHS as an ``Identifier`` named ``time`` (not a
+# ``FuncCall``), so int64 promotion must match these by identifier name too.
+INT64_BUILTIN_IDENTIFIERS = {"time", "time_close", "timenow"}
 
 PINE_TYPE_TO_CPP = {
     "int": "int", "float": "double", "bool": "bool", "string": "std::string",

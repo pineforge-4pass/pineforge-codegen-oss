@@ -183,6 +183,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._active_var_remap: dict[str, str] = {}
         # Set of var/series member names that belong to user functions (need cloning)
         self._func_var_members_set: set[str] = set()
+        # BUG C: function-local names emitted as ``UDT*`` pointer aliases (a UDT
+        # local initialised from a var/global UDT lvalue, mutated through, AND
+        # later rebound to a different lvalue). Member access lowers to ``->``
+        # and rebinds to ``&(...)``. Reset per function in _emit_func_def is not
+        # needed: names are function-unique and the value-copy fallback ignores
+        # entries for inactive functions.
+        self._udt_ptr_alias_locals: set[str] = set()
         self._precalc_loop_active: bool = False
         # Names of ``var`` members that live in a FUNCTION scope (not global).
         # These are initialized once-per-function-variant on first call (a

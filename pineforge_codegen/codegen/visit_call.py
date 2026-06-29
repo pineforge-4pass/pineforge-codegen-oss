@@ -1061,6 +1061,17 @@ class CallVisitor:
                 all_args.extend(self._visit_expr(v) for v in node.kwargs.values())
         else:
             all_args = [_visit_arg_for_series(a, i) for i, a in enumerate(node.args)]
+        # Drawing-style/visual CONSTANT passed positionally into a user function's
+        # ``string`` parameter: ``label.style_*`` / ``size.*`` / other
+        # DRAWING_STYLE_NS members lower to the bare token ``"0"`` (they only ever
+        # feed dropped visual kwargs). Bound to a ``std::string`` parameter, that
+        # ``0`` constructs ``std::string((char const*)0)`` at the call site -> a
+        # null-pointer ``strlen`` crash at runtime. Coerce such args to
+        # ``std::string("")`` so the (inert, visual-only) value is a valid empty
+        # string. Only touches user functions with a known string param and an
+        # arg that is exactly such a drawing-style constant read.
+        if namespace is None and func_name in self._func_names:
+            self._coerce_drawing_style_string_args(func_name, node.args, all_args)
         # Default args (parser does not store defaults): isInSession(sess, res = timeframe.period)
         if namespace is None and func_name in self._func_names:
             fi = self._func_info_map.get(func_name)
@@ -1088,6 +1099,32 @@ class CallVisitor:
             # sub-functions that also have variants (for state isolation)
             emit_name = f"{self._func_safe_name(func_name)}_cs{self._active_call_site_idx}"
         return f"{prefix}{emit_name}({', '.join(all_args)})"
+
+    def _coerce_drawing_style_string_args(self, func_name, arg_nodes, all_args) -> None:
+        """In-place coerce positional args bound to a ``std::string`` user-function
+        parameter that lowered to the bare token ``"0"`` from a drawing-style /
+        visual constant (``label.style_*`` etc.). Such a literal ``0`` binds as
+        ``std::string((char const*)0)`` and segfaults on first use. Replace with
+        ``std::string("")`` (the value is visual-only and inert in a backtest)."""
+        from .tables import DRAWING_STYLE_NS
+        fi = self._func_info_map.get(func_name)
+        if not fi or not getattr(fi, "node", None) or not fi.node.params:
+            return
+        specs = getattr(fi, "param_type_specs", []) or []
+        for i, arg in enumerate(arg_nodes):
+            if i >= len(all_args) or all_args[i] != "0":
+                continue
+            # Only when the destination parameter is a string.
+            spec = specs[i] if i < len(specs) else None
+            is_string_param = spec is not None and getattr(spec, "kind", None) == "primitive" \
+                and getattr(spec, "name", None) == "string"
+            if not is_string_param:
+                continue
+            # Only when the source really is a drawing-style/visual constant read
+            # (so we never silently turn a numeric ``0`` into an empty string).
+            if (isinstance(arg, MemberAccess) and isinstance(arg.object, Identifier)
+                    and arg.object.name in DRAWING_STYLE_NS):
+                all_args[i] = 'std::string("")'
 
     def _visit_fixnan(self, node: FuncCall) -> str:
         """Emit fixnan with persistent state member."""
