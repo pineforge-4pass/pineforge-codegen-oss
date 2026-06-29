@@ -60,8 +60,8 @@ from __future__ import annotations
 
 from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BreakStmt, ContinueStmt, ExprStmt, ForStmt,
-    ForInStmt, FuncCall, Identifier, IfStmt, NumberLiteral, Subscript,
-    SwitchStmt, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
+    ForInStmt, FuncCall, FuncDef, Identifier, IfStmt, NumberLiteral, StringLiteral,
+    Subscript, SwitchStmt, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
     WhileStmt,
 )
 from ..analyzer import (
@@ -77,6 +77,87 @@ class SecurityEmitter:
 
     Mixed into ``CodeGen``; not intended to be instantiated standalone."""
 
+    def _resolve_security_tf(self, tf_node, containing_func: str):
+        """Resolve a ``request.security`` timeframe argument to ``(tf_str, tf_expr)``.
+
+        ``tf_str`` is a compile-time string literal value; ``tf_expr`` is a runtime
+        C++ expression used at evaluator-registration time. Exactly one is non-None
+        for a usable tf (both None is acceptable only as an explicit "unknown").
+
+        A function-parameter tf (e.g. ``f(tf) => request.security(sym, tf, ...)``)
+        is not visible at class scope (the evaluator is a class method), so it is
+        resolved from the function's call sites. A dead-code UDF (never called)
+        falls back to the chart timeframe — its evaluator result is never read.
+        """
+        if isinstance(tf_node, StringLiteral):
+            return tf_node.value, None
+        if isinstance(tf_node, Identifier):
+            name = tf_node.name
+            if name in self._timeframe_period_vars:
+                return None, "script_tf_"
+            if (name in self._known_vars and name not in self._input_backed_vars
+                    and isinstance(self._known_vars[name], str)):
+                return self._known_vars[name], None
+            # class-scope resolvable (global / input member)?
+            if self._ident_is_resolvable(name):
+                try:
+                    return None, self._visit_expr(tf_node)
+                except Exception:
+                    pass
+            # function-parameter tf -> resolve from the call sites
+            if containing_func:
+                resolved = self._resolve_param_tf_from_callsites(containing_func, name)
+                if resolved is not None:
+                    return resolved
+            # graceful fallback so transpile does not hard-fail
+            return None, "input_tf_"
+        # any other expression — visit if it resolves at class scope
+        try:
+            return None, self._visit_expr(tf_node)
+        except Exception:
+            return None, "input_tf_"
+
+    def _resolve_param_tf_from_callsites(self, func_name: str, param_name: str):
+        """For a ``request.security`` whose tf is function parameter ``param_name``
+        of user function ``func_name``, return ``(tf_str, tf_expr)`` resolved from
+        the call sites, or None. If every call passes the same literal/member tf,
+        that tf is used; mixed timeframes or a never-called (dead-code) function
+        fall back to the chart timeframe (``input_tf_``)."""
+        fdef = None
+        for node in self._walk_ast(self.ctx.ast):
+            if isinstance(node, FuncDef) and node.name == func_name:
+                fdef = node
+                break
+        if fdef is None or param_name not in fdef.params:
+            return None
+        pidx = fdef.params.index(param_name)
+        resolved: list = []
+        found_call = False
+        for node in self._walk_ast(self.ctx.ast):
+            if (isinstance(node, FuncCall) and isinstance(node.callee, Identifier)
+                    and node.callee.name == func_name):
+                found_call = True
+                arg = node.args[pidx] if pidx < len(node.args) else None
+                if arg is None:
+                    continue
+                # Resolve the call-site arg (no further containing func — these
+                # are global-scope / input args).
+                resolved.append(self._resolve_security_tf(arg, ""))
+        if not found_call:
+            # dead code — evaluator never read; register with chart tf.
+            return (None, "input_tf_")
+        valid = [r for r in resolved if r is not None]
+        if not valid:
+            return (None, "input_tf_")
+        strs = {r[0] for r in valid}
+        exprs = {r[1] for r in valid}
+        if len(strs) == 1 and next(iter(strs), None) is not None:
+            return (next(iter(strs)), None)
+        if len(exprs) == 1 and next(iter(exprs), None) is not None:
+            return (None, next(iter(exprs)))
+        # mixed timeframes across call sites — cannot pick one statically
+        return (None, "input_tf_")
+
     def _normalize_security_call(self, item) -> dict:
         if hasattr(item, "sec_id"):
             return {
@@ -91,6 +172,7 @@ class SecurityEmitter:
                 "depends_on_mutable_globals": bool(getattr(item, "depends_on_mutable_globals", False)),
                 "mutable_globals": list(getattr(item, "mutable_globals", ()) or ()),
                 "is_lower_tf_array": bool(getattr(item, "is_lower_tf_array", False)),
+                "containing_func": getattr(item, "containing_func", "") or "",
             }
         return {
             "sec_id": item[0],
@@ -104,6 +186,7 @@ class SecurityEmitter:
             "depends_on_mutable_globals": False,
             "mutable_globals": [],
             "is_lower_tf_array": False,
+            "containing_func": "",
         }
 
     def _security_state_name(self, sec_id: int, name: str) -> str:

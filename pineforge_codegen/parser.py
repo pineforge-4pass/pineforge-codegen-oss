@@ -576,39 +576,60 @@ class Parser:
 
     # -- Function definition --
 
+    def _parse_param_type_annotation(self) -> str | None:
+        """Consume an optional function-parameter type annotation and return it
+        as a canonical hint string ('float', 'string', 'array<line>', 'pivot',
+        'chart.point', ...), or ``None`` for a bare untyped param.
+
+        Leaves the parser positioned at the parameter name. Supports the Pine
+        qualifier prefixes (``series`` / ``simple`` / ``const`` — consumed but
+        not part of the C++ type), builtin types, user-defined / drawing type
+        names, and the ``T[]`` postfix-array shorthand (normalised to
+        ``array<T>`` by ``_parse_type_hint_string``).
+        """
+        TYPE_TOKENS = {TokenType.TYPE_INT, TokenType.TYPE_FLOAT,
+                       TokenType.TYPE_BOOL, TokenType.TYPE_STRING}
+        # Optional qualifiers — they do not affect the C++ param type.
+        while self._check(TokenType.IDENT) and self._current().value in (
+            "series", "simple", "const",
+        ):
+            self._advance()
+        # Is there a type annotation before the parameter name? A builtin type
+        # token always is; an IDENT is a type only if followed by another IDENT
+        # (``line ln``) or by ``[`` (``line[] arr``).
+        has_type = False
+        if self._current().type in TYPE_TOKENS:
+            has_type = True
+        elif self._check(TokenType.IDENT):
+            nxt = self._peek().type
+            if nxt == TokenType.IDENT or nxt == TokenType.LBRACKET:
+                has_type = True
+        if not has_type:
+            return None
+        return self._parse_type_hint_string()
+
     def _parse_func_def(self) -> FuncDef:
         """Parse: name(param1, param2) => expr_or_block"""
         start_tok = self._current()
         name = self._consume(TokenType.IDENT).value
         self._consume(TokenType.LPAREN)
-        TYPE_TOKENS = {TokenType.TYPE_INT, TokenType.TYPE_FLOAT,
-                       TokenType.TYPE_BOOL, TokenType.TYPE_STRING}
         params = []
+        param_type_hints: list = []
+        param_defaults: list = []
         while not self._check(TokenType.RPAREN):
-            # Consume optional Pine parameter type qualifiers, e.g. `series float x`,
-            # `simple string maType`, `const int n`. Each is one qualifier in front
-            # of the (optional) type and the name — NOT a separate parameter.
-            while self._check(TokenType.IDENT) and self._current().value in (
-                "series",
-                "simple",
-                "const",
-            ):
-                self._advance()
-            # Handle optional type annotation: type param (e.g., int len, float src,
-            # string s). Built-in types are dedicated tokens; user-defined types are
-            # IDENTs and handled by the "next is IDENT" check below.
-            if self._current().type in TYPE_TOKENS:
-                self._advance()  # skip the type annotation
+            # Consume the optional type annotation (builtin / user / drawing /
+            # ``T[]``), returning the canonical hint string. Handles ``float[] arr``,
+            # ``line[] ln``, ``color c``, ``SDZone z``, ``string tf``, as well as
+            # the untyped bare-name case.
+            hint = self._parse_param_type_annotation()
             param_name = self._consume(TokenType.IDENT).value
-            if self._check(TokenType.IDENT):
-                # 'param_name' was actually a (user-defined) type name parsed as IDENT,
-                # next is the real name.
-                param_name = self._consume(TokenType.IDENT).value
-            # Skip default value: param = expr
+            pdefault = None
             if self._check(TokenType.EQUALS):
                 self._advance()  # consume '='
-                self._parse_expression()  # consume default value (discarded)
+                pdefault = self._parse_expression()  # default value
             params.append(param_name)
+            param_type_hints.append(hint)
+            param_defaults.append(pdefault)
             self._match(TokenType.COMMA)
         self._consume(TokenType.RPAREN)
         self._skip_newlines()
@@ -625,6 +646,13 @@ class Parser:
             expr = self._parse_expression()
             node = FuncDef(name=name, params=params, body=[ExprStmt(expr=expr)], is_single_expr=True)
 
+        # Record per-param type hints + defaults (mirrors _parse_method_def) so
+        # the analyzer can type UDT/string/array params and the codegen can emit
+        # them with the correct C++ type (``pivot hi``, ``std::string s``).
+        node.annotations = {
+            "param_type_hints": param_type_hints,
+            "param_defaults": param_defaults,
+        }
         return self._set_loc(node, start_tok)
 
     def _parse_type_or_enum_decl(self):

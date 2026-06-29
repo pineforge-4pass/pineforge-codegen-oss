@@ -41,6 +41,7 @@ from ..ast_nodes import (
 from ..symbols import PineType, TypeSpec
 from .. import signatures as sigs
 from .tables import (
+    ARRAY_DRAWING_NEW_CTORS,
     ARRAY_METHODS,
     BAR_BUILTINS,
     BAR_FIELDS,
@@ -227,7 +228,7 @@ class TypeInferer:
                 return TypeSpec.array(TypeSpec.primitive("string"))
             if namespace == "array" and func_name in (
                 "new", "new_float", "new_int", "new_bool", "new_string", "from",
-            ):
+            ) or (namespace == "array" and func_name in ARRAY_DRAWING_NEW_CTORS):
                 if func_name == "new_int":
                     return TypeSpec.array(TypeSpec.primitive("int"))
                 if func_name == "new_bool":
@@ -236,6 +237,10 @@ class TypeInferer:
                     return TypeSpec.array(TypeSpec.primitive("string"))
                 if func_name == "new_float":
                     return TypeSpec.array(TypeSpec.primitive("float"))
+                if func_name in ARRAY_DRAWING_NEW_CTORS:
+                    # array.new_line()/new_box()/new_label()/new_linefill() ->
+                    # std::vector<Line/Box/Label/Linefill> (typed alias of new<T>).
+                    return TypeSpec.array(TypeSpec.udt(ARRAY_DRAWING_NEW_CTORS[func_name]))
                 if targs:
                     return TypeSpec.array(self._type_spec_from_hint_name(targs[0]) or TypeSpec.udt(targs[0]))
                 if func_name == "from" and node.args:
@@ -553,6 +558,10 @@ class TypeInferer:
             if namespace == "str":
                 if func_name == "split":
                     return "std::vector<std::string>"
+                if func_name == "tonumber":
+                    return "double"
+                if func_name == "length":
+                    return "int"
                 return "std::string"
             if namespace == "ta" and func_name == "pivot_point_levels":
                 return "std::vector<double>"
@@ -637,16 +646,24 @@ class TypeInferer:
     def _infer_tuple_types(self, func_node: FuncDef, count: int) -> list[str]:
         """Infer the C++ type of each element returned by a tuple-returning function.
 
-        Builds a lightweight local-type map from the function's
-        ``VarDecl``s so identifiers referenced inside the final
-        ``[a, b, c]`` literal resolve precisely; falls back to
-        ``_infer_type`` when no local declaration matches."""
+        Builds a lightweight local-type map from the function's ``VarDecl``s
+        (including ones nested inside if/for/switch blocks) so identifiers
+        referenced inside the final ``[a, b, c]`` literal resolve precisely.
+        An explicit type hint wins (``string tag = na`` -> ``std::string``,
+        not the ``double`` implied by ``na``); otherwise the initializer
+        expression is inferred. Falls back to ``_infer_type`` when no local
+        declaration matches."""
         if not func_node.body:
             return ["double"] * count
 
         local_types: dict[str, str] = {}
-        for stmt in func_node.body:
-            if isinstance(stmt, VarDecl) and stmt.value is not None:
+        for stmt in self._walk_ast(func_node):
+            if isinstance(stmt, VarDecl) and stmt.value is not None and stmt.name:
+                if stmt.type_hint:
+                    spec = self._type_spec_from_hint_name(stmt.type_hint)
+                    if spec is not None:
+                        local_types[stmt.name] = self._type_spec_to_cpp(spec)
+                        continue
                 local_types[stmt.name] = self._infer_type(stmt.value)
 
         last_stmt = func_node.body[-1]

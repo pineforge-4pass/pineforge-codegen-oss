@@ -66,7 +66,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..ast_nodes import (
-    ASTNode, BoolLiteral, FuncCall, Identifier, MemberAccess,
+    ASTNode, BoolLiteral, ExprStmt, FuncCall, Identifier, MemberAccess,
     NumberLiteral, StringLiteral, TupleLiteral,
 )
 from ..symbols import PineType
@@ -293,6 +293,10 @@ class CallHandlers:
             lookahead_node = all_args[4] if len(all_args) > 4 else None
 
             mutable_globals = tuple(sorted(self._collect_security_mutable_globals(expr_node)))
+            # Capture the user function (if any) whose body contains this call,
+            # so the codegen can resolve a parameter ``tf`` via the call sites.
+            scope_name = self._symbols.current_scope.name
+            containing_func = scope_name[5:] if scope_name.startswith("func_") else ""
             self._security_calls.append(SecurityCallInfo(
                 sec_id=sec_id,
                 timeframe=tf_node,
@@ -304,6 +308,7 @@ class CallHandlers:
                 ta_range=security_ta_range,
                 depends_on_mutable_globals=bool(mutable_globals),
                 mutable_globals=mutable_globals,
+                containing_func=containing_func,
             ))
 
             return PineType.FLOAT
@@ -783,14 +788,28 @@ class CallHandlers:
         # For now, use the cached return type from initial analysis
         return_type = self._func_return_types.get(func_name, PineType.FLOAT)
 
-        # If the return type was UNKNOWN or VOID, infer from param types
+        # If the return type was UNKNOWN or VOID, infer it ONLY when the body
+        # is a single bare identifier that returns a parameter directly
+        # (``f(s) => s``). Inferring from params for arbitrary bodies misfires
+        # when a function merely HAS a string param but returns something else
+        # (e.g. ``getLineStyle(s) => switch s ... => line.style_solid`` or a
+        # body ending in ``label.new(...)``). Other cases rely on the cached
+        # body type plus udt_return_type / tuple inference.
         if return_type in (PineType.UNKNOWN, PineType.VOID):
-            if any(t == PineType.STRING for t in param_types):
-                return_type = PineType.STRING
-            elif any(t == PineType.FLOAT for t in param_types):
-                return_type = PineType.FLOAT
-            elif any(t == PineType.INT for t in param_types):
-                return_type = PineType.INT
+            if (func_def.is_single_expr and func_def.body
+                    and isinstance(func_def.body[0], ExprStmt)
+                    and isinstance(func_def.body[0].expr, Identifier)):
+                ret_name = func_def.body[0].expr.name
+                for idx, pname in enumerate(func_def.params):
+                    if pname == ret_name and idx < len(param_types):
+                        pt = param_types[idx]
+                        if pt == PineType.STRING:
+                            return_type = PineType.STRING
+                        elif pt == PineType.INT:
+                            return_type = PineType.INT
+                        elif pt == PineType.FLOAT:
+                            return_type = PineType.FLOAT
+                        break
 
         # If this function has series params, ensure bar-field arguments
         # passed at the call site are registered as series_bar_fields so that
@@ -869,6 +888,15 @@ class CallHandlers:
         # Forward UDT-return inference (set in _visit_FuncDef) so codegen can
         # emit the struct return type. Probe: udt-method-probe-20.
         udt_ret = self._func_udt_return_types.get(func_name)
+        ret_spec = getattr(self, "_func_return_type_specs", {}).get(func_name)
+        # Per-param TypeSpec: declared hints are authoritative; for untyped
+        # params, infer from the call-site argument's type_spec (so an untyped
+        # ``s`` used as a string, or a UDT passed by value, emits correctly).
+        param_specs = self._param_type_specs_from_def(func_def)
+        arg_specs = [self._type_spec_from_expr(arg) for arg in node.args]
+        for i in range(len(param_specs)):
+            if param_specs[i] is None and i < len(arg_specs):
+                param_specs[i] = arg_specs[i]
         existing = [fi for fi in self._func_infos if fi.name == func_name]
         if not existing:
             fi = FuncInfo(
@@ -879,6 +907,8 @@ class CallHandlers:
                 returns_tuple=is_tuple,
                 tuple_element_count=tuple_count,
                 udt_return_type=udt_ret,
+                param_type_specs=param_specs,
+                return_type_spec=ret_spec,
             )
             self._func_infos.append(fi)
         else:
@@ -889,7 +919,17 @@ class CallHandlers:
             for i, pt in enumerate(param_types):
                 if i < len(fi.param_types) and fi.param_types[i] == PineType.UNKNOWN:
                     fi.param_types[i] = pt
+            # Merge per-param TypeSpecs: keep declared hints (authoritative),
+            # fill untyped slots from this call site if still unknown.
+            if not fi.param_type_specs:
+                fi.param_type_specs = list(param_specs)
+            else:
+                for i in range(len(param_specs)):
+                    if i < len(fi.param_type_specs) and fi.param_type_specs[i] is None:
+                        fi.param_type_specs[i] = param_specs[i]
             if fi.udt_return_type is None and udt_ret is not None:
                 fi.udt_return_type = udt_ret
+            if fi.return_type_spec is None and ret_spec is not None:
+                fi.return_type_spec = ret_spec
 
         return return_type

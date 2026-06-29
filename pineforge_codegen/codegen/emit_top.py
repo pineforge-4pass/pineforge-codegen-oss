@@ -246,6 +246,13 @@ class TopLevelEmitter:
             safe = self._safe_name(name)
             if name in self._array_vars or name in self._map_vars:
                 continue
+            # Function-scoped ``var`` members are initialized once-per-variant
+            # on first call (see _emit_func_var_init_block); exclude them from
+            # the constructor so they are not double-initialized and so their
+            # (possibly bar-dependent) initializer is lowered in the function's
+            # own scope (with its active var remap for clones).
+            if name in getattr(self, "_func_local_var_names", ()):
+                continue
             # UDT-typed var members (``var SDZone z = na``) default-construct to
             # na via the struct's in-class ``__pf_na = true``; a ctor init like
             # ``z(na<double>())`` would not type-match the struct member.
@@ -374,17 +381,15 @@ class TopLevelEmitter:
             lines.append("        security_eval_states_.clear();")
             for info in self._security_eval_info:
                 tf = info.get("tf")
-                tf_expr = None
+                tf_expr = info.get("tf_expr")
                 if tf:
                     tf_expr = f'"{tf}"'
-                else:
-                    tf_node = info.get("tf_node")
-                    if tf_node is not None:
-                        if isinstance(tf_node, Identifier) and tf_node.name in self._timeframe_period_vars:
-                            tf_expr = "script_tf_"
-                        else:
-                            raw_tf_expr = self._visit_expr(tf_node)
-                            tf_expr = self._runtime_ctor_arg_for_reset(raw_tf_expr) or raw_tf_expr
+                elif not tf_expr:
+                    # No static tf and no resolvable runtime expression — fall
+                    # back to the chart timeframe so registration still compiles
+                    # (e.g. a request.security inside a dead-code UDF, or one
+                    # whose tf is a function param called with mixed timeframes).
+                    tf_expr = "input_tf_"
                 if tf_expr:
                     la = "true" if info["lookahead_on"] else "false"
                     go = "true" if info.get("gaps_on") else "false"
@@ -457,6 +462,10 @@ class TopLevelEmitter:
         if self.ctx.var_members:
             lines.append("        if (!_var_initialized) {")
             for name, ptype, init_expr in self.ctx.var_members:
+                # Function-scoped ``var`` members are init'd once-per-variant
+                # on first call (see _emit_func_var_init_block), not here.
+                if name in getattr(self, "_func_local_var_names", ()):
+                    continue
                 safe = self._safe_name(name)
                 if name in self._array_vars:
                     for stmt in self.ctx.ast.body:
@@ -557,6 +566,7 @@ class TopLevelEmitter:
                         default_cpp = self._visit_expr(default) if default is not None else "0"
                         title = self._get_input_title(stmt.value, var_name=stmt.name)
                         getter = self._input_type_to_getter(func_name_i, namespace_i)
+                        default_cpp = self._coerce_string_input_default(getter, default_cpp)
                         cpp_val = f'{getter}("{title}", {default_cpp})'
                         static_vars.append(f"{safe} = {cpp_val};")
 
@@ -756,6 +766,24 @@ class TopLevelEmitter:
                 # This param uses history access (e.g. src[1]) — pass as Series
                 cpp_t = "const Series<double>&"
                 self._current_func_series_params.add(p)
+            elif i < len(getattr(fi, "param_type_specs", [])) and fi.param_type_specs[i] is not None:
+                # Precise per-param TypeSpec (declared hint or call-site inference):
+                # ``pivot hi`` -> ``pivot&``, ``line ln`` -> ``Line&``, an untyped
+                # ``s`` used as a string -> ``std::string``. UDT / collection
+                # params pass by reference (Pine UDTs/arrays are reference types,
+                # so mutations propagate and member access compiles).
+                spec = fi.param_type_specs[i]
+                cpp_t = self._type_spec_to_cpp(spec)
+                if spec.kind == "udt":
+                    self._udt_param_udt[p] = spec.name
+                    self._udt_param_udt[self._safe_name(p)] = spec.name
+                    cpp_t = f"{cpp_t}&"
+                elif spec.kind in ("array", "map"):
+                    elem = spec.element if spec.kind == "array" else spec.value
+                    if elem is not None and elem.kind == "udt":
+                        self._udt_param_udt[p] = elem.name
+                        self._udt_param_udt[self._safe_name(p)] = elem.name
+                    cpp_t = f"{cpp_t}&"
             elif i < len(fi.param_types):
                 pt = fi.param_types[i]
                 cpp_t = PINE_TYPE_TO_CPP.get(pt, "double")
@@ -777,6 +805,10 @@ class TopLevelEmitter:
             # A function returning a drawing handle must emit the C++ handle
             # struct (Line/Box/Label/Linefill), not the unknown lowercase name.
             ret_type = DRAWING_TYPE_TO_CPP.get(fi.udt_return_type, fi.udt_return_type)
+        elif getattr(fi, "return_type_spec", None) is not None:
+            # Array-returning function (``f() => array.from(...)``) — emit the
+            # vector type from the inferred element TypeSpec.
+            ret_type = self._type_spec_to_cpp(fi.return_type_spec)
         else:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")
 
@@ -805,17 +837,34 @@ class TopLevelEmitter:
 
         lines.append(f"    {ret_type} {func_name}({', '.join(param_strs)}) {{")
 
+        # Function-scoped ``var`` one-shot initializer: Pine ``var`` inside a
+        # function is a function-local static — its initializer runs exactly
+        # once, on the first call to THIS variant, with the first bar's values
+        # the function actually sees. Each clone (cs0/cs1/…) is independent.
+        self._emit_func_var_init_block(fi, call_site_idx, lines)
+
         emitted_return = False
         if node.is_single_expr and node.body:
             expr = node.body[0].expr if isinstance(node.body[0], ExprStmt) else None
-            if expr:
+            if expr and self._call_is_void(expr):
+                # void setter as the sole body expr — emit as statement, fall
+                # through to the default return.
+                self._visit_stmt(node.body[0], lines, indent=2)
+            elif expr:
                 lines.append(f"        return {self._visit_expr(expr)};")
                 emitted_return = True
         else:
             for i, s in enumerate(node.body):
                 if i == len(node.body) - 1 and isinstance(s, ExprStmt):
-                    lines.append(f"        return {self._visit_expr(s.expr)};")
-                    emitted_return = True
+                    # A void drawing setter / delete / visual-noop used as the
+                    # last statement cannot be the return value (it lowers to a
+                    # void C++ call). Emit it as a plain statement and let the
+                    # default-return path below supply the function's result.
+                    if self._call_is_void(s.expr):
+                        self._visit_stmt(s, lines, indent=2)
+                    else:
+                        lines.append(f"        return {self._visit_expr(s.expr)};")
+                        emitted_return = True
                 elif i == len(node.body) - 1 and isinstance(s, (SwitchStmt, IfStmt)):
                     # Switch/if as last statement = return expression in PineScript
                     # Emit as: double _ret = 0; if/switch assigns _ret; return _ret;
@@ -852,6 +901,68 @@ class TopLevelEmitter:
         self._active_var_remap = {}
         self._in_ta_func_variant = False
         self._active_call_site_idx = None
+
+    def _func_var_init_flag_name(self, fname: str, call_site_idx: int | None) -> str:
+        suffix = f"_cs{call_site_idx}" if call_site_idx is not None else ""
+        return f"_fvinit_{self._func_safe_name(fname)}{suffix}"
+
+    def _emit_func_var_init_block(self, fi: FuncInfo, call_site_idx: int | None,
+                                  lines: list[str]) -> None:
+        """Emit the one-shot initializer block for a function's ``var`` members.
+
+        Pine ``var`` declared inside a function is a function-local static:
+        the initializer runs exactly once on the FIRST call to this variant
+        (using the first bar's values the function actually sees) and the
+        result persists for the strategy's lifetime. Each per-call-site clone
+        is an independent instance with its own flag and its own set of
+        (remapped) members.
+
+        This closes the gap where a function-scoped ``var line x = line.new(...)``
+        (or any non-compile-time initializer — drawing handles, UDT ctors,
+        arrays, runtime expressions) was declared as a default-constructed
+        class member but its initializer was dropped, leaving the member ``na``
+        / uninitialised and causing "drawing access on na handle" at runtime.
+        """
+        members = self.ctx.func_var_members.get(fi.name)
+        if not members:
+            return
+        flag = self._func_var_init_flag_name(fi.name, call_site_idx)
+        # ``_active_var_remap`` is already set for this variant by the caller,
+        # so lowering each init expression here correctly resolves references
+        # to sibling var members (which are themselves remapped for clones).
+        init_lines: list[str] = []
+        for name, ptype, _init_str in members:
+            init_ast = self.ctx.var_member_init_exprs.get(name)
+            safe = self._safe_name(name)
+            target = self._active_var_remap.get(safe, safe)
+            if name in self.ctx.series_vars:
+                if init_ast is None:
+                    continue
+                init_cpp = self._visit_expr(init_ast)
+                init_cpp = self._typed_na_init(init_cpp, name, ptype)
+                init_lines.append(f"        {target}.push({init_cpp});")
+                continue
+            if init_ast is None:
+                # No initializer to lower (e.g. bare ``var box b``); leave the
+                # member at its default-constructed value.
+                continue
+            # Skip a plain ``na`` initializer for drawing handles / UDTs whose
+            # default-constructed member is already the na sentinel; assigning
+            # ``na<double>()`` would not type-match the handle / struct.
+            udt_t = self._udt_var_types.get(name)
+            is_drawing = udt_t in DRAWING_TYPE_TO_CPP if udt_t else False
+            is_udt = udt_t in self._udt_defs if udt_t else False
+            from ..ast_nodes import NaLiteral
+            if (is_drawing or is_udt) and isinstance(init_ast, NaLiteral):
+                continue
+            init_cpp = self._visit_expr(init_ast)
+            init_lines.append(f"        {target} = {init_cpp};")
+        if not init_lines:
+            return
+        lines.append(f"        if (!{flag}) {{")
+        lines.extend(init_lines)
+        lines.append(f"            {flag} = true;")
+        lines.append("        }")
 
     def _emit_precalculate_and_run(self, lines: list[str]) -> None:
         has_static_ta = any(getattr(site, "is_static", False) for site in self.ctx.ta_call_sites)

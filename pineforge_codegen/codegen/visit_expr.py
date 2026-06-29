@@ -112,6 +112,7 @@ from .tables import (
     DAYOFWEEK_MAP,
     DISPLAY_MAP,
     DRAWING_STYLE_NS,
+    DRAWING_TYPE_TO_CPP,
     ON_OFF_INHERIT_MAP,
     ORDER_DIRECTION_MAP,
     SKIP_NAMESPACES,
@@ -209,6 +210,44 @@ class ExprVisitor:
             elems = ", ".join(self._visit_expr(e) for e in node.elements)
             return f"std::make_tuple({elems})"
         return "/* unknown */"
+
+    # ------------------------------------------------------------------
+    # Target-typed RHS lowering (drawing handles are C++ structs, not doubles)
+    # ------------------------------------------------------------------
+    def _is_na_expr(self, node) -> bool:
+        """True for a bare ``na`` (keyword NaLiteral or ``na`` identifier)."""
+        return (isinstance(node, NaLiteral)
+                or (isinstance(node, Identifier) and node.name == "na"))
+
+    def _drawing_na_default(self, target_name: str | None) -> str | None:
+        """If ``target_name`` is a drawing-handle variable (line/box/label/
+        linefill/chart.point), return its na default literal (e.g. ``Box{}`` —
+        a default-constructed handle whose id == -1 == na); otherwise None."""
+        if not target_name:
+            return None
+        udt = self._udt_var_types.get(target_name)
+        if udt in DRAWING_TYPE_TO_CPP:
+            return f"{DRAWING_TYPE_TO_CPP[udt]}{{}}"
+        return None
+
+    def _visit_rhs_value(self, value_node, target_name: str | None = None,
+                         target_cpp_type: str | None = None) -> str:
+        """Visit an assignment / declaration RHS.
+
+        A bare ``na`` lowers to a type-appropriate initializer for the target
+        instead of ``na<double>()``: drawing handles brace-init to their na
+        handle (``Box{}`` / ``Line{}`` / …); ``std::string``/``int``/``int64_t``/
+        ``bool`` use ``na<T>()``. Without this, ``Box b = na;`` and
+        ``string s = na;`` would both emit ``na<double>()`` and fail to compile
+        (no viable ``operator=`` / conversion). Every other RHS lowers unchanged.
+        """
+        if target_name and self._is_na_expr(value_node):
+            draw_default = self._drawing_na_default(target_name)
+            if draw_default is not None:
+                return draw_default
+            if target_cpp_type in ("std::string", "int", "int64_t", "bool"):
+                return f"na<{target_cpp_type}>()"
+        return self._visit_expr(value_node)
 
     def _visit_ident(self, node: Identifier) -> str:
         name = node.name
@@ -669,6 +708,8 @@ class ExprVisitor:
                 or name in self._var_names
                 or name in self._current_loop_vars
                 or name in self._current_func_param_types
+                or name in self._current_func_locals
+                or name in self._udt_var_types
             ):
                 safe = self._safe_name(name)
                 if self._active_var_remap and safe in self._active_var_remap:

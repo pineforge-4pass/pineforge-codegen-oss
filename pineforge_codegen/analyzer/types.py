@@ -115,6 +115,19 @@ class TypeHelper:
             return TypeSpec.udt(hint)
         return None
 
+    def _param_type_specs_from_def(self, func_def) -> list:
+        """Per-parameter ``TypeSpec`` (or ``None``) from a function's DECLARED
+        parameter type hints — the authoritative source for typed params
+        (``pivot hi``, ``string tf``, ``line[] arr``). Untyped params are
+        ``None`` here so regular-function call-site inference can fill them.
+        """
+        hints = (getattr(func_def, "annotations", None) or {}).get("param_type_hints", [])
+        specs: list = []
+        for i in range(len(func_def.params)):
+            hint = hints[i] if i < len(hints) else None
+            specs.append(self._type_spec_from_hint(hint) if hint else None)
+        return specs
+
     def _template_args_from_call(self, node: FuncCall) -> list[str]:
         callee = node.callee
         ann = getattr(callee, "annotations", None) or {}
@@ -229,6 +242,15 @@ class TypeHelper:
             sym = self._symbols.resolve(value.name)
             if sym is not None and sym.type_spec is not None:
                 return sym.type_spec
+        if isinstance(value, FuncCall):
+            # User-function return spec (e.g. an array-returning
+            # ``buildPDLevels() => array.from(...)``), so a caller's
+            # ``allLevels = buildPDLevels()`` infers an array TypeSpec.
+            cal = value.callee
+            fname = cal.member if isinstance(cal, MemberAccess) else (
+                cal.name if isinstance(cal, Identifier) else None)
+            if fname and fname in getattr(self, "_func_return_type_specs", {}):
+                return self._func_return_type_specs[fname]
         if isinstance(value, MemberAccess):
             owner = self._type_spec_from_expr(value.object)
             if owner is not None and owner.kind == "udt" and owner.name:
