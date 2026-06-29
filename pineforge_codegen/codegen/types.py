@@ -430,25 +430,190 @@ class TypeInferer:
             return PINE_TYPE_TO_CPP.get(sym.pine_type, "double")
         return "double"
 
-    def _is_int64_builtin_init(self, name: str) -> bool:
-        """True if ``name``'s defining expression is a top-level call to a
-        Pine builtin that returns ``int64_t`` (``time``, ``time_close``,
-        ``timestamp``). The Pine type system collapses these to ``int``
-        but the engine encodes the ``na`` sentinel in the upper 32 bits,
-        so storing into ``Series<int>`` would silently corrupt na detection.
-        """
-        from .tables import INT64_BUILTINS
-        expr = (
-            self.ctx.global_expr_map.get(name)
-            or self.ctx.var_member_init_exprs.get(name)
-        )
+    def _expr_is_int64_builtin(self, expr) -> bool:
+        """True if ``expr`` is a top-level int64-returning Pine builtin: either a
+        call to one of ``INT64_BUILTINS`` (``time(...)``, ``timestamp(...)``, …)
+        or a bare ``Identifier`` spelled like ``time`` / ``time_close`` /
+        ``timenow`` (which Pine exposes as a value, not a call)."""
+        from .tables import INT64_BUILTINS, INT64_BUILTIN_IDENTIFIERS
         if expr is None:
             return False
         if isinstance(expr, FuncCall):
             func_name, namespace = self._resolve_callee(expr.callee)
-            if namespace is None and func_name in INT64_BUILTINS:
-                return True
+            return namespace is None and func_name in INT64_BUILTINS
+        if isinstance(expr, Identifier):
+            return expr.name in INT64_BUILTIN_IDENTIFIERS
         return False
+
+    def _int64_reassign_targets(self) -> set[str]:
+        """Names of vars that are reassigned (``:=``/``=``) anywhere in the AST
+        with an RHS that is a top-level int64-returning builtin. Cached on the
+        instance. Pine ``int`` collapses these to 32-bit, but the runtime stores
+        the epoch in 64 bits, so the member must be promoted to ``int64_t``."""
+        cached = getattr(self, "_int64_reassign_cache", None)
+        if cached is not None:
+            return cached
+        from ..ast_nodes import Assignment
+        targets: set[str] = set()
+        ast = getattr(self.ctx, "ast", None)
+        if ast is not None:
+            for node in self._walk_ast(ast):
+                if (isinstance(node, Assignment)
+                        and isinstance(node.target, Identifier)
+                        and self._expr_is_int64_builtin(node.value)):
+                    targets.add(node.target.name)
+        self._int64_reassign_cache = targets
+        return targets
+
+    def _is_int64_builtin_init(self, name: str) -> bool:
+        """True if ``name``'s initializer OR any ``:=``/``=`` reassignment has an
+        RHS that is a top-level int64-returning builtin (``time``, ``time_close``,
+        ``timenow``, ``timestamp``, ``time_tradingday``). The Pine type system
+        collapses these to ``int`` but the engine encodes the ``na`` sentinel
+        (and the full epoch-ms value, which overflows int32) in 64 bits, so
+        storing into ``int`` silently corrupts both the value and na detection.
+        A reassignment like ``var int entryTime = na`` then ``entryTime := time``
+        must promote even though the *initializer* alone is ``na``.
+        """
+        expr = (
+            self.ctx.global_expr_map.get(name)
+            or self.ctx.var_member_init_exprs.get(name)
+        )
+        if self._expr_is_int64_builtin(expr):
+            return True
+        return name in self._int64_reassign_targets()
+
+    # ------------------------------------------------------------------
+    # BUG C: user-defined-UDT lvalue aliasing
+    # ------------------------------------------------------------------
+
+    def _is_udt_lvalue(self, expr) -> str | None:
+        """If ``expr`` is a *user-defined* UDT lvalue (a bare ``Identifier`` that
+        names a class-scope ``var``/global UDT member, e.g. ``wyckoffSwingLow``),
+        return its UDT type name; else ``None``.
+
+        Pine UDTs are reference types, so a local initialised from such an lvalue
+        and then mutated through must write back to the global. Drawing UDTs are
+        handled by the separate ``_uses_drawing`` path and are excluded here."""
+        if not isinstance(expr, Identifier):
+            return None
+        udt_t = self._udt_var_types.get(expr.name)
+        if udt_t is None or udt_t not in self._udt_defs:
+            return None
+        if udt_t in DRAWING_TYPE_TO_CPP:
+            return None
+        # Must be a known global/class-scope member (not a function param or a
+        # plain local snapshot) for write-through to be observable.
+        if expr.name in getattr(self, "_current_func_locals", set()):
+            # A function-local of UDT type that is itself a persistent ``var``
+            # member still write-through aliases; but a plain inline local does
+            # not represent shared state. Only treat ``var`` func-locals (in
+            # func_var_members) as aliasable shared state.
+            fname = getattr(self, "_active_func_name", None)
+            var_locals = {n for n, _, _ in self.ctx.func_var_members.get(fname, [])} if fname else set()
+            if expr.name not in var_locals:
+                return None
+        return udt_t
+
+    def _udt_lvalue_selection_type(self, expr) -> str | None:
+        """UDT type if ``expr`` is a UDT lvalue OR a ternary/switch whose every
+        selectable branch is a UDT lvalue of the SAME user-defined UDT type.
+        Returns ``None`` otherwise (so plain ``UDT a = b`` value-snapshots, calls,
+        ``.new(...)`` ctors, and mixed/non-lvalue selections never alias)."""
+        direct = self._is_udt_lvalue(expr)
+        if direct is not None:
+            return direct
+        branches: list = []
+        if isinstance(expr, Ternary):
+            branches = [expr.true_val, expr.false_val]
+        elif isinstance(expr, SwitchStmt):
+            for _case_expr, stmts in (expr.cases or []):
+                if not stmts:
+                    return None
+                last = stmts[-1]
+                branches.append(last.expr if isinstance(last, ExprStmt) else last)
+            if expr.default_body:
+                last = expr.default_body[-1]
+                branches.append(last.expr if isinstance(last, ExprStmt) else last)
+        else:
+            return None
+        if not branches:
+            return None
+        types = {self._is_udt_lvalue(b) for b in branches}
+        if len(types) == 1 and None not in types:
+            return next(iter(types))
+        return None
+
+    def _udt_local_alias_kind(self, node: VarDecl) -> tuple[str, str] | None:
+        """Decide whether a hintless/typed local UDT declaration must ALIAS the
+        global(s) it selects rather than value-copy (BUG C).
+
+        Returns ``("ref", udt_type)`` for a non-rebinding reference alias,
+        ``("ptr", udt_type)`` for a pointer alias (the local is later reassigned
+        to a *different* UDT lvalue, which a C++ reference cannot do), or
+        ``None`` to keep the existing value-copy semantics.
+
+        Conditions (all required):
+          * RHS is a UDT lvalue or a ternary/switch selecting same-typed UDT
+            lvalues (``_udt_lvalue_selection_type``).
+          * The local is MUTATED later in the enclosing function body
+            (``local.field := ...``) — a pure read-only snapshot needn't alias.
+
+        The mutation requirement is the safety guard: a local that is only read
+        keeps value semantics, and a local initialised from a non-lvalue (a
+        ``.new()`` ctor, a function return, or a plain local copy) returns
+        ``None`` here, preserving intentional independent-copy semantics."""
+        from ..ast_nodes import Assignment
+        body = getattr(self, "_current_func_body", None)
+        if body is None:
+            return None
+        udt_t = self._udt_lvalue_selection_type(node.value)
+        if udt_t is None:
+            return None
+        name = node.name
+        mutated = False
+        rebinds_to_other_lvalue = False
+        for stmt in self._walk_ast_list(body):
+            if not isinstance(stmt, Assignment):
+                continue
+            tgt = stmt.target
+            # Mutation through the local: ``p.field := ...``
+            if (isinstance(tgt, MemberAccess)
+                    and isinstance(tgt.object, Identifier)
+                    and tgt.object.name == name):
+                mutated = True
+            # Rebind of the local itself to another UDT lvalue: ``p := other``
+            elif isinstance(tgt, Identifier) and tgt.name == name:
+                if self._udt_lvalue_selection_type(stmt.value) is not None:
+                    rebinds_to_other_lvalue = True
+                else:
+                    # Reassigned to a non-lvalue (e.g. ``.new()`` / a copy):
+                    # aliasing would be wrong; bail to value-copy.
+                    return None
+        if not mutated:
+            return None
+        return ("ptr" if rebinds_to_other_lvalue else "ref"), udt_t
+
+    def _walk_ast_list(self, stmts):
+        """Yield every node within a list of statements (depth-first)."""
+        for s in stmts:
+            yield from self._walk_ast(s)
+
+    def _addr_of_udt_selection(self, expr, local_name: str):
+        """Render the address-of form of a UDT lvalue selection for a pointer
+        alias (BUG C rebind case): ``other`` -> ``&(other)``;
+        ``cond ? a : b`` -> ``(cond ? &(a) : &(b))``. The selectable branches are
+        guaranteed (by ``_udt_lvalue_selection_type``) to be UDT lvalues."""
+        if isinstance(expr, Identifier):
+            return f"&({self._safe_name(expr.name)})"
+        if isinstance(expr, Ternary):
+            cond = self._visit_expr(expr.condition)
+            t = self._addr_of_udt_selection(expr.true_val, local_name)
+            f = self._addr_of_udt_selection(expr.false_val, local_name)
+            return f"({cond} ? {t} : {f})"
+        # Switch selection: lower to nested ternaries over case equality. Rare in
+        # practice; fall back to address-of the whole lowered expression.
+        return f"&({self._visit_expr(expr)})"
 
     def _infer_cpp_type_for_security_elem(self, node) -> str:
         """C++ type for one element of the ``request.security(..., expr, ...)`` payload.

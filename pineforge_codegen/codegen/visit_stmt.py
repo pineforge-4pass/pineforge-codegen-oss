@@ -402,6 +402,26 @@ class StmtVisitor:
             self._visit_if_switch_expr(node.value, safe, lines, indent)
             return
 
+        # UDT lvalue alias (BUG C): a local initialised from a user-defined-UDT
+        # var/global lvalue (or a ternary/switch of such lvalues) and then
+        # mutated through must ALIAS the global, not value-copy — Pine UDTs are
+        # reference types. Emit a C++ reference (non-rebinding) or pointer
+        # (rebinding) alias instead of the default copy.
+        if not is_global_member:
+            alias = self._udt_local_alias_kind(node)
+            if alias is not None:
+                kind, udt_t = alias
+                if kind == "ref":
+                    cpp_val = self._visit_rhs_value(node.value, node.name, target_cpp_type=udt_t)
+                    lines.append(f"{pad}{udt_t}& {safe} = {cpp_val};")
+                    return
+                # Pointer alias: take address of each selected lvalue; subsequent
+                # field access lowers to ``->`` and rebinds to ``&(other)``.
+                self._udt_ptr_alias_locals.add(node.name)
+                cpp_val = self._addr_of_udt_selection(node.value, node.name)
+                lines.append(f"{pad}{udt_t}* {safe} = {cpp_val};")
+                return
+
         # General declaration
         cpp_type = self._type_for_decl(node) if not is_global_member else None
         cpp_val = self._visit_rhs_value(node.value, node.name, target_cpp_type=cpp_type)
@@ -476,6 +496,12 @@ class StmtVisitor:
         # Apply per-call-site var remap (for function-local vars)
         if self._active_var_remap and safe in self._active_var_remap:
             safe = self._active_var_remap[safe]
+
+        # Pointer-aliased UDT local (BUG C, rebinding case): ``p := other``
+        # rebinds the pointer to the address of the newly selected UDT lvalue.
+        if target_name in self._udt_ptr_alias_locals and node.op == ":=":
+            lines.append(f"{pad}{safe} = {self._addr_of_udt_selection(node.value, target_name)};")
+            return
 
         if target_name in self.ctx.series_vars:
             val_cpp = self._visit_expr(node.value)

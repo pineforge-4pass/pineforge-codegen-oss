@@ -1245,6 +1245,28 @@ class SecurityEmitter:
         )
         return out
 
+    def _emit_security_ohlc_hist_pushes(self, sec_id: int, lines: list[str]) -> None:
+        """Emit the OHLC history-offset Series pushes for ``sec_id``, gated on
+        ``is_complete``.
+
+        ``request.security(..., [high[1], low[1], ...], ...)`` reads HTF OHLC at
+        past-bar offsets. Each offset is backed by a per-field Series whose
+        history must advance once per COMPLETED HTF bar — not once per (partial)
+        chart-bar evaluation. ``_eval_security_N`` fires on every chart bar; only
+        the bar that completes the HTF aggregate has ``is_complete == true``.
+        Pushing unconditionally advanced the offset history every chart bar, so
+        ``high[1]`` resolved to a recent partial bar instead of the prior
+        completed HTF bar. Gate all pushes for this sec in one combined block."""
+        fields = sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ()))
+        if not fields:
+            return
+        lines.append("        if (is_complete) {")
+        for field in fields:
+            lines.append(
+                f"            {self._security_ohlc_hist_series_cpp(sec_id, field)}.push(bar.{field});"
+            )
+        lines.append("        }")
+
     def _emit_security_evaluators(self, lines: list[str]) -> None:
         """Emit _eval_security_N() methods and evaluate_security() dispatch."""
         if not self._security_calls:
@@ -1341,10 +1363,7 @@ class SecurityEmitter:
                         emitted_lines=lines,
                     )
                     lines.append(f"        _req_sec_{sec_id}_{i} = {el_cpp};")
-                for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
-                    lines.append(
-                        f"        {self._security_ohlc_hist_series_cpp(sec_id, field)}.push(bar.{field});"
-                    )
+                self._emit_security_ohlc_hist_pushes(sec_id, lines)
                 lines.append("    }")
                 lines.append("")
                 continue
@@ -1372,10 +1391,7 @@ class SecurityEmitter:
                 )
             else:
                 lines.append(f"        _req_sec_{sec_id} = {expr_cpp};")
-            for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
-                lines.append(
-                    f"        {self._security_ohlc_hist_series_cpp(sec_id, field)}.push(bar.{field});"
-                )
+            self._emit_security_ohlc_hist_pushes(sec_id, lines)
             lines.append("    }")
             lines.append("")
 

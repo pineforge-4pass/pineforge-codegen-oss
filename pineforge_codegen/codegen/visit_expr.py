@@ -714,6 +714,10 @@ class ExprVisitor:
                 safe = self._safe_name(name)
                 if self._active_var_remap and safe in self._active_var_remap:
                     safe = self._active_var_remap[safe]
+                # Pointer-aliased UDT local (BUG C, rebinding case): field access
+                # goes through ``->`` since the local holds ``UDT*``.
+                if name in self._udt_ptr_alias_locals:
+                    return f"{safe}->{node.member}"
                 return f"{safe}.{node.member}"
             if name not in self.ctx.series_vars:
                 # Unknown identifier — likely an enum value

@@ -849,6 +849,18 @@ class TopLevelEmitter:
             self._active_call_site_idx = None
 
         prev_func_locals = self._current_func_locals
+        prev_func_body = getattr(self, "_current_func_body", None)
+        prev_func_name = getattr(self, "_active_func_name", None)
+        # The function body is the lexical scope used by the UDT-alias analysis
+        # (BUG C): a local initialised from a var/global UDT lvalue and later
+        # mutated through must alias, not value-copy.
+        self._current_func_body = node.body
+        self._active_func_name = fi.name
+        # Pointer-aliased UDT locals are function-scoped: a name like ``p_ivot``
+        # may be a rebinding pointer alias in one function and a ``pivot&``
+        # parameter in another, so reset per function to avoid cross-contamination.
+        prev_ptr_alias = self._udt_ptr_alias_locals
+        self._udt_ptr_alias_locals = set()
         self._current_func_locals = {n for n, _, _ in self.ctx.func_var_members.get(fi.name, [])}
         # Plain (non-persistent) scalar locals are emitted inline and live in
         # no other set; collect them so the unknown-identifier guard in
@@ -917,6 +929,9 @@ class TopLevelEmitter:
         self._current_func_series_params = set()
         self._udt_param_udt = {}
         self._current_func_locals = prev_func_locals
+        self._current_func_body = prev_func_body
+        self._active_func_name = prev_func_name
+        self._udt_ptr_alias_locals = prev_ptr_alias
         self._active_ta_remap = {}
         self._active_var_remap = {}
         self._in_ta_func_variant = False
