@@ -156,6 +156,11 @@ class AnalyzerContext:
     func_ta_ranges: dict = field(default_factory=dict)    # func_name -> (start_idx, end_idx)
     func_call_cs_map: dict = field(default_factory=dict)  # call_node_id -> (func_name, call_site_index)
     func_call_site_counts: dict = field(default_factory=dict)  # func_name -> int
+    # (func_name, cs_idx) -> {orig_member_name: cloned_member_name}. Populated by
+    # the analyzer ONLY for clones whose default ``{base}_cs{cs_idx}`` name would
+    # collide with a clone minted through another enclosing function; lets codegen
+    # use the disambiguated name instead of re-deriving a colliding one.
+    func_cs_ta_clone_names: dict = field(default_factory=dict)
     # UDT / enum definitions:
     udt_defs: dict = field(default_factory=dict)          # type_name -> {field_name: PineType}
     enum_defs: dict = field(default_factory=dict)         # enum_name -> [member names]

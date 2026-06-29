@@ -66,8 +66,8 @@ from __future__ import annotations
 from typing import Any
 
 from ..ast_nodes import (
-    ASTNode, BoolLiteral, ExprStmt, FuncCall, Identifier, MemberAccess,
-    NumberLiteral, StringLiteral, TupleLiteral,
+    ASTNode, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier, MemberAccess,
+    NumberLiteral, StringLiteral, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..symbols import PineType
 from .. import signatures as sigs
@@ -207,6 +207,7 @@ class CallHandlers:
                 is_static=is_static,
             )
             self._ta_call_sites.append(site)
+            self._ta_member_names.add(site.member_name)
             return PineType.FLOAT
 
         # Determine constructor args
@@ -249,6 +250,7 @@ class CallHandlers:
             is_static=is_static,
         )
         self._ta_call_sites.append(site)
+        self._ta_member_names.add(site.member_name)
 
         return PineType.FLOAT
 
@@ -770,6 +772,57 @@ class CallHandlers:
     # User-defined function calls
     # ------------------------------------------------------------------
 
+    def _func_local_length_defs(self, func_def) -> dict[str, str]:
+        """Collect a user function's local scalar length-vars to their RHS
+        expression string, e.g. ``qqeCalc`` with ``wp = sf * 2 - 1`` returns
+        ``{"wp": "sf * 2 - 1"}``.
+
+        Only plain (non-``var``/``varip``) declarations whose RHS is a pure
+        arithmetic expression over identifiers/numbers (NumberLiteral, Identifier,
+        BinOp, UnaryOp, or a math.* FuncCall) qualify — these are the shapes that
+        can legitimately feed a TA constructor length. Series-valued locals (whose
+        RHS is a ta.* call, a subscript, a ternary, etc.) are skipped so we never
+        inline a price series into a ctor-length slot. Names reassigned with ``:=``
+        are also skipped (their value is not a stable compile-time length).
+        """
+        def _is_arith(n) -> bool:
+            if isinstance(n, (NumberLiteral, Identifier)):
+                return True
+            if isinstance(n, BinOp):
+                return _is_arith(n.left) and _is_arith(n.right)
+            if isinstance(n, UnaryOp):
+                return _is_arith(n.operand)
+            if isinstance(n, FuncCall):
+                # Allow math.* helpers (math.round/sqrt/...) over arith args.
+                callee = n.callee
+                if (isinstance(callee, MemberAccess)
+                        and isinstance(callee.object, Identifier)
+                        and callee.object.name == "math"):
+                    return all(_is_arith(a) for a in n.args)
+            return False
+
+        reassigned: set[str] = set()
+        def _scan_reassign(stmts):
+            from ..ast_nodes import Assignment
+            for s in stmts or []:
+                if isinstance(s, Assignment) and isinstance(s.target, Identifier):
+                    reassigned.add(s.target.name)
+                for attr in ("body", "else_body"):
+                    sub = getattr(s, attr, None)
+                    if isinstance(sub, list):
+                        _scan_reassign(sub)
+        _scan_reassign(func_def.body)
+
+        defs: dict[str, str] = {}
+        for stmt in func_def.body or []:
+            if (isinstance(stmt, VarDecl)
+                    and not stmt.is_var and not stmt.is_varip
+                    and stmt.name not in reassigned
+                    and stmt.value is not None
+                    and _is_arith(stmt.value)):
+                defs[stmt.name] = self._expr_to_str(stmt.value)
+        return defs
+
     def _handle_user_func_call(self, func_name: str, node: FuncCall) -> PineType:
         """Handle calls to user-defined functions."""
         func_def = self._func_defs[func_name]
@@ -843,6 +896,16 @@ class CallHandlers:
             if has_ta:
                 start, end = self._func_ta_ranges[func_name]
 
+                # Map of this function's local (non-param, non-series) derived
+                # length vars to their raw RHS expression strings, e.g.
+                # ``qqeCalc`` => ``wp = sf * 2 - 1`` -> {"wp": "sf * 2 - 1"}.
+                # A TA ctor arg captured as the bare local name ("wp") must be
+                # expanded to its definition so the subsequent param-substitution
+                # turns it into a class-scope expression ("rsiSmooth * 2 - 1")
+                # rather than leaving a dangling local that degenerates to
+                # period 1 in codegen.
+                local_defs = self._func_local_length_defs(func_def)
+
                 def _subst_params(arg: str, pmap: dict[str, str]) -> str:
                     """Substitute parameter names in an expression string.
 
@@ -856,23 +919,81 @@ class CallHandlers:
                         result = re.sub(rf'\b{re.escape(param)}\b', value, result)
                     return result
 
+                def _expand_locals(arg: str) -> str:
+                    """Recursively expand function-local length vars to their RHS
+                    (parenthesized) so only params / class-scope names remain."""
+                    import re
+                    if not local_defs:
+                        return arg
+                    for _ in range(32):
+                        def _rep(m: re.Match) -> str:
+                            nm = m.group(0)
+                            if nm in local_defs:
+                                return "(" + local_defs[nm] + ")"
+                            return nm
+                        new = re.sub(r"[A-Za-z_][A-Za-z_0-9]*", _rep, arg)
+                        if new == arg:
+                            break
+                        arg = new
+                    return arg
+
+                # Params of the function we are *currently inside* (if this is a
+                # nested user-func call). Used to detect when a substituted ctor
+                # arg becomes parameterized by the OUTER function, so the outer
+                # call site can resolve it (f_bbwp's _bbwLen -> i_bbwLen reaches
+                # f_basisMa's sites).
+                import re as _re
+                enclosing_params: set[str] = set()
+                for s in self._enclosing_func_params:
+                    enclosing_params |= s
+
                 if cs_idx == 0:
                     # First call site: save original param-based ctor_args for future cloning,
                     # then resolve to actual call-site values
                     for i in range(start, end):
                         site = self._ta_call_sites[i]
                         if not hasattr(site, '_orig_ctor_args'):
-                            site._orig_ctor_args = site.ctor_args[:]
+                            site._orig_ctor_args = [
+                                _expand_locals(a) for a in site.ctor_args
+                            ]
                         site.ctor_args = [_subst_params(a, param_arg_map) for a in site._orig_ctor_args]
+                        # If a substituted arg is now expressed in terms of an
+                        # enclosing function's params, promote it to the original
+                        # so the enclosing call re-substitutes, and mark the site
+                        # so the enclosing function's TA range widens to cover it.
+                        if enclosing_params and self._nested_ta_touched is not None:
+                            for a in site.ctor_args:
+                                toks = set(_re.findall(r"[A-Za-z_][A-Za-z_0-9]*", a))
+                                if toks & enclosing_params:
+                                    site._orig_ctor_args = list(site.ctor_args)
+                                    self._nested_ta_touched.add(i)
+                                    break
                 else:
                     # Subsequent call sites: clone using saved original param names,
                     # substituted with this call site's arguments
+                    clone_name_map: dict[str, str] = {}
                     for i in range(start, end):
                         orig = self._ta_call_sites[i]
                         orig_args = getattr(orig, '_orig_ctor_args', orig.ctor_args)
                         resolved_ctor = [_subst_params(a, param_arg_map) for a in orig_args]
+                        # Default name follows the ``{base}_cs{cs_idx}`` formula the
+                        # codegen re-derives. But the SAME base TA site can be reached
+                        # through more than one enclosing function (e.g. a helper cloned
+                        # both via its own call sites AND via a range-widened outer
+                        # function), so two distinct (func, cs_idx) namespaces can mint
+                        # the same name. Detect that collision and fall back to a
+                        # globally-unique name; record the chosen name so the codegen
+                        # consumes it verbatim (see _func_cs_ta_clone_names).
+                        clone_name = f"{orig.member_name}_cs{cs_idx}"
+                        if clone_name in self._ta_member_names:
+                            base = clone_name
+                            n = 2
+                            while clone_name in self._ta_member_names:
+                                clone_name = f"{base}_u{n}"
+                                n += 1
+                            clone_name_map[orig.member_name] = clone_name
                         cloned = TACallSite(
-                            member_name=f"{orig.member_name}_cs{cs_idx}",
+                            member_name=clone_name,
                             class_name=orig.class_name,
                             ctor_args=resolved_ctor,
                             compute_args=orig.compute_args[:],
@@ -881,6 +1002,9 @@ class CallHandlers:
                             is_static=orig.is_static,
                         )
                         self._ta_call_sites.append(cloned)
+                        self._ta_member_names.add(clone_name)
+                    if clone_name_map:
+                        self._func_cs_ta_clone_names[(func_name, cs_idx)] = clone_name_map
 
         # Create or update FuncInfo
         is_tuple = self._func_returns_tuple.get(func_name, False)

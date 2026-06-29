@@ -274,12 +274,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # Build cloned site remapping for cs > 0 (must happen before _ta_site_map
         # so cloned names are in _func_ta_members and get filtered out of the map)
+        #
+        # Default to the ``{orig}_cs{cs_idx}`` formula (matches the analyzer's clone
+        # naming), but defer to the analyzer's authoritative clone-name map for any
+        # site it had to disambiguate (a TA site reached through multiple enclosing
+        # functions would otherwise collide on the formula). Keeping the formula as
+        # the default leaves all non-colliding output byte-identical.
+        clone_names = getattr(ctx, "func_cs_ta_clone_names", {})
         for fname, orig_names in func_ta_originals.items():
             total_cs = ctx.func_call_site_counts.get(fname, 1)
             for cs_idx in range(1, total_cs):
+                overrides = clone_names.get((fname, cs_idx), {})
                 remap = {}
                 for orig_name in orig_names:
-                    remap[orig_name] = f"{orig_name}_cs{cs_idx}"
+                    remap[orig_name] = overrides.get(
+                        orig_name, f"{orig_name}_cs{cs_idx}")
                 self._func_cs_ta_remap[(fname, cs_idx)] = remap
                 self._func_ta_members.update(remap.values())
 
@@ -322,6 +331,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Map input-backed var name -> its input.*() FuncCall node so we can
         # later emit a runtime get_input_*() read with the same title/default.
         self._input_var_to_call: dict[str, FuncCall] = {}
+        # Class-scope arithmetic-over-input vars (e.g. ``wilderLen = rsiLen*2-1``).
+        # Maps the derived var name -> its raw RHS expression string. When such a
+        # var feeds a TA ctor length, the runtime-reset path expands it so input
+        # overrides propagate (``(get_input_int("RSI Length",14) * 2 - 1)``); the
+        # ctor-init list still folds to the Pine-default literal via _resolve_known.
+        self._derived_input_expr: dict[str, str] = {}
         self._timeframe_period_vars: set[str] = set()
         self._collect_known_vars()
         # Track var names
@@ -778,6 +793,45 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             walk(stmt)
         return reassigned
 
+    def _arith_expr_to_str(self, node) -> str | None:
+        """Render a numeric arithmetic-over-identifiers expression to a string
+        whose token spelling matches ``_resolve_known`` / ``_runtime_ctor_arg_for_reset``
+        (e.g. ``rsiLen * 2 - 1``). Returns None for any node shape we don't fold
+        (series subscripts, ternaries, etc.) so the caller leaves the var untracked.
+        """
+        if isinstance(node, NumberLiteral):
+            v = node.value
+            if isinstance(v, float) and v == int(v):
+                return str(int(v))
+            return str(v)
+        if isinstance(node, Identifier):
+            return node.name
+        if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
+            return f"{node.object.name}.{node.member}"
+        if isinstance(node, BinOp):
+            l = self._arith_expr_to_str(node.left)
+            r = self._arith_expr_to_str(node.right)
+            if l is None or r is None:
+                return None
+            return f"{l} {node.op} {r}"
+        if isinstance(node, UnaryOp):
+            o = self._arith_expr_to_str(node.operand)
+            if o is None:
+                return None
+            return f"{node.op}{o}"
+        if isinstance(node, FuncCall):
+            callee = self._arith_expr_to_str(node.callee)
+            if callee is None:
+                return None
+            parts = []
+            for a in node.args:
+                s = self._arith_expr_to_str(a)
+                if s is None:
+                    return None
+                parts.append(s)
+            return f"{callee}({', '.join(parts)})"
+        return None
+
     def _collect_known_var(self, node: VarDecl) -> None:
         """Extract known constant value from a VarDecl."""
         # Don't inline series variables — their values change over time
@@ -830,6 +884,36 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if stored:
                 self._input_backed_vars.add(node.name)
                 self._input_var_to_call[node.name] = node.value
+        # Class-scope arithmetic over known/input-backed vars
+        # (``wilderLen = rsiLen * 2 - 1``, ``n = math.round(len / 2)``).
+        # Without this branch the derived name is untracked, the TA ctor arg
+        # never folds, and the runtime-reset path silently degenerates to a
+        # period of 1. We (a) fold to a literal for the ctor-init list and
+        # (b) record the raw expression so the reset path can re-expand any
+        # input-backed operand to its get_input_*() runtime read.
+        elif isinstance(node.value, (BinOp, UnaryOp, FuncCall)):
+            expr_str = self._arith_expr_to_str(node.value)
+            if expr_str is not None:
+                import re as _re
+                tokens = set(_re.findall(r"[A-Za-z_][A-Za-z_0-9]*", expr_str))
+                refs_known = any(t in self._known_vars for t in tokens)
+                refs_input = any(t in self._input_backed_vars for t in tokens)
+                refs_derived = any(t in self._derived_input_expr for t in tokens)
+                if refs_known or refs_input or refs_derived:
+                    folded = self._resolve_known(expr_str)
+                    if self._is_compile_time_value(folded):
+                        try:
+                            num = float(folded)
+                            self._known_vars[node.name] = (
+                                int(num) if num == int(num) else num
+                            )
+                        except ValueError:
+                            pass
+                    if refs_input or refs_derived:
+                        # Track as input-backed so use-sites are not inlined and
+                        # the runtime-reset path emits the override-aware expr.
+                        self._derived_input_expr[node.name] = expr_str
+                        self._input_backed_vars.add(node.name)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -1469,6 +1553,24 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """
         import re
         ident_re = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+
+        # Expand class-scope derived vars (``wilderLen`` -> ``(rsiLen * 2 - 1)``)
+        # to their raw RHS so the input-backed leaves become get_input_*() reads
+        # below. Recursive (bounded) to handle chains of derived vars; guards
+        # against cycles.
+        def _expand_derived(s: str, seen: frozenset = frozenset(), depth: int = 0) -> str:
+            if depth > 32:
+                return s
+            def _rep(m: re.Match) -> str:
+                nm = m.group(0)
+                if nm in self._derived_input_expr and nm not in seen:
+                    inner = self._derived_input_expr[nm]
+                    return "(" + _expand_derived(inner, seen | {nm}, depth + 1) + ")"
+                return nm
+            return ident_re.sub(_rep, s)
+
+        arg_str = _expand_derived(arg_str)
+
         tokens = ident_re.findall(arg_str)
         input_tokens = [t for t in tokens if t in self._input_backed_vars]
         if not input_tokens:

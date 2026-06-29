@@ -214,9 +214,29 @@ class TopLevelEmitter:
         # TA members with ctor args
         for site in self.ctx.ta_call_sites:
             if site.ctor_args:
+                # If a ctor arg is neither a compile-time literal nor expandable
+                # to an input-backed runtime expression, the old code silently
+                # emitted period 1 with no overwriting reset — a wrong indicator
+                # masquerading as a working one. Refuse loudly instead. Args that
+                # DO expand to a runtime expr (input-backed / arithmetic-over-input,
+                # incl. function-derived lengths) are safe: the `!_ta_initialized_`
+                # reset overwrites the placeholder before the first compute.
+                for a in site.ctor_args:
+                    r = self._resolve_known(a)
+                    if (not self._is_compile_time_value(r)
+                            and self._runtime_ctor_arg_for_reset(a) is None):
+                        self._codegen_error(
+                            getattr(site, "node", None),
+                            f"Unsupported TA constructor length '{a}' for "
+                            f"{site.class_name}: it is neither a compile-time "
+                            f"constant nor derived from an input, so PineForge "
+                            f"cannot size the indicator buffer.",
+                            hint=("Use a literal, an input.*() value, or "
+                                  "arithmetic over those for TA lengths."),
+                        )
                 resolved = [self._resolve_known(a) for a in site.ctor_args]
-                # If any ctor arg isn't a compile-time value, use default 1
-                # (TA in user functions with runtime params)
+                # Compile-time placeholder for the init list; the runtime reset
+                # (when the arg is input-derived) overwrites it on the first bar.
                 safe_resolved = []
                 for r in resolved:
                     if self._is_compile_time_value(r):
