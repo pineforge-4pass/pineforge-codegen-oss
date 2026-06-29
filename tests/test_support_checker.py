@@ -471,11 +471,104 @@ def test_plot_emits_warning_not_error():
     assert any("visual only" in d.message for d in _warnings(src))
 
 
-def test_label_namespace_emits_warning_not_error():
-    src = PRELUDE + 'label.new(bar_index, high, "x")\n'
-    # bar_index now warns (divergent); label.new also warns (visual).
-    warnings = _warnings(src)
-    assert any("visual only" in d.message for d in warnings)
+def test_label_geometry_accepted_visual_setter_warns():
+    # Drawing-objects-as-data: label.new is REAL geometry (a label in the
+    # per-type arena) — accepted, no hard error and no "visual only" warning.
+    assert _errors(PRELUDE + 'label.new(bar_index, high, "x")\n') == []
+    # A pure-visual setter (label.set_color) is the part that is a no-op: it is
+    # accepted but warned, never rejected.
+    src2 = PRELUDE + 'lb = label.new(bar_index, high, "x")\nlabel.set_color(lb, color.red)\n'
+    assert _errors(src2) == []
+    assert any("visual no-op" in d.message for d in _warnings(src2))
+    # An UNKNOWN drawing method rejects loudly (not silently emitted).
+    assert _errors(PRELUDE + 'lb = label.new(bar_index, high, "x")\nlabel.bogus(lb)\n')
+
+
+def test_udt_drawing_field_history_rejected():
+    src = PRELUDE + """
+type DrawState
+    line ln = na
+var DrawState d = DrawState.new()
+d.ln := line.new(bar_index, close, bar_index + 1, close)
+prev = d.ln[1]
+"""
+    _expect_error(src, "UDT drawing fields")
+
+
+def test_udt_array_drawing_field_history_rejected():
+    src = PRELUDE + """
+type DrawState
+    array<line> lines = na
+var DrawState d = DrawState.new(array.new<line>())
+prev = d.lines[1]
+"""
+    _expect_error(src, "UDT drawing fields")
+
+
+def test_udt_bracket_array_drawing_field_history_rejected():
+    src = PRELUDE + """
+type DrawState
+    line[] lines = na
+var DrawState d = DrawState.new(array.new<line>())
+prev = d.lines[1]
+"""
+    _expect_error(src, "UDT drawing fields")
+
+
+def test_udt_drawing_field_current_bar_zero_allowed():
+    src = PRELUDE + """
+type DrawState
+    line ln = na
+var DrawState d = DrawState.new()
+d.ln := line.new(bar_index, close, bar_index + 1, close)
+same = d.ln[0]
+"""
+    assert _errors(src) == []
+
+
+def test_udt_non_drawing_field_history_allowed():
+    src = PRELUDE + """
+type State
+    float n = 0.0
+var State d = State.new()
+prev = d.n[1]
+"""
+    assert _errors(src) == []
+
+
+def test_tuple_destructured_drawing_handle_history_rejected():
+    src = PRELUDE + """
+makePair() => [line.new(bar_index, close, bar_index + 1, close), line.new(bar_index, open, bar_index + 1, open)]
+[la, lb] = makePair()
+prev = la[1]
+"""
+    _expect_error(src, "tuple-destructured drawing handles")
+
+
+def test_tuple_literal_drawing_handle_history_rejected():
+    src = PRELUDE + """
+[la, lb] = [line.new(bar_index, close, bar_index + 1, close), line.new(bar_index, open, bar_index + 1, open)]
+prev = lb[1]
+"""
+    _expect_error(src, "tuple-destructured drawing handles")
+
+
+def test_tuple_ternary_drawing_handle_history_rejected():
+    src = PRELUDE + """
+makePair() => [close > open ? line.new(bar_index, close, bar_index + 1, close) : na, line.new(bar_index, open, bar_index + 1, open)]
+[la, lb] = makePair()
+prev = la[1]
+"""
+    _expect_error(src, "tuple-destructured drawing handles")
+
+
+def test_numeric_tuple_element_history_still_allowed():
+    src = PRELUDE + """
+makePair() => [close, open]
+[a, b] = makePair()
+prev = a[1]
+"""
+    assert _errors(src) == []
 
 
 # ---------------------------------------------------------------------------

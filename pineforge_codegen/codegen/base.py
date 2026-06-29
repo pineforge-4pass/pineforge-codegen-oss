@@ -39,6 +39,7 @@ from .tables import (
     BAR_FIELDS,
     BAR_BUILTINS,
     BAR_SERIES_PUSH,
+    DRAWING_TYPE_TO_CPP,
     SECURITY_OHLC_BAR_FIELDS,
     TA_RETURNS_BOOL,
     TA_IMPLICIT_COMPUTE,
@@ -112,12 +113,17 @@ from .visit_stmt import StmtVisitor
 from .visit_expr import ExprVisitor
 from .visit_call import CallVisitor
 
+# DrawingVisitor owns the drawing-objects-as-data dispatch (line/box/label/
+# linefill/chart.point lowering onto the per-type arenas) plus _uses_drawing
+# detection and arena-cap computation. See codegen/drawing.py.
+from .drawing import DrawingVisitor
+
 
 # ---------------------------------------------------------------------------
 # CodeGen class
 # ---------------------------------------------------------------------------
 
-class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEmitter, TaSiteHelper, TypeInferer, InputHelper, NamingHelper):
+class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEmitter, TaSiteHelper, TypeInferer, InputHelper, DrawingVisitor, NamingHelper):
     """Generate C++ from an AnalyzerContext (visitor pattern).
 
     Mixin chain (Python MRO is left-to-right; method names are
@@ -347,7 +353,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # rewrite or strip downstream references to those fields so the
         # generated C++ never references a member that doesn't exist on the
         # emitted struct. See: pineforge-codegen issue #10.
-        _DRAWING_TYPES_INIT = {"label", "line", "box", "table", "linefill", "polyline", "chart.point"}
+        # Drawing-objects-as-data: line/box/label/linefill/chart.point are now
+        # REAL data (un-dropped from UDT structs). Only table/polyline stay
+        # dropped (no C++ representation). See drawing-objects-as-data.md §4.2.
+        _DRAWING_TYPES_INIT = {"table", "polyline"}
         self._udt_omitted_fields: dict[str, set[str]] = {}
         for _type_name, _fields in self._udt_defs.items():
             _omitted = set()
@@ -468,6 +477,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         self._register_global_aggregate_member_types()
         self._uses_matrix = self._detect_matrix_usage()
+        # Drawing-objects-as-data: gate all new emission (drawing.hpp include +
+        # the per-type arenas) on this flag so non-drawing strategies stay
+        # byte-identical. Caps come from the strategy() header max_*_count.
+        self._uses_drawing = self._detect_drawing_usage()
+        self._drawing_caps = self._compute_drawing_caps() if self._uses_drawing else {}
 
         # max_bars_back: the per-variable history depth the engine's Series<T>
         # ring buffer should retain. Pine exposes this two ways — the
@@ -1031,8 +1045,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 continue
             seen_var_members.add(name)
             safe = self._safe_name(name)
-            # Detect array vars from init expression
-            if "array.new" in str(init_str) or "array.from" in str(init_str) or name in self._array_vars:
+            # Detect array vars from init expression. Guard the substring
+            # heuristic against a UDT constructor that merely WRAPS array.new /
+            # array.from in its arguments — e.g.
+            # ``var draw d = draw.new(array.new<line>(), array.new<line>())``
+            # must declare as ``draw``, not ``std::vector<double>``. (Drawing
+            # made this latent collision reachable.)
+            _init_str_s = str(init_str)
+            _is_udt_ctor_init = any(
+                _init_str_s.startswith(f"{u}.new") for u in self._udt_defs
+            )
+            if (not _is_udt_ctor_init) and (
+                "array.new" in _init_str_s or "array.from" in _init_str_s
+                or name in self._array_vars
+            ):
                 self._array_vars.add(name)
                 lines.append(f"    {self._type_spec_to_cpp(self._array_spec_for_name(name))} {safe};")
                 continue
@@ -1063,6 +1089,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # decl as ``double`` and the later ``z = SDZone{...}`` would not
             # compile (assigning SDZone to double).
             init_s = str(init_str)
+            # Drawing handle var member (L-N2): a ``var line x`` declares as the
+            # C++ handle struct (Series<Line> when also history-referenced).
+            # Drawing names are NOT in _udt_defs, so the udt branch below would
+            # self-zero them to double; handle them first.
+            _draw_cpp = DRAWING_TYPE_TO_CPP.get(self._udt_var_types.get(name))
+            if _draw_cpp is not None:
+                if name in self.ctx.series_vars:
+                    lines.append(f"    Series<{_draw_cpp}> {safe}{_mbb};")
+                else:
+                    lines.append(f"    {_draw_cpp} {safe};")
+                continue
             udt_type = self._udt_var_types.get(name)
             if udt_type not in self._udt_defs:
                 udt_type = None
@@ -1131,7 +1168,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # data/validation/udt-method-probe-19-array-of-udt-method,
                 # data/validation/udt-method-probe-20-udt-return-from-func.
                 udt_t = self._udt_var_types[name]
-                lines.append(f"    {udt_t} {safe} = {udt_t}{{}};")
+                # Drawing handle global (L-N6 / U): map line/box/label/linefill
+                # to the C++ handle struct (the default is na, id=-1).
+                _draw_cpp = DRAWING_TYPE_TO_CPP.get(udt_t)
+                if _draw_cpp is not None:
+                    lines.append(f"    {_draw_cpp} {safe} = {_draw_cpp}{{}};")
+                else:
+                    lines.append(f"    {udt_t} {safe} = {udt_t}{{}};")
             else:
                 expr = self.ctx.global_expr_map.get(name) if hasattr(self.ctx, "global_expr_map") else None
                 cpp_type = self._infer_type(expr) if expr is not None else PINE_TYPE_TO_CPP.get(ptype, "double")
@@ -1174,6 +1217,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         lines.append(f"    Series<{cpp_type}> {cloned_safe}{_mbb};")
                     else:
                         lines.append(f"    double {cloned_safe} = 0.0;")
+
+        # 8d. Drawing-objects-as-data arenas (gated on _uses_drawing so
+        #     non-drawing strategies emit byte-identical C++). Each arena is a
+        #     per-strategy member -> reset-per-run is automatic. Caps come from
+        #     the strategy() header max_*_count (default 50; linefill default 50).
+        if self._uses_drawing:
+            caps = self._drawing_caps or {}
+            lines.append(f"    DrawingArena<LineRec> _pf_lines_{{{caps.get('line', 50)}}};")
+            lines.append(f"    DrawingArena<BoxRec> _pf_boxes_{{{caps.get('box', 50)}}};")
+            lines.append(f"    DrawingArena<LabelRec> _pf_labels_{{{caps.get('label', 50)}}};")
+            lines.append(f"    DrawingArena<LinefillRec> _pf_linefills_{{{caps.get('linefill', 50)}}};")
 
         # 9. _var_initialized flag
         if self.ctx.var_members:
@@ -1319,6 +1373,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     def _is_skip_expr(self, node) -> bool:
         """Check if an expression should be skipped (visual/unsupported)."""
         if isinstance(node, FuncCall):
+            # chart.point.* resolves to namespace "chart" (a SKIP_NAMESPACE) but
+            # is REAL data (a ChartPoint aggregate literal). Never skip it.
+            if self._is_chart_point_callee(node.callee):
+                return False
             func_name, namespace = self._resolve_callee(node.callee)
             if func_name in SKIP_FUNC_NAMES:
                 return True

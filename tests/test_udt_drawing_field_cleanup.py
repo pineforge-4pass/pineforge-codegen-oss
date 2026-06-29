@@ -1,20 +1,17 @@
-"""UDT with drawing-typed fields must compile cleanly even when downstream code
-references the dropped field.
+"""UDT with drawing-typed fields: the field is now REAL handle data.
 
-Repro: when a Pine UDT contains a drawing-typed field (``label``, ``line``,
-``box``, ``linefill``, ``polyline``, ``table``), codegen correctly omits the
-field from the C++ struct emission (the engine doesn't model drawing objects).
-But downstream ``m.tag := label.new(...)`` or ``x = m.tag`` references the
-dropped field and the generated C++ would otherwise fail to compile.
+Drawing-objects-as-data (spec §4.2 / §U): a UDT field of type ``line``/
+``box``/``label``/``linefill`` is no longer dropped from the emitted C++
+struct — it lowers to a plain handle struct member (``Line ln;`` /
+``std::vector<Line> upln;``), and ``m.tag := label.new(...)`` / ``x = m.tag``
+become real field read/writes against the shared per-type arena.
 
-The fix: track omitted fields per UDT and rewrite reads / strip writes so
-the generated C++ never references a member that doesn't exist on the
-emitted struct.
+(``table``/``polyline`` fields are still dropped — they have no C++ type.)
 """
 from pineforge_codegen import transpile
 
 
-def test_udt_with_dropped_label_field_compiles():
+def test_udt_label_field_is_real_handle():
     src = '''//@version=6
 strategy("t")
 type Marker
@@ -27,19 +24,15 @@ v = m.tag
 plot(m.price)
 '''
     cpp = transpile(src)
-    # Struct must NOT declare tag (existing behavior)
-    assert "label tag" not in cpp
-    # Downstream m.tag references must NOT appear as a raw struct member
-    # access (which would be a compile error). They must be commented out
-    # or rewritten to a placeholder expression.
-    for line in cpp.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("//") or stripped.startswith("/*"):
-            continue
-        assert "m.tag" not in stripped, f"bare m.tag reference in: {stripped!r}"
+    # The struct now declares a real Label handle member.
+    assert "Label tag" in cpp
+    # The field write lowers onto the arena, NOT a dropped placeholder.
+    assert "m.tag = pf_label_new(_pf_labels_," in cpp
+    # The field read is a plain handle copy (real member access survives).
+    assert "m.tag" in cpp
 
 
-def test_udt_with_dropped_line_field_assignment_stripped():
+def test_udt_line_field_assignment_is_real():
     src = '''//@version=6
 strategy("t")
 type Segment
@@ -52,15 +45,11 @@ s.ln := line.new(bar_index, close, bar_index + 1, open)
 plot(s.p1)
 '''
     cpp = transpile(src)
-    assert "line ln" not in cpp
-    for line in cpp.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("//") or stripped.startswith("/*"):
-            continue
-        assert "s.ln" not in stripped
+    assert "Line ln" in cpp
+    assert "s.ln = pf_line_new(_pf_lines_," in cpp
 
 
-def test_udt_with_dropped_box_field_read_replaced():
+def test_udt_box_field_read_is_real():
     src = '''//@version=6
 strategy("t")
 type Region
@@ -73,12 +62,9 @@ v = r.bx
 plot(r.top)
 '''
     cpp = transpile(src)
-    assert "box bx" not in cpp
-    for line in cpp.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("//") or stripped.startswith("/*"):
-            continue
-        assert "r.bx" not in stripped
+    assert "Box bx" in cpp
+    # The field read survives as a real handle member access.
+    assert "r.bx" in cpp
 
 
 def test_udt_without_drawing_fields_unchanged():
@@ -101,3 +87,5 @@ plot(v)
     # survives in the executable body (the plot of v depends on it).
     assert "p.x" in cpp
     assert "p.y" in cpp
+    # No drawing machinery for a non-drawing strategy.
+    assert "pineforge/drawing.hpp" not in cpp

@@ -90,6 +90,7 @@ from ..analyzer import FuncInfo
 from ..symbols import TypeSpec
 from .tables import (
     BAR_SERIES_PUSH,
+    DRAWING_TYPE_TO_CPP,
     PINE_TYPE_TO_CPP,
     RUNTIME_REGISTER_SECURITY_EVAL_FN,
     RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN,
@@ -136,6 +137,11 @@ class TopLevelEmitter:
             float_spec = TypeSpec.primitive("float")
             if any(spec.element != float_spec for spec in self._matrix_specs.values()):
                 lines.append('#include <pineforge/generic_matrix.hpp>')
+        # Drawing-objects-as-data runtime (line/box/label/linefill arenas +
+        # ChartPoint). Gated on _uses_drawing so non-drawing strategies stay
+        # byte-identical — mirrors the matrix.hpp gating above.
+        if getattr(self, "_uses_drawing", False):
+            lines.append('#include <pineforge/drawing.hpp>')
         lines.append("")
         # Compatibility shim for the namespace-wrap refactor: unqualified
         # references to BacktestEngine / Bar / na<T>() / ta::* / etc. resolve
@@ -244,6 +250,12 @@ class TopLevelEmitter:
             # na via the struct's in-class ``__pf_na = true``; a ctor init like
             # ``z(na<double>())`` would not type-match the struct member.
             if name in self._udt_var_types and self._udt_var_types[name] in self._udt_defs:
+                continue
+            # Drawing handle var member (L-N3): ``var line x`` / ``var box b``
+            # default-construct to {-1} (na). A ``b(na<double>())`` ctor init
+            # would not type-match the handle struct — skip it (the in-class
+            # member default is the once-only persistent na init).
+            if name in self._udt_var_types and self._udt_var_types[name] in DRAWING_TYPE_TO_CPP:
                 continue
             if name not in self.ctx.series_vars:
                 cpp_val = self._resolve_known(init_expr)
@@ -729,7 +741,12 @@ class TopLevelEmitter:
         func_sv = self.ctx.func_series_vars.get(fi.name, set())
         for i, p in enumerate(node.params):
             if is_udt and i == 0 and fi.udt_type_name:
-                cpp_t = f"{fi.udt_type_name}&"
+                # A method receiver whose type is a drawing primitive
+                # (egoigor's ``method slope(line ln)``) must emit ``Line&`` not
+                # the unknown ``line&``. Register _udt_param_udt so the body's
+                # getters dispatch through the §4.3 drawing path (L.6d / U.5).
+                recv_cpp = DRAWING_TYPE_TO_CPP.get(fi.udt_type_name, fi.udt_type_name)
+                cpp_t = f"{recv_cpp}&"
                 safe_p = self._safe_name(p)
                 self._udt_param_udt[safe_p] = fi.udt_type_name
                 self._udt_param_udt[p] = fi.udt_type_name
@@ -757,7 +774,9 @@ class TopLevelEmitter:
             tuple_types_list = self._infer_tuple_types(node, fi.tuple_element_count)
             ret_type = f"std::tuple<{', '.join(tuple_types_list)}>"
         elif getattr(fi, "udt_return_type", None):
-            ret_type = fi.udt_return_type
+            # A function returning a drawing handle must emit the C++ handle
+            # struct (Line/Box/Label/Linefill), not the unknown lowercase name.
+            ret_type = DRAWING_TYPE_TO_CPP.get(fi.udt_return_type, fi.udt_return_type)
         else:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")
 
