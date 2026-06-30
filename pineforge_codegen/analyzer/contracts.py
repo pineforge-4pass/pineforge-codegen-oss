@@ -179,6 +179,12 @@ class AnalyzerContext:
     collection_types: dict[str, TypeSpec] = field(default_factory=dict)
     # UDT name -> field_name -> structured type metadata
     udt_field_type_specs: dict[str, dict[str, TypeSpec]] = field(default_factory=dict)
+    # id(block_node) -> {raw_var_name: scope_unique_member_name} for block-scoped
+    # ``var``/``varip`` declarations whose raw name collides with a same-named
+    # block var in a sibling scope. Codegen activates the rename via
+    # ``_active_var_remap`` while emitting that block's statements so reads/writes
+    # of the var resolve to the disambiguated member.
+    block_var_renames: dict[int, dict[str, str]] = field(default_factory=dict)
     # ``// @pf-trace name=expr`` pragmas in source order. Populated by
     # :func:`pineforge_codegen.pragmas.extract_pf_trace_pragmas` from
     # the original source text and attached after :class:`Analyzer`

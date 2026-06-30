@@ -51,6 +51,23 @@ from .tables import (
     TA_RETURNS_BOOL,
 )
 
+# Collection (array / map / matrix) methods that MUTATE the receiver in place.
+# Used by the BUG-2 collection-lvalue-alias path to decide whether a local
+# bound to an existing collection lvalue must alias (mutated) or may value-copy
+# (read-only). A method missing here only costs the alias optimization; a
+# non-mutating method accidentally present would alias a read-only local, which
+# is still correct (reads through a reference equal reads through a copy).
+COLLECTION_MUTATING_METHODS = frozenset({
+    # array
+    "push", "unshift", "insert", "remove", "pop", "shift", "clear",
+    "set", "fill", "sort", "reverse", "concat",
+    # map
+    "put", "put_all",
+    # matrix
+    "add_row", "add_col", "remove_row", "remove_col", "reshape",
+    "swap_rows", "swap_columns",
+})
+
 
 class TypeInferer:
     """Type-spec / C++-type inference helpers shared across visitor mixins.
@@ -593,6 +610,89 @@ class TypeInferer:
         if not mutated:
             return None
         return ("ptr" if rebinds_to_other_lvalue else "ref"), udt_t
+
+    # ------------------------------------------------------------------
+    # BUG 2: collection (array / map / matrix) lvalue aliasing
+    # ------------------------------------------------------------------
+
+    def _collection_lvalue_spec(self, expr):
+        """If ``expr`` is a bare ``Identifier`` naming an array/map/matrix
+        var/global member, return its ``TypeSpec``; else ``None``. Pine
+        collections are reference types, so a local bound to such an lvalue and
+        then mutated through must ALIAS it, not value-copy."""
+        if not isinstance(expr, Identifier):
+            return None
+        name = expr.name
+        if name in self._matrix_specs:
+            return self._matrix_specs[name]
+        spec = self._collection_types.get(name)
+        if spec is not None and spec.kind in ("array", "map", "matrix"):
+            return spec
+        if name in self._array_vars:
+            return self._array_spec_for_name(name)
+        if name in self._map_vars:
+            return self._map_spec_for_name(name)
+        return None
+
+    def _collection_lvalue_selection_spec(self, expr):
+        """``TypeSpec`` if ``expr`` is a collection lvalue OR a ternary/switch
+        whose every selectable branch is a collection lvalue of the SAME C++
+        type; ``None`` otherwise (so ``array.new(...)`` ctors, copies, function
+        returns, and mixed selections keep value-copy semantics). Mirrors
+        ``_udt_lvalue_selection_type`` for the BUG-2 collection-alias path."""
+        direct = self._collection_lvalue_spec(expr)
+        if direct is not None:
+            return direct
+        branches: list = []
+        if isinstance(expr, Ternary):
+            branches = [expr.true_val, expr.false_val]
+        elif isinstance(expr, SwitchStmt):
+            for _case_expr, stmts in (expr.cases or []):
+                if not stmts:
+                    return None
+                last = stmts[-1]
+                branches.append(last.expr if isinstance(last, ExprStmt) else last)
+            if expr.default_body:
+                last = expr.default_body[-1]
+                branches.append(last.expr if isinstance(last, ExprStmt) else last)
+        else:
+            return None
+        if not branches:
+            return None
+        specs = [self._collection_lvalue_spec(b) for b in branches]
+        if any(s is None for s in specs):
+            return None
+        cpp_types = {self._type_spec_to_cpp(s) for s in specs}
+        if len(cpp_types) == 1:
+            return specs[0]
+        return None
+
+    def _collection_local_must_alias(self, node) -> bool:
+        """True when the local ``node`` declares an alias of an existing
+        collection lvalue that is later MUTATED in the enclosing function body
+        (``local.push/unshift/insert/remove/set/clear/pop/...``). A purely-read
+        local needn't alias; a local REASSIGNED to a different value can't be a
+        C++ reference, so it bails to value-copy (returns ``False``)."""
+        from ..ast_nodes import Assignment
+        body = getattr(self, "_current_func_body", None)
+        if body is None:
+            return False
+        name = node.name
+        mutated = False
+        for stmt in self._walk_ast_list(body):
+            # Rebind of the local itself (``orderBlocks := other``) — a C++
+            # reference cannot rebind, so keep value-copy semantics.
+            if (isinstance(stmt, Assignment)
+                    and isinstance(stmt.target, Identifier)
+                    and stmt.target.name == name):
+                return False
+            if (isinstance(stmt, FuncCall)
+                    and isinstance(stmt.callee, MemberAccess)
+                    and isinstance(stmt.callee.object, Identifier)
+                    and stmt.callee.object.name == name
+                    and stmt.callee.member in COLLECTION_MUTATING_METHODS):
+                mutated = True
+        return mutated
 
     def _walk_ast_list(self, stmts):
         """Yield every node within a list of statements (depth-first)."""
