@@ -1083,7 +1083,16 @@ class CallVisitor:
         emit_name = self._func_safe_name(func_name) if func_name in self._func_names else func_name
         # Per-call-site variant: if this function has TA/series calls, call the correct variant
         cs_info = self.ctx.func_call_cs_map.get(id(node))
-        if self._active_call_site_idx is not None and cs_info is not None:
+        dispatch_key = (self._current_instance_name, id(node))
+        if dispatch_key in self._instance_dispatch:
+            # Context-sensitive (call-path) dispatch: the instance pre-pass
+            # resolved this nested stateful-helper call to the clone bound to
+            # THIS enclosing path's members (see _build_func_instances). This
+            # is authoritative — it supersedes the textual-cs threading below,
+            # which conflates a callee's own call sites with the enclosing
+            # function's call sites for helpers reached through >1 path.
+            emit_name = self._instance_dispatch[dispatch_key]
+        elif self._active_call_site_idx is not None and cs_info is not None:
             # Inside a per-call-site variant: override the cs_map index with
             # the parent's active call-site index. This ensures sub-functions
             # called from ma_cs6() use their _cs6 variant, not _cs0.

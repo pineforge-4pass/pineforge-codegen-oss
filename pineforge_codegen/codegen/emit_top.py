@@ -751,11 +751,17 @@ class TopLevelEmitter:
         base = fi.node.name if fi.node else ""
         return self._func_safe_name(f"_udt_{udt}_{base}")
 
-    def _emit_func_def(self, fi: FuncInfo, lines: list[str], call_site_idx: int | None = None) -> None:
+    def _emit_func_def(self, fi: FuncInfo, lines: list[str], call_site_idx: int | None = None,
+                       instance: dict | None = None) -> None:
         """Emit a user-defined function as a class method.
 
         If call_site_idx is not None, emit a per-call-site variant with
         TA member names remapped to call-site-specific copies.
+
+        If ``instance`` is provided (a fresh context-sensitive instance minted by
+        ``_build_func_instances``), emit a uniquely-named clone whose TA/var
+        members come from the instance's composed remaps instead of the flat
+        ``_func_cs_*_remap`` tables.
         """
         node = fi.node
         if node is None:
@@ -834,7 +840,19 @@ class TopLevelEmitter:
 
         # For per-call-site variants, suffix the function name and activate TA + var remapping
         func_name = self._emit_udt_method_cpp_name(fi) if is_udt else self._func_safe_name(fi.name)
-        if call_site_idx is not None:
+        var_init_flag: str | None = None
+        if instance is not None:
+            # Fresh context-sensitive instance: name + composed remaps come from
+            # the instance record. No textual cs index (dispatch is via the
+            # instance map), but it IS a state-isolated variant.
+            func_name = instance["name"]
+            self._active_ta_remap = instance["ta_remap"]
+            self._active_var_remap = instance["var_remap"]
+            self._in_ta_func_variant = True
+            self._active_call_site_idx = None
+            self._current_instance_name = instance["name"]
+            var_init_flag = f"_fvinit_{instance['name']}"
+        elif call_site_idx is not None:
             func_name = f"{func_name}_cs{call_site_idx}"
             remap = self._func_cs_ta_remap.get((fi.name, call_site_idx), {})
             self._active_ta_remap = remap
@@ -842,11 +860,13 @@ class TopLevelEmitter:
             self._active_var_remap = var_remap
             self._in_ta_func_variant = True
             self._active_call_site_idx = call_site_idx
+            self._current_instance_name = f"{self._func_safe_name(fi.name)}_cs{call_site_idx}"
         else:
             self._active_ta_remap = {}
             self._active_var_remap = {}
             self._in_ta_func_variant = False
             self._active_call_site_idx = None
+            self._current_instance_name = None
 
         prev_func_locals = self._current_func_locals
         prev_func_body = getattr(self, "_current_func_body", None)
@@ -873,7 +893,7 @@ class TopLevelEmitter:
         # function is a function-local static — its initializer runs exactly
         # once, on the first call to THIS variant, with the first bar's values
         # the function actually sees. Each clone (cs0/cs1/…) is independent.
-        self._emit_func_var_init_block(fi, call_site_idx, lines)
+        self._emit_func_var_init_block(fi, call_site_idx, lines, flag_override=var_init_flag)
 
         emitted_return = False
         if node.is_single_expr and node.body:
@@ -936,13 +956,14 @@ class TopLevelEmitter:
         self._active_var_remap = {}
         self._in_ta_func_variant = False
         self._active_call_site_idx = None
+        self._current_instance_name = None
 
     def _func_var_init_flag_name(self, fname: str, call_site_idx: int | None) -> str:
         suffix = f"_cs{call_site_idx}" if call_site_idx is not None else ""
         return f"_fvinit_{self._func_safe_name(fname)}{suffix}"
 
     def _emit_func_var_init_block(self, fi: FuncInfo, call_site_idx: int | None,
-                                  lines: list[str]) -> None:
+                                  lines: list[str], flag_override: str | None = None) -> None:
         """Emit the one-shot initializer block for a function's ``var`` members.
 
         Pine ``var`` declared inside a function is a function-local static:
@@ -961,7 +982,7 @@ class TopLevelEmitter:
         members = self.ctx.func_var_members.get(fi.name)
         if not members:
             return
-        flag = self._func_var_init_flag_name(fi.name, call_site_idx)
+        flag = flag_override or self._func_var_init_flag_name(fi.name, call_site_idx)
         # ``_active_var_remap`` is already set for this variant by the caller,
         # so lowering each init expression here correctly resolves references
         # to sibling var members (which are themselves remapped for clones).
