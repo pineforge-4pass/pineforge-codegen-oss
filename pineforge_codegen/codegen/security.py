@@ -324,6 +324,58 @@ class SecurityEmitter:
     def _security_ohlc_hist_series_cpp(self, sec_id: int, field: str) -> str:
         return f"_sec{sec_id}_hist_{field}"
 
+    def _collect_security_ta_hist_indices(self, node) -> set[int]:
+        """Which security TA call-site indices need HTF history (subscript index >= 1).
+
+        ``request.security(..., ta.ema(close, 55)[1], ...)`` reads a *confirmed*
+        HTF TA value at a past-bar offset. The inner TA call runs in the security
+        (HTF) context and commits one value per COMPLETED HTF bar; offsets read a
+        per-site ``Series`` filled (gated on ``is_complete``) in
+        ``_eval_security_N``. Mirrors ``_collect_security_ohlc_hist_fields`` for
+        OHLC offsets. Offset 0 reuses the current committed value (``_secval_*``)
+        and needs no Series, so only index >= 1 registers here."""
+        out: set[int] = set()
+
+        def walk(n):
+            if n is None:
+                return
+            if isinstance(n, Subscript):
+                site = self._get_ta_site(n.object)
+                if site is not None:
+                    idx_lit = self._literal_int_for_security_index(n.index)
+                    if idx_lit is not None and idx_lit >= 1:
+                        site_idx = self._ta_index_by_site_id.get(id(site))
+                        if site_idx is not None:
+                            out.add(site_idx)
+            if isinstance(n, (list, tuple)):
+                for x in n:
+                    walk(x)
+                return
+            for _k, v in getattr(n, "__dict__", {}).items():
+                if isinstance(v, ASTNode):
+                    walk(v)
+                elif isinstance(v, (list, tuple)):
+                    for x in v:
+                        if isinstance(x, ASTNode):
+                            walk(x)
+
+        walk(node)
+        return out
+
+    def _security_ta_hist_series_cpp(self, member_name: str) -> str:
+        """Per-(sec, site) ``Series<double>`` backing ``ta.<fn>(...)[k>=1]`` HTF history."""
+        return f"{member_name}_hist"
+
+    def _security_ta_hist_series_names(self, sec_id: int) -> list[str]:
+        """Hist Series names for every security TA site (and variant) read at an
+        offset >= 1 in sec ``sec_id``."""
+        info = self._security_eval_info[sec_id]
+        names: list[str] = []
+        for idx in sorted(self._security_ta_hist_idx_by_sec.get(sec_id, ())):
+            for variant in (info.get("ta_variants") or {}).get(idx, []):
+                names.append(self._security_ta_hist_series_cpp(variant["member_name"]))
+        return names
+
     @staticmethod
     def _security_series_binding(series_name: str) -> str:
         return f"@series:{series_name}"
@@ -1267,6 +1319,37 @@ class SecurityEmitter:
             )
         lines.append("        }")
 
+    def _emit_security_ta_hist_pushes(
+        self, sec_id: int, info: dict, ta_results: dict, lines: list[str]
+    ) -> None:
+        """Emit the TA history-offset Series pushes for ``sec_id``, gated on
+        ``is_complete`` (mirrors ``_emit_security_ohlc_hist_pushes``).
+
+        ``request.security(..., ta.ema(close, 55)[1], ...)`` reads a confirmed
+        HTF TA value at a past-bar offset. The committed value (``_secval_*``,
+        produced with ``.compute()`` only when ``is_complete``) is pushed onto a
+        per-site Series once per COMPLETED HTF bar, AFTER the expression
+        assignment so the offset read sees the prior completed bar. Pushing on
+        every chart-bar eval would otherwise advance the offset history per
+        partial eval / chart tick (the bug this replaces, where the chart-context
+        ``_hist_call`` buffer advanced on ``is_first_tick_``)."""
+        indices = sorted(self._security_ta_hist_idx_by_sec.get(sec_id, ()))
+        if not indices:
+            return
+        pushes: list[str] = []
+        for idx in indices:
+            for variant in (info.get("ta_variants") or {}).get(idx, []):
+                result_name = ta_results.get((idx, variant["signature"]))
+                if result_name is None:
+                    continue
+                hist = self._security_ta_hist_series_cpp(variant["member_name"])
+                pushes.append(f"            {hist}.push({result_name});")
+        if not pushes:
+            return
+        lines.append("        if (is_complete) {")
+        lines.extend(pushes)
+        lines.append("        }")
+
     def _emit_security_evaluators(self, lines: list[str]) -> None:
         """Emit _eval_security_N() methods and evaluate_security() dispatch."""
         if not self._security_calls:
@@ -1364,6 +1447,7 @@ class SecurityEmitter:
                     )
                     lines.append(f"        _req_sec_{sec_id}_{i} = {el_cpp};")
                 self._emit_security_ohlc_hist_pushes(sec_id, lines)
+                self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
                 lines.append("    }")
                 lines.append("")
                 continue
@@ -1392,6 +1476,7 @@ class SecurityEmitter:
             else:
                 lines.append(f"        _req_sec_{sec_id} = {expr_cpp};")
             self._emit_security_ohlc_hist_pushes(sec_id, lines)
+            self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
             lines.append("    }")
             lines.append("")
 
@@ -1428,6 +1513,8 @@ class SecurityEmitter:
                     lines.append(
                         f"                {self._security_ohlc_hist_series_cpp(sec_id, field)}.clear();"
                     )
+                for name in self._security_ta_hist_series_names(sec_id):
+                    lines.append(f"                {name}.clear();")
                 lines.append("                break;")
                 continue
             if returns_tuple and tuple_size and tuple_size > 0 and isinstance(expr_node, TupleLiteral):
@@ -1450,16 +1537,21 @@ class SecurityEmitter:
                     lines.append(
                         f"                {self._security_ohlc_hist_series_cpp(sec_id, field)}.clear();"
                     )
+                for name in self._security_ta_hist_series_names(sec_id):
+                    lines.append(f"                {name}.clear();")
                 lines.append("                break;")
             else:
                 hist = self._security_ohlc_hist_fields_by_sec.get(sec_id, ())
-                if hist:
+                ta_hist_names = self._security_ta_hist_series_names(sec_id)
+                if hist or ta_hist_names:
                     lines.append(f"            case {sec_id}:")
                     lines.append(f"                _req_sec_{sec_id} = na<double>();")
                     for field in sorted(hist):
                         lines.append(
                             f"                {self._security_ohlc_hist_series_cpp(sec_id, field)}.clear();"
                         )
+                    for name in ta_hist_names:
+                        lines.append(f"                {name}.clear();")
                     lines.append("                break;")
                 else:
                     lines.append(f"            case {sec_id}: _req_sec_{sec_id} = na<double>(); break;")
@@ -1594,6 +1686,46 @@ class SecurityEmitter:
                         expr_node,
                         "request.security() OHLC history index must be a literal integer (e.g. high[1])",
                     )
+            ta_site = self._get_ta_site(expr_node.object)
+            if ta_site is not None:
+                # ``ta.<fn>(...)[k]`` inside request.security(): the inner TA call
+                # runs in the HTF (security) context and commits one value per
+                # COMPLETED HTF bar. Read the already-emitted security TA result —
+                # offset 0 reuses the current committed value (``_secval_*``),
+                # offset k>=1 reads a per-site Series that advances on
+                # ``is_complete`` (HTF-bar boundary) in ``_eval_security_N``. The
+                # buggy generic path re-lowered the inner TA to the CHART member
+                # and gated a ``_hist_call`` buffer on ``is_first_tick_`` (chart
+                # tick), so without a magnifier it advanced every chart bar and
+                # produced the chart-tf TA instead of the confirmed HTF value.
+                idx = self._ta_index_by_site_id.get(id(ta_site))
+                sig = self._security_binding_stack_signature(helper_binding_stack)
+                idx_lit = self._literal_int_for_security_index(expr_node.index)
+                if idx_lit is None:
+                    self._codegen_error(
+                        expr_node,
+                        "request.security() TA history index must be a literal integer (e.g. ta.ema(close, 55)[1])",
+                    )
+                if idx_lit == 0:
+                    # Current completed-HTF-bar value: reuse the bare-TA emission.
+                    return self._build_security_expr(
+                        sec_id,
+                        expr_node.object,
+                        ta_range,
+                        ta_results,
+                        resolving,
+                        security_mutable_names,
+                        helper_binding_stack,
+                        emitted_lines,
+                    )
+                member_name = self._security_ta_variant_names.get(
+                    (sec_id, idx, sig),
+                    f"_sec{sec_id}_{ta_site.member_name}",
+                )
+                hist = self._security_ta_hist_series_cpp(member_name)
+                # ta(...)[k] -> hist[k-1]: hist[0] is the prior completed HTF bar
+                # (current value not yet pushed — push happens after this assign).
+                return f"{hist}[{idx_lit - 1}]"
 
         if isinstance(expr_node, BinOp):
             left = self._build_security_expr(

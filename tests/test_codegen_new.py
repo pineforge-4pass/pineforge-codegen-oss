@@ -1114,6 +1114,45 @@ daily_close = request.security(syminfo.tickerid, "D", close)
     assert 'evaluate_security' in cpp or '_eval_security_0' in cpp
 
 
+def test_request_security_ta_history_offset_uses_htf_gating():
+    """``request.security(..., ta.ema(close,55)[1], lookahead=barmerge.lookahead_on)``
+
+    The inner TA call runs in the HTF (security) context and commits one value
+    per COMPLETED HTF bar. The history offset must read a per-site Series that
+    advances on ``is_complete`` (HTF-bar boundary), reusing the already-emitted
+    security TA result (``_secval_*`` from the ``_sec0__ta_ema_*`` member). The
+    pre-fix bug fell through to the generic chart-context path, emitting a
+    ``_hist_call`` buffer gated on ``is_first_tick_`` against the CHART member
+    ``_ta_ema_*`` (with ``_precalc``), so without a magnifier it advanced every
+    chart bar and produced the chart-tf EMA instead of the confirmed HTF EMA."""
+    cpp = _generate("""
+//@version=6
+strategy("T")
+htfBasis = request.security(syminfo.tickerid, "240", ta.ema(close, 55)[1], lookahead=barmerge.lookahead_on)
+plot(htfBasis)
+""")
+    # Isolate the security evaluator body.
+    start = cpp.index("void _eval_security_0(")
+    end = cpp.index("void evaluate_security(", start)
+    eval_body = cpp[start:end]
+
+    # HTF gating: history Series declared, read at offset 0 ([1] -> hist[0]),
+    # pushed gated on is_complete using the security-context committed value.
+    assert "Series<double> _sec0__ta_ema_1_hist" in cpp
+    assert "_secval_0 = is_complete ? _sec0__ta_ema_1.compute(" in eval_body
+    assert "_req_sec_0 = _sec0__ta_ema_1_hist[0];" in eval_body
+    assert "if (is_complete) {" in eval_body
+    assert "_sec0__ta_ema_1_hist.push(_secval_0);" in eval_body
+
+    # The buggy chart-context history path must NOT appear in the evaluator:
+    # no _hist_call buffer, no is_first_tick_ gating, no _precalc chart-context
+    # lowering of the chart member _ta_ema_1 (only _sec0__ta_ema_1 is used here).
+    assert "_hist_call" not in eval_body
+    assert "is_first_tick_" not in eval_body
+    assert "_precalc__ta_ema_1" not in eval_body
+    assert "is_first_tick_ ? _ta_ema_1" not in eval_body
+
+
 def test_request_financial_still_na():
     cpp = _generate("""
 //@version=6
