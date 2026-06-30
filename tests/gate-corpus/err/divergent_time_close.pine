@@ -1,9 +1,0 @@
-//@version=6
-strategy("T")
-// The bare ``time_close`` variable is aliased to the bar OPEN timestamp in
-// PineForge codegen, so a backtest comparing against it would be silently
-// wrong -> hard reject (ERROR). (The session-aware time_close(...) FUNCTION is
-// a separate, supported builtin and is not rejected.)
-expired = time >= time_close
-if expired
-    strategy.close_all()

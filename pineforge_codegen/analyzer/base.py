@@ -343,6 +343,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if top_stmt is not None and (not info.source_stmts or info.source_stmts[-1] is not top_stmt):
             info.source_stmts.append(top_stmt)
 
+    @staticmethod
+    def _is_input_func_call(node: FuncCall) -> bool:
+        """True for an ``input(...)`` or ``input.<member>(...)`` call."""
+        callee = node.callee
+        if isinstance(callee, Identifier) and callee.name == "input":
+            return True
+        return (
+            isinstance(callee, MemberAccess)
+            and isinstance(callee.object, Identifier)
+            and callee.object.name == "input"
+        )
+
     def _collect_security_mutable_globals(
         self, node: ASTNode | None, resolving: set[str] | None = None
     ) -> set[str]:
@@ -387,6 +399,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     out |= self._collect_security_mutable_globals(stmt, resolving)
                 resolving.remove(call_key)
                 return out
+
+        if isinstance(node, FuncCall) and self._is_input_func_call(node):
+            # An ``input.*()`` / ``input()`` initializer is a compile-time
+            # constant. Only its defval (first positional or ``defval=``) can
+            # carry a genuine data dependency; the cosmetic kwargs
+            # (group/tooltip/title/inline/display/confirm/minval/maxval/step)
+            # are presentation-only. Walking them would falsely pull a
+            # ``var string GROUP = "..."`` label into the security's
+            # mutable-globals set and trip the "TA ctor depends on rebound
+            # mutable globals" reject (parallax / higherTimeframeLength).
+            defval = node.args[0] if node.args else node.kwargs.get("defval")
+            if defval is not None:
+                out |= self._collect_security_mutable_globals(defval, resolving)
+            return out
 
         def walk(value: Any) -> None:
             nonlocal out
@@ -693,6 +719,83 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if owner not in self._udt_fields:
             return None
         return owner
+
+    def _func_terminal_drawing_type(self, func_node: FuncDef) -> str | None:
+        """Resolve the drawing-handle / UDT type of a function's terminal
+        (return) expression for cases the direct ``_udt_name_from_ctor`` on the
+        last statement misses:
+
+          - the last statement is an ``IfStmt`` whose terminal branch yields a
+            drawing/UDT constructor (``makeEventLabel`` => ``if cond\\n
+            label.new(...)``); and
+          - the last statement is a bare ``Identifier`` bound to a
+            drawing-handle local (``setTradeLine`` => ``line result = ...`` then
+            a trailing ``result``).
+
+        Returns the drawing/UDT type name, or ``None``. Without this a function
+        that returns a ``line``/``label`` handle this way is mis-typed
+        ``double`` and clang rejects ``no viable conversion from Line to
+        double``.
+        """
+        from .types import _DRAWING_TYPE_NAMES
+
+        body = func_node.body
+        if not body:
+            return None
+
+        # Map a drawing-handle local var name -> drawing type. Seeded from
+        # declared drawing type hints (``line result``) and the function's own
+        # drawing-typed parameters, plus any local first bound to a drawing
+        # ``<ns>.new(...)`` constructor.
+        local_drawing: dict[str, str] = {}
+        param_hints = (func_node.annotations or {}).get("param_type_hints", [])
+        for i, p in enumerate(func_node.params):
+            hint = param_hints[i] if i < len(param_hints) else None
+            if hint in _DRAWING_TYPE_NAMES:
+                local_drawing[p] = hint
+
+        def _scan(stmts):
+            for st in stmts:
+                if isinstance(st, VarDecl):
+                    if st.type_hint in _DRAWING_TYPE_NAMES:
+                        local_drawing[st.name] = st.type_hint
+                    else:
+                        dt = self._udt_name_from_ctor(st.value)
+                        if dt in _DRAWING_TYPE_NAMES:
+                            local_drawing.setdefault(st.name, dt)
+                elif isinstance(st, Assignment) and isinstance(st.target, Identifier):
+                    dt = self._udt_name_from_ctor(st.value)
+                    if dt in _DRAWING_TYPE_NAMES:
+                        local_drawing.setdefault(st.target.name, dt)
+                elif isinstance(st, IfStmt):
+                    _scan(st.body)
+                    _scan(st.else_body)
+
+        _scan(body)
+
+        def _resolve_terminal(stmt):
+            # An if used as the function's return expression: the value is the
+            # terminal of the executed branch — recurse into the body's (then
+            # else's) terminal statement.
+            if isinstance(stmt, IfStmt):
+                for branch in (stmt.body, stmt.else_body):
+                    if branch:
+                        t = _resolve_terminal(branch[-1])
+                        if t is not None:
+                            return t
+                return None
+            expr = None
+            if isinstance(stmt, ExprStmt):
+                expr = stmt.expr
+            elif not isinstance(stmt, TupleLiteral) and hasattr(stmt, "loc"):
+                expr = stmt
+            if expr is None:
+                return None
+            if isinstance(expr, Identifier) and expr.name in local_drawing:
+                return local_drawing[expr.name]
+            return self._udt_name_from_ctor(expr)
+
+        return _resolve_terminal(body[-1])
 
     def _visit_VarDecl(self, node: VarDecl) -> PineType:
         # Infer type from the value expression
@@ -1015,6 +1118,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 # last_stmt is itself an expression node (single-expr funcs)
                 ret_expr = last_stmt if hasattr(last_stmt, "loc") else None
             udt_ret = self._udt_name_from_ctor(ret_expr) if ret_expr is not None else None
+            if udt_ret is None:
+                # Drawing-handle returns wrapped in an if-statement terminal
+                # branch (``makeEventLabel``) or returned as a bare drawing-handle
+                # local (``setTradeLine``) are not direct ctors on the last
+                # expression — resolve them so the function emits the C++ handle
+                # type (Line/Label/...) instead of the ``double`` default.
+                udt_ret = self._func_terminal_drawing_type(node)
             if udt_ret is not None:
                 self._func_udt_return_types[node.name] = udt_ret
             # Array-return inference: a function whose body ends in
