@@ -1286,3 +1286,102 @@ if barstate.islastconfirmedhistory
     assert "is_last_tick_" in cpp
     assert "barstate_islast_" in cpp
 
+
+
+# === Regression: nested stateful helper reached through multiple call paths ===
+# A single inner helper (`leg`, carrying ta.highest/lowest + a `var` member) is
+# reached through clones of more than one outer helper with DIFFERENT length
+# args. The flat `{G}_cs{idx}` clone namespace used to conflate the callee's own
+# call sites with the enclosing functions' call sites, collapsing every clone
+# onto ONE shared (last-written) TA member and leaving the rest DECLARED-but-
+# never-COMPUTED ("dead"). This pins the context-sensitive (call-path) cloning
+# that gives each path its own member. (Was: all clones shared one member.)
+
+import re as _re
+
+
+def _ta_decls_and_computed(cpp: str):
+    decls = _re.findall(r'ta::(?:Highest|Lowest|Change|Sma|Ema) (_ta_\w+);', cpp)
+    computed = set(_re.findall(r'(_ta_\w+)\.(?:compute|recompute)\(', cpp))
+    return decls, computed
+
+
+def test_nested_helper_multi_path_distinct_ta_members():
+    # `leg` reached via f_get (called twice: 10, 20) AND g_get (called once: 30).
+    cpp = _generate(
+        """
+//@version=6
+strategy("nested multipath")
+leg(int size) =>
+    var int l = 0
+    h = ta.highest(size)
+    lo = ta.lowest(size)
+    l := h > lo ? 1 : -1
+    l
+f_get(int len) =>
+    leg(len)
+g_get(int len) =>
+    leg(len)
+a = f_get(10)
+b = f_get(20)
+c = g_get(30)
+plot(a + b + c)
+"""
+    )
+    decls, computed = _ta_decls_and_computed(cpp)
+    highest = [d for d in decls if d.startswith("_ta_highest_")]
+    lowest = [d for d in decls if d.startswith("_ta_lowest_")]
+    # Three distinct rolling windows are needed (lengths 10/20/30).
+    assert len(highest) >= 3, f"expected >=3 highest members, got {highest}"
+    assert len(lowest) >= 3, f"expected >=3 lowest members, got {lowest}"
+    # No DEAD members: every declared TA member must be computed at least once.
+    dead = [d for d in decls if d not in computed]
+    assert not dead, f"declared-but-never-computed TA members: {dead}"
+    # Each emitted `leg` clone must reference a DISTINCT highest member (no two
+    # clones share one rolling window).
+    bodies = _re.findall(r'int (leg(?:_cs\d+|__ni\d+))\(int size\) \{(.*?)\n    \}', cpp, _re.S)
+    used = []
+    for _fn, body in bodies:
+        hits = _re.findall(r'(_ta_highest_\w+)\.(?:compute|recompute)\(', body)
+        used.extend(set(hits))
+    assert len(used) == len(set(used)), (
+        f"two leg clones share a highest member (state collision): {used}"
+    )
+    # And at least 3 leg clones bound to the 3 distinct windows.
+    assert len(set(used)) >= 3, f"expected >=3 distinct leg windows, got {set(used)}"
+
+
+def test_nested_helper_multi_path_distinct_var_state():
+    # Same shape; assert the `var int l` is NOT shared across the distinct paths
+    # (each leg clone gets its own scalar state member).
+    cpp = _generate(
+        """
+//@version=6
+strategy("nested multipath var")
+leg(int size) =>
+    var int l = 0
+    h = ta.highest(size)
+    lo = ta.lowest(size)
+    l := h > lo ? 1 : -1
+    l
+f_get(int len) =>
+    leg(len)
+g_get(int len) =>
+    leg(len)
+a = f_get(10)
+b = f_get(20)
+c = g_get(30)
+plot(a + b + c)
+"""
+    )
+    bodies = _re.findall(r'int (leg(?:_cs\d+|__ni\d+))\(int size\) \{(.*?)\n    \}', cpp, _re.S)
+    var_used = []
+    for _fn, body in bodies:
+        # the returned var member: `return l...;`
+        m = _re.search(r'return (l(?:_cs\d+|__ni\d+)?);', body)
+        if m:
+            var_used.append(m.group(1))
+    assert len(var_used) >= 3, f"expected >=3 leg clones, got {var_used}"
+    assert len(var_used) == len(set(var_used)), (
+        f"two leg clones share the `var int l` state member: {var_used}"
+    )
