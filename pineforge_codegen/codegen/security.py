@@ -175,6 +175,7 @@ class SecurityEmitter:
                 "mutable_globals": list(getattr(item, "mutable_globals", ()) or ()),
                 "is_lower_tf_array": bool(getattr(item, "is_lower_tf_array", False)),
                 "containing_func": getattr(item, "containing_func", "") or "",
+                "callsite_idx": getattr(item, "callsite_idx", None),
             }
         return {
             "sec_id": item[0],
@@ -189,6 +190,7 @@ class SecurityEmitter:
             "mutable_globals": [],
             "is_lower_tf_array": False,
             "containing_func": "",
+            "callsite_idx": None,
         }
 
     def _security_state_name(self, sec_id: int, name: str) -> str:

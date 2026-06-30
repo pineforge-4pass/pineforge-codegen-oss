@@ -126,10 +126,12 @@ def test_security_param_tf_dead_code_falls_back_to_chart_tf():
     assert "Unknown variable" not in cpp
 
 
-def test_security_param_tf_mixed_literals_rejected():
-    # Called with two different literal tfs -> a single evaluator cannot serve
-    # both; the analyzer now rejects loudly instead of silently collapsing onto
-    # the chart timeframe (the masayanfx multi-time-score root cause).
+def test_security_param_tf_mixed_with_non_literal_callsite_rejected():
+    # Two distinct literal tfs PLUS a third call site whose tf isn't a
+    # compile-time literal (a ternary the const-folder can't resolve) ->
+    # can't pin every clone to a concrete timeframe, so the original
+    # deterministic rejection still applies rather than guessing or silently
+    # dropping the non-literal site.
     import pytest
     with pytest.raises(Exception, match="multiple distinct literal timeframes"):
         _cpp(
@@ -137,8 +139,33 @@ def test_security_param_tf_mixed_literals_rejected():
             "    request.security(syminfo.tickerid, tf, close)\n"
             "a = f(\"5\")\n"
             "b = f(\"15\")\n"
-            "plot(a + b)"
+            "c = f(close > 0 ? \"5\" : \"60\")\n"
+            "plot(a + b + c)"
         )
+
+
+def test_security_param_tf_mixed_literals_cloned_per_callsite():
+    # Called with two different literal tfs -> a single evaluator cannot serve
+    # both, so the analyzer clones one SecurityCallInfo per call site (each
+    # pinned to that site's literal tf) and the codegen emits one specialized
+    # function body per call site (f_cs0/f_cs1), each reading its own
+    # register_security_eval'd evaluator. No nested ta.* call here, so this
+    # function has no TA/series state of its own — exercises the
+    # func_security_clone_only backfill path (the per-call-site UDF-cloning
+    # machinery otherwise only triggers for has_ta/has_series functions).
+    cpp = _cpp(
+        "f(tf) =>\n"
+        "    request.security(syminfo.tickerid, tf, close)\n"
+        "a = f(\"5\")\n"
+        "b = f(\"15\")\n"
+        "plot(a + b)"
+    )
+    assert cpp.count("register_security_eval") == 2
+    assert 'register_security_eval(0, "5", input_tf_, false, false)' in cpp
+    assert 'register_security_eval(1, "15", input_tf_, false, false)' in cpp
+    assert "f_cs0" in cpp and "f_cs1" in cpp
+    assert "a = f_cs0(std::string(\"5\"))" in cpp
+    assert "b = f_cs1(std::string(\"15\"))" in cpp
 
 
 def test_security_param_tf_same_literal_across_callsites_accepted():
@@ -153,22 +180,52 @@ def test_security_param_tf_same_literal_across_callsites_accepted():
     assert "register_security_eval" in cpp
 
 
-def test_security_param_tf_six_distinct_literals_rejected():
+def test_security_param_tf_six_distinct_literals_cloned_per_callsite():
     # The masayanfx shape: one param-tf security UDF called with six different
-    # literals. Must reject with the mixed-literals error.
-    import pytest
-    with pytest.raises(Exception, match="multiple distinct literal timeframes"):
-        _cpp(
-            "scoreFromRange(tf) =>\n"
-            "    request.security(syminfo.tickerid, tf, close)\n"
-            "a = scoreFromRange(\"5\")\n"
-            "b = scoreFromRange(\"15\")\n"
-            "c = scoreFromRange(\"60\")\n"
-            "d = scoreFromRange(\"240\")\n"
-            "e = scoreFromRange(\"D\")\n"
-            "g = scoreFromRange(\"W\")\n"
-            "plot(a + b + c + d + e + g)"
-        )
+    # literals (no nested ta.* call, mirroring the test above). Each call site
+    # gets its own clone + evaluator instead of silently collapsing onto the
+    # chart timeframe.
+    cpp = _cpp(
+        "scoreFromRange(tf) =>\n"
+        "    request.security(syminfo.tickerid, tf, close)\n"
+        "a = scoreFromRange(\"5\")\n"
+        "b = scoreFromRange(\"15\")\n"
+        "c = scoreFromRange(\"60\")\n"
+        "d = scoreFromRange(\"240\")\n"
+        "e = scoreFromRange(\"D\")\n"
+        "g = scoreFromRange(\"W\")\n"
+        "plot(a + b + c + d + e + g)"
+    )
+    assert cpp.count("register_security_eval") == 6
+    for cs_idx, tf in enumerate(("5", "15", "60", "240", "D", "W")):
+        assert f'register_security_eval({cs_idx}, "{tf}", input_tf_, false, false)' in cpp
+        assert f"scoreFromRange_cs{cs_idx}" in cpp
+
+
+def test_security_param_tf_nested_ta_six_distinct_literals_cloned_per_callsite():
+    # The EXACT masayanfx shape: a nested ta.* call inside request.security's
+    # expression makes this function has_ta=True, so per-call-site cloning is
+    # ALREADY triggered by the pre-existing TA-isolation mechanism — exercises
+    # the "reuse func_call_cs_map's existing numbering" path rather than the
+    # backfill path the two tests above exercise.
+    cpp = _cpp(
+        "indexPeriod = 14\n"
+        "scoreFromRange(tf) =>\n"
+        "    tfHigh = request.security(syminfo.tickerid, tf, ta.highest(high, indexPeriod)[1], barmerge.gaps_off, barmerge.lookahead_off)\n"
+        "    tfLow = request.security(syminfo.tickerid, tf, ta.lowest(low, indexPeriod)[1], barmerge.gaps_off, barmerge.lookahead_off)\n"
+        "    tfHigh - tfLow\n"
+        "a = scoreFromRange(\"5\")\n"
+        "b = scoreFromRange(\"15\")\n"
+        "c = scoreFromRange(\"60\")\n"
+        "d = scoreFromRange(\"240\")\n"
+        "e = scoreFromRange(\"D\")\n"
+        "g = scoreFromRange(\"W\")\n"
+        "plot(a + b + c + d + e + g)"
+    )
+    # 2 request.security calls x 6 call sites = 12 evaluators.
+    assert cpp.count("register_security_eval") == 12
+    for cs_idx, tf in enumerate(("5", "15", "60", "240", "D", "W")):
+        assert f"scoreFromRange_cs{cs_idx}" in cpp
 
 
 # ---------------------------------------------------------------------------

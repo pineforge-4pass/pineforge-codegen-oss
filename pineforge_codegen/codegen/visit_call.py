@@ -520,19 +520,34 @@ class CallVisitor:
                             all_args.append(None)
                         all_args[i] = node.kwargs[pname]
                 
-                # Find matching security call ID
-                sec_id = None
-                tf_node = None
-                expr_node = None
-                for item in self._security_calls:
-                    sid, tfn, exprn = item["sec_id"], item["tf_node"], item["expr_node"]
-                    if item.get("is_lower_tf_array"):
-                        continue
-                    if exprn is all_args[2] if len(all_args) > 2 else False:
-                        sec_id = sid
-                        tf_node = tfn
-                        expr_node = exprn
-                        break
+                # Find matching security call ID. A request.security whose
+                # timeframe is a UDF parameter called from multiple sites with
+                # multiple distinct literal timeframes is registered as N
+                # CLONES (one SecurityCallInfo per call site, same source
+                # expr_node identity, distinct sec_id/callsite_idx — see
+                # Analyzer._check_mixed_callsite_security_tf). All clones
+                # match the identity check below identically, so when more
+                # than one matches, disambiguate by which call-site clone's
+                # function body is currently being emitted
+                # (self._active_call_site_idx, set by _emit_func_def while
+                # walking that exact clone's body).
+                candidates = [
+                    item for item in self._security_calls
+                    if not item.get("is_lower_tf_array")
+                    and (exprn := item["expr_node"]) is not None
+                    and (len(all_args) > 2 and exprn is all_args[2])
+                ]
+                chosen = None
+                if len(candidates) == 1:
+                    chosen = candidates[0]
+                elif len(candidates) > 1:
+                    chosen = next(
+                        (c for c in candidates
+                         if c.get("callsite_idx") == self._active_call_site_idx),
+                        candidates[0],
+                    )
+                sec_id = chosen["sec_id"] if chosen else None
+                expr_node = chosen["expr_node"] if chosen else None
 
                 if sec_id is not None and expr_node is not None:
                     if isinstance(expr_node, TupleLiteral):

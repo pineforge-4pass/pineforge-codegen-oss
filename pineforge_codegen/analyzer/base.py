@@ -163,6 +163,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_ta_ranges: dict[str, tuple[int, int]] = {}  # func_name -> (start, end) indices
         self._func_call_site_count: dict[str, int] = {}  # func_name -> count
         self._func_call_cs_map: dict[int, tuple[str, int]] = {}  # call_node_id -> (func_name, cs_idx)
+        # Functions whose ONLY reason for needing per-call-site body cloning
+        # is a security-tf-monomorphized request.security (no TA/series state
+        # of their own — see _check_mixed_callsite_security_tf).
+        self._func_security_clone_only: set[str] = set()
         # Authoritative clone-name map: (func_name, cs_idx) -> {orig_member_name:
         # cloned_member_name}. The codegen rebuilds its TA remap from the
         # ``{orig}_cs{cs_idx}`` formula by default, but a TA site reached through
@@ -307,6 +311,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             func_ta_ranges=self._func_ta_ranges,
             func_call_cs_map=self._func_call_cs_map,
             func_call_site_counts=self._func_call_site_count,
+            func_security_clone_only=self._func_security_clone_only,
             func_cs_ta_clone_names=self._func_cs_ta_clone_names,
             udt_defs=self._udt_fields,
             enum_defs=self._enum_defs,
@@ -510,42 +515,132 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if isinstance(stmt, FuncDef):
                 func_defs[stmt.name] = stmt
 
+        new_calls: list[SecurityCallInfo] = []
+        cloned_any = False
         for sec in sec_calls:
             containing = getattr(sec, "containing_func", "") or ""
-            if not containing:
-                continue
             tf_node = getattr(sec, "timeframe", None)
-            if not isinstance(tf_node, Identifier):
+            if not containing or not isinstance(tf_node, Identifier):
+                new_calls.append(sec)
                 continue
             param_name = tf_node.name
             fdef = func_defs.get(containing)
             if fdef is None or param_name not in fdef.params:
+                new_calls.append(sec)
                 continue
             pidx = fdef.params.index(param_name)
-            literals: set[str] = set()
-            found_call = False
-            for call in self._iter_user_func_calls(containing):
-                found_call = True
+            calls = list(self._iter_user_func_calls(containing))
+            if not calls:
+                new_calls.append(sec)  # dead code — evaluator result never read
+                continue
+            # Number call sites for THIS function. If ``containing`` already
+            # has TA call sites or series/var members, the per-call-site
+            # UDF-body-cloning mechanism already numbered its call sites in
+            # _func_call_cs_map (a request.security nested ta.* registers as
+            # part of the function-body walk, same as a top-level ta.* call)
+            # — reuse that authoritative numbering so this clone's
+            # callsite_idx stays aligned with self._active_call_site_idx.
+            # Otherwise (e.g. ``f(tf) => request.security(sym, tf, close)``
+            # with no nested ta.* call) that mechanism never fired for this
+            # function at all, since it gates on has_ta/has_series; assign
+            # fresh cs_idx ourselves in call-site order and BACKFILL
+            # func_call_cs_map / func_call_site_count / func_security_clone_only
+            # so the codegen actually clones this function's body too (the
+            # has_ta/has_series emission gate ORs in func_security_clone_only
+            # — see codegen/base.py) and the existing top-level call-site
+            # naming (which keys purely off func_call_cs_map, not
+            # has_ta/has_series) picks the right ``_cs{N}`` variant.
+            already_tracked = self._func_call_site_count.get(containing, 0) > 0
+            per_cs: list[tuple[int, str | None]] = []
+            for i, call in enumerate(calls):
+                if already_tracked:
+                    cs_info = self._func_call_cs_map.get(id(call))
+                    if cs_info is None or cs_info[0] != containing:
+                        continue  # shouldn't happen: has_ta/has_series tracks ALL call sites
+                    cs_idx = cs_info[1]
+                else:
+                    cs_idx = i
+                    self._func_call_cs_map.setdefault(id(call), (containing, cs_idx))
                 arg = call.args[pidx] if pidx < len(call.args) else None
                 lit = self._callsite_tf_literal_value(arg)
-                if lit is not None:
-                    literals.add(lit)
-            if not found_call:
-                continue  # dead code — evaluator result never read
-            if len(literals) >= 2:
+                per_cs.append((cs_idx, lit))
+            if not per_cs:
+                new_calls.append(sec)  # dead code — evaluator result never read
+                continue
+            distinct_literals = {lit for _, lit in per_cs if lit is not None}
+            if len(distinct_literals) < 2:
+                new_calls.append(sec)  # single TF (or unresolved) — no cloning needed
+                continue
+            if any(lit is None for _, lit in per_cs):
+                # Some call site's tf isn't a compile-time literal — can't
+                # pin every clone to a concrete timeframe. Keep the original
+                # deterministic rejection rather than guess.
                 self._error(
                     "request.security timeframe parameter '"
                     + param_name
                     + "' of function '"
                     + containing
                     + "' is called with multiple distinct literal timeframes ("
-                    + ", ".join(sorted(literals))
+                    + ", ".join(sorted(distinct_literals))
                     + "). A single request.security evaluator cannot serve "
                     "them all and would silently collapse onto the chart "
                     "timeframe. Pass a single timeframe, or inline a separate "
                     "request.security call at each call site.",
                     tf_node.loc,
                 )
+                new_calls.append(sec)
+                continue
+            if not already_tracked:
+                # First thing establishing per-call-site identity for this
+                # function — make it authoritative so the codegen's
+                # function-emission gate (has_ta or has_series or
+                # func_security_clone_only) actually clones its body, with
+                # self._active_call_site_idx set to each of our cs_idx values
+                # in turn while it does.
+                self._func_call_site_count[containing] = len(calls)
+                self._func_security_clone_only.add(containing)
+            # Clone: one SecurityCallInfo per call site, each pinned to that
+            # site's literal timeframe via a synthetic StringLiteral (so the
+            # existing literal-timeframe resolution path needs no changes)
+            # and given a fresh, currently-unused sec_id.
+            next_sec_id = max((s.sec_id for s in sec_calls), default=-1) + 1
+            next_sec_id = max(next_sec_id, len(sec_calls) + len(new_calls))
+            for cs_idx, lit in sorted(per_cs):
+                clone = SecurityCallInfo(
+                    sec_id=next_sec_id,
+                    timeframe=StringLiteral(value=lit, loc=tf_node.loc),
+                    expression=sec.expression,
+                    returns_tuple=sec.returns_tuple,
+                    tuple_size=sec.tuple_size,
+                    gaps=sec.gaps,
+                    lookahead=sec.lookahead,
+                    ta_range=sec.ta_range,
+                    depends_on_mutable_globals=sec.depends_on_mutable_globals,
+                    mutable_globals=sec.mutable_globals,
+                    is_lower_tf_array=sec.is_lower_tf_array,
+                    containing_func=sec.containing_func,
+                    callsite_idx=cs_idx,
+                )
+                new_calls.append(clone)
+                next_sec_id += 1
+            cloned_any = True
+
+        if cloned_any:
+            # A freshly-backfilled func_call_site_count[containing] may need
+            # to cascade to a sub-function containing's body calls (the same
+            # propagation _propagate_call_site_counts() already did once
+            # before this method ran) — re-run it now that backfill exists.
+            self._propagate_call_site_counts()
+            # Renumber sec_id contiguously 0..N-1 in final list order — the
+            # codegen indexes _security_eval_info / register_security_eval /
+            # _eval_security_N by sec_id, all assumed dense from registration
+            # order. The provisional IDs assigned above only needed to be
+            # distinct from each other while building new_calls; this final
+            # pass is what callers (e.g. the codegen's expr_node identity
+            # lookup, which now also keys off callsite_idx) actually see.
+            for i, sec in enumerate(new_calls):
+                sec.sec_id = i
+            self._security_calls = new_calls
 
     def _iter_user_func_calls(self, func_name: str):
         """Yield every ``func_name(...)`` call anywhere in the AST (top-level

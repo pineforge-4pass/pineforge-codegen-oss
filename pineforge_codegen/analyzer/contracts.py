@@ -128,6 +128,19 @@ class SecurityCallInfo:
     # evaluator is a class method, not the function body) — the codegen resolves
     # such a param-tf from the function's call sites instead.
     containing_func: str = ""
+    # Set when this SecurityCallInfo is one of N per-call-site CLONES of a
+    # single source request.security(...) whose ``timeframe`` is a UDF
+    # parameter called from >= 2 sites with >= 2 distinct literal timeframes
+    # (e.g. ``scoreFromRange(tf) => request.security(sym, tf, ...)`` called as
+    # ``scoreFromRange("15")``, ``scoreFromRange("240")``, ...). Each clone's
+    # ``timeframe`` is rewritten to a literal StringLiteral for its call site
+    # and gets its own unique ``sec_id``; ``callsite_idx`` is the SAME index
+    # ``func_call_cs_map`` assigns that call site for the existing per-
+    # call-site UDF-body-cloning mechanism, so the codegen can pick the right
+    # clone's ``sec_id`` while emitting that call site's specialized function
+    # body (``self._active_call_site_idx``). None for an ordinary
+    # (non-cloned) security call.
+    callsite_idx: int | None = None
 
 
 @dataclass
@@ -156,6 +169,16 @@ class AnalyzerContext:
     func_ta_ranges: dict = field(default_factory=dict)    # func_name -> (start_idx, end_idx)
     func_call_cs_map: dict = field(default_factory=dict)  # call_node_id -> (func_name, call_site_index)
     func_call_site_counts: dict = field(default_factory=dict)  # func_name -> int
+    # Functions that need per-call-site body cloning PURELY because they
+    # contain a request.security(...) whose timeframe is a UDF parameter
+    # called with >= 2 distinct literal timeframes (the security-tf-
+    # monomorphization case), even though they have no TA call sites or
+    # series/var members of their own (the usual trigger for cloning). The
+    # codegen's function-emission gate ORs this in alongside has_ta/
+    # has_series so self._active_call_site_idx is actually set while it
+    # emits each call site's body — required for the per-clone
+    # SecurityCallInfo.callsite_idx disambiguation in visit_call.py to work.
+    func_security_clone_only: set = field(default_factory=set)
     # (func_name, cs_idx) -> {orig_member_name: cloned_member_name}. Populated by
     # the analyzer ONLY for clones whose default ``{base}_cs{cs_idx}`` name would
     # collide with a clone minted through another enclosing function; lets codegen
