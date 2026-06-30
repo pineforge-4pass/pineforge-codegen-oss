@@ -351,10 +351,22 @@ class CallVisitor:
             return f"is_na({args})"
 
         # nz(x) / nz(x, y)
+        #
+        # x's emitted C++ source is substituted into the surrounding
+        # expression, so it must be evaluated EXACTLY ONCE: when x is a
+        # stateful call (e.g. a ta.* site lowered to `.compute()`/
+        # `.recompute()`), naively embedding {x} twice — once for the
+        # is_na() check, once for the non-na branch — invokes that call
+        # twice per bar, silently corrupting the indicator's internal state
+        # (e.g. nz(ta.sma(v, 50), v) becomes an effective 25-bar SMA: every
+        # bar is pushed into the ring buffer twice). An immediately-invoked
+        # lambda hoists x into a local `auto` so it is computed once and
+        # both branches read the same value; `[&]` is safe here since the
+        # lambda is called synchronously and discarded, never escaping.
         if func_name == "nz" and namespace is None:
             x = self._visit_expr(node.args[0])
             y = self._visit_expr(node.args[1]) if len(node.args) > 1 else "0.0"
-            return f"(is_na({x}) ? {y} : {x})"
+            return f"([&]{{ auto _nz_v = ({x}); return is_na(_nz_v) ? ({y}) : _nz_v; }}())"
 
         # fixnan(x) -> persistent state
         if func_name == "fixnan" and namespace is None:
