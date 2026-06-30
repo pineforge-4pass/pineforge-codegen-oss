@@ -1385,3 +1385,93 @@ plot(a + b + c)
     assert len(var_used) == len(set(var_used)), (
         f"two leg clones share the `var int l` state member: {var_used}"
     )
+
+
+# === Regression: block-scoped var name collision (BUG 1) ===
+# egoigor1976-1-trendline-strategy declared `var bool valid` inside two sibling
+# top-level `if` blocks; both deduped to ONE C++ member and cross-contaminated.
+# Block-scoped vars colliding by raw name across sibling scopes must now mint a
+# distinct member each. (44%->100% price-exact once disambiguated.)
+
+
+def test_block_scoped_var_collision_emits_distinct_members():
+    cpp = _generate("""
+//@version=6
+strategy("T")
+if close > open
+    var int counter = 0
+    counter := counter + 1
+if close < open
+    var int counter = 0
+    counter := counter + 1
+""")
+    # Two sibling-block `var int counter`s -> two distinct C++ members.
+    assert "int counter;" in cpp
+    assert "int counter__blk1;" in cpp, (
+        "second sibling-block `var int counter` must get a scope-unique member; "
+        "without disambiguation both blocks share one member and cross-contaminate"
+    )
+    # Both members get their own ctor init.
+    assert "counter(0)" in cpp and "counter__blk1(0)" in cpp
+    # The first (upper) block keeps the raw name; the second (lower) is remapped.
+    assert "counter = (counter + 1)" in cpp
+    assert "counter__blk1 = (counter__blk1 + 1)" in cpp
+
+
+def test_block_scoped_var_no_collision_keeps_raw_name():
+    # A single block-scoped var (no sibling collision) must NOT be renamed.
+    cpp = _generate("""
+//@version=6
+strategy("T")
+if close > open
+    var int counter = 0
+    counter := counter + 1
+""")
+    assert "int counter;" in cpp
+    assert "__blk" not in cpp, "no-op expected when there is no sibling-scope collision"
+
+
+# === Regression: collection lvalue aliasing value-copied (BUG 2) ===
+# jevondijefferson-big-breakout-strategy bound a local to an existing member
+# array via a ternary then mutated it (`orderBlocks.unshift(...)`); the
+# value-copy meant the member array never grew. A mutated local aliasing an
+# existing collection lvalue must emit a non-rebinding C++ reference.
+# (36%->77% once aliased.)
+
+
+def test_collection_lvalue_alias_emits_reference_when_mutated():
+    cpp = _generate("""
+//@version=6
+strategy("T")
+var array<float> a = array.new<float>()
+var array<float> b = array.new<float>()
+pick(bool which) =>
+    array<float> sel = which ? a : b
+    sel.push(close)
+    array.size(sel)
+n = pick(close > open)
+""")
+    # The mutated local aliases the selected member -> reference, not a copy.
+    assert "std::vector<double>& sel = " in cpp, (
+        "a local collection aliasing a member array and then mutated must emit "
+        "a `&` reference; a value-copy never mutates the member"
+    )
+    # Sanity: the (buggy) value-copy form must be gone.
+    assert "std::vector<double> sel = " not in cpp
+
+
+def test_collection_lvalue_alias_readonly_stays_value_copy():
+    # A read-only local bound to a member array is NOT aliased (no mutation),
+    # so the conservative value-copy is preserved (no-op guarantee).
+    cpp = _generate("""
+//@version=6
+strategy("T")
+var array<float> a = array.new<float>()
+var array<float> b = array.new<float>()
+peek(bool which) =>
+    array<float> sel = which ? a : b
+    array.size(sel)
+n = peek(close > open)
+""")
+    assert "std::vector<double>& sel = " not in cpp
+    assert "std::vector<double> sel = " in cpp

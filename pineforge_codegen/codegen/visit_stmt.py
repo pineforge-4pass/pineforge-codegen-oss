@@ -106,6 +106,10 @@ from .tables import (
     MATRIX_RETURNING_METHODS,
 )
 
+# Sentinel for "no block-scoped var remap was activated" so an empty dict
+# saved-remap is still distinguishable from the no-op case.
+_NO_BLOCK_REMAP = object()
+
 
 class StmtVisitor:
     """Statement-level visitor methods shared across the codegen.
@@ -422,6 +426,31 @@ class StmtVisitor:
                 lines.append(f"{pad}{udt_t}* {safe} = {cpp_val};")
                 return
 
+        # Collection lvalue alias (BUG 2): a local bound to an existing array /
+        # map / matrix lvalue (or a ternary/switch selecting same-typed ones)
+        # and later MUTATED through must ALIAS the member, not value-copy — Pine
+        # collections are reference types. Proven: jevondijefferson-big-breakout
+        # does ``array<orderBlock> orderBlocks = internal ? internalOrderBlocks
+        # : swingOrderBlocks`` then ``orderBlocks.unshift(ob)`` in three helpers;
+        # the value-copy left the member arrays empty. Emit a non-rebinding C++
+        # reference instead.
+        if not is_global_member:
+            coll_spec = self._collection_lvalue_selection_spec(node.value)
+            if coll_spec is not None and self._collection_local_must_alias(node):
+                # Register the local's collection kind so subsequent
+                # ``.size()/.get()/.unshift()`` dispatch resolves correctly.
+                self._collection_types[node.name] = coll_spec
+                if coll_spec.kind == "array":
+                    self._array_vars.add(node.name)
+                elif coll_spec.kind == "map":
+                    self._map_vars.add(node.name)
+                elif coll_spec.kind == "matrix":
+                    self._matrix_specs[node.name] = coll_spec
+                cpp_type = self._type_spec_to_cpp(coll_spec)
+                cpp_val = self._visit_rhs_value(node.value, node.name, target_cpp_type=cpp_type)
+                lines.append(f"{pad}{cpp_type}& {safe} = {cpp_val};")
+                return
+
         # General declaration
         cpp_type = self._type_for_decl(node) if not is_global_member else None
         cpp_val = self._visit_rhs_value(node.value, node.name, target_cpp_type=cpp_type)
@@ -627,7 +656,30 @@ class StmtVisitor:
 
         lines.append(f"{pad}/* unsupported tuple assignment */")
 
+    def _push_block_var_remap(self, node):
+        """Activate block-scoped var renames for ``node`` (BUG 1). Returns the
+        previous ``_active_var_remap`` to restore (or ``_NO_BLOCK_REMAP`` if this
+        block owns no renames). Renames are MERGED over the inherited remap so
+        nested blocks keep any enclosing func-clone / outer-block mapping."""
+        renames = self._block_var_renames.get(id(node))
+        if not renames:
+            return _NO_BLOCK_REMAP
+        saved = self._active_var_remap
+        self._active_var_remap = {**saved, **renames}
+        return saved
+
+    def _pop_block_var_remap(self, saved) -> None:
+        if saved is not _NO_BLOCK_REMAP:
+            self._active_var_remap = saved
+
     def _visit_if(self, node: IfStmt, lines: list[str], indent: int) -> None:
+        _blk_saved = self._push_block_var_remap(node)
+        try:
+            self._visit_if_body(node, lines, indent)
+        finally:
+            self._pop_block_var_remap(_blk_saved)
+
+    def _visit_if_body(self, node: IfStmt, lines: list[str], indent: int) -> None:
         pad = "    " * indent
 
         # TA hoisting: inside per-call-site function variants, execute ALL
@@ -673,8 +725,12 @@ class StmtVisitor:
         self._current_loop_vars = set(self._current_loop_vars)
         if var:
             self._current_loop_vars.add(var)
-        for s in node.body:
-            self._visit_stmt(s, lines, indent + 1)
+        _blk_saved = self._push_block_var_remap(node)
+        try:
+            for s in node.body:
+                self._visit_stmt(s, lines, indent + 1)
+        finally:
+            self._pop_block_var_remap(_blk_saved)
         self._current_loop_vars = saved_loop
         lines.append(f"{pad}}}")
 
@@ -695,8 +751,12 @@ class StmtVisitor:
         elif node.vars:
             bindings = ", ".join(node.vars)
             lines.append(f"{pad}for (auto [{bindings}] : {iterable}) {{")
-        for s in node.body:
-            self._visit_stmt(s, lines, indent + 1)
+        _blk_saved = self._push_block_var_remap(node)
+        try:
+            for s in node.body:
+                self._visit_stmt(s, lines, indent + 1)
+        finally:
+            self._pop_block_var_remap(_blk_saved)
         lines.append(f"{pad}}}")
         self._current_loop_vars = saved_loop
 
@@ -704,8 +764,12 @@ class StmtVisitor:
         pad = "    " * indent
         cond = self._visit_expr(node.condition)
         lines.append(f"{pad}while ({cond}) {{")
-        for s in node.body:
-            self._visit_stmt(s, lines, indent + 1)
+        _blk_saved = self._push_block_var_remap(node)
+        try:
+            for s in node.body:
+                self._visit_stmt(s, lines, indent + 1)
+        finally:
+            self._pop_block_var_remap(_blk_saved)
         lines.append(f"{pad}}}")
 
     def _visit_switch(self, node: SwitchStmt, lines: list[str], indent: int) -> None:

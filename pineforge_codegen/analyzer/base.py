@@ -127,6 +127,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._global_var_decls: list[tuple[str, PineType]] = []
         self._global_expr_map: dict[str, Any] = {}
         self._var_member_init_exprs: dict[str, Any] = {}
+        # Block-scoped ``var``/``varip`` name-collision disambiguation.
+        # Two same-named block-scoped vars in SIBLING non-global, non-function
+        # scopes (e.g. ``var bool valid`` declared inside ``if A`` and again
+        # inside ``if B``) would otherwise dedupe to ONE C++ member and
+        # cross-contaminate. ``_block_node_stack`` tracks the enclosing
+        # block AST nodes during analysis; ``_block_var_owner`` maps a raw
+        # block-var name to the id() of the FIRST block that declared it;
+        # ``_block_var_renames`` maps id(block_node) -> {raw_name: unique}
+        # for every later colliding block so codegen can activate the
+        # rename via ``_active_var_remap`` while emitting that block.
+        self._block_node_stack: list[Any] = []
+        self._block_var_owner: dict[str, int] = {}
+        self._block_var_renames: dict[int, dict[str, str]] = {}
+        self._block_var_seq = 0
         self._ta_counter = 0
         self._fixnan_counter = 0
         # Track user-defined function nodes for deferred analysis
@@ -305,6 +319,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             udt_var_types=dict(self._udt_var_types),
             collection_types=dict(self._collection_types),
             udt_field_type_specs=dict(self._udt_field_type_specs),
+            block_var_renames=dict(self._block_var_renames),
         )
 
     def _record_global_binding_stmt(self, name: str, pine_type: PineType,
@@ -750,14 +765,41 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Track var members
         if node.is_var or node.is_varip:
             init_str = self._expr_to_str(node.value)
-            self._var_members.append((node.name, val_type, init_str))
+            scope_name = self._symbols.current_scope.name
+            # Block-scoped var name-collision disambiguation. A ``var``/``varip``
+            # declared inside a non-global, non-function block (an ``if`` / ``for``
+            # / ``while`` body at on_bar scope) is keyed by RAW name. Two sibling
+            # blocks declaring the same name would dedupe to ONE C++ member and
+            # cross-contaminate (proven: egoigor1976-1-trendline-strategy's
+            # ``var bool valid`` in the upper- and lower-trendline ``if`` blocks).
+            # When such a name already belongs to a DIFFERENT block, mint a
+            # scope-unique member name and record the rename so codegen activates
+            # it (via ``_active_var_remap``) while emitting that block.
+            member_name = node.name
+            is_block_scoped = (
+                not self._global_scope
+                and not scope_name.startswith("func_")
+                and not scope_name.startswith("method_")
+                and bool(self._block_node_stack)
+            )
+            if is_block_scoped:
+                block_id = id(self._block_node_stack[-1])
+                owner = self._block_var_owner.get(node.name)
+                if owner is None:
+                    # First block to claim this name keeps the raw member name.
+                    self._block_var_owner[node.name] = block_id
+                elif owner != block_id:
+                    # Sibling-scope collision: disambiguate this declaration.
+                    self._block_var_seq += 1
+                    member_name = f"{node.name}__blk{self._block_var_seq}"
+                    self._block_var_renames.setdefault(block_id, {})[node.name] = member_name
+            self._var_members.append((member_name, val_type, init_str))
             # Capture the init AST too so codegen can inspect the RHS callee
             # (used to detect int64-returning builtins like ``time()`` and
             # promote the symbol storage type to ``int64_t``).
             if node.value is not None:
-                self._var_member_init_exprs[node.name] = node.value
+                self._var_member_init_exprs[member_name] = node.value
             # Track function-scoped var members
-            scope_name = self._symbols.current_scope.name
             if scope_name.startswith("func_"):
                 func_name = scope_name[5:]  # strip "func_" prefix
                 if func_name not in self._func_var_members:
@@ -1127,6 +1169,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _visit_IfStmt(self, node: IfStmt) -> PineType:
         old_global = self._global_scope
         self._global_scope = False
+        self._block_node_stack.append(node)
         try:
             self._visit(node.condition)
             body_type = PineType.VOID
@@ -1135,6 +1178,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             for stmt in node.else_body:
                 self._visit(stmt)
         finally:
+            self._block_node_stack.pop()
             self._global_scope = old_global
         # If used as expression (x = if ...), return last expr type
         return body_type
@@ -1158,6 +1202,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         old_global = self._global_scope
         self._global_scope = False
+        self._block_node_stack.append(node)
         try:
             self._visit(node.start)
             self._visit(node.end)
@@ -1166,6 +1211,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             for stmt in node.body:
                 self._visit(stmt)
         finally:
+            self._block_node_stack.pop()
             self._global_scope = old_global
 
         self._symbols.exit_scope()
@@ -1174,6 +1220,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _visit_ForInStmt(self, node) -> PineType:
         old_global = self._global_scope
         self._global_scope = False
+        self._block_node_stack.append(node)
         try:
             self._visit(node.iterable)
             self._symbols.enter_scope("for_in")
@@ -1196,17 +1243,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._visit(stmt)
             self._symbols.exit_scope()
         finally:
+            self._block_node_stack.pop()
             self._global_scope = old_global
         return PineType.VOID
 
     def _visit_WhileStmt(self, node: WhileStmt) -> PineType:
         old_global = self._global_scope
         self._global_scope = False
+        self._block_node_stack.append(node)
         try:
             self._visit(node.condition)
             for stmt in node.body:
                 self._visit(stmt)
         finally:
+            self._block_node_stack.pop()
             self._global_scope = old_global
         return PineType.VOID
 

@@ -394,6 +394,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._global_mutable_infos: dict[str, object] = getattr(ctx, "global_mutable_infos", {}) or {}
         self._udt_var_types: dict[str, str] = getattr(ctx, "udt_var_types", {}) or {}
         self._collection_types: dict[str, TypeSpec] = getattr(ctx, "collection_types", {}) or {}
+        # id(block_node) -> {raw_var_name: unique_member} for block-scoped var
+        # name collisions (see Analyzer._visit_VarDecl). Activated into
+        # ``_active_var_remap`` while emitting the owning block's statements.
+        self._block_var_renames: dict[int, dict[str, str]] = getattr(ctx, "block_var_renames", {}) or {}
         self._udt_field_type_specs: dict[str, dict[str, TypeSpec]] = getattr(ctx, "udt_field_type_specs", {}) or {}
         # Map UDT struct name -> set of field names that were dropped from the
         # emitted C++ struct because they had drawing-only types (label, line,
