@@ -982,6 +982,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Pre-scan for strategy series vars
         self._prescan_strategy_series()
         self._security_ohlc_hist_fields_by_sec: dict[int, set[str]] = {}
+        # request.security TA call-sites read at a history offset (``ta.ema(...)[k>=1]``).
+        # Maps sec_id -> set of TA call-site indices needing an HTF history Series.
+        self._security_ta_hist_idx_by_sec: dict[int, set[int]] = {}
 
         lines: list[str] = []
 
@@ -1077,6 +1080,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(
                         f"    Series<double> {self._security_ohlc_hist_series_cpp(sec_id, field)}{_mbb};"
                     )
+                self._security_ta_hist_idx_by_sec[sec_id] = (
+                    self._collect_security_ta_hist_indices(expr_node)
+                )
+                for name in self._security_ta_hist_series_names(sec_id):
+                    lines.append(f"    Series<double> {name}{_mbb};")
                 continue
             if returns_tuple and tuple_size and tuple_size > 0 and isinstance(expr_node, TupleLiteral):
                 hist_fields: set[str] = set()
@@ -1098,6 +1106,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 lines.append(
                     f"    Series<double> {self._security_ohlc_hist_series_cpp(sec_id, field)}{_mbb};"
                 )
+            self._security_ta_hist_idx_by_sec[sec_id] = (
+                self._collect_security_ta_hist_indices(expr_node)
+            )
+            for name in self._security_ta_hist_series_names(sec_id):
+                lines.append(f"    Series<double> {name}{_mbb};")
 
         if self._security_calls:
             lines.append('    std::unordered_map<std::string, Series<double>> _security_helper_series_;')
