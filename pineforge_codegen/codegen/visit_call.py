@@ -562,9 +562,12 @@ class CallVisitor:
 
         # ticker.* calls
         if namespace == "ticker":
-            # ticker.inherit(symbol, ...) and ticker.standard(symbol) — passthrough:
-            # emit the symbol argument unchanged (same-symbol passthrough).
-            if func_name in ("inherit", "standard"):
+            # ticker.inherit(symbol, ...) / ticker.standard(symbol) — passthrough,
+            # and ticker.heikinashi(symbol) — same-symbol HA: emit the symbol
+            # argument unchanged. The runtime HA candle transform is applied by
+            # the engine via register_security_eval's heikinashi flag, so the
+            # ticker value itself just needs to be the (string) chart symbol.
+            if func_name in ("inherit", "standard", "heikinashi"):
                 if node.args:
                     return self._visit_expr(node.args[0])
                 if "symbol" in node.kwargs:

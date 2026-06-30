@@ -119,6 +119,11 @@ class SecurityCallInfo:
     gaps: Any = None
     lookahead: Any = None
     ta_range: Any = None
+    # request.security(ticker.heikinashi(syminfo.tickerid), ...) — the chart's own
+    # symbol read as Heikin-Ashi candles. The engine applies the HA OHLC transform
+    # to each (aggregated) bar before evaluating the security expression; the
+    # expression's close/open/high/low therefore see HA values. Same-symbol only.
+    heikinashi: bool = False
     depends_on_mutable_globals: bool = False
     mutable_globals: tuple[str, ...] = ()
     is_lower_tf_array: bool = False

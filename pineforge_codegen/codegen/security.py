@@ -171,6 +171,7 @@ class SecurityEmitter:
                 "gaps_node": item.gaps,
                 "lookahead_node": item.lookahead,
                 "ta_range": item.ta_range,
+                "heikinashi": bool(getattr(item, "heikinashi", False)),
                 "depends_on_mutable_globals": bool(getattr(item, "depends_on_mutable_globals", False)),
                 "mutable_globals": list(getattr(item, "mutable_globals", ()) or ()),
                 "is_lower_tf_array": bool(getattr(item, "is_lower_tf_array", False)),
