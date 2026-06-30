@@ -908,11 +908,13 @@ class TopLevelEmitter:
         else:
             for i, s in enumerate(node.body):
                 if i == len(node.body) - 1 and isinstance(s, ExprStmt):
-                    # A void drawing setter / delete / visual-noop used as the
-                    # last statement cannot be the return value (it lowers to a
-                    # void C++ call). Emit it as a plain statement and let the
-                    # default-return path below supply the function's result.
-                    if self._call_is_void(s.expr):
+                    # A void drawing setter / delete / visual-noop, or a dropped
+                    # table/polyline method call (``panel.cell(...)``), used as
+                    # the last statement cannot be the return value (it lowers to
+                    # a void / no-op C++ call). Emit it as a plain statement
+                    # (which ``_is_skip_expr`` drops) and let the default-return
+                    # path below supply the function's result.
+                    if self._call_is_void(s.expr) or self._is_skip_expr(s.expr):
                         self._visit_stmt(s, lines, indent=2)
                     else:
                         lines.append(f"        return {self._visit_expr(s.expr)};")
@@ -920,10 +922,14 @@ class TopLevelEmitter:
                 elif i == len(node.body) - 1 and isinstance(s, (SwitchStmt, IfStmt)):
                     # Switch/if as last statement = return expression in PineScript
                     # Emit as: double _ret = 0; if/switch assigns _ret; return _ret;
-                    default_ret = (
-                        f"{ret_type}{{}}" if ret_type in self._udt_defs
-                        else self._default_for_type(ret_type)
-                    )
+                    # A drawing-handle / UDT return type must brace-init its
+                    # default (``Label _func_ret = Label{};``) — falling through
+                    # to ``_default_for_type`` would emit ``0.0`` and clang would
+                    # reject ``Label _func_ret = 0.0;``.
+                    if ret_type in self._udt_defs or ret_type in DRAWING_TYPE_TO_CPP.values():
+                        default_ret = f"{ret_type}{{}}"
+                    else:
+                        default_ret = self._default_for_type(ret_type)
                     lines.append(f"        {ret_type} _func_ret = {default_ret};")
                     self._visit_if_switch_expr(s, "_func_ret", lines, indent=2)
                     lines.append(f"        return _func_ret;")
@@ -938,10 +944,10 @@ class TopLevelEmitter:
                 default_vals = ", ".join(["0.0"] * fi.tuple_element_count)
                 lines.append(f"        return std::make_tuple({default_vals});")
             else:
-                default_ret = (
-                    f"{ret_type}{{}}" if ret_type in self._udt_defs
-                    else self._default_for_type(ret_type)
-                )
+                if ret_type in self._udt_defs or ret_type in DRAWING_TYPE_TO_CPP.values():
+                    default_ret = f"{ret_type}{{}}"
+                else:
+                    default_ret = self._default_for_type(ret_type)
                 lines.append(f"        return {default_ret};")
 
         lines.append("    }")

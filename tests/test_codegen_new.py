@@ -1,5 +1,6 @@
 """Tests for the new CodeGen that reads from AnalyzerContext."""
 
+from pineforge_codegen import transpile
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from pineforge_codegen.analyzer import Analyzer
@@ -1475,3 +1476,126 @@ n = peek(close > open)
 """)
     assert "std::vector<double>& sel = " not in cpp
     assert "std::vector<double> sel = " in cpp
+
+
+# ===========================================================================
+# Recovered-strategy regression tests (transpile-error -> supported).
+#
+# Each pins a distinct codegen fix that recovered a previously-rejected
+# scraped strategy. They run the FULL pipeline (support_checker + analyzer +
+# codegen) via ``transpile`` and assert the load-bearing emitted construct.
+# ===========================================================================
+
+
+def test_drawing_handle_return_via_bare_local_identifier():
+    """lukeborgerding setTradeLine: a UDF that returns a bare ``line`` local
+    must emit a ``Line`` (handle) return type, not the ``double`` default —
+    otherwise clang rejects ``no viable conversion from Line to double``."""
+    cpp = transpile('''//@version=6
+strategy("T")
+setTradeLine(lineId, price) =>
+    line result = lineId
+    if na(result)
+        result := line.new(time, price, time_close, price)
+    else
+        line.set_xy2(result, time_close, price)
+    result
+var line ln = na
+ln := setTradeLine(ln, close)
+''')
+    assert "Line setTradeLine(" in cpp
+    assert "double setTradeLine(" not in cpp
+
+
+def test_drawing_handle_return_via_if_terminal_branch():
+    """parallax makeEventLabel: a UDF whose terminal statement is an ``if``
+    whose branch yields ``label.new(...)`` must emit a ``Label`` return type
+    (resolved through the if-terminal), and the default-init must brace-init the
+    handle (``Label _func_ret = Label{};``), never ``0.0``."""
+    cpp = transpile('''//@version=6
+strategy("T")
+showLbl = input.bool(true)
+makeEventLabel(bool trig, float lvl, string txt) =>
+    if trig and showLbl
+        label.new(bar_index, lvl, txt, style = label.style_label_up)
+makeEventLabel(close > open, low, "Up")
+''')
+    assert "Label makeEventLabel(" in cpp
+    assert "Label _func_ret = 0.0" not in cpp
+
+
+def test_time_close_variable_emits_faithful_accessor():
+    """lukeborgerding: the bare ``time_close`` variable is no longer rejected as
+    a divergent mis-alias; it lowers to the engine ``time_close()`` accessor
+    (true bar-close timestamp)."""
+    cpp = transpile('''//@version=6
+strategy("T")
+x = time_close
+plot(x > time ? 1 : 0)
+''')
+    assert "time_close()" in cpp
+
+
+def test_security_ta_ctor_ignores_cosmetic_input_group_kwarg():
+    """parallax: a constant ``var string`` used ONLY as an ``input.*`` cosmetic
+    ``group=`` kwarg must not be classified as a rebound mutable global, so the
+    ``ta.ema(close, len)[1]`` request.security TA-constructor reject does not
+    fire. The strategy must transpile and emit a request.security read."""
+    cpp = transpile('''//@version=6
+strategy("T")
+var string GRP = "Mapping"
+htfLen = input.int(34, "HTF EMA Length", minval = 2, group = GRP)
+htf = input.timeframe("240", "HTF", group = GRP)
+useBias = input.bool(true, group = GRP)
+htfEma = useBias ? request.security(syminfo.tickerid, htf, ta.ema(close, htfLen)[1], lookahead = barmerge.lookahead_on) : ta.ema(close, htfLen)
+if close > htfEma
+    strategy.entry("L", strategy.long)
+''')
+    assert "_req_sec" in cpp
+
+
+def test_generic_collection_param_in_multiline_func_parses():
+    """concordance percentileFromSorted: a multi-line UDF whose FIRST parameter
+    uses the generic ``array<float>`` syntax must parse (and its body locals
+    resolve) — previously the generic ``<...>`` type was mis-consumed as the
+    param name and the whole function silently leaked to top-level scope,
+    surfacing as ``Undefined variable: 'result'``."""
+    cpp = transpile('''//@version=6
+strategy("T")
+percentileFromSorted(array<float> sortedValues, float pct) =>
+    float result = na
+    int n = array.size(sortedValues)
+    if n > 0
+        if pct > 50.0
+            result := array.get(sortedValues, 0)
+        else
+            result := array.get(sortedValues, 1)
+    result
+var array<float> xs = array.from(1.0, 2.0)
+plot(percentileFromSorted(xs, 50.0))
+''')
+    # Parsed as a real function (not leaked to top-level): the param emits and
+    # the body's reassigned local is in scope (no Undefined-variable abort).
+    assert "percentileFromSorted(" in cpp
+    assert "Undefined" not in cpp
+
+
+def test_table_param_visual_method_accepts_align_const_and_drops_call():
+    """concordance dashCell/dashDivider: ``text.align_*`` passed to a method on
+    a ``table``-typed PARAMETER (``panel.cell(...)``) must be accepted (visual
+    constant), and codegen must DROP the table method call (table has no C++
+    representation) instead of emitting a broken ``double``-receiver member
+    access."""
+    cpp = transpile('''//@version=6
+strategy("T")
+dashCell(table panel, int row, string txt) =>
+    panel.cell(0, row, txt, text_halign = text.align_left)
+    panel.merge_cells(0, row, 1, row)
+var table dash = table.new(position.top_right, 2, 2)
+if barstate.islast
+    dashCell(dash, 0, "x")
+''')
+    # text.align_left accepted (no reject) AND the table method calls dropped.
+    assert "dashCell(" in cpp
+    assert ".cell(" not in cpp
+    assert "merge_cells" not in cpp

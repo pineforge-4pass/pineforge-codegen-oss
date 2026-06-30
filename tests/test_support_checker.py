@@ -81,7 +81,7 @@ def test_divergent_variables_warn(var_name: str):
 
 @pytest.mark.parametrize("var_name", sorted(DIVERGENT_VARS_ERROR))
 def test_divergent_mis_alias_variables_error(var_name: str):
-    """last_bar_index / time_close are silent mis-aliases -> ERROR (rejected)."""
+    """last_bar_index is a silent mis-alias -> ERROR (rejected)."""
     src = PRELUDE + f"x = {var_name}\n"
     errs = _errors(src)
     assert errs, f"{var_name} is a silent mis-alias and must ERROR, not warn"
@@ -96,8 +96,14 @@ def test_last_bar_index_errors():
     _expect_error(PRELUDE + "x = last_bar_index\n", "last_bar_index")
 
 
-def test_time_close_errors():
-    _expect_error(PRELUDE + "x = time_close\n", "time_close")
+def test_time_close_variable_accepted():
+    """The bare ``time_close`` variable is faithfully supported: codegen lowers
+    it to the engine ``time_close()`` accessor (true bar-close = bar open +
+    chart-timeframe duration), so it is neither an error nor a divergence
+    warning."""
+    src = PRELUDE + "x = time_close\n"
+    assert _errors(src) == [], "time_close is now faithfully emitted, not rejected"
+    assert not any("diverges" in d.message for d in _warnings(src))
 
 
 def test_bar_index_still_warns():
@@ -116,7 +122,10 @@ def test_divergent_error_subset_is_subset():
     assert DIVERGENT_VARS_ERROR <= set(DIVERGENT_VARS)
     assert "bar_index" not in DIVERGENT_VARS_ERROR
     assert "timenow" not in DIVERGENT_VARS_ERROR
-    assert {"last_bar_index", "time_close"} == set(DIVERGENT_VARS_ERROR)
+    # time_close is no longer rejected — codegen lowers it to the faithful
+    # engine time_close() accessor.
+    assert "time_close" not in DIVERGENT_VARS_ERROR
+    assert {"last_bar_index"} == set(DIVERGENT_VARS_ERROR)
 
 
 def test_time_close_function_call_not_flagged_as_divergent_var():

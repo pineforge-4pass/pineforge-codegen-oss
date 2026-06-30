@@ -596,13 +596,17 @@ class Parser:
             self._advance()
         # Is there a type annotation before the parameter name? A builtin type
         # token always is; an IDENT is a type only if followed by another IDENT
-        # (``line ln``) or by ``[`` (``line[] arr``).
+        # (``line ln``), by ``[`` (``line[] arr``), or by ``<`` (the generic
+        # collection syntax ``array<float> xs`` / ``matrix<float> m`` /
+        # ``map<string,float> mp``). Without the ``<`` case the generic type is
+        # mis-consumed as the parameter name and the whole function definition
+        # silently fails to parse (its body leaks to top-level scope).
         has_type = False
         if self._current().type in TYPE_TOKENS:
             has_type = True
         elif self._check(TokenType.IDENT):
             nxt = self._peek().type
-            if nxt == TokenType.IDENT or nxt == TokenType.LBRACKET:
+            if nxt in (TokenType.IDENT, TokenType.LBRACKET, TokenType.LT):
                 has_type = True
         if not has_type:
             return None
@@ -729,7 +733,8 @@ class Parser:
             if self._current().type in TYPE_KEYWORDS:
                 param_type = self._parse_type_hint_string()
             elif (self._current().type == TokenType.IDENT
-                  and self._peek().type == TokenType.IDENT):
+                  and self._peek().type in (TokenType.IDENT, TokenType.LBRACKET, TokenType.LT)):
+                # ``line ln`` / ``float[] arr`` / ``array<float> xs`` typed param.
                 param_type = self._parse_type_hint_string()
             p = self._consume(TokenType.IDENT).value
             pdefault = None

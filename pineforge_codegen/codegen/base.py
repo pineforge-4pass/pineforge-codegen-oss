@@ -442,6 +442,29 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 self._map_vars.add(_name)
             elif _spec.kind == "udt" and _spec.name:
                 self._udt_var_types.setdefault(_name, _spec.name)
+        # Table / polyline variables and params have NO C++ representation
+        # (SKIP_VAR_TYPES). A *method* call on such a receiver
+        # (``panel.cell(...)``, ``dash.merge_cells(...)``) is a visual no-op
+        # that must be dropped — but unlike the namespace form
+        # (``table.cell(...)``) the receiver is a bare var/param the
+        # namespace-based skip cannot see. Collect those names so
+        # ``_is_skip_expr`` can drop their method calls.
+        _SKIP_DECL_TYPES = set(SKIP_VAR_TYPES) | {"polyline"}
+        self._visual_drop_vars: set[str] = set()
+        for _node in self._walk_ast(self.ctx.ast):
+            if isinstance(_node, VarDecl):
+                if _node.type_hint in _SKIP_DECL_TYPES:
+                    self._visual_drop_vars.add(_node.name)
+                elif isinstance(_node.value, FuncCall):
+                    _fn, _ns = self._resolve_callee(_node.value.callee)
+                    if _fn == "new" and _ns in _SKIP_DECL_TYPES:
+                        self._visual_drop_vars.add(_node.name)
+            elif isinstance(_node, (FuncDef, MethodDef)):
+                _hints = (getattr(_node, "annotations", None) or {}).get("param_type_hints") or []
+                for _i, _p in enumerate(getattr(_node, "params", []) or []):
+                    _h = _hints[_i] if _i < len(_hints) else None
+                    if _h and str(_h).replace(" ", "") in _SKIP_DECL_TYPES:
+                        self._visual_drop_vars.add(_p)
         # Collect request.security metadata per call
         self._security_eval_info: list[dict] = []
         self._security_ta_variant_names: dict[tuple[int, int, tuple], str] = {}
@@ -1734,6 +1757,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if namespace in SKIP_NAMESPACES:
                 return True
             if namespace in SKIP_VAR_TYPES:
+                return True
+            # Method call on a table/polyline-typed receiver var/param
+            # (``panel.cell(...)``). These types have no C++ representation, so
+            # the call is a visual no-op — drop it (mirrors the namespace form).
+            if namespace in self._visual_drop_vars:
                 return True
             # strategy.risk.* — handled in _visit_stmt, not skipped
         if isinstance(node, MemberAccess):

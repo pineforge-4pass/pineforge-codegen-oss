@@ -103,6 +103,13 @@ _DRAWING_SUPPORTED_BY_NS: dict[str, frozenset[str]] = {
     "label": SUPPORTED_LABEL, "linefill": SUPPORTED_LINEFILL,
 }
 _DRAWING_TYPE_NAMES: frozenset[str] = frozenset({"line", "box", "label", "linefill"})
+# Scalar visual-container types whose *method* calls (``panel.cell(...)``,
+# ``ln.set_xy1(...)``) legitimately carry visual-constant args (``text.align_*``,
+# ``size.*``). A method on a receiver of one of these types — including a
+# table/box/line/label/linefill PARAMETER — is a visual sink, so its argument
+# subtree is visited with constant-namespace reads allowed (mirrors the
+# namespace-form ``table.cell``/``label.new`` handling).
+_VISUAL_CONTAINER_TYPES: frozenset[str] = _DRAWING_TYPE_NAMES | frozenset({"table"})
 SUPPORTED_COLOR_CONST: frozenset[str] = frozenset(COLOR_CONST_MAP)
 SUPPORTED_COLOR_FUNC: frozenset[str] = frozenset({"new", "rgb", "r", "g", "b", "t"})
 # Cosmetic color builders with no backtest-logic effect. Warned (not rejected);
@@ -171,17 +178,23 @@ HARD_REJECT_NAMESPACE: dict[str, str] = {
 # DIVERGENT_VARS_ERROR is a SUBSET that is escalated to ERROR (rejected): these
 # are silent MIS-ALIASES, not merely data-window divergences. They return a
 # plausible value that is the WRONG quantity (last_bar_index -> current bar
-# index; time_close -> bar OPEN timestamp) and that value flows directly into
-# trade logic, so the backtest would be silently wrong. A WARNING is not enough.
+# index) and that value flows directly into trade logic, so the backtest would
+# be silently wrong. A WARNING is not enough.
+#
+# NOTE: the bare ``time_close`` variable is NOT divergent — codegen lowers it to
+# the engine's ``time_close()`` accessor, which returns the true bar-close
+# timestamp (bar open + chart-timeframe duration via ``pine_time_close``),
+# deterministic and TV-faithful. It was previously mis-listed here as a bar-open
+# alias; that was stale. (The session-aware ``time_close(...)`` FUNCTION is a
+# separate supported builtin handled in visit_call.)
 DIVERGENT_VARS: dict[str, str] = {
     "bar_index":      "bar_index depends on the data window; PineForge and TradingView produce different values for the same script.",
     "last_bar_index": "last_bar_index is aliased to the CURRENT bar index in PineForge codegen (not the index of the last bar); backtest would be silently wrong — rejected.",
     "timenow":        "timenow is aliased to the current bar timestamp in PineForge; it is not real wall-clock time.",
-    "time_close":     "time_close is aliased to the bar OPEN timestamp in PineForge; it does not represent the bar close time; backtest would be silently wrong — rejected.",
 }
 
 # Subset of DIVERGENT_VARS escalated from WARNING to ERROR (see comment above).
-DIVERGENT_VARS_ERROR: frozenset[str] = frozenset({"last_bar_index", "time_close"})
+DIVERGENT_VARS_ERROR: frozenset[str] = frozenset({"last_bar_index"})
 
 BARSTATE_APPROX_VARS: dict[str, str] = {
     "barstate.islast": "barstate.islast is always false in PineForge batch backtests.",
@@ -445,6 +458,11 @@ class SupportChecker:
         # shapes before codegen.
         self._udt_drawing_fields: dict[str, set[str]] = {}
         self._var_udt_types: dict[str, str] = {}
+        # Names (vars and function params) declared as a scalar visual-container
+        # type (table/box/line/label/linefill). A method call on one of these
+        # (``panel.cell(...)``) is a visual sink whose args may carry visual
+        # constants, so it routes through ``_visit_children_const_ok``.
+        self._visual_container_vars: set[str] = set()
         self._drawing_tuple_vars: set[str] = set()
         self._func_tuple_drawing_returns: dict[str, list[bool]] = {}
         # Track whether we are inside an if/ternary condition expression.
@@ -496,8 +514,21 @@ class SupportChecker:
                 tuple_returns = self._single_expr_tuple_drawing_mask(stmt)
                 if tuple_returns:
                     self._func_tuple_drawing_returns[stmt.name] = tuple_returns
+                self._collect_visual_container_params(stmt)
             elif isinstance(stmt, MethodDef):
                 self._user_methods.add(stmt.name)
+                self._collect_visual_container_params(stmt)
+
+    def _collect_visual_container_params(self, fn) -> None:
+        """Register a function's parameters that are declared with a scalar
+        visual-container type (``table panel``, ``line ln``) so method calls on
+        them inside the body (``panel.cell(...)``) are treated as visual sinks.
+        """
+        hints = (getattr(fn, "annotations", None) or {}).get("param_type_hints") or []
+        for i, pname in enumerate(getattr(fn, "params", []) or []):
+            hint = hints[i] if i < len(hints) else None
+            if hint and str(hint).replace(" ", "") in _VISUAL_CONTAINER_TYPES:
+                self._visual_container_vars.add(pname)
 
     @staticmethod
     def _type_name_contains_drawing(type_name: str | None) -> bool:
@@ -739,6 +770,16 @@ class SupportChecker:
             ns, name = _qualified_name(node.value.callee)
             if name == "new" and ns in self._user_types:
                 self._var_udt_types[node.name] = ns
+        # Track scalar visual-container vars (``var table dash = table.new(...)``)
+        # so a direct ``dash.cell(..., text.align_left)`` is treated as a visual
+        # sink (mirrors the table/box/line/label/linefill PARAM tracking).
+        decl_hint = str(node.type_hint).replace(" ", "") if node.type_hint else None
+        if decl_hint in _VISUAL_CONTAINER_TYPES:
+            self._visual_container_vars.add(node.name)
+        elif isinstance(node.value, FuncCall):
+            vns, vname = _qualified_name(node.value.callee)
+            if vname == "new" and vns in _VISUAL_CONTAINER_TYPES:
+                self._visual_container_vars.add(node.name)
         if node.is_varip:
             self._err(
                 node,
@@ -1126,6 +1167,17 @@ class SupportChecker:
                 node,
                 f"{full}(...) has no effect in PineForge backtests (visual only).",
             )
+            self._visit_children_const_ok(node)
+            return
+
+        # Method call on a scalar visual-container receiver (``panel.cell(...)``
+        # where ``panel`` is a ``table`` param, ``ln.set_xy1(...)`` on a ``line``
+        # var). ``ns`` is the receiver variable/param name, not a namespace, so
+        # the namespace-form drawing/table branches above did not fire. These are
+        # visual sinks whose args legitimately carry visual constants
+        # (``text.align_*``, ``size.*``), so visit children with const reads
+        # allowed instead of tripping the free-expression const-namespace reject.
+        if ns is not None and ns in self._visual_container_vars:
             self._visit_children_const_ok(node)
             return
 
