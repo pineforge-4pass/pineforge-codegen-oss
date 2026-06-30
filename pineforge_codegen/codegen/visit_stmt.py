@@ -734,6 +734,30 @@ class StmtVisitor:
         self._current_loop_vars = saved_loop
         lines.append(f"{pad}}}")
 
+    def _loop_elem_is_writeback_udt(self, iterable) -> bool:
+        """Whether a ``for x in coll`` loop variable must bind by reference.
+
+        In Pine a ``for x in arr`` loop variable over an array of *user-defined
+        objects* is a reference to the element — field writes (``x.f := v``)
+        mutate the array in place — whereas over a primitive array it is a
+        copy. So emit C++ ``auto&`` only for arrays whose element is a
+        user-defined UDT struct. Primitive elements keep ``auto`` (Pine copy
+        semantics: writing the loop var must NOT write back). Drawing handles
+        (line/box/label/linefill/...) also keep ``auto``: their element type
+        name is a builtin, not in ``_udt_defs``, and a handle copy already
+        mutates the shared engine object. (Reassigning the loop var itself —
+        ``x := ...`` — is not modelled by either form, but Pine forbids it for
+        objects in practice and it does not occur in the corpus.)
+        """
+        spec = self._type_spec_from_expr(iterable)
+        return (
+            spec is not None
+            and spec.kind == "array"
+            and spec.element is not None
+            and spec.element.kind == "udt"
+            and spec.element.name in self._udt_defs
+        )
+
     def _visit_for_in(self, node, lines: list[str], indent: int) -> None:
         pad = "    " * indent
         iterable = self._visit_expr(node.iterable)
@@ -747,7 +771,8 @@ class StmtVisitor:
                     self._current_loop_vars.add(v)
         if node.var:
             v_cpp = self._safe_name(node.var)
-            lines.append(f"{pad}for (auto {v_cpp} : {iterable}) {{")
+            ref = "&" if self._loop_elem_is_writeback_udt(node.iterable) else ""
+            lines.append(f"{pad}for (auto{ref} {v_cpp} : {iterable}) {{")
         elif node.vars:
             bindings = ", ".join(node.vars)
             lines.append(f"{pad}for (auto [{bindings}] : {iterable}) {{")

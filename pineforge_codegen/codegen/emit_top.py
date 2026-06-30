@@ -413,6 +413,10 @@ class TopLevelEmitter:
                 if tf_expr:
                     la = "true" if info["lookahead_on"] else "false"
                     go = "true" if info.get("gaps_on") else "false"
+                    # Heikin-Ashi same-symbol read: emit the 6th arg only when set
+                    # so every non-HA strategy's generated code stays byte-identical
+                    # (the engine param defaults to false).
+                    ha_arg = ", true" if info.get("heikinashi") else ""
                     sec_id = info["sec_id"]
                     # The runtime registration function is named in tables.py
                     # to keep a single source of truth and to avoid embedding
@@ -428,7 +432,7 @@ class TopLevelEmitter:
                         lines.append(
                             f"        {RUNTIME_REGISTER_SECURITY_EVAL_FN}"
                             f"({sec_id}, {tf_expr}, "
-                            f"input_tf_, {la}, {go});")
+                            f"input_tf_, {la}, {go}{ha_arg});")
             lines.append("    }")
 
     # Map strategy series member name to push expression

@@ -231,6 +231,12 @@ class TypeInferer:
             return None
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            # ticker.* constructors (inherit/standard/heikinashi) return a symbol
+            # string; without this the member-type inference defaults to double
+            # and a ``haTicker = ticker.heikinashi(...)`` global mis-declares as
+            # double then assigns a std::string. (Analyzer agrees: ticker.* -> STRING.)
+            if namespace == "ticker":
+                return TypeSpec.primitive("string")
             targs = self._template_args_from_call(node)
             # Drawing-objects-as-data return typing (spec §4.5 DRAWING_RETURN_SPECS):
             # *.new / *.copy -> handle of the self-type; linefill.get_line* -> line.

@@ -534,6 +534,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "tf_node": tf_node,
                 "gaps_on": is_gaps_on,
                 "lookahead_on": is_lookahead_on,
+                "heikinashi": bool(item.get("heikinashi", False)),
                 "ta_range": ta_range,
                 "ta_indices": sorted(ta_indices),
                 "ta_binding_stacks": ta_binding_stacks,
