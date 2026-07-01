@@ -335,6 +335,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._switch_counter = 0
         self._security_inline_counter = 0
         self._random_call_counter = 0
+        self._for_counter = 0
         # UDT / enum (needed before _collect_known_vars for input.enum)
         self._udt_defs: dict[str, list] = {}
         self._enum_defs: dict[str, list[str]] = {}
