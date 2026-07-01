@@ -1066,6 +1066,69 @@ class TopLevelEmitter:
             push_expr_bars = push_expr.replace("current_bar_.", "bars[i].")
             lines.append(f"            _s_{field_name}.push({push_expr_bars});")
 
+        # Advance the native input.source() backing series (_src_open_ etc.)
+        # from bars[i] too. A static TA site's compute args can reference an
+        # input.source()-derived member (e.g. ``ta.stdev(bbSourceInput, 20)``)
+        # which resolves at runtime to ``get_input_source(...)`` reading one
+        # of these series — normally advanced once per real bar by
+        # ``_push_source_series()`` inside ``dispatch_bar()``, which this
+        # standalone precalc loop never calls. Without this, every static TA
+        # site fed by an input.source() reads an empty series (0.0) for the
+        # entire precalculation, silently corrupting its precalculated
+        # values (e.g. a Bollinger Band's stdev collapsing to 0). Gated on
+        # ``_src_series_active_`` to stay a no-op for scripts with no
+        # input.source() usage; cleared again before the real run begins
+        # (BacktestEngine::run() clears every _src_*_ series unconditionally).
+        lines.append("            if (_src_series_active_) {")
+        lines.append("                const double _pc_o = bars[i].open;")
+        lines.append("                const double _pc_h = bars[i].high;")
+        lines.append("                const double _pc_l = bars[i].low;")
+        lines.append("                const double _pc_c = bars[i].close;")
+        lines.append("                const double _pc_v = bars[i].volume;")
+        lines.append("                _src_open_.push(_pc_o);   _src_high_.push(_pc_h);   _src_low_.push(_pc_l);")
+        lines.append("                _src_close_.push(_pc_c);  _src_volume_.push(_pc_v);")
+        lines.append("                _src_hl2_.push((_pc_h + _pc_l) / 2.0);")
+        lines.append("                _src_hlc3_.push((_pc_h + _pc_l + _pc_c) / 3.0);")
+        lines.append("                _src_ohlc4_.push((_pc_o + _pc_h + _pc_l + _pc_c) / 4.0);")
+        lines.append("                _src_hlcc4_.push((_pc_h + _pc_l + _pc_c + _pc_c) / 4.0);")
+        lines.append("            }")
+
+        # Replay every top-level ``X = input.source(...)`` (or bare
+        # ``X = input(close)``) assignment. A static TA site's compute args
+        # often don't reference ``get_input_source(...)`` inline — they
+        # reference the top-level variable the script bound it to (e.g.
+        # ``bbSourceInput = input.source(close, "BB Source")`` then
+        # ``ta.stdev(bbSourceInput, 20)``). That variable is deliberately
+        # NOT covered by the ``_inputs_initialized_`` once-only static-input
+        # block above (see ``is_static_global_input``'s ``_is_source_input``
+        # exclusion) because it tracks a live per-bar series, not a frozen
+        # config value — under normal per-bar dispatch it is reassigned every
+        # real bar. This precalc loop has no other path that reassigns it, so
+        # without this replay every is_static site downstream of it would
+        # keep reading its ctor-initialized 0.0 for the whole precalculation
+        # even with the ``_src_*_`` fix above.
+        for stmt in self.ctx.ast.body:
+            if not isinstance(stmt, VarDecl):
+                continue
+            if stmt.name not in self._global_member_vars:
+                continue
+            if not (isinstance(stmt.value, FuncCall) and self._is_source_input(stmt.value)):
+                continue
+            safe = self._safe_name(stmt.name)
+            default = self._get_input_default(stmt.value)
+            base = self._source_defval_to_base_series(default)
+            title = self._get_input_title(stmt.value, var_name=stmt.name)
+            cpp_val = f'get_input_source("{title}", {base})[0]'
+            # A source var subscripted elsewhere in the script (e.g. ``src[1]``)
+            # is declared ``Series<double>``, not a scalar double, mirroring
+            # the normal per-bar path's ``{safe}.push({cpp_val})`` (see
+            # ``_visit_var_decl``'s ``node.name in self.ctx.series_vars``
+            # branch) — a plain ``=`` there is a compile error.
+            if stmt.name in self.ctx.series_vars:
+                lines.append(f'            {safe}.push({cpp_val});')
+            else:
+                lines.append(f'            {safe} = {cpp_val};')
+
         # Set _precalc_loop_active = True
         self._precalc_loop_active = True
         try:
