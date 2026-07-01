@@ -1413,7 +1413,7 @@ class SecurityEmitter:
                         )
                         var_name = variant["result_name"]
                         sec_name = variant["member_name"]
-                        lines.append(f"        auto {var_name} = is_complete "
+                        lines.append(f"        auto {var_name} = security_series_slot_is_new({sec_id}) "
                                      f"? {sec_name}.compute({compute_args}) "
                                      f": {sec_name}.recompute({compute_args});")
                         ta_results[(idx, variant["signature"])] = var_name
@@ -1822,7 +1822,7 @@ class SecurityEmitter:
                 helper_binding_stack,
                 emitted_lines,
             )
-            return f"(is_complete ? {sec_name}.compute({compute_args}) : {sec_name}.recompute({compute_args}))"
+            return f"(security_series_slot_is_new({sec_id}) ? {sec_name}.compute({compute_args}) : {sec_name}.recompute({compute_args}))"
 
         result = self._visit_expr(expr_node)
         return self._rewrite_security_cpp(result, sec_id, security_mutable_names, helper_binding_stack)

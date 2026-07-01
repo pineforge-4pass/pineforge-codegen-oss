@@ -1140,7 +1140,7 @@ plot(htfBasis)
     # HTF gating: history Series declared, read at offset 0 ([1] -> hist[0]),
     # pushed gated on is_complete using the security-context committed value.
     assert "Series<double> _sec0__ta_ema_1_hist" in cpp
-    assert "_secval_0 = is_complete ? _sec0__ta_ema_1.compute(" in eval_body
+    assert "_secval_0 = security_series_slot_is_new(0) ? _sec0__ta_ema_1.compute(" in eval_body
     assert "_req_sec_0 = _sec0__ta_ema_1_hist[0];" in eval_body
     assert "if (is_complete) {" in eval_body
     assert "_sec0__ta_ema_1_hist.push(_secval_0);" in eval_body
