@@ -458,12 +458,18 @@ def test_hard_reject_func_table_covers_known_unsupported_calls():
 def test_hard_reject_namespace_covers_ticker():
     # G2 sprint: ticker blanket-reject converted to per-function entries.
     # ticker.inherit / ticker.standard are now codegen passthrough (not rejected).
-    # The 7 chart-type modifiers remain in HARD_REJECT_FUNC.
+    # ticker.heikinashi is contextually supported for the chart's own symbol
+    # (see test_ticker_heikinashi_chart_symbol_accepted) — rejected only for a
+    # cross-symbol arg. The remaining 6 chart-type modifiers stay hard-rejected.
     assert "ticker" not in HARD_REJECT_NAMESPACE, (
         "ticker blanket-reject was intentionally converted to per-function entries (G2 sprint)"
     )
+    assert "ticker.heikinashi" not in HARD_REJECT_FUNC, (
+        "ticker.heikinashi is contextually supported for the chart's own symbol, "
+        "not blanket hard-rejected"
+    )
     for fn in (
-        "ticker.heikinashi", "ticker.renko", "ticker.kagi", "ticker.linebreak",
+        "ticker.renko", "ticker.kagi", "ticker.linebreak",
         "ticker.pointfigure", "ticker.new", "ticker.modify",
     ):
         assert fn in HARD_REJECT_FUNC, f"{fn} should be per-function hard-rejected"

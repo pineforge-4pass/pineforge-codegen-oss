@@ -171,10 +171,12 @@ class SecurityEmitter:
                 "gaps_node": item.gaps,
                 "lookahead_node": item.lookahead,
                 "ta_range": item.ta_range,
+                "heikinashi": bool(getattr(item, "heikinashi", False)),
                 "depends_on_mutable_globals": bool(getattr(item, "depends_on_mutable_globals", False)),
                 "mutable_globals": list(getattr(item, "mutable_globals", ()) or ()),
                 "is_lower_tf_array": bool(getattr(item, "is_lower_tf_array", False)),
                 "containing_func": getattr(item, "containing_func", "") or "",
+                "callsite_idx": getattr(item, "callsite_idx", None),
             }
         return {
             "sec_id": item[0],
@@ -189,6 +191,7 @@ class SecurityEmitter:
             "mutable_globals": [],
             "is_lower_tf_array": False,
             "containing_func": "",
+            "callsite_idx": None,
         }
 
     def _security_state_name(self, sec_id: int, name: str) -> str:
@@ -335,12 +338,29 @@ class SecurityEmitter:
         OHLC offsets. Offset 0 reuses the current committed value (``_secval_*``)
         and needs no Series, so only index >= 1 registers here."""
         out: set[int] = set()
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+
+        def resolve_ta_site(obj, resolving: set[str] | None = None):
+            """_get_ta_site only matches the literal ta.* FuncCall node by
+            identity; fall back through global_expr_map for an indirect
+            binding (``v = ta.ema(close, 55)`` then ``...v[1]...``), mirroring
+            the same fallback in _build_security_expr's Subscript branch."""
+            site = self._get_ta_site(obj)
+            if site is not None:
+                return site
+            if isinstance(obj, Identifier):
+                if resolving is None:
+                    resolving = set()
+                if obj.name in global_expr_map and obj.name not in resolving:
+                    resolving.add(obj.name)
+                    return resolve_ta_site(global_expr_map[obj.name], resolving)
+            return None
 
         def walk(n):
             if n is None:
                 return
             if isinstance(n, Subscript):
-                site = self._get_ta_site(n.object)
+                site = resolve_ta_site(n.object)
                 if site is not None:
                     idx_lit = self._literal_int_for_security_index(n.index)
                     if idx_lit is not None and idx_lit >= 1:
@@ -1413,7 +1433,7 @@ class SecurityEmitter:
                         )
                         var_name = variant["result_name"]
                         sec_name = variant["member_name"]
-                        lines.append(f"        auto {var_name} = is_complete "
+                        lines.append(f"        auto {var_name} = security_series_slot_is_new({sec_id}) "
                                      f"? {sec_name}.compute({compute_args}) "
                                      f": {sec_name}.recompute({compute_args});")
                         ta_results[(idx, variant["signature"])] = var_name
@@ -1686,6 +1706,34 @@ class SecurityEmitter:
                         expr_node,
                         "request.security() OHLC history index must be a literal integer (e.g. high[1])",
                     )
+
+                # Indirect TA binding: ``v = ta.ema(close, 55)`` then
+                # ``request.security(..., v[1], ...)``. _get_ta_site below only
+                # matches the literal ta.* FuncCall node by identity, so a bare
+                # Identifier subscript target silently misses it and falls
+                # through to a chart-resolution read of the wrong (non-HTF)
+                # series. Resolve through the same global_expr_map the
+                # non-subscript Identifier path above already uses, and
+                # recurse on a synthetic Subscript over the resolved value so
+                # it re-enters this whole branch (TA site, OHLC field, or
+                # helper binding, whichever the resolved expression turns out
+                # to be) instead of duplicating that dispatch here.
+                global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+                if (expr_node.object.name in global_expr_map
+                        and expr_node.object.name not in resolving):
+                    resolving.add(expr_node.object.name)
+                    resolved = self._build_security_expr(
+                        sec_id,
+                        Subscript(object=global_expr_map[expr_node.object.name], index=expr_node.index),
+                        ta_range,
+                        ta_results,
+                        resolving,
+                        security_mutable_names,
+                        helper_binding_stack,
+                        emitted_lines,
+                    )
+                    resolving.remove(expr_node.object.name)
+                    return resolved
             ta_site = self._get_ta_site(expr_node.object)
             if ta_site is not None:
                 # ``ta.<fn>(...)[k]`` inside request.security(): the inner TA call
@@ -1822,7 +1870,7 @@ class SecurityEmitter:
                 helper_binding_stack,
                 emitted_lines,
             )
-            return f"(is_complete ? {sec_name}.compute({compute_args}) : {sec_name}.recompute({compute_args}))"
+            return f"(security_series_slot_is_new({sec_id}) ? {sec_name}.compute({compute_args}) : {sec_name}.recompute({compute_args}))"
 
         result = self._visit_expr(expr_node)
         return self._rewrite_security_cpp(result, sec_id, security_mutable_names, helper_binding_stack)

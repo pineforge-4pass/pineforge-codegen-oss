@@ -254,6 +254,25 @@ class CallHandlers:
 
         return PineType.FLOAT
 
+    def _security_symbol_is_heikinashi(self, node, _seen=None) -> bool:
+        """True when a request.security symbol is ``ticker.heikinashi(<chart
+        symbol>)`` — directly, or via a global alias (``haTicker =
+        ticker.heikinashi(syminfo.tickerid)``). Name-cycle-guarded. The
+        support_checker has already rejected the cross-symbol HA case, so any HA
+        reaching here is the chart's own symbol."""
+        if _seen is None:
+            _seen = set()
+        if (isinstance(node, FuncCall) and isinstance(node.callee, MemberAccess)
+                and isinstance(node.callee.object, Identifier)
+                and node.callee.object.name == "ticker"
+                and node.callee.member == "heikinashi"):
+            return True
+        if (isinstance(node, Identifier) and node.name in self._global_expr_map
+                and node.name not in _seen):
+            _seen.add(node.name)
+            return self._security_symbol_is_heikinashi(self._global_expr_map[node.name], _seen)
+        return False
+
     def _handle_request_call(self, func_name: str, node: FuncCall) -> PineType:
         """Handle request.* function calls."""
         if func_name == "security":
@@ -295,6 +314,11 @@ class CallHandlers:
             lookahead_node = all_args[4] if len(all_args) > 4 else None
 
             mutable_globals = tuple(sorted(self._collect_security_mutable_globals(expr_node)))
+            # Heikin-Ashi same-symbol read: request.security(ticker.heikinashi(
+            # syminfo.tickerid), ...) (directly or via a global alias). The engine
+            # applies the HA candle transform inside the security eval.
+            symbol_node = all_args[0] if all_args else None
+            heikinashi = self._security_symbol_is_heikinashi(symbol_node)
             # Capture the user function (if any) whose body contains this call,
             # so the codegen can resolve a parameter ``tf`` via the call sites.
             scope_name = self._symbols.current_scope.name
@@ -308,6 +332,7 @@ class CallHandlers:
                 gaps=gaps_node,
                 lookahead=lookahead_node,
                 ta_range=security_ta_range,
+                heikinashi=heikinashi,
                 depends_on_mutable_globals=bool(mutable_globals),
                 mutable_globals=mutable_globals,
                 containing_func=containing_func,

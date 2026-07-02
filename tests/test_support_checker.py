@@ -640,9 +640,13 @@ def test_hard_reject_namespace_includes_ticker():
         "ticker blanket-reject was converted to per-function entries (G2 sprint); "
         "ticker.inherit/standard are now passthrough."
     )
-    # The 7 chart-type modifier / cross-symbol construction functions remain hard-rejected.
+    # ticker.heikinashi is contextually supported for the chart's own symbol
+    # (handled in _visit_FuncCall), so it is NOT in the blanket hard-reject set.
+    assert "ticker.heikinashi" not in HARD_REJECT_FUNC
+    # The remaining 6 chart-type modifier / cross-symbol construction functions
+    # stay hard-rejected.
     for fn in (
-        "ticker.heikinashi", "ticker.renko", "ticker.kagi", "ticker.linebreak",
+        "ticker.renko", "ticker.kagi", "ticker.linebreak",
         "ticker.pointfigure", "ticker.new", "ticker.modify",
     ):
         assert fn in HARD_REJECT_FUNC, f"{fn} should be hard-rejected per G2 spec"
@@ -660,8 +664,26 @@ def test_divergent_includes_bar_index():
 # G2 sprint: ticker per-function split tests
 # ---------------------------------------------------------------------------
 
-def test_ticker_heikinashi_rejected():
-    src = PRELUDE + 't = ticker.heikinashi(syminfo.tickerid)\n'
+def test_ticker_heikinashi_chart_symbol_accepted():
+    # ticker.heikinashi(syminfo.tickerid) is the chart's OWN symbol with a causal
+    # Heikin-Ashi candle transform; the engine applies it inside request.security
+    # (register_security_eval heikinashi flag). Supported — directly and via alias.
+    src = (PRELUDE
+           + 'ha = ticker.heikinashi(syminfo.tickerid)\n'
+           + 'v = request.security(ha, "60", close, lookahead = barmerge.lookahead_off)\n'
+           + 'plot(v)\n')
+    assert _errors(src) == []
+    # Inline (un-aliased) symbol form is equally accepted.
+    src2 = (PRELUDE
+            + 'v = request.security(ticker.heikinashi(syminfo.tickerid), "60", close)\n'
+            + 'plot(v)\n')
+    assert _errors(src2) == []
+
+
+def test_ticker_heikinashi_cross_symbol_rejected():
+    # Heikin-Ashi of a DIFFERENT symbol is genuine cross-symbol construction —
+    # PineForge cannot load an alternate symbol's HA candles.
+    src = PRELUDE + 't = ticker.heikinashi("BINANCE:BTCUSDT")\n'
     _expect_error(src, "ticker.heikinashi")
 
 

@@ -132,11 +132,10 @@ HARD_REJECT_FUNC: dict[str, str] = {
     "request.seed":              "External seed data feeds not available in PineForge.",
     "request.quandl":            "External Quandl data not available in PineForge.",
     "request.currency_rate":     "Currency conversion data not available in PineForge.",
-    # ticker.* chart-type modifiers and cross-symbol constructors — hard reject
-    "ticker.heikinashi":         (
-        "ticker.heikinashi() chart-type modifier / cross-symbol construction not supported — "
-        "PineForge runs same-symbol MTF only via request.security with the chart's own tickerid."
-    ),
+    # ticker.* chart-type modifiers and cross-symbol constructors — hard reject.
+    # NOTE: ticker.heikinashi is handled contextually in _visit_FuncCall (allowed
+    # for the chart's own symbol — the engine applies the HA candle transform
+    # inside the same-symbol security eval — rejected for cross-symbol).
     "ticker.renko":              (
         "ticker.renko() chart-type modifier / cross-symbol construction not supported — "
         "PineForge runs same-symbol MTF only via request.security with the chart's own tickerid."
@@ -479,6 +478,12 @@ class SupportChecker:
         # bare ``time_close`` variable) must NOT be flagged as a divergent
         # variable read. Populated as _visit_FuncCall descends into children.
         self._callee_node_ids: set[int] = set()
+        # Declaration value of each scalar variable (``name = <expr>``), so the
+        # request.security symbol check can resolve an aliased symbol through
+        # its definition — e.g. ``haTicker = ticker.heikinashi(syminfo.tickerid)``
+        # then ``request.security(haTicker, ...)``, or ``reqSym = cond ? other :
+        # syminfo.tickerid``. First binding wins (closest to declaration).
+        self._scalar_defs: dict[str, ASTNode] = {}
 
     # -- Public API --
 
@@ -764,6 +769,8 @@ class SupportChecker:
         self._visit_children_const_ok(node)
 
     def _visit_VarDecl(self, node: VarDecl) -> None:
+        if node.name and node.value is not None:
+            self._scalar_defs.setdefault(node.name, node.value)
         if node.type_hint in self._user_types:
             self._var_udt_types[node.name] = node.type_hint
         elif isinstance(node.value, FuncCall):
@@ -863,6 +870,25 @@ class SupportChecker:
         # Hard rejects by full name.
         if full in HARD_REJECT_FUNC:
             self._err(node, f"{full}(...) is not supported.", hint=HARD_REJECT_FUNC[full])
+            self._visit_children(node)
+            return
+
+        # Heikin-Ashi: supported for the chart's OWN symbol only. The engine
+        # applies the HA candle transform inside the same-symbol security eval
+        # (request.security(ticker.heikinashi(syminfo.tickerid), ...)); a
+        # cross-symbol HA construction (an alternate symbol's candles) is not.
+        if full == "ticker.heikinashi":
+            arg0 = node.args[0] if node.args else node.kwargs.get("symbol")
+            if arg0 is None or not self._is_current_symbol_expr(arg0):
+                self._err(
+                    node,
+                    "ticker.heikinashi(...) is supported only for the chart's own symbol.",
+                    hint=(
+                        "Pass syminfo.tickerid: PineForge applies the Heikin-Ashi candle "
+                        "transform to the chart symbol inside request.security, but cannot "
+                        "load an alternate symbol's HA candles."
+                    ),
+                )
             self._visit_children(node)
             return
 
@@ -1457,19 +1483,38 @@ class SupportChecker:
             return False
         return node.member in allowed
 
-    def _is_current_symbol_expr(self, node: ASTNode) -> bool:
+    def _is_current_symbol_expr(self, node: ASTNode, _seen: set[str] | None = None) -> bool:
+        if _seen is None:
+            _seen = set()
         chain = _resolve_member_chain(node)
         if chain in SECURITY_CURRENT_SYMBOL_NAMES:
             return True
-        # ticker.inherit(symbol, ...) and ticker.standard(symbol) are passthrough;
-        # if their first argument is a current-symbol expression, allow it.
+        # ticker.inherit(symbol, ...) / ticker.standard(symbol) are passthrough,
+        # and ticker.heikinashi(symbol) is the chart's OWN symbol with a causal
+        # Heikin-Ashi candle transform (the engine applies it inside the security
+        # eval via register_security_eval's heikinashi flag — no alternate symbol
+        # is loaded). All allow a current-symbol first argument; a non-current
+        # arg is genuine cross-symbol construction and still falls through.
         if isinstance(node, FuncCall):
             ns, fname = _qualified_name(node.callee)
-            if ns == "ticker" and fname in ("inherit", "standard"):
-                if node.args and self._is_current_symbol_expr(node.args[0]):
+            if ns == "ticker" and fname in ("inherit", "standard", "heikinashi"):
+                if node.args and self._is_current_symbol_expr(node.args[0], _seen):
                     return True
-                if "symbol" in node.kwargs and self._is_current_symbol_expr(node.kwargs["symbol"]):
+                if "symbol" in node.kwargs and self._is_current_symbol_expr(node.kwargs["symbol"], _seen):
                     return True
+        # A ternary symbol (``cond ? other : syminfo.tickerid``) resolves to the
+        # chart symbol whenever EITHER branch does. PineForge only ever loads the
+        # chart symbol, so this is exact at any config where the chosen branch is
+        # the chart symbol; an unconditional cross-symbol expression still errors.
+        if isinstance(node, Ternary):
+            return (self._is_current_symbol_expr(node.true_val, _seen)
+                    or self._is_current_symbol_expr(node.false_val, _seen))
+        # Def-use: resolve a bare identifier through its declaration value so an
+        # aliased symbol is accepted (``haTicker = ticker.heikinashi(...)`` then
+        # ``request.security(haTicker, ...)``). Name-cycle-guarded.
+        if isinstance(node, Identifier) and node.name in self._scalar_defs and node.name not in _seen:
+            _seen.add(node.name)
+            return self._is_current_symbol_expr(self._scalar_defs[node.name], _seen)
         return False
 
     # -- Pine timeframe-literal validation --

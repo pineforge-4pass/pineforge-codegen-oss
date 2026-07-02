@@ -335,6 +335,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._switch_counter = 0
         self._security_inline_counter = 0
         self._random_call_counter = 0
+        self._for_counter = 0
         # UDT / enum (needed before _collect_known_vars for input.enum)
         self._udt_defs: dict[str, list] = {}
         self._enum_defs: dict[str, list[str]] = {}
@@ -534,6 +535,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "tf_node": tf_node,
                 "gaps_on": is_gaps_on,
                 "lookahead_on": is_lookahead_on,
+                "heikinashi": bool(item.get("heikinashi", False)),
                 "ta_range": ta_range,
                 "ta_indices": sorted(ta_indices),
                 "ta_binding_stacks": ta_binding_stacks,
@@ -1613,7 +1615,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             total_cs = self.ctx.func_call_site_counts.get(fi.name, 0)
             has_ta = fi.name in self.ctx.func_ta_ranges
             has_series = fi.name in self.ctx.func_series_vars or fi.name in self.ctx.func_var_members
-            if (has_ta or has_series) and total_cs > 0:
+            # A function whose ONLY reason to need per-call-site cloning is a
+            # security-tf-monomorphized request.security (no TA/series state
+            # of its own — see Analyzer._check_mixed_callsite_security_tf)
+            # still needs N separate emitted bodies so self._active_call_site_idx
+            # is set while each is emitted (read by the request.security
+            # use-site lowering in visit_call.py to pick the right clone's
+            # sec_id).
+            needs_security_clone = fi.name in self.ctx.func_security_clone_only
+            if (has_ta or has_series or needs_security_clone) and total_cs > 0:
                 # Emit one variant per call site
                 for cs_idx in range(total_cs):
                     self._emit_func_def(fi, lines, call_site_idx=cs_idx)
