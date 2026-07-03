@@ -238,6 +238,7 @@ def test_hour_two_arg_passes_tz():
     )
     cpp = _generate(src)
     assert "America/New_York" in cpp
+    assert "normalize_timezone_for_posix" in cpp
     # Two-arg form must use localtime_r (with the TZ env mutation) rather
     # than just gmtime_r — that is the whole point of the tz argument.
     assert "localtime_r" in cpp
@@ -263,6 +264,7 @@ def test_hour_one_arg_uses_syminfo_timezone():
     # TV docs. The default ``SymInfo::timezone`` of "UTC" keeps the
     # cheap gmtime_r path active for crypto.
     assert "syminfo_.timezone" in cpp
+    assert "normalize_timezone_for_posix" in cpp
     # The chart-display TZ slot must NOT leak into the bar-time lambda;
     # if it ever does, this test catches the regression.
     assert "chart_timezone_" not in cpp

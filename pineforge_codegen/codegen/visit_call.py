@@ -760,7 +760,7 @@ class CallVisitor:
                 sc = args[6] if len(args) > 6 else "0"
                 return (
                     f"[&]() -> int64_t {{ "
-                    f"std::string _tz = ({tz}); "
+                    f"std::string _tz = pineforge::normalize_timezone_for_posix(({tz})); "
                     f"int _yr = ({yr}); int _mo = ({mo}); int _dy = ({dy}); "
                     f"int _hr = ({hr}); int _min = ({mn}); int _sc = ({sc}); "
                     f"static thread_local std::string _last_tz; "

@@ -55,7 +55,7 @@ def tz_time_field_lambda(field_expr: str, ts_arg: str, tz_arg: str) -> str:
     """
     return (
         "[&]() -> int { "
-        f"std::string _tz = ({tz_arg}); "
+        f"std::string _tz = pineforge::normalize_timezone_for_posix(({tz_arg})); "
         f"time_t _secs = (time_t)(({ts_arg}) / 1000); "
         "struct tm tm_buf; "
         "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") { "

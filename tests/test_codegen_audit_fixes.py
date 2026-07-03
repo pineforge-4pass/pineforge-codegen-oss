@@ -82,6 +82,7 @@ def test_timestamp_numeric_form_works():
 
 def test_timestamp_tz_form_works():
     cpp = _gen('t = timestamp("GMT+2", 2020, 1, 2)\nplot(close)\n')
+    assert "normalize_timezone_for_posix" in cpp
     assert "mktime" in cpp
 
 
