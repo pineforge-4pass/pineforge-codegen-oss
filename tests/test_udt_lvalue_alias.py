@@ -110,6 +110,28 @@ plot(x)
     assert "pivot* p" not in body
 
 
+def test_array_get_udt_local_mutation_emits_reference_alias():
+    src = PROLOGUE + """
+var array<pivot> pivots = array.new<pivot>()
+upd(int i) =>
+    pivot p = array.get(pivots, i)
+    p.currentLevel := close
+    p.crossed := true
+    0
+if array.size(pivots) == 0
+    array.push(pivots, pivot.new(na, false))
+if close > open
+    upd(0)
+plot(close)
+"""
+    cpp = transpile(src)
+    body = _func_body(cpp, "upd")
+    assert "pivot& p = pivots[(i)];" in body
+    assert "pivot p = pivots[(i)];" not in body
+    assert "p.currentLevel = " in body
+    assert "p.crossed = true;" in body
+
+
 def test_drawing_style_constant_into_string_param_coerced():
     # The crash unmasked by the alias fix: label.style_* into a string param.
     src = """//@version=6

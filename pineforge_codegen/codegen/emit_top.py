@@ -776,10 +776,12 @@ class TopLevelEmitter:
         # Determine param types and set context for type inference inside body
         param_strs = []
         self._current_func_param_types = {}
+        self._current_func_param_specs = {}
         self._current_func_series_params = set()
         self._udt_param_udt = {}
         func_sv = self.ctx.func_series_vars.get(fi.name, set())
         for i, p in enumerate(node.params):
+            spec = None
             if is_udt and i == 0 and fi.udt_type_name:
                 # A method receiver whose type is a drawing primitive
                 # (egoigor's ``method slope(line ln)``) must emit ``Line&`` not
@@ -821,6 +823,9 @@ class TopLevelEmitter:
                 cpp_t = "double"
             param_strs.append(f"{cpp_t} {self._safe_name(p)}")
             self._current_func_param_types[p] = cpp_t
+            if spec is not None:
+                self._current_func_param_specs[p] = spec
+                self._current_func_param_specs[self._safe_name(p)] = spec
 
         # Determine return type: tuple, UDT, or scalar.
         # The UDT branch handles user functions whose body is ``T.new(...)``;
@@ -958,6 +963,7 @@ class TopLevelEmitter:
 
         lines.append("    }")
         self._current_func_param_types = {}
+        self._current_func_param_specs = {}
         self._current_func_series_params = set()
         self._udt_param_udt = {}
         self._current_func_locals = prev_func_locals

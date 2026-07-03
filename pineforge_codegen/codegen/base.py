@@ -434,6 +434,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_calls: list[dict] = [self._normalize_security_call(item) for item in ctx.security_calls]
         # Current function parameter types (set during _emit_func_def)
         self._current_func_param_types: dict[str, str] = {}
+        self._current_func_param_specs: dict[str, "TypeSpec"] = {}
         # Current function params that are series (const Series<double>&)
         self._current_func_series_params: set[str] = set()
         # Locals declared in the function currently being emitted (symbol table loses them after analysis)

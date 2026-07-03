@@ -215,6 +215,9 @@ class TypeInferer:
                 return loop_specs[node.name]
             if node.name in self._collection_types:
                 return self._collection_types[node.name]
+            param_specs = getattr(self, "_current_func_param_specs", {})
+            if node.name in param_specs:
+                return param_specs[node.name]
             if node.name in self._udt_var_types:
                 return TypeSpec.udt(self._udt_var_types[node.name])
             # Drawing-typed method/function parameter (L.6d / U.5): a ``line ln``
@@ -515,12 +518,29 @@ class TypeInferer:
 
     def _is_udt_lvalue(self, expr) -> str | None:
         """If ``expr`` is a *user-defined* UDT lvalue (a bare ``Identifier`` that
-        names a class-scope ``var``/global UDT member, e.g. ``wyckoffSwingLow``),
-        return its UDT type name; else ``None``.
+        names a class-scope ``var``/global UDT member, e.g. ``wyckoffSwingLow``,
+        or an element selected from ``array<UDT>``), return its UDT type name;
+        else ``None``.
 
         Pine UDTs are reference types, so a local initialised from such an lvalue
         and then mutated through must write back to the global. Drawing UDTs are
         handled by the separate ``_uses_drawing`` path and are excluded here."""
+        if isinstance(expr, FuncCall):
+            callee = expr.callee
+            func_name, namespace = self._resolve_callee(callee)
+            receiver = None
+            if namespace == "array" and func_name in ("get", "first", "last") and expr.args:
+                receiver = expr.args[0]
+            elif (isinstance(callee, MemberAccess)
+                  and func_name in ("get", "first", "last")):
+                receiver = callee.object
+            if receiver is not None:
+                spec = self._type_spec_from_expr(receiver)
+                elem = spec.element if spec is not None and spec.kind == "array" else None
+                if (elem is not None and elem.kind == "udt" and elem.name in self._udt_defs
+                        and elem.name not in DRAWING_TYPE_TO_CPP):
+                    return elem.name
+            return None
         if not isinstance(expr, Identifier):
             return None
         udt_t = self._udt_var_types.get(expr.name)
