@@ -911,6 +911,12 @@ class TypeInferer:
                 return tt if tt.startswith("std::vector") else ft
             if tt == "std::string" or ft == "std::string":
                 return "std::string"
+            if tt == "double" or ft == "double":
+                return "double"
+            if tt == "int64_t" or ft == "int64_t":
+                return "int64_t"
+            if tt == "bool" and ft == "bool":
+                return "bool"
             return tt
         # Block-as-expression cases: read the type of the last statement of
         # the first branch / case; matches Pine semantics for ``x = if...``.

@@ -15,6 +15,8 @@ Covers seven fix families:
      before the real run.
   8. Pine ``for`` loops infer direction even when an explicit positive ``by``
      step is supplied.
+  9. Numeric ternaries promote an ``int`` literal branch to ``double`` when the
+     other branch is floating-point arithmetic.
 """
 
 from pineforge_codegen import transpile
@@ -793,3 +795,13 @@ def test_for_loop_with_explicit_by_infers_descending_direction():
     assert "i += (_for_down_" in cpp
     assert "_for_end_" in cpp and "_for_end_0 = (0)" in cpp
     assert "for (int i = limit; i <= 0; i += 1)" not in cpp
+
+
+def test_numeric_ternary_with_int_literal_and_float_branch_declares_double():
+    cpp = _cpp(
+        "rng = high - low\n"
+        "pressure = rng == 0 ? 0 : (close - low) / rng\n"
+        "plot(pressure)"
+    )
+    assert "double pressure" in cpp
+    assert "int pressure" not in cpp
