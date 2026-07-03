@@ -1404,7 +1404,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 3. TA members
         for site in self.ctx.ta_call_sites:
             lines.append(f"    {site.class_name} {site.member_name};")
-            if getattr(site, "is_static", False):
+            if self._ta_site_uses_precalc(site):
                 vtype = self._ta_return_type(site)
                 lines.append(f"    std::vector<{vtype}> _precalc_{site.member_name};")
         lines.append("    bool _use_precalc = false;")

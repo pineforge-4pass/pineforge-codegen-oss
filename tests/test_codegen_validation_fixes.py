@@ -374,6 +374,18 @@ def test_ta_stdev_biased_arg_goes_to_constructor_not_compute():
     assert ".recompute(current_bar_.close, false)" not in cpp
 
 
+def test_ta_precalc_skips_user_series_alias_source():
+    cpp = _cpp(
+        "ha_close = close\n"
+        "bbLen = input.int(20, \"BB Length\")\n"
+        "dev = ta.stdev(ha_close, bbLen) * 2.0\n"
+        "plot(dev)"
+    )
+    assert "std::vector<double> _precalc__ta_stdev" not in cpp
+    assert "_use_precalc ? _precalc__ta_stdev" not in cpp
+    assert "_ta_stdev_1.compute(ha_close)" in cpp
+
+
 def test_text_align_wrapper_param_infers_string():
     cpp = _cpp(
         "var table dash = table.new(position.top_right, 1, 1)\n"
@@ -658,3 +670,20 @@ def test_function_scoped_var_not_in_constructor_init_list():
     import re
     m = re.search(r"GeneratedStrategy\(\)\s*:([^\n]*)", cpp)
     assert m is None or "c(5)" not in m.group(0)
+
+
+def test_strategy_exit_profit_loss_passes_relative_ticks_to_engine():
+    # strategy.exit(profit/loss) can be issued while its entry is still pending.
+    # Codegen must not convert the tick offsets to absolute prices using
+    # position_entry_price_ at call time, because the actual entry fill may not
+    # exist until the next bar.
+    cpp = _cpp(
+        "if bar_index == 0\n"
+        "    strategy.entry(\"L\", strategy.long)\n"
+        "    strategy.exit(\"X\", \"L\", profit=40, loss=20)\n"
+        "plot(close)"
+    )
+    assert "position_entry_price_ +" not in cpp
+    assert "position_entry_price_ -" not in cpp
+    assert 'strategy_exit(std::string("X"), std::string("L"), na<double>(), na<double>()' in cpp
+    assert ", 100.0, \"\", na<double>(), \"\", 40, 20);" in cpp

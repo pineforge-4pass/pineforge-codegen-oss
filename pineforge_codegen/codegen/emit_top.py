@@ -1034,7 +1034,7 @@ class TopLevelEmitter:
         lines.append("        }")
 
     def _emit_precalculate_and_run(self, lines: list[str]) -> None:
-        has_static_ta = any(getattr(site, "is_static", False) for site in self.ctx.ta_call_sites)
+        has_static_ta = any(self._ta_site_uses_precalc(site) for site in self.ctx.ta_call_sites)
         if not has_static_ta:
             return
 
@@ -1045,13 +1045,13 @@ class TopLevelEmitter:
 
         # Resize precalculated vectors
         for site in self.ctx.ta_call_sites:
-            if getattr(site, "is_static", False):
+            if self._ta_site_uses_precalc(site):
                 lines.append(f"        _precalc_{site.member_name}.resize(n);")
 
         # Reset indicators to clean slate
         lines.append("")
         for site in self.ctx.ta_call_sites:
-            if getattr(site, "is_static", False):
+            if self._ta_site_uses_precalc(site):
                 resolved = [self._resolve_known(a) for a in site.ctor_args]
                 safe_resolved = []
                 for r in resolved:
@@ -1140,7 +1140,7 @@ class TopLevelEmitter:
         self._precalc_loop_active = True
         try:
             for site in self.ctx.ta_call_sites:
-                if getattr(site, "is_static", False):
+                if self._ta_site_uses_precalc(site):
                     compute_args = self._ta_compute_args_for_site(site)
                     compute_args_bars = compute_args.replace("current_bar_.", "bars[i].")
                     lines.append(f"            _precalc_{site.member_name}[i] = {site.member_name}.compute({compute_args_bars});")
@@ -1152,7 +1152,7 @@ class TopLevelEmitter:
         # Reset indicators and series for the real backtest run
         lines.append("")
         for site in self.ctx.ta_call_sites:
-            if getattr(site, "is_static", False):
+            if self._ta_site_uses_precalc(site):
                 resolved = [self._resolve_known(a) for a in site.ctor_args]
                 safe_resolved = []
                 for r in resolved:

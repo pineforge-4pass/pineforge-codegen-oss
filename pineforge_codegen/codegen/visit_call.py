@@ -388,9 +388,10 @@ class CallVisitor:
         if site is not None:
             compute_args = self._ta_compute_args_for_site(site)
             ta_mem = self._ta_member_name(site)
-            if getattr(self, "_precalc_loop_active", False) and getattr(site, "is_static", False):
+            uses_precalc = self._ta_site_uses_precalc(site)
+            if getattr(self, "_precalc_loop_active", False) and uses_precalc:
                 return f"_precalc_{ta_mem}[i]"
-            if getattr(site, "is_static", False):
+            if uses_precalc:
                 return f"(_use_precalc ? _precalc_{ta_mem}[bar_index_] : (is_first_tick_ ? {ta_mem}.compute({compute_args}) : {ta_mem}.recompute({compute_args})))"
             return f"(is_first_tick_ ? {ta_mem}.compute({compute_args}) : {ta_mem}.recompute({compute_args}))"
 
@@ -1277,17 +1278,17 @@ class CallVisitor:
                 qty_val = self._visit_expr(qty_n) if qty_n else "na<double>()"
                 comment = self._visit_expr(comment_n) if comment_n is not None else '""'
                 oca_val = self._visit_expr(oca_name_n) if oca_name_n is not None else '""'
+                profit_ticks = "na<double>()"
+                loss_ticks = "na<double>()"
 
                 if profit_n and not limit_n:
-                    ticks = self._visit_expr(profit_n)
-                    limit_val = f"(position_entry_price_ + (signed_position_size() > 0 ? 1.0 : -1.0) * ({ticks}) * syminfo_mintick_)"
+                    profit_ticks = self._visit_expr(profit_n)
                 if loss_n and not stop_n:
-                    ticks = self._visit_expr(loss_n)
-                    stop_val = f"(position_entry_price_ - (signed_position_size() > 0 ? 1.0 : -1.0) * ({ticks}) * syminfo_mintick_)"
+                    loss_ticks = self._visit_expr(loss_n)
 
                 return (f"strategy_exit({exit_id}, {from_id}, {limit_val}, {stop_val}, "
                         f"{trail_pts}, {trail_off}, {trail_pr}, {qty_pct}, {comment}, "
-                        f"{qty_val}, {oca_val})")
+                        f"{qty_val}, {oca_val}, {profit_ticks}, {loss_ticks})")
             close_comment = self._visit_expr(comment_n) if comment_n is not None else '""'
             return f"strategy_close({exit_id}, {close_comment})"
 
