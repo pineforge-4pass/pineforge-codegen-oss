@@ -1038,6 +1038,18 @@ class TopLevelEmitter:
         if not has_static_ta:
             return
 
+        replayed_source_series: list[str] = []
+        for stmt in self.ctx.ast.body:
+            if not isinstance(stmt, VarDecl):
+                continue
+            if stmt.name not in self._global_member_vars:
+                continue
+            if not (isinstance(stmt.value, FuncCall) and self._is_source_input(stmt.value)):
+                continue
+            if stmt.name in self.ctx.series_vars:
+                replayed_source_series.append(self._safe_name(stmt.name))
+        replayed_source_series = sorted(set(replayed_source_series))
+
         lines.append("    void precalculate(const Bar* bars, int n) {")
         lines.append("        _use_precalc = false;")
         lines.append("        if (n <= 0 || bars == nullptr) return;")
@@ -1062,6 +1074,13 @@ class TopLevelEmitter:
         lines.append("")
         for field_name in sorted(self.ctx.series_bar_fields):
             lines.append(f"        _s_{field_name}.clear();")
+        for safe in replayed_source_series:
+            lines.append(f"        {safe}.clear();")
+        if self._script_has_input_source():
+            lines.append("        _src_open_.clear(); _src_high_.clear(); _src_low_.clear();")
+            lines.append("        _src_close_.clear(); _src_volume_.clear();")
+            lines.append("        _src_hl2_.clear(); _src_hlc3_.clear();")
+            lines.append("        _src_ohlc4_.clear(); _src_hlcc4_.clear();")
 
         # Start precalculation loop
         lines.append("")
@@ -1084,8 +1103,8 @@ class TopLevelEmitter:
         # entire precalculation, silently corrupting its precalculated
         # values (e.g. a Bollinger Band's stdev collapsing to 0). Gated on
         # ``_src_series_active_`` to stay a no-op for scripts with no
-        # input.source() usage; cleared again before the real run begins
-        # (BacktestEngine::run() clears every _src_*_ series unconditionally).
+        # input.source() usage; cleared before and after the precalc pass so
+        # replayed source history cannot leak into the real run.
         lines.append("            if (_src_series_active_) {")
         lines.append("                const double _pc_o = bars[i].open;")
         lines.append("                const double _pc_h = bars[i].high;")
@@ -1161,6 +1180,13 @@ class TopLevelEmitter:
 
         for field_name in sorted(self.ctx.series_bar_fields):
             lines.append(f"        _s_{field_name}.clear();")
+        for safe in replayed_source_series:
+            lines.append(f"        {safe}.clear();")
+        if self._script_has_input_source():
+            lines.append("        _src_open_.clear(); _src_high_.clear(); _src_low_.clear();")
+            lines.append("        _src_close_.clear(); _src_volume_.clear();")
+            lines.append("        _src_hl2_.clear(); _src_hlc3_.clear();")
+            lines.append("        _src_ohlc4_.clear(); _src_hlcc4_.clear();")
 
         lines.append("")
         lines.append("        _use_precalc = true;")

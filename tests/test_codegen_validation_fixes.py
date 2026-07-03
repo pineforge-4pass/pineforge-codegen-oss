@@ -1,6 +1,6 @@
 """Regression tests for codegen bugs found by pinescript-scrapper validation.
 
-Covers six fix families:
+Covers seven fix families:
   1. drawing-handle ``na`` reset/assignment (Box{}/Line{}/... not na<double>()),
      plus typed ``na`` for string/int/bool declaration init.
   2. void drawing setter used as a UDF's last expression / if-branch value.
@@ -11,6 +11,8 @@ Covers six fix families:
   5. typed drawing array constructors ``array.new_line/box/label/linefill``.
   6. Pine v6 bool casts that must treat ``na`` as ``false`` instead of C++'s
      truthy NaN conversion.
+  7. ``input.source`` series replayed during TA precompute must be cleared
+     before the real run.
 """
 
 from pineforge_codegen import transpile
@@ -356,6 +358,18 @@ def test_bool_cast_numeric_na_is_false_not_cpp_nan_truthy():
     assert "bool isUp" in cpp
     assert "bool fromClose" in cpp
     assert "bool fromZero" in cpp
+
+
+def test_precalc_clears_replayed_input_source_series():
+    cpp = _cpp(
+        "src = input.source(high, \"High source\")\n"
+        "ph = ta.pivothigh(src, 5, 5)\n"
+        "x = src[5]\n"
+        "plot(na(ph) ? x : ph)"
+    )
+    assert "src.push(get_input_source" in cpp
+    assert cpp.count("src.clear();") >= 2
+    assert "_src_high_.clear()" in cpp
 
 
 def test_str_contains_udf_infers_bool_return_type():
