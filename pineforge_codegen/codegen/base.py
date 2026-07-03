@@ -1240,6 +1240,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # request.security TA call-sites read at a history offset (``ta.ema(...)[k>=1]``).
         # Maps sec_id -> set of TA call-site indices needing an HTF history Series.
         self._security_ta_hist_idx_by_sec: dict[int, set[int]] = {}
+        # request.security helper-call results read at a history offset
+        # (``myHelper()[k]``). Maps (sec_id, node-id) -> backing Series metadata.
+        self._security_expr_hist_by_node: dict[tuple[int, int], dict] = {}
 
         lines: list[str] = []
 
@@ -1340,6 +1343,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 )
                 for name in self._security_ta_hist_series_names(sec_id):
                     lines.append(f"    Series<double> {name}{_mbb};")
+                self._emit_security_expr_hist_members(sec_id, expr_node, lines, _mbb)
                 continue
             if returns_tuple and tuple_size and tuple_size > 0 and isinstance(expr_node, TupleLiteral):
                 hist_fields: set[str] = set()
@@ -1380,6 +1384,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             )
             for name in self._security_ta_hist_series_names(sec_id):
                 lines.append(f"    Series<double> {name}{_mbb};")
+            self._emit_security_expr_hist_members(sec_id, expr_node, lines, _mbb)
 
         if self._security_calls:
             lines.append('    std::unordered_map<std::string, Series<double>> _security_helper_series_;')

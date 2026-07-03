@@ -1171,6 +1171,33 @@ plot(htfBasis)
     assert "is_first_tick_ ? _ta_ema_1" not in eval_body
 
 
+def test_request_security_helper_history_offset_uses_htf_context():
+    cpp = _generate("""
+//@version=6
+strategy("T")
+clamp(float x) =>
+    math.max(-1.0, math.min(1.0, x))
+score() =>
+    raw = timeframe.isweekly ? clamp(close - open) : na
+    raw
+htfScore = request.security(syminfo.tickerid, "W", score()[1], lookahead=barmerge.lookahead_off)
+plot(htfScore)
+""")
+    start = cpp.index("void _eval_security_0(")
+    end = cpp.index("void evaluate_security(", start)
+    eval_body = cpp[start:end]
+
+    assert "Series<double> _sec0_expr_hist_0" in cpp
+    assert "tf_is_weekly(\"W\")" in eval_body
+    assert "bar.close - bar.open" in eval_body
+    assert "_req_sec_0 = ([&]() -> double" in eval_body
+    assert "_sec0_expr_hist_0[_hidx - 1]" in eval_body
+    assert "if (is_complete) _sec0_expr_hist_0.push(_hv);" in eval_body
+    assert "_hist_call" not in eval_body
+    assert "is_first_tick_" not in eval_body
+    assert "current_bar_" not in eval_body
+
+
 def test_request_financial_still_na():
     cpp = _generate("""
 //@version=6

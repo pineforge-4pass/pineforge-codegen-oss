@@ -67,8 +67,9 @@ from ..ast_nodes import (
 from ..analyzer import (
     FuncInfo, TACallSite, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
 )
+from .. import signatures as sigs
 from ..symbols import PineType
-from .tables import PINE_TYPE_TO_CPP, SECURITY_OHLC_BAR_FIELDS
+from .tables import MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_OHLC_BAR_FIELDS, _merge_kwargs
 
 
 class SecurityEmitter:
@@ -412,6 +413,144 @@ class SecurityEmitter:
             for variant in (info.get("ta_variants") or {}).get(idx, []):
                 names.append(self._security_ta_hist_series_cpp(variant["member_name"]))
         return names
+
+    def _collect_security_expr_hist_subscripts(
+        self, node, resolving: set[str] | None = None
+    ) -> list[Subscript]:
+        """Subscripted helper-call results needing security-context history."""
+        if node is None:
+            return []
+        if resolving is None:
+            resolving = set()
+
+        out: list[Subscript] = []
+        seen: set[int] = set()
+
+        def add(n: Subscript) -> None:
+            key = id(n)
+            if key not in seen:
+                seen.add(key)
+                out.append(n)
+
+        def walk(n) -> None:
+            if n is None:
+                return
+            if isinstance(n, Identifier):
+                global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+                if n.name in global_expr_map and n.name not in resolving:
+                    resolving.add(n.name)
+                    walk(global_expr_map[n.name])
+                    resolving.remove(n.name)
+                return
+            if (
+                isinstance(n, Subscript)
+                and isinstance(n.object, FuncCall)
+                and self._get_ta_site(n.object) is None
+            ):
+                add(n)
+            if isinstance(n, (list, tuple)):
+                for x in n:
+                    walk(x)
+                return
+            for _k, v in getattr(n, "__dict__", {}).items():
+                if isinstance(v, ASTNode):
+                    walk(v)
+                elif isinstance(v, (list, tuple)):
+                    for x in v:
+                        if isinstance(x, ASTNode):
+                            walk(x)
+
+        walk(node)
+        return out
+
+    def _security_expr_hist_series_names(self, sec_id: int) -> list[str]:
+        names = []
+        for (sid, _node_id), meta in sorted(self._security_expr_hist_by_node.items()):
+            if sid == sec_id:
+                names.append(meta["name"])
+        return names
+
+    def _emit_security_expr_hist_members(
+        self, sec_id: int, expr_node, lines: list[str], mbb_suffix: str
+    ) -> None:
+        for idx, node in enumerate(self._collect_security_expr_hist_subscripts(expr_node)):
+            cpp_t = self._infer_type(node.object)
+            if cpp_t not in ("double", "int", "bool"):
+                cpp_t = "double"
+            name = f"_sec{sec_id}_expr_hist_{idx}"
+            self._security_expr_hist_by_node[(sec_id, id(node))] = {
+                "name": name,
+                "type": cpp_t,
+            }
+            lines.append(f"    Series<{cpp_t}> {name}{mbb_suffix};")
+
+    def _build_security_math_call(
+        self,
+        sec_id: int,
+        func_name: str,
+        node: FuncCall,
+        ta_range,
+        ta_results: dict,
+        resolving: set[str],
+        security_mutable_names: set[str],
+        helper_binding_stack: tuple[dict[str, ASTNode], ...],
+        emitted_lines: list[str] | None,
+    ) -> str:
+        visit = lambda arg: self._build_security_expr(
+            sec_id,
+            arg,
+            ta_range,
+            ta_results,
+            resolving,
+            security_mutable_names,
+            helper_binding_stack,
+            emitted_lines,
+        )
+        args = _merge_kwargs(
+            node.args,
+            node.kwargs,
+            sigs.get_param_names("math", func_name),
+            visit,
+        )
+        if func_name == "round" and len(args) == 2:
+            return f"(std::round({args[0]} * std::pow(10.0, {args[1]})) / std::pow(10.0, {args[1]}))"
+        if func_name == "round_to_mintick":
+            x = args[0] if args else "0.0"
+            return f"round_to_mintick({x})"
+        if func_name == "todegrees":
+            x = args[0] if args else "0.0"
+            return f"({x} * 180.0 / M_PI)"
+        if func_name == "toradians":
+            x = args[0] if args else "0.0"
+            return f"({x} * M_PI / 180.0)"
+        if func_name == "random":
+            lo = args[0] if len(args) > 0 else "0.0"
+            hi = args[1] if len(args) > 1 else "1.0"
+            seed = args[2] if len(args) > 2 else "0"
+            call_site = self._random_call_counter
+            self._random_call_counter += 1
+            return f"pine_random({lo}, {call_site}u, {hi}, (uint32_t)({seed}), bar_index_)"
+        if func_name == "avg" and len(args) > 2:
+            sum_expr = " + ".join(f"(double)({a})" for a in args)
+            return f"(({sum_expr}) / {len(args)}.0)"
+        if func_name == "max" and len(args) > 2:
+            result = f"std::max((double)({args[0]}), (double)({args[1]}))"
+            for a in args[2:]:
+                result = f"std::max({result}, (double)({a}))"
+            return result
+        if func_name == "min" and len(args) > 2:
+            result = f"std::min((double)({args[0]}), (double)({args[1]}))"
+            for a in args[2:]:
+                result = f"std::min({result}, (double)({a}))"
+            return result
+        if func_name in MATH_FUNC_MAP:
+            mapped = MATH_FUNC_MAP[func_name]
+            if "{0}" in mapped:
+                return mapped.format(*args)
+            if func_name in ("min", "max") and len(args) == 2:
+                return f"{mapped}((double)({args[0]}), (double)({args[1]}))"
+            return f"{mapped}({', '.join(args)})"
+        return f"0.0 /* unsupported: math.{func_name} */"
 
     def _security_timeframe_expr(self, sec_id: int) -> str:
         """C++ expression for the timeframe of a request.security evaluator."""
@@ -1590,6 +1729,8 @@ class SecurityEmitter:
                     )
                 for name in self._security_ta_hist_series_names(sec_id):
                     lines.append(f"                {name}.clear();")
+                for name in self._security_expr_hist_series_names(sec_id):
+                    lines.append(f"                {name}.clear();")
                 lines.append("                break;")
                 continue
             if returns_tuple and tuple_size and tuple_size > 0 and isinstance(expr_node, TupleLiteral):
@@ -1614,6 +1755,8 @@ class SecurityEmitter:
                     )
                 for name in self._security_ta_hist_series_names(sec_id):
                     lines.append(f"                {name}.clear();")
+                for name in self._security_expr_hist_series_names(sec_id):
+                    lines.append(f"                {name}.clear();")
                 lines.append("                break;")
             elif returns_tuple and tuple_size and tuple_size > 0:
                 site = self._get_ta_site(expr_node)
@@ -1637,11 +1780,14 @@ class SecurityEmitter:
                     )
                 for name in self._security_ta_hist_series_names(sec_id):
                     lines.append(f"                {name}.clear();")
+                for name in self._security_expr_hist_series_names(sec_id):
+                    lines.append(f"                {name}.clear();")
                 lines.append("                break;")
             else:
                 hist = self._security_ohlc_hist_fields_by_sec.get(sec_id, ())
                 ta_hist_names = self._security_ta_hist_series_names(sec_id)
-                if hist or ta_hist_names:
+                expr_hist_names = self._security_expr_hist_series_names(sec_id)
+                if hist or ta_hist_names or expr_hist_names:
                     lines.append(f"            case {sec_id}:")
                     lines.append(f"                _req_sec_{sec_id} = na<double>();")
                     for field in sorted(hist):
@@ -1649,6 +1795,8 @@ class SecurityEmitter:
                             f"                {self._security_ohlc_hist_series_cpp(sec_id, field)}.clear();"
                         )
                     for name in ta_hist_names:
+                        lines.append(f"                {name}.clear();")
+                    for name in expr_hist_names:
                         lines.append(f"                {name}.clear();")
                     lines.append("                break;")
                 else:
@@ -1821,6 +1969,31 @@ class SecurityEmitter:
                     )
                     resolving.remove(expr_node.object.name)
                     return resolved
+            if (
+                isinstance(expr_node.object, FuncCall)
+                and self._get_ta_site(expr_node.object) is None
+            ):
+                meta = self._security_expr_hist_by_node.get((sec_id, id(expr_node)))
+                hist = meta["name"] if meta else f"_sec{sec_id}_expr_hist_missing"
+                cpp_t = meta["type"] if meta else "double"
+                inner = self._build_security_expr(
+                    sec_id,
+                    expr_node.object,
+                    ta_range,
+                    ta_results,
+                    resolving,
+                    security_mutable_names,
+                    helper_binding_stack,
+                    emitted_lines,
+                )
+                return (
+                    f"([&]() -> {cpp_t} {{ "
+                    f"{cpp_t} _hv = ({inner}); "
+                    f"int _hidx = (int)({index_cpp}); "
+                    f"{cpp_t} _out = (_hidx <= 0) ? _hv : {hist}[_hidx - 1]; "
+                    f"if (is_complete) {hist}.push(_hv); "
+                    f"return _out; }}())"
+                )
             ta_site = self._get_ta_site(expr_node.object)
             if ta_site is not None:
                 # ``ta.<fn>(...)[k]`` inside request.security(): the inner TA call
@@ -1936,6 +2109,24 @@ class SecurityEmitter:
                     )
                 resolving.remove(call_key)
                 return resolved
+
+        if (
+            isinstance(expr_node, FuncCall)
+            and isinstance(expr_node.callee, MemberAccess)
+            and isinstance(expr_node.callee.object, Identifier)
+            and expr_node.callee.object.name == "math"
+        ):
+            return self._build_security_math_call(
+                sec_id,
+                expr_node.callee.member,
+                expr_node,
+                ta_range,
+                ta_results,
+                resolving,
+                security_mutable_names,
+                helper_binding_stack,
+                emitted_lines,
+            )
 
         site = self._get_ta_site(expr_node)
         if site:
