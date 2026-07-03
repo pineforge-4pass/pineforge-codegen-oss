@@ -166,6 +166,28 @@ class Parser:
     # ------------------------------------------------------------------
 
     def _parse_statement(self):
+        stmt = self._parse_single_statement()
+        if not self._check(TokenType.COMMA):
+            return stmt
+
+        stmts: list = []
+        self._extend_statement_list(stmts, stmt)
+        while self._match(TokenType.COMMA):
+            if self._check(TokenType.NEWLINE) or self._check(TokenType.DEDENT) or self._at_end():
+                break
+            self._extend_statement_list(stmts, self._parse_single_statement())
+        return stmts
+
+    @staticmethod
+    def _extend_statement_list(stmts: list, stmt) -> None:
+        if stmt is None:
+            return
+        if isinstance(stmt, list):
+            stmts.extend(stmt)
+        else:
+            stmts.append(stmt)
+
+    def _parse_single_statement(self):
         cur = self._current()
 
         # Control flow keywords
@@ -374,12 +396,24 @@ class Parser:
         first = VarDecl(name=name_tok.value, value=value)
         self._set_loc(first, start_tok)
 
-        # Check for comma-separated additional declarations: x=1, y=2, z=3
-        if not self._check(TokenType.COMMA):
+        # Check for comma-separated additional declarations: x=1, y=2, z=3.
+        # Other comma-separated simple statements (``a := 1, b := 2`` or
+        # ``array.fill(a, na), array.set(a, 0, 1)``) are handled by the
+        # statement wrapper above, so do not greedily consume their comma.
+        if not (
+            self._check(TokenType.COMMA)
+            and self._peek().type == TokenType.IDENT
+            and self._peek(2).type == TokenType.EQUALS
+        ):
             return first
 
         decls = [first]
-        while self._match(TokenType.COMMA):
+        while (
+            self._check(TokenType.COMMA)
+            and self._peek().type == TokenType.IDENT
+            and self._peek(2).type == TokenType.EQUALS
+        ):
+            self._advance()
             st = self._current()
             n = self._consume(TokenType.IDENT)
             self._consume(TokenType.EQUALS)

@@ -1,6 +1,6 @@
 """Regression tests for codegen bugs found by pinescript-scrapper validation.
 
-Covers five fix families:
+Covers six fix families:
   1. drawing-handle ``na`` reset/assignment (Box{}/Line{}/... not na<double>()),
      plus typed ``na`` for string/int/bool declaration init.
   2. void drawing setter used as a UDF's last expression / if-branch value.
@@ -9,6 +9,8 @@ Covers five fix families:
   4. parser handling of ``T[]`` array-typed function parameters (``float[] arr``,
      ``line[] ln``) — previously the whole function was dropped.
   5. typed drawing array constructors ``array.new_line/box/label/linefill``.
+  6. Pine v6 bool casts that must treat ``na`` as ``false`` instead of C++'s
+     truthy NaN conversion.
 """
 
 from pineforge_codegen import transpile
@@ -312,6 +314,48 @@ def test_untyped_var_drawing_array_constructor_emits_typed_member():
     )
     assert "std::vector<Box> boxes;" in cpp
     assert "std::vector<double> boxes;" not in cpp
+
+
+def test_comma_separated_statements_and_array_fill_emit_all_side_effects():
+    cpp = _cpp(
+        "var float a = na\n"
+        "var float b = na\n"
+        "var float[] xs = array.new_float(3, na)\n"
+        "var int[] ys = array.new_int(2, na)\n"
+        "var label[] lbs = array.new_label(2, na)\n"
+        "if true\n"
+        "    a := 1, b := 2\n"
+        "    array.fill(xs, na), array.set(xs, 1, 7)\n"
+        "    array.fill(ys, na), ys.set(1, na)\n"
+        "    array.fill(lbs, na)\n"
+        "plot(a + b + array.get(xs, 1))"
+    )
+    assert "a = 1;" in cpp
+    assert "b = 2;" in cpp
+    assert "xs = std::vector<double>((size_t)(3), na<double>());" in cpp
+    assert "ys = std::vector<int>((size_t)(2), na<int>());" in cpp
+    assert "lbs = std::vector<Label>((size_t)(2), Label{});" in cpp
+    assert "std::fill(xs.begin(), xs.end(), na<double>());" in cpp
+    assert "xs[(1)] = 7;" in cpp
+    assert "std::fill(ys.begin(), ys.end(), na<int>());" in cpp
+    assert "ys[(1)] = na<int>();" in cpp
+    assert "std::fill(lbs.begin(), lbs.end(), Label{});" in cpp
+    assert "std::vector<double>((size_t)(3), 0.0)" not in cpp
+
+
+def test_bool_cast_numeric_na_is_false_not_cpp_nan_truthy():
+    cpp = _cpp(
+        "var bool isUp = bool(na)\n"
+        "fromClose = bool(close)\n"
+        "fromZero = bool(0)\n"
+        "plot(isUp ? close : open)\n"
+    )
+    assert "(bool)(na<double>())" not in cpp
+    assert "is_na(_pf_v) ? false : (bool)_pf_v" in cpp
+    assert "var bool" not in cpp
+    assert "bool isUp" in cpp
+    assert "bool fromClose" in cpp
+    assert "bool fromZero" in cpp
 
 
 def test_str_contains_udf_infers_bool_return_type():

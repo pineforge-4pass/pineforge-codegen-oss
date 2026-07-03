@@ -1790,7 +1790,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if self._is_chart_point_callee(node.callee):
                 return False
             func_name, namespace = self._resolve_callee(node.callee)
-            if func_name in SKIP_FUNC_NAMES:
+            if namespace is None and func_name in SKIP_FUNC_NAMES:
                 return True
             if namespace in SKIP_NAMESPACES:
                 return True

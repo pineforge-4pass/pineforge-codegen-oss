@@ -210,6 +210,44 @@ class CallVisitor:
     # Function-call dispatch
     # ------------------------------------------------------------------
 
+    def _array_init_value_expr(self, elem_spec: TypeSpec | None, value_node) -> str:
+        if isinstance(value_node, NaLiteral):
+            if elem_spec is not None and elem_spec.kind == "udt":
+                return self._default_for_spec(elem_spec)
+            cpp_type = self._type_spec_to_cpp(elem_spec)
+            if cpp_type in ("double", "int", "int64_t", "bool", "std::string"):
+                return f"na<{cpp_type}>()"
+            return self._default_for_spec(elem_spec)
+        return self._visit_expr(value_node)
+
+    def _array_method_args(
+        self, method: str, arg_nodes: list, spec: TypeSpec | None,
+    ) -> list[str]:
+        elem_spec = (
+            spec.element
+            if spec is not None and spec.kind == "array" and spec.element is not None
+            else TypeSpec.primitive("float")
+        )
+        value_arg_indexes = {
+            "set": {1},
+            "push": {0},
+            "unshift": {0},
+            "insert": {1},
+            "fill": {0},
+            "includes": {0},
+            "indexof": {0},
+            "lastindexof": {0},
+            "binary_search": {0},
+            "binary_search_leftmost": {0},
+            "binary_search_rightmost": {0},
+        }.get(method, set())
+        return [
+            self._array_init_value_expr(elem_spec, arg)
+            if idx in value_arg_indexes
+            else self._visit_expr(arg)
+            for idx, arg in enumerate(arg_nodes)
+        ]
+
     def _visit_func_call(self, node: FuncCall) -> str:
         callee = node.callee
         if isinstance(callee, MemberAccess):
@@ -271,7 +309,9 @@ class CallVisitor:
                     meth = callee.member
                     raw_args = [self._visit_expr(a) for a in node.args]
                     if recv_spec is not None and recv_spec.kind == "array" and meth in ARRAY_METHODS:
-                        return self._array_method_expr(recv, meth, raw_args, recv_spec)
+                        return self._array_method_expr(
+                            recv, meth, self._array_method_args(meth, node.args, recv_spec), recv_spec
+                        )
                     if recv_spec is not None and recv_spec.kind == "map" and meth in MAP_METHODS:
                         return self._map_method_expr(recv, meth, raw_args, recv_spec)
                     args = ", ".join(raw_args)
@@ -295,7 +335,9 @@ class CallVisitor:
                         return self._map_method_expr(m, meth_raw, margs, self._map_spec_for_name(oname))
                     if oname in self._array_vars and meth_raw in ARRAY_METHODS:
                         arr = self._safe_name(oname)
-                        margs = [self._visit_expr(a) for a in node.args]
+                        margs = self._array_method_args(
+                            meth_raw, node.args, self._array_spec_for_name(oname)
+                        )
                         return self._array_method_expr(arr, meth_raw, margs, self._array_spec_for_name(oname))
                     if oname in self._matrix_specs and meth_raw in MATRIX_METHODS:
                         arr = self._safe_name(oname)
@@ -453,8 +495,9 @@ class CallVisitor:
         # Array method syntax: arr.push(val) where namespace is the array variable name
         if namespace is not None and namespace in self._array_vars and func_name in ARRAY_METHODS:
             arr = self._safe_name(namespace)
-            args = [self._visit_expr(a) for a in node.args]
-            return self._array_method_expr(arr, func_name, args, self._array_spec_for_name(namespace))
+            spec = self._array_spec_for_name(namespace)
+            args = self._array_method_args(func_name, node.args, spec)
+            return self._array_method_expr(arr, func_name, args, spec)
 
         # Array operations — emit proper C++ vector operations
         if namespace == "array":
@@ -466,11 +509,7 @@ class CallVisitor:
                 if node.args:
                     size_arg = self._visit_expr(node.args[0])
                     if len(node.args) > 1:
-                        init_val = (
-                            init_default
-                            if isinstance(node.args[1], NaLiteral)
-                            else self._visit_expr(node.args[1])
-                        )
+                        init_val = self._array_init_value_expr(elem_spec, node.args[1])
                     else:
                         init_val = init_default
                     return f"{cpp_type}((size_t)({size_arg}), {init_val})"
@@ -482,8 +521,8 @@ class CallVisitor:
             # Method calls: array.method(arr, args...)
             if func_name in ARRAY_METHODS and node.args:
                 arr = self._visit_expr(node.args[0])
-                rest = [self._visit_expr(a) for a in node.args[1:]]
                 spec = self._type_spec_from_expr(node.args[0])
+                rest = self._array_method_args(func_name, node.args[1:], spec)
                 return self._array_method_expr(arr, func_name, rest, spec)
             return "0"
 
@@ -852,7 +891,15 @@ class CallVisitor:
         if func_name == "float" and namespace is None and node.args:
             return f"(double)({self._visit_expr(node.args[0])})"
         if func_name == "bool" and namespace is None and node.args:
-            return f"(bool)({self._visit_expr(node.args[0])})"
+            # Pine v6 bools are two-state. Explicit bool(int/float) treats na
+            # like false, while a raw C++ cast would make NaN truthy.
+            x = self._visit_expr(node.args[0])
+            return (
+                f"[&](){{ auto _pf_v = ({x}); "
+                f"using _pf_t = std::decay_t<decltype(_pf_v)>; "
+                f"if constexpr (std::is_same_v<_pf_t, bool>) {{ return _pf_v; }} "
+                f"else {{ return is_na(_pf_v) ? false : (bool)_pf_v; }} }}()"
+            )
         if func_name == "string" and namespace is None and node.args:
             # Pine string(x) cast — same emission as str.tostring(x), with
             # string passthrough and TV-style "true"/"false" for bools
