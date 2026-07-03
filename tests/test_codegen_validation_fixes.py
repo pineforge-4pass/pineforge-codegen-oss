@@ -13,6 +13,8 @@ Covers seven fix families:
      truthy NaN conversion.
   7. ``input.source`` series replayed during TA precompute must be cleared
      before the real run.
+  8. Pine ``for`` loops infer direction even when an explicit positive ``by``
+     step is supplied.
 """
 
 from pineforge_codegen import transpile
@@ -775,3 +777,19 @@ def test_string_concat_preserves_udt_for_in_field_string_type():
     )
     assert "std::to_string(lvl.name)" not in cpp
     assert 'std::string("hit ") + lvl.name' in cpp
+
+
+def test_for_loop_with_explicit_by_infers_descending_direction():
+    cpp = _cpp(
+        "limit = input.int(3)\n"
+        "var vals = array.new<int>()\n"
+        "if bar_index == 0\n"
+        "    for i = limit to 0 by 1\n"
+        "        array.push(vals, i)\n"
+        "plot(close)"
+    )
+    assert "const bool _for_down_" in cpp
+    assert "int _for_step_" in cpp
+    assert "i += (_for_down_" in cpp
+    assert "_for_end_" in cpp and "_for_end_0 = (0)" in cpp
+    assert "for (int i = limit; i <= 0; i += 1)" not in cpp

@@ -294,6 +294,20 @@ av = array.avg(a)
 """)
 
 
+def test_descending_for_by_array_remove_compiles():
+    _check("descending_for_by_array_remove", """
+var levels = array.new<float>()
+if bar_index == 0
+    array.push(levels, close)
+    array.push(levels, high)
+if array.size(levels) > 0
+    for i = array.size(levels) - 1 to 0 by 1
+        v = array.get(levels, i)
+        if v <= close
+            array.remove(levels, i)
+""")
+
+
 def test_maps_compile():
     _check("maps", """
 m = map.new<string, float>()
