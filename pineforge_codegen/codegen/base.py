@@ -441,6 +441,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._current_func_local_types: dict[str, str] = {}
         # for-in loop iterator names (must resolve member access, not enum fallback)
         self._current_loop_vars: set[str] = set()
+        self._current_loop_var_specs: dict[str, "TypeSpec"] = {}
         # Track array variables for codegen
         self._array_vars: set[str] = set()
         # Track map variables for codegen

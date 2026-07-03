@@ -259,7 +259,7 @@ class StmtVisitor:
         is_global_member = node.name in self._global_member_vars
 
         def remember_local_type(cpp_type: str | None) -> None:
-            if cpp_type and not is_global_member and node.name in self._current_func_locals:
+            if cpp_type and not is_global_member:
                 self._current_func_local_types[node.name] = cpp_type
 
         # Check if it is a static (non-series) global member variable already evaluated inside _inputs_initialized_ block
@@ -792,9 +792,19 @@ class StmtVisitor:
         pad = "    " * indent
         iterable = self._visit_expr(node.iterable)
         saved_loop = self._current_loop_vars
+        saved_loop_specs = self._current_loop_var_specs
         self._current_loop_vars = set(self._current_loop_vars)
+        self._current_loop_var_specs = dict(self._current_loop_var_specs)
+        iterable_spec = self._type_spec_from_expr(node.iterable)
+        elem_spec = (
+            iterable_spec.element
+            if iterable_spec is not None and iterable_spec.kind == "array"
+            else None
+        )
         if node.var:
             self._current_loop_vars.add(node.var)
+            if elem_spec is not None:
+                self._current_loop_var_specs[node.var] = elem_spec
         if node.vars:
             for v in node.vars:
                 if v != "_":
@@ -814,6 +824,7 @@ class StmtVisitor:
             self._pop_block_var_remap(_blk_saved)
         lines.append(f"{pad}}}")
         self._current_loop_vars = saved_loop
+        self._current_loop_var_specs = saved_loop_specs
 
     def _visit_while(self, node: WhileStmt, lines: list[str], indent: int) -> None:
         pad = "    " * indent

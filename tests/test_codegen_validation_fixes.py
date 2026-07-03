@@ -687,3 +687,33 @@ def test_strategy_exit_profit_loss_passes_relative_ticks_to_engine():
     assert "position_entry_price_ -" not in cpp
     assert 'strategy_exit(std::string("X"), std::string("L"), na<double>(), na<double>()' in cpp
     assert ", 100.0, \"\", na<double>(), \"\", 40, 20);" in cpp
+
+
+def test_string_concat_preserves_top_level_local_string_types():
+    cpp = _cpp(
+        "if barstate.islast\n"
+        "    role_txt = close > open ? \"run\" : \"next\"\n"
+        "    status_icon = close > open ? \"ok\" : \"  \"\n"
+        "    row_label = status_icon + \"DCA-\" + str.tostring(bar_index) + role_txt\n"
+        "    label.new(bar_index, close, row_label)\n"
+        "plot(close)"
+    )
+    assert "std::to_string(status_icon)" not in cpp
+    assert "std::to_string(role_txt)" not in cpp
+    assert "std::string row_label" in cpp
+
+
+def test_string_concat_preserves_udt_for_in_field_string_type():
+    cpp = _cpp(
+        "type Level\n"
+        "    string name\n"
+        "    float price\n"
+        "var levels = array.new<Level>()\n"
+        "if bar_index == 0\n"
+        "    array.push(levels, Level.new(\"PDH\", high))\n"
+        "for lvl in levels\n"
+        "    label.new(bar_index, lvl.price, \"hit \" + lvl.name)\n"
+        "plot(close)"
+    )
+    assert "std::to_string(lvl.name)" not in cpp
+    assert 'std::string("hit ") + lvl.name' in cpp

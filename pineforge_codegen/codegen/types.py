@@ -210,6 +210,9 @@ class TypeInferer:
         if isinstance(node, StringLiteral):
             return TypeSpec.primitive("string")
         if isinstance(node, Identifier):
+            loop_specs = getattr(self, "_current_loop_var_specs", None)
+            if loop_specs and node.name in loop_specs:
+                return loop_specs[node.name]
             if node.name in self._collection_types:
                 return self._collection_types[node.name]
             if node.name in self._udt_var_types:
@@ -898,6 +901,9 @@ class TypeInferer:
                 sym_key = f"syminfo.{node.member}"
                 if sym_key in _pf_sigs.SYMINFO_VARIABLES:
                     return PINE_TYPE_TO_CPP.get(_pf_sigs.SYMINFO_VARIABLES[sym_key], "double")
+            spec = self._type_spec_from_expr(node)
+            if spec is not None:
+                return self._type_spec_to_cpp(spec)
         if isinstance(node, Ternary):
             tt = self._infer_type(node.true_val)
             ft = self._infer_type(node.false_val)
