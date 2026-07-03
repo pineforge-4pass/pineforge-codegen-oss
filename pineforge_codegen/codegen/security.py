@@ -324,8 +324,25 @@ class SecurityEmitter:
         walk(node)
         return out
 
+    def _collect_security_ohlc_hist_fields_for_call(self, item: dict) -> set[str]:
+        """Collect HTF OHLC history needed by a security expression and any
+        mutable-global rebinds replayed inside that security evaluator."""
+        fields = self._collect_security_ohlc_hist_fields(item.get("expr_node"))
+        for name in item.get("mutable_globals", []) or []:
+            info = self._global_mutable_infos.get(name)
+            if info is None:
+                continue
+            for stmt in getattr(info, "source_stmts", []) or []:
+                fields |= self._collect_security_ohlc_hist_fields(stmt)
+        return fields
+
     def _security_ohlc_hist_series_cpp(self, sec_id: int, field: str) -> str:
         return f"_sec{sec_id}_hist_{field}"
+
+    @staticmethod
+    def _security_tuple_result_default(cpp_type: str, tuple_size: int) -> str:
+        vals = ", ".join("na<double>()" for _ in range(max(0, tuple_size)))
+        return f"{cpp_type}{{{vals}}}"
 
     def _collect_security_ta_hist_indices(self, node) -> set[int]:
         """Which security TA call-site indices need HTF history (subscript index >= 1).
@@ -1553,6 +1570,29 @@ class SecurityEmitter:
                         lines.append(f"                _req_sec_{sec_id}_{i}.clear();")
                     else:
                         lines.append(f"                _req_sec_{sec_id}_{i} = 0;")
+                for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
+                    lines.append(
+                        f"                {self._security_ohlc_hist_series_cpp(sec_id, field)}.clear();"
+                    )
+                for name in self._security_ta_hist_series_names(sec_id):
+                    lines.append(f"                {name}.clear();")
+                lines.append("                break;")
+            elif returns_tuple and tuple_size and tuple_size > 0:
+                site = self._get_ta_site(expr_node)
+                ta_name = self._ta_name_from_site(site) if site is not None else ""
+                ctype = {
+                    "macd": "ta::MACDResult",
+                    "supertrend": "ta::SupertrendResult",
+                    "dmi": "ta::DMIResult",
+                    "bb": "ta::BBResult",
+                    "kc": "ta::KCResult",
+                    "vwap_bands": "ta::VWAPBandsResult",
+                }.get(ta_name, "std::tuple<double, double>")
+                lines.append(f"            case {sec_id}:")
+                lines.append(
+                    f"                _req_sec_{sec_id} = "
+                    f"{self._security_tuple_result_default(ctype, tuple_size)};"
+                )
                 for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
                     lines.append(
                         f"                {self._security_ohlc_hist_series_cpp(sec_id, field)}.clear();"

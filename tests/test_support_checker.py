@@ -493,6 +493,25 @@ def test_label_geometry_accepted_visual_setter_warns():
     assert _errors(PRELUDE + 'lb = label.new(bar_index, high, "x")\nlabel.bogus(lb)\n')
 
 
+def test_table_cell_visual_wrapper_allows_style_constants():
+    src = PRELUDE + """
+cell(table t, int c, int r, string txt, align) =>
+    t.cell(c, r, txt, text_halign = align)
+
+var table dash = table.new(position.top_right, 1, 1)
+cell(dash, 0, 0, "ok", text.align_right)
+"""
+    assert _errors(src) == []
+
+
+def test_visual_style_constant_still_rejected_in_non_visual_wrapper():
+    src = PRELUDE + """
+passthrough(x) => x
+v = passthrough(text.align_right)
+"""
+    _expect_error(src, "text.align_right")
+
+
 def test_udt_drawing_field_history_rejected():
     src = PRELUDE + """
 type DrawState

@@ -53,6 +53,7 @@ from .tables import (
     SKIP_VAR_TYPES,
     SYMINFO_MEMBER_MAP,
     COLOR_CONST_MAP,
+    ARRAY_NEW_CTORS,
     ARRAY_METHODS,
     MAP_METHODS,
     MATRIX_METHODS,
@@ -64,6 +65,15 @@ from .tables import (
     STR_FUNC_MAP,
     _merge_kwargs,
 )
+
+TA_TUPLE_RESULT_TYPES = {
+    "macd": "ta::MACDResult",
+    "supertrend": "ta::SupertrendResult",
+    "dmi": "ta::DMIResult",
+    "bb": "ta::BBResult",
+    "kc": "ta::KCResult",
+    "vwap_bands": "ta::VWAPBandsResult",
+}
 
 # (TA_IMPLICIT_COMPUTE / TA_COMPUTE_ARGS now imported from .tables above.)
 
@@ -428,6 +438,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._current_func_series_params: set[str] = set()
         # Locals declared in the function currently being emitted (symbol table loses them after analysis)
         self._current_func_locals: set[str] = set()
+        self._current_func_local_types: dict[str, str] = {}
         # for-in loop iterator names (must resolve member access, not enum fallback)
         self._current_loop_vars: set[str] = set()
         # Track array variables for codegen
@@ -854,31 +865,33 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     spec = self._matrix_specs.get(recv_name) or TypeSpec.matrix(TypeSpec.primitive("float"))
                 self._matrix_specs[name] = spec
                 self._collection_types[name] = spec
-            elif ns == "array" and fn in (
-                "new",
-                "new_float",
-                "new_int",
-                "new_bool",
-                "new_string",
-                "from",
-            ):
+            elif ns == "array" and fn in ({"new", "from"} | set(ARRAY_NEW_CTORS)):
                 self._array_vars.add(name)
+                spec = self._type_spec_from_expr(expr) or self._array_spec_for_name(name)
+                self._collection_types[name] = spec
             elif ns == "map" and fn == "new":
                 self._map_vars.add(name)
 
-        # Also register var/varip matrix members from AST nodes so that
-        # the typed-matrix gate checks see the correct element spec.
+        # Also register var/varip aggregate members from AST nodes so that
+        # class-member declarations see the precise collection type before
+        # on_bar emits the initializer. This is required for unannotated
+        # drawing arrays such as ``var boxes = array.new_box()``.
         var_decl_map: dict[str, FuncCall] = {}
         for stmt in (self.ctx.ast.body if hasattr(self.ctx, "ast") else []):
             if isinstance(stmt, VarDecl) and isinstance(stmt.value, FuncCall):
                 var_decl_map[stmt.name] = stmt.value
         for name, _ptype, _init_str in self.ctx.var_members:
-            if name in self._matrix_specs:
-                continue
             expr = var_decl_map.get(name)
             if expr is None:
                 continue
             fn2, ns2 = self._resolve_callee(expr.callee)
+            if ns2 == "array" and fn2 in ({"new", "from"} | set(ARRAY_NEW_CTORS)):
+                self._array_vars.add(name)
+                spec2 = self._type_spec_from_expr(expr) or self._array_spec_for_name(name)
+                self._collection_types[name] = spec2
+                continue
+            if name in self._matrix_specs:
+                continue
             if ns2 == "matrix" and fn2 == "new":
                 targs2 = self._template_args_from_call(expr) if hasattr(expr, "annotations") else []
                 elem_spec2 = self._type_spec_from_hint_name(targs2[0]) if targs2 else TypeSpec.primitive("float")
@@ -1331,6 +1344,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 hist_fields: set[str] = set()
                 for el in expr_node.elements:
                     hist_fields |= self._collect_security_ohlc_hist_fields(el)
+                for name in item.get("mutable_globals", []) or []:
+                    info = self._global_mutable_infos.get(name)
+                    if info is not None:
+                        for stmt in getattr(info, "source_stmts", []) or []:
+                            hist_fields |= self._collect_security_ohlc_hist_fields(stmt)
                 self._security_ohlc_hist_fields_by_sec[sec_id] = hist_fields
                 for i, el in enumerate(expr_node.elements):
                     ctype = self._infer_cpp_type_for_security_elem(el)
@@ -1338,9 +1356,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         lines.append(f"    {ctype} _req_sec_{sec_id}_{i}{{}};")
                     else:
                         lines.append(f"    {ctype} _req_sec_{sec_id}_{i} = na<double>();")
+            elif returns_tuple and tuple_size and tuple_size > 0:
+                self._security_ohlc_hist_fields_by_sec[sec_id] = (
+                    self._collect_security_ohlc_hist_fields_for_call(item)
+                )
+                site = self._get_ta_site(expr_node)
+                ta_name = self._ta_name_from_site(site) if site is not None else ""
+                ctype = TA_TUPLE_RESULT_TYPES.get(ta_name, "std::tuple<double, double>")
+                default = self._security_tuple_result_default(ctype, tuple_size)
+                lines.append(f"    {ctype} _req_sec_{sec_id} = {default};")
             else:
-                self._security_ohlc_hist_fields_by_sec[sec_id] = self._collect_security_ohlc_hist_fields(
-                    expr_node
+                self._security_ohlc_hist_fields_by_sec[sec_id] = (
+                    self._collect_security_ohlc_hist_fields_for_call(item)
                 )
                 lines.append(f"    double _req_sec_{sec_id} = na<double>();")
             for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):

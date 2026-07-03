@@ -729,6 +729,18 @@ class ExprVisitor:
         right = self._visit_expr(node.right)
         cpp_ops = {"and": "&&", "or": "||"}
         op = cpp_ops.get(node.op, node.op)
+        if node.op == "+":
+            lt = self._infer_type(node.left)
+            rt = self._infer_type(node.right)
+            if lt == "std::string" or rt == "std::string":
+                def _as_string(rendered, inferred):
+                    if inferred == "std::string":
+                        return rendered
+                    if inferred == "bool":
+                        return f'(({rendered}) ? std::string("true") : std::string("false"))'
+                    return f"std::to_string({rendered})"
+
+                return f"({_as_string(left, lt)} + {_as_string(right, rt)})"
         # PineScript % works on floats — use std::fmod in C++
         if node.op == "%":
             return f"std::fmod((double)({left}), (double)({right}))"

@@ -791,6 +791,8 @@ class TypeInferer:
                     return "double"
             if node.name in self._current_func_param_types:
                 return self._current_func_param_types[node.name]
+            if node.name in getattr(self, "_current_func_local_types", {}):
+                return self._current_func_local_types[node.name]
             sym = self.ctx.symbols.resolve(node.name)
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return self._type_spec_to_cpp(sym.type_spec)
@@ -829,9 +831,11 @@ class TypeInferer:
             if namespace == "str":
                 if func_name == "split":
                     return "std::vector<std::string>"
+                if func_name in ("contains", "startswith", "endswith"):
+                    return "bool"
                 if func_name == "tonumber":
                     return "double"
-                if func_name == "length":
+                if func_name in ("length", "pos"):
                     return "int"
                 return "std::string"
             if namespace == "ta" and func_name == "pivot_point_levels":
@@ -881,6 +885,12 @@ class TypeInferer:
             # pine_str_tostring); bare reads must declare std::string.
             if ename == "format":
                 return "std::string"
+            if ename == "timeframe":
+                if node.member in ("period", "main_period"):
+                    return "std::string"
+                if node.member == "multiplier":
+                    return "int"
+                return "bool"
             # syminfo.* type inference: look up in SYMINFO_MEMBER_MAP
             # and derive C++ type from the expression (na<T>() or function call).
             if ename == "syminfo":

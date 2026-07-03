@@ -302,6 +302,90 @@ def test_drawing_array_constructor_default_value_arg():
     assert "std::vector<Box>((size_t)(2)" in cpp
 
 
+def test_untyped_var_drawing_array_constructor_emits_typed_member():
+    cpp = _cpp(
+        "var boxes = array.new_box()\n"
+        "if bar_index == 0\n"
+        "    b = box.new(bar_index, high, bar_index + 1, low)\n"
+        "    array.push(boxes, b)\n"
+        "plot(array.size(boxes))"
+    )
+    assert "std::vector<Box> boxes;" in cpp
+    assert "std::vector<double> boxes;" not in cpp
+
+
+def test_str_contains_udf_infers_bool_return_type():
+    cpp = _cpp(
+        "hasXau() =>\n"
+        "    str.contains(str.upper(syminfo.ticker), \"XAU\")\n"
+        "isGold = hasXau()\n"
+        "plot(isGold ? close : open)"
+    )
+    assert "bool hasXau()" in cpp
+    assert "std::string hasXau()" not in cpp
+
+
+def test_input_source_passed_to_history_udf_is_series_arg():
+    cpp = _cpp(
+        "src = input.source(close, \"Source\")\n"
+        "lagged(_src, _len) =>\n"
+        "    lag = math.floor((_len - 1) / 2)\n"
+        "    _src + (_src - _src[lag])\n"
+        "z = lagged(src, 10)\n"
+        "plot(z)"
+    )
+    assert "Series<double> src" in cpp
+    assert "lagged_cs0(src, 10)" in cpp or "lagged(src, 10)" in cpp
+    assert "lagged_cs0(src[0], 10)" not in cpp
+    assert "lagged(src[0], 10)" not in cpp
+
+
+def test_syminfo_pointvalue_infers_numeric_udf_return():
+    cpp = _cpp(
+        "pointValue = syminfo.pointvalue\n"
+        "dollarsToPoints(dollars) =>\n"
+        "    dollars / pointValue\n"
+        "x = dollarsToPoints(100.0)\n"
+        "plot(x)"
+    )
+    assert "double dollarsToPoints(double dollars)" in cpp
+    assert "std::string dollarsToPoints" not in cpp
+
+
+def test_timestamp_timezone_variable_uses_tz_overload():
+    cpp = _cpp(
+        "tz = input.string(\"America/New_York\", \"Timezone\")\n"
+        "nyYear = year(time, tz)\n"
+        "rangeStart = timestamp(tz, nyYear, 1, 2, 9, 30)\n"
+        "plot(rangeStart)"
+    )
+    assert "std::string _tz = (tz)" in cpp
+    assert "int _yr = (tz)" not in cpp
+    assert "mktime(&t)" in cpp
+
+
+def test_ta_stdev_biased_arg_goes_to_constructor_not_compute():
+    cpp = _cpp(
+        "x = ta.stdev(close, 3, false)\n"
+        "plot(x)"
+    )
+    assert "ta::StdDev(3, false)" in cpp
+    assert ".compute(current_bar_.close, false)" not in cpp
+    assert ".recompute(current_bar_.close, false)" not in cpp
+
+
+def test_text_align_wrapper_param_infers_string():
+    cpp = _cpp(
+        "var table dash = table.new(position.top_right, 1, 1)\n"
+        "cell(alignMode) =>\n"
+        "    table.cell(dash, 0, 0, \"x\", text_halign = alignMode)\n"
+        "cell(text.align_right)\n"
+        "plot(close)"
+    )
+    assert "cell(std::string alignMode)" in cpp
+    assert "cell(int alignMode)" not in cpp
+
+
 # ---------------------------------------------------------------------------
 # Round 2: tuple-element type retention + UDF param/return type inference
 # (jevondijefferson / thulashimohanr blockers)
@@ -574,4 +658,3 @@ def test_function_scoped_var_not_in_constructor_init_list():
     import re
     m = re.search(r"GeneratedStrategy\(\)\s*:([^\n]*)", cpp)
     assert m is None or "c(5)" not in m.group(0)
-

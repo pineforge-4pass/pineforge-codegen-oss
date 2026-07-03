@@ -110,7 +110,7 @@ TA_CLASS_MAP = {
 TA_PERIOD_ARG = {
     "sma": 1, "ema": 1, "rma": 1, "rsi": 1, "atr": 0,
     "highest": 1, "lowest": 1, "change": 1,
-    "wma": 1, "hma": 1, "stdev": 1,
+    "wma": 1, "hma": 1,
     # Task 6
     "sum": 1,
     # Task 7 Batch 1
@@ -119,7 +119,7 @@ TA_PERIOD_ARG = {
     "mom": 1, "roc": 1, "rising": 1, "falling": 1, "cci": 1,
     # cum has no period arg — handled in TA_NO_CTOR
     # Task 7 Batch 3
-    "variance": 1, "median": 1, "highestbars": 1, "lowestbars": 1,
+    "median": 1, "highestbars": 1, "lowestbars": 1,
     # Batch 4
     "cmo": 1, "cog": 1, "correlation": 2,
     "percentile_nearest_rank": 1, "percentile_linear_interpolation": 1,
@@ -130,6 +130,14 @@ TA_PERIOD_ARG = {
 
 # Functions that return tuples
 TA_TUPLE_RETURNS = {"macd", "supertrend", "dmi", "bb", "kc", "vwap_bands"}
+TA_TUPLE_ELEMENT_COUNTS = {
+    "macd": 3,
+    "supertrend": 2,
+    "dmi": 3,
+    "bb": 3,
+    "kc": 3,
+    "vwap_bands": 3,
+}
 
 # Functions with multiple constructor args
 TA_MULTI_CTOR = {
@@ -156,6 +164,16 @@ TA_MULTI_CTOR = {
     "bbw": [1, 2],           # length, mult
     "kcw": [1, 2],           # length, mult
     "tr":  [0],              # handle_na (compile-time bool)
+    "stdev": [1, 2],         # length, biased
+    "variance": [1, 2],      # length, biased
+}
+
+# Compute-arg indices: which positional args are forwarded to ``.compute()``.
+# Entries here override the default analyzer behavior of forwarding every
+# non-constructor argument.
+TA_COMPUTE_ARGS = {
+    "stdev": [0],
+    "variance": [0],
 }
 
 # No-state functions (no constructor args, stateless or self-contained)

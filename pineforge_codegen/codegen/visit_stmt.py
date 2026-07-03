@@ -258,6 +258,10 @@ class StmtVisitor:
         # Global-scope non-var vars are class members — emit assignment, not declaration
         is_global_member = node.name in self._global_member_vars
 
+        def remember_local_type(cpp_type: str | None) -> None:
+            if cpp_type and not is_global_member and node.name in self._current_func_locals:
+                self._current_func_local_types[node.name] = cpp_type
+
         # Check if it is a static (non-series) global member variable already evaluated inside _inputs_initialized_ block
         is_static_global_input = False
         if is_global_member and isinstance(node.value, FuncCall) and self._is_input_call(node.value):
@@ -457,6 +461,7 @@ class StmtVisitor:
         if is_global_member:
             lines.append(f"{pad}{safe} = {cpp_val};")
         else:
+            remember_local_type(cpp_type)
             lines.append(f"{pad}{cpp_type} {safe} = {cpp_val};")
 
     @staticmethod

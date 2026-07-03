@@ -462,6 +462,12 @@ class SupportChecker:
         # (``panel.cell(...)``) is a visual sink whose args may carry visual
         # constants, so it routes through ``_visit_children_const_ok``.
         self._visual_container_vars: set[str] = set()
+        # User helpers whose body is only a visual sink (for example
+        # ``cell(table t, ..., align) => t.cell(..., text_halign=align)``).
+        # A call to such a helper is itself a visual context, so style
+        # constants passed through its arguments are safe and should not trip
+        # the free-expression constant-namespace rejection.
+        self._visual_sink_funcs: set[str] = set()
         self._drawing_tuple_vars: set[str] = set()
         self._func_tuple_drawing_returns: dict[str, list[bool]] = {}
         # Track whether we are inside an if/ternary condition expression.
@@ -520,6 +526,8 @@ class SupportChecker:
                 if tuple_returns:
                     self._func_tuple_drawing_returns[stmt.name] = tuple_returns
                 self._collect_visual_container_params(stmt)
+                if self._func_body_is_visual_sink(stmt):
+                    self._visual_sink_funcs.add(stmt.name)
             elif isinstance(stmt, MethodDef):
                 self._user_methods.add(stmt.name)
                 self._collect_visual_container_params(stmt)
@@ -534,6 +542,27 @@ class SupportChecker:
             hint = hints[i] if i < len(hints) else None
             if hint and str(hint).replace(" ", "") in _VISUAL_CONTAINER_TYPES:
                 self._visual_container_vars.add(pname)
+
+    def _expr_is_visual_sink_call(self, expr: ASTNode | None) -> bool:
+        if not isinstance(expr, FuncCall):
+            return False
+        ns, name = _qualified_name(expr.callee)
+        if ns is None and name in SKIP_FUNC_NAMES:
+            return True
+        if ns is not None and ns in SKIP_NAMESPACES:
+            return True
+        if ns in _DRAWING_NOOP_BY_NS and name in _DRAWING_NOOP_BY_NS[ns]:
+            return True
+        return ns is not None and ns in self._visual_container_vars
+
+    def _func_body_is_visual_sink(self, fn: FuncDef | MethodDef) -> bool:
+        if not fn.body:
+            return False
+        for stmt in fn.body:
+            expr = stmt.expr if isinstance(stmt, ExprStmt) else None
+            if not self._expr_is_visual_sink_call(expr):
+                return False
+        return True
 
     @staticmethod
     def _type_name_contains_drawing(type_name: str | None) -> bool:
@@ -1204,6 +1233,10 @@ class SupportChecker:
         # (``text.align_*``, ``size.*``), so visit children with const reads
         # allowed instead of tripping the free-expression const-namespace reject.
         if ns is not None and ns in self._visual_container_vars:
+            self._visit_children_const_ok(node)
+            return
+
+        if ns is None and name in self._visual_sink_funcs:
             self._visit_children_const_ok(node)
             return
 

@@ -873,6 +873,7 @@ class TopLevelEmitter:
             self._current_instance_name = None
 
         prev_func_locals = self._current_func_locals
+        prev_func_local_types = self._current_func_local_types
         prev_func_body = getattr(self, "_current_func_body", None)
         prev_func_name = getattr(self, "_active_func_name", None)
         # The function body is the lexical scope used by the UDT-alias analysis
@@ -886,6 +887,7 @@ class TopLevelEmitter:
         prev_ptr_alias = self._udt_ptr_alias_locals
         self._udt_ptr_alias_locals = set()
         self._current_func_locals = {n for n, _, _ in self.ctx.func_var_members.get(fi.name, [])}
+        self._current_func_local_types = {}
         # Plain (non-persistent) scalar locals are emitted inline and live in
         # no other set; collect them so the unknown-identifier guard in
         # _visit_ident does not mistake them for undeclared symbols.
@@ -959,6 +961,7 @@ class TopLevelEmitter:
         self._current_func_series_params = set()
         self._udt_param_udt = {}
         self._current_func_locals = prev_func_locals
+        self._current_func_local_types = prev_func_local_types
         self._current_func_body = prev_func_body
         self._active_func_name = prev_func_name
         self._udt_ptr_alias_locals = prev_ptr_alias

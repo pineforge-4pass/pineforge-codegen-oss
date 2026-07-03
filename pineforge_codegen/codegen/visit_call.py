@@ -136,6 +136,7 @@ from ..ast_nodes import (
     FuncCall,
     Identifier,
     MemberAccess,
+    NaLiteral,
     TupleLiteral,
     StringLiteral,
 )
@@ -459,10 +460,18 @@ class CallVisitor:
             if func_name in ("new", "new_float", "new_int", "new_bool", "new_string") or func_name in ARRAY_DRAWING_NEW_CTORS:
                 spec = self._type_spec_from_expr(node) or TypeSpec.array(TypeSpec.primitive("float"))
                 cpp_type = self._type_spec_to_cpp(spec)
-                init_default = self._default_for_spec(spec.element if spec.element is not None else TypeSpec.primitive("float"))
+                elem_spec = spec.element if spec.element is not None else TypeSpec.primitive("float")
+                init_default = self._default_for_spec(elem_spec)
                 if node.args:
                     size_arg = self._visit_expr(node.args[0])
-                    init_val = self._visit_expr(node.args[1]) if len(node.args) > 1 else init_default
+                    if len(node.args) > 1:
+                        init_val = (
+                            init_default
+                            if isinstance(node.args[1], NaLiteral)
+                            else self._visit_expr(node.args[1])
+                        )
+                    else:
+                        init_val = init_default
                     return f"{cpp_type}((size_t)({size_arg}), {init_val})"
                 return f"{cpp_type}()"
             if func_name == "from":
@@ -698,6 +707,8 @@ class CallVisitor:
                 if first_arg_spec is not None and first_arg_spec.kind == "primitive" and first_arg_spec.name == "string":
                     is_tz_first = True
                 elif isinstance(node.args[0], StringLiteral):
+                    is_tz_first = True
+                elif self._infer_type(node.args[0]) == "std::string":
                     is_tz_first = True
 
             if is_tz_first:
@@ -1060,17 +1071,31 @@ class CallVisitor:
 
         def _visit_arg_for_series(arg_node, arg_idx):
             """Visit a function argument, returning Series ref for series params."""
-            if arg_idx in _func_series_param_indices and isinstance(arg_node, Identifier):
-                aname = arg_node.name
-                # Bar field: pass _s_close instead of current_bar_.close
-                if aname in BAR_FIELDS or aname in BAR_SERIES_PUSH:
-                    return f"_s_{aname}"
-                # Series var: pass the Series object directly
-                if aname in self.ctx.series_vars:
-                    safe = self._safe_name(aname)
-                    if self._active_var_remap and safe in self._active_var_remap:
-                        safe = self._active_var_remap[safe]
-                    return safe
+            if arg_idx in _func_series_param_indices:
+                if isinstance(arg_node, Identifier):
+                    aname = arg_node.name
+                    # Bar field: pass _s_close instead of current_bar_.close
+                    if aname in BAR_FIELDS or aname in BAR_SERIES_PUSH:
+                        return f"_s_{aname}"
+                    # Series var: pass the Series object directly
+                    if aname in self.ctx.series_vars:
+                        safe = self._safe_name(aname)
+                        if self._active_var_remap and safe in self._active_var_remap:
+                            safe = self._active_var_remap[safe]
+                        return safe
+                expr_cpp = self._visit_expr(arg_node)
+                cpp_t = self._infer_type(arg_node)
+                if cpp_t not in ("double", "int", "bool"):
+                    cpp_t = "double"
+                return (
+                    f"([&]() -> const Series<{cpp_t}>& {{ "
+                    f"static thread_local Series<{cpp_t}> _series_arg; "
+                    f"if (is_first_tick_ && bar_index_ == 0) _series_arg.clear(); "
+                    f"{cpp_t} _sv = ({expr_cpp}); "
+                    f"if (is_first_tick_) _series_arg.push(_sv); "
+                    f"else _series_arg.update(_sv); "
+                    f"return _series_arg; }}())"
+                )
             return self._visit_expr(arg_node)
 
         if node.kwargs:
