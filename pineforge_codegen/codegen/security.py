@@ -60,9 +60,9 @@ from __future__ import annotations
 
 from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BreakStmt, ContinueStmt, ExprStmt, ForStmt,
-    ForInStmt, FuncCall, FuncDef, Identifier, IfStmt, NumberLiteral, StringLiteral,
-    Subscript, SwitchStmt, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
-    WhileStmt,
+    ForInStmt, FuncCall, FuncDef, Identifier, IfStmt, MemberAccess, NumberLiteral,
+    StringLiteral, Subscript, SwitchStmt, Ternary, TupleAssign, TupleLiteral,
+    UnaryOp, VarDecl, WhileStmt,
 )
 from ..analyzer import (
     FuncInfo, TACallSite, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
@@ -412,6 +412,44 @@ class SecurityEmitter:
             for variant in (info.get("ta_variants") or {}).get(idx, []):
                 names.append(self._security_ta_hist_series_cpp(variant["member_name"]))
         return names
+
+    def _security_timeframe_expr(self, sec_id: int) -> str:
+        """C++ expression for the timeframe of a request.security evaluator."""
+        info = self._security_eval_info[sec_id]
+        if info.get("tf"):
+            return f'"{info["tf"]}"'
+        if info.get("tf_expr"):
+            return info["tf_expr"]
+        return "input_tf_"
+
+    def _build_security_timeframe_member(self, sec_id: int, member: str) -> str | None:
+        """Lower timeframe.* reads inside request.security to the requested TF."""
+        tf = self._security_timeframe_expr(sec_id)
+        if member == "period":
+            return tf
+        if member == "main_period":
+            return "main_period()"
+        if member == "multiplier":
+            return f"tf_multiplier({tf})"
+        if member == "isintraday":
+            return f"tf_is_intraday({tf})"
+        if member == "isminutes":
+            return f"(tf_is_intraday({tf}) && !tf_is_seconds({tf}))"
+        if member == "isdaily":
+            return f"tf_is_daily({tf})"
+        if member == "isweekly":
+            return f"tf_is_weekly({tf})"
+        if member == "ismonthly":
+            return f"tf_is_monthly({tf})"
+        if member == "isdwm":
+            return f"(tf_is_daily({tf}) || tf_is_weekly({tf}) || tf_is_monthly({tf}))"
+        if member == "isseconds":
+            return f"tf_is_seconds({tf})"
+        if member == "in_seconds":
+            return f"tf_to_seconds({tf})"
+        if member == "isticks":
+            return "false"
+        return None
 
     @staticmethod
     def _security_series_binding(series_name: str) -> str:
@@ -1690,6 +1728,15 @@ class SecurityEmitter:
                     emitted_lines,
                 )
                 resolving.remove(expr_node.name)
+                return resolved
+
+        if (
+            isinstance(expr_node, MemberAccess)
+            and isinstance(expr_node.object, Identifier)
+            and expr_node.object.name == "timeframe"
+        ):
+            resolved = self._build_security_timeframe_member(sec_id, expr_node.member)
+            if resolved is not None:
                 return resolved
 
         if isinstance(expr_node, Subscript):

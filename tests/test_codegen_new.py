@@ -226,6 +226,21 @@ def test_timeframe_isdwm_uses_runtime_timeframe_helpers():
     assert "x = 0;" not in cpp
 
 
+def test_timeframe_namespace_uses_requested_tf_inside_security():
+    src = (
+        '//@version=6\nstrategy("T")\n'
+        'w = request.security(syminfo.tickerid, "W", '
+        'timeframe.isintraday ? 1 : timeframe.isweekly ? 2 : 3)\n'
+        'm = request.security(syminfo.tickerid, "M", timeframe.ismonthly ? 4 : 5)\n'
+        'chart = timeframe.isintraday\n'
+    )
+    cpp = _generate(src)
+    assert 'tf_is_intraday("W")' in cpp
+    assert 'tf_is_weekly("W")' in cpp
+    assert 'tf_is_monthly("M")' in cpp
+    assert "tf_is_intraday(script_tf_)" in cpp
+
+
 def test_hour_two_arg_passes_tz():
     """``hour(time, "America/New_York")`` must propagate the tz string into
     the emitted C++ so the runtime can honor a non-UTC chart. Without this,
