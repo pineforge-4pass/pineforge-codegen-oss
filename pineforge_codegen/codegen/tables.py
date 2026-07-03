@@ -634,6 +634,33 @@ MATRIX_METHODS = {
 # Math / String dispatch
 # ---------------------------------------------------------------------------
 
+def _math_minmax_na_expr(func_name: str, args: list[str]) -> str:
+    """Emit Pine-compatible math.min/math.max with na propagation.
+
+    ``std::min``/``std::max`` do not propagate NaN consistently because their
+    comparison is specified in terms of ``operator<``. Pine math.min/max return
+    ``na`` when any operand is ``na``, so generated clamp-style expressions
+    like ``math.max(-1, math.min(1, na))`` must stay ``na``.
+    """
+    if not args:
+        return "na<double>()"
+    if len(args) == 1:
+        return f"(double)({args[0]})"
+    op = "std::max" if func_name == "max" else "std::min"
+    decls = " ".join(
+        f"double _v{i} = (double)({arg});" for i, arg in enumerate(args)
+    )
+    guard = " || ".join(f"is_na(_v{i})" for i in range(len(args)))
+    updates = " ".join(
+        f"_out = {op}(_out, _v{i});" for i in range(1, len(args))
+    )
+    return (
+        f"([&]() -> double {{ {decls} "
+        f"if ({guard}) return na<double>(); "
+        f"double _out = _v0; {updates} return _out; }}())"
+    )
+
+
 MATH_FUNC_MAP = {
     "abs": "std::abs", "max": "std::max", "min": "std::min",
     "ceil": "std::ceil", "floor": "std::floor", "round": "std::round",

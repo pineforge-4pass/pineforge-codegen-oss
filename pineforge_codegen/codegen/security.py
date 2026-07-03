@@ -69,7 +69,10 @@ from ..analyzer import (
 )
 from .. import signatures as sigs
 from ..symbols import PineType
-from .tables import MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_OHLC_BAR_FIELDS, _merge_kwargs
+from .tables import (
+    MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_OHLC_BAR_FIELDS,
+    _math_minmax_na_expr, _merge_kwargs,
+)
 
 
 class SecurityEmitter:
@@ -533,22 +536,12 @@ class SecurityEmitter:
         if func_name == "avg" and len(args) > 2:
             sum_expr = " + ".join(f"(double)({a})" for a in args)
             return f"(({sum_expr}) / {len(args)}.0)"
-        if func_name == "max" and len(args) > 2:
-            result = f"std::max((double)({args[0]}), (double)({args[1]}))"
-            for a in args[2:]:
-                result = f"std::max({result}, (double)({a}))"
-            return result
-        if func_name == "min" and len(args) > 2:
-            result = f"std::min((double)({args[0]}), (double)({args[1]}))"
-            for a in args[2:]:
-                result = f"std::min({result}, (double)({a}))"
-            return result
+        if func_name in ("min", "max"):
+            return _math_minmax_na_expr(func_name, args)
         if func_name in MATH_FUNC_MAP:
             mapped = MATH_FUNC_MAP[func_name]
             if "{0}" in mapped:
                 return mapped.format(*args)
-            if func_name in ("min", "max") and len(args) == 2:
-                return f"{mapped}((double)({args[0]}), (double)({args[1]}))"
             return f"{mapped}({', '.join(args)})"
         return f"0.0 /* unsupported: math.{func_name} */"
 

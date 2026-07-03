@@ -734,6 +734,14 @@ def test_math_min_variadic():
     assert cpp.count("std::min") >= 2  # nested std::min calls
 
 
+def test_math_min_max_propagate_na_in_clamp():
+    src = "x = math.max(-1.0, math.min(1.0, na))\n"
+    cpp = _generate_raw(src)
+    assert "return na<double>();" in cpp
+    assert "if (is_na(_v0) || is_na(_v1)) return na<double>();" in cpp
+    assert "std::max((double)((-1.0)), (double)(std::min" not in cpp
+
+
 # === Task 9: strategy.closedtrades API + max_drawdown/max_runup ===
 
 
@@ -1196,6 +1204,28 @@ plot(htfScore)
     assert "_hist_call" not in eval_body
     assert "is_first_tick_" not in eval_body
     assert "current_bar_" not in eval_body
+
+
+def test_request_security_math_min_max_propagate_na():
+    cpp = _generate("""
+//@version=6
+strategy("T")
+clamp(float x) =>
+    math.max(-1.0, math.min(1.0, x))
+score() =>
+    v = timeframe.isweekly ? na : close
+    clamp(v)
+w = request.security(syminfo.tickerid, "W", score(), lookahead=barmerge.lookahead_off)
+plot(w)
+""")
+    start = cpp.index("void _eval_security_0(")
+    end = cpp.index("void evaluate_security(", start)
+    eval_body = cpp[start:end]
+
+    assert 'tf_is_weekly("W")' in eval_body
+    assert "return na<double>();" in eval_body
+    assert "if (is_na(_v0) || is_na(_v1)) return na<double>();" in eval_body
+    assert "std::max((double)((-1.0)), (double)(std::min" not in eval_body
 
 
 def test_request_financial_still_na():

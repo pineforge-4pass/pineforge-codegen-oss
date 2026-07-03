@@ -161,6 +161,7 @@ from .tables import (
     SKIP_VAR_TYPES,
     STR_FUNC_MAP,
     TIME_FIELD_EXPRS,
+    _math_minmax_na_expr,
     _merge_kwargs,
     _merge_kwargs_with_defaults,
     tz_time_field_lambda,
@@ -1556,23 +1557,12 @@ class CallVisitor:
         if func_name == "avg" and len(args) > 2:
             sum_expr = " + ".join(f"(double)({a})" for a in args)
             return f"(({sum_expr}) / {len(args)}.0)"
-        if func_name == "max" and len(args) > 2:
-            result = f"std::max((double)({args[0]}), (double)({args[1]}))"
-            for a in args[2:]:
-                result = f"std::max({result}, (double)({a}))"
-            return result
-        if func_name == "min" and len(args) > 2:
-            result = f"std::min((double)({args[0]}), (double)({args[1]}))"
-            for a in args[2:]:
-                result = f"std::min({result}, (double)({a}))"
-            return result
+        if func_name in ("min", "max"):
+            return _math_minmax_na_expr(func_name, args)
         if func_name in MATH_FUNC_MAP:
             mapped = MATH_FUNC_MAP[func_name]
             if "{0}" in mapped:
                 return mapped.format(*args)
-            # std::min/std::max require same types — cast to double
-            if func_name in ("min", "max") and len(args) == 2:
-                return f"{mapped}((double)({args[0]}), (double)({args[1]}))"
             return f"{mapped}({', '.join(args)})"
         # Unknown math.* — safe fallback
         return f"0.0 /* unsupported: math.{func_name} */"
