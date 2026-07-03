@@ -1335,8 +1335,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 for field in sorted(
                     self._security_ohlc_hist_fields_by_sec.get(sec_id, ())
                 ):
+                    ctype = self._security_bar_hist_type(field)
                     lines.append(
-                        f"    Series<double> {self._security_ohlc_hist_series_cpp(sec_id, field)}{_mbb};"
+                        f"    Series<{ctype}> {self._security_ohlc_hist_series_cpp(sec_id, field)}{_mbb};"
                     )
                 self._security_ta_hist_idx_by_sec[sec_id] = (
                     self._collect_security_ta_hist_indices(expr_node)
@@ -1376,8 +1377,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 )
                 lines.append(f"    double _req_sec_{sec_id} = na<double>();")
             for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
+                ctype = self._security_bar_hist_type(field)
                 lines.append(
-                    f"    Series<double> {self._security_ohlc_hist_series_cpp(sec_id, field)}{_mbb};"
+                    f"    Series<{ctype}> {self._security_ohlc_hist_series_cpp(sec_id, field)}{_mbb};"
                 )
             self._security_ta_hist_idx_by_sec[sec_id] = (
                 self._collect_security_ta_hist_indices(expr_node)

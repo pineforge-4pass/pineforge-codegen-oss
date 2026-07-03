@@ -134,6 +134,23 @@ def test_security_param_tf_dead_code_falls_back_to_chart_tf():
     assert "Unknown variable" not in cpp
 
 
+def test_security_input_backed_timeframe_alias_expands_at_registration():
+    # NicoCashFx shape: request.security receives a global timeframe alias whose
+    # value is assigned on_bar from input-backed operands. Registration happens
+    # before on_bar, so emitting the alias member itself registers an empty tf.
+    cpp = _cpp(
+        'useChart = input.bool(false, "Use chart")\n'
+        'fixedTf = input.string("30", "Fixed TF", options=["15", "30", "60"])\n'
+        "tf = useChart ? timeframe.period : fixedTf\n"
+        'htf = request.security(syminfo.tickerid, tf, close)\n'
+        "plot(htf)"
+    )
+    assert 'register_security_eval(0, tf, input_tf_, false, false)' not in cpp
+    assert 'get_input_bool("Use chart", false)' in cpp
+    assert 'get_input_string("Fixed TF", std::string("30"))' in cpp
+    assert 'register_security_eval(0, ((get_input_bool("Use chart", false)) ? (script_tf_) : (get_input_string("Fixed TF", std::string("30")))), input_tf_, false, false)' in cpp
+
+
 def test_security_param_tf_mixed_with_non_literal_callsite_rejected():
     # Two distinct literal tfs PLUS a third call site whose tf isn't a
     # compile-time literal (a ternary the const-folder can't resolve) ->

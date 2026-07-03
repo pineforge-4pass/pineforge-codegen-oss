@@ -113,7 +113,27 @@ BAR_SERIES_PUSH = {
     "ohlc4": "((current_bar_.open + current_bar_.high + current_bar_.low + current_bar_.close) / 4.0)",
 }
 
-# OHLCV identifiers that refer to the *security* (HTF) bar inside ``request.security()``.
+# Bar identifiers that refer to the *security* (HTF) bar inside
+# ``request.security()``. ``time`` is the HTF bar-open timestamp.
+SECURITY_BAR_FIELD_EXPRS = {
+    "open": "bar.open",
+    "high": "bar.high",
+    "low": "bar.low",
+    "close": "bar.close",
+    "volume": "bar.volume",
+    "time": "bar.timestamp",
+}
+SECURITY_BAR_FIELD_TYPES = {
+    "open": "double",
+    "high": "double",
+    "low": "double",
+    "close": "double",
+    "volume": "double",
+    "time": "int64_t",
+}
+SECURITY_BAR_FIELDS = frozenset(SECURITY_BAR_FIELD_EXPRS)
+
+# Backwards-compatible name for consumers that only need the OHLCV subset.
 SECURITY_OHLC_BAR_FIELDS = frozenset({"open", "high", "low", "close", "volume"})
 
 # Generated C++ runtime function names referenced by the codegen as string
