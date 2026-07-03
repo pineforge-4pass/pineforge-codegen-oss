@@ -151,6 +151,30 @@ def test_security_input_backed_timeframe_alias_expands_at_registration():
     assert 'register_security_eval(0, ((get_input_bool("Use chart", false)) ? (script_tf_) : (get_input_string("Fixed TF", std::string("30")))), input_tf_, false, false)' in cpp
 
 
+def test_bar_index_builtin_uses_public_offset_helper():
+    cpp = _cpp(
+        "fire = bar_index % 200 == 0\n"
+        "if fire\n"
+        "    strategy.entry(\"L\", strategy.long)\n"
+        "plot(close)"
+    )
+    assert "std::fmod((double)(pine_bar_index()), (double)(200))" in cpp
+
+
+def test_bar_index_history_series_is_pushed_from_offset_helper():
+    cpp = _cpp(
+        "past = bar_index[6]\n"
+        "span = bar_index - past\n"
+        "if span >= 6\n"
+        "    strategy.entry(\"L\", strategy.long)\n"
+        "plot(close)"
+    )
+    assert "Series<int> bar_index" in cpp
+    assert "if (is_first_tick_) bar_index.push(pine_bar_index());" in cpp
+    assert "else bar_index.update(pine_bar_index());" in cpp
+    assert "(pine_bar_index() - past)" in cpp
+
+
 def test_security_param_tf_mixed_with_non_literal_callsite_rejected():
     # Two distinct literal tfs PLUS a third call site whose tf isn't a
     # compile-time literal (a ternary the const-folder can't resolve) ->

@@ -470,7 +470,7 @@ class TopLevelEmitter:
             if _bname in self._var_names:
                 continue
             _bexpr = BAR_BUILTINS.get(_bname)
-            if _bexpr is None or f"{_bname}(" in _bexpr:
+            if _bexpr is None or _bexpr.strip().startswith(f"{_bname}("):
                 continue
             _bsafe = self._safe_name(_bname)
             lines.append(f"        if (is_first_tick_) {_bsafe}.push({_bexpr});")

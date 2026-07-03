@@ -76,11 +76,11 @@ def tz_time_field_lambda(field_expr: str, ts_arg: str, tz_arg: str) -> str:
 
 
 BAR_BUILTINS = {
-    "bar_index": "bar_index_",
+    "bar_index": "pine_bar_index()",
     "time": "current_bar_.timestamp",
     "time_close": "time_close()",
     "timenow": "current_bar_.timestamp",
-    "last_bar_index": "last_bar_index_",
+    "last_bar_index": "pine_last_bar_index()",
     "last_bar_time": "last_bar_time_",
     # time_tradingday: Unix-ms of the session-open of the trading day that
     # contains the current bar. Backed by pine_time_tradingday() in the engine.

@@ -36,8 +36,8 @@ def test_line_new_drops_visual_kwargs_keeps_geometry():
         "xloc=xloc.bar_index, extend=extend.both, color=color.red, "
         "style=line.style_dashed, width=2)"
     )
-    assert ("pf_line_new(_pf_lines_, (int64_t)(bar_index_), (double)(current_bar_.close), "
-            "(int64_t)((bar_index_ + 1)), (double)(current_bar_.open), "
+    assert ("pf_line_new(_pf_lines_, (int64_t)(pine_bar_index()), (double)(current_bar_.close), "
+            "(int64_t)((pine_bar_index() + 1)), (double)(current_bar_.open), "
             "XLoc::bar_index, true, true)") in cpp
     assert "color" not in cpp.split("pf_line_new")[1].split(";")[0]
 
@@ -56,7 +56,7 @@ def test_line_getters_setters_delete_copy():
     assert "double y" in cpp and "pf_line_get_y2(_pf_lines_, ln)" in cpp
     assert "int64_t x" in cpp and "pf_line_get_x1(_pf_lines_, ln)" in cpp
     assert "pf_line_set_y2(_pf_lines_, ln, (double)(current_bar_.close))" in cpp
-    assert "pf_line_set_x2(_pf_lines_, ln, (int64_t)(bar_index_))" in cpp
+    assert "pf_line_set_x2(_pf_lines_, ln, (int64_t)(pine_bar_index()))" in cpp
     assert "Line c" in cpp and "pf_line_copy(_pf_lines_, ln)" in cpp
     assert "pf_line_delete(_pf_lines_, ln)" in cpp
 
@@ -72,8 +72,8 @@ def test_box_new_and_getters():
         "l = box.get_left(bx)\n"
         "box.set_bottom(bx, low)"
     )
-    assert ("pf_box_new(_pf_boxes_, (int64_t)(bar_index_), (double)(current_bar_.high), "
-            "(int64_t)((bar_index_ + 5)), (double)(current_bar_.low), XLoc::bar_index)") in cpp
+    assert ("pf_box_new(_pf_boxes_, (int64_t)(pine_bar_index()), (double)(current_bar_.high), "
+            "(int64_t)((pine_bar_index() + 5)), (double)(current_bar_.low), XLoc::bar_index)") in cpp
     assert "double t" in cpp and "pf_box_get_top(_pf_boxes_, bx)" in cpp
     assert "int64_t l" in cpp and "pf_box_get_left(_pf_boxes_, bx)" in cpp
     assert "pf_box_set_bottom(_pf_boxes_, bx, (double)(current_bar_.low))" in cpp
@@ -90,7 +90,7 @@ def test_label_new_text_and_getters():
         "s = lb.get_text()\n"
         "yy = lb.get_y()"
     )
-    assert ('pf_label_new(_pf_labels_, (int64_t)(bar_index_), (double)(current_bar_.close), '
+    assert ('pf_label_new(_pf_labels_, (int64_t)(pine_bar_index()), (double)(current_bar_.close), '
             'std::string("hi"), XLoc::bar_index, YLoc::abovebar)') in cpp
     assert 'pf_label_set_text(_pf_labels_, lb, std::string("bye"))' in cpp
     assert "std::string s" in cpp and "pf_label_get_text(_pf_labels_, lb)" in cpp
@@ -109,8 +109,8 @@ def test_chart_point_and_line_pts_and_linefill():
         "lf = linefill.new(ln1, ln2, color.new(color.red, 80))\n"
         "g = linefill.get_line1(lf)"
     )
-    assert "ChartPoint{ .index=bar_index_, .time=(int64_t)current_bar_.timestamp, .price=(current_bar_.close) }" in cpp
-    assert "ChartPoint{ .index=(int64_t)((bar_index_ + 3)), .time=na<int64_t>(), .price=(current_bar_.high) }" in cpp
+    assert "ChartPoint{ .index=(int64_t)(pine_bar_index()), .time=(int64_t)current_bar_.timestamp, .price=(current_bar_.close) }" in cpp
+    assert "ChartPoint{ .index=(int64_t)((pine_bar_index() + 3)), .time=na<int64_t>(), .price=(current_bar_.high) }" in cpp
     assert "pf_line_new_pts(_pf_lines_, p1, p2, XLoc::bar_index)" in cpp
     # linefill drops the color arg.
     assert "pf_linefill_new(_pf_linefills_, ln1, ln2)" in cpp
