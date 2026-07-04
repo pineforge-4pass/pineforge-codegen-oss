@@ -464,6 +464,7 @@ def test_timestamp_timezone_variable_uses_tz_overload():
     )
     assert "std::string _tz = pineforge::normalize_timezone_for_posix((tz))" in cpp
     assert "int _yr = (tz)" not in cpp
+    assert "t.tm_isdst = -1" in cpp
     assert "mktime(&t)" in cpp
 
 

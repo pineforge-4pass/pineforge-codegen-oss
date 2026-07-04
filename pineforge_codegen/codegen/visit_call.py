@@ -812,6 +812,7 @@ class CallVisitor:
                     f"struct tm t = {{}}; "
                     f"t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
                     f"t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
+                    f"t.tm_isdst = -1; "
                     f"int64_t _res; "
                     f"if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") {{ "
                     f"_res = (int64_t)timegm(&t) * 1000; "
