@@ -28,7 +28,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..ast_nodes import (
-    Assignment, BinOp, ExprStmt, FuncCall, Ternary, UnaryOp, VarDecl,
+    Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall,
+    Identifier, MemberAccess, NaLiteral, NumberLiteral, StringLiteral,
+    Subscript, Ternary, TupleLiteral, UnaryOp, VarDecl,
 )
 from .tables import TA_IMPLICIT_APPEND, TA_IMPLICIT_COMPUTE_FULL
 
@@ -220,6 +222,90 @@ class TaSiteHelper:
             return TA_IMPLICIT_APPEND[ta_name]
 
         return ""
+
+    # ------------------------------------------------------------------
+    # Precalculation safety
+    # ------------------------------------------------------------------
+
+    _PRECALC_BAR_IDENTIFIERS = {
+        "open", "high", "low", "close", "volume",
+        "hl2", "hlc3", "ohlc4", "hlcc4",
+        "time", "time_close", "bar_index",
+    }
+
+    def _is_precalc_replayed_source_var(self, name: str) -> bool:
+        """True for top-level ``x = input.source(...)`` variables replayed in
+        ``precalculate()``.
+
+        The precompute loop explicitly advances native source series and then
+        replays those source-input assignments before computing static TA
+        sites. Other user aliases, even when they are statically derived from
+        bar data (``src = close`` / ``ha_close = close``), are not replayed
+        there and must therefore use the normal per-bar TA path."""
+        ast = getattr(self.ctx, "ast", None)
+        for stmt in getattr(ast, "body", ()):
+            if (
+                isinstance(stmt, VarDecl)
+                and stmt.name == name
+                and isinstance(stmt.value, FuncCall)
+                and self._is_source_input(stmt.value)
+            ):
+                return True
+        return False
+
+    def _expr_safe_for_ta_precalc(self, expr) -> bool:
+        if expr is None:
+            return True
+        if isinstance(expr, (NumberLiteral, StringLiteral, BoolLiteral, NaLiteral, ColorLiteral)):
+            return True
+        if isinstance(expr, Identifier):
+            if expr.name in self._PRECALC_BAR_IDENTIFIERS:
+                return True
+            if self._is_precalc_replayed_source_var(expr.name):
+                return True
+            if expr.name in getattr(self.ctx, "series_vars", set()):
+                return False
+            return expr.name in getattr(self, "_static_vars", set())
+        if isinstance(expr, MemberAccess):
+            if isinstance(expr.object, Identifier) and (
+                expr.object.name.startswith("input") or expr.object.name in getattr(self, "_enum_defs", {})
+            ):
+                return True
+            return self._expr_safe_for_ta_precalc(expr.object)
+        if isinstance(expr, BinOp):
+            return self._expr_safe_for_ta_precalc(expr.left) and self._expr_safe_for_ta_precalc(expr.right)
+        if isinstance(expr, UnaryOp):
+            return self._expr_safe_for_ta_precalc(expr.operand)
+        if isinstance(expr, Ternary):
+            return (
+                self._expr_safe_for_ta_precalc(expr.condition)
+                and self._expr_safe_for_ta_precalc(expr.true_val)
+                and self._expr_safe_for_ta_precalc(expr.false_val)
+            )
+        if isinstance(expr, Subscript):
+            return self._expr_safe_for_ta_precalc(expr.object) and self._expr_safe_for_ta_precalc(expr.index)
+        if isinstance(expr, TupleLiteral):
+            return all(self._expr_safe_for_ta_precalc(elem) for elem in expr.elements)
+        if isinstance(expr, FuncCall):
+            if isinstance(expr.callee, MemberAccess) and isinstance(expr.callee.object, Identifier):
+                if expr.callee.object.name in ("math", "str", "color"):
+                    return all(self._expr_safe_for_ta_precalc(arg) for arg in expr.args)
+            return False
+        return False
+
+    def _ta_site_uses_precalc(self, site: "TACallSite") -> bool:
+        """Whether a static TA site can safely read from ``_precalc_*``.
+
+        Static-ness from the analyzer means the expression can be represented
+        from bar data and constants, but the standalone precompute loop only
+        replays a narrow subset of per-bar assignments. A user alias such as
+        ``ha_close = close`` is static in that analyzer sense, yet its Series is
+        empty during precompute, so ``ta.stdev(ha_close, 20)`` precalculates as
+        all-``na``. Opting that site out preserves correctness; it simply uses
+        the ordinary stateful TA object during ``on_bar``."""
+        if not getattr(site, "is_static", False):
+            return False
+        return all(self._expr_safe_for_ta_precalc(arg) for arg in site.compute_args)
 
     def _security_ta_compute_args_for_site(
         self,

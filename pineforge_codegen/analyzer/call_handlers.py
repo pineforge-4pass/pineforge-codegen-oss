@@ -75,7 +75,7 @@ from .. import tv_input_choices as tv_in
 from .contracts import FixnanCallSite, FuncInfo, SecurityCallInfo, TACallSite
 from .tables import (
     BAR_FIELDS, TA_CLASS_MAP, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
-    TA_TUPLE_RETURNS,
+    TA_TUPLE_RETURNS, TA_TUPLE_ELEMENT_COUNTS, TA_COMPUTE_ARGS,
 )
 
 
@@ -235,9 +235,14 @@ class CallHandlers:
         elif func_name in TA_PERIOD_ARG:
             ctor_indices = {TA_PERIOD_ARG[func_name]}
 
-        for i, arg in enumerate(all_args):
-            if i not in ctor_indices and arg is not None:
-                compute_args.append(arg)
+        if func_name in TA_COMPUTE_ARGS:
+            for i in TA_COMPUTE_ARGS[func_name]:
+                if i < len(all_args) and all_args[i] is not None:
+                    compute_args.append(all_args[i])
+        else:
+            for i, arg in enumerate(all_args):
+                if i not in ctor_indices and arg is not None:
+                    compute_args.append(arg)
 
         is_static = self._global_scope and all(self._is_static_expression(arg) for arg in compute_args)
         site = TACallSite(
@@ -309,6 +314,27 @@ class CallHandlers:
 
             returns_tuple = isinstance(expr_node, TupleLiteral)
             tuple_size = len(expr_node.elements) if returns_tuple else 0
+            if not returns_tuple and isinstance(expr_node, FuncCall):
+                expr_func = None
+                expr_ns = None
+                if (isinstance(expr_node.callee, MemberAccess)
+                        and isinstance(expr_node.callee.object, Identifier)):
+                    expr_ns = expr_node.callee.object.name
+                    expr_func = expr_node.callee.member
+                if expr_ns == "ta":
+                    if expr_func == "vwap":
+                        merged_v = list(expr_node.args)
+                        for i, pname in enumerate(["source", "anchor", "stdev_mult"]):
+                            if pname in expr_node.kwargs:
+                                while len(merged_v) <= i:
+                                    merged_v.append(None)
+                                if merged_v[i] is None:
+                                    merged_v[i] = expr_node.kwargs[pname]
+                        if len(merged_v) >= 3:
+                            expr_func = "vwap_bands"
+                    if expr_func in TA_TUPLE_RETURNS:
+                        returns_tuple = True
+                        tuple_size = TA_TUPLE_ELEMENT_COUNTS.get(expr_func, 0)
 
             gaps_node = all_args[3] if len(all_args) > 3 else None
             lookahead_node = all_args[4] if len(all_args) > 4 else None
@@ -899,6 +925,18 @@ class CallHandlers:
                     arg = node.args[p_idx]
                     if isinstance(arg, Identifier) and arg.name in BAR_FIELDS:
                         self._series_bar_fields.add(arg.name)
+                    elif isinstance(arg, Identifier):
+                        sym = self._symbols.resolve(arg.name)
+                        spec = getattr(sym, "type_spec", None) if sym is not None else None
+                        if spec is not None and spec.kind in ("array", "map", "matrix"):
+                            continue
+                        if sym is not None:
+                            sym.is_series = True
+                            if sym.scope and sym.scope.startswith("func_"):
+                                caller_name = sym.scope[5:]
+                                self._func_series_vars.setdefault(caller_name, set()).add(arg.name)
+                            else:
+                                self._series_vars.add(arg.name)
 
         # Per-call-site cloning: if this function has TA calls or series vars,
         # track call sites so codegen can create per-call-site variants.
@@ -1041,7 +1079,10 @@ class CallHandlers:
         # Per-param TypeSpec: declared hints are authoritative; for untyped
         # params, infer from the call-site argument's type_spec (so an untyped
         # ``s`` used as a string, or a UDT passed by value, emits correctly).
-        param_specs = self._param_type_specs_from_def(func_def)
+        param_specs = list(
+            getattr(self, "_func_param_type_specs", {}).get(func_name)
+            or self._param_type_specs_from_def(func_def)
+        )
         arg_specs = [self._type_spec_from_expr(arg) for arg in node.args]
         for i in range(len(param_specs)):
             if param_specs[i] is None and i < len(arg_specs):

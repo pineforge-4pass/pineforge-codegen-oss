@@ -210,8 +210,14 @@ class TypeInferer:
         if isinstance(node, StringLiteral):
             return TypeSpec.primitive("string")
         if isinstance(node, Identifier):
+            loop_specs = getattr(self, "_current_loop_var_specs", None)
+            if loop_specs and node.name in loop_specs:
+                return loop_specs[node.name]
             if node.name in self._collection_types:
                 return self._collection_types[node.name]
+            param_specs = getattr(self, "_current_func_param_specs", {})
+            if node.name in param_specs:
+                return param_specs[node.name]
             if node.name in self._udt_var_types:
                 return TypeSpec.udt(self._udt_var_types[node.name])
             # Drawing-typed method/function parameter (L.6d / U.5): a ``line ln``
@@ -512,12 +518,29 @@ class TypeInferer:
 
     def _is_udt_lvalue(self, expr) -> str | None:
         """If ``expr`` is a *user-defined* UDT lvalue (a bare ``Identifier`` that
-        names a class-scope ``var``/global UDT member, e.g. ``wyckoffSwingLow``),
-        return its UDT type name; else ``None``.
+        names a class-scope ``var``/global UDT member, e.g. ``wyckoffSwingLow``,
+        or an element selected from ``array<UDT>``), return its UDT type name;
+        else ``None``.
 
         Pine UDTs are reference types, so a local initialised from such an lvalue
         and then mutated through must write back to the global. Drawing UDTs are
         handled by the separate ``_uses_drawing`` path and are excluded here."""
+        if isinstance(expr, FuncCall):
+            callee = expr.callee
+            func_name, namespace = self._resolve_callee(callee)
+            receiver = None
+            if namespace == "array" and func_name in ("get", "first", "last") and expr.args:
+                receiver = expr.args[0]
+            elif (isinstance(callee, MemberAccess)
+                  and func_name in ("get", "first", "last")):
+                receiver = callee.object
+            if receiver is not None:
+                spec = self._type_spec_from_expr(receiver)
+                elem = spec.element if spec is not None and spec.kind == "array" else None
+                if (elem is not None and elem.kind == "udt" and elem.name in self._udt_defs
+                        and elem.name not in DRAWING_TYPE_TO_CPP):
+                    return elem.name
+            return None
         if not isinstance(expr, Identifier):
             return None
         udt_t = self._udt_var_types.get(expr.name)
@@ -791,6 +814,8 @@ class TypeInferer:
                     return "double"
             if node.name in self._current_func_param_types:
                 return self._current_func_param_types[node.name]
+            if node.name in getattr(self, "_current_func_local_types", {}):
+                return self._current_func_local_types[node.name]
             sym = self.ctx.symbols.resolve(node.name)
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return self._type_spec_to_cpp(sym.type_spec)
@@ -829,9 +854,11 @@ class TypeInferer:
             if namespace == "str":
                 if func_name == "split":
                     return "std::vector<std::string>"
+                if func_name in ("contains", "startswith", "endswith"):
+                    return "bool"
                 if func_name == "tonumber":
                     return "double"
-                if func_name == "length":
+                if func_name in ("length", "pos"):
                     return "int"
                 return "std::string"
             if namespace == "ta" and func_name == "pivot_point_levels":
@@ -881,6 +908,12 @@ class TypeInferer:
             # pine_str_tostring); bare reads must declare std::string.
             if ename == "format":
                 return "std::string"
+            if ename == "timeframe":
+                if node.member in ("period", "main_period"):
+                    return "std::string"
+                if node.member == "multiplier":
+                    return "int"
+                return "bool"
             # syminfo.* type inference: look up in SYMINFO_MEMBER_MAP
             # and derive C++ type from the expression (na<T>() or function call).
             if ename == "syminfo":
@@ -888,6 +921,9 @@ class TypeInferer:
                 sym_key = f"syminfo.{node.member}"
                 if sym_key in _pf_sigs.SYMINFO_VARIABLES:
                     return PINE_TYPE_TO_CPP.get(_pf_sigs.SYMINFO_VARIABLES[sym_key], "double")
+            spec = self._type_spec_from_expr(node)
+            if spec is not None:
+                return self._type_spec_to_cpp(spec)
         if isinstance(node, Ternary):
             tt = self._infer_type(node.true_val)
             ft = self._infer_type(node.false_val)
@@ -895,6 +931,12 @@ class TypeInferer:
                 return tt if tt.startswith("std::vector") else ft
             if tt == "std::string" or ft == "std::string":
                 return "std::string"
+            if tt == "double" or ft == "double":
+                return "double"
+            if tt == "int64_t" or ft == "int64_t":
+                return "int64_t"
+            if tt == "bool" and ft == "bool":
+                return "bool"
             return tt
         # Block-as-expression cases: read the type of the last statement of
         # the first branch / case; matches Pine semantics for ``x = if...``.

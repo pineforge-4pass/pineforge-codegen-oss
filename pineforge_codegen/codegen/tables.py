@@ -55,7 +55,7 @@ def tz_time_field_lambda(field_expr: str, ts_arg: str, tz_arg: str) -> str:
     """
     return (
         "[&]() -> int { "
-        f"std::string _tz = ({tz_arg}); "
+        f"std::string _tz = pineforge::normalize_timezone_for_posix(({tz_arg})); "
         f"time_t _secs = (time_t)(({ts_arg}) / 1000); "
         "struct tm tm_buf; "
         "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") { "
@@ -76,11 +76,11 @@ def tz_time_field_lambda(field_expr: str, ts_arg: str, tz_arg: str) -> str:
 
 
 BAR_BUILTINS = {
-    "bar_index": "bar_index_",
+    "bar_index": "pine_bar_index()",
     "time": "current_bar_.timestamp",
     "time_close": "time_close()",
     "timenow": "current_bar_.timestamp",
-    "last_bar_index": "last_bar_index_",
+    "last_bar_index": "pine_last_bar_index()",
     "last_bar_time": "last_bar_time_",
     # time_tradingday: Unix-ms of the session-open of the trading day that
     # contains the current bar. Backed by pine_time_tradingday() in the engine.
@@ -113,7 +113,27 @@ BAR_SERIES_PUSH = {
     "ohlc4": "((current_bar_.open + current_bar_.high + current_bar_.low + current_bar_.close) / 4.0)",
 }
 
-# OHLCV identifiers that refer to the *security* (HTF) bar inside ``request.security()``.
+# Bar identifiers that refer to the *security* (HTF) bar inside
+# ``request.security()``. ``time`` is the HTF bar-open timestamp.
+SECURITY_BAR_FIELD_EXPRS = {
+    "open": "bar.open",
+    "high": "bar.high",
+    "low": "bar.low",
+    "close": "bar.close",
+    "volume": "bar.volume",
+    "time": "bar.timestamp",
+}
+SECURITY_BAR_FIELD_TYPES = {
+    "open": "double",
+    "high": "double",
+    "low": "double",
+    "close": "double",
+    "volume": "double",
+    "time": "int64_t",
+}
+SECURITY_BAR_FIELDS = frozenset(SECURITY_BAR_FIELD_EXPRS)
+
+# Backwards-compatible name for consumers that only need the OHLCV subset.
 SECURITY_OHLC_BAR_FIELDS = frozenset({"open", "high", "low", "close", "volume"})
 
 # Generated C++ runtime function names referenced by the codegen as string
@@ -633,6 +653,33 @@ MATRIX_METHODS = {
 # ---------------------------------------------------------------------------
 # Math / String dispatch
 # ---------------------------------------------------------------------------
+
+def _math_minmax_na_expr(func_name: str, args: list[str]) -> str:
+    """Emit Pine-compatible math.min/math.max with na propagation.
+
+    ``std::min``/``std::max`` do not propagate NaN consistently because their
+    comparison is specified in terms of ``operator<``. Pine math.min/max return
+    ``na`` when any operand is ``na``, so generated clamp-style expressions
+    like ``math.max(-1, math.min(1, na))`` must stay ``na``.
+    """
+    if not args:
+        return "na<double>()"
+    if len(args) == 1:
+        return f"(double)({args[0]})"
+    op = "std::max" if func_name == "max" else "std::min"
+    decls = " ".join(
+        f"double _v{i} = (double)({arg});" for i, arg in enumerate(args)
+    )
+    guard = " || ".join(f"is_na(_v{i})" for i in range(len(args)))
+    updates = " ".join(
+        f"_out = {op}(_out, _v{i});" for i in range(1, len(args))
+    )
+    return (
+        f"([&]() -> double {{ {decls} "
+        f"if ({guard}) return na<double>(); "
+        f"double _out = _v0; {updates} return _out; }}())"
+    )
+
 
 MATH_FUNC_MAP = {
     "abs": "std::abs", "max": "std::max", "min": "std::min",

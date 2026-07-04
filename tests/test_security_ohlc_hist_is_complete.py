@@ -53,3 +53,52 @@ plot(close)
     guard_idx = body.index("if (is_complete) {")
     push = re.search(r"_sec0_hist_high\.push\(bar\.high\);", body)
     assert push is not None and push.start() > guard_idx
+
+
+def test_security_time_identifier_uses_security_bar_timestamp():
+    src = """//@version=6
+strategy("t", overlay=true)
+ht = request.security(syminfo.tickerid, "60", time, lookahead=barmerge.lookahead_off)
+if not na(ht)
+    strategy.entry("L", strategy.long)
+plot(close)
+"""
+    body = _eval_body(transpile(src))
+    assert "_req_sec_0 = bar.timestamp;" in body
+    assert "current_bar_.timestamp" not in body
+
+
+def test_security_time_history_uses_completed_htf_history():
+    src = """//@version=6
+strategy("t", overlay=true)
+ht = request.security(syminfo.tickerid, "60", time[1], lookahead=barmerge.lookahead_off)
+if not na(ht)
+    strategy.entry("L", strategy.long)
+plot(close)
+"""
+    cpp = transpile(src)
+    body = _eval_body(cpp)
+    assert "Series<int64_t> _sec0_hist_time" in cpp
+    assert "_req_sec_0 = _sec0_hist_time[0];" in body
+    assert "time[1]" not in body
+    assert "current_bar_.timestamp" not in body
+    guard_idx = body.index("if (is_complete) {")
+    push = re.search(r"_sec0_hist_time\.push\(bar\.timestamp\);", body)
+    assert push is not None and push.start() > guard_idx
+
+
+def test_security_time_history_allows_input_backed_offset():
+    src = """//@version=6
+strategy("t", overlay=true)
+len = input.int(5, "Len")
+ht = request.security(syminfo.tickerid, "60", time[len], lookahead=barmerge.lookahead_off)
+if not na(ht)
+    strategy.entry("L", strategy.long)
+plot(close)
+"""
+    cpp = transpile(src)
+    body = _eval_body(cpp)
+    assert "Series<int64_t> _sec0_hist_time" in cpp
+    assert "int _hidx = (int)(get_input_int(\"Len\", 5));" in body
+    assert "return (_hidx <= 0) ? bar.timestamp : _sec0_hist_time[_hidx - 1];" in body
+    assert "time[len]" not in body

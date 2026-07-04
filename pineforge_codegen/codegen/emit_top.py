@@ -470,7 +470,7 @@ class TopLevelEmitter:
             if _bname in self._var_names:
                 continue
             _bexpr = BAR_BUILTINS.get(_bname)
-            if _bexpr is None or f"{_bname}(" in _bexpr:
+            if _bexpr is None or _bexpr.strip().startswith(f"{_bname}("):
                 continue
             _bsafe = self._safe_name(_bname)
             lines.append(f"        if (is_first_tick_) {_bsafe}.push({_bexpr});")
@@ -776,10 +776,12 @@ class TopLevelEmitter:
         # Determine param types and set context for type inference inside body
         param_strs = []
         self._current_func_param_types = {}
+        self._current_func_param_specs = {}
         self._current_func_series_params = set()
         self._udt_param_udt = {}
         func_sv = self.ctx.func_series_vars.get(fi.name, set())
         for i, p in enumerate(node.params):
+            spec = None
             if is_udt and i == 0 and fi.udt_type_name:
                 # A method receiver whose type is a drawing primitive
                 # (egoigor's ``method slope(line ln)``) must emit ``Line&`` not
@@ -821,6 +823,9 @@ class TopLevelEmitter:
                 cpp_t = "double"
             param_strs.append(f"{cpp_t} {self._safe_name(p)}")
             self._current_func_param_types[p] = cpp_t
+            if spec is not None:
+                self._current_func_param_specs[p] = spec
+                self._current_func_param_specs[self._safe_name(p)] = spec
 
         # Determine return type: tuple, UDT, or scalar.
         # The UDT branch handles user functions whose body is ``T.new(...)``;
@@ -873,6 +878,7 @@ class TopLevelEmitter:
             self._current_instance_name = None
 
         prev_func_locals = self._current_func_locals
+        prev_func_local_types = self._current_func_local_types
         prev_func_body = getattr(self, "_current_func_body", None)
         prev_func_name = getattr(self, "_active_func_name", None)
         # The function body is the lexical scope used by the UDT-alias analysis
@@ -886,6 +892,7 @@ class TopLevelEmitter:
         prev_ptr_alias = self._udt_ptr_alias_locals
         self._udt_ptr_alias_locals = set()
         self._current_func_locals = {n for n, _, _ in self.ctx.func_var_members.get(fi.name, [])}
+        self._current_func_local_types = {}
         # Plain (non-persistent) scalar locals are emitted inline and live in
         # no other set; collect them so the unknown-identifier guard in
         # _visit_ident does not mistake them for undeclared symbols.
@@ -956,9 +963,11 @@ class TopLevelEmitter:
 
         lines.append("    }")
         self._current_func_param_types = {}
+        self._current_func_param_specs = {}
         self._current_func_series_params = set()
         self._udt_param_udt = {}
         self._current_func_locals = prev_func_locals
+        self._current_func_local_types = prev_func_local_types
         self._current_func_body = prev_func_body
         self._active_func_name = prev_func_name
         self._udt_ptr_alias_locals = prev_ptr_alias
@@ -1031,9 +1040,21 @@ class TopLevelEmitter:
         lines.append("        }")
 
     def _emit_precalculate_and_run(self, lines: list[str]) -> None:
-        has_static_ta = any(getattr(site, "is_static", False) for site in self.ctx.ta_call_sites)
+        has_static_ta = any(self._ta_site_uses_precalc(site) for site in self.ctx.ta_call_sites)
         if not has_static_ta:
             return
+
+        replayed_source_series: list[str] = []
+        for stmt in self.ctx.ast.body:
+            if not isinstance(stmt, VarDecl):
+                continue
+            if stmt.name not in self._global_member_vars:
+                continue
+            if not (isinstance(stmt.value, FuncCall) and self._is_source_input(stmt.value)):
+                continue
+            if stmt.name in self.ctx.series_vars:
+                replayed_source_series.append(self._safe_name(stmt.name))
+        replayed_source_series = sorted(set(replayed_source_series))
 
         lines.append("    void precalculate(const Bar* bars, int n) {")
         lines.append("        _use_precalc = false;")
@@ -1042,13 +1063,13 @@ class TopLevelEmitter:
 
         # Resize precalculated vectors
         for site in self.ctx.ta_call_sites:
-            if getattr(site, "is_static", False):
+            if self._ta_site_uses_precalc(site):
                 lines.append(f"        _precalc_{site.member_name}.resize(n);")
 
         # Reset indicators to clean slate
         lines.append("")
         for site in self.ctx.ta_call_sites:
-            if getattr(site, "is_static", False):
+            if self._ta_site_uses_precalc(site):
                 resolved = [self._resolve_known(a) for a in site.ctor_args]
                 safe_resolved = []
                 for r in resolved:
@@ -1059,6 +1080,13 @@ class TopLevelEmitter:
         lines.append("")
         for field_name in sorted(self.ctx.series_bar_fields):
             lines.append(f"        _s_{field_name}.clear();")
+        for safe in replayed_source_series:
+            lines.append(f"        {safe}.clear();")
+        if self._script_has_input_source():
+            lines.append("        _src_open_.clear(); _src_high_.clear(); _src_low_.clear();")
+            lines.append("        _src_close_.clear(); _src_volume_.clear();")
+            lines.append("        _src_hl2_.clear(); _src_hlc3_.clear();")
+            lines.append("        _src_ohlc4_.clear(); _src_hlcc4_.clear();")
 
         # Start precalculation loop
         lines.append("")
@@ -1081,8 +1109,8 @@ class TopLevelEmitter:
         # entire precalculation, silently corrupting its precalculated
         # values (e.g. a Bollinger Band's stdev collapsing to 0). Gated on
         # ``_src_series_active_`` to stay a no-op for scripts with no
-        # input.source() usage; cleared again before the real run begins
-        # (BacktestEngine::run() clears every _src_*_ series unconditionally).
+        # input.source() usage; cleared before and after the precalc pass so
+        # replayed source history cannot leak into the real run.
         lines.append("            if (_src_series_active_) {")
         lines.append("                const double _pc_o = bars[i].open;")
         lines.append("                const double _pc_h = bars[i].high;")
@@ -1137,7 +1165,7 @@ class TopLevelEmitter:
         self._precalc_loop_active = True
         try:
             for site in self.ctx.ta_call_sites:
-                if getattr(site, "is_static", False):
+                if self._ta_site_uses_precalc(site):
                     compute_args = self._ta_compute_args_for_site(site)
                     compute_args_bars = compute_args.replace("current_bar_.", "bars[i].")
                     lines.append(f"            _precalc_{site.member_name}[i] = {site.member_name}.compute({compute_args_bars});")
@@ -1149,7 +1177,7 @@ class TopLevelEmitter:
         # Reset indicators and series for the real backtest run
         lines.append("")
         for site in self.ctx.ta_call_sites:
-            if getattr(site, "is_static", False):
+            if self._ta_site_uses_precalc(site):
                 resolved = [self._resolve_known(a) for a in site.ctor_args]
                 safe_resolved = []
                 for r in resolved:
@@ -1158,6 +1186,13 @@ class TopLevelEmitter:
 
         for field_name in sorted(self.ctx.series_bar_fields):
             lines.append(f"        _s_{field_name}.clear();")
+        for safe in replayed_source_series:
+            lines.append(f"        {safe}.clear();")
+        if self._script_has_input_source():
+            lines.append("        _src_open_.clear(); _src_high_.clear(); _src_low_.clear();")
+            lines.append("        _src_close_.clear(); _src_volume_.clear();")
+            lines.append("        _src_hl2_.clear(); _src_hlc3_.clear();")
+            lines.append("        _src_ohlc4_.clear(); _src_hlcc4_.clear();")
 
         lines.append("")
         lines.append("        _use_precalc = true;")

@@ -133,8 +133,8 @@ _ta("kcw",     _sig([("source", F), ("length", I), ("mult", F, 1.5)]))
 # --- Volatility & Range ---
 _ta("atr",     _sig([("length", I)]))
 _ta("tr",      _sig([("handle_na", B, False)]))
-_ta("stdev",   _sig([("source", F), ("length", I)]))
-_ta("variance",_sig([("source", F), ("length", I)]))
+_ta("stdev",   _sig([("source", F), ("length", I), ("biased", B, True)]))
+_ta("variance",_sig([("source", F), ("length", I), ("biased", B, True)]))
 
 # --- Trend ---
 _ta("supertrend", _sig([("factor", F), ("atrPeriod", I)],

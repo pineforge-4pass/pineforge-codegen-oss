@@ -1,6 +1,6 @@
 """Regression tests for codegen bugs found by pinescript-scrapper validation.
 
-Covers five fix families:
+Covers seven fix families:
   1. drawing-handle ``na`` reset/assignment (Box{}/Line{}/... not na<double>()),
      plus typed ``na`` for string/int/bool declaration init.
   2. void drawing setter used as a UDF's last expression / if-branch value.
@@ -9,6 +9,14 @@ Covers five fix families:
   4. parser handling of ``T[]`` array-typed function parameters (``float[] arr``,
      ``line[] ln``) — previously the whole function was dropped.
   5. typed drawing array constructors ``array.new_line/box/label/linefill``.
+  6. Pine v6 bool casts that must treat ``na`` as ``false`` instead of C++'s
+     truthy NaN conversion.
+  7. ``input.source`` series replayed during TA precompute must be cleared
+     before the real run.
+  8. Pine ``for`` loops infer direction even when an explicit positive ``by``
+     step is supplied.
+  9. Numeric ternaries promote an ``int`` literal branch to ``double`` when the
+     other branch is floating-point arithmetic.
 """
 
 from pineforge_codegen import transpile
@@ -124,6 +132,47 @@ def test_security_param_tf_dead_code_falls_back_to_chart_tf():
     )
     assert "register_security_eval" in cpp
     assert "Unknown variable" not in cpp
+
+
+def test_security_input_backed_timeframe_alias_expands_at_registration():
+    # NicoCashFx shape: request.security receives a global timeframe alias whose
+    # value is assigned on_bar from input-backed operands. Registration happens
+    # before on_bar, so emitting the alias member itself registers an empty tf.
+    cpp = _cpp(
+        'useChart = input.bool(false, "Use chart")\n'
+        'fixedTf = input.string("30", "Fixed TF", options=["15", "30", "60"])\n'
+        "tf = useChart ? timeframe.period : fixedTf\n"
+        'htf = request.security(syminfo.tickerid, tf, close)\n'
+        "plot(htf)"
+    )
+    assert 'register_security_eval(0, tf, input_tf_, false, false)' not in cpp
+    assert 'get_input_bool("Use chart", false)' in cpp
+    assert 'get_input_string("Fixed TF", std::string("30"))' in cpp
+    assert 'register_security_eval(0, ((get_input_bool("Use chart", false)) ? (script_tf_) : (get_input_string("Fixed TF", std::string("30")))), input_tf_, false, false)' in cpp
+
+
+def test_bar_index_builtin_uses_public_offset_helper():
+    cpp = _cpp(
+        "fire = bar_index % 200 == 0\n"
+        "if fire\n"
+        "    strategy.entry(\"L\", strategy.long)\n"
+        "plot(close)"
+    )
+    assert "std::fmod((double)(pine_bar_index()), (double)(200))" in cpp
+
+
+def test_bar_index_history_series_is_pushed_from_offset_helper():
+    cpp = _cpp(
+        "past = bar_index[6]\n"
+        "span = bar_index - past\n"
+        "if span >= 6\n"
+        "    strategy.entry(\"L\", strategy.long)\n"
+        "plot(close)"
+    )
+    assert "Series<int> bar_index" in cpp
+    assert "if (is_first_tick_) bar_index.push(pine_bar_index());" in cpp
+    assert "else bar_index.update(pine_bar_index());" in cpp
+    assert "(pine_bar_index() - past)" in cpp
 
 
 def test_security_param_tf_mixed_with_non_literal_callsite_rejected():
@@ -300,6 +349,157 @@ def test_drawing_array_constructor_default_value_arg():
         "plot(array.size(bxs))"
     )
     assert "std::vector<Box>((size_t)(2)" in cpp
+
+
+def test_untyped_var_drawing_array_constructor_emits_typed_member():
+    cpp = _cpp(
+        "var boxes = array.new_box()\n"
+        "if bar_index == 0\n"
+        "    b = box.new(bar_index, high, bar_index + 1, low)\n"
+        "    array.push(boxes, b)\n"
+        "plot(array.size(boxes))"
+    )
+    assert "std::vector<Box> boxes;" in cpp
+    assert "std::vector<double> boxes;" not in cpp
+
+
+def test_comma_separated_statements_and_array_fill_emit_all_side_effects():
+    cpp = _cpp(
+        "var float a = na\n"
+        "var float b = na\n"
+        "var float[] xs = array.new_float(3, na)\n"
+        "var int[] ys = array.new_int(2, na)\n"
+        "var label[] lbs = array.new_label(2, na)\n"
+        "if true\n"
+        "    a := 1, b := 2\n"
+        "    array.fill(xs, na), array.set(xs, 1, 7)\n"
+        "    array.fill(ys, na), ys.set(1, na)\n"
+        "    array.fill(lbs, na)\n"
+        "plot(a + b + array.get(xs, 1))"
+    )
+    assert "a = 1;" in cpp
+    assert "b = 2;" in cpp
+    assert "xs = std::vector<double>((size_t)(3), na<double>());" in cpp
+    assert "ys = std::vector<int>((size_t)(2), na<int>());" in cpp
+    assert "lbs = std::vector<Label>((size_t)(2), Label{});" in cpp
+    assert "std::fill(xs.begin(), xs.end(), na<double>());" in cpp
+    assert "xs[(1)] = 7;" in cpp
+    assert "std::fill(ys.begin(), ys.end(), na<int>());" in cpp
+    assert "ys[(1)] = na<int>();" in cpp
+    assert "std::fill(lbs.begin(), lbs.end(), Label{});" in cpp
+    assert "std::vector<double>((size_t)(3), 0.0)" not in cpp
+
+
+def test_bool_cast_numeric_na_is_false_not_cpp_nan_truthy():
+    cpp = _cpp(
+        "var bool isUp = bool(na)\n"
+        "fromClose = bool(close)\n"
+        "fromZero = bool(0)\n"
+        "plot(isUp ? close : open)\n"
+    )
+    assert "(bool)(na<double>())" not in cpp
+    assert "is_na(_pf_v) ? false : (bool)_pf_v" in cpp
+    assert "var bool" not in cpp
+    assert "bool isUp" in cpp
+    assert "bool fromClose" in cpp
+    assert "bool fromZero" in cpp
+
+
+def test_precalc_clears_replayed_input_source_series():
+    cpp = _cpp(
+        "src = input.source(high, \"High source\")\n"
+        "ph = ta.pivothigh(src, 5, 5)\n"
+        "x = src[5]\n"
+        "plot(na(ph) ? x : ph)"
+    )
+    assert "src.push(get_input_source" in cpp
+    assert cpp.count("src.clear();") >= 2
+    assert "_src_high_.clear()" in cpp
+
+
+def test_str_contains_udf_infers_bool_return_type():
+    cpp = _cpp(
+        "hasXau() =>\n"
+        "    str.contains(str.upper(syminfo.ticker), \"XAU\")\n"
+        "isGold = hasXau()\n"
+        "plot(isGold ? close : open)"
+    )
+    assert "bool hasXau()" in cpp
+    assert "std::string hasXau()" not in cpp
+
+
+def test_input_source_passed_to_history_udf_is_series_arg():
+    cpp = _cpp(
+        "src = input.source(close, \"Source\")\n"
+        "lagged(_src, _len) =>\n"
+        "    lag = math.floor((_len - 1) / 2)\n"
+        "    _src + (_src - _src[lag])\n"
+        "z = lagged(src, 10)\n"
+        "plot(z)"
+    )
+    assert "Series<double> src" in cpp
+    assert "lagged_cs0(src, 10)" in cpp or "lagged(src, 10)" in cpp
+    assert "lagged_cs0(src[0], 10)" not in cpp
+    assert "lagged(src[0], 10)" not in cpp
+
+
+def test_syminfo_pointvalue_infers_numeric_udf_return():
+    cpp = _cpp(
+        "pointValue = syminfo.pointvalue\n"
+        "dollarsToPoints(dollars) =>\n"
+        "    dollars / pointValue\n"
+        "x = dollarsToPoints(100.0)\n"
+        "plot(x)"
+    )
+    assert "double dollarsToPoints(double dollars)" in cpp
+    assert "std::string dollarsToPoints" not in cpp
+
+
+def test_timestamp_timezone_variable_uses_tz_overload():
+    cpp = _cpp(
+        "tz = input.string(\"America/New_York\", \"Timezone\")\n"
+        "nyYear = year(time, tz)\n"
+        "rangeStart = timestamp(tz, nyYear, 1, 2, 9, 30)\n"
+        "plot(rangeStart)"
+    )
+    assert "std::string _tz = pineforge::normalize_timezone_for_posix((tz))" in cpp
+    assert "int _yr = (tz)" not in cpp
+    assert "t.tm_isdst = -1" in cpp
+    assert "mktime(&t)" in cpp
+
+
+def test_ta_stdev_biased_arg_goes_to_constructor_not_compute():
+    cpp = _cpp(
+        "x = ta.stdev(close, 3, false)\n"
+        "plot(x)"
+    )
+    assert "ta::StdDev(3, false)" in cpp
+    assert ".compute(current_bar_.close, false)" not in cpp
+    assert ".recompute(current_bar_.close, false)" not in cpp
+
+
+def test_ta_precalc_skips_user_series_alias_source():
+    cpp = _cpp(
+        "ha_close = close\n"
+        "bbLen = input.int(20, \"BB Length\")\n"
+        "dev = ta.stdev(ha_close, bbLen) * 2.0\n"
+        "plot(dev)"
+    )
+    assert "std::vector<double> _precalc__ta_stdev" not in cpp
+    assert "_use_precalc ? _precalc__ta_stdev" not in cpp
+    assert "_ta_stdev_1.compute(ha_close)" in cpp
+
+
+def test_text_align_wrapper_param_infers_string():
+    cpp = _cpp(
+        "var table dash = table.new(position.top_right, 1, 1)\n"
+        "cell(alignMode) =>\n"
+        "    table.cell(dash, 0, 0, \"x\", text_halign = alignMode)\n"
+        "cell(text.align_right)\n"
+        "plot(close)"
+    )
+    assert "cell(std::string alignMode)" in cpp
+    assert "cell(int alignMode)" not in cpp
 
 
 # ---------------------------------------------------------------------------
@@ -575,3 +775,75 @@ def test_function_scoped_var_not_in_constructor_init_list():
     m = re.search(r"GeneratedStrategy\(\)\s*:([^\n]*)", cpp)
     assert m is None or "c(5)" not in m.group(0)
 
+
+def test_strategy_exit_profit_loss_passes_relative_ticks_to_engine():
+    # strategy.exit(profit/loss) can be issued while its entry is still pending.
+    # Codegen must not convert the tick offsets to absolute prices using
+    # position_entry_price_ at call time, because the actual entry fill may not
+    # exist until the next bar.
+    cpp = _cpp(
+        "if bar_index == 0\n"
+        "    strategy.entry(\"L\", strategy.long)\n"
+        "    strategy.exit(\"X\", \"L\", profit=40, loss=20)\n"
+        "plot(close)"
+    )
+    assert "position_entry_price_ +" not in cpp
+    assert "position_entry_price_ -" not in cpp
+    assert 'strategy_exit(std::string("X"), std::string("L"), na<double>(), na<double>()' in cpp
+    assert ", 100.0, \"\", na<double>(), \"\", 40, 20);" in cpp
+
+
+def test_string_concat_preserves_top_level_local_string_types():
+    cpp = _cpp(
+        "if barstate.islast\n"
+        "    role_txt = close > open ? \"run\" : \"next\"\n"
+        "    status_icon = close > open ? \"ok\" : \"  \"\n"
+        "    row_label = status_icon + \"DCA-\" + str.tostring(bar_index) + role_txt\n"
+        "    label.new(bar_index, close, row_label)\n"
+        "plot(close)"
+    )
+    assert "std::to_string(status_icon)" not in cpp
+    assert "std::to_string(role_txt)" not in cpp
+    assert "std::string row_label" in cpp
+
+
+def test_string_concat_preserves_udt_for_in_field_string_type():
+    cpp = _cpp(
+        "type Level\n"
+        "    string name\n"
+        "    float price\n"
+        "var levels = array.new<Level>()\n"
+        "if bar_index == 0\n"
+        "    array.push(levels, Level.new(\"PDH\", high))\n"
+        "for lvl in levels\n"
+        "    label.new(bar_index, lvl.price, \"hit \" + lvl.name)\n"
+        "plot(close)"
+    )
+    assert "std::to_string(lvl.name)" not in cpp
+    assert 'std::string("hit ") + lvl.name' in cpp
+
+
+def test_for_loop_with_explicit_by_infers_descending_direction():
+    cpp = _cpp(
+        "limit = input.int(3)\n"
+        "var vals = array.new<int>()\n"
+        "if bar_index == 0\n"
+        "    for i = limit to 0 by 1\n"
+        "        array.push(vals, i)\n"
+        "plot(close)"
+    )
+    assert "const bool _for_down_" in cpp
+    assert "int _for_step_" in cpp
+    assert "i += (_for_down_" in cpp
+    assert "_for_end_" in cpp and "_for_end_0 = (0)" in cpp
+    assert "for (int i = limit; i <= 0; i += 1)" not in cpp
+
+
+def test_numeric_ternary_with_int_literal_and_float_branch_declares_double():
+    cpp = _cpp(
+        "rng = high - low\n"
+        "pressure = rng == 0 ? 0 : (close - low) / rng\n"
+        "plot(pressure)"
+    )
+    assert "double pressure" in cpp
+    assert "int pressure" not in cpp

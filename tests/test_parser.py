@@ -229,6 +229,21 @@ def test_tuple_assign():
     assert stmt.names == ["a", "b"]
 
 
+def test_comma_separated_simple_statements_preserved():
+    prog = _parse(
+        "if true\n"
+        "    a := 1, b := 2, array.fill(xs, na), array.set(xs, 0, 3)\n"
+    )
+    body = prog.body[0].body
+    assert len(body) == 4
+    assert isinstance(body[0], Assignment)
+    assert body[0].target.name == "a"
+    assert isinstance(body[1], Assignment)
+    assert body[1].target.name == "b"
+    assert isinstance(body[2], ExprStmt)
+    assert isinstance(body[3], ExprStmt)
+
+
 def test_strategy_decl():
     src = 'strategy("Test", overlay=true)\n'
     prog = _parse("//@version=6\n" + src)

@@ -156,6 +156,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Probe: data/validation/udt-method-probe-20-udt-return-from-func.
         self._func_udt_return_types: dict[str, str] = {}
         self._func_return_type_specs: dict[str, "TypeSpec"] = {}
+        self._func_param_type_specs: dict[str, list] = {}
         # Per-function var_members and series_vars (for call-site cloning)
         self._func_var_members: dict[str, list] = {}  # func_name -> [(name, PineType, init_str)]
         self._func_series_vars: dict[str, set] = {}   # func_name -> set[str]
@@ -1184,6 +1185,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if hi > lo:
             self._func_ta_ranges[node.name] = (lo, hi)
 
+        inferred_param_specs = self._param_type_specs_from_def(node)
+        for i, param in enumerate(node.params):
+            if i < len(inferred_param_specs) and inferred_param_specs[i] is not None:
+                continue
+            sym = self._symbols.resolve(param)
+            spec = getattr(sym, "type_spec", None) if sym is not None else None
+            if spec is not None and i < len(inferred_param_specs):
+                inferred_param_specs[i] = spec
+        self._func_param_type_specs[node.name] = inferred_param_specs
+
         self._symbols.exit_scope()
 
         # Detect if function returns a tuple (last stmt is TupleLiteral)
@@ -1511,6 +1522,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         # String concatenation: if either side is STRING, result is STRING
         if left_type == PineType.STRING or right_type == PineType.STRING:
+            def _mark_string_param(expr) -> None:
+                if not isinstance(expr, Identifier):
+                    return
+                sym = self._symbols.resolve(expr.name)
+                if sym is None or not (sym.scope or "").startswith("func_"):
+                    return
+                if sym.pine_type == PineType.UNKNOWN:
+                    sym.pine_type = PineType.STRING
+                    sym.type_spec = TypeSpec.primitive("string")
+
+            if left_type == PineType.STRING:
+                _mark_string_param(node.right)
+            if right_type == PineType.STRING:
+                _mark_string_param(node.left)
             return PineType.STRING
 
         # Arithmetic: promote to FLOAT if either side is FLOAT
@@ -1583,11 +1608,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if isinstance(obj, Identifier) and obj.name == "str":
                 for arg in node.args:
                     self._visit(arg)
-                # Most str.* return a string, but a few don't:
-                #   str.tonumber -> float, str.length -> int
+                # Most str.* return a string, but predicates and index helpers
+                # are scalar. Keep this aligned with signatures.py and the C++
+                # emitter's _infer_type path.
+                if member in ("contains", "startswith", "endswith"):
+                    return PineType.BOOL
                 if member == "tonumber":
                     return PineType.FLOAT
-                if member == "length":
+                if member in ("length", "pos"):
                     return PineType.INT
                 return PineType.STRING
 
@@ -1812,9 +1840,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
             # syminfo.*
             if ns == "syminfo":
-                if node.member == "mintick":
-                    return PineType.FLOAT
-                return PineType.STRING
+                from .. import signatures as _pf_sigs
+                return _pf_sigs.SYMINFO_VARIABLES.get(
+                    f"syminfo.{node.member}",
+                    PineType.STRING,
+                )
 
             # color.* constants
             if ns == "color":
@@ -1873,7 +1903,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
             # text.* constants (align_left, align_right, etc.)
             if ns == "text":
-                return PineType.INT
+                return PineType.STRING
 
             # extend.* constants (left, right, both, none)
             if ns == "extend":

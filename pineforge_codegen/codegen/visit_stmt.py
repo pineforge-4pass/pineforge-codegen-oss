@@ -258,6 +258,10 @@ class StmtVisitor:
         # Global-scope non-var vars are class members — emit assignment, not declaration
         is_global_member = node.name in self._global_member_vars
 
+        def remember_local_type(cpp_type: str | None) -> None:
+            if cpp_type and not is_global_member:
+                self._current_func_local_types[node.name] = cpp_type
+
         # Check if it is a static (non-series) global member variable already evaluated inside _inputs_initialized_ block
         is_static_global_input = False
         if is_global_member and isinstance(node.value, FuncCall) and self._is_input_call(node.value):
@@ -457,6 +461,7 @@ class StmtVisitor:
         if is_global_member:
             lines.append(f"{pad}{safe} = {cpp_val};")
         else:
+            remember_local_type(cpp_type)
             lines.append(f"{pad}{cpp_type} {safe} = {cpp_val};")
 
     @staticmethod
@@ -716,40 +721,37 @@ class StmtVisitor:
         pad = "    " * indent
         start = self._visit_expr(node.start)
         end = self._visit_expr(node.end)
-        var = node.var  # new AST uses .var instead of .var_name
-        if node.step is not None:
-            # Explicit `by` step: unchanged from before — ascending compare
-            # (matches every existing corpus use, all positive literal steps).
-            step = self._visit_expr(node.step)
-            lines.append(f"{pad}for (int {var} = {start}; {var} <= {end}; {var} += {step}) {{")
-        else:
-            # No `by` clause: Pine v6 auto-infers the loop direction from
-            # start/end — descending (step -1) when start > end, else
-            # ascending (step +1); see the Pine v6 `for` reference. start/end
-            # are arbitrary runtime expressions (``for i = array.size(arr)-1
-            # to 0`` — a common "iterate backward to safely remove an element
-            # while iterating" idiom), so the direction can't always be
-            # resolved at codegen time. Compute start/end into locals ONCE
-            # (avoids re-evaluating a side-effecting expression, same class
-            # of bug as nz()'s double-eval) and pick the comparison direction
-            # at runtime from their relative order — this previously always
-            # emitted an ascending `<=` loop, which never executes when
-            # start > end (silently dropping the whole loop body).
-            fid = self._for_counter
-            self._for_counter += 1
-            s_var, e_var = f"_for_start_{fid}", f"_for_end_{fid}"
-            lines.append(f"{pad}int {s_var} = ({start}), {e_var} = ({end});")
-            lines.append(
-                f"{pad}for (int {var} = {s_var}; "
-                f"({s_var} <= {e_var}) ? ({var} <= {e_var}) : ({var} >= {e_var}); "
-                f"{var} += ({s_var} <= {e_var}) ? 1 : -1) {{"
-            )
+        step = self._visit_expr(node.step) if node.step is not None else "1"
+        var = self._safe_name(node.var)  # new AST uses .var instead of .var_name
+
+        # Pine infers loop direction from the initial ``from``/``to`` values for
+        # both implicit and explicit ``by`` loops. The ``by`` value is a positive
+        # magnitude; descending loops subtract it. ``to`` can change during the
+        # loop, so refresh the cached end expression after each iteration while
+        # keeping the initial direction and step fixed.
+        fid = self._for_counter
+        self._for_counter += 1
+        s_var = f"_for_start_{fid}"
+        e_var = f"_for_end_{fid}"
+        step_var = f"_for_step_{fid}"
+        down_var = f"_for_down_{fid}"
+        lines.append(f"{pad}int {s_var} = ({start});")
+        lines.append(f"{pad}int {e_var} = ({end});")
+        lines.append(f"{pad}int {step_var} = ({step});")
+        lines.append(f"{pad}if ({step_var} < 0) {step_var} = -{step_var};")
+        lines.append(f"{pad}if ({step_var} == 0) {step_var} = 1;")
+        lines.append(f"{pad}const bool {down_var} = ({s_var} > {e_var});")
+        lines.append(
+            f"{pad}for (int {var} = {s_var}; "
+            f"({down_var} ? ({var} >= {e_var}) : ({var} <= {e_var})); "
+            f"{var} += ({down_var} ? -{step_var} : {step_var}), {e_var} = ({end})) {{"
+        )
         # Register the loop counter so reads of it inside the body resolve (the
         # unknown-identifier guard in _visit_ident would otherwise flag it).
         saved_loop = self._current_loop_vars
         self._current_loop_vars = set(self._current_loop_vars)
-        if var:
-            self._current_loop_vars.add(var)
+        if node.var:
+            self._current_loop_vars.add(node.var)
         _blk_saved = self._push_block_var_remap(node)
         try:
             for s in node.body:
@@ -787,9 +789,19 @@ class StmtVisitor:
         pad = "    " * indent
         iterable = self._visit_expr(node.iterable)
         saved_loop = self._current_loop_vars
+        saved_loop_specs = self._current_loop_var_specs
         self._current_loop_vars = set(self._current_loop_vars)
+        self._current_loop_var_specs = dict(self._current_loop_var_specs)
+        iterable_spec = self._type_spec_from_expr(node.iterable)
+        elem_spec = (
+            iterable_spec.element
+            if iterable_spec is not None and iterable_spec.kind == "array"
+            else None
+        )
         if node.var:
             self._current_loop_vars.add(node.var)
+            if elem_spec is not None:
+                self._current_loop_var_specs[node.var] = elem_spec
         if node.vars:
             for v in node.vars:
                 if v != "_":
@@ -809,6 +821,7 @@ class StmtVisitor:
             self._pop_block_var_remap(_blk_saved)
         lines.append(f"{pad}}}")
         self._current_loop_vars = saved_loop
+        self._current_loop_var_specs = saved_loop_specs
 
     def _visit_while(self, node: WhileStmt, lines: list[str], indent: int) -> None:
         pad = "    " * indent

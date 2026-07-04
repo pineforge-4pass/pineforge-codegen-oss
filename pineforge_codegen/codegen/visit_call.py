@@ -136,6 +136,7 @@ from ..ast_nodes import (
     FuncCall,
     Identifier,
     MemberAccess,
+    NaLiteral,
     TupleLiteral,
     StringLiteral,
 )
@@ -160,6 +161,7 @@ from .tables import (
     SKIP_VAR_TYPES,
     STR_FUNC_MAP,
     TIME_FIELD_EXPRS,
+    _math_minmax_na_expr,
     _merge_kwargs,
     _merge_kwargs_with_defaults,
     tz_time_field_lambda,
@@ -208,6 +210,44 @@ class CallVisitor:
     # ------------------------------------------------------------------
     # Function-call dispatch
     # ------------------------------------------------------------------
+
+    def _array_init_value_expr(self, elem_spec: TypeSpec | None, value_node) -> str:
+        if isinstance(value_node, NaLiteral):
+            if elem_spec is not None and elem_spec.kind == "udt":
+                return self._default_for_spec(elem_spec)
+            cpp_type = self._type_spec_to_cpp(elem_spec)
+            if cpp_type in ("double", "int", "int64_t", "bool", "std::string"):
+                return f"na<{cpp_type}>()"
+            return self._default_for_spec(elem_spec)
+        return self._visit_expr(value_node)
+
+    def _array_method_args(
+        self, method: str, arg_nodes: list, spec: TypeSpec | None,
+    ) -> list[str]:
+        elem_spec = (
+            spec.element
+            if spec is not None and spec.kind == "array" and spec.element is not None
+            else TypeSpec.primitive("float")
+        )
+        value_arg_indexes = {
+            "set": {1},
+            "push": {0},
+            "unshift": {0},
+            "insert": {1},
+            "fill": {0},
+            "includes": {0},
+            "indexof": {0},
+            "lastindexof": {0},
+            "binary_search": {0},
+            "binary_search_leftmost": {0},
+            "binary_search_rightmost": {0},
+        }.get(method, set())
+        return [
+            self._array_init_value_expr(elem_spec, arg)
+            if idx in value_arg_indexes
+            else self._visit_expr(arg)
+            for idx, arg in enumerate(arg_nodes)
+        ]
 
     def _visit_func_call(self, node: FuncCall) -> str:
         callee = node.callee
@@ -270,7 +310,9 @@ class CallVisitor:
                     meth = callee.member
                     raw_args = [self._visit_expr(a) for a in node.args]
                     if recv_spec is not None and recv_spec.kind == "array" and meth in ARRAY_METHODS:
-                        return self._array_method_expr(recv, meth, raw_args, recv_spec)
+                        return self._array_method_expr(
+                            recv, meth, self._array_method_args(meth, node.args, recv_spec), recv_spec
+                        )
                     if recv_spec is not None and recv_spec.kind == "map" and meth in MAP_METHODS:
                         return self._map_method_expr(recv, meth, raw_args, recv_spec)
                     args = ", ".join(raw_args)
@@ -294,7 +336,9 @@ class CallVisitor:
                         return self._map_method_expr(m, meth_raw, margs, self._map_spec_for_name(oname))
                     if oname in self._array_vars and meth_raw in ARRAY_METHODS:
                         arr = self._safe_name(oname)
-                        margs = [self._visit_expr(a) for a in node.args]
+                        margs = self._array_method_args(
+                            meth_raw, node.args, self._array_spec_for_name(oname)
+                        )
                         return self._array_method_expr(arr, meth_raw, margs, self._array_spec_for_name(oname))
                     if oname in self._matrix_specs and meth_raw in MATRIX_METHODS:
                         arr = self._safe_name(oname)
@@ -387,9 +431,10 @@ class CallVisitor:
         if site is not None:
             compute_args = self._ta_compute_args_for_site(site)
             ta_mem = self._ta_member_name(site)
-            if getattr(self, "_precalc_loop_active", False) and getattr(site, "is_static", False):
+            uses_precalc = self._ta_site_uses_precalc(site)
+            if getattr(self, "_precalc_loop_active", False) and uses_precalc:
                 return f"_precalc_{ta_mem}[i]"
-            if getattr(site, "is_static", False):
+            if uses_precalc:
                 return f"(_use_precalc ? _precalc_{ta_mem}[bar_index_] : (is_first_tick_ ? {ta_mem}.compute({compute_args}) : {ta_mem}.recompute({compute_args})))"
             return f"(is_first_tick_ ? {ta_mem}.compute({compute_args}) : {ta_mem}.recompute({compute_args}))"
 
@@ -451,18 +496,23 @@ class CallVisitor:
         # Array method syntax: arr.push(val) where namespace is the array variable name
         if namespace is not None and namespace in self._array_vars and func_name in ARRAY_METHODS:
             arr = self._safe_name(namespace)
-            args = [self._visit_expr(a) for a in node.args]
-            return self._array_method_expr(arr, func_name, args, self._array_spec_for_name(namespace))
+            spec = self._array_spec_for_name(namespace)
+            args = self._array_method_args(func_name, node.args, spec)
+            return self._array_method_expr(arr, func_name, args, spec)
 
         # Array operations — emit proper C++ vector operations
         if namespace == "array":
             if func_name in ("new", "new_float", "new_int", "new_bool", "new_string") or func_name in ARRAY_DRAWING_NEW_CTORS:
                 spec = self._type_spec_from_expr(node) or TypeSpec.array(TypeSpec.primitive("float"))
                 cpp_type = self._type_spec_to_cpp(spec)
-                init_default = self._default_for_spec(spec.element if spec.element is not None else TypeSpec.primitive("float"))
+                elem_spec = spec.element if spec.element is not None else TypeSpec.primitive("float")
+                init_default = self._default_for_spec(elem_spec)
                 if node.args:
                     size_arg = self._visit_expr(node.args[0])
-                    init_val = self._visit_expr(node.args[1]) if len(node.args) > 1 else init_default
+                    if len(node.args) > 1:
+                        init_val = self._array_init_value_expr(elem_spec, node.args[1])
+                    else:
+                        init_val = init_default
                     return f"{cpp_type}((size_t)({size_arg}), {init_val})"
                 return f"{cpp_type}()"
             if func_name == "from":
@@ -472,8 +522,8 @@ class CallVisitor:
             # Method calls: array.method(arr, args...)
             if func_name in ARRAY_METHODS and node.args:
                 arr = self._visit_expr(node.args[0])
-                rest = [self._visit_expr(a) for a in node.args[1:]]
                 spec = self._type_spec_from_expr(node.args[0])
+                rest = self._array_method_args(func_name, node.args[1:], spec)
                 return self._array_method_expr(arr, func_name, rest, spec)
             return "0"
 
@@ -699,6 +749,8 @@ class CallVisitor:
                     is_tz_first = True
                 elif isinstance(node.args[0], StringLiteral):
                     is_tz_first = True
+                elif self._infer_type(node.args[0]) == "std::string":
+                    is_tz_first = True
 
             if is_tz_first:
                 # A single string argument is the timestamp(dateString)
@@ -748,7 +800,7 @@ class CallVisitor:
                 sc = args[6] if len(args) > 6 else "0"
                 return (
                     f"[&]() -> int64_t {{ "
-                    f"std::string _tz = ({tz}); "
+                    f"std::string _tz = pineforge::normalize_timezone_for_posix(({tz})); "
                     f"int _yr = ({yr}); int _mo = ({mo}); int _dy = ({dy}); "
                     f"int _hr = ({hr}); int _min = ({mn}); int _sc = ({sc}); "
                     f"static thread_local std::string _last_tz; "
@@ -760,6 +812,7 @@ class CallVisitor:
                     f"struct tm t = {{}}; "
                     f"t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
                     f"t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
+                    f"t.tm_isdst = -1; "
                     f"int64_t _res; "
                     f"if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") {{ "
                     f"_res = (int64_t)timegm(&t) * 1000; "
@@ -840,7 +893,15 @@ class CallVisitor:
         if func_name == "float" and namespace is None and node.args:
             return f"(double)({self._visit_expr(node.args[0])})"
         if func_name == "bool" and namespace is None and node.args:
-            return f"(bool)({self._visit_expr(node.args[0])})"
+            # Pine v6 bools are two-state. Explicit bool(int/float) treats na
+            # like false, while a raw C++ cast would make NaN truthy.
+            x = self._visit_expr(node.args[0])
+            return (
+                f"[&](){{ auto _pf_v = ({x}); "
+                f"using _pf_t = std::decay_t<decltype(_pf_v)>; "
+                f"if constexpr (std::is_same_v<_pf_t, bool>) {{ return _pf_v; }} "
+                f"else {{ return is_na(_pf_v) ? false : (bool)_pf_v; }} }}()"
+            )
         if func_name == "string" and namespace is None and node.args:
             # Pine string(x) cast — same emission as str.tostring(x), with
             # string passthrough and TV-style "true"/"false" for bools
@@ -1060,17 +1121,31 @@ class CallVisitor:
 
         def _visit_arg_for_series(arg_node, arg_idx):
             """Visit a function argument, returning Series ref for series params."""
-            if arg_idx in _func_series_param_indices and isinstance(arg_node, Identifier):
-                aname = arg_node.name
-                # Bar field: pass _s_close instead of current_bar_.close
-                if aname in BAR_FIELDS or aname in BAR_SERIES_PUSH:
-                    return f"_s_{aname}"
-                # Series var: pass the Series object directly
-                if aname in self.ctx.series_vars:
-                    safe = self._safe_name(aname)
-                    if self._active_var_remap and safe in self._active_var_remap:
-                        safe = self._active_var_remap[safe]
-                    return safe
+            if arg_idx in _func_series_param_indices:
+                if isinstance(arg_node, Identifier):
+                    aname = arg_node.name
+                    # Bar field: pass _s_close instead of current_bar_.close
+                    if aname in BAR_FIELDS or aname in BAR_SERIES_PUSH:
+                        return f"_s_{aname}"
+                    # Series var: pass the Series object directly
+                    if aname in self.ctx.series_vars:
+                        safe = self._safe_name(aname)
+                        if self._active_var_remap and safe in self._active_var_remap:
+                            safe = self._active_var_remap[safe]
+                        return safe
+                expr_cpp = self._visit_expr(arg_node)
+                cpp_t = self._infer_type(arg_node)
+                if cpp_t not in ("double", "int", "bool"):
+                    cpp_t = "double"
+                return (
+                    f"([&]() -> const Series<{cpp_t}>& {{ "
+                    f"static thread_local Series<{cpp_t}> _series_arg; "
+                    f"if (is_first_tick_ && bar_index_ == 0) _series_arg.clear(); "
+                    f"{cpp_t} _sv = ({expr_cpp}); "
+                    f"if (is_first_tick_) _series_arg.push(_sv); "
+                    f"else _series_arg.update(_sv); "
+                    f"return _series_arg; }}())"
+                )
             return self._visit_expr(arg_node)
 
         if node.kwargs:
@@ -1252,17 +1327,17 @@ class CallVisitor:
                 qty_val = self._visit_expr(qty_n) if qty_n else "na<double>()"
                 comment = self._visit_expr(comment_n) if comment_n is not None else '""'
                 oca_val = self._visit_expr(oca_name_n) if oca_name_n is not None else '""'
+                profit_ticks = "na<double>()"
+                loss_ticks = "na<double>()"
 
                 if profit_n and not limit_n:
-                    ticks = self._visit_expr(profit_n)
-                    limit_val = f"(position_entry_price_ + (signed_position_size() > 0 ? 1.0 : -1.0) * ({ticks}) * syminfo_mintick_)"
+                    profit_ticks = self._visit_expr(profit_n)
                 if loss_n and not stop_n:
-                    ticks = self._visit_expr(loss_n)
-                    stop_val = f"(position_entry_price_ - (signed_position_size() > 0 ? 1.0 : -1.0) * ({ticks}) * syminfo_mintick_)"
+                    loss_ticks = self._visit_expr(loss_n)
 
                 return (f"strategy_exit({exit_id}, {from_id}, {limit_val}, {stop_val}, "
                         f"{trail_pts}, {trail_off}, {trail_pr}, {qty_pct}, {comment}, "
-                        f"{qty_val}, {oca_val})")
+                        f"{qty_val}, {oca_val}, {profit_ticks}, {loss_ticks})")
             close_comment = self._visit_expr(comment_n) if comment_n is not None else '""'
             return f"strategy_close({exit_id}, {close_comment})"
 
@@ -1483,23 +1558,12 @@ class CallVisitor:
         if func_name == "avg" and len(args) > 2:
             sum_expr = " + ".join(f"(double)({a})" for a in args)
             return f"(({sum_expr}) / {len(args)}.0)"
-        if func_name == "max" and len(args) > 2:
-            result = f"std::max((double)({args[0]}), (double)({args[1]}))"
-            for a in args[2:]:
-                result = f"std::max({result}, (double)({a}))"
-            return result
-        if func_name == "min" and len(args) > 2:
-            result = f"std::min((double)({args[0]}), (double)({args[1]}))"
-            for a in args[2:]:
-                result = f"std::min({result}, (double)({a}))"
-            return result
+        if func_name in ("min", "max"):
+            return _math_minmax_na_expr(func_name, args)
         if func_name in MATH_FUNC_MAP:
             mapped = MATH_FUNC_MAP[func_name]
             if "{0}" in mapped:
                 return mapped.format(*args)
-            # std::min/std::max require same types — cast to double
-            if func_name in ("min", "max") and len(args) == 2:
-                return f"{mapped}((double)({args[0]}), (double)({args[1]}))"
             return f"{mapped}({', '.join(args)})"
         # Unknown math.* — safe fallback
         return f"0.0 /* unsupported: math.{func_name} */"

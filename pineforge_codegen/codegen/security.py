@@ -60,15 +60,20 @@ from __future__ import annotations
 
 from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BreakStmt, ContinueStmt, ExprStmt, ForStmt,
-    ForInStmt, FuncCall, FuncDef, Identifier, IfStmt, NumberLiteral, StringLiteral,
-    Subscript, SwitchStmt, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
-    WhileStmt,
+    ForInStmt, FuncCall, FuncDef, Identifier, IfStmt, MemberAccess, NumberLiteral,
+    StringLiteral, Subscript, SwitchStmt, Ternary, TupleAssign, TupleLiteral,
+    UnaryOp, VarDecl, WhileStmt,
 )
 from ..analyzer import (
     FuncInfo, TACallSite, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
 )
+from .. import signatures as sigs
 from ..symbols import PineType
-from .tables import PINE_TYPE_TO_CPP, SECURITY_OHLC_BAR_FIELDS
+from .tables import (
+    MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_BAR_FIELDS,
+    SECURITY_BAR_FIELD_EXPRS, SECURITY_BAR_FIELD_TYPES, _math_minmax_na_expr,
+    _merge_kwargs,
+)
 
 
 class SecurityEmitter:
@@ -100,6 +105,13 @@ class SecurityEmitter:
                 return self._known_vars[name], None
             if name in self._input_backed_vars and name in self._input_var_to_call:
                 return None, self._visit_expr(self._input_var_to_call[name])
+            global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+            if name in global_expr_map:
+                expanded = self._security_tf_runtime_expr(
+                    global_expr_map[name], resolving={name}
+                )
+                if expanded is not None:
+                    return None, expanded
             # class-scope resolvable (global / input member)?
             if self._ident_is_resolvable(name):
                 try:
@@ -115,9 +127,55 @@ class SecurityEmitter:
             return None, "input_tf_"
         # any other expression — visit if it resolves at class scope
         try:
-            return None, self._visit_expr(tf_node)
+            expanded = self._security_tf_runtime_expr(tf_node)
+            return None, expanded if expanded is not None else self._visit_expr(tf_node)
         except Exception:
             return None, "input_tf_"
+
+    def _security_tf_runtime_expr(self, node, resolving: set[str] | None = None) -> str | None:
+        """Render a request.security timeframe expression for registration time.
+
+        Security evaluators are registered before ``on_bar()`` initializes global
+        variables, so input-backed aliases such as ``tf = useChart ? timeframe.period
+        : inputTf`` must be expanded to their source expression with direct
+        ``get_input_*`` reads. Emitting the member name would register with its
+        default-constructed value (usually an empty string).
+        """
+        if node is None:
+            return None
+        resolving = resolving or set()
+        if isinstance(node, StringLiteral):
+            return self._visit_expr(node)
+        if isinstance(node, Identifier):
+            name = node.name
+            if name in self._timeframe_period_vars:
+                return "script_tf_"
+            if name in self._input_backed_vars and name in self._input_var_to_call:
+                return self._visit_expr(self._input_var_to_call[name])
+            if (name in self._known_vars and name not in self._input_backed_vars
+                    and isinstance(self._known_vars[name], str)):
+                return self._visit_expr(StringLiteral(value=self._known_vars[name]))
+            global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+            if name in global_expr_map and name not in resolving:
+                resolving.add(name)
+                out = self._security_tf_runtime_expr(global_expr_map[name], resolving)
+                resolving.remove(name)
+                return out
+            return self._visit_expr(node)
+        if (
+            isinstance(node, MemberAccess)
+            and isinstance(node.object, Identifier)
+            and node.object.name == "timeframe"
+            and node.member == "period"
+        ):
+            return "script_tf_"
+        if isinstance(node, Ternary):
+            cond = self._security_tf_runtime_expr(node.condition, resolving)
+            tv = self._security_tf_runtime_expr(node.true_val, resolving)
+            fv = self._security_tf_runtime_expr(node.false_val, resolving)
+            if cond is not None and tv is not None and fv is not None:
+                return f"(({cond}) ? ({tv}) : ({fv}))"
+        return self._visit_expr(node)
 
     def _resolve_param_tf_from_callsites(self, func_name: str, param_name: str):
         """For a ``request.security`` whose tf is function parameter ``param_name``
@@ -276,7 +334,7 @@ class SecurityEmitter:
         return None
 
     def _literal_int_for_security_index(self, node) -> int | None:
-        """Integer index for OHLC[ n ] inside request.security (must be literal)."""
+        """Integer index for bar-field[n] inside request.security (must be literal)."""
         if isinstance(node, NumberLiteral):
             v = node.value
             if isinstance(v, bool):
@@ -296,18 +354,20 @@ class SecurityEmitter:
         return None
 
     def _collect_security_ohlc_hist_fields(self, node) -> set[str]:
-        """Which OHLC fields need HTF history (subscript index >= 1) for this expression."""
+        """Which security bar fields need HTF history (subscript index >= 1)."""
         out: set[str] = set()
 
         def walk(n):
             if n is None:
                 return
             if isinstance(n, Subscript) and isinstance(n.object, Identifier):
-                if n.object.name in SECURITY_OHLC_BAR_FIELDS:
+                if n.object.name in SECURITY_BAR_FIELDS:
                     idx = self._literal_int_for_security_index(n.index)
-                    # high[0] uses current HTF `bar`; high[k>=1] reads prior completed HTF
-                    # bars from Series history (filled before push in _eval_security_*).
-                    if idx is not None and idx >= 1:
+                    # high[0]/time[0] uses current HTF `bar`; k>=1 reads prior
+                    # completed HTF bars from Series history (filled before push
+                    # in _eval_security_*). Dynamic indices may be >=1 at
+                    # runtime, so they need the same backing Series.
+                    if idx is None or idx >= 1:
                         out.add(n.object.name)
             if isinstance(n, (list, tuple)):
                 for x in n:
@@ -324,8 +384,31 @@ class SecurityEmitter:
         walk(node)
         return out
 
+    def _collect_security_ohlc_hist_fields_for_call(self, item: dict) -> set[str]:
+        """Collect HTF OHLC history needed by a security expression and any
+        mutable-global rebinds replayed inside that security evaluator."""
+        fields = self._collect_security_ohlc_hist_fields(item.get("expr_node"))
+        for name in item.get("mutable_globals", []) or []:
+            info = self._global_mutable_infos.get(name)
+            if info is None:
+                continue
+            for stmt in getattr(info, "source_stmts", []) or []:
+                fields |= self._collect_security_ohlc_hist_fields(stmt)
+        return fields
+
     def _security_ohlc_hist_series_cpp(self, sec_id: int, field: str) -> str:
         return f"_sec{sec_id}_hist_{field}"
+
+    def _security_bar_hist_type(self, field: str) -> str:
+        return SECURITY_BAR_FIELD_TYPES.get(field, "double")
+
+    def _security_bar_field_expr(self, field: str) -> str:
+        return SECURITY_BAR_FIELD_EXPRS.get(field, f"bar.{field}")
+
+    @staticmethod
+    def _security_tuple_result_default(cpp_type: str, tuple_size: int) -> str:
+        vals = ", ".join("na<double>()" for _ in range(max(0, tuple_size)))
+        return f"{cpp_type}{{{vals}}}"
 
     def _collect_security_ta_hist_indices(self, node) -> set[int]:
         """Which security TA call-site indices need HTF history (subscript index >= 1).
@@ -395,6 +478,172 @@ class SecurityEmitter:
             for variant in (info.get("ta_variants") or {}).get(idx, []):
                 names.append(self._security_ta_hist_series_cpp(variant["member_name"]))
         return names
+
+    def _collect_security_expr_hist_subscripts(
+        self, node, resolving: set[str] | None = None
+    ) -> list[Subscript]:
+        """Subscripted helper-call results needing security-context history."""
+        if node is None:
+            return []
+        if resolving is None:
+            resolving = set()
+
+        out: list[Subscript] = []
+        seen: set[int] = set()
+
+        def add(n: Subscript) -> None:
+            key = id(n)
+            if key not in seen:
+                seen.add(key)
+                out.append(n)
+
+        def walk(n) -> None:
+            if n is None:
+                return
+            if isinstance(n, Identifier):
+                global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+                if n.name in global_expr_map and n.name not in resolving:
+                    resolving.add(n.name)
+                    walk(global_expr_map[n.name])
+                    resolving.remove(n.name)
+                return
+            if (
+                isinstance(n, Subscript)
+                and isinstance(n.object, FuncCall)
+                and self._get_ta_site(n.object) is None
+            ):
+                add(n)
+            if isinstance(n, (list, tuple)):
+                for x in n:
+                    walk(x)
+                return
+            for _k, v in getattr(n, "__dict__", {}).items():
+                if isinstance(v, ASTNode):
+                    walk(v)
+                elif isinstance(v, (list, tuple)):
+                    for x in v:
+                        if isinstance(x, ASTNode):
+                            walk(x)
+
+        walk(node)
+        return out
+
+    def _security_expr_hist_series_names(self, sec_id: int) -> list[str]:
+        names = []
+        for (sid, _node_id), meta in sorted(self._security_expr_hist_by_node.items()):
+            if sid == sec_id:
+                names.append(meta["name"])
+        return names
+
+    def _emit_security_expr_hist_members(
+        self, sec_id: int, expr_node, lines: list[str], mbb_suffix: str
+    ) -> None:
+        for idx, node in enumerate(self._collect_security_expr_hist_subscripts(expr_node)):
+            cpp_t = self._infer_type(node.object)
+            if cpp_t not in ("double", "int", "bool"):
+                cpp_t = "double"
+            name = f"_sec{sec_id}_expr_hist_{idx}"
+            self._security_expr_hist_by_node[(sec_id, id(node))] = {
+                "name": name,
+                "type": cpp_t,
+            }
+            lines.append(f"    Series<{cpp_t}> {name}{mbb_suffix};")
+
+    def _build_security_math_call(
+        self,
+        sec_id: int,
+        func_name: str,
+        node: FuncCall,
+        ta_range,
+        ta_results: dict,
+        resolving: set[str],
+        security_mutable_names: set[str],
+        helper_binding_stack: tuple[dict[str, ASTNode], ...],
+        emitted_lines: list[str] | None,
+    ) -> str:
+        visit = lambda arg: self._build_security_expr(
+            sec_id,
+            arg,
+            ta_range,
+            ta_results,
+            resolving,
+            security_mutable_names,
+            helper_binding_stack,
+            emitted_lines,
+        )
+        args = _merge_kwargs(
+            node.args,
+            node.kwargs,
+            sigs.get_param_names("math", func_name),
+            visit,
+        )
+        if func_name == "round" and len(args) == 2:
+            return f"(std::round({args[0]} * std::pow(10.0, {args[1]})) / std::pow(10.0, {args[1]}))"
+        if func_name == "round_to_mintick":
+            x = args[0] if args else "0.0"
+            return f"round_to_mintick({x})"
+        if func_name == "todegrees":
+            x = args[0] if args else "0.0"
+            return f"({x} * 180.0 / M_PI)"
+        if func_name == "toradians":
+            x = args[0] if args else "0.0"
+            return f"({x} * M_PI / 180.0)"
+        if func_name == "random":
+            lo = args[0] if len(args) > 0 else "0.0"
+            hi = args[1] if len(args) > 1 else "1.0"
+            seed = args[2] if len(args) > 2 else "0"
+            call_site = self._random_call_counter
+            self._random_call_counter += 1
+            return f"pine_random({lo}, {call_site}u, {hi}, (uint32_t)({seed}), bar_index_)"
+        if func_name == "avg" and len(args) > 2:
+            sum_expr = " + ".join(f"(double)({a})" for a in args)
+            return f"(({sum_expr}) / {len(args)}.0)"
+        if func_name in ("min", "max"):
+            return _math_minmax_na_expr(func_name, args)
+        if func_name in MATH_FUNC_MAP:
+            mapped = MATH_FUNC_MAP[func_name]
+            if "{0}" in mapped:
+                return mapped.format(*args)
+            return f"{mapped}({', '.join(args)})"
+        return f"0.0 /* unsupported: math.{func_name} */"
+
+    def _security_timeframe_expr(self, sec_id: int) -> str:
+        """C++ expression for the timeframe of a request.security evaluator."""
+        info = self._security_eval_info[sec_id]
+        if info.get("tf"):
+            return f'"{info["tf"]}"'
+        if info.get("tf_expr"):
+            return info["tf_expr"]
+        return "input_tf_"
+
+    def _build_security_timeframe_member(self, sec_id: int, member: str) -> str | None:
+        """Lower timeframe.* reads inside request.security to the requested TF."""
+        tf = self._security_timeframe_expr(sec_id)
+        if member == "period":
+            return tf
+        if member == "main_period":
+            return "main_period()"
+        if member == "multiplier":
+            return f"tf_multiplier({tf})"
+        if member == "isintraday":
+            return f"tf_is_intraday({tf})"
+        if member == "isminutes":
+            return f"(tf_is_intraday({tf}) && !tf_is_seconds({tf}))"
+        if member == "isdaily":
+            return f"tf_is_daily({tf})"
+        if member == "isweekly":
+            return f"tf_is_weekly({tf})"
+        if member == "ismonthly":
+            return f"tf_is_monthly({tf})"
+        if member == "isdwm":
+            return f"(tf_is_daily({tf}) || tf_is_weekly({tf}) || tf_is_monthly({tf}))"
+        if member == "isseconds":
+            return f"tf_is_seconds({tf})"
+        if member == "in_seconds":
+            return f"tf_to_seconds({tf})"
+        if member == "isticks":
+            return "false"
+        return None
 
     @staticmethod
     def _security_series_binding(series_name: str) -> str:
@@ -1335,7 +1584,7 @@ class SecurityEmitter:
         lines.append("        if (is_complete) {")
         for field in fields:
             lines.append(
-                f"            {self._security_ohlc_hist_series_cpp(sec_id, field)}.push(bar.{field});"
+                f"            {self._security_ohlc_hist_series_cpp(sec_id, field)}.push({self._security_bar_field_expr(field)});"
             )
         lines.append("        }")
 
@@ -1535,6 +1784,8 @@ class SecurityEmitter:
                     )
                 for name in self._security_ta_hist_series_names(sec_id):
                     lines.append(f"                {name}.clear();")
+                for name in self._security_expr_hist_series_names(sec_id):
+                    lines.append(f"                {name}.clear();")
                 lines.append("                break;")
                 continue
             if returns_tuple and tuple_size and tuple_size > 0 and isinstance(expr_node, TupleLiteral):
@@ -1559,11 +1810,39 @@ class SecurityEmitter:
                     )
                 for name in self._security_ta_hist_series_names(sec_id):
                     lines.append(f"                {name}.clear();")
+                for name in self._security_expr_hist_series_names(sec_id):
+                    lines.append(f"                {name}.clear();")
+                lines.append("                break;")
+            elif returns_tuple and tuple_size and tuple_size > 0:
+                site = self._get_ta_site(expr_node)
+                ta_name = self._ta_name_from_site(site) if site is not None else ""
+                ctype = {
+                    "macd": "ta::MACDResult",
+                    "supertrend": "ta::SupertrendResult",
+                    "dmi": "ta::DMIResult",
+                    "bb": "ta::BBResult",
+                    "kc": "ta::KCResult",
+                    "vwap_bands": "ta::VWAPBandsResult",
+                }.get(ta_name, "std::tuple<double, double>")
+                lines.append(f"            case {sec_id}:")
+                lines.append(
+                    f"                _req_sec_{sec_id} = "
+                    f"{self._security_tuple_result_default(ctype, tuple_size)};"
+                )
+                for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
+                    lines.append(
+                        f"                {self._security_ohlc_hist_series_cpp(sec_id, field)}.clear();"
+                    )
+                for name in self._security_ta_hist_series_names(sec_id):
+                    lines.append(f"                {name}.clear();")
+                for name in self._security_expr_hist_series_names(sec_id):
+                    lines.append(f"                {name}.clear();")
                 lines.append("                break;")
             else:
                 hist = self._security_ohlc_hist_fields_by_sec.get(sec_id, ())
                 ta_hist_names = self._security_ta_hist_series_names(sec_id)
-                if hist or ta_hist_names:
+                expr_hist_names = self._security_expr_hist_series_names(sec_id)
+                if hist or ta_hist_names or expr_hist_names:
                     lines.append(f"            case {sec_id}:")
                     lines.append(f"                _req_sec_{sec_id} = na<double>();")
                     for field in sorted(hist):
@@ -1571,6 +1850,8 @@ class SecurityEmitter:
                             f"                {self._security_ohlc_hist_series_cpp(sec_id, field)}.clear();"
                         )
                     for name in ta_hist_names:
+                        lines.append(f"                {name}.clear();")
+                    for name in expr_hist_names:
                         lines.append(f"                {name}.clear();")
                     lines.append("                break;")
                 else:
@@ -1619,9 +1900,7 @@ class SecurityEmitter:
                     emitted_lines,
                 )
             bar_fields = {
-                "close": "bar.close", "high": "bar.high",
-                "low": "bar.low", "open": "bar.open",
-                "volume": "bar.volume",
+                **SECURITY_BAR_FIELD_EXPRS,
                 "hl2": "((bar.high + bar.low) / 2.0)",
                 "hlc3": "((bar.high + bar.low + bar.close) / 3.0)",
                 "ohlc4": "((bar.open + bar.high + bar.low + bar.close) / 4.0)",
@@ -1650,6 +1929,15 @@ class SecurityEmitter:
                     emitted_lines,
                 )
                 resolving.remove(expr_node.name)
+                return resolved
+
+        if (
+            isinstance(expr_node, MemberAccess)
+            and isinstance(expr_node.object, Identifier)
+            and expr_node.object.name == "timeframe"
+        ):
+            resolved = self._build_security_timeframe_member(sec_id, expr_node.member)
+            if resolved is not None:
                 return resolved
 
         if isinstance(expr_node, Subscript):
@@ -1682,29 +1970,33 @@ class SecurityEmitter:
                         emitted_lines,
                     )
                     return f"{obj_cpp}[{index_cpp}]"
-                if expr_node.object.name in SECURITY_OHLC_BAR_FIELDS:
+                if expr_node.object.name in SECURITY_BAR_FIELDS:
+                    field = expr_node.object.name
                     idx_lit = self._literal_int_for_security_index(expr_node.index)
                     if idx_lit is not None:
-                        bar_map = {
-                            "open": "bar.open",
-                            "high": "bar.high",
-                            "low": "bar.low",
-                            "close": "bar.close",
-                            "volume": "bar.volume",
-                        }
                         if idx_lit == 0:
-                            return bar_map[expr_node.object.name]
+                            return self._security_bar_field_expr(field)
                         if idx_lit >= 1:
                             # lookahead_off: we evaluate when an HTF bar completes; `bar` is that
-                            # bar. On the HTF series, high[0]/close is the current (just-finished)
-                            # bar; high[1] is one HTF bar back = hist[field][0] *before* we push
-                            # `bar` (Series [0] = most recent prior push). high[k] -> hist[k-1].
-                            field = expr_node.object.name
+                            # bar. On the HTF series, high[0]/time[0] is the current
+                            # (just-finished) bar; high[1]/time[1] is one HTF bar back
+                            # = hist[field][0] *before* we push `bar` (Series [0] =
+                            # most recent prior push). field[k] -> hist[k-1].
                             hist = self._security_ohlc_hist_series_cpp(sec_id, field)
                             return f"{hist}[{idx_lit - 1}]"
-                    self._codegen_error(
-                        expr_node,
-                        "request.security() OHLC history index must be a literal integer (e.g. high[1])",
+                    if idx_lit is not None:
+                        self._codegen_error(
+                            expr_node,
+                            "request.security() bar-field history index must be non-negative",
+                        )
+                    hist = self._security_ohlc_hist_series_cpp(sec_id, field)
+                    cpp_t = self._security_bar_hist_type(field)
+                    current = self._security_bar_field_expr(field)
+                    return (
+                        f"([&]() -> {cpp_t} {{ "
+                        f"int _hidx = (int)({index_cpp}); "
+                        f"return (_hidx <= 0) ? {current} : {hist}[_hidx - 1]; "
+                        f"}}())"
                     )
 
                 # Indirect TA binding: ``v = ta.ema(close, 55)`` then
@@ -1734,6 +2026,31 @@ class SecurityEmitter:
                     )
                     resolving.remove(expr_node.object.name)
                     return resolved
+            if (
+                isinstance(expr_node.object, FuncCall)
+                and self._get_ta_site(expr_node.object) is None
+            ):
+                meta = self._security_expr_hist_by_node.get((sec_id, id(expr_node)))
+                hist = meta["name"] if meta else f"_sec{sec_id}_expr_hist_missing"
+                cpp_t = meta["type"] if meta else "double"
+                inner = self._build_security_expr(
+                    sec_id,
+                    expr_node.object,
+                    ta_range,
+                    ta_results,
+                    resolving,
+                    security_mutable_names,
+                    helper_binding_stack,
+                    emitted_lines,
+                )
+                return (
+                    f"([&]() -> {cpp_t} {{ "
+                    f"{cpp_t} _hv = ({inner}); "
+                    f"int _hidx = (int)({index_cpp}); "
+                    f"{cpp_t} _out = (_hidx <= 0) ? _hv : {hist}[_hidx - 1]; "
+                    f"if (is_complete) {hist}.push(_hv); "
+                    f"return _out; }}())"
+                )
             ta_site = self._get_ta_site(expr_node.object)
             if ta_site is not None:
                 # ``ta.<fn>(...)[k]`` inside request.security(): the inner TA call
@@ -1849,6 +2166,24 @@ class SecurityEmitter:
                     )
                 resolving.remove(call_key)
                 return resolved
+
+        if (
+            isinstance(expr_node, FuncCall)
+            and isinstance(expr_node.callee, MemberAccess)
+            and isinstance(expr_node.callee.object, Identifier)
+            and expr_node.callee.object.name == "math"
+        ):
+            return self._build_security_math_call(
+                sec_id,
+                expr_node.callee.member,
+                expr_node,
+                ta_range,
+                ta_results,
+                resolving,
+                security_mutable_names,
+                helper_binding_stack,
+                emitted_lines,
+            )
 
         site = self._get_ta_site(expr_node)
         if site:

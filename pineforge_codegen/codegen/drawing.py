@@ -255,7 +255,7 @@ class DrawingVisitor:
             vals = self._merge_drawing_args(node, ["price"])
             price = (self._visit_expr(vals["price"]) if vals.get("price") is not None
                      else "current_bar_.close")
-            return (f"ChartPoint{{ .index=bar_index_, "
+            return (f"ChartPoint{{ .index=(int64_t)(pine_bar_index()), "
                     f".time=(int64_t)current_bar_.timestamp, .price=({price}) }}")
         if func_name == "from_index":
             vals = self._merge_drawing_args(node, ["index", "price"])
