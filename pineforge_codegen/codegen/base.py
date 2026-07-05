@@ -338,10 +338,28 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._instance_dispatch: dict[tuple[str | None, int], str] = {}
         self._fresh_instances: list[dict] = []
         self._fresh_var_members: list[tuple[str, str]] = []
+        # Fresh fixnan members for context-sensitive helper instances (nested
+        # helpers reached through >1 distinct call path). Each fresh instance
+        # gets its OWN previous-value member so two paths never share fixnan
+        # state. Populated by ``_build_func_instances``; declared in step 7.
+        self._fresh_fixnan_members: list[tuple[Any, str]] = []
         # NOTE: _build_func_instances() runs at the top of generate() (it needs
         # _all_member_names / _func_safe_name, which are populated later in __init__).
         # Build lookup: node id -> FixnanCallSite (counter-based)
         self._fixnan_counter = 0
+        # Per-call-site fixnan member remap for user functions (mirrors the TA
+        # remap): (func_name, cs_idx) -> {orig_member: cloned_member}.
+        self._func_cs_fixnan_remap: dict[tuple[str, int], dict[str, str]] = {}
+        # Active fixnan remap (set during per-call-site function emission).
+        self._active_fixnan_remap: dict[str, str] = {}
+        # node id -> original FixnanCallSite (the cs0 / source-level site).
+        self._fixnan_site_map: dict[int, Any] = {}
+        # Set of fixnan member names that belong to user functions (excluded
+        # from the site map so the active remap can dispatch per variant).
+        self._func_fixnan_members: set[str] = set()
+        # Dead fixnan site indices (owner is a dead user function). Skipped
+        # at declaration time so dead functions' fixnan state is not emitted.
+        self._dead_fixnan_indices: set[int] = set()
         self._switch_counter = 0
         self._security_inline_counter = 0
         self._random_call_counter = 0
@@ -377,9 +395,25 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # ctor-init list still folds to the Pine-default literal via _resolve_known.
         self._derived_input_expr: dict[str, str] = {}
         self._timeframe_period_vars: set[str] = set()
+        # Names of class-scope vars whose value is a bar-invariant scalar —
+        # i.e. derived only from inputs, literals, ``timeframe.*`` members,
+        # ``math.*`` over stable args, and ternaries/casts/arithmetic over
+        # any of those. Such vars are safe to embed in a TA ctor runtime
+        # reset expression (they do not depend on per-bar series). Vars
+        # referencing series / ta.* results / history subscripts / strategy
+        # state are NOT here, so a TA length fed by them is still rejected
+        # by the constructor guard.
+        self._stable_runtime_vars: set[str] = set()
+        # ``_var_names`` (var/varip persistent-state members) is needed by the
+        # stability classifier during _collect_known_vars, so pre-seed it from
+        # the analyzer's var_members before that pass runs; the canonical
+        # assignment below preserves the existing initialization order.
+        self._var_names: set[str] = set()
+        for _vn, _, _ in ctx.var_members:
+            self._var_names.add(_vn)
         self._collect_known_vars()
         # Track var names
-        self._var_names: set[str] = set()
+        self._var_names = set()
         for name, _, _ in ctx.var_members:
             self._var_names.add(name)
         # Every name bound ANYWHERE in the program (top-level, nested in
@@ -396,6 +430,87 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for fi in ctx.func_infos:
             self._func_names.add(fi.name)
             self._func_info_map[fi.name] = fi
+        # Dead-code user functions: those that contain TA call sites but are
+        # never called anywhere in the script (no call site registered them,
+        # so func_call_site_counts reports 0). Their OWN TA ctor args still
+        # carry bare parameter names (e.g. ``dirmov_short(len) => ta.rma(ta.tr, len)``)
+        # that can never be resolved to a concrete length, and since the
+        # function never runs its TA buffers would be dead weight anyway.
+        # Track the dead TA site indices and dead function names so emission
+        # can skip both — the ctor guard no longer hard-fails on the bare
+        # param and no dangling member/function body is emitted. A function
+        # with zero call sites but NO TA state is NOT dead-by-this-rule (it
+        # may still be emitted; harmless if truly unreferenced).
+        #
+        # IMPORTANT: dead-ness of a TA site is decided by the site's
+        # ``owner_func`` (set by the analyzer), NOT by which function's
+        # ``func_ta_ranges`` slice the site happens to fall in. A function's
+        # slice can include clones of ANOTHER (live) function's sites that
+        # were minted while visiting THIS function's body (a nested call to
+        # a live callee registers the callee's cs{N} clones in the caller's
+        # TA-range slice). Keying dead-ness off the slice would drop those
+        # borrowed clones' declarations, leaving the owning callee's emitted
+        # clone body referencing undeclared members. Regression:
+        # quantbyboji-nq-hma-midday (``_ta_change_*_cs1`` / ``_ta_rma_*_cs1``
+        # minted inside dead ``adx_short``'s body but owned by live ``dirmov``).
+        self._dead_func_names: set[str] = set()
+        self._dead_ta_indices: set[int] = set()
+        for _fn in (ctx.func_ta_ranges or {}):
+            if (ctx.func_call_site_counts or {}).get(_fn, 0) > 0:
+                continue
+            # Only treat plain user functions (not UDT methods) as skippable
+            # dead code; methods are dispatched through the UDT and their
+            # call-site tracking is handled separately.
+            fi = self._func_info_map.get(_fn)
+            if fi is not None and getattr(fi, "is_udt_method", False):
+                continue
+            self._dead_func_names.add(_fn)
+        # Mark TA sites dead ONLY when their owner is a dead function. A
+        # site with ``owner_func=None`` (top-level) or whose owner is a
+        # live function survives -- even if it sits inside a dead
+        # function's TA-range slice (it's a borrowed clone).
+        for _i, _site in enumerate(ctx.ta_call_sites):
+            _owner = getattr(_site, "owner_func", None)
+            if _owner is not None and _owner in self._dead_func_names:
+                self._dead_ta_indices.add(_i)
+        # Build per-call-site fixnan remap + site map (mirrors TA remap above).
+        # Dead fixnan sites (owner is a dead function) are skipped at decl time.
+        clone_fn_names = getattr(ctx, "func_cs_fixnan_clone_names", {})
+        for _i, _fsite in enumerate(ctx.fixnan_sites):
+            _fowner = getattr(_fsite, "owner_func", None)
+            if _fowner is not None and _fowner in self._dead_func_names:
+                self._dead_fixnan_indices.add(_i)
+        # cs0 fixnan remap is identity (originals). Build originals per func.
+        func_fixnan_originals: dict[str, list[str]] = {}
+        for _fname, _idxs in (ctx.func_fixnan_indices or {}).items():
+            origs = [ctx.fixnan_sites[i].member_name for i in _idxs
+                     if i not in self._dead_fixnan_indices]
+            if origs:
+                func_fixnan_originals[_fname] = origs
+                self._func_cs_fixnan_remap[(_fname, 0)] = {m: m for m in origs}
+                self._func_fixnan_members.update(origs)
+        # cs > 0 remap uses the ``{orig}_cs{cs_idx}`` formula (or the
+        # analyzer's disambiguated name from func_cs_fixnan_clone_names).
+        for _fname, _origs in func_fixnan_originals.items():
+            _total_cs = ctx.func_call_site_counts.get(_fname, 1)
+            for _cs_idx in range(1, _total_cs):
+                _overrides = clone_fn_names.get((_fname, _cs_idx), {})
+                _remap = {}
+                for _orig in _origs:
+                    _remap[_orig] = _overrides.get(_orig, f"{_orig}_cs{_cs_idx}")
+                self._func_cs_fixnan_remap[(_fname, _cs_idx)] = _remap
+                self._func_fixnan_members.update(_remap.values())
+        # Site map: node id -> original site (cs0). Skip dead sites and
+        # function-local originals (the active remap dispatches variants).
+        for _i, _fsite in enumerate(ctx.fixnan_sites):
+            if _i in self._dead_fixnan_indices:
+                continue
+            if _fsite.node is None:
+                continue
+            if _fsite.member_name not in self._func_fixnan_members:
+                self._fixnan_site_map[id(_fsite.node)] = _fsite
+            elif id(_fsite.node) not in self._fixnan_site_map:
+                self._fixnan_site_map[id(_fsite.node)] = _fsite
         # Track strategy series vars (e.g., strategy.closedtrades[1])
         self._strategy_series_vars: set[str] = set()
         # Track global-scope non-var declarations (emitted as class members)
@@ -658,7 +773,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         ctx = self.ctx
         stateful = (set(ctx.func_ta_ranges.keys())
                     | set(ctx.func_var_members.keys())
-                    | set(ctx.func_series_vars.keys()))
+                    | set(ctx.func_series_vars.keys())
+                    | set(ctx.func_fixnan_indices.keys()))
         if not stateful:
             return
 
@@ -673,6 +789,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         def var_originals(fname: str) -> list[str]:
             return [self._safe_name(n) for n, _, _ in ctx.func_var_members.get(fname, [])]
+
+        def fixnan_originals(fname: str) -> list[str]:
+            return list(self._func_cs_fixnan_remap.get((fname, 0), {}).keys())
 
         def natural_name(fname: str, cs_idx: int) -> str:
             return f"{self._func_safe_name(fname)}_cs{cs_idx}"
@@ -694,6 +813,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         "name": natural_name(fname, k),
                         "ta_remap": self._func_cs_ta_remap.get((fname, k), {}),
                         "var_remap": self._func_cs_var_remap.get((fname, k), {}),
+                        "fixnan_remap": self._func_cs_fixnan_remap.get((fname, k), {}),
                     })
             else:
                 worklist.append({
@@ -701,6 +821,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     "name": self._func_safe_name(fname),
                     "ta_remap": {},
                     "var_remap": {},
+                    "fixnan_remap": {},
                 })
 
         while worklist:
@@ -712,6 +833,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if not body:
                 continue
             active_ta = inst["ta_remap"]
+            active_fixnan = inst.get("fixnan_remap", {})
             for callnode in self._iter_func_calls(body):
                 cs_info = ctx.func_call_cs_map.get(id(callnode))
                 if cs_info is None:
@@ -724,12 +846,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 for m in ta_originals(g_name):
                     mid = natural_ta.get(m, m)
                     composed_ta[m] = active_ta.get(mid, mid)
-                if composed_ta == natural_ta:
+                natural_fixnan = self._func_cs_fixnan_remap.get((g_name, j), {})
+                composed_fixnan = {}
+                for m in fixnan_originals(g_name):
+                    mid = natural_fixnan.get(m, m)
+                    composed_fixnan[m] = active_fixnan.get(mid, mid)
+                if composed_ta == natural_ta and composed_fixnan == natural_fixnan:
                     # Path resolves to the callee's own cs{j} clone — reuse it.
                     self._instance_dispatch[(inst["name"], id(callnode))] = \
                         natural_name(g_name, j)
                     continue
-                key = (g_name, frozenset(composed_ta.items()))
+                key = (g_name, frozenset(composed_ta.items()),
+                       frozenset(composed_fixnan.items()))
                 ginst = interned.get(key)
                 if ginst is None:
                     fresh_counter += 1
@@ -739,11 +867,28 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         fresh_member = f"{v}__ni{fresh_counter}"
                         fvar_remap[v] = fresh_member
                         self._fresh_var_members.append((v, fresh_member))
+                    # Fresh fixnan members: each path gets its OWN previous-
+                    # value member so two call paths never share fixnan state.
+                    ffixnan_remap: dict[str, str] = {}
+                    for orig_fn_member in fixnan_originals(g_name):
+                        fresh_fn_member = f"{orig_fn_member}__ni{fresh_counter}"
+                        ffixnan_remap[orig_fn_member] = fresh_fn_member
+                        # Find the original FixnanCallSite to carry its type.
+                        orig_fn_site = None
+                        for _fs in ctx.fixnan_sites:
+                            if _fs.member_name == orig_fn_member:
+                                orig_fn_site = _fs
+                                break
+                        if orig_fn_site is not None:
+                            self._fresh_fixnan_members.append(
+                                (orig_fn_site, fresh_fn_member)
+                            )
                     ginst = {
                         "fname": g_name,
                         "name": inst_name,
                         "ta_remap": composed_ta,
                         "var_remap": fvar_remap,
+                        "fixnan_remap": ffixnan_remap,
                     }
                     interned[key] = ginst
                     self._fresh_instances.append(ginst)
@@ -1027,6 +1172,134 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for stmt in self.ctx.ast.body:
             if isinstance(stmt, VarDecl) and stmt.name not in reassigned:
                 self._collect_known_var(stmt)
+        # A second pass handles the stable-reassigned-scalar pattern: a
+        # class-scope scalar initialized from a stable expr and reassigned
+        # ONLY inside top-level if/elif chains whose conditions and assigned
+        # values are themselves stable (inputs / timeframe.* / math.*). Such
+        # a var is a bar-invariant scalar and may feed a TA ctor length with
+        # a runtime reset that reproduces the conditional logic. Series-
+        # dependent reassignments are left untracked (rejected by the guard).
+        self._collect_reassigned_stable_scalars(reassigned)
+
+    def _collect_reassigned_stable_scalars(self, reassigned: set[str]) -> None:
+        """Track class-scope scalars that are reassigned but only along stable
+        if/elif paths (see ``test_stable_reassigned_class_scope_length``).
+
+        For each top-level ``v = <init>`` whose name is reassigned, build the
+        final value as a nested ternary by folding subsequent top-level
+        IfStmts / direct Assignments. If every condition and every assigned
+        RHS is stable (and renderable), record the ternary in
+        ``_derived_input_expr`` and add ``v`` to ``_stable_runtime_vars`` so
+        the TA ctor reset path can expand it. Anything non-stable (a ta.*
+        result, a bar field, a series var) leaves the var untracked, so the
+        ctor guard still rejects it loudly.
+        """
+        from ..ast_nodes import IfStmt, Assignment
+        body = self.ctx.ast.body or []
+        # Pre-resolve each reassigned var's initial VarDecl.
+        inits: dict[str, object] = {}
+        for stmt in body:
+            if (isinstance(stmt, VarDecl) and stmt.name in reassigned
+                    and not stmt.is_var and not stmt.is_varip):
+                # Only consider vars whose initial value is itself stable;
+                # an unstable init cannot become a stable scalar via later
+                # reassignment.
+                if stmt.value is not None and self._expr_is_stable(stmt.value):
+                    inits[stmt.name] = stmt.value
+        if not inits:
+            return
+
+        def _value_after(stmts, fallback: str | None) -> str | None:
+            """Fold a statement list into the final value expression for the
+            target var, given ``fallback`` as the value on entry. Returns None
+            if any condition / assignment is non-stable or unrenderable."""
+            current = fallback
+            for s in stmts or []:
+                if isinstance(s, Assignment) and isinstance(s.target, Identifier):
+                    if s.target.name != target_name:
+                        continue
+                    if s.op != ":=":
+                        return None  # compound assignment — not a stable fold
+                    if not self._expr_is_stable(s.value):
+                        return None
+                    rhs = self._arith_expr_to_str(s.value)
+                    if rhs is None:
+                        return None
+                    current = rhs
+                elif isinstance(s, IfStmt):
+                    # Only model IfStmts that actually reassign the target var;
+                    # an unrelated IfStmt (e.g. entry/exit logic with a series
+                    # condition) must NOT abort the fold — the var simply keeps
+                    # its current value through it.
+                    if not _reassigns(s, target_name):
+                        continue
+                    if not self._expr_is_stable(s.condition):
+                        return None
+                    cond = self._arith_expr_to_str(s.condition)
+                    if cond is None:
+                        return None
+                    then_val = _value_after(s.body, current)
+                    if then_val is None:
+                        return None
+                    else_val = _value_after(s.else_body, current)
+                    if else_val is None:
+                        return None
+                    current = f"({cond} ? {then_val} : {else_val})"
+                # Other statement shapes (for/while/switch/var decls of
+                # other vars) are ignored for this var's value fold; they
+                # do not reassign ``target_name`` in a way we model.
+            return current
+
+        def _reassigns(node, name: str) -> bool:
+            """True if any ``:=`` assignment to ``name`` occurs within node."""
+            from ..ast_nodes import IfStmt as _If, Assignment as _Asg
+            if isinstance(node, _Asg) and isinstance(node.target, Identifier):
+                return node.target.name == name
+            if isinstance(node, _If):
+                if any(_reassigns(c, name) for c in (node.body or [])):
+                    return True
+                if any(_reassigns(c, name) for c in (node.else_body or [])):
+                    return True
+                return False
+            for attr in ("body", "else_body", "cases", "default_body"):
+                sub = getattr(node, attr, None)
+                if isinstance(sub, list):
+                    if any(_reassigns(c, name) for c in sub):
+                        return True
+            return False
+
+        for target_name, init_node in inits.items():
+            init_str = self._arith_expr_to_str(init_node)
+            if init_str is None:
+                continue
+            final = _value_after(body, init_str)
+            if final is None:
+                continue
+            # Sanity: the fold must actually differ from the bare init,
+            # otherwise there were no stable reassignments and the var is
+            # already covered (or rejected) by the main pass.
+            if final == init_str:
+                continue
+            # Fold to a compile-time literal when possible (so the ctor-init
+            # list can use it directly); otherwise record the raw expression
+            # for the runtime reset path to expand.
+            folded = self._resolve_known(final)
+            if self._is_compile_time_value(folded):
+                try:
+                    num = float(folded)
+                    self._known_vars[target_name] = (
+                        int(num) if num == int(num) else num
+                    )
+                except ValueError:
+                    pass
+            self._derived_input_expr[target_name] = final
+            self._stable_runtime_vars.add(target_name)
+            # Mark input-backed iff the expression references an input so the
+            # override-aware get_input_*() reads are emitted on the reset path.
+            import re as _re
+            toks = set(_re.findall(r"[A-Za-z_][A-Za-z_0-9]*", final))
+            if any(t in self._input_backed_vars for t in toks):
+                self._input_backed_vars.add(target_name)
 
     def _find_reassigned_vars(self) -> set[str]:
         """Scan AST to find all variable names that are targets of := or compound assignment."""
@@ -1052,6 +1325,114 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for stmt in self.ctx.ast.body:
             walk(stmt)
         return reassigned
+
+    # ``math.*`` members that are pure functions over their (stable) args, or
+    # stable constants. Anything outside this set (e.g. ``math.random``) is
+    # treated as non-stable. Used by ``_expr_is_stable``.
+    _MATH_STABLE_MEMBERS: frozenset[str] = frozenset({
+        "pi", "e", "phi", "rphi",
+        "abs", "max", "min", "round", "floor", "ceil",
+        "sqrt", "log", "log10", "exp", "pow",
+        "sin", "cos", "tan", "asin", "acos", "atan", "sign",
+        "sum", "avg", "to_precision", "round_to_mintick",
+    })
+
+    # ``timeframe.*`` members that are constant for the lifetime of a run —
+    # they reflect the script's resolution, not a per-bar value.
+    _TF_STABLE_MEMBERS: frozenset[str] = frozenset({
+        "period", "main_period", "multiplier",
+        "isintraday", "isminutes", "isdaily", "isweekly",
+        "ismonthly", "isdwm", "isseconds", "in_seconds", "isticks",
+    })
+
+    def _expr_is_stable(self, node) -> bool:
+        """True iff ``node``'s value is a bar-invariant scalar.
+
+        A stable expression depends only on: literals, ``input.*`` values,
+        previously-tracked stable runtime vars, known compile-time consts,
+        ``timeframe.*`` members (constant per run), ``syminfo.*`` (constant
+        per instrument), and ``math.*`` functions/consts over stable
+        sub-expressions, combined with arithmetic / comparison / logical
+        ops, ternaries, and the ``int/float/bool/string`` casts.
+
+        Returns False (i.e. "series") for any node that references a per-bar
+        value: bar fields (close/open/...), series vars, history subscripts,
+        ``ta.*`` results, strategy.* state, or any unrecognised construct.
+        The conservative False keeps the TA-ctor guard intact for genuinely
+        dynamic lengths.
+        """
+        if node is None:
+            return False
+        if isinstance(node, (NumberLiteral, StringLiteral, BoolLiteral)):
+            return True
+        if isinstance(node, NaLiteral):
+            return True
+        if isinstance(node, Identifier):
+            name = node.name
+            if name in self._known_vars:
+                return True
+            if name in self._stable_runtime_vars:
+                return True
+            if name in self._input_backed_vars:
+                return True
+            if name in self.ctx.series_vars:
+                return False
+            if name in self._var_names:
+                # var/varip persistent state — mutable across bars.
+                return False
+            if name in BAR_FIELDS or name in BAR_BUILTINS:
+                return False
+            # Unrecognised bare identifier: be conservative so we never
+            # silently allow an undeclared / dynamic length through.
+            return False
+        if isinstance(node, MemberAccess):
+            if isinstance(node.object, Identifier):
+                ns = node.object.name
+                if ns == "timeframe":
+                    return node.member in self._TF_STABLE_MEMBERS
+                if ns == "math":
+                    return node.member in self._MATH_STABLE_MEMBERS
+                if ns == "syminfo":
+                    # syminfo.* (mintick, pointvalue, tickerid, ...) is
+                    # constant for the run — safe as a stable scalar.
+                    return True
+            # bar.* / request.* / any other member access reads per-bar or
+            # dynamic state.
+            return False
+        if isinstance(node, Subscript):
+            # History read (``close[1]``) or indexed access — per-bar.
+            return False
+        if isinstance(node, Ternary):
+            return (self._expr_is_stable(node.condition)
+                    and self._expr_is_stable(node.true_val)
+                    and self._expr_is_stable(node.false_val))
+        if isinstance(node, BinOp):
+            return self._expr_is_stable(node.left) and self._expr_is_stable(node.right)
+        if isinstance(node, UnaryOp):
+            return self._expr_is_stable(node.operand)
+        if isinstance(node, FuncCall):
+            func_name, namespace = self._resolve_callee(node.callee)
+            if namespace == "ta":
+                return False
+            if namespace == "math":
+                if func_name not in self._MATH_STABLE_MEMBERS:
+                    return False
+                return all(self._expr_is_stable(a) for a in node.args)
+            if namespace == "timeframe":
+                # ``timeframe.in_seconds()`` (and any other function-form
+                # timeframe member) is a stable per-run scalar — it reflects
+                # the script's resolution, not a per-bar value.
+                if func_name not in self._TF_STABLE_MEMBERS:
+                    return False
+                return all(self._expr_is_stable(a) for a in node.args)
+            if namespace == "input":
+                return True
+            if namespace is None and func_name in ("int", "float", "bool", "string"):
+                return all(self._expr_is_stable(a) for a in node.args)
+            # Any other call (user functions, str.*, array.*, ...) — series
+            # by default; the conservative answer keeps the guard honest.
+            return False
+        return False
 
     def _arith_expr_to_str(self, node) -> str | None:
         """Render a numeric arithmetic-over-identifiers expression to a string
@@ -1079,6 +1460,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if o is None:
                 return None
             return f"{node.op}{o}"
+        if isinstance(node, Ternary):
+            c = self._arith_expr_to_str(node.condition)
+            t = self._arith_expr_to_str(node.true_val)
+            f = self._arith_expr_to_str(node.false_val)
+            if c is None or t is None or f is None:
+                return None
+            return f"{c} ? {t} : {f}"
         if isinstance(node, FuncCall):
             callee = self._arith_expr_to_str(node.callee)
             if callee is None:
@@ -1144,36 +1532,56 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if stored:
                 self._input_backed_vars.add(node.name)
                 self._input_var_to_call[node.name] = node.value
-        # Class-scope arithmetic over known/input-backed vars
-        # (``wilderLen = rsiLen * 2 - 1``, ``n = math.round(len / 2)``).
+        # Class-scope arithmetic / ternaries / casts over known, input-backed,
+        # timeframe.*, or math.* operands
+        # (``wilderLen = rsiLen * 2 - 1``, ``fastPeriod = isM5 ? ... : ...``,
+        # ``filterLen = math.max(1, int(math.round(2 / a)))``).
         # Without this branch the derived name is untracked, the TA ctor arg
         # never folds, and the runtime-reset path silently degenerates to a
-        # period of 1. We (a) fold to a literal for the ctor-init list and
-        # (b) record the raw expression so the reset path can re-expand any
-        # input-backed operand to its get_input_*() runtime read.
-        elif isinstance(node.value, (BinOp, UnaryOp, FuncCall)):
+        # period of 1. We (a) fold to a literal for the ctor-init list when
+        # possible and (b) record the raw expression so the reset path can
+        # re-expand any input-backed operand to its get_input_*() runtime read
+        # and render timeframe.* / math.* fragments to valid C++.
+        #
+        # The ``_expr_is_stable`` gate is what separates a faithful stable
+        # scalar (inputs + constants + timeframe + math) from a series-derived
+        # value: a length that depends on a ta.* result, a history subscript,
+        # or a bar field stays untracked and is therefore rejected by the TA
+        # ctor guard — preserving the guardrail for genuine dynamic lengths.
+        elif isinstance(node.value, (BinOp, UnaryOp, FuncCall, Ternary)):
             expr_str = self._arith_expr_to_str(node.value)
-            if expr_str is not None:
+            if expr_str is not None and self._expr_is_stable(node.value):
                 import re as _re
                 tokens = set(_re.findall(r"[A-Za-z_][A-Za-z_0-9]*", expr_str))
-                refs_known = any(t in self._known_vars for t in tokens)
                 refs_input = any(t in self._input_backed_vars for t in tokens)
                 refs_derived = any(t in self._derived_input_expr for t in tokens)
-                if refs_known or refs_input or refs_derived:
-                    folded = self._resolve_known(expr_str)
-                    if self._is_compile_time_value(folded):
-                        try:
-                            num = float(folded)
-                            self._known_vars[node.name] = (
-                                int(num) if num == int(num) else num
-                            )
-                        except ValueError:
-                            pass
-                    if refs_input or refs_derived:
-                        # Track as input-backed so use-sites are not inlined and
-                        # the runtime-reset path emits the override-aware expr.
-                        self._derived_input_expr[node.name] = expr_str
-                        self._input_backed_vars.add(node.name)
+                # The stability classifier already proved this expression is a
+                # bar-invariant scalar (inputs / constants / timeframe.* /
+                # math.* / syminfo.* only). Track it unconditionally so later
+                # stable exprs (and the TA reset path) can reference / expand
+                # it — e.g. ``pi = math.asin(1) * 2`` feeds ``beta`` feeds
+                # ``alpha`` feeds a function-local ``filterLen``.
+                folded = self._resolve_known(expr_str)
+                if self._is_compile_time_value(folded):
+                    try:
+                        num = float(folded)
+                        self._known_vars[node.name] = (
+                            int(num) if num == int(num) else num
+                        )
+                    except ValueError:
+                        pass
+                # Record the raw expression so the runtime-reset path can
+                # re-expand operands. Always record for stable derived exprs
+                # (even pure-math / pure-timeframe ones with no input) so the
+                # reset can render them.
+                self._derived_input_expr[node.name] = expr_str
+                self._stable_runtime_vars.add(node.name)
+                # Mark input-backed so use-sites are not inlined and the
+                # override-aware get_input_*() reads are emitted on the reset
+                # path. Pure-math / pure-timeframe exprs (no input) stay out
+                # of this set, which is fine — they have no override to honor.
+                if refs_input or refs_derived:
+                    self._input_backed_vars.add(node.name)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -1411,7 +1819,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     )
 
         # 3. TA members
-        for site in self.ctx.ta_call_sites:
+        for _ta_idx, site in enumerate(self.ctx.ta_call_sites):
+            if _ta_idx in self._dead_ta_indices:
+                continue
             lines.append(f"    {site.class_name} {site.member_name};")
             if self._ta_site_uses_precalc(site):
                 vtype = self._ta_return_type(site)
@@ -1521,7 +1931,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 lines.append(f"    Series<{cpp_type}> {safe}{_mbb};")
 
         # 7. Fixnan members
-        for site in self.ctx.fixnan_sites:
+        for _fi_idx, site in enumerate(self.ctx.fixnan_sites):
+            if _fi_idx in self._dead_fixnan_indices:
+                continue
             cpp_type = PINE_TYPE_TO_CPP.get(site.pine_type, "double")
             lines.append(f"    {cpp_type} {site.member_name} = na<{cpp_type}>();")
 
@@ -1594,6 +2006,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             emitted_clones.add(fresh_safe)
             self._emit_cloned_var_decl(orig_safe, fresh_safe, _mbb, lines)
 
+        # 8c3. Fresh fixnan members for context-sensitive helper instances.
+        #      Each fresh instance gets its OWN previous-value member so two
+        #      call paths never share fixnan state (mirrors 8c2 for vars).
+        for orig_site, fresh_safe in self._fresh_fixnan_members:
+            if fresh_safe in emitted_clones:
+                continue
+            emitted_clones.add(fresh_safe)
+            cpp_type = PINE_TYPE_TO_CPP.get(orig_site.pine_type, "double")
+            lines.append(f"    {cpp_type} {fresh_safe} = na<{cpp_type}>();")
+
         # 8d. Drawing-objects-as-data arenas (gated on _uses_drawing so
         #     non-drawing strategies emit byte-identical C++). Each arena is a
         #     per-strategy member -> reset-per-run is automatic. Caps come from
@@ -1648,6 +2070,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 10. User-defined functions (with per-call-site variants for functions
         #     containing TA calls OR series variables that need isolation)
         for fi in self.ctx.func_infos:
+            # Dead-code user functions (defined but never called, with TA
+            # state whose ctor args can't be sized) are skipped entirely —
+            # their bodies reference TA members we no longer emit, and the
+            # functions never run anyway.
+            if fi.name in self._dead_func_names:
+                continue
             total_cs = self.ctx.func_call_site_counts.get(fi.name, 0)
             has_ta = fi.name in self.ctx.func_ta_ranges
             has_series = fi.name in self.ctx.func_series_vars or fi.name in self.ctx.func_var_members
@@ -1846,76 +2274,278 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     # _infer_type / _infer_tuple_types live on TypeInferer — see codegen/types.py.
     # _is_compile_time_value lives on TaSiteHelper — see codegen/ta.py.
 
+    # Pine ``timeframe.<member>`` -> C++ runtime expression. Mirrors the
+    # mapping in ``visit_expr._visit_member_access`` so a stable timeframe
+    # fragment embedded in a TA ctor reset renders to the same C++ the
+    # expression visitor would emit for a direct ``timeframe.*`` read.
+    _TIMEFRAME_MEMBER_CPP: dict[str, str] = {
+        "period": "script_tf_",
+        "main_period": "main_period()",
+        "multiplier": "tf_multiplier(script_tf_)",
+        "isintraday": "tf_is_intraday(script_tf_)",
+        "isminutes": "(tf_is_intraday(script_tf_) && !tf_is_seconds(script_tf_))",
+        "isdaily": "tf_is_daily(script_tf_)",
+        "isweekly": "tf_is_weekly(script_tf_)",
+        "ismonthly": "tf_is_monthly(script_tf_)",
+        "isdwm": "(tf_is_daily(script_tf_) || tf_is_weekly(script_tf_) || tf_is_monthly(script_tf_))",
+        "isseconds": "tf_is_seconds(script_tf_)",
+        "in_seconds": "tf_to_seconds(script_tf_)",
+        "isticks": "false",
+    }
+
+    # Pine ``math.<member>`` -> C++ form. Function members map to ``std::*``;
+    # constants map to their engine-side macro / literal.
+    _MATH_MEMBER_CPP: dict[str, str] = {
+        "pi": "M_PI", "e": "M_E", "phi": "1.618033988749895",
+        "rphi": "0.6180339887498949",
+        "abs": "std::abs", "max": "std::max", "min": "std::min",
+        "round": "std::round", "floor": "std::floor", "ceil": "std::ceil",
+        "sqrt": "std::sqrt", "log": "std::log", "log10": "std::log10",
+        "exp": "std::exp", "pow": "std::pow",
+        "sin": "std::sin", "cos": "std::cos", "tan": "std::tan",
+        "asin": "std::asin", "acos": "std::acos", "atan": "std::atan",
+        "sign": "(double)([] (double _v) { return (_v>0) - (_v<0); })",
+    }
+
+    # Pine logical operators (word form) -> C++ operator, used when rendering
+    # a stable runtime expression. Matched with word boundaries.
+    _PINE_LOGICAL_OPS: dict[str, str] = {"and": "&&", "or": "||", "not": "!"}
+
+    def _render_inline_input_calls(self, expr_str: str) -> tuple[str, bool]:
+        """Render inline ``input(...)`` / ``input.<type>(...)`` calls in a TA
+        ctor-arg expression string to override-aware ``get_input_*()`` reads.
+
+        A bare input expression passed straight as a length argument
+        (``adx(input(15), input(15))``) reaches the reset path as the raw call
+        spelling ``input(15)`` because the analyzer's param-substitution has no
+        intermediate variable to record in ``_input_backed_vars``. This helper
+        finds each such call (balanced parens, ``input`` optionally followed by
+        ``.<type>``), re-parses it into a FuncCall, and renders it via the same
+        ``_render_input_value`` used for ordinary input var reads.
+
+        Returns ``(rewritten_str, found_any)``. When no inline input call is
+        present, the string is returned unchanged with ``found_any=False``.
+        """
+        import re
+        # Locate ``input`` (as a word, not a substring of get_input_int etc.)
+        # optionally followed by ``.<member>``, then a ``(`` opening a balanced
+        # argument list.
+        out = expr_str
+        found = False
+        idx = 0
+        while idx < len(out):
+            m = re.search(r"\binput\b", out[idx:])
+            if m is None:
+                break
+            start = idx + m.start()
+            # Reject a match that is part of a longer identifier
+            # (e.g. ``get_input_int``) — the \b guard above already handles
+            # alphanumerics, but be defensive.
+            if start > 0 and (out[start - 1].isalnum() or out[start - 1] == "_"):
+                idx = start + len("input")
+                continue
+            j = start + len("input")
+            # Optional ``.<member>`` for the typed form ``input.int(...)``.
+            member = None
+            if j < len(out) and out[j] == ".":
+                k = j + 1
+                nm_start = k
+                while k < len(out) and (out[k].isalnum() or out[k] == "_"):
+                    k += 1
+                if k > nm_start:
+                    member = out[nm_start:k]
+                    j = k
+            # Must be followed by ``(`` to be a call.
+            if j >= len(out) or out[j] != "(":
+                idx = j
+                continue
+            # Walk the balanced parens to extract the call substring.
+            depth = 0
+            k = j
+            while k < len(out):
+                ch = out[k]
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        k += 1
+                        break
+                k += 1
+            if depth != 0:
+                # Unbalanced — bail on this match.
+                idx = j + 1
+                continue
+            call_src = out[start:k]
+            try:
+                from ..lexer import Lexer
+                from ..parser import Parser
+                tokens = Lexer(call_src).tokenize()
+                node = Parser(tokens, source=call_src)._parse_expression()
+                if not self._is_input_call(node):
+                    idx = k
+                    continue
+                func_name_i, namespace_i = self._resolve_callee(node.callee)
+                # Inline inputs have no enclosing var; reuse the default
+                # value as a synthetic title key so distinct defaults get
+                # distinct input controls (and identical defaults collapse,
+                # which is correct since they resolve to the same value).
+                default_node = self._get_input_default(node)
+                synth_title = self._visit_expr(default_node) if default_node is not None else ""
+                title = self._get_input_title(node, var_name=None)
+                if not title:
+                    title = synth_title
+                rendered = self._render_input_value(node, func_name_i, namespace_i, title)
+            except Exception:
+                idx = k
+                continue
+            out = out[:start] + rendered + out[k:]
+            found = True
+            idx = start + len(rendered)
+        return out, found
+
     def _runtime_ctor_arg_for_reset(self, arg_str: str) -> str | None:
-        """Convert a TA ctor-arg string into its runtime C++ expression when
-        the source expression references an input-backed variable. Returns the
-        runtime expression (e.g. ``get_input_int("MACD Fast", 12)``) when the
-        ctor arg depends on an input value; returns None for pure literals or
-        expressions that do not contain any input-backed identifier, so the
-        caller can decide to skip emitting a reset for that site.
+        """Convert a TA ctor-arg string into its runtime C++ expression.
+
+        Returns the runtime expression (e.g.
+        ``get_input_int("MACD Fast", 12)`` or a ternary / math expression
+        over such reads and ``timeframe.*`` members) when the ctor arg
+        depends on a stable runtime scalar — an input-backed variable, a
+        ``timeframe.*`` member, or arithmetic / ternaries / casts over
+        those. Returns None for pure literals or expressions that contain
+        any unrecognised (potentially series) identifier, so the caller
+        (the TA ctor guard) rejects them loudly instead of silently
+        emitting period 1.
         """
         import re
         ident_re = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
 
-        # Expand class-scope derived vars (``wilderLen`` -> ``(rsiLen * 2 - 1)``)
-        # to their raw RHS so the input-backed leaves become get_input_*() reads
-        # below. Recursive (bounded) to handle chains of derived vars; guards
-        # against cycles.
+        # Expand class-scope derived vars (``wilderLen`` -> ``(rsiLen * 2 - 1)``,
+        # ``fastPeriod`` -> ``(isM5 ? ... : ...)``) to their raw RHS so input
+        # leaves become get_input_*() reads below. Recursive (bounded) to
+        # handle chains of derived vars; guards against cycles.
         def _expand_derived(s: str, seen: frozenset = frozenset(), depth: int = 0) -> str:
             if depth > 32:
                 return s
-            def _rep(m: re.Match) -> str:
-                nm = m.group(0)
+            def _rep(p: re.Match) -> str:
+                nm = p.group(0)
                 if nm in self._derived_input_expr and nm not in seen:
                     inner = self._derived_input_expr[nm]
                     return "(" + _expand_derived(inner, seen | {nm}, depth + 1) + ")"
                 return nm
             return ident_re.sub(_rep, s)
 
-        arg_str = _expand_derived(arg_str)
+        expanded = _expand_derived(arg_str)
 
-        tokens = ident_re.findall(arg_str)
-        input_tokens = [t for t in tokens if t in self._input_backed_vars]
-        if not input_tokens:
+        tokens = set(ident_re.findall(expanded))
+
+        # Gate: every identifier token must be renderable. If any token is an
+        # unrecognised bare identifier (not an input, not a known const, not
+        # a structural keyword / namespace prefix, not a stable tracked var
+        # that we already expanded), we conservatively refuse — that identifier
+        # would otherwise leak through as an undeclared C++ symbol, or worse,
+        # a series var that should have been rejected by the ctor guard.
+        structural = (set(self._PINE_LOGICAL_OPS)
+                      | {"timeframe", "math", "syminfo",
+                         "int", "float", "bool", "string",
+                         "true", "false", "na"})
+        member_tokens = (set(self._TIMEFRAME_MEMBER_CPP)
+                         | set(self._MATH_MEMBER_CPP))
+        renderable = (self._input_backed_vars
+                      | self._stable_runtime_vars
+                      | structural
+                      | member_tokens)
+        leftover = tokens - renderable
+        # Known compile-time consts that survived expansion (e.g. ``pi`` was
+        # NOT tracked as a Python value but its name token is a stable var
+        # already; pure numeric names are in _known_vars and covered above).
+        leftover = {t for t in leftover if t not in self._known_vars}
+        # Inline ``input(...)`` / ``input.<t>(...)`` calls (a bare input
+        # expression passed straight as a length arg, e.g.
+        # ``adx(input(15), input(15))``) are re-parsed and rendered below,
+        # after the gate. ``input`` is the only token they contribute, so
+        # allow it through the gate here.
+        leftover.discard("input")
+        if leftover:
             return None
 
-        # Pine math.*  → C++ std::* (must run before identifier substitution so
-        # we don't treat `math.round` etc. as a bare identifier). We wrap the
-        # whole expression in (int) below because TA ctors want integer lengths.
-        expr = arg_str
-        math_map = {
-            "math.round": "std::round",
-            "math.sqrt": "std::sqrt",
-            "math.ceil": "std::ceil",
-            "math.floor": "std::floor",
-            "math.abs": "std::abs",
-            "math.max": "std::max",
-            "math.min": "std::min",
-            "math.log": "std::log",
-            "math.exp": "std::exp",
-            "math.pow": "std::pow",
-        }
-        for pine_fn, cpp_fn in math_map.items():
-            expr = expr.replace(pine_fn, cpp_fn)
+        # Must depend on at least one runtime component (input-backed var, a
+        # timeframe reference, or an inline input() call); otherwise it's a
+        # pure compile-time expr and no reset is needed (the ctor-init literal
+        # is correct).
+        has_input = any(t in self._input_backed_vars for t in tokens)
+        has_timeframe = "timeframe" in tokens
+        has_inline_input = "input" in tokens
+        if not (has_input or has_timeframe or has_inline_input):
+            return None
 
-        def _sub(match: re.Match) -> str:
-            name = match.group(0)
-            if name not in self._input_backed_vars:
-                return name
-            call_node = self._input_var_to_call.get(name)
-            if call_node is None:
-                return name
-            func_name_i, namespace_i = self._resolve_callee(call_node.callee)
-            title = self._get_input_title(call_node, var_name=name)
-            return self._render_input_value(call_node, func_name_i, namespace_i, title)
+        # Render inline input() calls to override-aware get_input_*() reads
+        # now that the gate has accepted the expression. Done after the gate
+        # so the rendered getter tokens (get_input_int, ...) do not have to
+        # be added to ``renderable``.
+        if has_inline_input:
+            expanded, _ = self._render_inline_input_calls(expanded)
+
+        expr = expanded
+
+        # 1) timeframe.<member> -> C++ (before ident substitution so the
+        # member names don't get caught by the identifier pass). Use a
+        # targeted regex so e.g. ``isminutes`` is not confused with
+        # ``ismonthly``.
+        def _tf_rep(p: re.Match) -> str:
+            mem = p.group(1)
+            return self._TIMEFRAME_MEMBER_CPP.get(mem, p.group(0))
+        # ``timeframe.in_seconds()`` is a function-form member in Pine (the
+        # only one in the table); its C++ form ``tf_to_seconds(script_tf_)``
+        # is already a complete call, so consume the Pine ``()`` to avoid a
+        # double-call ``tf_to_seconds(script_tf_)()``. Property-form members
+        # (``timeframe.isdaily``) never carry ``()`` so the optional group is
+        # a no-op for them.
+        expr = re.sub(r"\btimeframe\.(\w+)(?:\(\))?", _tf_rep, expr)
+
+        # 2) math.<member> -> C++ (constants + std::* functions).
+        def _math_rep(p: re.Match) -> str:
+            mem = p.group(1)
+            return self._MATH_MEMBER_CPP.get(mem, p.group(0))
+        expr = re.sub(r"\bmath\.(\w+)", _math_rep, expr)
+
+        # 3) Pine word-logical operators -> C++ operators (after timeframe/math
+        # substitution so we don't rewrite inside their C++ expansions).
+        for pine_op, cpp_op in self._PINE_LOGICAL_OPS.items():
+            expr = re.sub(rf"\b{pine_op}\b", cpp_op, expr)
+
+        # 4) Substitute input-backed vars with override-aware get_input_*()
+        # reads, and inline known compile-time consts (non-input) as literals.
+        def _sub(p: re.Match) -> str:
+            name = p.group(0)
+            if name in self._input_backed_vars:
+                call_node = self._input_var_to_call.get(name)
+                if call_node is None:
+                    return name
+                func_name_i, namespace_i = self._resolve_callee(call_node.callee)
+                title = self._get_input_title(call_node, var_name=name)
+                return self._render_input_value(call_node, func_name_i, namespace_i, title)
+            if name in self._known_vars and name not in self._input_backed_vars:
+                val = self._known_vars[name]
+                if isinstance(val, bool):
+                    return "true" if val else "false"
+                if isinstance(val, (int, float)):
+                    return str(val)
+                return f'std::string("{self._cpp_string_escape(val)}")'
+            return name
 
         rewritten = ident_re.sub(_sub, expr)
-        # Pine auto-converts floats to ints for TA lengths; C++ does not, so
-        # wrap the whole expression in an explicit int cast when any math.*
-        # function appears (they return doubles).
-        if any(m in arg_str for m in math_map):
+
+        # 5) Pine auto-converts floats to ints for TA lengths; C++ does not.
+        # If any math.* function appears (returns double) OR a timeframe.*
+        # boolean is part of a ternary whose branches are doubles, wrap the
+        # whole expression in an explicit int cast so the TA ctor gets an
+        # integer length.
+        had_math = "std::" in rewritten or bool(re.search(r"\btimeframe\b", expanded))
+        if had_math:
             return f"(int)({rewritten})"
         return rewritten
+
 
     def _collect_ta_runtime_resets(self) -> list[str]:
         """Collect reassignment statements for every TA object whose ctor args
@@ -1928,7 +2558,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         resets: list[str] = []
 
         # Main-context TA objects
-        for site in self.ctx.ta_call_sites:
+        for _ta_idx, site in enumerate(self.ctx.ta_call_sites):
+            if _ta_idx in self._dead_ta_indices:
+                continue
             if not site.ctor_args:
                 continue
             runtime_args: list[str] = []

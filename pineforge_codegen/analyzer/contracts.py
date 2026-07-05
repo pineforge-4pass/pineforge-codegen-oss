@@ -37,6 +37,20 @@ class TACallSite:
     returns_tuple: bool        # e.g., MACD, supertrend
     node: Any = None           # the FuncCall AST node
     is_static: bool = False    # true if global scope & arguments are recursively static
+    # Name of the user function that OWNS this site, or None for a top-level
+    # site. For an ORIGINAL site this is the function whose body textually
+    # contains the ``ta.*`` call. For a CLONE minted in
+    # ``_handle_user_func_call`` this is the CALLEE (the function being
+    # called, NOT the caller whose body visit triggered the clone) -- the
+    # clone belongs to the callee's per-call-site namespace.
+    #
+    # The codegen's dead-code pass keys off this rather than off
+    # ``func_ta_ranges`` slices, because a function's slice can include
+    # clones of ANOTHER (live) function's sites (minted while visiting a
+    # caller's body). Marking such a borrowed clone dead would leave the
+    # owning callee's emitted clone body referencing undeclared members
+    # (regression: quantbyboji-nq-hma-midday ``_ta_change_*_cs1``).
+    owner_func: str | None = None
 
 
 @dataclass
@@ -87,6 +101,13 @@ class FixnanCallSite:
     """Per-call-site state for ``fixnan(...)`` (one previous-value member each)."""
     member_name: str           # e.g., "_prev_fixnan_1"
     pine_type: Any             # PineType
+    node: Any = None           # the FuncCall AST node (for variant-aware lookup)
+    # Name of the user function that OWNS this site, or None for a top-level
+    # site. Mirrors ``TACallSite.owner_func``: the codegen's dead-code pass
+    # and per-variant clone logic key off this so a fixnan site minted inside
+    # a dead caller's body but cloned for a live callee survives, and each
+    # emitted function variant references its OWN fixnan member.
+    owner_func: str | None = None
 
 
 @dataclass
@@ -164,6 +185,14 @@ class AnalyzerContext:
     var_members: list = field(default_factory=list)   # [(name, PineType, init_expr_str)]
     func_infos: list = field(default_factory=list)
     fixnan_sites: list = field(default_factory=list)
+    # Per-function fixnan site ownership (func_name -> list of indices into
+    # ``fixnan_sites``). Used by the codegen to clone fixnan members per
+    # call-site variant and to skip fixnan state owned by dead functions.
+    func_fixnan_indices: dict = field(default_factory=dict)
+    # (func_name, cs_idx) -> {orig_member_name: cloned_member_name}. Like
+    # ``func_cs_ta_clone_names`` but for fixnan: populated only when the
+    # default ``{base}_cs{cs_idx}`` clone name collides.
+    func_cs_fixnan_clone_names: dict = field(default_factory=dict)
     strategy_params: dict = field(default_factory=dict)
     diagnostics: list = field(default_factory=list)    # warnings
     filename: str = "<stdin>"

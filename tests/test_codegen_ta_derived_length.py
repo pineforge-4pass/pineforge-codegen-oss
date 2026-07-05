@@ -130,6 +130,57 @@ plot(out)
 
 
 # ---------------------------------------------------------------------------
+# 2c. Length threaded through TWO levels of nested user functions whose
+#     call site passes an INLINE input() call (no intermediate var name).
+#     Mirrors the quantbyboji DMI/ADX pattern:
+#       dirmov(len) => ta.rma(ta.tr, len)
+#       adx(dilen, adxlen) => dirmov(dilen); ta.rma(x, adxlen)
+#       sig = adx(input(15), input(15))
+#     The ctor args must resolve to input-backed reset expressions
+#     (get_input_int(..., 15)), never to the bare parameter name ``len``
+#     or the unresolved call spelling ``input(15)``.
+# ---------------------------------------------------------------------------
+
+def test_nested_user_func_inline_input_length():
+    src = """//@version=6
+strategy("derived-nested-inline-input")
+dirmov(len) =>
+    truerange = ta.rma(ta.tr, len)
+    plus = ta.rma(close, len) / truerange
+adx(dilen, adxlen) =>
+    x = dirmov(dilen)
+    ta.rma(x, adxlen)
+sig = adx(input(15), input(15))
+plot(sig)
+"""
+    cpp = transpile(src)
+    rma_members = re.findall(r"(_ta_rma_\d+)\(", cpp)
+    assert rma_members, "no RMA member emitted"
+    # Every RMA ctor that sizes a buffer must be backed by a runtime reset
+    # that reads the input value (override-aware); no bare ``len`` and no
+    # unresolved ``input(15)`` spelling may survive in the reset.
+    saw_input_backed = False
+    for m in rma_members:
+        reset = _reset_line(cpp, m)
+        if not reset:
+            continue
+        if "get_input_int(" in reset and "15" in reset:
+            saw_input_backed = True
+        assert "input(15)" not in reset, (
+            f"reset for {m} still carries the unresolved input() spelling: {reset}"
+        )
+        assert " ta::RMA(len)" not in reset and "= len;" not in reset, (
+            f"reset for {m} references the bare param name: {reset}"
+        )
+    assert saw_input_backed, (
+        "no RMA runtime reset references the input value; ctor args did not "
+        f"resolve to input-backed expressions. members: {rma_members}"
+    )
+    assert "ta::RMA(len)" not in cpp
+    assert "ta::RMA(input(15))" not in cpp
+
+
+# ---------------------------------------------------------------------------
 # 3. Legitimate input that genuinely defaults to 1 stays period 1
 # ---------------------------------------------------------------------------
 
@@ -181,3 +232,300 @@ x = ta.ema(close, wilderLen)
 plot(x)
 """
     assert transpile(src) == transpile(src)
+
+
+# ---------------------------------------------------------------------------
+# 4. Stable timeframe-ternary length
+#    fastPeriod = isM5 ? math.max(1, int(maPeriodFastInput / 5))
+#                     : maPeriodFastInput
+#    where isM5 = timeframe.isminutes and timeframe.multiplier == 5
+#    All operands are stable per-run scalars (an input + timeframe.*) so the
+#    ctor guard must accept it and the reset must render to valid C++ that
+#    references no undeclared locals.
+# ---------------------------------------------------------------------------
+
+def test_stable_timeframe_ternary_length():
+    src = """//@version=6
+strategy("stable-timeframe-ternary")
+maPeriodFastInput = input.int(60, "Fast SMA Period")
+isM5 = timeframe.isminutes and timeframe.multiplier == 5
+fastPeriod = isM5 ? math.max(1, int(maPeriodFastInput / 5)) : maPeriodFastInput
+fastMA = ta.sma(close, fastPeriod)
+plot(fastMA)
+"""
+    cpp = transpile(src)
+    members = re.findall(r"(_ta_sma_\d+)\(", cpp)
+    assert members, "no SMA member emitted"
+    member = members[0]
+    # ctor-init list uses a safe placeholder (1); the runtime reset
+    # overwrites it on the first bar.
+    assert _ctor_period(cpp, member) == "1"
+    reset = _reset_line(cpp, member)
+    assert reset, "no runtime reset emitted for stable-timeframe length"
+    # Override-aware: the input read appears in the reset.
+    assert 'get_input_int("Fast SMA Period", 60)' in reset
+    # The timeframe condition renders to the engine's tf_* helpers, NOT to
+    # the bare Pine ``timeframe.isminutes`` / a dangling ``isM5`` local.
+    assert "tf_is_intraday(script_tf_)" in reset
+    assert "tf_multiplier(script_tf_)" in reset
+    assert "timeframe.isminutes" not in reset
+    assert " isM5 " not in reset
+    # Pine ``and`` must be lowered to C++ ``&&``.
+    assert " && " in reset
+    # Ternary preserved as a C++ ternary.
+    assert " ? " in reset and " : " in reset
+    # math.max / int(...) cast lowered to valid C++.
+    assert "std::max" in reset
+
+
+# ---------------------------------------------------------------------------
+# 5. Function-local math-derived length over input-derived parameters
+#    filterLen = math.max(1, int(math.round(2 / a)))   inside AIFilter(data,a,p)
+#    where alpha/beta/pi are class-scope stable scalars derived from inputs.
+# ---------------------------------------------------------------------------
+
+def test_function_local_math_derived_length():
+    src = """//@version=6
+strategy("func-local-math-length")
+period = input.int(144, "Period")
+poles = input.int(4, "Poles")
+pi    = math.asin(1) * 2
+beta  = (1 - math.cos(2 * pi / period)) / (math.pow(1.414, 2 / poles) - 1)
+alpha = -beta + math.sqrt(beta * beta + 2 * beta)
+AIFilter(data, a, p) =>
+    filterLen = math.max(1, int(math.round(2 / a)))
+    ta.ema(data, filterLen)
+out = AIFilter(close, alpha, poles)
+plot(out)
+"""
+    cpp = transpile(src)
+    members = re.findall(r"(_ta_ema_\d+)\(", cpp)
+    assert members, "no EMA member emitted"
+    member = members[0]
+    # ctor placeholder; reset overwrites it.
+    assert _ctor_period(cpp, member) == "1"
+    reset = _reset_line(cpp, member)
+    assert reset, "no runtime reset emitted for function-local math length"
+    # The reset references BOTH inputs (period, poles) override-aware.
+    assert 'get_input_int("Period", 144)' in reset
+    assert 'get_input_int("Poles", 4)' in reset
+    # math.* and the int() cast lower to valid C++; no Pine-namespace leak.
+    assert "std::asin" in reset
+    assert "std::cos" in reset
+    assert "std::sqrt" in reset
+    assert "std::pow" in reset
+    assert "std::round" in reset
+    assert "std::max" in reset
+    assert "math.asin" not in reset
+    assert "math.cos" not in reset
+    # No dangling function-local identifier (``alpha`` / ``filterLen``)
+    # should survive — they must be fully expanded to input reads + math.
+    assert "alpha" not in reset
+    assert "filterLen" not in reset
+
+
+# ---------------------------------------------------------------------------
+# Guardrail (negative): a ternary length whose condition depends on a
+# series (ta.*) result stays rejected — it is NOT a stable scalar.
+# ---------------------------------------------------------------------------
+
+def test_series_dependent_ternary_length_rejected():
+    src = """//@version=6
+strategy("series-dep-ternary")
+normalSwingLookback = input.int(10, "Normal")
+highVolSwingLookback = input.int(20, "High Vol")
+highVolThreshold = input.float(2.0, "Threshold")
+volatilityRatio = ta.rma(close, 14) / ta.atr(14)
+activeSwingLookback = volatilityRatio >= highVolThreshold ? highVolSwingLookback : normalSwingLookback
+x = ta.lowest(low, activeSwingLookback)
+plot(x)
+"""
+    with pytest.raises(CompileError) as ei:
+        transpile(src)
+    assert "Unsupported TA constructor length" in str(ei.value)
+
+
+# ---------------------------------------------------------------------------
+# Guardrail (negative): a reassigned series-dependent length stays rejected.
+# ---------------------------------------------------------------------------
+
+def test_series_reassigned_length_rejected():
+    src = """//@version=6
+strategy("series-reassigned")
+n = ta.barssince(close > open)
+v = ta.ema(close, n)
+plot(v)
+"""
+    with pytest.raises(CompileError):
+        transpile(src)
+
+
+# ---------------------------------------------------------------------------
+# 6. Stable REASSIGNED class-scope scalar length.
+#    effectiveSwingSize = swingSize                       (initial: input)
+#    if autoSwingSize                                    (cond: input bool)
+#        if timeframe.isdaily                            (cond: stable)
+#            effectiveSwingSize := math.max(swingSize, 3)
+#        else if timeframe.in_seconds() >= 3600          (cond: stable)
+#            effectiveSwingSize := math.max(swingSize, 2)
+#    pivHi = ta.pivothigh(high, effectiveSwingSize, effectiveSwingSize)
+#
+#    Stable per run because every condition and assignment uses only
+#    inputs / timeframe.* / math.*. The ctor guard must accept it and the
+#    reset must render to valid C++ that references the input reads.
+# ---------------------------------------------------------------------------
+
+def test_stable_reassigned_class_scope_length():
+    src = """//@version=6
+strategy("stable-reassigned-scalar")
+swingSize = input.int(1, "Pivot Lookback")
+autoSwingSize = input.bool(true, "Auto")
+effectiveSwingSize = swingSize
+if autoSwingSize
+    if timeframe.isdaily
+        effectiveSwingSize := math.max(swingSize, 3)
+    else if timeframe.in_seconds() >= 3600
+        effectiveSwingSize := math.max(swingSize, 2)
+pivHi = ta.pivothigh(high, effectiveSwingSize, effectiveSwingSize)
+plot(pivHi)
+"""
+    cpp = transpile(src)
+    members = re.findall(r"(_ta_pivothigh_\d+)\(", cpp)
+    assert members, "no PivotHigh member emitted"
+    member = members[0]
+    # ctor placeholder; reset overwrites it on the first bar.
+    assert _ctor_period(cpp, member) in ("1", "1, 1"), (
+        f"expected ctor placeholder, got {_ctor_period(cpp, member)}"
+    )
+    reset = _reset_line(cpp, member)
+    assert reset, "no runtime reset emitted for reassigned scalar length"
+    # Override-aware: both inputs appear in the reset.
+    assert 'get_input_int("Pivot Lookback", 1)' in reset
+    assert 'get_input_bool("Auto", true)' in reset
+    # timeframe.* renders to the engine's tf_* helpers, not bare Pine.
+    assert "tf_is_daily(script_tf_)" in reset
+    assert "tf_to_seconds(script_tf_)" in reset
+    assert "timeframe.isdaily" not in reset
+    assert "timeframe.in_seconds" not in reset
+    # math.max lowered to std::max.
+    assert "std::max" in reset
+    # No dangling local name survives — it must be fully expanded.
+    assert "effectiveSwingSize" not in reset
+    assert "autoSwingSize" not in reset
+
+
+# ---------------------------------------------------------------------------
+# Guardrail (negative): the wellmanapex shape — a reassigned scalar whose
+# value depends on a SERIES (ta.rma result) — stays rejected even though
+# the structure (initial VarDecl + reassigned in a ternary) superficially
+# resembles the stable case above.
+# ---------------------------------------------------------------------------
+
+def test_series_reassigned_ternary_length_rejected():
+    src = """//@version=6
+strategy("series-reassigned-ternary")
+normalSwingLookback = input.int(10, "Normal")
+highVolSwingLookback = input.int(20, "High Vol")
+highVolThreshold = input.float(2.0, "Threshold")
+volatilityRatio = ta.rma(close, 14) / ta.atr(14)
+activeSwingLookback = volatilityRatio >= highVolThreshold ? highVolSwingLookback : normalSwingLookback
+x = ta.lowest(low, activeSwingLookback)
+plot(x)
+"""
+    with pytest.raises(CompileError) as ei:
+        transpile(src)
+    assert "Unsupported TA constructor length" in str(ei.value)
+
+
+# ---------------------------------------------------------------------------
+# 7. Cloned no-ctor TA sites (ta.change) referenced by a cloned function
+#    variant MUST be declared + initialized even when the clone is minted
+#    while visiting a DEAD user function's body.
+#
+#    Shape (mirrors quantbyboji-nq-hma-midday DMI):
+#      dirmov(len) => uses ta.change (no-ctor) + ta.rma(len) (ctor)
+#      adx(dilen, adxlen) => calls dirmov(dilen); ta.rma(adxlen)
+#      adx_dead(dilen, adxlen) => calls dirmov(dilen); ta.rma(adxlen)
+#      sig = adx(input(15), input(15))   # adx_dead is NEVER called
+#
+#    The analyzer registers dirmov's cs0 clones while visiting adx's body,
+#    and dirmov's cs1 clones while visiting adx_dead's body. adx_dead's
+#    TA range therefore INCLUDES dirmov's cs1 clones; when adx_dead is
+#    classified dead (zero call sites), the dead-code pass must NOT mark
+#    those clones dead -- they belong to dirmov (a LIVE callee), and
+#    dirmov_cs1's emitted body references them by name
+#    (``_ta_change_<n>_cs1``, ``_ta_rma_<n>_cs1``).  Previously the pass
+#    keyed dead-ness off the dead function's TA-range slice and dropped
+#    the clone declarations, producing
+#    ``error: use of undeclared identifier '_ta_change_<n>_cs1'``.
+# ---------------------------------------------------------------------------
+
+def test_cloned_no_ctor_ta_sites_declared_through_dead_caller():
+    src = """//@version=6
+strategy("cs1-clone-through-dead-fn")
+diLen = input.int(15, "DI Length")
+adxLen = input.int(15, "ADX Length")
+dirmov(len) =>
+    up = ta.change(high)
+    down = -ta.change(low)
+    plusDM = na(up) ? na : up > down and up > 0 ? up : 0
+    minusDM = na(down) ? na : down > up and down > 0 ? down : 0
+    truerange = ta.rma(ta.tr, len)
+    plus = fixnan(100 * ta.rma(plusDM, len) / truerange)
+    minus = fixnan(100 * ta.rma(minusDM, len) / truerange)
+    [plus, minus]
+adx() =>
+    [plus, minus] = dirmov(diLen)
+    sum = plus + minus
+    adx_val = 100 * ta.rma(math.abs(plus - minus) / (sum == 0 ? 1 : sum), adxLen)
+    adx_val
+adx_dead() =>
+    [plus, minus] = dirmov(diLen)
+    sum = plus + minus
+    adx_val = 100 * ta.rma(math.abs(plus - minus) / (sum == 0 ? 1 : sum), adxLen)
+    adx_val
+sig = adx()
+plot(sig)
+"""
+    cpp = transpile(src)
+
+    # Every _ta_* identifier referenced in the emitted C++ MUST have a
+    # corresponding ``ta::<Class> <name>;`` declaration. This catches the
+    # exact regression: ``_ta_change_<n>_cs1`` / ``_ta_rma_<n>_cs1``
+    # referenced by the cloned ``dirmov_cs1`` body but dropped from the
+    # member list by the dead-code pass.
+    declared = set(re.findall(r"ta::\w+\s+(\w+)\s*;", cpp))
+    referenced = set()
+    for m in re.finditer(r"(_ta_\w+)\s*(?:\.|=)", cpp):
+        referenced.add(m.group(1))
+    referenced |= set(re.findall(r"(_ta_\w+)\s*\.", cpp))
+    # Exclude internal bookkeeping flags (``_ta_initialized_``) -- those are
+    # declared as ``bool _ta_initialized_ = false;`` separately, not as TA
+    # members; they are not part of this regression.
+    referenced.discard("_ta_initialized_")
+
+    missing = referenced - declared
+    assert not missing, (
+        f"TA members referenced in emitted C++ but never declared: "
+        f"{sorted(missing)}"
+    )
+
+    # The no-ctor ``ta.change`` clones specifically must be present
+    # (this is the exact class that regressed -- it has no ctor arg so the
+    # old codegen never even tried to recover it via the reset path).
+    change_clones = re.findall(r"ta::Change\s+(_ta_change_\w+)\s*;", cpp)
+    assert any("_cs1" in n for n in change_clones), (
+        f"expected at least one _ta_change_*_cs1 declaration; got {change_clones}"
+    )
+
+    # And at least one ``dirmov_cs1`` body must be emitted (i.e. we did not
+    # silently drop the clone -- it compiles against the now-declared members).
+    assert re.search(r"\bdirmov_cs1\s*\(", cpp), (
+        "dirmov_cs1 clone body not emitted"
+    )
+
+    # Sanity: the genuinely-dead adx_dead function is still skipped.
+    assert not re.search(r"\badx_dead\b\s*\(", cpp), (
+        "dead adx_dead body should not be emitted"
+    )
+

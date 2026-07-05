@@ -1242,8 +1242,34 @@ class CallVisitor:
 
     def _visit_fixnan(self, node: FuncCall) -> str:
         """Emit fixnan with persistent state member."""
-        self._fixnan_counter += 1
-        member = f"_prev_fixnan_{self._fixnan_counter}"
+        # Variant-aware lookup keyed off the analyzer-tracked site:
+        #   * function-owned site -> dispatch through the active per-call-site
+        #     remap so each emitted variant (cs0/cs1/__ni{N}) references its
+        #     OWN previous-value member.
+        #   * top-level site (owner_func is None) -> use ``site.member_name``
+        #     directly. The declarations come from ``ctx.fixnan_sites`` keyed
+        #     by these member names, so referencing anything else (e.g. the
+        #     legacy monotonic counter) would either dangle a declaration or
+        #     silently alias another site's state. In particular, when a
+        #     function-owned fixnan is analyzed BEFORE a top-level one, the
+        #     counter would restart at 1 and collide with the function's
+        #     ``_prev_fixnan_1`` -- corrupting both. Using the site's own
+        #     member name keeps declaration and reference in lockstep.
+        #   * unmapped site (node not in the site map, e.g. a fixnan reached
+        #     only through a path the analyzer didn't register) -> fall back
+        #     to the legacy monotonic counter so emission still produces a
+        #     referenceable member.
+        site = self._fixnan_site_map.get(id(node))
+        if site is not None:
+            if site.member_name in self._func_fixnan_members:
+                member = self._active_fixnan_remap.get(
+                    site.member_name, site.member_name
+                )
+            else:
+                member = site.member_name
+        else:
+            self._fixnan_counter += 1
+            member = f"_prev_fixnan_{self._fixnan_counter}"
         x = self._visit_expr(node.args[0])
         return f"(is_na({x}) ? {member} : ({member} = {x}))"
 

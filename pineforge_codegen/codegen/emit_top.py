@@ -212,7 +212,11 @@ class TopLevelEmitter:
     def _emit_constructor(self, lines: list[str]) -> None:
         init_parts: list[str] = []
         # TA members with ctor args
-        for site in self.ctx.ta_call_sites:
+        for ta_idx, site in enumerate(self.ctx.ta_call_sites):
+            # Skip dead-code function TA sites entirely — their buffers never
+            # run and their ctor args (bare param names) can never be sized.
+            if ta_idx in self._dead_ta_indices:
+                continue
             if site.ctor_args:
                 # If a ctor arg is neither a compile-time literal nor expandable
                 # to an input-backed runtime expression, the old code silently
@@ -857,6 +861,7 @@ class TopLevelEmitter:
             func_name = instance["name"]
             self._active_ta_remap = instance["ta_remap"]
             self._active_var_remap = instance["var_remap"]
+            self._active_fixnan_remap = instance.get("fixnan_remap", {})
             self._in_ta_func_variant = True
             self._active_call_site_idx = None
             self._current_instance_name = instance["name"]
@@ -867,12 +872,14 @@ class TopLevelEmitter:
             self._active_ta_remap = remap
             var_remap = self._func_cs_var_remap.get((fi.name, call_site_idx), {})
             self._active_var_remap = var_remap
+            self._active_fixnan_remap = self._func_cs_fixnan_remap.get((fi.name, call_site_idx), {})
             self._in_ta_func_variant = True
             self._active_call_site_idx = call_site_idx
             self._current_instance_name = f"{self._func_safe_name(fi.name)}_cs{call_site_idx}"
         else:
             self._active_ta_remap = {}
             self._active_var_remap = {}
+            self._active_fixnan_remap = {}
             self._in_ta_func_variant = False
             self._active_call_site_idx = None
             self._current_instance_name = None
@@ -973,6 +980,7 @@ class TopLevelEmitter:
         self._udt_ptr_alias_locals = prev_ptr_alias
         self._active_ta_remap = {}
         self._active_var_remap = {}
+        self._active_fixnan_remap = {}
         self._in_ta_func_variant = False
         self._active_call_site_idx = None
         self._current_instance_name = None
@@ -1040,7 +1048,11 @@ class TopLevelEmitter:
         lines.append("        }")
 
     def _emit_precalculate_and_run(self, lines: list[str]) -> None:
-        has_static_ta = any(self._ta_site_uses_precalc(site) for site in self.ctx.ta_call_sites)
+        has_static_ta = any(
+            self._ta_site_uses_precalc(site)
+            for _ti, site in enumerate(self.ctx.ta_call_sites)
+            if _ti not in self._dead_ta_indices
+        )
         if not has_static_ta:
             return
 
@@ -1062,13 +1074,17 @@ class TopLevelEmitter:
         lines.append("")
 
         # Resize precalculated vectors
-        for site in self.ctx.ta_call_sites:
+        for _ti, site in enumerate(self.ctx.ta_call_sites):
+            if _ti in self._dead_ta_indices:
+                continue
             if self._ta_site_uses_precalc(site):
                 lines.append(f"        _precalc_{site.member_name}.resize(n);")
 
         # Reset indicators to clean slate
         lines.append("")
-        for site in self.ctx.ta_call_sites:
+        for _ti, site in enumerate(self.ctx.ta_call_sites):
+            if _ti in self._dead_ta_indices:
+                continue
             if self._ta_site_uses_precalc(site):
                 resolved = [self._resolve_known(a) for a in site.ctor_args]
                 safe_resolved = []
@@ -1164,7 +1180,9 @@ class TopLevelEmitter:
         # Set _precalc_loop_active = True
         self._precalc_loop_active = True
         try:
-            for site in self.ctx.ta_call_sites:
+            for _ti, site in enumerate(self.ctx.ta_call_sites):
+                if _ti in self._dead_ta_indices:
+                    continue
                 if self._ta_site_uses_precalc(site):
                     compute_args = self._ta_compute_args_for_site(site)
                     compute_args_bars = compute_args.replace("current_bar_.", "bars[i].")
@@ -1176,7 +1194,9 @@ class TopLevelEmitter:
 
         # Reset indicators and series for the real backtest run
         lines.append("")
-        for site in self.ctx.ta_call_sites:
+        for _ti, site in enumerate(self.ctx.ta_call_sites):
+            if _ti in self._dead_ta_indices:
+                continue
             if self._ta_site_uses_precalc(site):
                 resolved = [self._resolve_known(a) for a in site.ctor_args]
                 safe_resolved = []

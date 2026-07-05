@@ -625,3 +625,64 @@ var m = matrix.new<int>(2, 2, 0)
 var other = matrix.new<int>(2, 2, 1)
 m.concat(other, false)
 """)
+
+
+# ---------------------------------------------------------------------------
+# Regression: cloned no-ctor TA sites (ta.change) + ctor TA sites (ta.rma)
+# referenced by a cloned function variant MUST be declared when the clone
+# is minted inside a DEAD caller's body. Mirrors the quantbyboji DMI shape:
+#   dirmov(len) => ta.change(high); ta.rma(ta.tr, len)   // no-ctor + ctor mix
+#   adx()      => dirmov(diLen); ta.rma(...)             // live caller
+#   adx_dead() => dirmov(diLen); ta.rma(...)             // dead caller (never called)
+# The dead caller's body visit mints dirmov's cs1 clones; the dead-code pass
+# must NOT drop them (they belong to live dirmov). Previously the emitted
+# dirmov_cs1 body referenced undeclared _ta_change_*_cs1 / _ta_rma_*_cs1.
+# ---------------------------------------------------------------------------
+
+def test_regression_cloned_no_ctor_ta_through_dead_caller_compiles():
+    skip_if_no_compile_env()
+    _check("cs1_clone_through_dead_caller", """
+diLen = input.int(15, "DI Length")
+adxLen = input.int(15, "ADX Length")
+dirmov(len) =>
+    up = ta.change(high)
+    down = -ta.change(low)
+    plusDM = na(up) ? na : up > down and up > 0 ? up : 0
+    minusDM = na(down) ? na : down > up and down > 0 ? down : 0
+    truerange = ta.rma(ta.tr, len)
+    plus = fixnan(100 * ta.rma(plusDM, len) / truerange)
+    minus = fixnan(100 * ta.rma(minusDM, len) / truerange)
+    [plus, minus]
+adx() =>
+    [plus, minus] = dirmov(diLen)
+    sum = plus + minus
+    adx_val = 100 * ta.rma(math.abs(plus - minus) / (sum == 0 ? 1 : sum), adxLen)
+    adx_val
+adx_dead() =>
+    [plus, minus] = dirmov(diLen)
+    sum = plus + minus
+    adx_val = 100 * ta.rma(math.abs(plus - minus) / (sum == 0 ? 1 : sum), adxLen)
+    adx_val
+sig = adx()
+plot(sig)
+""")
+
+
+# ---------------------------------------------------------------------------
+# Regression: a top-level ``fixnan`` must not alias a function-owned
+# ``fixnan`` member when the function fixnan is analyzed first. Mirrors
+# test_fixnan_top_level_and_function_owned_do_not_alias in
+# test_codegen_new.py, but here we assert the emitted C++ parses against
+# the engine headers (catches the aliasing at the compile level too).
+# ---------------------------------------------------------------------------
+
+def test_regression_fixnan_top_level_not_aliased_with_function_compiles():
+    skip_if_no_compile_env()
+    _check("fixnan_no_alias", """
+f(x) =>
+    fixnan(x)
+a = fixnan(close)
+b = f(high)
+plot(a)
+plot(b)
+""")
