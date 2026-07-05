@@ -89,8 +89,22 @@ class DiagnosticsHelper:
             loc,
         )
 
+    # Non-atomic node kinds whose serialized infix form must be parenthesized
+    # when used as an operand, so the string re-parses to the SAME tree. A TA
+    # ctor-arg string produced here is later re-parsed and lowered by the
+    # codegen (``_runtime_ctor_arg_for_reset``); a flattened ``(a - b) / c``
+    # would otherwise silently reassociate under C++ precedence.
+    _NONATOMIC_EXPR_NODES = (BinOp, UnaryOp, Ternary)
+
+    def _operand_to_str(self, node: ASTNode) -> str:
+        s = self._expr_to_str(node)
+        if isinstance(node, self._NONATOMIC_EXPR_NODES):
+            return f"({s})"
+        return s
+
     def _expr_to_str(self, node: ASTNode) -> str:
-        """Convert an expression node to a rough string representation."""
+        """Convert an expression node to a string that re-parses to the same
+        tree (grouping preserved for non-atomic operands)."""
         if isinstance(node, NumberLiteral):
             return str(node.value)
         if isinstance(node, StringLiteral):
@@ -104,9 +118,9 @@ class DiagnosticsHelper:
         if isinstance(node, MemberAccess):
             return f"{self._expr_to_str(node.object)}.{node.member}"
         if isinstance(node, BinOp):
-            return f"{self._expr_to_str(node.left)} {node.op} {self._expr_to_str(node.right)}"
+            return f"{self._operand_to_str(node.left)} {node.op} {self._operand_to_str(node.right)}"
         if isinstance(node, UnaryOp):
-            return f"{node.op}{self._expr_to_str(node.operand)}"
+            return f"{node.op}{self._operand_to_str(node.operand)}"
         if isinstance(node, FuncCall):
             args = ", ".join(self._expr_to_str(a) for a in node.args)
             callee_str = self._expr_to_str(node.callee)
@@ -114,5 +128,5 @@ class DiagnosticsHelper:
         if isinstance(node, Subscript):
             return f"{self._expr_to_str(node.object)}[{self._expr_to_str(node.index)}]"
         if isinstance(node, Ternary):
-            return f"{self._expr_to_str(node.condition)} ? {self._expr_to_str(node.true_val)} : {self._expr_to_str(node.false_val)}"
+            return f"{self._operand_to_str(node.condition)} ? {self._operand_to_str(node.true_val)} : {self._operand_to_str(node.false_val)}"
         return "<?>"

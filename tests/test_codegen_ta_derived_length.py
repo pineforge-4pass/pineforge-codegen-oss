@@ -66,7 +66,9 @@ plot(src)
     # And the runtime reset re-derives it from the (possibly overridden) input.
     reset = _reset_line(cpp, member)
     assert 'get_input_int("RSI Length", 14)' in reset
-    assert "* 2 - 1" in reset
+    # Reset lowers through the expression visitor, which parenthesizes operands
+    # (grouping preserved: ``(rsiLen * 2) - 1``, not a flattened infix string).
+    assert '(get_input_int("RSI Length", 14) * 2) - 1' in reset
     assert "ta::EMA(1)" not in reset  # must NOT be the silent no-op
 
 
@@ -95,7 +97,7 @@ plot(out)
     for m in sized:
         reset = _reset_line(cpp, m)
         assert 'get_input_int("Smooth EMA Length", 5)' in reset
-        assert "* 2 - 1" in reset
+        assert '(get_input_int("Smooth EMA Length", 5) * 2) - 1' in reset
     assert "ta::EMA(1)" not in cpp
 
 
@@ -528,4 +530,69 @@ plot(sig)
     assert not re.search(r"\badx_dead\b\s*\(", cpp), (
         "dead adx_dead body should not be emitted"
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression: the stable-runtime-length reset re-materializes the length by
+# re-parsing the expanded expression and lowering it through the SAME
+# expression visitor the statement path uses. Two Pine semantics MUST survive:
+#   (1) operator grouping (a parenthesized +/- subexpression under a division),
+#   (2) float division of two int operands (Pine `/` never truncates).
+# Both used to be destroyed by the old lossy AST->infix serializer +
+# token-substitution renderer (grouping flattened, int/int stayed integer
+# division), collapsing a derived TA length to 1 and trading zero times.
+# ---------------------------------------------------------------------------
+
+def test_reset_preserves_grouping_across_division():
+    # length = int(round((a + b) / (a - b))). Pine groups the sum over the
+    # difference: (10+3)/(10-3) = 13/7 ≈ 1.857 → 2. If the serializer drops the
+    # parentheses the string reassociates under C++ precedence to
+    # `a + b / a - b` = 10 + 0.3 - 3 ≈ 7.3 → 7 — a different length. The reset
+    # must emit the difference as one grouped divisor, coerced to double.
+    src = """//@version=6
+strategy("grp")
+a = input.int(10, "A")
+b = input.int(3, "B")
+lenv = int(math.round((a + b) / (a - b)))
+plot(ta.ema(close, lenv))
+"""
+    cpp = transpile(src)
+    members = re.findall(r"(_ta_ema_\d+)\(", cpp)
+    assert members, "no EMA member emitted"
+    reset = _reset_line(cpp, members[0])
+    assert reset, "no runtime reset emitted for grouped-division length"
+    # Pine `/` is float division → both operands coerced to double.
+    assert "(double)(" in reset
+    # The difference (a - b) survives as one grouped divisor unit — NOT
+    # reassociated so that `+ b` and `- b` become sibling additive terms.
+    assert '(get_input_int("A", 10) - get_input_int("B", 3))' in reset
+    assert '(get_input_int("A", 10) + get_input_int("B", 3))' in reset
+    # The pre-fix flattened form would place the sum's `+ ... /` and a trailing
+    # `- get_input_int("B", 3)` as siblings of the top-level division.
+    assert '+ get_input_int("B", 3) /' not in reset
+    assert "ta::EMA(1)" not in reset  # must NOT collapse to the silent no-op
+
+
+def test_reset_uses_float_division_for_two_int_operands():
+    # 2 / poles must be FLOAT division (Pine semantics): 2/4 = 0.5, so
+    # pow(2, 0.5) = 1.414…, *10 → 14.1 → round 14. Integer division would give
+    # 2/4 = 0 → pow(2, 0) = 1 → *10 → round 10 — the discriminant/length
+    # collapse behind the adxae zero-trades bug.
+    src = """//@version=6
+strategy("fdiv")
+poles = input.int(4, "Poles")
+lenv = int(math.round(10 * math.pow(2.0, 2 / poles)))
+plot(ta.ema(close, lenv))
+"""
+    cpp = transpile(src)
+    members = re.findall(r"(_ta_ema_\d+)\(", cpp)
+    assert members, "no EMA member emitted"
+    reset = _reset_line(cpp, members[0])
+    assert reset, "no runtime reset emitted for float-division length"
+    # The int input operand is coerced to double for the division; the bare
+    # `2 / get_input_int(...)` integer-division form (the bug) must be gone.
+    assert '(double)(get_input_int("Poles", 4))' in reset
+    assert '2 / get_input_int("Poles", 4)' not in reset
+    assert "std::pow" in reset
+    assert "ta::EMA(1)" not in reset
 
