@@ -2173,6 +2173,19 @@ class SecurityEmitter:
             and isinstance(expr_node.callee.object, Identifier)
             and expr_node.callee.object.name == "math"
         ):
+            # A rolling/stateful math reducer (e.g. math.sum -> math::Sum) is
+            # precomputed into a committed _secval_* by the security TA
+            # machinery, exactly like a ta.* call. Return that committed value
+            # instead of falling through to _build_security_math_call, whose
+            # inline lowering only covers scalar math and emits a broken
+            # "unsupported: math.<f>" 0.0 for a reducer. Scalar math
+            # (abs/round/min/max/...) is not a TA site, so this is a no-op.
+            math_site = self._get_ta_site(expr_node)
+            if math_site is not None:
+                math_idx = self._ta_index_by_site_id.get(id(math_site))
+                math_sig = self._security_binding_stack_signature(helper_binding_stack)
+                if math_idx is not None and (math_idx, math_sig) in ta_results:
+                    return ta_results[(math_idx, math_sig)]
             return self._build_security_math_call(
                 sec_id,
                 expr_node.callee.member,
