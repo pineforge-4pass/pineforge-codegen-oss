@@ -143,6 +143,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._block_var_seq = 0
         self._ta_counter = 0
         self._fixnan_counter = 0
+        # All fixnan member names minted so far (base + clones), for O(1)
+        # collision detection when minting a per-call-site fixnan clone.
+        self._fixnan_member_names: set[str] = set()
+        # Authoritative fixnan clone-name map for collisions: (func, cs_idx)
+        # -> {orig_member: cloned_member}. Consumed verbatim by the codegen
+        # when the default ``{base}_cs{cs_idx}`` formula would collide.
+        self._func_cs_fixnan_clone_names: dict[tuple[str, int], dict[str, str]] = {}
         # Track user-defined function nodes for deferred analysis
         self._func_defs: dict[str, FuncDef] = {}
         # Track user-defined function return types
@@ -164,6 +171,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_ta_ranges: dict[str, tuple[int, int]] = {}  # func_name -> (start, end) indices
         self._func_call_site_count: dict[str, int] = {}  # func_name -> count
         self._func_call_cs_map: dict[int, tuple[str, int]] = {}  # call_node_id -> (func_name, cs_idx)
+        # Per-function fixnan site ownership: func_name -> list of fixnan site
+        # indices in self._fixnan_sites owned by that function. Mirrors the
+        # TA-range slicing but for fixnan state, so per-call-site cloning can
+        # mint fresh fixnan members per variant and the codegen dead-code pass
+        # can skip fixnan state owned by dead functions.
+        self._func_fixnan_indices: dict[str, list[int]] = {}
         # Functions whose ONLY reason for needing per-call-site body cloning
         # is a security-tf-monomorphized request.security (no TA/series state
         # of their own — see _check_mixed_callsite_security_tf).
@@ -201,6 +214,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # a TA ctor length with one of the OUTER function's params, so the outer
         # call site can re-substitute (e.g. f_bbwp(_bbwLen) -> f_basisMa(_len)).
         self._enclosing_func_params: list[set[str]] = []
+        # Parallel stack of the function NAMES whose param-sets are in
+        # ``_enclosing_func_params``. The top of stack (or None at global
+        # scope) is the owner of any ORIGINAL ``ta.*`` site minted right now
+        # -- recorded on ``TACallSite.owner_func`` so the codegen dead-code
+        # pass can tell borrowed clones apart from a dead function's own
+        # sites (see contracts.TACallSite.owner_func).
+        self._enclosing_func_names: list[str] = []
         # Set of TA-site indices a nested user-func call rewrote in terms of the
         # current enclosing function's params (None when not inside a FuncDef body).
         self._nested_ta_touched: set | None = None
@@ -303,6 +323,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             var_members=self._var_members,
             func_infos=self._func_infos,
             fixnan_sites=self._fixnan_sites,
+            func_fixnan_indices=self._func_fixnan_indices,
+            func_cs_fixnan_clone_names=self._func_cs_fixnan_clone_names,
             strategy_params=self._strategy_params,
             diagnostics=self._diagnostics,
             filename=self._filename,
@@ -1163,6 +1185,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         old_global = self._global_scope
         self._global_scope = False
         self._enclosing_func_params.append(set(node.params))
+        self._enclosing_func_names.append(node.name)
         self._nested_ta_touched = set()
         try:
             for stmt in node.body:
@@ -1170,6 +1193,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         finally:
             self._global_scope = old_global
             self._enclosing_func_params.pop()
+            self._enclosing_func_names.pop()
             nested_touched = self._nested_ta_touched
             self._nested_ta_touched = None
 

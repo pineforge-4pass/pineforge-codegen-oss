@@ -206,6 +206,23 @@ class InputHelper:
         default = self._get_input_default(node)
         default_cpp = self._visit_expr(default) if default is not None else "0"
         getter = self._input_type_to_getter(func_name, namespace)
+        # The generic ``input(...)`` overload is typed by its defval in Pine
+        # v6 (an int default yields an int input). The static getter table
+        # cannot see the default, so infer the getter from the default's
+        # literal type here. This matters for TA lengths: ``input(15)`` must
+        # route to ``get_input_int`` so the RMA/EMA ctor receives an int.
+        if func_name == "input" and namespace is None:
+            if isinstance(default, BoolLiteral):
+                getter = "get_input_bool"
+            elif isinstance(default, NumberLiteral):
+                if isinstance(default.value, bool):
+                    getter = "get_input_bool"
+                elif isinstance(default.value, int):
+                    getter = "get_input_int"
+                else:
+                    getter = "get_input_double"
+            elif isinstance(default, StringLiteral):
+                getter = "get_input_string"
         default_cpp = self._coerce_string_input_default(getter, default_cpp)
         return f'{getter}("{title}", {default_cpp})'
 

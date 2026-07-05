@@ -446,6 +446,68 @@ def test_fixnan_translation():
     assert "is_na" in cpp
 
 
+def test_fixnan_top_level_and_function_owned_do_not_alias():
+    """Regression: a top-level ``fixnan`` must reference its OWN declared
+    member, not the member owned by a function fixnan analyzed earlier.
+
+    Bug history: ``_visit_fixnan`` fell back to a monotonic counter for any
+    mapped site that was NOT function-owned. Since the analyzer assigns
+    member names (``_prev_fixnan_<n>``) in source order, a function-owned
+    fixnan analyzed first claims ``_prev_fixnan_1``; the subsequent
+    top-level fixnan's declaration is ``_prev_fixnan_2`` but the codegen
+    reference restarted the counter at 1, silently aliasing the function's
+    state. The fix uses ``site.member_name`` directly for top-level sites
+    and reserves the counter fallback only for genuinely unmapped sites.
+    """
+    src = """//@version=6
+strategy("fixnan-no-alias")
+f(x) =>
+    fixnan(x)
+a = fixnan(close)
+b = f(high)
+plot(a)
+plot(b)
+"""
+    cpp = transpile(src)
+
+    # Exactly two fixnan members, declared by the analyzer in source order:
+    #   _prev_fixnan_1 -> f's body (analyzed first, function-owned)
+    #   _prev_fixnan_2 -> top-level a = fixnan(close)
+    import re
+    declared = re.findall(r"double\s+(_prev_fixnan_\d+)\s*=", cpp)
+    assert declared == ["_prev_fixnan_1", "_prev_fixnan_2"], (
+        f"expected two fixnan members in source order; got {declared}"
+    )
+
+    # The top-level ``a = fixnan(close)`` reference MUST be _prev_fixnan_2,
+    # NOT _prev_fixnan_1 (which belongs to f). The pre-fix bug aliased them.
+    top_level_refs = re.findall(
+        r"_prev_fixnan_(\d+)\s*=\s*current_bar_\.close", cpp
+    )
+    assert top_level_refs, "top-level fixnan(close) reference not found"
+    assert top_level_refs == ["2"], (
+        f"top-level fixnan(close) must reference _prev_fixnan_2 (its own "
+        f"declared member); got references to {top_level_refs}. This is "
+        f"the aliasing regression -- the top-level site is silently "
+        f"sharing the function f's fixnan state."
+    )
+
+    # Sanity: the function-owned fixnan (inside f's body) references
+    # _prev_fixnan_1, distinct from the top-level _prev_fixnan_2.
+    func_refs = re.findall(r"_prev_fixnan_(\d+)\s*=\s*x", cpp)
+    assert func_refs == ["1"], (
+        f"f's body fixnan must reference _prev_fixnan_1; got {func_refs}"
+    )
+
+    # Stronger: every referenced _prev_fixnan_N must have a declaration.
+    referenced = set(re.findall(r"(_prev_fixnan_\d+)", cpp))
+    declared_set = set(declared)
+    assert referenced <= declared_set, (
+        f"referenced fixnan members without declarations: "
+        f"{referenced - declared_set}"
+    )
+
+
 def test_cpp_name_safety():
     src = '//@version=6\nstrategy("T")\nexp = true\n'
     cpp = _generate(src)

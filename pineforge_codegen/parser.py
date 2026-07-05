@@ -214,6 +214,33 @@ class Parser:
         if cur.type in (TokenType.VAR, TokenType.VARIP):
             return self._parse_var_keyword_decl()
 
+        # Type-qualifier prefix on a top-level declaration. Pine v6 allows
+        # ``const`` / ``simple`` / ``series`` to qualify a typed variable
+        # declaration (``const int DEFAULT = 1``). The qualifier carries no
+        # C++-side meaning (the engine infers mutability from ``var``/
+        # ``varip``), so consume it and parse the underlying declaration.
+        # Without this the qualifier is parsed as a bare identifier and the
+        # subsequent typed decl leaks the stray ``ExprStmt(const)`` that
+        # produces "Unknown variable 'const'" at codegen.
+        if (cur.type == TokenType.IDENT
+                and cur.value in ("const", "series", "simple")):
+            nxt = self._peek()
+            # ``const int NAME = ...`` / ``const float[] x = ...``
+            typed_after_qual = (
+                nxt.type in TYPE_KEYWORDS
+                or (nxt.type == TokenType.IDENT and self._is_ident_typed_var_decl(offset=1))
+            )
+            # ``const NAME = ...`` (qualifier on an untyped decl — rare but
+            # legal; ``const`` here is just dropped).
+            bare_after_qual = (
+                nxt.type == TokenType.IDENT
+                and self._peek(2).type == TokenType.EQUALS
+                and self._peek(3).type != TokenType.EQUALS
+            )
+            if typed_after_qual or bare_after_qual:
+                self._advance()  # consume the qualifier prefix
+                return self._parse_single_statement()
+
         # Type-annotated declaration: float x = ..., int x = ...
         if cur.type in TYPE_KEYWORDS and self._peek().type == TokenType.IDENT:
             # Check that the IDENT is followed by = (not == ) to confirm declaration
@@ -295,7 +322,7 @@ class Parser:
 
         return self._set_loc(ExprStmt(expr=expr), start_tok)
 
-    def _is_ident_typed_var_decl(self) -> bool:
+    def _is_ident_typed_var_decl(self, offset: int = 0) -> bool:
         """Look ahead for ``IDENT [<...>] IDENT '='`` (UDT-typed declaration).
 
         Triggered by ``Sample s = expr`` / ``array<Sample> w = expr`` /
@@ -305,15 +332,21 @@ class Parser:
         ``true``, ``false``), and function-definition shapes
         (``IDENT '(' ... ')' '=>'``).
 
+        ``offset`` shifts the starting position (used to look ahead past a
+        consumed type-qualifier prefix like ``const``).
+
         Probe: data/validation/udt-method-probe-19-array-of-udt-method.
         """
-        cur = self._current()
+        base = self.pos + offset
+        if base >= len(self.tokens):
+            return False
+        cur = self.tokens[base]
         if cur.type != TokenType.IDENT:
             return False
         if cur.value in ("enum", "type", "strategy", "indicator", "na", "true", "false"):
             return False
         # Skip past optional generic args after the type ident: IDENT [< ... >]
-        i = self.pos + 1
+        i = base + 1
         if i < len(self.tokens) and self.tokens[i].type == TokenType.LT:
             depth = 1
             i += 1

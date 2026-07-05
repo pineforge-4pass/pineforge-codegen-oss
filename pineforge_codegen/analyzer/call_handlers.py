@@ -67,7 +67,7 @@ from typing import Any
 
 from ..ast_nodes import (
     ASTNode, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier, MemberAccess,
-    NumberLiteral, StringLiteral, TupleLiteral, UnaryOp, VarDecl,
+    NumberLiteral, StringLiteral, Ternary, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..symbols import PineType
 from .. import signatures as sigs
@@ -205,6 +205,7 @@ class CallHandlers:
                 returns_tuple=returns_tuple,
                 node=node,
                 is_static=is_static,
+                owner_func=(self._enclosing_func_names[-1] if self._enclosing_func_names else None),
             )
             self._ta_call_sites.append(site)
             self._ta_member_names.add(site.member_name)
@@ -253,6 +254,7 @@ class CallHandlers:
             returns_tuple=returns_tuple,
             node=node,
             is_static=is_static,
+            owner_func=(self._enclosing_func_names[-1] if self._enclosing_func_names else None),
         )
         self._ta_call_sites.append(site)
         self._ta_member_names.add(site.member_name)
@@ -811,11 +813,18 @@ class CallHandlers:
             arg_type = self._visit(arg)
 
         self._fixnan_counter += 1
+        owner = self._enclosing_func_names[-1] if self._enclosing_func_names else None
         site = FixnanCallSite(
             member_name=f"_prev_fixnan_{self._fixnan_counter}",
             pine_type=arg_type,
+            node=node,
+            owner_func=owner,
         )
+        idx = len(self._fixnan_sites)
         self._fixnan_sites.append(site)
+        self._fixnan_member_names.add(site.member_name)
+        if owner is not None:
+            self._func_fixnan_indices.setdefault(owner, []).append(idx)
 
         return arg_type
 
@@ -843,12 +852,29 @@ class CallHandlers:
                 return _is_arith(n.left) and _is_arith(n.right)
             if isinstance(n, UnaryOp):
                 return _is_arith(n.operand)
+            if isinstance(n, Ternary):
+                # ``cond ? a : b`` — expand when both branches are arith.
+                # The condition may be a comparison/logical over arith leaves;
+                # rely on the codegen stability gate to reject series deps.
+                return (_is_arith(n.true_val) and _is_arith(n.false_val)
+                        and _is_arith(n.condition))
+            if isinstance(n, MemberAccess):
+                # ``timeframe.*`` / ``syminfo.*`` / ``math.pi`` etc. — stable
+                # per-run scalars that may appear inside a function-local
+                # derived length. Let the codegen stability classifier decide.
+                return True
             if isinstance(n, FuncCall):
-                # Allow math.* helpers (math.round/sqrt/...) over arith args.
                 callee = n.callee
+                # Allow math.* helpers (math.round/sqrt/cos/...) over arith args.
                 if (isinstance(callee, MemberAccess)
                         and isinstance(callee.object, Identifier)
                         and callee.object.name == "math"):
+                    return all(_is_arith(a) for a in n.args)
+                # Pine type-cast builtins ``int(x)`` / ``float(x)`` / ``bool(x)``
+                # / ``string(x)`` — transparent over arith args. Common in
+                # derived TA lengths (``int(math.round(2 / a))``).
+                if (isinstance(callee, Identifier)
+                        and callee.name in ("int", "float", "bool", "string")):
                     return all(_is_arith(a) for a in n.args)
             return False
 
@@ -1063,11 +1089,51 @@ class CallHandlers:
                             returns_tuple=orig.returns_tuple,
                             node=orig.node,
                             is_static=orig.is_static,
+                            # The clone belongs to the CALLEE's per-call-site
+                            # namespace (``func_name``), NOT the caller whose
+                            # body visit minted it. The codegen dead-code pass
+                            # uses owner_func to decide whether to drop the
+                            # declaration: a clone owned by a live callee must
+                            # survive even when minted during a dead caller's
+                            # body visit (regression: quantbyboji DMI).
+                            owner_func=func_name,
                         )
                         self._ta_call_sites.append(cloned)
                         self._ta_member_names.add(clone_name)
                     if clone_name_map:
                         self._func_cs_ta_clone_names[(func_name, cs_idx)] = clone_name_map
+
+            # Clone fixnan sites for cs_idx > 0 so each emitted variant of
+            # this function references its OWN previous-value member (two
+            # call sites must not share fixnan state -- the second would
+            # otherwise read the first's last non-na value). cs0 keeps the
+            # originals. The clone name follows the ``{orig}_cs{cs_idx}``
+            # formula the codegen re-derives (mirrors TA clone naming).
+            fn_indices = self._func_fixnan_indices.get(func_name, [])
+            if cs_idx > 0 and fn_indices:
+                clone_map: dict[str, str] = {}
+                for fi in fn_indices:
+                    orig = self._fixnan_sites[fi]
+                    fn_clone_name = f"{orig.member_name}_cs{cs_idx}"
+                    # Disambiguate collisions (a fixnan site reached through
+                    # >1 enclosing function could collide on the formula).
+                    if fn_clone_name in self._fixnan_member_names:
+                        base = fn_clone_name
+                        n = 2
+                        while fn_clone_name in self._fixnan_member_names:
+                            fn_clone_name = f"{base}_u{n}"
+                            n += 1
+                        clone_map[orig.member_name] = fn_clone_name
+                    cloned_fn = FixnanCallSite(
+                        member_name=fn_clone_name,
+                        pine_type=orig.pine_type,
+                        node=orig.node,
+                        owner_func=func_name,
+                    )
+                    self._fixnan_sites.append(cloned_fn)
+                    self._fixnan_member_names.add(fn_clone_name)
+                if clone_map:
+                    self._func_cs_fixnan_clone_names[(func_name, cs_idx)] = clone_map
 
         # Create or update FuncInfo
         is_tuple = self._func_returns_tuple.get(func_name, False)
