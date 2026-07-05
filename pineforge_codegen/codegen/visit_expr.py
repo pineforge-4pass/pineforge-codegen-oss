@@ -373,7 +373,12 @@ class ExprVisitor:
                 if node.member == "position_size":
                     return "signed_position_size()"
                 if node.member == "position_avg_price":
-                    return "position_entry_price_"
+                    # Pine returns `na` when the position is flat
+                    # (position_size == 0); the engine field is 0.0 when flat.
+                    # Guard so the common `na(strategy.position_avg_price)`
+                    # flat/in-position idiom is not silently defeated.
+                    return ("(signed_position_size() == 0.0 ? na<double>() "
+                            ": position_entry_price_)")
                 if node.member == "position_entry_name":
                     return "position_entry_name()"
                 # Trade counts
