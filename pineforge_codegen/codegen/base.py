@@ -191,6 +191,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._func_cs_var_remap: dict[tuple[str, int], dict[str, str]] = {}
         # Active var name remap (set during per-call-site function emission)
         self._active_var_remap: dict[str, str] = {}
+        # When True (only while lowering a TA runtime-reset length expression
+        # through the expression visitor), an input-backed variable identifier
+        # renders as an override-aware ``get_input_*()`` read instead of its
+        # class member name. The reset can run in ``evaluate_security`` BEFORE
+        # the input members are initialised, so it must not depend on their
+        # init order. See ``_lower_reset_expr_via_visitor``.
+        self._reset_input_getter_mode: bool = False
         # Set of var/series member names that belong to user functions (need cloning)
         self._func_var_members_set: set[str] = set()
         # BUG C: function-local names emitted as ``UDT*`` pointer aliases (a UDT
@@ -1434,11 +1441,31 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return False
         return False
 
+    # AST node kinds whose serialized form is self-delimiting (a literal, a
+    # name, a member read, or a ``name(...)`` call). Non-atomic kinds (BinOp /
+    # UnaryOp / Ternary) MUST be parenthesized when they appear as an operand,
+    # otherwise re-parsing the flattened infix string silently reassociates the
+    # tree: Pine grouping ``(a - b) / (c - d)`` degrades to ``a - b / c - d``
+    # under C++ precedence. See ``_runtime_ctor_arg_for_reset`` (the string is
+    # re-parsed and lowered through the expression visitor).
+    _ATOMIC_ARITH_NODES = (NumberLiteral, Identifier, MemberAccess, FuncCall)
+
+    def _arith_operand_to_str(self, node) -> str | None:
+        """Serialize ``node`` for use as an operand: parenthesize it unless its
+        serialized form is already self-delimiting, so grouping survives a
+        round-trip through the parser."""
+        s = self._arith_expr_to_str(node)
+        if s is None:
+            return None
+        if isinstance(node, self._ATOMIC_ARITH_NODES):
+            return s
+        return f"({s})"
+
     def _arith_expr_to_str(self, node) -> str | None:
         """Render a numeric arithmetic-over-identifiers expression to a string
-        whose token spelling matches ``_resolve_known`` / ``_runtime_ctor_arg_for_reset``
-        (e.g. ``rsiLen * 2 - 1``). Returns None for any node shape we don't fold
-        (series subscripts, ternaries, etc.) so the caller leaves the var untracked.
+        that re-parses to the SAME tree (grouping preserved via
+        ``_arith_operand_to_str``). Returns None for any node shape we don't
+        fold (series subscripts, etc.) so the caller leaves the var untracked.
         """
         if isinstance(node, NumberLiteral):
             v = node.value
@@ -1450,20 +1477,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
             return f"{node.object.name}.{node.member}"
         if isinstance(node, BinOp):
-            l = self._arith_expr_to_str(node.left)
-            r = self._arith_expr_to_str(node.right)
+            l = self._arith_operand_to_str(node.left)
+            r = self._arith_operand_to_str(node.right)
             if l is None or r is None:
                 return None
             return f"{l} {node.op} {r}"
         if isinstance(node, UnaryOp):
-            o = self._arith_expr_to_str(node.operand)
+            o = self._arith_operand_to_str(node.operand)
             if o is None:
                 return None
             return f"{node.op}{o}"
         if isinstance(node, Ternary):
-            c = self._arith_expr_to_str(node.condition)
-            t = self._arith_expr_to_str(node.true_val)
-            f = self._arith_expr_to_str(node.false_val)
+            c = self._arith_operand_to_str(node.condition)
+            t = self._arith_operand_to_str(node.true_val)
+            f = self._arith_operand_to_str(node.false_val)
             if c is None or t is None or f is None:
                 return None
             return f"{c} ? {t} : {f}"
@@ -2479,6 +2506,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if not (has_input or has_timeframe or has_inline_input):
             return None
 
+        # Preferred path: re-parse the (gate-approved, grouping-faithful)
+        # expression and lower it through the SAME expression visitor the
+        # statement path uses. Operator grouping and Pine numeric typing
+        # (``/`` always yields float; ``(double)`` coercion) are then correct
+        # by construction — reused from ``_visit_binop``, not re-derived here.
+        # Falls back to the legacy token-substitution renderer below only if
+        # re-parse / lowering unexpectedly fails, so a working site is never
+        # worse off than before this change.
+        lowered = self._lower_reset_expr_via_visitor(expanded)
+        if lowered is not None:
+            return lowered
+
         # Render inline input() calls to override-aware get_input_*() reads
         # now that the gate has accepted the expression. Done after the gate
         # so the rendered getter tokens (get_input_int, ...) do not have to
@@ -2545,6 +2584,50 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if had_math:
             return f"(int)({rewritten})"
         return rewritten
+
+    def _lower_reset_expr_via_visitor(self, expanded: str) -> str | None:
+        """Re-parse a gate-approved, fully-expanded TA-length expression and
+        lower it through the SAME expression visitor the statement path uses,
+        so operator grouping and Pine numeric typing are preserved identically
+        (Pine ``/`` always yields float; ``math.*`` returns double; branches are
+        parenthesized). Reuses ``_visit_binop`` etc.; nothing is re-typed here.
+
+        Input-backed variables render as override-aware ``get_input_*()`` reads
+        (not member refs) via ``_reset_input_getter_mode`` — the reset can run
+        in ``evaluate_security`` before the input members are initialised, so it
+        must not depend on their init order. Inline ``input(...)`` calls and
+        ``math.*`` / ``timeframe.*`` members lower through the visitor's own
+        handlers (same C++ the statement path would emit).
+
+        Returns None if re-parse / lowering fails, so the caller falls back to
+        the legacy token-substitution renderer (never worse than before)."""
+        try:
+            from ..lexer import Lexer
+            from ..parser import Parser
+            tokens = Lexer(expanded).tokenize()
+            node = Parser(tokens, source=expanded)._parse_expression()
+        except Exception:
+            return None
+        prev = self._reset_input_getter_mode
+        self._reset_input_getter_mode = True
+        try:
+            rendered = self._visit_expr(node)
+        except Exception:
+            return None
+        finally:
+            self._reset_input_getter_mode = prev
+        if not rendered or "/* " in rendered:
+            # Unknown/unhandled node leaked a placeholder — defer to legacy.
+            return None
+        # A TA length must be int. Truncate when the lowered form is
+        # float-typed (a ``std::*`` call, a ``(double)`` division coercion, or a
+        # ``timeframe.*`` helper — all timeframe helpers reference script_tf_).
+        # A bare int / identifier length carries none of these and is left
+        # unwrapped, so simple sites stay byte-identical to the legacy output.
+        if ("std::" in rendered or "(double)" in rendered
+                or "script_tf_" in rendered):
+            return f"(int)({rendered})"
+        return rendered
 
 
     def _collect_ta_runtime_resets(self) -> list[str]:

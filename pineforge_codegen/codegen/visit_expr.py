@@ -275,6 +275,16 @@ class ExprVisitor:
                 return str(val)
             if isinstance(val, str):
                 return f'std::string("{val}")'
+        # TA runtime-reset lowering: an input-backed var renders as its
+        # override-aware getter (not the member name), because the reset may
+        # run before the input members are initialised (evaluate_security path).
+        if (self._reset_input_getter_mode
+                and name in self._input_backed_vars
+                and name in self._input_var_to_call):
+            call_node = self._input_var_to_call[name]
+            func_name_i, namespace_i = self._resolve_callee(call_node.callee)
+            title = self._get_input_title(call_node, var_name=name)
+            return self._render_input_value(call_node, func_name_i, namespace_i, title)
         # Pine type name `color` used as a value (no variable) → int64 color constant.
         # Params handled above; symbol table does not retain function locals after analysis.
         if name == "color":
