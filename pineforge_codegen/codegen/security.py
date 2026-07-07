@@ -1173,6 +1173,16 @@ class SecurityEmitter:
             if bound is not None:
                 if isinstance(bound, str):
                     return collected
+                # Guard against a cyclic helper binding: an identifier bound to
+                # an expression that transitively references the same binding
+                # (e.g. mutually-referential helper params) would recurse here
+                # forever — the mutable/global/func paths below already carry a
+                # `resolving` guard, this path did not. Keyed by the bound node
+                # so acyclic bindings are unaffected (byte-identical emission).
+                bind_key = f"bind:{id(bound)}"
+                if bind_key in resolving:
+                    return collected
+                resolving.add(bind_key)
                 self._collect_security_ta_binding_stacks(
                     bound,
                     resolving,
@@ -1181,6 +1191,7 @@ class SecurityEmitter:
                     inline_ta_indices,
                     inline_helper,
                 )
+                resolving.discard(bind_key)
                 return collected
 
             mutable_info = self._global_mutable_infos.get(expr_node.name)
