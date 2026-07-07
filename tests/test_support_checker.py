@@ -349,11 +349,14 @@ def test_request_security_currency_kwarg_rejected():
     _expect_error(src, "currency")
 
 
-def test_request_security_ignore_invalid_symbol_kwarg_rejected():
+def test_request_security_ignore_invalid_symbol_kwarg_accepted():
+    # ignore_invalid_symbol is a guaranteed no-op: codegen forces the current
+    # chart symbol (always valid), so the flag can never change the result.
+    # Accept it (codegen drops it) rather than reject a valid, harmless script.
     src = (PRELUDE +
            'a = request.security(syminfo.tickerid, "60", close, '
            'ignore_invalid_symbol=true)\n')
-    _expect_error(src, "ignore_invalid_symbol")
+    assert _errors(src) == []
 
 
 def test_request_security_positional_gaps_lookahead_passes():
@@ -626,9 +629,11 @@ def test_security_allowed_params_locked():
     G2 sprint: backadjustment / settlement_as_close / adjustment added so scripts
     using those request.security kwargs compile instead of being hard-rejected.
     Codegen silently drops them (engine uses fixed unadjusted data).
+    ignore_invalid_symbol added: a guaranteed no-op on the forced chart symbol.
     """
     assert SECURITY_ALLOWED_PARAMS == frozenset(
         {"symbol", "timeframe", "expression", "gaps", "lookahead",
+         "ignore_invalid_symbol",
          "backadjustment", "settlement_as_close", "adjustment"}
     )
 

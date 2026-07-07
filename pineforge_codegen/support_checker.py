@@ -342,10 +342,14 @@ UNSUPPORTED_NAMESPACE_VARS: dict[str, str] = {
 # request.security parameter rules.
 # Codegen supports symbol/timeframe/expression plus gaps/lookahead (read in
 # _eval_security_* emission and forwarded to register_security_eval).
-# ignore_invalid_symbol/currency are accepted by the parser but silently
-# dropped by codegen — reject loudly to surface unsupported behavior.
+# `currency` is still rejected loudly (it changes the returned values via FX
+# conversion, which codegen drops — silently wrong). `ignore_invalid_symbol` is
+# a guaranteed no-op here: codegen forces request.security onto the current
+# chart symbol (see the "symbol must reference current chart symbol" check),
+# which is always valid, so the flag can never change the result — accept+ignore.
 SECURITY_ALLOWED_PARAMS: frozenset[str] = frozenset(
     {"symbol", "timeframe", "expression", "gaps", "lookahead",
+     "ignore_invalid_symbol",
      # Data-adjustment constants — silently accepted and ignored by codegen;
      # the underlying engine uses a fixed unadjusted data source.
      "backadjustment", "settlement_as_close", "adjustment"}

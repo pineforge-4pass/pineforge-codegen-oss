@@ -108,6 +108,20 @@ def test_timestamp_datestring_dd_mmm_yyyy_parsed():
     assert "1626728400000LL" in cpp
 
 
+def test_timestamp_datestring_ymd_utc_word_parsed():
+    # "YYYY-MM-DD HH:MM UTC" — space-separated with a trailing tz WORD (not a
+    # numeric offset). 2024-01-01 00:00 UTC = 1704067200000 ms.
+    cpp = _gen('t = timestamp("2024-01-01 00:00 UTC")\nplot(close)\n')
+    assert "1704067200000LL" in cpp
+
+
+def test_timestamp_datestring_gmt_offset_word_parsed():
+    # "GMT+2" trailing word = +2h offset. 1 Jan 2020 09:30 GMT+2 = 07:30 UTC
+    # = 1577863800000 ms.
+    cpp = _gen('t = timestamp("1 Jan 2020 09:30 GMT+2")\nplot(close)\n')
+    assert "1577863800000LL" in cpp
+
+
 def test_timestamp_unparseable_datestring_rejected():
     with pytest.raises(CompileError, match="could not parse"):
         _gen('t = timestamp("not a date")\nplot(close)\n')
