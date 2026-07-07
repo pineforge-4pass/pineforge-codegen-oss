@@ -59,10 +59,10 @@ tables and types come from ``codegen/tables.py``, ``..ast_nodes``,
 from __future__ import annotations
 
 from ..ast_nodes import (
-    ASTNode, Assignment, BinOp, BreakStmt, ContinueStmt, ExprStmt, ForStmt,
-    ForInStmt, FuncCall, FuncDef, Identifier, IfStmt, MemberAccess, NumberLiteral,
-    StringLiteral, Subscript, SwitchStmt, Ternary, TupleAssign, TupleLiteral,
-    UnaryOp, VarDecl, WhileStmt,
+    ASTNode, Assignment, BinOp, BoolLiteral, BreakStmt, ContinueStmt, ExprStmt,
+    ForStmt, ForInStmt, FuncCall, FuncDef, Identifier, IfStmt, MemberAccess,
+    NumberLiteral, StringLiteral, Subscript, SwitchStmt, Ternary, TupleAssign,
+    TupleLiteral, UnaryOp, VarDecl, WhileStmt,
 )
 from ..analyzer import (
     FuncInfo, TACallSite, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
@@ -353,6 +353,116 @@ class SecurityEmitter:
             return None
         return None
 
+    # In PineForge batch backtests these barstate flags are compile-time
+    # constants (see support_checker / codegen.visit_expr barstate emission):
+    # every bar is historical, none realtime/last. The other flags
+    # (isfirst/isnew/isconfirmed) depend on runtime tick state, so they are
+    # deliberately absent and leave a fold "unknown".
+    _SECURITY_CONST_BARSTATE = {
+        "isrealtime": False,
+        "islast": False,
+        "ishistory": True,
+        "islastconfirmedhistory": False,
+    }
+
+    def _fold_security_const_bool(
+        self,
+        node,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None = None,
+        resolving: set[str] | None = None,
+    ) -> bool | None:
+        """Fold a boolean expression to a compile-time constant, or None.
+
+        Only reduces expressions whose non-literal leaves are the batch-constant
+        barstate flags above; anything runtime-dependent returns None. Used to
+        resolve a request.security history index expressed as
+        ``barstate.isrealtime ? 1 : 0`` and friends."""
+        if resolving is None:
+            resolving = set()
+        if isinstance(node, BoolLiteral):
+            return bool(node.value)
+        if (
+            isinstance(node, MemberAccess)
+            and isinstance(node.object, Identifier)
+            and node.object.name == "barstate"
+        ):
+            return self._SECURITY_CONST_BARSTATE.get(node.member)
+        if isinstance(node, UnaryOp) and node.op == "not":
+            inner = self._fold_security_const_bool(
+                node.operand, helper_binding_stack, resolving
+            )
+            return None if inner is None else (not inner)
+        if isinstance(node, BinOp) and node.op in ("and", "or"):
+            left = self._fold_security_const_bool(
+                node.left, helper_binding_stack, resolving
+            )
+            right = self._fold_security_const_bool(
+                node.right, helper_binding_stack, resolving
+            )
+            if left is None or right is None:
+                return None
+            return (left and right) if node.op == "and" else (left or right)
+        if isinstance(node, Identifier):
+            bound = self._security_lookup_helper_binding(node.name, helper_binding_stack)
+            if bound is not None:
+                return self._fold_security_const_bool(
+                    bound, helper_binding_stack, resolving
+                )
+            global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+            if node.name in global_expr_map and node.name not in resolving:
+                resolving.add(node.name)
+                out = self._fold_security_const_bool(
+                    global_expr_map[node.name], helper_binding_stack, resolving
+                )
+                resolving.remove(node.name)
+                return out
+        return None
+
+    def _resolve_security_index_literal(
+        self,
+        node,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None = None,
+        resolving: set[str] | None = None,
+    ) -> int | None:
+        """Resolve a request.security TA/bar-field history index to a literal int.
+
+        Extends ``_literal_int_for_security_index`` by also resolving the index
+        through helper-parameter bindings and global aliases and constant-folding
+        a ternary whose condition is a batch-constant barstate flag (e.g.
+        ``idxHigher = barstate.isrealtime ? 1 : 0`` -> 0). A literal index short-
+        circuits on the first line, so behaviour is unchanged for every already-
+        literal index. Returns None when the index cannot be reduced to a
+        compile-time literal, so the caller keeps its existing rejection."""
+        direct = self._literal_int_for_security_index(node)
+        if direct is not None:
+            return direct
+        if resolving is None:
+            resolving = set()
+        if isinstance(node, Identifier):
+            bound = self._security_lookup_helper_binding(node.name, helper_binding_stack)
+            if bound is not None:
+                return self._resolve_security_index_literal(
+                    bound, helper_binding_stack, resolving
+                )
+            global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+            if node.name in global_expr_map and node.name not in resolving:
+                resolving.add(node.name)
+                out = self._resolve_security_index_literal(
+                    global_expr_map[node.name], helper_binding_stack, resolving
+                )
+                resolving.remove(node.name)
+                return out
+            return None
+        if isinstance(node, Ternary):
+            cond = self._fold_security_const_bool(node.condition, helper_binding_stack)
+            if cond is None:
+                return None
+            chosen = node.true_val if cond else node.false_val
+            return self._resolve_security_index_literal(
+                chosen, helper_binding_stack, resolving
+            )
+        return None
+
     def _collect_security_ohlc_hist_fields(self, node) -> set[str]:
         """Which security bar fields need HTF history (subscript index >= 1)."""
         out: set[str] = set()
@@ -445,7 +555,7 @@ class SecurityEmitter:
             if isinstance(n, Subscript):
                 site = resolve_ta_site(n.object)
                 if site is not None:
-                    idx_lit = self._literal_int_for_security_index(n.index)
+                    idx_lit = self._resolve_security_index_literal(n.index)
                     if idx_lit is not None and idx_lit >= 1:
                         site_idx = self._ta_index_by_site_id.get(id(site))
                         if site_idx is not None:
@@ -2076,7 +2186,9 @@ class SecurityEmitter:
                 # produced the chart-tf TA instead of the confirmed HTF value.
                 idx = self._ta_index_by_site_id.get(id(ta_site))
                 sig = self._security_binding_stack_signature(helper_binding_stack)
-                idx_lit = self._literal_int_for_security_index(expr_node.index)
+                idx_lit = self._resolve_security_index_literal(
+                    expr_node.index, helper_binding_stack
+                )
                 if idx_lit is None:
                     self._codegen_error(
                         expr_node,

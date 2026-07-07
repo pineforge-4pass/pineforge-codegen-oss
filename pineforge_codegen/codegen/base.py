@@ -2661,15 +2661,38 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     f"{site.member_name} = {site.class_name}({', '.join(runtime_args)});"
                 )
 
-        # Security-context TA copies (same ctor args as their main-context site)
+        # Security-context TA copies. Normally these share the ctor args of
+        # their main-context site, but a request.security nested in a helper
+        # called at several sites is cloned per call site (distinct sec_id +
+        # callsite_idx) while the shared TA site's ``ctor_args`` were resolved
+        # ONCE (against the first call site). Every clone would then size its
+        # indicator from call site 0's argument (e.g. four EMAs all pinned to
+        # crossFastLen instead of the per-site fast/slow lengths). Resolve each
+        # sec's ctor args against ITS call site by reusing the per-call-site
+        # function-clone TA remap (identity for cs0 / non-clones, so all other
+        # output stays byte-identical).
+        sec_call_by_id = {it["sec_id"]: it for it in self._security_calls}
+        ta_site_by_member = {s.member_name: s for s in self.ctx.ta_call_sites}
         for info in self._security_eval_info:
+            sec_item = sec_call_by_id.get(info["sec_id"])
+            sec_containing = (sec_item or {}).get("containing_func") or ""
+            sec_cs_idx = (sec_item or {}).get("callsite_idx")
             for idx, variants in (info.get("ta_variants") or {}).items():
                 site = self.ctx.ta_call_sites[idx]
-                if not site.ctor_args:
+                ctor_site = site
+                if sec_containing and sec_cs_idx is not None:
+                    remap = self._func_cs_ta_remap.get((sec_containing, sec_cs_idx))
+                    if remap:
+                        cloned_name = remap.get(site.member_name)
+                        if cloned_name and cloned_name != site.member_name:
+                            cand = ta_site_by_member.get(cloned_name)
+                            if cand is not None:
+                                ctor_site = cand
+                if not ctor_site.ctor_args:
                     continue
                 runtime_args = []
                 any_runtime = False
-                for a in site.ctor_args:
+                for a in ctor_site.ctor_args:
                     rt = self._runtime_ctor_arg_for_reset(a)
                     if rt is not None:
                         runtime_args.append(rt)
