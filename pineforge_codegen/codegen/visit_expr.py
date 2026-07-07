@@ -493,8 +493,19 @@ class ExprVisitor:
                     (node.member in TA_IMPLICIT_COMPUTE_FULL and node.member in TA_COMPUTE_ARGS and TA_COMPUTE_ARGS[node.member] == [])
                     or node.member == "vwap"
                 ):
-                    # Find the matching call site
-                    for site in self.ctx.ta_call_sites:
+                    # Find the matching call site. Skip sites pruned as dead
+                    # code (their owner function is never called): a dead site's
+                    # member declaration is never emitted (see base.py
+                    # ``_dead_ta_indices`` / emit_top.py member-decl guard), so
+                    # binding a LIVE bare property read to one references an
+                    # undeclared member. Regression: nightowlxtrader-azt — a live
+                    # ``ta.vwap`` (top-level + inside request.security) resolved
+                    # to dead ``f5``'s first-in-order ``_ta_vwap_10`` and emitted
+                    # ``use of undeclared identifier '_ta_vwap_10'``. A live read
+                    # must bind to a live site.
+                    for _i, site in enumerate(self.ctx.ta_call_sites):
+                        if _i in self._dead_ta_indices:
+                            continue
                         ta_short = site.class_name.split("::")[-1].lower()
                         if site.member_name.startswith(f"_ta_{node.member}_"):
                             if node.member == "vwap":
