@@ -455,6 +455,22 @@ class StmtVisitor:
                 lines.append(f"{pad}{cpp_type}& {safe} = {cpp_val};")
                 return
 
+        # Global-scope UDT array-element alias (BUG: Pine array elements of a
+        # user-defined type are references). A global loop-local bound from
+        # ``arr.get(i)`` and later field-mutated must ALIAS the element so the
+        # mutation writes back into the array. Emit a fresh per-iteration
+        # ``UDT& z = arr[i];`` reference (any hoisted class member was
+        # suppressed) — identical to the non-hoisted function-local alias path.
+        # Gated by _register_udt_array_get_ref_locals (which only records global-
+        # scope names); the ``_current_func_body is None`` guard confines this to
+        # global scope, so a function-local sharing the name keeps its own path.
+        if (node.name in self._udt_array_get_ref_locals
+                and getattr(self, "_current_func_body", None) is None):
+            udt_t = self._udt_var_types.get(node.name)
+            cpp_val = self._visit_rhs_value(node.value, node.name, target_cpp_type=udt_t)
+            lines.append(f"{pad}{udt_t}& {safe} = {cpp_val};")
+            return
+
         # General declaration
         cpp_type = self._type_for_decl(node) if not is_global_member else None
         cpp_val = self._visit_rhs_value(node.value, node.name, target_cpp_type=cpp_type)

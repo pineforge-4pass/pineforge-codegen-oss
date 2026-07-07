@@ -132,6 +132,76 @@ plot(close)
     assert "p.crossed = true;" in body
 
 
+_GLOBAL_ARRAY_PROLOGUE = PROLOGUE + """
+var array<pivot> pivots = array.new<pivot>()
+if array.size(pivots) == 0
+    array.push(pivots, pivot.new(na, false))
+"""
+
+
+def test_global_while_array_get_udt_mutation_emits_reference_alias():
+    # Regression: a GLOBAL-scope ``while`` loop-local bound from an array
+    # element and field-mutated is hoisted to a class member and its in-loop
+    # init lowered to a value-copy assignment, so the mutation was lost. It must
+    # instead ALIAS the element (Pine array elements of a UDT are references) so
+    # a later ``arr.get(i).f`` read sees the new value.
+    src = _GLOBAL_ARRAY_PROLOGUE + """
+int wi = 0
+while wi < array.size(pivots)
+    pivot p = array.get(pivots, wi)
+    p.currentLevel := close
+    p.crossed := true
+    wi += 1
+plot(close)
+"""
+    cpp = transpile(src)
+    # Fresh per-iteration reference to the array element (write-back), not copy.
+    assert re.search(r"pivot& p = pivots\[\(wi\)\];", cpp)
+    assert "pivot p = pivots[(wi)];" not in cpp
+    # The hoisted value member is suppressed (the alias replaces it).
+    assert "pivot p = pivot{};" not in cpp
+    # Mutations write through the reference with ``.`` member access.
+    assert "p.currentLevel = " in cpp
+    assert "p.crossed = true;" in cpp
+
+
+def test_global_for_array_get_udt_mutation_emits_reference_alias():
+    # Same defect via a GLOBAL ``for i = ...`` loop. Here the get-local stays a
+    # true local (not hoisted), but the function-local alias path no-ops at
+    # global scope, so it also value-copied. Must alias for write-back.
+    src = _GLOBAL_ARRAY_PROLOGUE + """
+for fi = 0 to array.size(pivots) - 1
+    pivot p = array.get(pivots, fi)
+    p.currentLevel := close
+    p.crossed := true
+plot(close)
+"""
+    cpp = transpile(src)
+    assert re.search(r"pivot& p = pivots\[\(fi\)\];", cpp)
+    assert "pivot p = pivots[(fi)];" not in cpp
+    assert "p.currentLevel = " in cpp
+    assert "p.crossed = true;" in cpp
+
+
+def test_global_readonly_array_get_udt_stays_value_copy():
+    # CAUTION control locking the scope of the fix: a GLOBAL get-local that is
+    # only READ (never field-mutated) must keep value-copy semantics — no
+    # needless reference/pointer aliasing (this is what keeps the read-only
+    # tripwire strategies byte-identical).
+    src = _GLOBAL_ARRAY_PROLOGUE + """
+float acc = 0.0
+for ri = 0 to array.size(pivots) - 1
+    pivot p = array.get(pivots, ri)
+    acc := acc + p.currentLevel
+plot(acc)
+"""
+    cpp = transpile(src)
+    assert "pivot& p" not in cpp
+    assert "pivot* p" not in cpp
+    # Plain value copy of the element remains.
+    assert "pivot p = pivots[(ri)];" in cpp
+
+
 def test_drawing_style_constant_into_string_param_coerced():
     # The crash unmasked by the alias fix: label.style_* into a string param.
     src = """//@version=6

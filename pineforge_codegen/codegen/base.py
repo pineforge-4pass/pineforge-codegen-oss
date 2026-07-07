@@ -207,6 +207,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # needed: names are function-unique and the value-copy fallback ignores
         # entries for inactive functions.
         self._udt_ptr_alias_locals: set[str] = set()
+        # Names of hoisted GLOBAL-scope UDT loop-locals bound from a UDT array
+        # element (``z = arr.get(i)``) and later field-mutated. Pine array
+        # elements of a user-defined type are references, so such a local must
+        # ALIAS the element, not value-copy — the mutation has to write back
+        # into the array. These are de-hoisted from the class-member value-copy
+        # to a fresh per-iteration ``UDT& z = arr[i];`` local reference (the same
+        # form the non-hoisted function-local alias path already emits). Read-only
+        # get-locals are NOT recorded (no field mutation) and keep value-copy
+        # semantics. Populated by _register_udt_array_get_ref_locals.
+        self._udt_array_get_ref_locals: set[str] = set()
         self._precalc_loop_active: bool = False
         # Names of ``var`` members that live in a FUNCTION scope (not global).
         # These are initialized once-per-function-variant on first call (a
@@ -688,6 +698,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._all_member_names.add(self._safe_name(name))
 
         self._register_global_aggregate_member_types()
+        self._register_udt_array_get_ref_locals()
         self._uses_matrix = self._detect_matrix_usage()
         # Drawing-objects-as-data: gate all new emission (drawing.hpp include +
         # the per-type arenas) on this flag so non-drawing strategies stay
@@ -1067,6 +1078,68 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         spec2 = self._matrix_specs[recv_name2]
                         self._matrix_specs[name] = spec2
                         self._collection_types[name] = spec2
+
+    def _walk_global_scope_with_loopflag(self, stmts, in_loop):
+        """Yield ``(stmt, in_loop)`` for every statement in global scope,
+        recursing into control-flow bodies (if/for/while/switch) but NOT into
+        nested function definitions — a function-local of the same name lives in
+        a separate scope and must not be attributed to a global member. The
+        ``in_loop`` flag is True once inside any for/while loop body."""
+        for s in stmts:
+            if isinstance(s, FuncDef):
+                continue
+            yield s, in_loop
+            child_in_loop = in_loop or isinstance(s, (ForStmt, ForInStmt, WhileStmt))
+            for attr in ("body", "else_body", "default_body"):
+                child = getattr(s, attr, None)
+                if isinstance(child, list):
+                    yield from self._walk_global_scope_with_loopflag(child, child_in_loop)
+            cases = getattr(s, "cases", None)
+            if isinstance(cases, list):
+                for _case_expr, case_stmts in cases:
+                    if isinstance(case_stmts, list):
+                        yield from self._walk_global_scope_with_loopflag(case_stmts, child_in_loop)
+
+    def _register_udt_array_get_ref_locals(self) -> None:
+        """Detect global-scope UDT loop-locals that alias a UDT array element and
+        are later field-mutated (Pine array elements of a user-defined type are
+        references — ``z = arr.get(i)`` then ``z.f := v`` MUST write back into
+        ``arr``).
+
+        A non-``var`` global-scope ``UDT z = arr.get(i)`` (or ``.first`` /
+        ``.last``) nested inside a for/while loop mis-lowers to a value copy: a
+        global ``while`` loop hoists ``z`` to a class member whose in-loop init
+        becomes a value-copy assignment, and a global ``for`` loop keeps ``z`` a
+        true local but the function-local alias path (``_udt_local_alias_kind``)
+        no-ops at global scope (``_current_func_body`` is None) — both silently
+        drop the field mutation. We record exactly this shape so the (possible)
+        class member is suppressed and the in-loop VarDecl is emitted as a fresh
+        per-iteration ``UDT& z = arr[i];`` reference instead (the same alias form
+        the non-hoisted function-local path already produces). Strictly gated:
+        the RHS must be a UDT-array-element lvalue AND the name must be field-
+        mutated at global scope AND the declaration must be loop-nested. A
+        read-only get-local is never recorded, so its value-copy output is
+        unchanged. Function-local get-locals are excluded (the walker skips
+        function bodies) — those keep using the existing alias path."""
+        pairs = list(self._walk_global_scope_with_loopflag(self.ctx.ast.body, False))
+        field_mutated: set[str] = set()
+        for s, _in_loop in pairs:
+            if (isinstance(s, Assignment)
+                    and isinstance(s.target, MemberAccess)
+                    and isinstance(s.target.object, Identifier)):
+                field_mutated.add(s.target.object.name)
+        for s, in_loop in pairs:
+            if not isinstance(s, VarDecl) or s.is_var or s.is_varip:
+                continue
+            if not in_loop:
+                continue
+            if not isinstance(s.value, FuncCall):
+                continue
+            if self._is_udt_lvalue(s.value) is None:
+                continue
+            if s.name not in field_mutated:
+                continue
+            self._udt_array_get_ref_locals.add(s.name)
 
     def _extract_receiver_name(self, call_node) -> str | None:
         """Extract receiver Identifier name from m.method(...) or matrix.method(m, ...).
@@ -1979,6 +2052,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         seen_global = set()
         for name, ptype in self.ctx.global_var_decls:
             if name in seen_global or name in self.ctx.series_vars or name in self._var_names:
+                continue
+            # De-hoisted UDT array-element alias (Pine reference semantics): the
+            # in-loop VarDecl is emitted as a fresh ``UDT& z = arr[i];`` local
+            # reference each iteration, so there is no persistent class member.
+            if name in self._udt_array_get_ref_locals:
+                seen_global.add(name)
                 continue
             seen_global.add(name)
             safe = self._safe_name(name)
