@@ -276,13 +276,21 @@ you delete or weaken the special case, the test will tell you.
    PREVIOUS bar's HLC (`_s_high[1]`, `_s_low[1]`, `_s_close[1]`) per
    Pine v6 semantics with `developing=false`.
 6. **`request.security` is strict.** Only `symbol`, `timeframe`,
-  `expression`, `gaps`, and `lookahead` are allowed. Symbol must resolve
-   to the current chart symbol (`syminfo.tickerid` or `syminfo.ticker`).
-   `gaps` and `lookahead` must be the literal `barmerge.gaps_*` /
+  `expression`, `gaps`, `lookahead`, and `ignore_invalid_symbol` are
+   allowed (`ignore_invalid_symbol` is accepted but inert — the symbol is
+   always the chart symbol, so no symbol can be invalid). Symbol must
+   resolve to the current chart symbol (`syminfo.tickerid` or
+   `syminfo.ticker`, incl. first-binding aliases and
+   `ticker.inherit/standard/heikinashi(<chart sym>)`). `gaps` and
+   `lookahead` must be the literal `barmerge.gaps_*` /
    `barmerge.lookahead_*` member access (codegen does not parse other
-   shapes). `barmerge.lookahead_on` is hard-rejected for backtest-honesty
-   reasons. The `timeframe` argument, when a string literal, is validated
-   against the Pine v6 TF format at parse time (PR #3).
+   shapes). `barmerge.lookahead_on` is ACCEPTED with a repaint WARNING —
+   engine-supported (first-intrabar publication; script-tf publish gating
+   for finer-than-chart targets): see `_check_request_security`'s lookahead
+   branch and `test_request_security_lookahead_on_kwarg_warns`. The old
+   "hard-rejected" wording here was verified stale against the code on
+   2026-07-07 — do not restore it. The `timeframe` argument, when a string
+   literal, is validated against the Pine v6 TF format at parse time (PR #3).
 7. `**SUPPORTED_LOG`** gates `log.{info,warning,error}`. Without it,
   typos like `log.foo("x")` previously emitted a dead empty-string
    statement. Don't remove the gate.
