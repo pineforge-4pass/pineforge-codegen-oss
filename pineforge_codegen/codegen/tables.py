@@ -96,10 +96,12 @@ BAR_BUILTINS = {
     # ``_bar_hour()`` helpers. For UTC-exchange data (the crypto corpus,
     # SymInfo's constructor default) the lambda takes the gmtime_r fast
     # path and is value-identical to the old emission.
+    # Route through the engine's cached pine_hour/pine_minute/... (session_time.hpp)
+    # instead of an inline per-call setenv+tzset lambda — the lambda's TZ churn
+    # caused a macOS tzset()->notifyd IPC storm (KI-35). The engine helpers are
+    # value-identical (same tm fields + Pine offsets) but tzset-churn-free.
     **{
-        name: tz_time_field_lambda(
-            TIME_FIELD_EXPRS[name], "current_bar_.timestamp", "syminfo_.timezone"
-        )
+        name: f"pine_{name}(current_bar_.timestamp, syminfo_.timezone)"
         for name in ("hour", "minute", "second", "dayofmonth", "dayofweek",
                      "month", "year", "weekofyear")
     },
