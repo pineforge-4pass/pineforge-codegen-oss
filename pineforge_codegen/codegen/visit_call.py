@@ -715,11 +715,12 @@ class CallVisitor:
                 # mutex-guarded setenv+localtime_r block as the 2-arg
                 # form.
                 tz_arg = "syminfo_.timezone"
-            # 2-arg form — honor the tz argument. The shared
-            # ``tz_time_field_lambda`` (codegen/tables.py) also backs the
-            # bare variable forms (``hour`` etc. via BAR_BUILTINS), so the
-            # numbers agree across both forms.
-            return tz_time_field_lambda(field_expr, ts_arg, tz_arg)
+            # Route through the engine's cached pine_<field>() (session_time.hpp),
+            # same as the bare variable forms (BAR_BUILTINS) — value-identical but
+            # free of the per-call setenv+tzset churn (KI-35). field_expr is unused
+            # now (the engine applies the Pine offsets internally).
+            del field_expr
+            return f"pine_{func_name}((int64_t)({ts_arg}), {tz_arg})"
 
         # time(timeframe) or time(timeframe, session[, tz])
         if func_name == "time" and namespace is None and (node.args or node.kwargs):
