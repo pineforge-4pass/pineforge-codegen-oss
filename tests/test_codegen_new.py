@@ -252,12 +252,13 @@ def test_hour_two_arg_passes_tz():
         'plot(h)\n'
     )
     cpp = _generate(src)
+    # The tz literal is preserved (auditable) as the pine_hour() call argument;
+    # the tz-aware decomposition now lives in the engine helper (session_time.cpp)
+    # rather than an inline setenv+tzset+localtime_r lambda — the per-call tzset
+    # churn caused a macOS notifyd storm (KI-35).
     assert "America/New_York" in cpp
-    assert "normalize_timezone_for_posix" in cpp
-    # Two-arg form must use localtime_r (with the TZ env mutation) rather
-    # than just gmtime_r — that is the whole point of the tz argument.
-    assert "localtime_r" in cpp
-    assert "setenv" in cpp
+    assert ('pine_hour((int64_t)(current_bar_.timestamp), '
+            'std::string("America/New_York"))') in cpp
 
 
 def test_hour_one_arg_uses_syminfo_timezone():
@@ -275,18 +276,14 @@ def test_hour_one_arg_uses_syminfo_timezone():
         'h = hour(time)\n'
     )
     cpp = _generate(src)
-    # The 1-arg form must reference syminfo_.timezone (exchange TZ) per
-    # TV docs. The default ``SymInfo::timezone`` of "UTC" keeps the
-    # cheap gmtime_r path active for crypto.
-    assert "syminfo_.timezone" in cpp
-    assert "normalize_timezone_for_posix" in cpp
-    # The chart-display TZ slot must NOT leak into the bar-time lambda;
+    # The 1-arg form must thread syminfo_.timezone (exchange TZ) into the engine
+    # helper pine_hour() per TV docs. The UTC fast path (tzset-free gmtime_r) now
+    # lives inside pine_hour (session_time.cpp), not the generated code (KI-35).
+    assert ("pine_hour((int64_t)(current_bar_.timestamp), "
+            "syminfo_.timezone)") in cpp
+    # The chart-display TZ slot must NOT leak into the bar-time call;
     # if it ever does, this test catches the regression.
     assert "chart_timezone_" not in cpp
-    # Both branches of the lambda are emitted; cheap gmtime_r still serves
-    # the UTC default.
-    assert "gmtime_r" in cpp
-    assert "localtime_r" in cpp
 
 
 def test_dayofweek_two_arg_passes_tz():
@@ -300,25 +297,23 @@ def test_dayofweek_two_arg_passes_tz():
     )
     cpp = _generate(src)
     assert "Asia/Tokyo" in cpp
-    assert "localtime_r" in cpp
+    assert ('pine_dayofweek((int64_t)(current_bar_.timestamp), '
+            'std::string("Asia/Tokyo"))') in cpp
 
 
 def test_hour_two_arg_utc_literal_short_circuits():
-    """Pine ``hour(time, "UTC")`` should emit a tz-aware lambda but at
-    runtime take the gmtime_r branch (the inline ``if (_tz == "UTC")``
-    check). The emitted source still references the literal so the tz
-    intent is auditable."""
+    """Pine ``hour(time, "UTC")`` routes through the engine helper pine_hour();
+    the UTC fast path (tzset-free gmtime_r) lives inside the helper
+    (session_time.cpp, KI-35). The emitted source still references the "UTC"
+    literal so the tz intent is auditable."""
     src = (
         '//@version=6\nstrategy("T")\n'
         'h = hour(time, "UTC")\n'
     )
     cpp = _generate(src)
     assert '"UTC"' in cpp
-    # Both branches are emitted in the lambda; both gmtime_r and localtime_r
-    # appear in the source even though only the gmtime_r branch runs at
-    # runtime for this literal.
-    assert "gmtime_r" in cpp
-    assert "localtime_r" in cpp
+    assert ('pine_hour((int64_t)(current_bar_.timestamp), '
+            'std::string("UTC"))') in cpp
 
 
 def test_time_in_request_security_uses_bar_timestamp():

@@ -254,26 +254,24 @@ def test_array_slice_string_elements():
 # C18 — bare time variables use the exchange timezone path
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("var,field", [
-    ("hour", "tm_buf.tm_hour"),
-    ("minute", "tm_buf.tm_min"),
-    ("second", "tm_buf.tm_sec"),
-    ("dayofmonth", "tm_buf.tm_mday"),
-    ("dayofweek", "tm_buf.tm_wday + 1"),
-    ("month", "tm_buf.tm_mon + 1"),
-    ("year", "tm_buf.tm_year + 1900"),
+@pytest.mark.parametrize("var", [
+    "hour", "minute", "second", "dayofmonth", "dayofweek", "month", "year",
 ])
-def test_bare_time_vars_use_exchange_timezone(var, field):
+def test_bare_time_vars_use_exchange_timezone(var):
+    # Bare time vars route through the engine helper pine_<var>() threading the
+    # exchange TZ (syminfo_.timezone); the tm-field extraction and Pine offsets
+    # live inside the helper (session_time.cpp, KI-35), not the generated code.
     cpp = _gen(f"x = {var}\nplot(close)\n")
     assert f"_bar_{var}()" not in cpp
-    assert "syminfo_.timezone" in cpp
-    assert field in cpp
+    assert f"pine_{var}(current_bar_.timestamp, syminfo_.timezone)" in cpp
 
 
 def test_bare_and_function_form_share_emission():
     cpp = _gen("a = hour\nb = hour(time)\nplot(close)\n")
-    # Both forms route through the same tz-aware lambda body.
-    assert cpp.count("tm_buf.tm_hour") == 2
+    # Both the bare and function forms route through the same engine helper
+    # pine_hour() (the bare form passes the timestamp directly, the function
+    # form casts its time arg to int64_t).
+    assert cpp.count("pine_hour(") == 2
     assert "_bar_hour()" not in cpp
 
 
