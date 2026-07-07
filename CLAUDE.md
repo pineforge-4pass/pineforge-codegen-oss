@@ -206,14 +206,15 @@ strategy. The taxonomy:
 | Bucket                           | What                                                                 |
 | -------------------------------- | -------------------------------------------------------------------- |
 | `HARD_REJECT_FUNC`               | Calls with no PineForge semantics at all (e.g. `request.financial`). |
-| `HARD_REJECT_NAMESPACE`          | Whole namespaces (e.g. `ticker.*`).                                  |
-| `DIVERGENT_VARS` (warning)       | Built-in variables whose value diverges from TV (e.g. `bar_index`).  |
+| `HARD_REJECT_NAMESPACE`          | Whole-namespace rejects — currently EMPTY (the old `ticker.*` blanket reject became per-function `HARD_REJECT_FUNC` entries: `ticker.{renko,kagi,linebreak,pointfigure,new,modify}`; `ticker.inherit`/`ticker.standard` pass through, `ticker.heikinashi` allowed for the chart's own symbol). |
+| `DIVERGENT_VARS` (warning) / `DIVERGENT_VARS_ERROR` (reject) | Built-in variables whose value diverges from TV (e.g. `bar_index` warns); the ERROR subset (`last_bar_index` — would silently mis-alias to the CURRENT bar index) is rejected because the backtest would be silently wrong. |
 | `BARSTATE_APPROX_VARS` (warning) | Barstate flags PineForge approximates in batch mode.                 |
 | `STRATEGY_UNSUPPORTED_PARAMS`    | Per-strategy.* call kwargs that codegen drops silently.              |
 | `NOT_YET_FUNC`                   | Implementable but currently no codegen — reject loudly.              |
 | `SUPPORTED_*` frozensets         | Per-namespace whitelist of names codegen knows how to emit.          |
 | `varip` VarDecl check            | `varip` declarations rejected outright — batch backtests have no realtime tick state. |
 | TF literal validation            | `request.security` / `request.security_lower_tf` `timeframe` string literals validated against Pine v6 format at parse time. |
+| syminfo na-gap warning           | `SUPPORTED_SYMINFO` = every `SYMINFO_MEMBER_MAP` key, but members whose emission is `na<T>()` or a `get_syminfo_metadata(...)` lookup (root/pricescale/minmove/mincontract/current_contract/expiration_date/isin/sector/industry + fundamentals/recommendations/target_price_*) form `_SYMINFO_SILENT_GAP_FIELDS` (derived from the emission table, so new na-accept fields can't drift out): every read WARNS that the value is na until a data feed injects it. |
 
 
 When extending codegen with a new Pine builtin: add to the corresponding
@@ -230,22 +231,23 @@ These bit us once and are now pinned by `test_compile_smoke.py`'s
 you delete or weaken the special case, the test will tell you.
 
 1. **`year(time)` / `month(time)` / `dayofmonth` / `dayofweek` /
-  `hour(time, tz)` / `minute` / `second` / `weekofyear` function-call
-   form** lowers to an inline lambda that mirrors the engine's
-   `BacktestEngine::_decompose_bar_time()`. The variable form uses
-   `_bar_year()` etc. via `BAR_BUILTINS` (still UTC-only — `_bar_*`
-   accessors call `gmtime_r` unconditionally; chart-tz wiring on the
-   variable side is a separate engine change). The function-call form
-   honors a tz argument: the two-arg form `hour(time, tz)` uses the
-   explicit tz; the one-arg form `hour(time)` defaults to
-   `syminfo_.timezone` (the engine's `SymInfo::timezone` field, "UTC"
-   by default). When the resolved tz is empty / "UTC" / "Etc/UTC" the
-   lambda takes the cheap `gmtime_r` fast path; otherwise it enters a
-   mutex-guarded `setenv("TZ", ...)` + `localtime_r` block that
-   mirrors `pine_tz::ScopedTimezone` (`src/timezone.cpp`, not exposed
-   via any public `<pineforge/...>` header). Harnesses validating
-   against TV exports for non-UTC symbols MUST set chart_tz to match
-   the chart's TZ at export time.
+  `hour(time, tz)` / `minute` / `second` / `weekofyear`** — BOTH the
+   function-call form and the bare variable form lower to the engine's
+   cached, timezone-aware `pine_<field>(ts_ms, tz)` helpers
+   (`session_time.hpp`): the variable form via `BAR_BUILTINS`
+   (`pine_year(current_bar_.timestamp, syminfo_.timezone)` …), the
+   function form via `visit_call.py` (`pine_hour((int64_t)(ts), tz)`),
+   so the two forms agree. The two-arg form uses the explicit tz; the
+   one-arg form defaults to `syminfo_.timezone` (engine
+   `SymInfo::timezone`, "UTC" by default). The old inline
+   `setenv("TZ")+localtime_r` lambda (`tz_time_field_lambda`,
+   codegen/tables.py) is no longer emitted — per-call tzset churn
+   caused a macOS notifyd IPC storm (KI-35) — and has zero call sites.
+   Chart display TZ is a separate engine slot (`chart_timezone_`,
+   `strategy_set_chart_timezone`) intentionally NOT consulted by these
+   builtins; harnesses validating metrics against TV exports for
+   non-UTC charts must still set chart_tz to match the chart's TZ at
+   export time.
 2. **Matrix-returning methods** (`inv` / `pinv` / `transpose` / `copy` /
   `submatrix` / `concat` / `diff` / `mult` / `pow` / `eigenvectors` /
    `kron`) live in `MATRIX_RETURNING_METHODS` (`codegen/tables.py`).
