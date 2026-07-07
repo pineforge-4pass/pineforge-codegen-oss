@@ -176,9 +176,21 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
     "MMM DD YYYY ..." forms. A dateString without a time zone is GMT+0 per
     the Pine reference. Returns None when the string cannot be parsed.
     """
-    from datetime import datetime, timezone
+    import re
+    from datetime import datetime, timezone, timedelta
 
     txt = text.strip()
+    # Pine dateStrings may carry a trailing timezone WORD ("2024-01-01 00:00 UTC",
+    # "1 Jan 2020 09:30 GMT+2") that neither fromisoformat nor the strptime forms
+    # below can read. Peel it off and fold it into an explicit offset (UTC/GMT
+    # with an optional ±H[:MM] suffix; the bare word is +00:00).
+    tzoff = None
+    m = re.search(r"\s+(?:UTC|GMT)([+-]\d{1,2})?(?::?(\d{2}))?$", txt, re.I)
+    if m:
+        txt = txt[: m.start()].strip()
+        h = int(m.group(1) or 0)
+        mm = int(m.group(2) or 0)
+        tzoff = timezone(timedelta(hours=h, minutes=(mm if h >= 0 else -mm)))
     dt = None
     try:
         dt = datetime.fromisoformat(txt)
@@ -188,6 +200,7 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
             "%d %b %Y %H:%M:%S", "%d %b %Y %H:%M", "%d %b %Y",
             "%b %d %Y %H:%M:%S %z", "%b %d %Y %H:%M %z",
             "%b %d %Y %H:%M:%S", "%b %d %Y %H:%M", "%b %d %Y",
+            "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
         ):
             try:
                 dt = datetime.strptime(txt, fmt)
@@ -197,7 +210,7 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=(tzoff or timezone.utc))
     return int(dt.timestamp() * 1000)
 
 

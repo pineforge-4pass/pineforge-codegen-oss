@@ -517,11 +517,14 @@ wk = weekofyear(time)
     cpp = transpile(src)
     # Spot-check the lowering shape so anyone deleting the special case
     # in visit_call.py learns about it from the assertion, not from a
-    # mysterious clang error.
-    assert "gmtime_r" in cpp, (
-        "year(time) etc. should lower to a gmtime_r-based extraction lambda; "
-        "if you intentionally moved the implementation to a runtime helper, "
-        "update this assertion to match the new emission shape."
+    # mysterious clang error. The bar-time builtins now lower to the engine's
+    # cached pine_<field>() helpers (session_time.cpp) instead of an inline
+    # gmtime_r/localtime_r lambda — the per-call tzset churn caused a macOS
+    # notifyd storm (KI-35). The UTC/tz decode lives inside the helper now.
+    assert "pine_year(" in cpp and "pine_hour(" in cpp, (
+        "year(time)/hour(time) etc. should lower to the engine pine_<field>() "
+        "helpers; if you intentionally changed the emission, update this "
+        "assertion to match the new shape."
     )
     compile_cpp(cpp, label="regression_year_function_form")
 
