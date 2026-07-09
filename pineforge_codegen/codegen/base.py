@@ -381,6 +381,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_inline_counter = 0
         self._random_call_counter = 0
         self._for_counter = 0
+        # Unique lambda-local names used when an array lowering references its
+        # receiver more than once.  The binding keeps temporary-producing or
+        # side-effectful receivers single-evaluation (see TypeInferer).
+        self._array_receiver_counter = 0
         # UDT / enum (needed before _collect_known_vars for input.enum)
         self._udt_defs: dict[str, list] = {}
         self._enum_defs: dict[str, list[str]] = {}

@@ -294,6 +294,15 @@ av = array.avg(a)
 """)
 
 
+def test_nested_array_slice_aggregates_compile():
+    _check("nested_array_slice_aggregates", """
+a = array.from(1.0, 3.0, 2.0)
+mx = array.max(array.slice(a, 0, 2))
+mn = array.min(array.slice(a, 1, 3))
+plot(mx + mn)
+""")
+
+
 def test_descending_for_by_array_remove_compiles():
     _check("descending_for_by_array_remove", """
 var levels = array.new<float>()

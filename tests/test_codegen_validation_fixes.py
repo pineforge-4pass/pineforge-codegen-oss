@@ -1,6 +1,6 @@
 """Regression tests for codegen bugs found by pinescript-scrapper validation.
 
-Covers seven fix families:
+Covers ten fix families:
   1. drawing-handle ``na`` reset/assignment (Box{}/Line{}/... not na<double>()),
      plus typed ``na`` for string/int/bool declaration init.
   2. void drawing setter used as a UDF's last expression / if-branch value.
@@ -17,7 +17,11 @@ Covers seven fix families:
      step is supplied.
   9. Numeric ternaries promote an ``int`` literal branch to ``double`` when the
      other branch is floating-point arithmetic.
+ 10. Array methods materialize a duplicated receiver expression once, so
+     nested temporary-producing calls cannot form cross-temporary iterators.
 """
+
+import re
 
 from pineforge_codegen import transpile
 
@@ -847,3 +851,33 @@ def test_numeric_ternary_with_int_literal_and_float_branch_declares_double():
     )
     assert "double pressure" in cpp
     assert "int pressure" not in cpp
+
+
+# ---------------------------------------------------------------------------
+# 10. duplicated array receivers are evaluated once
+# ---------------------------------------------------------------------------
+def test_nested_array_slice_aggregates_materialize_one_receiver():
+    cpp = _cpp(
+        "a = array.from(1.0, 3.0, 2.0)\n"
+        "mx = array.max(array.slice(a, 0, 2))\n"
+        "mn = array.min(array.slice(a, 1, 3))\n"
+        "plot(mx + mn)"
+    )
+
+    mx_line = next(line for line in cpp.splitlines() if line.strip().startswith("mx = "))
+    mn_line = next(line for line in cpp.splitlines() if line.strip().startswith("mn = "))
+
+    # Before the fix, each constructor appeared twice: max/min_element took
+    # begin() from one temporary vector and end() from another (undefined
+    # behaviour).  Each source slice must now produce one vector constructor,
+    # and each iterator pair must use the same named receiver binding.
+    assert mx_line.count("std::vector<double>(") == 1
+    assert mn_line.count("std::vector<double>(") == 1
+    assert re.search(
+        r"std::max_element\((__pf_array_receiver_\d+)\.begin\(\),\1\.end\(\)\)",
+        mx_line,
+    )
+    assert re.search(
+        r"std::min_element\((__pf_array_receiver_\d+)\.begin\(\),\1\.end\(\)\)",
+        mn_line,
+    )

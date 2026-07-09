@@ -329,6 +329,44 @@ class TypeInferer:
     # Method lowering for collection types (used by visit_call paths)
     # ------------------------------------------------------------------
 
+    def _array_receiver_once_expr(
+        self, array_expr: str, args: list[str], lower_receiver,
+    ) -> str:
+        """Lower an array method without duplicating its receiver evaluation.
+
+        ``ARRAY_METHODS`` is intentionally a compact table of expression
+        templates.  Many templates need the receiver more than once (for
+        example ``begin()`` + ``end()``).  Substituting a temporary-producing
+        receiver directly into those slots creates distinct objects, so the
+        resulting iterator range is invalid.  Render first with a fresh token;
+        when the template uses it repeatedly and the real receiver is not a
+        plain identifier lvalue, bind it to one lambda-local forwarding
+        reference and render every use through that binding.  The lambda's
+        deduced ``auto`` return copies scalar results before a temporary
+        receiver dies; mutations still reach lvalue arrays through the
+        forwarding reference.  Single-use and plain-identifier lowerings
+        remain byte-for-byte unchanged.
+
+        This is receiver-only by design: Pine argument evaluation and the
+        separate empty-array semantics are outside this fix.
+        """
+        counter = getattr(self, "_array_receiver_counter", 0)
+        occupied = "\n".join((array_expr, *args))
+        while True:
+            receiver = f"__pf_array_receiver_{counter}"
+            counter += 1
+            if receiver not in occupied:
+                break
+        self._array_receiver_counter = counter
+
+        lowered = lower_receiver(receiver)
+        if lowered.count(receiver) <= 1 or array_expr.isidentifier():
+            return lower_receiver(array_expr)
+        return (
+            f"[&]() {{ auto&& {receiver} = ({array_expr}); "
+            f"return {lowered}; }}()"
+        )
+
     def _array_method_expr(
         self, array_expr: str, method: str, args: list[str], spec: TypeSpec | None = None,
     ) -> str:
@@ -337,34 +375,36 @@ class TypeInferer:
         arr_cpp_type = self._type_spec_to_cpp(spec)
         elem_cpp = self._type_spec_to_cpp(spec.element) if spec.element is not None else "double"
         if method == "copy":
-            return f"{arr_cpp_type}({array_expr})"
-        if method == "slice":
-            return f"{arr_cpp_type}({array_expr}.begin()+(int)({args[0]}),{array_expr}.begin()+(int)({args[1]}))"
-        if method == "join":
+            lower_receiver = lambda recv: f"{arr_cpp_type}({recv})"
+        elif method == "slice":
+            lower_receiver = lambda recv: f"{arr_cpp_type}({recv}.begin()+(int)({args[0]}),{recv}.begin()+(int)({args[1]}))"
+        elif method == "join" and elem_cpp == "std::string":
             sep = args[0] if args else 'std::string(",")'
-            if elem_cpp == "std::string":
-                return f"[&](){{ std::string r; for(size_t i=0;i<{array_expr}.size();i++){{ if(i>0)r+={sep}; r+={array_expr}[i]; }} return r; }}()"
-        numeric_only = {
-            "sum", "avg", "min", "max", "range", "stdev", "variance", "median",
-            "mode", "percentile_linear_interpolation", "percentile_nearest_rank",
-            "percentrank", "abs", "standardize", "covariance", "binary_search",
-            "binary_search_leftmost", "binary_search_rightmost", "sort_indices",
-        }
-        if method in numeric_only and elem_cpp not in ("double", "int"):
-            self._codegen_error(
-                None,
-                f"array.{method} requires a numeric array",
-                hint="Use numeric arrays for aggregate/statistical array functions.",
-            )
-        if method in ARRAY_METHODS:
-            return ARRAY_METHODS[method](array_expr, args)
-        # Defensive: support_checker rejects any array.* method not in
-        # SUPPORTED_ARRAY (derived from ARRAY_METHODS). Reaching here means the
-        # checker was bypassed or the tables drifted.
-        raise ValueError(
-            f"codegen: unhandled array method '{method}' — analyzer should have "
-            f"rejected. Add it to ARRAY_METHODS."
-        )
+            lower_receiver = lambda recv: f"[&](){{ std::string r; for(size_t i=0;i<{recv}.size();i++){{ if(i>0)r+={sep}; r+={recv}[i]; }} return r; }}()"
+        else:
+            numeric_only = {
+                "sum", "avg", "min", "max", "range", "stdev", "variance", "median",
+                "mode", "percentile_linear_interpolation", "percentile_nearest_rank",
+                "percentrank", "abs", "standardize", "covariance", "binary_search",
+                "binary_search_leftmost", "binary_search_rightmost", "sort_indices",
+            }
+            if method in numeric_only and elem_cpp not in ("double", "int"):
+                self._codegen_error(
+                    None,
+                    f"array.{method} requires a numeric array",
+                    hint="Use numeric arrays for aggregate/statistical array functions.",
+                )
+            if method not in ARRAY_METHODS:
+                # Defensive: support_checker rejects any array.* method not in
+                # SUPPORTED_ARRAY (derived from ARRAY_METHODS). Reaching here means the
+                # checker was bypassed or the tables drifted.
+                raise ValueError(
+                    f"codegen: unhandled array method '{method}' — analyzer should have "
+                    f"rejected. Add it to ARRAY_METHODS."
+                )
+            lower_receiver = lambda recv: ARRAY_METHODS[method](recv, args)
+
+        return self._array_receiver_once_expr(array_expr, args, lower_receiver)
 
     def _map_method_expr(
         self, map_expr: str, method: str, args: list[str], spec: TypeSpec | None = None,
