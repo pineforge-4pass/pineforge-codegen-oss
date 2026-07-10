@@ -381,6 +381,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_inline_counter = 0
         self._random_call_counter = 0
         self._for_counter = 0
+        # Synthetic history buffers used by inline call-history and by scalar
+        # expressions passed to UDF series parameters.  They are pre-registered
+        # at generate() time so declarations precede method emission, then
+        # addressed by (source node, emitted UDF variant).  Each record is a
+        # real class-member Series and therefore joins _PFScriptState through
+        # the declaration-derived checkpoint inventory.
+        self._inline_history_members: list[dict] = []
+        self._inline_history_member_by_key: dict[tuple, str] = {}
         # Unique lambda-local names used when an array lowering references its
         # receiver more than once.  The binding keeps temporary-producing or
         # side-effectful receivers single-evaluation (see TypeInferer).
@@ -796,7 +804,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         stateful = (set(ctx.func_ta_ranges.keys())
                     | set(ctx.func_var_members.keys())
                     | set(ctx.func_series_vars.keys())
-                    | set(ctx.func_fixnan_indices.keys()))
+                    | set(ctx.func_fixnan_indices.keys())
+                    | set(ctx.func_security_clone_only))
         if not stateful:
             return
 
@@ -816,7 +825,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return list(self._func_cs_fixnan_remap.get((fname, 0), {}).keys())
 
         def natural_name(fname: str, cs_idx: int) -> str:
-            return f"{self._func_safe_name(fname)}_cs{cs_idx}"
+            return f"{self._func_cpp_base_name(fname)}_cs{cs_idx}"
 
         interned: dict[tuple, dict] = {}
         worklist: list[dict] = []
@@ -824,7 +833,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         fresh_counter = 0
 
         # Seed with the natural clones the flat emission loop produces.
-        for fname in stateful:
+        for fname in sorted(stateful):
             if fname not in func_bodies:
                 continue
             total_cs = ctx.func_call_site_counts.get(fname, 0)
@@ -840,7 +849,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             else:
                 worklist.append({
                     "fname": fname,
-                    "name": self._func_safe_name(fname),
+                    "name": self._func_cpp_base_name(fname),
                     "ta_remap": {},
                     "var_remap": {},
                     "fixnan_remap": {},
@@ -883,7 +892,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 ginst = interned.get(key)
                 if ginst is None:
                     fresh_counter += 1
-                    inst_name = f"{self._func_safe_name(g_name)}__ni{fresh_counter}"
+                    inst_name = f"{self._func_cpp_base_name(g_name)}__ni{fresh_counter}"
                     fvar_remap: dict[str, str] = {}
                     for v in var_originals(g_name):
                         fresh_member = f"{v}__ni{fresh_counter}"
@@ -1742,11 +1751,163 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     walk(v)
         walk(self.ctx.ast)
 
+    def _func_cpp_base_name(self, fname: str) -> str:
+        """Return the actual emitted C++ base name for a UDF or UDT method."""
+        fi = self._func_info_map.get(fname)
+        if fi is not None and getattr(fi, "is_udt_method", False):
+            return self._emit_udt_method_cpp_name(fi)
+        return self._func_safe_name(fname)
+
+    def _inline_history_contexts_for_owner(self, owner: str | None) -> list[str | None]:
+        """Return every method-emission context that owns one source AST site.
+
+        ``None`` denotes top-level/on_bar or a function emitted exactly once.
+        Stateful UDF clones and fresh nested-helper instances use the same names
+        assigned to ``_current_instance_name`` by ``_emit_func_def`` so lookup
+        while visiting a body is deterministic and cannot collapse call sites.
+        """
+        if owner is None:
+            return [None]
+        if owner in self._dead_func_names:
+            return []
+
+        total_cs = self.ctx.func_call_site_counts.get(owner, 0)
+        cloned = (
+            owner in self.ctx.func_ta_ranges
+            or owner in self.ctx.func_series_vars
+            or owner in self.ctx.func_var_members
+            or owner in self.ctx.func_security_clone_only
+        ) and total_cs > 0
+        if cloned:
+            contexts: list[str | None] = [
+                f"{self._func_cpp_base_name(owner)}_cs{idx}"
+                for idx in range(total_cs)
+            ]
+        else:
+            contexts = [None]
+
+        for inst in self._fresh_instances:
+            if inst["fname"] == owner and inst["name"] not in contexts:
+                contexts.append(inst["name"])
+        return contexts
+
+    def _prepare_inline_history_members(self) -> None:
+        """Pre-register every generated temporary-Series class member.
+
+        Member declarations and the declaration-derived rollback aggregate are
+        emitted before function/on_bar bodies.  A source-order AST pass therefore
+        reserves stable names up front.  The key includes an emitted UDF context
+        because the same body AST is rendered once per stateful call-site clone.
+        """
+        self._inline_history_members = []
+        self._inline_history_member_by_key = {}
+        counters = {"hist_call": 0, "series_arg": 0}
+
+        def walk_nodes(value):
+            """Yield AST nodes in stable field order, including tuple elements.
+
+            NamingHelper._walk_ast predates several AST containers and is
+            intentionally a best-effort utility.  Member pre-registration must
+            be exhaustive because a missed node becomes an undeclared C++
+            member, so use the dataclass field graph directly here.
+            """
+            if isinstance(value, ASTNode):
+                yield value
+                for child in vars(value).values():
+                    yield from walk_nodes(child)
+                return
+            if isinstance(value, (list, tuple)):
+                for child in value:
+                    yield from walk_nodes(child)
+                return
+            if isinstance(value, dict):
+                for child in value.values():
+                    yield from walk_nodes(child)
+                return
+            if isinstance(value, TypeField) and value.default is not None:
+                yield from walk_nodes(value.default)
+
+        owner_by_node: dict[int, str] = {}
+        for fi in self.ctx.func_infos:
+            if fi.node is None:
+                continue
+            for child in walk_nodes(fi.node):
+                owner_by_node[id(child)] = fi.name
+
+        def register(kind: str, source_key: tuple, cpp_type: str,
+                     owner: str | None) -> None:
+            if cpp_type not in ("double", "int", "bool"):
+                cpp_type = "double"
+            for context in self._inline_history_contexts_for_owner(owner):
+                key = (kind, *source_key, context)
+                if key in self._inline_history_member_by_key:
+                    continue
+                counters[kind] += 1
+                member_name = f"_{kind}_{counters[kind]}"
+                self._inline_history_member_by_key[key] = member_name
+                self._inline_history_members.append({
+                    "kind": kind,
+                    "member_name": member_name,
+                    "cpp_type": cpp_type,
+                    "context": context,
+                })
+
+        def actual_args_for(call: FuncCall, params: list[str]) -> list:
+            if call.kwargs:
+                return _merge_kwargs(call.args, call.kwargs, params, lambda arg: arg)
+            return list(call.args)
+
+        for node in walk_nodes(self.ctx.ast):
+            owner = owner_by_node.get(id(node))
+            if isinstance(node, Subscript) and isinstance(node.object, FuncCall):
+                register(
+                    "hist_call", (id(node),), self._infer_type(node.object), owner
+                )
+
+            if not isinstance(node, FuncCall):
+                continue
+            func_name, _ = self._resolve_callee(node.callee)
+            fi = self._func_info_map.get(func_name)
+            if fi is None or fi.node is None:
+                continue
+            func_sv = self.ctx.func_series_vars.get(fi.name, set())
+            series_param_indices = {
+                idx for idx, name in enumerate(fi.node.params) if name in func_sv
+            }
+            if not series_param_indices:
+                continue
+            args = actual_args_for(node, list(fi.node.params))
+            for idx, arg in enumerate(args):
+                if idx not in series_param_indices:
+                    continue
+                if isinstance(arg, Identifier):
+                    if arg.name in BAR_FIELDS or arg.name in BAR_SERIES_PUSH:
+                        continue
+                    if arg.name in self.ctx.series_vars:
+                        continue
+                register(
+                    "series_arg", (id(node), idx), self._infer_type(arg), owner
+                )
+
+    def _inline_history_member(self, kind: str, node: ASTNode,
+                               arg_idx: int | None = None) -> str:
+        source_key = (id(node),) if arg_idx is None else (id(node), arg_idx)
+        key = (kind, *source_key, self._current_instance_name)
+        member = self._inline_history_member_by_key.get(key)
+        if member is None:
+            raise AssertionError(
+                "missing pre-registered inline history member for "
+                f"{kind} at {getattr(node, 'loc', None)} in context "
+                f"{self._current_instance_name!r}"
+            )
+        return member
+
     def generate(self) -> str:
         """Generate C++ source from the AnalyzerContext."""
         # Context-sensitive instance pre-pass (needs the naming helpers populated
         # in __init__). Computes nested stateful-helper dispatch + fresh instances.
         self._build_func_instances()
+        self._prepare_inline_history_members()
         # Pre-scan for strategy series vars
         self._prescan_strategy_series()
         self._security_ohlc_hist_fields_by_sec: dict[int, set[str]] = {}
@@ -1820,6 +1981,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 2. Open class
         lines.append("class GeneratedStrategy : public BacktestEngine {")
         lines.append("public:")
+        _script_state_decl_start = len(lines)
         
         # request.security state
         for item in self._security_calls:
@@ -2051,6 +2213,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             else:
                 lines.append(f"    Series<double> {svar}{_mbb};")
 
+        # 8a. Synthetic temporary history.  Unlike the legacy function-local
+        # static buffers, these members are value-copyable rollback state and
+        # have one identity per source site / emitted UDF variant.
+        for info in self._inline_history_members:
+            lines.append(
+                f"    Series<{info['cpp_type']}> {info['member_name']}{_mbb};"
+            )
+
         # 8b. Global-scope non-var declarations as class members
         #     (so user-defined functions can reference them)
         seen_global = set()
@@ -2171,6 +2341,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 9c. _inputs_initialized_ flag for cached global inputs.
         lines.append("    bool _inputs_initialized_ = false;")
 
+        lines.append("")
+
+        # 9d. Historical execution rollback checkpoint.  Derive the member
+        # inventory from the declarations above so every future generated
+        # state category is captured automatically (or generation fails loudly
+        # if it introduces an unfamiliar declaration form).
+        _script_state_members = self._collect_script_state_members(
+            lines[_script_state_decl_start:-1]
+        )
+        self._emit_script_state_hooks(lines, _script_state_members)
         lines.append("")
 
         # 9. Constructor with TA initializer list

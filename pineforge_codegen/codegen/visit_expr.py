@@ -509,8 +509,18 @@ class ExprVisitor:
                         ta_short = site.class_name.split("::")[-1].lower()
                         if site.member_name.startswith(f"_ta_{node.member}_"):
                             if node.member == "vwap":
-                                return f"(is_first_tick_ ? {site.member_name}.compute(current_bar_.close, current_bar_.volume, current_bar_.timestamp) : {site.member_name}.recompute(current_bar_.close, current_bar_.volume, current_bar_.timestamp))"
-                            return f"(is_first_tick_ ? {site.member_name}.compute({TA_IMPLICIT_COMPUTE_FULL[node.member]}) : {site.member_name}.recompute({TA_IMPLICIT_COMPUTE_FULL[node.member]}))"
+                                return (
+                                    f"(history_advances_new_bar() ? {site.member_name}.compute("
+                                    "current_bar_.close, current_bar_.volume, current_bar_.timestamp) "
+                                    f": {site.member_name}.recompute(current_bar_.close, "
+                                    "current_bar_.volume, current_bar_.timestamp))"
+                                )
+                            return (
+                                f"(history_advances_new_bar() ? {site.member_name}.compute("
+                                f"{TA_IMPLICIT_COMPUTE_FULL[node.member]}) : "
+                                f"{site.member_name}.recompute("
+                                f"{TA_IMPLICIT_COMPUTE_FULL[node.member]}))"
+                            )
                     # No registered call site for this TA property read —
                     # the old fallback emitted std::string("<name>"), a
                     # silent type mismatch. Reject loudly instead.
@@ -822,26 +832,26 @@ class ExprVisitor:
         # ``ta.highest(high, 10)[1]`` or ``f()[2]``. In Pine the call yields a
         # series, so ``[k]`` reads its value k bars ago — but the call lowers to
         # a freshly-computed C++ scalar, and ``scalar[k]`` is not subscriptable.
-        # Materialize the result into a self-contained history buffer: a static
+        # Materialize the result into a checkpoint-owned class-member
         # ``Series<T>`` that pushes (new bar) / updates (intrabar) the value
         # exactly once per evaluation — same semantics as every other series in
         # the strategy — and read ``[k]`` off it. The inner call is emitted once
-        # so its own stateful indicator is not double-stepped, and the buffer
-        # clears itself on run-start (``is_first_tick_ && bar_index_ == 0``) so a
-        # reused strategy handle (parameter sweep) does not leak prior-run history.
+        # so its own stateful indicator is not double-stepped.  The deterministic
+        # member identity includes the emitted UDF variant; separate Pine call
+        # sites never share history, and on_bar clears every synthetic member at
+        # run-start even when this particular expression is conditional.
         if isinstance(node.object, FuncCall):
             inner = self._visit_expr(node.object)
             cpp_t = self._infer_type(node.object)
             if cpp_t not in ("double", "int", "bool"):
                 cpp_t = "double"
+            member = self._inline_history_member("hist_call", node)
             return (
                 f"([&]() -> {cpp_t} {{ "
-                f"static thread_local Series<{cpp_t}> _hist_call; "
-                f"if (is_first_tick_ && bar_index_ == 0) _hist_call.clear(); "
                 f"{cpp_t} _hv = ({inner}); "
-                f"if (is_first_tick_) _hist_call.push(_hv); "
-                f"else _hist_call.update(_hv); "
-                f"return _hist_call[(int)({idx})]; }}())"
+                f"if (history_advances_new_bar()) {member}.push(_hv); "
+                f"else {member}.update(_hv); "
+                f"return {member}[(int)({idx})]; }}())"
             )
         obj = self._visit_expr(node.object)
         # If subscripting a non-series variable (e.g., function parameter),

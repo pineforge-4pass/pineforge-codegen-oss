@@ -118,6 +118,8 @@ class TopLevelEmitter:
         lines.append("#include <string>")
         lines.append("#include <vector>")
         lines.append("#include <tuple>")
+        lines.append("#include <optional>")
+        lines.append("#include <type_traits>")
         lines.append("#include <memory>")
         lines.append("#include <mutex>")
         lines.append("#include <unordered_map>")
@@ -191,6 +193,139 @@ class TopLevelEmitter:
             if self._is_source_input(node):
                 return True
         return False
+
+    @staticmethod
+    def _script_state_member_name(decl_line: str) -> str | None:
+        """Extract a generated class-member name from one declaration line.
+
+        ``CodeGen.generate`` emits the complete persistent script state as a
+        contiguous block of one-line declarations before the constructor.  The
+        rollback checkpoint is derived from that block rather than from a
+        second, hand-maintained inventory: adding a new TA/helper/collection
+        member therefore automatically makes it part of Pine's historical
+        execution rollback.
+
+        The supported declaration shapes are the only shapes emitted in that
+        block today::
+
+            Type name;
+            Type name = value;
+            Type name(args);
+            Type name{args};
+
+        A declaration that does not match fails generation loudly.  Silently
+        omitting an unfamiliar member would be materially worse: it would let
+        state leak between ``calc_on_order_fills`` executions.
+        """
+        text = decl_line.strip()
+        if not text:
+            return None
+        if not text.endswith(";"):
+            raise AssertionError(
+                f"unexpected generated script-state declaration: {decl_line!r}"
+            )
+        text = text[:-1].rstrip()
+        if " = " in text:
+            text = text.split(" = ", 1)[0].rstrip()
+        else:
+            # Series<T> members can carry a max_bars_back ctor suffix and
+            # drawing arenas use brace initialization.  Both suffixes start in
+            # the final declarator token; C++ types emitted here never contain
+            # parentheses or braces.
+            last_space = text.rfind(" ")
+            if last_space < 0:
+                raise AssertionError(
+                    f"missing type in generated script-state declaration: {decl_line!r}"
+                )
+            declarator = text[last_space + 1:]
+            cut = len(declarator)
+            for marker in ("(", "{"):
+                pos = declarator.find(marker)
+                if pos >= 0:
+                    cut = min(cut, pos)
+            text = text[:last_space + 1] + declarator[:cut]
+
+        name = text.rsplit(" ", 1)[-1].strip()
+        if not name or not (name[0].isalpha() or name[0] == "_") \
+                or not all(ch.isalnum() or ch == "_" for ch in name):
+            raise AssertionError(
+                f"cannot identify generated script-state member: {decl_line!r}"
+            )
+        return name
+
+    def _collect_script_state_members(self, declaration_lines: list[str]) -> list[str]:
+        """Return every rollback-relevant generated member in declaration order.
+
+        Precalculated TA result vectors and their mode flag are immutable once
+        the engine starts its broker walk.  Copying an O(number-of-bars) cache
+        before every COOF execution would be both unnecessary and catastrophic,
+        so those implementation caches are the sole exclusions.  The live TA
+        objects themselves remain captured because dynamic/magnifier runs call
+        ``compute`` and mutate them.
+        """
+        members: list[str] = []
+        seen: set[str] = set()
+        for line in declaration_lines:
+            name = self._script_state_member_name(line)
+            if name is None:
+                continue
+            if name == "_use_precalc" or name.startswith("_precalc_"):
+                continue
+            if name in seen:
+                raise AssertionError(f"duplicate generated script-state member: {name}")
+            seen.add(name)
+            members.append(name)
+        return members
+
+    def _emit_script_state_hooks(self, lines: list[str], members: list[str]) -> None:
+        """Emit the engine's Pine rollback checkpoint hook implementation.
+
+        The checkpoint owns value copies of all generated mutable state.  Every
+        runtime container used by generated code (Series, std::vector/map,
+        PineMatrix/generic matrices, UDTs and drawing arenas) has value
+        semantics, so copying recursively preserves data without retaining
+        pointers into live state.  Drawing handles themselves are stable ids;
+        their arenas are captured in the same checkpoint.
+
+        The static assertions deliberately turn any future non-copyable member
+        into a compile failure instead of a nominal, shallow rollback.  Engine
+        broker/order state lives in the base class and is intentionally absent:
+        fills must survive while Pine script variables roll back.
+        """
+        lines.append("    struct _PFScriptState {")
+        for idx, name in enumerate(members):
+            lines.append(
+                f"        decltype(GeneratedStrategy::{name}) _pf_value_{idx};"
+            )
+        lines.append("    };")
+        lines.append(
+            "    static_assert(std::is_copy_constructible_v<_PFScriptState>, "
+            '"generated Pine state must be deep-copy constructible");'
+        )
+        lines.append(
+            "    static_assert(std::is_copy_assignable_v<_PFScriptState>, "
+            '"generated Pine state must be deep-copy assignable");'
+        )
+        lines.append("    std::optional<_PFScriptState> _pf_script_state_checkpoint_;")
+        lines.append("")
+        lines.append("    void snapshot_script_state() override {")
+        lines.append("        _pf_script_state_checkpoint_.emplace(_PFScriptState{")
+        for name in members:
+            lines.append(f"            {name},")
+        lines.append("        });")
+        lines.append("    }")
+        lines.append("")
+        lines.append("    void restore_script_state() override {")
+        lines.append("        if (!_pf_script_state_checkpoint_) return;")
+        for idx, name in enumerate(members):
+            lines.append(
+                f"        this->{name} = _pf_script_state_checkpoint_->_pf_value_{idx};"
+            )
+        lines.append("    }")
+        lines.append("")
+        lines.append("    void commit_script_state() override {")
+        lines.append("        snapshot_script_state();")
+        lines.append("    }")
 
     def _typed_na_init(self, cpp_val: str, name: str, ptype) -> str:
         """Re-type a bare ``na<double>()`` initializer to match a non-double
@@ -300,6 +435,9 @@ class TopLevelEmitter:
         if sp.get("process_orders_on_close") is True:
             ctor_body.append("        process_orders_on_close_ = true;")
 
+        if sp.get("calc_on_order_fills") is True:
+            ctor_body.append("        calc_on_order_fills_ = true;")
+
         if "initial_capital" in sp and isinstance(sp["initial_capital"], (int, float)):
             ctor_body.append(f"        initial_capital_ = {float(sp['initial_capital'])};")
 
@@ -384,6 +522,7 @@ class TopLevelEmitter:
         lines.append('        if (key == "pyramiding") { pyramiding_ = std::stoi(value); return; }')
         lines.append('        if (key == "slippage") { slippage_ = std::stoi(value); return; }')
         lines.append('        if (key == "process_orders_on_close") { process_orders_on_close_ = (value == "true" || value == "1"); return; }')
+        lines.append('        if (key == "calc_on_order_fills") { calc_on_order_fills_ = (value == "true" || value == "1"); return; }')
         lines.append('        if (key == "close_entries_rule") { close_entries_rule_any_ = (value == "ANY" || value == "any" || value == "1"); return; }')
         lines.append('        if (key == "default_qty_type") {')
         lines.append('            if (value == "fixed" || value == "strategy.fixed" || value == "0") default_qty_type_ = QtyType::FIXED;')
@@ -452,14 +591,45 @@ class TopLevelEmitter:
         "initial_capital": "initial_capital_",
     }
 
+    @staticmethod
+    def _emit_history_series_write(
+            lines: list[str], pad: str, member: str, value: str) -> None:
+        """Emit one Pine-series write without conflating history with isnew.
+
+        Historical fill recalculations keep ``barstate.isnew`` true, but a
+        post-close recalculation restored from the completed ordinary-close
+        checkpoint must replace that bar's current history slot rather than
+        append a duplicate slot.  The engine exposes those independent facts
+        as ``is_first_tick_`` and ``history_advances_new_bar()`` respectively.
+        """
+        lines.append(
+            f"{pad}if (history_advances_new_bar()) {member}.push({value});"
+        )
+        lines.append(f"{pad}else {member}.update({value});")
+
     def _emit_on_bar(self, lines: list[str]) -> None:
         lines.append("    void on_bar(const Bar& bar) override {")
+
+        # reset_run_state() owns engine/broker state, while these generated
+        # Series members belong to the strategy object. Clear all of them on
+        # the first genuine history slot of bar zero, unconditionally: a site
+        # may live behind a branch that does not execute on bar zero. This is a
+        # narrow synthetic-buffer reset, not a promise that every generated
+        # member/init latch supports full same-handle reruns. The post-C rollback
+        # execution has history_advances_new_bar()==false, so it preserves the
+        # committed slot.
+        for info in self._inline_history_members:
+            lines.append(
+                "        if (history_advances_new_bar() && bar_index_ == 0) "
+                f"{info['member_name']}.clear();"
+            )
 
         # a. Push bar field series (with bar magnifier support)
         for field_name in sorted(self.ctx.series_bar_fields):
             push_expr = BAR_SERIES_PUSH.get(field_name, f"current_bar_.{field_name}")
-            lines.append(f"        if (is_first_tick_) _s_{field_name}.push({push_expr});")
-            lines.append(f"        else _s_{field_name}.update({push_expr});")
+            self._emit_history_series_write(
+                lines, "        ", f"_s_{field_name}", push_expr
+            )
 
         # a1. Push history-referenced scalar bar builtins (time[n], bar_index[n],
         #     hl2[n], …). They land in ``series_vars`` and are declared as Series
@@ -477,14 +647,13 @@ class TopLevelEmitter:
             if _bexpr is None or _bexpr.strip().startswith(f"{_bname}("):
                 continue
             _bsafe = self._safe_name(_bname)
-            lines.append(f"        if (is_first_tick_) {_bsafe}.push({_bexpr});")
-            lines.append(f"        else {_bsafe}.update({_bexpr});")
+            self._emit_history_series_write(lines, "        ", _bsafe, _bexpr)
 
         # a2. Push strategy series
         for svar in sorted(self._strategy_series_vars):
             member = svar.replace("_strat_", "")
             push_expr = self._STRAT_SERIES_PUSH.get(member, "0")
-            lines.append(f"        {svar}.push({push_expr});")
+            self._emit_history_series_write(lines, "        ", svar, push_expr)
 
         # b. Var init / carry-forward
         if self.ctx.var_members:
@@ -556,7 +725,9 @@ class TopLevelEmitter:
                 if name in self._array_vars:
                     continue
                 if name in self.ctx.series_vars:
-                    lines.append(f"            if (is_first_tick_) {safe}.push({safe}[0]);")
+                    self._emit_history_series_write(
+                        lines, "            ", safe, f"{safe}[0]"
+                    )
                     # Also carry-forward cloned copies for per-call-site function variants
                     carry_emitted: set[str] = set()
                     for (fname, cs_idx), remap in self._func_cs_var_remap.items():
@@ -566,7 +737,9 @@ class TopLevelEmitter:
                             cloned = remap[safe]
                             if cloned not in carry_emitted:
                                 carry_emitted.add(cloned)
-                                lines.append(f"            if (is_first_tick_) {cloned}.push({cloned}[0]);")
+                                self._emit_history_series_write(
+                                    lines, "            ", cloned, f"{cloned}[0]"
+                                )
             lines.append("        }")
 
         # c. Push non-var series (they start fresh each bar with a push)
@@ -875,7 +1048,11 @@ class TopLevelEmitter:
             self._active_fixnan_remap = self._func_cs_fixnan_remap.get((fi.name, call_site_idx), {})
             self._in_ta_func_variant = True
             self._active_call_site_idx = call_site_idx
-            self._current_instance_name = f"{self._func_safe_name(fi.name)}_cs{call_site_idx}"
+            # Use the actual emitted name. Plain UDFs are unchanged; UDT
+            # methods carry their `_udt_Type_method` prefix. This identity is
+            # shared with _build_func_instances and synthetic-history member
+            # registration, so method call paths can dispatch independently.
+            self._current_instance_name = func_name
         else:
             self._active_ta_remap = {}
             self._active_var_remap = {}

@@ -1375,7 +1375,7 @@ def test_magnifier_series_guard():
 strategy("T")
 x = ta.sma(close, 14)
 """)
-    assert "is_first_tick_" in cpp
+    assert "history_advances_new_bar()" in cpp
     assert ".recompute(" in cpp
 
 

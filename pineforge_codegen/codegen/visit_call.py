@@ -224,6 +224,25 @@ class CallVisitor:
     # Function-call dispatch
     # ------------------------------------------------------------------
 
+    def _udt_method_call_emit_name(self, fi, node: FuncCall) -> str:
+        """Resolve a UDT method call through the ordinary UDF clone graph."""
+        base = self._emit_udt_method_cpp_name(fi)
+        dispatch = self._instance_dispatch.get(
+            (self._current_instance_name, id(node))
+        )
+        if dispatch is not None:
+            return dispatch
+
+        cs_info = self.ctx.func_call_cs_map.get(id(node))
+        if self._active_call_site_idx is not None and cs_info is not None:
+            return f"{base}_cs{self._active_call_site_idx}"
+        if cs_info is not None and cs_info[0] == fi.name:
+            return f"{base}_cs{cs_info[1]}"
+        if (self._active_call_site_idx is not None
+                and self.ctx.func_call_site_counts.get(fi.name, 0) > 1):
+            return f"{base}_cs{self._active_call_site_idx}"
+        return base
+
     def _array_init_value_expr(self, elem_spec: TypeSpec | None, value_node) -> str:
         if isinstance(value_node, NaLiteral):
             if elem_spec is not None and elem_spec.kind == "udt":
@@ -270,7 +289,7 @@ class CallVisitor:
                 mk = f"{recv_spec.name}.{callee.member}"
                 fi_u = self._func_info_map.get(mk)
                 if fi_u is not None and getattr(fi_u, "is_udt_method", False):
-                    fn_cpp = self._emit_udt_method_cpp_name(fi_u)
+                    fn_cpp = self._udt_method_call_emit_name(fi_u, node)
                     recv_e = self._visit_expr(callee.object)
                     param_names = list(fi_u.node.params[1:]) if fi_u.node else []
                     # Drop the leading ``self`` slot from param_defaults so the
@@ -380,7 +399,7 @@ class CallVisitor:
                         mk = f"{udt_t}.{meth_raw}"
                         fi_u = self._func_info_map.get(mk)
                         if fi_u is not None and getattr(fi_u, "is_udt_method", False):
-                            fn_cpp = self._emit_udt_method_cpp_name(fi_u)
+                            fn_cpp = self._udt_method_call_emit_name(fi_u, node)
                             recv_e = self._visit_expr(obj)
                             param_names = list(fi_u.node.params[1:]) if fi_u.node else []
                             # Drop the leading ``self`` slot so param_defaults
@@ -448,8 +467,15 @@ class CallVisitor:
             if getattr(self, "_precalc_loop_active", False) and uses_precalc:
                 return f"_precalc_{ta_mem}[i]"
             if uses_precalc:
-                return f"(_use_precalc ? _precalc_{ta_mem}[bar_index_] : (is_first_tick_ ? {ta_mem}.compute({compute_args}) : {ta_mem}.recompute({compute_args})))"
-            return f"(is_first_tick_ ? {ta_mem}.compute({compute_args}) : {ta_mem}.recompute({compute_args}))"
+                return (
+                    f"(_use_precalc ? _precalc_{ta_mem}[bar_index_] : "
+                    f"(history_advances_new_bar() ? {ta_mem}.compute({compute_args}) "
+                    f": {ta_mem}.recompute({compute_args})))"
+                )
+            return (
+                f"(history_advances_new_bar() ? {ta_mem}.compute({compute_args}) "
+                f": {ta_mem}.recompute({compute_args}))"
+            )
 
         # math.* calls
         if namespace == "math":
@@ -1151,14 +1177,15 @@ class CallVisitor:
                 cpp_t = self._infer_type(arg_node)
                 if cpp_t not in ("double", "int", "bool"):
                     cpp_t = "double"
+                member = self._inline_history_member(
+                    "series_arg", node, arg_idx=arg_idx
+                )
                 return (
                     f"([&]() -> const Series<{cpp_t}>& {{ "
-                    f"static thread_local Series<{cpp_t}> _series_arg; "
-                    f"if (is_first_tick_ && bar_index_ == 0) _series_arg.clear(); "
                     f"{cpp_t} _sv = ({expr_cpp}); "
-                    f"if (is_first_tick_) _series_arg.push(_sv); "
-                    f"else _series_arg.update(_sv); "
-                    f"return _series_arg; }}())"
+                    f"if (history_advances_new_bar()) {member}.push(_sv); "
+                    f"else {member}.update(_sv); "
+                    f"return {member}; }}())"
                 )
             return self._visit_expr(arg_node)
 

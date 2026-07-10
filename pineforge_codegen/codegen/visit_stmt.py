@@ -288,7 +288,7 @@ class StmtVisitor:
             title = self._get_input_title(node.value, var_name=node.name)
             cpp_val = self._render_input_value(node.value, func_name_i, namespace_i, title)
             if node.name in self.ctx.series_vars:
-                lines.append(f"{pad}{safe}.push({cpp_val});")
+                self._emit_history_series_write(lines, pad, safe, cpp_val)
             elif is_global_member:
                 lines.append(f"{pad}{safe} = {cpp_val};")
             else:
@@ -385,9 +385,12 @@ class StmtVisitor:
             compute_args = self._ta_compute_args_for_site(site)
             ret_type = "bool" if self._ta_name_from_site(site) in TA_RETURNS_BOOL else "double"
             ta_name = self._ta_member_name(site)
-            ta_expr = f"(is_first_tick_ ? {ta_name}.compute({compute_args}) : {ta_name}.recompute({compute_args}))"
+            ta_expr = (
+                f"(history_advances_new_bar() ? {ta_name}.compute({compute_args}) "
+                f": {ta_name}.recompute({compute_args}))"
+            )
             if node.name in self.ctx.series_vars:
-                lines.append(f"{pad}{safe}.push({ta_expr});")
+                self._emit_history_series_write(lines, pad, safe, ta_expr)
             elif is_global_member:
                 lines.append(f"{pad}{safe} = {ta_expr};")
             else:
@@ -397,7 +400,7 @@ class StmtVisitor:
         # Non-var series variable — push instead of declare
         if node.name in self.ctx.series_vars:
             cpp_val = self._visit_expr(node.value)
-            lines.append(f"{pad}{safe}.push({cpp_val});")
+            self._emit_history_series_write(lines, pad, safe, cpp_val)
             return
 
         # If/switch expression: x = if cond ... else ...
@@ -612,7 +615,11 @@ class StmtVisitor:
             compute_args = self._ta_compute_args_for_site(site)
             ta_mem = self._ta_member_name(site)
             result_var = f"_result_{ta_mem}"
-            lines.append(f"{pad}auto {result_var} = (is_first_tick_ ? {ta_mem}.compute({compute_args}) : {ta_mem}.recompute({compute_args}));")
+            lines.append(
+                f"{pad}auto {result_var} = (history_advances_new_bar() ? "
+                f"{ta_mem}.compute({compute_args}) : "
+                f"{ta_mem}.recompute({compute_args}));"
+            )
 
             ta_name = self._ta_name_from_site(site)
             fields = TA_TUPLE_FIELDS.get(ta_name, [f"field{i}" for i in range(len(node.names))])
@@ -632,7 +639,9 @@ class StmtVisitor:
                     # destructured names keep the plain scalar declaration.
                     if name in self.ctx.series_vars:
                         safe = self._safe_name(name)
-                        lines.append(f"{pad}{safe}.push({field_expr});")
+                        self._emit_history_series_write(
+                            lines, pad, safe, field_expr
+                        )
                     else:
                         lines.append(f"{pad}double {name} = {field_expr};")
             return

@@ -488,27 +488,180 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if isinstance(stmt, FuncDef):
                 func_defs[stmt.name] = stmt
 
+        # UDT methods participate in the same stateful call graph as plain
+        # UDFs.  Their analyzer identity is ``Type.method`` while FuncInfo.node
+        # carries the synthetic FuncDef used by codegen.
+        func_info_by_name = {fi.name: fi for fi in self._func_infos}
+        for fi in self._func_infos:
+            if getattr(fi, "is_udt_method", False) and fi.node is not None:
+                func_defs.setdefault(fi.name, fi.node)
+
         # Preserve call-node identity as well as the callee name: late clone
         # materialization needs the textual call's argument mapping to resolve
         # parameterized TA constructor lengths.
-        def _find_calls(node, known_funcs: set[str]) -> list[tuple[str, FuncCall]]:
+        def _resolved_user_call_name(call: FuncCall, owner: str | None) -> str | None:
+            if isinstance(call.callee, Identifier):
+                return call.callee.name if call.callee.name in func_defs else None
+            if not isinstance(call.callee, MemberAccess):
+                return None
+
+            recv = call.callee.object
+            method = call.callee.member
+            udt_name: str | None = None
+            if isinstance(recv, Identifier):
+                udt_name = self._udt_var_types.get(recv.name)
+                owner_info = func_info_by_name.get(owner or "")
+                if udt_name is None and owner_info is not None \
+                        and owner_info.node is not None:
+                    if (getattr(owner_info, "is_udt_method", False)
+                            and owner_info.node.params
+                            and recv.name == owner_info.node.params[0]):
+                        udt_name = owner_info.udt_type_name
+                    elif recv.name in owner_info.node.params:
+                        param_idx = owner_info.node.params.index(recv.name)
+                        specs = getattr(owner_info, "param_type_specs", []) or []
+                        spec = specs[param_idx] if param_idx < len(specs) else None
+                        if spec is not None and spec.kind == "udt":
+                            udt_name = spec.name
+            if udt_name is None:
+                spec = self._type_spec_from_expr(recv)
+                if spec is not None and spec.kind == "udt":
+                    udt_name = spec.name
+            key = f"{udt_name}.{method}" if udt_name else ""
+            return key if key in func_defs else None
+
+        def _find_calls(node, known_funcs: set[str],
+                        owner: str | None = None,
+                        seen: set[int] | None = None) -> list[tuple[str, FuncCall]]:
             calls: list[tuple[str, FuncCall]] = []
-            if isinstance(node, FuncCall) and isinstance(node.callee, Identifier):
-                if node.callee.name in known_funcs:
-                    calls.append((node.callee.name, node))
+            if node is None:
+                return calls
+            if seen is None:
+                seen = set()
+            if isinstance(node, (list, tuple, dict)) or hasattr(node, "__dict__"):
+                node_id = id(node)
+                if node_id in seen:
+                    return calls
+                seen.add(node_id)
+            if isinstance(node, (list, tuple)):
+                for item in node:
+                    calls.extend(_find_calls(item, known_funcs, owner, seen))
+                return calls
+            if isinstance(node, dict):
+                for item in node.values():
+                    calls.extend(_find_calls(item, known_funcs, owner, seen))
+                return calls
+            if not hasattr(node, "__dict__"):
+                return calls
+            if isinstance(node, FuncCall):
+                resolved = _resolved_user_call_name(node, owner)
+                if resolved in known_funcs:
+                    calls.append((resolved, node))
             for attr_val in vars(node).values():
-                if isinstance(attr_val, list):
-                    for item in attr_val:
-                        if hasattr(item, '__dict__'):
-                            calls.extend(_find_calls(item, known_funcs))
-                elif hasattr(attr_val, '__dict__'):
-                    calls.extend(_find_calls(attr_val, known_funcs))
+                calls.extend(_find_calls(attr_val, known_funcs, owner, seen))
             return calls
 
         known_func_names = set(func_defs.keys())
         calls_by_parent = {
-            name: _find_calls(func_def, known_func_names)
+            name: _find_calls(func_def, known_func_names, name)
             for name, func_def in func_defs.items()
+        }
+        calls_by_callee: dict[str, list[FuncCall]] = {
+            name: [] for name in known_func_names
+        }
+        # Preserve source order across definitions and top-level statements.
+        # Method bodies use their ``Type.method`` owner so ``self.sibling()``
+        # resolves without relying on a now-exited symbol-table scope.
+        for stmt in self._ast.body:
+            if isinstance(stmt, FuncDef):
+                owner = stmt.name
+            elif isinstance(stmt, MethodDef):
+                owner = f"{stmt.type_name}.{stmt.name}"
+            else:
+                owner = None
+            for callee, call in _find_calls(stmt, known_func_names, owner):
+                calls_by_callee.setdefault(callee, []).append(call)
+
+        # Codegen synthesizes a Series buffer for two expression shapes that
+        # do not appear in ``_func_series_vars`` themselves:
+        #
+        #   * a call result read through history, e.g. ``f()[1]``;
+        #   * a scalar expression bridged into a UDF series parameter, e.g.
+        #     ``history(close + open)`` where ``history(src) => src[1]``.
+        #
+        # A buffer is mutable per-call-site state just like TA/fixnan.  Mark
+        # its lexical owner stateful before the normal call-path closure so a
+        # function invoked from two source sites receives two emitted bodies
+        # (and therefore two independent generated buffer members).  Without
+        # this, moving the old function-local static into a class member would
+        # accidentally merge both Pine call sites into one history stream.
+        def _actual_arg(call: FuncCall, param_name: str, param_idx: int):
+            if param_idx < len(call.args):
+                return call.args[param_idx]
+            return call.kwargs.get(param_name)
+
+        def _needs_scalar_series_bridge(call: FuncCall) -> bool:
+            if not isinstance(call.callee, Identifier):
+                return False
+            callee = call.callee.name
+            fi = func_info_by_name.get(callee)
+            if fi is None or fi.node is None:
+                return False
+            series_params = self._func_series_vars.get(callee, set())
+            if not series_params:
+                return False
+            direct_bar_series = {
+                "open", "high", "low", "close", "volume",
+                "hl2", "hlc3", "ohlc4",
+            }
+            for idx, param_name in enumerate(fi.node.params):
+                if param_name not in series_params:
+                    continue
+                arg = _actual_arg(call, param_name, idx)
+                if arg is None:
+                    continue
+                if isinstance(arg, Identifier) and (
+                    arg.name in direct_bar_series or arg.name in self._series_vars
+                ):
+                    continue
+                return True
+            return False
+
+        def _has_synthetic_history_state(
+                node, seen: set[int] | None = None) -> bool:
+            if node is None:
+                return False
+            if seen is None:
+                seen = set()
+            if isinstance(node, (list, tuple, dict)) or hasattr(node, "__dict__"):
+                node_id = id(node)
+                if node_id in seen:
+                    return False
+                seen.add(node_id)
+            if isinstance(node, (list, tuple)):
+                return any(
+                    _has_synthetic_history_state(item, seen) for item in node
+                )
+            if isinstance(node, dict):
+                return any(
+                    _has_synthetic_history_state(item, seen)
+                    for item in node.values()
+                )
+            if not hasattr(node, "__dict__"):
+                return False
+            if (isinstance(node, Subscript)
+                    and isinstance(node.object, FuncCall)):
+                return True
+            if isinstance(node, FuncCall) and _needs_scalar_series_bridge(node):
+                return True
+            return any(
+                _has_synthetic_history_state(value, seen)
+                for value in vars(node).values()
+            )
+
+        synthetic_history_stateful = {
+            name for name, func_def in func_defs.items()
+            if _has_synthetic_history_state(func_def)
         }
 
         # request.security owns a separate evaluator context and already
@@ -524,7 +677,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             expression = getattr(sec, "expression", None)
             if expression is not None:
                 security_boundary_funcs.update(
-                    sub for sub, _ in _find_calls(expression, known_func_names)
+                    sub for sub, _ in _find_calls(
+                        expression, known_func_names, containing or None
+                    )
                 )
 
         # Canonical direct-state predicate.  TA-only and fixnan-only helpers
@@ -534,6 +689,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             | set(self._func_var_members)
             | set(self._func_ta_ranges)
             | set(self._func_fixnan_indices)
+            | synthetic_history_stateful
         )
 
         # Close upward over the call graph so a pure A -> B -> stateful C chain
@@ -566,7 +722,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # disturbing any indices already assigned by the visitor or security
         # monomorphization.
         for fname in sorted(stateful):
-            calls = list(self._iter_user_func_calls(fname))
+            calls = calls_by_callee.get(fname, [])
             current = self._func_call_site_count.get(fname, 0)
             next_idx = current
             for call in calls:
