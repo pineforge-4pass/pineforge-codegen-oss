@@ -1438,6 +1438,108 @@ def _ta_decls_and_computed(cpp: str):
     return decls, computed
 
 
+def test_nested_ta_only_helper_clones_full_call_path_state():
+    """A TA-only callee inherits every stateful outer call path.
+
+    ``inner`` deliberately owns no ``var``/series state: its only state is the
+    rolling ``math.sum`` member.  The two outer calls consume different source
+    streams, so sharing one sum would advance the same window twice per bar and
+    make the runtime results order-dependent.
+    """
+    cpp = _generate(
+        """
+//@version=6
+strategy("nested TA-only call paths")
+inner(float src) =>
+    math.sum(src, 2)
+outer(float src) =>
+    inner(src)
+close_sum = outer(close)
+open_sum = outer(open)
+plot(close_sum)
+plot(open_sum)
+"""
+    )
+
+    sums = _re.findall(r"math::Sum\s+(_ta_sum_\w+);", cpp)
+    assert len(sums) == 2, f"expected two independent Sum members, got {sums}"
+
+    outer_bodies = dict(_re.findall(
+        r"double\s+(outer_cs[01])\(double src\)\s*\{(.*?)\n    \}", cpp, _re.S
+    ))
+    assert "inner_cs0(src)" in outer_bodies.get("outer_cs0", ""), outer_bodies
+    assert "inner_cs1(src)" in outer_bodies.get("outer_cs1", ""), outer_bodies
+
+    inner_bodies = dict(_re.findall(
+        r"double\s+(inner_cs[01])\(double src\)\s*\{(.*?)\n    \}", cpp, _re.S
+    ))
+    used_by_inner = {}
+    for name in ("inner_cs0", "inner_cs1"):
+        hits = _re.findall(r"(_ta_sum_\w+)\.(?:compute|recompute)\(src\)",
+                           inner_bodies.get(name, ""))
+        assert hits, f"{name} does not compute its own Sum member: {inner_bodies}"
+        used_by_inner[name] = set(hits)
+    assert used_by_inner["inner_cs0"].isdisjoint(used_by_inner["inner_cs1"]), (
+        f"nested call paths share rolling state: {used_by_inner}"
+    )
+
+    computed = set(_re.findall(r"(_ta_sum_\w+)\.(?:compute|recompute)\(", cpp))
+    assert set(sums) == computed, (
+        f"declared/computed Sum mismatch (unused clone or dangling use): "
+        f"declared={set(sums)}, computed={computed}"
+    )
+
+    # Distinct top-level sources must dispatch through distinct outer variants;
+    # together with the disjoint members above, this pins runtime independence.
+    assert "close_sum = outer_cs0(current_bar_.close);" in cpp
+    assert "open_sum = outer_cs1(current_bar_.open);" in cpp
+
+
+def test_nested_fixnan_only_helper_clones_full_call_path_state():
+    """The same inherited isolation applies when fixnan is the only state."""
+    cpp = _generate(
+        """
+//@version=6
+strategy("nested fixnan-only call paths")
+inner(float src) =>
+    fixnan(src)
+outer(float src) =>
+    inner(src)
+close_held = outer(close)
+open_held = outer(open)
+plot(close_held)
+plot(open_held)
+"""
+    )
+
+    members = _re.findall(r"double\s+(_prev_fixnan_\w+)\s*=\s*na<double>", cpp)
+    assert len(members) == 2, f"expected two fixnan members, got {members}"
+
+    outer_bodies = dict(_re.findall(
+        r"double\s+(outer_cs[01])\(double src\)\s*\{(.*?)\n    \}", cpp, _re.S
+    ))
+    assert "inner_cs0(src)" in outer_bodies.get("outer_cs0", ""), outer_bodies
+    assert "inner_cs1(src)" in outer_bodies.get("outer_cs1", ""), outer_bodies
+
+    inner_bodies = dict(_re.findall(
+        r"double\s+(inner_cs[01])\(double src\)\s*\{(.*?)\n    \}", cpp, _re.S
+    ))
+    used = {}
+    for name in ("inner_cs0", "inner_cs1"):
+        hits = set(_re.findall(r"(_prev_fixnan_\w+)\s*=\s*src",
+                               inner_bodies.get(name, "")))
+        assert hits, f"{name} does not update its own fixnan member: {inner_bodies}"
+        used[name] = hits
+    assert used["inner_cs0"].isdisjoint(used["inner_cs1"]), (
+        f"nested call paths share fixnan state: {used}"
+    )
+    assert set(members) == used["inner_cs0"] | used["inner_cs1"], (
+        f"declared-but-unused fixnan clone: declared={members}, used={used}"
+    )
+    assert "close_held = outer_cs0(current_bar_.close);" in cpp
+    assert "open_held = outer_cs1(current_bar_.open);" in cpp
+
+
 def test_nested_helper_multi_path_distinct_ta_members():
     # `leg` reached via f_get (called twice: 10, 20) AND g_get (called once: 30).
     cpp = _generate(

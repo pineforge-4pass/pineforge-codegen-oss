@@ -171,15 +171,23 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_ta_ranges: dict[str, tuple[int, int]] = {}  # func_name -> (start, end) indices
         self._func_call_site_count: dict[str, int] = {}  # func_name -> count
         self._func_call_cs_map: dict[int, tuple[str, int]] = {}  # call_node_id -> (func_name, cs_idx)
+        # Textual nested calls whose identity is inherited from the active
+        # parent clone rather than assigned a fixed source-level cs index.
+        # Kept separately so a second propagation pass (security TF cloning)
+        # does not accidentally backfill them as a new cs{N} call site.
+        self._func_inherited_call_nodes: set[int] = set()
         # Per-function fixnan site ownership: func_name -> list of fixnan site
         # indices in self._fixnan_sites owned by that function. Mirrors the
         # TA-range slicing but for fixnan state, so per-call-site cloning can
         # mint fresh fixnan members per variant and the codegen dead-code pass
         # can skip fixnan state owned by dead functions.
         self._func_fixnan_indices: dict[str, list[int]] = {}
-        # Functions whose ONLY reason for needing per-call-site body cloning
-        # is a security-tf-monomorphized request.security (no TA/series state
-        # of their own — see _check_mixed_callsite_security_tf).
+        # Functions that need per-call-site BODY cloning despite owning no
+        # TA/series/var state.  The set originated for security-tf
+        # monomorphization; it is also the existing emitter contract used by
+        # pure wrappers around stateful callees and fixnan-only functions.
+        # Security evaluator identity remains independently tracked by each
+        # SecurityCallInfo.callsite_idx.
         self._func_security_clone_only: set[str] = set()
         # Authoritative clone-name map: (func_name, cs_idx) -> {orig_member_name:
         # cloned_member_name}. The codegen rebuilds its TA remap from the
@@ -463,40 +471,118 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return out
 
     def _propagate_call_site_counts(self) -> None:
-        """Propagate call-site counts from parent functions to sub-functions.
+        """Propagate stateful UDF identity through complete call paths.
 
-        If function F has N call sites and calls sub-function G internally,
-        G also needs N variants so that F_csK can call G_csK with isolated state.
-        This ensures every stateful sub-function gets per-call-site isolation
-        inherited from its parent.
+        A UDF is stateful when it owns series/``var`` state, TA state, or
+        ``fixnan`` state, and every pure wrapper that reaches such a UDF is
+        stateful transitively.  Give each wrapper's textual calls stable cs
+        identities, then inherit a multi-call-site parent's count down to its
+        stateful callees.  Any inherited TA/fixnan variants are materialized
+        immediately; exporting a count without the corresponding members would
+        make codegen reference undeclared or shared state.
         """
         from pineforge_codegen.ast_nodes import FuncCall, FuncDef, Identifier
 
-        # Collect all user function definitions from AST
         func_defs: dict[str, FuncDef] = {}
         for stmt in self._ast.body:
             if isinstance(stmt, FuncDef):
                 func_defs[stmt.name] = stmt
 
-        # Find which functions call which sub-functions (direct calls only)
-        def _find_calls(node, known_funcs: set[str]) -> set[str]:
-            calls: set[str] = set()
+        # Preserve call-node identity as well as the callee name: late clone
+        # materialization needs the textual call's argument mapping to resolve
+        # parameterized TA constructor lengths.
+        def _find_calls(node, known_funcs: set[str]) -> list[tuple[str, FuncCall]]:
+            calls: list[tuple[str, FuncCall]] = []
             if isinstance(node, FuncCall) and isinstance(node.callee, Identifier):
                 if node.callee.name in known_funcs:
-                    calls.add(node.callee.name)
+                    calls.append((node.callee.name, node))
             for attr_val in vars(node).values():
                 if isinstance(attr_val, list):
                     for item in attr_val:
                         if hasattr(item, '__dict__'):
-                            calls |= _find_calls(item, known_funcs)
+                            calls.extend(_find_calls(item, known_funcs))
                 elif hasattr(attr_val, '__dict__'):
-                    calls |= _find_calls(attr_val, known_funcs)
+                    calls.extend(_find_calls(attr_val, known_funcs))
             return calls
 
         known_func_names = set(func_defs.keys())
+        calls_by_parent = {
+            name: _find_calls(func_def, known_func_names)
+            for name, func_def in func_defs.items()
+        }
 
-        # For each multi-call-site function, propagate count to sub-functions
-        # that have stateful locals (series vars or var members)
+        # request.security owns a separate evaluator context and already
+        # materializes/remaps its embedded TA state per SecurityCallInfo.  Do
+        # not thread ordinary UDF clone indices through a function used as a
+        # security expression (or through the containing wrapper); doing so
+        # would double-clone evaluator state and disturb expression identity.
+        security_boundary_funcs: set[str] = set()
+        for sec in getattr(self, "_security_calls", []) or []:
+            containing = getattr(sec, "containing_func", "") or ""
+            if containing:
+                security_boundary_funcs.add(containing)
+            expression = getattr(sec, "expression", None)
+            if expression is not None:
+                security_boundary_funcs.update(
+                    sub for sub, _ in _find_calls(expression, known_func_names)
+                )
+
+        # Canonical direct-state predicate.  TA-only and fixnan-only helpers
+        # are just as stateful as functions carrying an explicit series/var.
+        stateful = (
+            set(self._func_series_vars)
+            | set(self._func_var_members)
+            | set(self._func_ta_ranges)
+            | set(self._func_fixnan_indices)
+        )
+
+        # Close upward over the call graph so a pure A -> B -> stateful C chain
+        # receives variants at every level.  The existing clone-only emitter
+        # marker is intentionally separate from request.security evaluator
+        # identity, so ordinary security calls remain shared unless the
+        # dedicated timeframe-monomorphization pass clones them.
+        changed = True
+        while changed:
+            changed = False
+            for fname, calls in calls_by_parent.items():
+                if fname in stateful:
+                    continue
+                if any(sub in stateful for sub, _ in calls):
+                    stateful.add(fname)
+                    changed = True
+
+        # Direct fixnan-only functions and pure transitive wrappers own no
+        # TA/series member that would trip the emitter's ordinary body-clone
+        # gate. Reuse its established body-only clone marker; this does not
+        # create or renumber any SecurityCallInfo.
+        for fname in sorted(stateful):
+            if (fname not in self._func_ta_ranges
+                    and fname not in self._func_series_vars
+                    and fname not in self._func_var_members):
+                self._func_security_clone_only.add(fname)
+
+        # The initial visitor only numbers directly-stateful callees. Backfill
+        # stable identities for newly discovered pure wrappers without
+        # disturbing any indices already assigned by the visitor or security
+        # monomorphization.
+        for fname in sorted(stateful):
+            calls = list(self._iter_user_func_calls(fname))
+            current = self._func_call_site_count.get(fname, 0)
+            next_idx = current
+            for call in calls:
+                if id(call) in self._func_inherited_call_nodes:
+                    continue
+                existing = self._func_call_cs_map.get(id(call))
+                if existing is not None and existing[0] == fname:
+                    next_idx = max(next_idx, existing[1] + 1)
+                    continue
+                self._func_call_cs_map[id(call)] = (fname, next_idx)
+                next_idx += 1
+            if next_idx > current:
+                self._func_call_site_count[fname] = next_idx
+
+        # Inherit each multi-call-site parent's index space down the full path.
+        # Re-run to a fixed point for A -> B -> C chains.
         changed = True
         while changed:
             changed = False
@@ -505,14 +591,32 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     continue
                 if fname not in func_defs:
                     continue
-                sub_calls = _find_calls(func_defs[fname], known_func_names)
-                for sub in sub_calls:
-                    has_state = (sub in self._func_series_vars or
-                                 sub in self._func_var_members)
-                    if not has_state:
+                if fname in security_boundary_funcs:
+                    continue
+                for sub, call_node in calls_by_parent.get(fname, []):
+                    if sub not in stateful:
                         continue
                     current = self._func_call_site_count.get(sub, 0)
                     if current < count:
+                        # One textual nested call is not an independent cs0
+                        # path: it inherits the active parent clone index.
+                        # Remove the visitor's provisional cs0 map so codegen's
+                        # established active-index fallback dispatches
+                        # F_csK -> G_csK.  Keeping the map would make the
+                        # context-sensitive instance pre-pass pin every parent
+                        # clone to G_cs0 before that fallback can run.
+                        if current == 1:
+                            cs_info = self._func_call_cs_map.get(id(call_node))
+                            if cs_info == (sub, 0):
+                                self._func_call_cs_map.pop(id(call_node), None)
+                                self._func_inherited_call_nodes.add(id(call_node))
+                        for cs_idx in range(current, count):
+                            self._materialize_user_func_call_site_state(
+                                sub,
+                                cs_idx,
+                                call_node,
+                                reuse_existing_owner=fname,
+                            )
                         self._func_call_site_count[sub] = count
                         changed = True
 

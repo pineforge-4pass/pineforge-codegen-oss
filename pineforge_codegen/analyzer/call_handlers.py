@@ -900,6 +900,170 @@ class CallHandlers:
                 defs[stmt.name] = self._expr_to_str(stmt.value)
         return defs
 
+    def _materialize_user_func_call_site_state(
+            self, func_name: str, cs_idx: int, node: FuncCall,
+            *, reuse_existing_owner: str | None = None) -> None:
+        """Materialize TA/fixnan state for one UDF call-site variant.
+
+        Ordinary call sites are handled while walking the AST.  A second class
+        is discovered only after that walk: a stateful helper reached through a
+        multi-call-site parent needs the parent's additional call-path indices
+        even though the helper has only one textual call.  The late propagation
+        pass in ``Analyzer._propagate_call_site_counts`` calls this same helper
+        for those inherited variants so the exported count never references a
+        TA/fixnan clone that was not actually declared.
+
+        ``reuse_existing_owner`` is used only by late propagation.  A
+        range-widened parent may already have materialized the default
+        ``{member}_cs{idx}`` clone for the borrowed callee site; when that clone
+        belongs to the parent currently being propagated, it is the desired
+        call-path state and must be reused rather than duplicated under a
+        disambiguated-but-unused name.
+        """
+        func_def = self._func_defs[func_name]
+
+        param_arg_map: dict[str, str] = {}
+        for p_idx, param_name in enumerate(func_def.params):
+            if p_idx < len(node.args):
+                param_arg_map[param_name] = self._expr_to_str(node.args[p_idx])
+
+        if func_name in self._func_ta_ranges:
+            start, end = self._func_ta_ranges[func_name]
+
+            # Map local derived length variables back to expressions over the
+            # function's parameters before substituting call-site arguments.
+            local_defs = self._func_local_length_defs(func_def)
+
+            def _subst_params(arg: str, pmap: dict[str, str]) -> str:
+                import re
+                result = arg
+                for param, value in sorted(
+                        pmap.items(), key=lambda item: len(item[0]), reverse=True):
+                    result = re.sub(rf'\b{re.escape(param)}\b', value, result)
+                return result
+
+            def _expand_locals(arg: str) -> str:
+                import re
+                if not local_defs:
+                    return arg
+                for _ in range(32):
+                    def _rep(match: re.Match) -> str:
+                        name = match.group(0)
+                        if name in local_defs:
+                            return "(" + local_defs[name] + ")"
+                        return name
+                    expanded = re.sub(r"[A-Za-z_][A-Za-z_0-9]*", _rep, arg)
+                    if expanded == arg:
+                        break
+                    arg = expanded
+                return arg
+
+            import re as _re
+            enclosing_params: set[str] = set()
+            for names in self._enclosing_func_params:
+                enclosing_params |= names
+
+            if cs_idx == 0:
+                # cs0 owns the source-level sites. Preserve their parameterized
+                # ctor args for every later direct or inherited clone.
+                for i in range(start, end):
+                    site = self._ta_call_sites[i]
+                    if not hasattr(site, '_orig_ctor_args'):
+                        site._orig_ctor_args = [
+                            _expand_locals(arg) for arg in site.ctor_args
+                        ]
+                    site.ctor_args = [
+                        _subst_params(arg, param_arg_map)
+                        for arg in site._orig_ctor_args
+                    ]
+                    # If a ctor is now expressed in an enclosing UDF's params,
+                    # retain that expression so the enclosing call can resolve
+                    # it and widen the enclosing TA range as before.
+                    if enclosing_params and self._nested_ta_touched is not None:
+                        for arg in site.ctor_args:
+                            tokens = set(_re.findall(
+                                r"[A-Za-z_][A-Za-z_0-9]*", arg))
+                            if tokens & enclosing_params:
+                                site._orig_ctor_args = list(site.ctor_args)
+                                self._nested_ta_touched.add(i)
+                                break
+            else:
+                clone_name_map: dict[str, str] = {}
+                for i in range(start, end):
+                    orig = self._ta_call_sites[i]
+                    orig_args = getattr(orig, '_orig_ctor_args', orig.ctor_args)
+                    resolved_ctor = [
+                        _subst_params(arg, param_arg_map) for arg in orig_args
+                    ]
+                    clone_name = f"{orig.member_name}_cs{cs_idx}"
+                    existing = next(
+                        (site for site in self._ta_call_sites
+                         if site.member_name == clone_name),
+                        None,
+                    )
+                    if (reuse_existing_owner is not None
+                            and existing is not None
+                            and existing.owner_func == reuse_existing_owner):
+                        # The active parent's widened range already made the
+                        # exact member this inherited callee variant needs.
+                        continue
+                    if clone_name in self._ta_member_names:
+                        base = clone_name
+                        suffix = 2
+                        while clone_name in self._ta_member_names:
+                            clone_name = f"{base}_u{suffix}"
+                            suffix += 1
+                        clone_name_map[orig.member_name] = clone_name
+                    cloned = TACallSite(
+                        member_name=clone_name,
+                        class_name=orig.class_name,
+                        ctor_args=resolved_ctor,
+                        compute_args=orig.compute_args[:],
+                        returns_tuple=orig.returns_tuple,
+                        node=orig.node,
+                        is_static=orig.is_static,
+                        owner_func=func_name,
+                    )
+                    self._ta_call_sites.append(cloned)
+                    self._ta_member_names.add(clone_name)
+                if clone_name_map:
+                    self._func_cs_ta_clone_names[(func_name, cs_idx)] = clone_name_map
+
+        # fixnan is stateful for the same reason as a rolling TA reducer: each
+        # emitted function variant needs its own previous-value member.
+        fn_indices = self._func_fixnan_indices.get(func_name, [])
+        if cs_idx > 0 and fn_indices:
+            clone_map: dict[str, str] = {}
+            for fi in fn_indices:
+                orig = self._fixnan_sites[fi]
+                clone_name = f"{orig.member_name}_cs{cs_idx}"
+                existing = next(
+                    (site for site in self._fixnan_sites
+                     if site.member_name == clone_name),
+                    None,
+                )
+                if (reuse_existing_owner is not None
+                        and existing is not None
+                        and existing.owner_func == reuse_existing_owner):
+                    continue
+                if clone_name in self._fixnan_member_names:
+                    base = clone_name
+                    suffix = 2
+                    while clone_name in self._fixnan_member_names:
+                        clone_name = f"{base}_u{suffix}"
+                        suffix += 1
+                    clone_map[orig.member_name] = clone_name
+                cloned = FixnanCallSite(
+                    member_name=clone_name,
+                    pine_type=orig.pine_type,
+                    node=orig.node,
+                    owner_func=func_name,
+                )
+                self._fixnan_sites.append(cloned)
+                self._fixnan_member_names.add(clone_name)
+            if clone_map:
+                self._func_cs_fixnan_clone_names[(func_name, cs_idx)] = clone_map
+
     def _handle_user_func_call(self, func_name: str, node: FuncCall) -> PineType:
         """Handle calls to user-defined functions."""
         func_def = self._func_defs[func_name]
@@ -964,176 +1128,16 @@ class CallHandlers:
                             else:
                                 self._series_vars.add(arg.name)
 
-        # Per-call-site cloning: if this function has TA calls or series vars,
-        # track call sites so codegen can create per-call-site variants.
-        # This prevents shared state corruption when the function is called
-        # multiple times per bar.
+        # Per-call-site cloning: TA, series/var, and fixnan state all advance
+        # across bars/calls and therefore require isolated UDF variants.
         has_ta = func_name in self._func_ta_ranges
         has_series = func_name in self._func_series_vars or func_name in self._func_var_members
-        if has_ta or has_series:
+        has_fixnan = func_name in self._func_fixnan_indices
+        if has_ta or has_series or has_fixnan:
             cs_idx = self._func_call_site_count.get(func_name, 0)
             self._func_call_site_count[func_name] = cs_idx + 1
             self._func_call_cs_map[id(node)] = (func_name, cs_idx)
-
-            # Build parameter -> call-site argument string mapping
-            param_arg_map: dict[str, str] = {}
-            for p_idx, param_name in enumerate(func_def.params):
-                if p_idx < len(node.args):
-                    param_arg_map[param_name] = self._expr_to_str(node.args[p_idx])
-
-            # Clone TA call sites (only if function has TA ranges)
-            if has_ta:
-                start, end = self._func_ta_ranges[func_name]
-
-                # Map of this function's local (non-param, non-series) derived
-                # length vars to their raw RHS expression strings, e.g.
-                # ``qqeCalc`` => ``wp = sf * 2 - 1`` -> {"wp": "sf * 2 - 1"}.
-                # A TA ctor arg captured as the bare local name ("wp") must be
-                # expanded to its definition so the subsequent param-substitution
-                # turns it into a class-scope expression ("rsiSmooth * 2 - 1")
-                # rather than leaving a dangling local that degenerates to
-                # period 1 in codegen.
-                local_defs = self._func_local_length_defs(func_def)
-
-                def _subst_params(arg: str, pmap: dict[str, str]) -> str:
-                    """Substitute parameter names in an expression string.
-
-                    Handles both exact matches ('len' -> 'len3') and parameter
-                    names within expressions ('len / 2' -> 'len3 / 2').
-                    """
-                    import re
-                    result = arg
-                    # Sort by length descending to avoid partial replacements
-                    for param, value in sorted(pmap.items(), key=lambda x: len(x[0]), reverse=True):
-                        result = re.sub(rf'\b{re.escape(param)}\b', value, result)
-                    return result
-
-                def _expand_locals(arg: str) -> str:
-                    """Recursively expand function-local length vars to their RHS
-                    (parenthesized) so only params / class-scope names remain."""
-                    import re
-                    if not local_defs:
-                        return arg
-                    for _ in range(32):
-                        def _rep(m: re.Match) -> str:
-                            nm = m.group(0)
-                            if nm in local_defs:
-                                return "(" + local_defs[nm] + ")"
-                            return nm
-                        new = re.sub(r"[A-Za-z_][A-Za-z_0-9]*", _rep, arg)
-                        if new == arg:
-                            break
-                        arg = new
-                    return arg
-
-                # Params of the function we are *currently inside* (if this is a
-                # nested user-func call). Used to detect when a substituted ctor
-                # arg becomes parameterized by the OUTER function, so the outer
-                # call site can resolve it (f_bbwp's _bbwLen -> i_bbwLen reaches
-                # f_basisMa's sites).
-                import re as _re
-                enclosing_params: set[str] = set()
-                for s in self._enclosing_func_params:
-                    enclosing_params |= s
-
-                if cs_idx == 0:
-                    # First call site: save original param-based ctor_args for future cloning,
-                    # then resolve to actual call-site values
-                    for i in range(start, end):
-                        site = self._ta_call_sites[i]
-                        if not hasattr(site, '_orig_ctor_args'):
-                            site._orig_ctor_args = [
-                                _expand_locals(a) for a in site.ctor_args
-                            ]
-                        site.ctor_args = [_subst_params(a, param_arg_map) for a in site._orig_ctor_args]
-                        # If a substituted arg is now expressed in terms of an
-                        # enclosing function's params, promote it to the original
-                        # so the enclosing call re-substitutes, and mark the site
-                        # so the enclosing function's TA range widens to cover it.
-                        if enclosing_params and self._nested_ta_touched is not None:
-                            for a in site.ctor_args:
-                                toks = set(_re.findall(r"[A-Za-z_][A-Za-z_0-9]*", a))
-                                if toks & enclosing_params:
-                                    site._orig_ctor_args = list(site.ctor_args)
-                                    self._nested_ta_touched.add(i)
-                                    break
-                else:
-                    # Subsequent call sites: clone using saved original param names,
-                    # substituted with this call site's arguments
-                    clone_name_map: dict[str, str] = {}
-                    for i in range(start, end):
-                        orig = self._ta_call_sites[i]
-                        orig_args = getattr(orig, '_orig_ctor_args', orig.ctor_args)
-                        resolved_ctor = [_subst_params(a, param_arg_map) for a in orig_args]
-                        # Default name follows the ``{base}_cs{cs_idx}`` formula the
-                        # codegen re-derives. But the SAME base TA site can be reached
-                        # through more than one enclosing function (e.g. a helper cloned
-                        # both via its own call sites AND via a range-widened outer
-                        # function), so two distinct (func, cs_idx) namespaces can mint
-                        # the same name. Detect that collision and fall back to a
-                        # globally-unique name; record the chosen name so the codegen
-                        # consumes it verbatim (see _func_cs_ta_clone_names).
-                        clone_name = f"{orig.member_name}_cs{cs_idx}"
-                        if clone_name in self._ta_member_names:
-                            base = clone_name
-                            n = 2
-                            while clone_name in self._ta_member_names:
-                                clone_name = f"{base}_u{n}"
-                                n += 1
-                            clone_name_map[orig.member_name] = clone_name
-                        cloned = TACallSite(
-                            member_name=clone_name,
-                            class_name=orig.class_name,
-                            ctor_args=resolved_ctor,
-                            compute_args=orig.compute_args[:],
-                            returns_tuple=orig.returns_tuple,
-                            node=orig.node,
-                            is_static=orig.is_static,
-                            # The clone belongs to the CALLEE's per-call-site
-                            # namespace (``func_name``), NOT the caller whose
-                            # body visit minted it. The codegen dead-code pass
-                            # uses owner_func to decide whether to drop the
-                            # declaration: a clone owned by a live callee must
-                            # survive even when minted during a dead caller's
-                            # body visit (regression: quantbyboji DMI).
-                            owner_func=func_name,
-                        )
-                        self._ta_call_sites.append(cloned)
-                        self._ta_member_names.add(clone_name)
-                    if clone_name_map:
-                        self._func_cs_ta_clone_names[(func_name, cs_idx)] = clone_name_map
-
-            # Clone fixnan sites for cs_idx > 0 so each emitted variant of
-            # this function references its OWN previous-value member (two
-            # call sites must not share fixnan state -- the second would
-            # otherwise read the first's last non-na value). cs0 keeps the
-            # originals. The clone name follows the ``{orig}_cs{cs_idx}``
-            # formula the codegen re-derives (mirrors TA clone naming).
-            fn_indices = self._func_fixnan_indices.get(func_name, [])
-            if cs_idx > 0 and fn_indices:
-                clone_map: dict[str, str] = {}
-                for fi in fn_indices:
-                    orig = self._fixnan_sites[fi]
-                    fn_clone_name = f"{orig.member_name}_cs{cs_idx}"
-                    # Disambiguate collisions (a fixnan site reached through
-                    # >1 enclosing function could collide on the formula).
-                    if fn_clone_name in self._fixnan_member_names:
-                        base = fn_clone_name
-                        n = 2
-                        while fn_clone_name in self._fixnan_member_names:
-                            fn_clone_name = f"{base}_u{n}"
-                            n += 1
-                        clone_map[orig.member_name] = fn_clone_name
-                    cloned_fn = FixnanCallSite(
-                        member_name=fn_clone_name,
-                        pine_type=orig.pine_type,
-                        node=orig.node,
-                        owner_func=func_name,
-                    )
-                    self._fixnan_sites.append(cloned_fn)
-                    self._fixnan_member_names.add(fn_clone_name)
-                if clone_map:
-                    self._func_cs_fixnan_clone_names[(func_name, cs_idx)] = clone_map
+            self._materialize_user_func_call_site_state(func_name, cs_idx, node)
 
         # Create or update FuncInfo
         is_tuple = self._func_returns_tuple.get(func_name, False)
