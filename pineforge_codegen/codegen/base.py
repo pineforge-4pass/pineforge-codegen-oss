@@ -1262,6 +1262,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # First, find all variables that are reassigned anywhere in the AST.
         # These cannot be inlined as constants since their value changes at runtime.
         reassigned = self._find_reassigned_vars()
+        # Register never-reassigned ``var``/``varip`` scalars with a stable
+        # init FIRST — a later derived var (or a UDF body) may reference such a
+        # scalar as a stable length component, so it must be classified stable
+        # before those exprs are evaluated below.
+        self._collect_stable_var_scalars(reassigned)
         for stmt in self.ctx.ast.body:
             if isinstance(stmt, VarDecl) and stmt.name not in reassigned:
                 self._collect_known_var(stmt)
@@ -1273,6 +1278,48 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # a runtime reset that reproduces the conditional logic. Series-
         # dependent reassignments are left untracked (rejected by the guard).
         self._collect_reassigned_stable_scalars(reassigned)
+
+    def _collect_stable_var_scalars(self, reassigned: set[str]) -> None:
+        """Track top-level ``var``/``varip`` scalars declared exactly once (never
+        reassigned) from a stable init expression.
+
+        A ``var`` scalar's one-shot initializer runs once and the value never
+        changes across bars, so a never-reassigned ``var`` over a stable init
+        (``var int _tfSec = timeframe.in_seconds()``) is a bar-invariant scalar —
+        safe to embed in a TA ctor runtime-reset expression. Recording it in
+        ``_derived_input_expr`` + ``_stable_runtime_vars`` lets the reset path
+        expand the name and lets ``_expr_is_stable`` classify it (the
+        ``_stable_runtime_vars`` check precedes the ``_var_names`` rejection).
+
+        A ``var`` that is reassigned anywhere (``:=`` in ``reassigned``), is a
+        series var, or is initialized from a non-stable value stays untracked —
+        so a TA length fed by genuinely-mutable persistent state is still
+        rejected by the constructor guard. Names are NOT folded into
+        ``_known_vars`` (no use-site inlining): only the length-analysis path is
+        affected, and the ``var`` member still emits and initializes normally.
+        """
+        for stmt in (self.ctx.ast.body or []):
+            if not isinstance(stmt, VarDecl):
+                continue
+            if not (stmt.is_var or stmt.is_varip):
+                continue
+            if stmt.name in reassigned:
+                continue
+            if stmt.name in self.ctx.series_vars:
+                continue
+            if stmt.value is None or not self._expr_is_stable(stmt.value):
+                continue
+            expr_str = self._arith_expr_to_str(stmt.value)
+            if expr_str is None:
+                continue
+            self._derived_input_expr[stmt.name] = expr_str
+            self._stable_runtime_vars.add(stmt.name)
+            # Mark input-backed iff the init references an input, so the reset
+            # emits override-aware get_input_*() reads for it.
+            import re as _re
+            toks = set(_re.findall(r"[A-Za-z_][A-Za-z_0-9]*", expr_str))
+            if any(t in self._input_backed_vars for t in toks):
+                self._input_backed_vars.add(stmt.name)
 
     def _collect_reassigned_stable_scalars(self, reassigned: set[str]) -> None:
         """Track class-scope scalars that are reassigned but only along stable
@@ -1438,7 +1485,117 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         "ismonthly", "isdwm", "isseconds", "in_seconds", "isticks",
     })
 
-    def _expr_is_stable(self, node) -> bool:
+    # Depth ceiling for inlining nested single-expression user functions while
+    # classifying a TA length's stability. Pine forbids recursion, so any real
+    # chain is shallow; the cap is a backstop against pathological input and is
+    # enforced together with a name-stack cycle guard.
+    _UDF_INLINE_MAX_DEPTH = 16
+
+    def _get_udf_def(self, name: str):
+        """Return the top-level single-name ``FuncDef`` for ``name`` (or None).
+
+        Built lazily and cached. UDT ``MethodDef``s are intentionally excluded —
+        only a free function can appear as a bare-name TA length call.
+        """
+        cache = getattr(self, "_udf_def_cache", None)
+        if cache is None:
+            cache = {}
+            for stmt in (self.ctx.ast.body or []):
+                if isinstance(stmt, FuncDef):
+                    # Last definition wins; a name map is all the length path needs.
+                    cache[stmt.name] = stmt
+            self._udf_def_cache = cache
+        return cache.get(name)
+
+    def _inline_single_expr_udf(self, node, _udf_stack: frozenset = frozenset(),
+                                _depth: int = 0):
+        """If ``node`` is a call to a user-defined SINGLE-EXPRESSION function,
+        return its body expression with each parameter substituted by the
+        corresponding call-argument node. Returns None when the call is not such
+        a function, the arity/kwargs do not match, the body is not a single
+        expression, the body contains a shape we do not clone, or the call would
+        recurse (cycle / depth-limit).
+
+        Purely structural: it does NOT judge stability (the caller does, via
+        ``_expr_is_stable`` on the returned node). The conservative None keeps
+        the TA-ctor guard intact.
+        """
+        if not isinstance(node, FuncCall):
+            return None
+        func_name, namespace = self._resolve_callee(node.callee)
+        if namespace is not None or func_name is None:
+            return None
+        if func_name in _udf_stack or _depth >= self._UDF_INLINE_MAX_DEPTH:
+            return None
+        fdef = self._get_udf_def(func_name)
+        if fdef is None:
+            return None
+        # A body that is exactly ONE expression statement is inlinable, whether
+        # written inline after ``=>`` (``is_single_expr=True``) or as a one-line
+        # indented block (``f(x) =>`` then a single indented expr, which the
+        # parser records as ``is_single_expr=False`` with a one-ExprStmt body —
+        # the gonzowiththewind-sisyphus ``f_bars`` shape). A multi-statement
+        # body (len != 1, or a non-ExprStmt) is conservatively refused.
+        body = fdef.body
+        if not body or len(body) != 1 or not isinstance(body[0], ExprStmt):
+            return None
+        # Require a plain positional call: one arg per param, no kwargs, no
+        # default-parameter fill-in — anything else is conservatively refused.
+        if node.kwargs or len(node.args) != len(fdef.params):
+            return None
+        subst = dict(zip(fdef.params, node.args))
+        return self._subst_params(body[0].expr, subst)
+
+    def _subst_params(self, node, subst: dict):
+        """Return a copy of ``node`` with every ``Identifier`` whose name is a
+        key in ``subst`` replaced by the mapped argument node. Returns None for
+        any node outside the small arithmetic/call grammar we fold (an
+        unrecognised construct — e.g. a history ``Subscript`` — conservatively
+        aborts the inline). ``dataclasses.replace`` preserves ``loc``/
+        ``annotations`` so diagnostics still point at real source spans."""
+        import dataclasses as _dc
+        if isinstance(node, (NumberLiteral, StringLiteral, BoolLiteral, NaLiteral)):
+            return node
+        if isinstance(node, Identifier):
+            return subst.get(node.name, node)
+        if isinstance(node, MemberAccess):
+            obj = self._subst_params(node.object, subst)
+            if obj is None:
+                return None
+            return _dc.replace(node, object=obj)
+        if isinstance(node, Ternary):
+            c = self._subst_params(node.condition, subst)
+            t = self._subst_params(node.true_val, subst)
+            f = self._subst_params(node.false_val, subst)
+            if c is None or t is None or f is None:
+                return None
+            return _dc.replace(node, condition=c, true_val=t, false_val=f)
+        if isinstance(node, BinOp):
+            l = self._subst_params(node.left, subst)
+            r = self._subst_params(node.right, subst)
+            if l is None or r is None:
+                return None
+            return _dc.replace(node, left=l, right=r)
+        if isinstance(node, UnaryOp):
+            o = self._subst_params(node.operand, subst)
+            if o is None:
+                return None
+            return _dc.replace(node, operand=o)
+        if isinstance(node, FuncCall):
+            if node.kwargs:
+                return None
+            new_args = []
+            for a in node.args:
+                sa = self._subst_params(a, subst)
+                if sa is None:
+                    return None
+                new_args.append(sa)
+            return _dc.replace(node, args=new_args)
+        # Subscript (history read) and anything else: not a stable-length shape.
+        return None
+
+    def _expr_is_stable(self, node, _udf_stack: frozenset = frozenset(),
+                        _depth: int = 0) -> bool:
         """True iff ``node``'s value is a bar-invariant scalar.
 
         A stable expression depends only on: literals, ``input.*`` values,
@@ -1496,13 +1653,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # History read (``close[1]``) or indexed access — per-bar.
             return False
         if isinstance(node, Ternary):
-            return (self._expr_is_stable(node.condition)
-                    and self._expr_is_stable(node.true_val)
-                    and self._expr_is_stable(node.false_val))
+            return (self._expr_is_stable(node.condition, _udf_stack, _depth)
+                    and self._expr_is_stable(node.true_val, _udf_stack, _depth)
+                    and self._expr_is_stable(node.false_val, _udf_stack, _depth))
         if isinstance(node, BinOp):
-            return self._expr_is_stable(node.left) and self._expr_is_stable(node.right)
+            return (self._expr_is_stable(node.left, _udf_stack, _depth)
+                    and self._expr_is_stable(node.right, _udf_stack, _depth))
         if isinstance(node, UnaryOp):
-            return self._expr_is_stable(node.operand)
+            return self._expr_is_stable(node.operand, _udf_stack, _depth)
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
             if namespace == "ta":
@@ -1510,20 +1668,40 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if namespace == "math":
                 if func_name not in self._MATH_STABLE_MEMBERS:
                     return False
-                return all(self._expr_is_stable(a) for a in node.args)
+                return all(self._expr_is_stable(a, _udf_stack, _depth)
+                           for a in node.args)
             if namespace == "timeframe":
                 # ``timeframe.in_seconds()`` (and any other function-form
                 # timeframe member) is a stable per-run scalar — it reflects
                 # the script's resolution, not a per-bar value.
                 if func_name not in self._TF_STABLE_MEMBERS:
                     return False
-                return all(self._expr_is_stable(a) for a in node.args)
+                return all(self._expr_is_stable(a, _udf_stack, _depth)
+                           for a in node.args)
             if namespace == "input":
                 return True
             if namespace is None and func_name in ("int", "float", "bool", "string"):
-                return all(self._expr_is_stable(a) for a in node.args)
-            # Any other call (user functions, str.*, array.*, ...) — series
-            # by default; the conservative answer keeps the guard honest.
+                return all(self._expr_is_stable(a, _udf_stack, _depth)
+                           for a in node.args)
+            # A user-defined single-expression function is stable iff every
+            # argument is stable AND its body (with the params bound to those
+            # args) is stable — i.e. the body references only stable scalars
+            # (inputs / consts / timeframe.* / math.* / never-reassigned var
+            # scalars) and no series / strategy state / ta.* results. Inlining
+            # the body (params substituted by the arg nodes) lets the ordinary
+            # classifier decide; the name-stack + depth guard refuses recursion
+            # so a cyclic / malformed UDF is rejected, not looped forever.
+            if namespace is None and func_name is not None:
+                inlined = self._inline_single_expr_udf(node, _udf_stack, _depth)
+                if inlined is not None:
+                    if not all(self._expr_is_stable(a, _udf_stack, _depth)
+                               for a in node.args):
+                        return False
+                    return self._expr_is_stable(
+                        inlined, _udf_stack | {func_name}, _depth + 1)
+            # Any other call (multi-statement user functions, str.*, array.*,
+            # ...) — series by default; the conservative answer keeps the guard
+            # honest.
             return False
         return False
 
@@ -1536,22 +1714,28 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     # re-parsed and lowered through the expression visitor).
     _ATOMIC_ARITH_NODES = (NumberLiteral, Identifier, MemberAccess, FuncCall)
 
-    def _arith_operand_to_str(self, node) -> str | None:
+    def _arith_operand_to_str(self, node, _udf_stack: frozenset = frozenset(),
+                              _depth: int = 0) -> str | None:
         """Serialize ``node`` for use as an operand: parenthesize it unless its
         serialized form is already self-delimiting, so grouping survives a
         round-trip through the parser."""
-        s = self._arith_expr_to_str(node)
+        s = self._arith_expr_to_str(node, _udf_stack, _depth)
         if s is None:
             return None
         if isinstance(node, self._ATOMIC_ARITH_NODES):
             return s
         return f"({s})"
 
-    def _arith_expr_to_str(self, node) -> str | None:
+    def _arith_expr_to_str(self, node, _udf_stack: frozenset = frozenset(),
+                           _depth: int = 0) -> str | None:
         """Render a numeric arithmetic-over-identifiers expression to a string
         that re-parses to the SAME tree (grouping preserved via
         ``_arith_operand_to_str``). Returns None for any node shape we don't
         fold (series subscripts, etc.) so the caller leaves the var untracked.
+
+        ``_udf_stack``/``_depth`` guard the single-expression-UDF inlining below
+        against recursion cycles (Pine forbids recursion, but a malformed source
+        must be refused, not looped forever).
         """
         if isinstance(node, NumberLiteral):
             v = node.value
@@ -1563,30 +1747,44 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
             return f"{node.object.name}.{node.member}"
         if isinstance(node, BinOp):
-            l = self._arith_operand_to_str(node.left)
-            r = self._arith_operand_to_str(node.right)
+            l = self._arith_operand_to_str(node.left, _udf_stack, _depth)
+            r = self._arith_operand_to_str(node.right, _udf_stack, _depth)
             if l is None or r is None:
                 return None
             return f"{l} {node.op} {r}"
         if isinstance(node, UnaryOp):
-            o = self._arith_operand_to_str(node.operand)
+            o = self._arith_operand_to_str(node.operand, _udf_stack, _depth)
             if o is None:
                 return None
             return f"{node.op}{o}"
         if isinstance(node, Ternary):
-            c = self._arith_operand_to_str(node.condition)
-            t = self._arith_operand_to_str(node.true_val)
-            f = self._arith_operand_to_str(node.false_val)
+            c = self._arith_operand_to_str(node.condition, _udf_stack, _depth)
+            t = self._arith_operand_to_str(node.true_val, _udf_stack, _depth)
+            f = self._arith_operand_to_str(node.false_val, _udf_stack, _depth)
             if c is None or t is None or f is None:
                 return None
             return f"{c} ? {t} : {f}"
         if isinstance(node, FuncCall):
-            callee = self._arith_expr_to_str(node.callee)
+            # A bare-name call to a single-expression user function has no C++
+            # counterpart at class scope — inline its body (params substituted
+            # by the arg expressions) so the rendered string is pure
+            # math/timeframe/input arithmetic the ctor-reset path can expand.
+            # Namespaced calls (math.*/timeframe.*/int(...)) fall through to the
+            # ordinary ``callee(args)`` rendering below. The stack/depth guard
+            # refuses a recursive UDF (returns None -> caller leaves it untracked
+            # -> the ctor guard rejects it loudly) instead of recursing forever.
+            fn, ns = self._resolve_callee(node.callee)
+            if ns is None and fn is not None and self._get_udf_def(fn) is not None:
+                inlined = self._inline_single_expr_udf(node, _udf_stack, _depth)
+                if inlined is None:
+                    return None
+                return self._arith_expr_to_str(inlined, _udf_stack | {fn}, _depth + 1)
+            callee = self._arith_expr_to_str(node.callee, _udf_stack, _depth)
             if callee is None:
                 return None
             parts = []
             for a in node.args:
-                s = self._arith_expr_to_str(a)
+                s = self._arith_expr_to_str(a, _udf_stack, _depth)
                 if s is None:
                     return None
                 parts.append(s)

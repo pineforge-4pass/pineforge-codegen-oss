@@ -596,3 +596,172 @@ plot(ta.ema(close, lenv))
     assert "std::pow" in reset
     assert "ta::EMA(1)" not in reset
 
+
+# ===========================================================================
+# 8. UDF-wrapped stable lengths + never-reassigned ``var`` scalar lengths.
+#
+# Two false-positive shapes were hard-rejected by the stable-length guard even
+# though the length is a bar-invariant scalar (gonzowiththewind-sisyphus):
+#   GAP-1  a single-expression user function over stable args
+#          (``swingBars = f_bars(swingMinutes)``,
+#           ``f_bars(m) => math.max(1, math.round(m*60.0/_tfSec))``) — the UDF
+#          boundary blocked length-stability analysis.
+#   GAP-2  a ``var`` scalar initialized once from a stable per-run expression
+#          and NEVER reassigned (``var int _tfSec = timeframe.in_seconds()``)
+#          was treated as mutable persistent state.
+#
+# The sentinel that MUST stay rejected: a length that is genuinely series-
+# dynamic (wellmanapex ``activeSwingLookback`` — a ternary over a ta.atr
+# ratio). Covered by ``test_series_dependent_ternary_length_rejected`` /
+# ``test_series_reassigned_ternary_length_rejected`` above, plus the UDF-over-
+# series and reassigned-var-body guards below.
+# ---------------------------------------------------------------------------
+
+
+# R1 — UDF-wrapped stable length (isolates GAP-1: no var involved).
+def test_udf_wrapped_stable_length_transpiles():
+    src = """//@version=6
+strategy("udf-stable-len")
+swingInput = input.int(7, "Swing Bars")
+f_len(int m) => math.max(1, m * 2)
+n = f_len(swingInput)
+plot(ta.ema(close, n))
+"""
+    cpp = transpile(src)
+    members = re.findall(r"(_ta_ema_\d+)\(", cpp)
+    assert members, "no EMA member emitted"
+    member = members[0]
+    # ctor placeholder; the runtime reset overwrites it on the first bar.
+    assert _ctor_period(cpp, member) == "1"
+    reset = _reset_line(cpp, member)
+    assert reset, "no runtime reset emitted for UDF-wrapped length"
+    # The UDF body is inlined and expanded to an override-aware input read.
+    assert 'get_input_int("Swing Bars", 7)' in reset
+    assert "std::max" in reset
+    # No dangling UDF call spelling / bare param may survive.
+    assert "f_len" not in reset
+    assert " m " not in reset and "= m;" not in reset
+    assert "ta::EMA(1)" not in reset  # must NOT collapse to the silent no-op
+
+
+# R2 — never-reassigned ``var`` scalar stable-init used in a length (isolates
+# GAP-2: no UDF involved).
+def test_never_reassigned_var_scalar_length_transpiles():
+    src = """//@version=6
+strategy("var-scalar-len")
+barsPerHour = input.int(60, "Bars Per Hour")
+var int _tfSec = timeframe.in_seconds()
+lenv = math.max(1, math.round(barsPerHour * 60.0 / _tfSec))
+plot(ta.sma(close, lenv))
+"""
+    cpp = transpile(src)
+    members = re.findall(r"(_ta_sma_\d+)\(", cpp)
+    assert members, "no SMA member emitted"
+    member = members[0]
+    assert _ctor_period(cpp, member) == "1"
+    reset = _reset_line(cpp, member)
+    assert reset, "no runtime reset emitted for var-scalar length"
+    # Input read + timeframe helper both render into the reset.
+    assert 'get_input_int("Bars Per Hour", 60)' in reset
+    assert "tf_to_seconds(script_tf_)" in reset
+    assert "std::max" in reset
+    assert "std::round" in reset
+    # The stable var must be fully expanded; no bare ``_tfSec`` symbol leaks.
+    assert "_tfSec" not in reset
+    assert "timeframe.in_seconds" not in reset
+    assert "ta::SMA(1)" not in reset
+
+
+# R3 — combined shape: the exact gonzowiththewind-sisyphus reduction (both
+# gaps at once — a single-expr UDF whose body reads a never-reassigned var).
+def test_udf_over_var_scalar_length_transpiles():
+    src = """//@version=6
+strategy("udf-over-var-len")
+swingMinutes = input.float(3.0, "Swing Minutes", minval=0.5)
+var int _tfSec = timeframe.in_seconds()
+f_bars(float minutes) =>
+    math.max(1, math.round(minutes * 60.0 / _tfSec))
+swingBars = f_bars(swingMinutes)
+recentLow = ta.lowest(low[1], swingBars)
+plot(recentLow)
+"""
+    cpp = transpile(src)
+    members = re.findall(r"(_ta_lowest_\d+)\(", cpp)
+    assert members, "no Lowest member emitted"
+    member = members[0]
+    assert _ctor_period(cpp, member) == "1"
+    reset = _reset_line(cpp, member)
+    assert reset, "no runtime reset emitted for UDF-over-var length"
+    # Both the input (via the UDF arg) and the timeframe var expand into the
+    # reset — override-aware and referencing no dangling locals. (Pine ``float``
+    # inputs lower to the engine's ``get_input_double`` accessor.)
+    assert 'get_input_double("Swing Minutes", 3' in reset
+    assert "tf_to_seconds(script_tf_)" in reset
+    assert "std::max" in reset
+    assert "std::round" in reset
+    assert "f_bars" not in reset
+    assert "_tfSec" not in reset
+    assert "swingBars" not in reset
+
+
+# G1 — a UDF call whose ARG is a series value stays rejected: the args must be
+# stable for the inlined body to be a stable length.
+def test_udf_over_series_arg_length_rejected():
+    src = """//@version=6
+strategy("udf-series-arg")
+f_len(int m) => math.max(1, m)
+n = f_len(int(ta.atr(14)))
+plot(ta.ema(close, n))
+"""
+    with pytest.raises(CompileError) as ei:
+        transpile(src)
+    assert "Unsupported TA constructor length" in str(ei.value)
+
+
+# G2 — a single-expr UDF whose body reads a REASSIGNED var (genuinely mutable
+# persistent state) stays rejected.
+def test_udf_over_reassigned_var_body_length_rejected():
+    src = """//@version=6
+strategy("udf-reassigned-var")
+inp = input.int(5, "Len")
+var int _acc = 0
+_acc := _acc + 1
+f_bad(int m) => math.max(1, m + _acc)
+n = f_bad(inp)
+plot(ta.ema(close, n))
+"""
+    with pytest.raises(CompileError) as ei:
+        transpile(src)
+    assert "Unsupported TA constructor length" in str(ei.value)
+
+
+# G3 — a self-recursive UDF is refused without hanging (Pine forbids recursion;
+# the inliner must break the cycle and reject rather than loop forever).
+def test_recursive_udf_length_refused_without_hang():
+    src = """//@version=6
+strategy("udf-recursive")
+inp = input.int(5, "Len")
+f_rec(int m) => f_rec(m) + 1
+n = f_rec(inp)
+plot(ta.ema(close, n))
+"""
+    with pytest.raises(CompileError):
+        transpile(src)
+
+
+# G4 — a MULTI-statement UDF used as a class-scope length is conservatively
+# rejected (only single-expression UDFs are inlined for length stability).
+def test_multi_statement_udf_length_rejected():
+    src = """//@version=6
+strategy("udf-multi-stmt")
+inp = input.int(5, "Len")
+f_multi(int m) =>
+    x = m * 2
+    x + 1
+n = f_multi(inp)
+plot(ta.ema(close, n))
+"""
+    with pytest.raises(CompileError) as ei:
+        transpile(src)
+    assert "Unsupported TA constructor length" in str(ei.value)
+
