@@ -95,7 +95,7 @@ _CHILD = (
 _SEEDS = [0, 1, 2, 7, 12345]
 
 
-def _transpile_under_seed(seed: int) -> str:
+def _transpile_under_seed(seed: int, fixture: str = FIXTURE) -> str:
     """Transpile FIXTURE in a fresh interpreter pinned to ``PYTHONHASHSEED=seed``."""
     env = {
         **os.environ,
@@ -108,7 +108,7 @@ def _transpile_under_seed(seed: int) -> str:
     }
     proc = subprocess.run(
         [sys.executable, "-c", _CHILD],
-        input=FIXTURE,
+        input=fixture,
         env=env,
         capture_output=True,
         text=True,
@@ -134,3 +134,38 @@ def test_transpile_byte_identical_across_hash_seeds() -> None:
         "(see fix(codegen): deterministic member-clone ordering). "
         "Likely a set is being iterated into emitted C++ again."
     )
+
+
+_SYNTHETIC_HISTORY_FIXTURE = """//@version=6
+strategy("Synthetic Determinism", calc_on_order_fills=true)
+type Box
+    float bias
+passthrough(float src) => src
+history_arg(float src) => src[1]
+leaf(float src) => history_arg(src + 1.0)
+left(float src) => leaf(src)
+right(float src) => leaf(src)
+wrapped(float src, int mode) =>
+    switch mode
+        1 => passthrough(src)[1]
+        => src
+method measure(Box self, float src) =>
+    call_prev = passthrough(src + self.bias)[1]
+    arg_prev = history_arg(src - self.bias)
+    call_prev + arg_prev
+var Box bx = Box.new(1.0)
+a = left(close)
+b = right(open)
+c = wrapped(close, 1)
+d = wrapped(open, 1)
+e = bx.measure(close)
+f = bx.measure(open)
+"""
+
+
+def test_synthetic_history_names_byte_identical_across_hash_seeds() -> None:
+    outputs = [
+        _transpile_under_seed(seed, _SYNTHETIC_HISTORY_FIXTURE)
+        for seed in _SEEDS
+    ]
+    assert len(set(outputs)) == 1

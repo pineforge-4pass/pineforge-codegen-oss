@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 #include <tuple>
+#include <optional>
+#include <type_traits>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -121,6 +123,97 @@ public:
     bool _ta_initialized_ = false;
     bool _inputs_initialized_ = false;
 
+    struct _PFScriptState {
+        decltype(GeneratedStrategy::_ta_sma_1) _pf_value_0;
+        decltype(GeneratedStrategy::_ta_sma_2) _pf_value_1;
+        decltype(GeneratedStrategy::_ta_sma_3) _pf_value_2;
+        decltype(GeneratedStrategy::_ta_sma_4) _pf_value_3;
+        decltype(GeneratedStrategy::_ta_sma_5) _pf_value_4;
+        decltype(GeneratedStrategy::_ta_sma_6) _pf_value_5;
+        decltype(GeneratedStrategy::_ta_crossover_7) _pf_value_6;
+        decltype(GeneratedStrategy::_ta_crossunder_8) _pf_value_7;
+        decltype(GeneratedStrategy::m) _pf_value_8;
+        decltype(GeneratedStrategy::length) _pf_value_9;
+        decltype(GeneratedStrategy::v1) _pf_value_10;
+        decltype(GeneratedStrategy::v2) _pf_value_11;
+        decltype(GeneratedStrategy::v1_mean) _pf_value_12;
+        decltype(GeneratedStrategy::v2_mean) _pf_value_13;
+        decltype(GeneratedStrategy::cov11) _pf_value_14;
+        decltype(GeneratedStrategy::cov12) _pf_value_15;
+        decltype(GeneratedStrategy::cov21) _pf_value_16;
+        decltype(GeneratedStrategy::cov22) _pf_value_17;
+        decltype(GeneratedStrategy::covReady) _pf_value_18;
+        decltype(GeneratedStrategy::lam) _pf_value_19;
+        decltype(GeneratedStrategy::lamSma) _pf_value_20;
+        decltype(GeneratedStrategy::_var_initialized) _pf_value_21;
+        decltype(GeneratedStrategy::_ta_initialized_) _pf_value_22;
+        decltype(GeneratedStrategy::_inputs_initialized_) _pf_value_23;
+    };
+    static_assert(std::is_copy_constructible_v<_PFScriptState>, "generated Pine state must be deep-copy constructible");
+    static_assert(std::is_copy_assignable_v<_PFScriptState>, "generated Pine state must be deep-copy assignable");
+    std::optional<_PFScriptState> _pf_script_state_checkpoint_;
+
+    void snapshot_script_state() override {
+        _pf_script_state_checkpoint_.emplace(_PFScriptState{
+            _ta_sma_1,
+            _ta_sma_2,
+            _ta_sma_3,
+            _ta_sma_4,
+            _ta_sma_5,
+            _ta_sma_6,
+            _ta_crossover_7,
+            _ta_crossunder_8,
+            m,
+            length,
+            v1,
+            v2,
+            v1_mean,
+            v2_mean,
+            cov11,
+            cov12,
+            cov21,
+            cov22,
+            covReady,
+            lam,
+            lamSma,
+            _var_initialized,
+            _ta_initialized_,
+            _inputs_initialized_,
+        });
+    }
+
+    void restore_script_state() override {
+        if (!_pf_script_state_checkpoint_) return;
+        this->_ta_sma_1 = _pf_script_state_checkpoint_->_pf_value_0;
+        this->_ta_sma_2 = _pf_script_state_checkpoint_->_pf_value_1;
+        this->_ta_sma_3 = _pf_script_state_checkpoint_->_pf_value_2;
+        this->_ta_sma_4 = _pf_script_state_checkpoint_->_pf_value_3;
+        this->_ta_sma_5 = _pf_script_state_checkpoint_->_pf_value_4;
+        this->_ta_sma_6 = _pf_script_state_checkpoint_->_pf_value_5;
+        this->_ta_crossover_7 = _pf_script_state_checkpoint_->_pf_value_6;
+        this->_ta_crossunder_8 = _pf_script_state_checkpoint_->_pf_value_7;
+        this->m = _pf_script_state_checkpoint_->_pf_value_8;
+        this->length = _pf_script_state_checkpoint_->_pf_value_9;
+        this->v1 = _pf_script_state_checkpoint_->_pf_value_10;
+        this->v2 = _pf_script_state_checkpoint_->_pf_value_11;
+        this->v1_mean = _pf_script_state_checkpoint_->_pf_value_12;
+        this->v2_mean = _pf_script_state_checkpoint_->_pf_value_13;
+        this->cov11 = _pf_script_state_checkpoint_->_pf_value_14;
+        this->cov12 = _pf_script_state_checkpoint_->_pf_value_15;
+        this->cov21 = _pf_script_state_checkpoint_->_pf_value_16;
+        this->cov22 = _pf_script_state_checkpoint_->_pf_value_17;
+        this->covReady = _pf_script_state_checkpoint_->_pf_value_18;
+        this->lam = _pf_script_state_checkpoint_->_pf_value_19;
+        this->lamSma = _pf_script_state_checkpoint_->_pf_value_20;
+        this->_var_initialized = _pf_script_state_checkpoint_->_pf_value_21;
+        this->_ta_initialized_ = _pf_script_state_checkpoint_->_pf_value_22;
+        this->_inputs_initialized_ = _pf_script_state_checkpoint_->_pf_value_23;
+    }
+
+    void commit_script_state() override {
+        snapshot_script_state();
+    }
+
     explicit GeneratedStrategy() : _ta_sma_1(14), _ta_sma_2(14), _ta_sma_3(14), _ta_sma_4(14), _ta_sma_5(14), _ta_sma_6(14) {
         initial_capital_ = 1000000.0;
         default_qty_type_ = QtyType::FIXED;
@@ -138,6 +231,7 @@ public:
         if (key == "pyramiding") { pyramiding_ = std::stoi(value); return; }
         if (key == "slippage") { slippage_ = std::stoi(value); return; }
         if (key == "process_orders_on_close") { process_orders_on_close_ = (value == "true" || value == "1"); return; }
+        if (key == "calc_on_order_fills") { calc_on_order_fills_ = (value == "true" || value == "1"); return; }
         if (key == "close_entries_rule") { close_entries_rule_any_ = (value == "ANY" || value == "any" || value == "1"); return; }
         if (key == "default_qty_type") {
             if (value == "fixed" || value == "strategy.fixed" || value == "0") default_qty_type_ = QtyType::FIXED;
@@ -174,12 +268,12 @@ public:
         }
         v1 = (current_bar_.close - current_bar_.open);
         v2 = (current_bar_.high - current_bar_.low);
-        v1_mean = (is_first_tick_ ? _ta_sma_1.compute(v1) : _ta_sma_1.recompute(v1));
-        v2_mean = (is_first_tick_ ? _ta_sma_2.compute(v2) : _ta_sma_2.recompute(v2));
-        cov11 = (is_first_tick_ ? _ta_sma_3.compute(((v1 - v1_mean) * (v1 - v1_mean))) : _ta_sma_3.recompute(((v1 - v1_mean) * (v1 - v1_mean))));
-        cov12 = (is_first_tick_ ? _ta_sma_4.compute(((v1 - v1_mean) * (v2 - v2_mean))) : _ta_sma_4.recompute(((v1 - v1_mean) * (v2 - v2_mean))));
+        v1_mean = (history_advances_new_bar() ? _ta_sma_1.compute(v1) : _ta_sma_1.recompute(v1));
+        v2_mean = (history_advances_new_bar() ? _ta_sma_2.compute(v2) : _ta_sma_2.recompute(v2));
+        cov11 = (history_advances_new_bar() ? _ta_sma_3.compute(((v1 - v1_mean) * (v1 - v1_mean))) : _ta_sma_3.recompute(((v1 - v1_mean) * (v1 - v1_mean))));
+        cov12 = (history_advances_new_bar() ? _ta_sma_4.compute(((v1 - v1_mean) * (v2 - v2_mean))) : _ta_sma_4.recompute(((v1 - v1_mean) * (v2 - v2_mean))));
         cov21 = cov12;
-        cov22 = (is_first_tick_ ? _ta_sma_5.compute(((v2 - v2_mean) * (v2 - v2_mean))) : _ta_sma_5.recompute(((v2 - v2_mean) * (v2 - v2_mean))));
+        cov22 = (history_advances_new_bar() ? _ta_sma_5.compute(((v2 - v2_mean) * (v2 - v2_mean))) : _ta_sma_5.recompute(((v2 - v2_mean) * (v2 - v2_mean))));
         m.set((int)(0), (int)(0), cov11);
         m.set((int)(0), (int)(1), cov12);
         m.set((int)(1), (int)(0), cov21);
@@ -189,11 +283,11 @@ public:
         if (covReady) {
             lam = ((((double)m.eigenvalues().size() > 0)) ? (m.eigenvalues()[(0)]) : (na<double>()));
         }
-        lamSma = (is_first_tick_ ? _ta_sma_6.compute(lam) : _ta_sma_6.recompute(lam));
-        if ((((covReady && !(is_na(lam))) && !(is_na(lamSma))) && (is_first_tick_ ? _ta_crossover_7.compute(lam, lamSma) : _ta_crossover_7.recompute(lam, lamSma)))) {
+        lamSma = (history_advances_new_bar() ? _ta_sma_6.compute(lam) : _ta_sma_6.recompute(lam));
+        if ((((covReady && !(is_na(lam))) && !(is_na(lamSma))) && (history_advances_new_bar() ? _ta_crossover_7.compute(lam, lamSma) : _ta_crossover_7.recompute(lam, lamSma)))) {
             strategy_entry(std::string("Long"), true, na<double>(), na<double>(), na<double>(), "");
         }
-        if ((((covReady && !(is_na(lam))) && !(is_na(lamSma))) && (is_first_tick_ ? _ta_crossunder_8.compute(lam, lamSma) : _ta_crossunder_8.recompute(lam, lamSma)))) {
+        if ((((covReady && !(is_na(lam))) && !(is_na(lamSma))) && (history_advances_new_bar() ? _ta_crossunder_8.compute(lam, lamSma) : _ta_crossunder_8.recompute(lam, lamSma)))) {
             strategy_entry(std::string("Short"), false, na<double>(), na<double>(), na<double>(), "");
         }
     }

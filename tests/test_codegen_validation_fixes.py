@@ -174,7 +174,9 @@ def test_bar_index_history_series_is_pushed_from_offset_helper():
         "plot(close)"
     )
     assert "Series<int> bar_index" in cpp
-    assert "if (is_first_tick_) bar_index.push(pine_bar_index());" in cpp
+    assert (
+        "if (history_advances_new_bar()) bar_index.push(pine_bar_index());" in cpp
+    )
     assert "else bar_index.update(pine_bar_index());" in cpp
     assert "(pine_bar_index() - past)" in cpp
 

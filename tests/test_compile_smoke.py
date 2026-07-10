@@ -67,6 +67,81 @@ def test_minimal_strategy_compiles():
     compile_cpp(cpp, label="minimal_strategy")
 
 
+def test_calc_on_order_fills_mixed_script_state_checkpoint_compiles():
+    """The rollback aggregate must remain copyable across every state family."""
+    skip_if_no_compile_env()
+    cpp = transpile('''//@version=6
+strategy("COOF compile", calc_on_order_fills=true)
+type Pt
+    float x
+    float y
+bump(float v) =>
+    var float total = 0.0
+    total += v
+    fixnan(total)
+var float historical = 0.0
+var array<float> xs = array.new<float>()
+var mp = map.new<string, float>()
+var mx = matrix.new<float>(2, 2, 0.0)
+var Pt point = Pt.new(1.0, 2.0)
+var line ln = na
+historical += close
+previous = historical[1]
+previous_position = strategy.position_size[1]
+array.push(xs, historical)
+map.put(mp, "x", historical)
+matrix.set(mx, 0, 0, historical)
+point.x := historical
+ln := line.new(bar_index, close, bar_index + 1, close)
+e = ta.ema(close, 3)
+a = bump(close)
+b = bump(open)
+history_arg(float src) =>
+    src[1]
+inline_previous = ta.highest(high, 3)[1]
+bridged_previous = history_arg(close + open)
+if barstate.isnew and e > 0
+    strategy.entry("L", strategy.long)
+''')
+    compile_cpp(cpp, label="calc_on_order_fills_mixed_state")
+
+
+def test_calc_on_order_fills_synthetic_history_isolation_compiles():
+    """Nested, switch-arm, and UDT-method buffer clones must all parse."""
+    skip_if_no_compile_env()
+    cpp = transpile('''//@version=6
+strategy("COOF synthetic compile", calc_on_order_fills=true)
+type Box
+    float bias
+passthrough(float src) =>
+    src
+history_arg(float src) =>
+    src[1]
+leaf(float src) =>
+    history_arg(src + 1.0)
+left(float src) =>
+    leaf(src)
+right(float src) =>
+    leaf(src)
+switch_wrapped(float src, int mode) =>
+    switch mode
+        1 => passthrough(src)[1]
+        => src
+method measure(Box self, float src) =>
+    call_prev = passthrough(src + self.bias)[1]
+    arg_prev = history_arg(src - self.bias)
+    call_prev + arg_prev
+var Box bx = Box.new(1.0)
+nested_a = left(close)
+nested_b = right(open)
+switch_a = switch_wrapped(close, 1)
+switch_b = switch_wrapped(open, 1)
+method_a = bx.measure(close)
+method_b = bx.measure(open)
+''')
+    compile_cpp(cpp, label="calc_on_order_fills_synthetic_isolation")
+
+
 # ---------------------------------------------------------------------------
 # TA — covers single-value, tuple-returning, implicit-OHLC, and ta.* vars.
 # ---------------------------------------------------------------------------
