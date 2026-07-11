@@ -589,7 +589,14 @@ class StmtVisitor:
                             f"expected {self._type_spec_to_cpp(lhs_spec)}, "
                             f"got {self._type_spec_to_cpp(rhs_spec)}",
                         )
-            val_cpp = self._visit_rhs_value(node.value, target_name)
+            # A bare-``na`` reassignment must adopt the target's declared scalar
+            # type (``x := na`` -> ``na<int>()`` not ``na<double>()``); otherwise
+            # a double NaN is stored into an int/int64_t/bool member (UB, defeats
+            # is_na<T>()). Only computed for bare na — every other RHS is
+            # unaffected.
+            tct = (self._na_reassign_cpp_type(target_name)
+                   if self._is_na_expr(node.value) else None)
+            val_cpp = self._visit_rhs_value(node.value, target_name, target_cpp_type=tct)
             if node.op == ":=":
                 lines.append(f"{pad}{safe} = {val_cpp};")
             else:
@@ -599,7 +606,9 @@ class StmtVisitor:
                 else:
                     lines.append(f"{pad}{safe} {node.op} {val_cpp};")
         else:
-            val_cpp = self._visit_rhs_value(node.value, target_name)
+            tct = (self._na_reassign_cpp_type(target_name)
+                   if self._is_na_expr(node.value) else None)
+            val_cpp = self._visit_rhs_value(node.value, target_name, target_cpp_type=tct)
             if node.op == ":=":
                 lines.append(f"{pad}{safe} = {val_cpp};")
             else:

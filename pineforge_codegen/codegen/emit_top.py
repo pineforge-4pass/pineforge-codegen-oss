@@ -1216,6 +1216,11 @@ class TopLevelEmitter:
             if (is_drawing or is_udt) and isinstance(init_ast, NaLiteral):
                 continue
             init_cpp = self._visit_expr(init_ast)
+            # A bare-``na`` initializer for an int/int64_t/bool ``var`` member
+            # must be typed (``na<int>()``), mirroring the class-scope ctor
+            # init (``_typed_na_init`` at _emit_constructor); a raw ``na<double>()``
+            # NaN stored into an int member is UB and defeats is_na<T>().
+            init_cpp = self._typed_na_init(init_cpp, name, ptype)
             init_lines.append(f"        {target} = {init_cpp};")
         if not init_lines:
             return
