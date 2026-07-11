@@ -140,42 +140,91 @@ class SecurityEmitter:
         : inputTf`` must be expanded to their source expression with direct
         ``get_input_*`` reads. Emitting the member name would register with its
         default-constructed value (usually an empty string).
+
+        Delegates to :meth:`_substitute_tf_input_reads`, which rewrites the
+        input-derived *leaves* of the expression tree — including leaves buried
+        inside a ternary CONDITION or any BinOp / UnaryOp / FuncCall — and then
+        renders the substituted tree through the normal expression visitor.
         """
         if node is None:
             return None
-        resolving = resolving or set()
-        if isinstance(node, StringLiteral):
-            return self._visit_expr(node)
+        substituted = self._substitute_tf_input_reads(node, resolving or set())
+        return self._visit_expr(substituted)
+
+    def _substitute_tf_input_reads(self, node, resolving: set[str]):
+        """Return ``node`` with input-derived leaves rewritten to expressions
+        that are valid at security-registration time (before ``on_bar()``
+        assigns members from their inputs):
+
+        * an input-backed var -> its ``input.*()`` source call (``get_input_*``);
+        * a ``timeframe.period`` alias var -> ``timeframe.period`` (``script_tf_``);
+        * a known compile-time string var -> that string literal;
+        * a global alias -> its defining expression, expanded recursively.
+
+        The walk descends through Ternary / BinOp / UnaryOp / FuncCall /
+        Subscript, so an input-backed identifier nested inside e.g. a ternary
+        condition (``mode == "15" ? "240" : "60"``) resolves to its input read
+        instead of the uninitialised member. A subtree containing no
+        input-derived leaf is returned unchanged (same object) so unaffected
+        timeframe expressions render byte-identically to before the fix.
+        MemberAccess and literals are left verbatim: ``timeframe.period`` is
+        already lowered to ``script_tf_`` by the expression visitor.
+        """
+        if not isinstance(node, ASTNode):
+            return node
         if isinstance(node, Identifier):
             name = node.name
             if name in self._timeframe_period_vars:
-                return "script_tf_"
+                return MemberAccess(object=Identifier(name="timeframe"), member="period")
             if name in self._input_backed_vars and name in self._input_var_to_call:
-                return self._visit_expr(self._input_var_to_call[name])
+                return self._input_var_to_call[name]
             if (name in self._known_vars and name not in self._input_backed_vars
                     and isinstance(self._known_vars[name], str)):
-                return self._visit_expr(StringLiteral(value=self._known_vars[name]))
+                return StringLiteral(value=self._known_vars[name])
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
             if name in global_expr_map and name not in resolving:
-                resolving.add(name)
-                out = self._security_tf_runtime_expr(global_expr_map[name], resolving)
-                resolving.remove(name)
-                return out
-            return self._visit_expr(node)
-        if (
-            isinstance(node, MemberAccess)
-            and isinstance(node.object, Identifier)
-            and node.object.name == "timeframe"
-            and node.member == "period"
-        ):
-            return "script_tf_"
+                return self._substitute_tf_input_reads(
+                    global_expr_map[name], resolving | {name})
+            return node
         if isinstance(node, Ternary):
-            cond = self._security_tf_runtime_expr(node.condition, resolving)
-            tv = self._security_tf_runtime_expr(node.true_val, resolving)
-            fv = self._security_tf_runtime_expr(node.false_val, resolving)
-            if cond is not None and tv is not None and fv is not None:
-                return f"(({cond}) ? ({tv}) : ({fv}))"
-        return self._visit_expr(node)
+            cond = self._substitute_tf_input_reads(node.condition, resolving)
+            tv = self._substitute_tf_input_reads(node.true_val, resolving)
+            fv = self._substitute_tf_input_reads(node.false_val, resolving)
+            if cond is node.condition and tv is node.true_val and fv is node.false_val:
+                return node
+            return Ternary(condition=cond, true_val=tv, false_val=fv)
+        if isinstance(node, BinOp):
+            left = self._substitute_tf_input_reads(node.left, resolving)
+            right = self._substitute_tf_input_reads(node.right, resolving)
+            if left is node.left and right is node.right:
+                return node
+            return BinOp(left=left, op=node.op, right=right)
+        if isinstance(node, UnaryOp):
+            operand = self._substitute_tf_input_reads(node.operand, resolving)
+            if operand is node.operand:
+                return node
+            return UnaryOp(op=node.op, operand=operand)
+        if isinstance(node, FuncCall):
+            new_args = [self._substitute_tf_input_reads(a, resolving) for a in node.args]
+            new_kwargs = {
+                k: (self._substitute_tf_input_reads(v, resolving)
+                    if isinstance(v, ASTNode) else v)
+                for k, v in node.kwargs.items()
+            }
+            unchanged = (
+                all(a is b for a, b in zip(new_args, node.args))
+                and all(new_kwargs[k] is node.kwargs[k] for k in node.kwargs)
+            )
+            if unchanged:
+                return node
+            return FuncCall(callee=node.callee, args=new_args, kwargs=new_kwargs)
+        if isinstance(node, Subscript):
+            obj = self._substitute_tf_input_reads(node.object, resolving)
+            idx = self._substitute_tf_input_reads(node.index, resolving)
+            if obj is node.object and idx is node.index:
+                return node
+            return Subscript(object=obj, index=idx)
+        return node
 
     def _resolve_param_tf_from_callsites(self, func_name: str, param_name: str):
         """For a ``request.security`` whose tf is function parameter ``param_name``
