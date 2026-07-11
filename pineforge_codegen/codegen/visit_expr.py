@@ -166,6 +166,20 @@ _BUILTIN_NAMESPACE_NAMES: frozenset[str] = frozenset({
 })
 
 
+# KI-71: Pine relational comparisons (``==`` ``!=`` ``<`` ``>`` ``<=`` ``>=``)
+# with an ``na`` operand evaluate *falsy*. Naive C++ relationals do not honour
+# this for the engine's na sentinels, so these ops route through na-aware
+# lowering when an operand can be na (see ``_visit_binop`` / ``_operand_na_kind``).
+_RELATIONAL_OPS: frozenset[str] = frozenset({"==", "!=", "<", ">", "<=", ">="})
+
+# C++ scalar types carrying a detectable ``na`` sentinel via ``is_na``:
+# ``double`` -> NaN (IEEE), ``int``/``int64_t`` -> ``numeric_limits<T>::min()``.
+# Only these route through the na-aware relational lowering — ``is_na`` has no
+# overload for ``bool``/``std::string``/vector/UDT-value operands, and Pine's
+# na-bool is engine-indistinguishable from ``false`` (na<bool>() == false).
+_NA_SCALAR_CPP: frozenset[str] = frozenset({"int", "int64_t", "double"})
+
+
 class ExprVisitor:
     """Expression-level visitor methods shared across the codegen.
 
@@ -760,6 +774,78 @@ class ExprVisitor:
                 return f'std::string("{node.member}")'
         return f"{obj}.{node.member}"
 
+    def _operand_na_kind(self, node, cpp_type: str) -> str | None:
+        """Classify a relational operand by the ``na`` sentinel it can carry.
+
+        Returns:
+
+        * ``"int"``   — an ``int``/``int64_t`` expression that can hold the
+          ``INT_MIN`` sentinel. Because that sentinel is a *finite* very-negative
+          integer (not NaN), naive C++ diverges from Pine's falsy-on-na rule for
+          EVERY relational — ordered (``<`` ``>`` ``<=`` ``>=``) and equality
+          (``==`` ``!=``) alike.
+        * ``"float"`` — a ``double`` expression that can hold NaN. IEEE already
+          yields ``false`` for ``==`` ``<`` ``>`` ``<=`` ``>=`` against NaN
+          (matching Pine's falsy), so the ONLY diverging float cell is ``!=``
+          (IEEE ``NaN != x`` is true; Pine is falsy).
+        * ``None``     — provably not na (numeric/bool literal, inlined
+          compile-time constant) or a non-scalar type with no ``is_na`` overload;
+          the naive emission is already correct.
+        """
+        if cpp_type not in _NA_SCALAR_CPP:
+            return None
+        # Literals are never na.
+        if isinstance(node, (NumberLiteral, BoolLiteral)):
+            return None
+        # A bare ``na`` lowers to ``na<double>()`` — a real NaN, i.e. it IS na.
+        if self._is_na_expr(node):
+            return "float"
+        # Inlined compile-time constants (non-input known vars) never hold na.
+        if (isinstance(node, Identifier)
+                and node.name in self._known_vars
+                and node.name not in self._input_backed_vars):
+            return None
+        return "int" if cpp_type in ("int", "int64_t") else "float"
+
+    def _emit_na_relational(self, op: str, left: str, right: str) -> str:
+        """Emit an na-aware relational: ``false`` when either operand is ``na``.
+
+        Mirrors the ``nz()`` lambda idiom (``visit_call``): each operand is
+        hoisted to a temporary so a stateful operand expression is evaluated
+        exactly once (no double-step), then compared only when neither side is
+        na. ``is_na`` resolves via the emitted ``using namespace pineforge;``
+        (``double`` -> ``isnan``; integral -> ``== numeric_limits<T>::min()``).
+        """
+        return (f"([&]{{ auto _pna_l = ({left}); auto _pna_r = ({right}); "
+                f"return !is_na(_pna_l) && !is_na(_pna_r) && "
+                f"(_pna_l {op} _pna_r); }}())")
+
+    def _lower_relational(self, op: str, left_node, right_node,
+                          left_cpp: str, right_cpp: str) -> str:
+        """Lower a Pine relational to C++, applying KI-71 na-aware wrapping.
+
+        Shared by ``_visit_binop`` and the ``request.security`` expression
+        builder so EVERY relational emission site honours Pine's falsy-on-na
+        rule. Wraps only the diverging cells: any na-capable *integer* operand
+        (the INT_MIN sentinel poisons all six operators) or a ``!=`` with an
+        na-capable *float* operand (the sole IEEE-diverging float cell). Pure
+        ``double`` ``==`` ``<`` ``>`` ``<=`` ``>=`` keep the naive emission —
+        IEEE is already falsy-on-NaN there, so wrapping would be a pure no-op.
+        Non-relational ``op`` (or non-scalar operands with no ``is_na``) fall
+        through to the naive ``(left op right)`` form unchanged.
+        """
+        if op in _RELATIONAL_OPS:
+            lt = self._infer_type(left_node)
+            rt = self._infer_type(right_node)
+            if lt in _NA_SCALAR_CPP and rt in _NA_SCALAR_CPP:
+                lk = self._operand_na_kind(left_node, lt)
+                rk = self._operand_na_kind(right_node, rt)
+                int_na = "int" in (lk, rk)
+                float_na = "float" in (lk, rk)
+                if int_na or (op == "!=" and float_na):
+                    return self._emit_na_relational(op, left_cpp, right_cpp)
+        return f"({left_cpp} {op} {right_cpp})"
+
     def _visit_binop(self, node: BinOp) -> str:
         left = self._visit_expr(node.left)
         right = self._visit_expr(node.right)
@@ -786,7 +872,7 @@ class ExprVisitor:
         # Ref: https://www.tradingview.com/pine-script-docs/concepts/operators/
         if node.op == "/":
             return f"((double)({left}) / (double)({right}))"
-        return f"({left} {op} {right})"
+        return self._lower_relational(op, node.left, node.right, left, right)
 
     def _visit_unaryop(self, node: UnaryOp) -> str:
         operand = self._visit_expr(node.operand)

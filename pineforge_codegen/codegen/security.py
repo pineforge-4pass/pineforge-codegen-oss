@@ -2275,7 +2275,10 @@ class SecurityEmitter:
             op = cpp_ops.get(expr_node.op, expr_node.op)
             if expr_node.op == "%":
                 return f"std::fmod((double)({left}), (double)({right}))"
-            return f"({left} {op} {right})"
+            # KI-71: honour Pine's falsy-on-na relational rule inside
+            # request.security expressions too (this builder is a second
+            # relational emission site independent of _visit_binop).
+            return self._lower_relational(op, expr_node.left, expr_node.right, left, right)
 
         if isinstance(expr_node, UnaryOp):
             operand = self._build_security_expr(
