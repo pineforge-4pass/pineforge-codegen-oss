@@ -552,6 +552,59 @@ class TypeInferer:
             return True
         return name in self._int64_reassign_targets()
 
+    def _na_reassign_cpp_type(self, name: str) -> str | None:
+        """Declared scalar C++ type of a ``:=`` reassignment target ``name``, so a
+        bare-``na`` RHS (``x := na``) can be spelled ``na<T>()`` matching the
+        member/local type instead of the default ``na<double>()``.
+
+        Assigning a double quiet-NaN into an ``int``/``int64_t``/``bool`` member is
+        undefined behaviour (NaN->int is unspecified; on ARM64 it saturates to 0,
+        which is not the ``na<T>()`` sentinel) and defeats ``is_na<T>()``. Mirrors
+        the member-declaration type logic (``base._emit_class_members`` /
+        ``_typed_na_init``): ``PINE_TYPE_TO_CPP`` plus the int->int64_t epoch
+        promotion. Returns ``None`` for collections / UDT / drawing handles and
+        for ``double`` (already the default lowering), so those paths are
+        unchanged.
+        """
+        # Collections / UDT / drawing handles never take a scalar ``na<T>()``:
+        # leave them to the drawing-na / default lowering in _visit_rhs_value.
+        if (name in self._array_vars
+                or name in self._map_vars
+                or name in getattr(self, "_matrix_specs", {})
+                or name in self._udt_var_types):
+            return None
+        cpp_type: str | None = None
+        # 1. ``var`` member (class-scope OR function-local: both are recorded in
+        #    ctx.var_members). This is the authoritative declaration source.
+        for vname, ptype, _init in self.ctx.var_members:
+            if vname == name:
+                cpp_type = PINE_TYPE_TO_CPP.get(ptype, "double")
+                break
+        # 2. Function-local plain (non-``var``) scalar: its declared type was
+        #    remembered at the VarDecl (``_type_for_decl``).
+        if cpp_type is None:
+            cpp_type = getattr(self, "_current_func_local_types", {}).get(name)
+        # 3. Function parameter.
+        if cpp_type is None:
+            cpp_type = getattr(self, "_current_func_param_types", {}).get(name)
+        # 4. Global-scope non-``var`` class member.
+        if cpp_type is None:
+            for gname, gptype in self.ctx.global_var_decls:
+                if gname == name:
+                    cpp_type = PINE_TYPE_TO_CPP.get(gptype, "double")
+                    break
+        if cpp_type is None:
+            return None
+        # int -> int64_t promotion for epoch-ms builtins, mirroring the member
+        # declaration so the na sentinel width matches the storage width.
+        if cpp_type == "int" and self._is_int64_builtin_init(name):
+            cpp_type = "int64_t"
+        # Only the retypeable scalar types are meaningful; ``double`` already
+        # lowers to ``na<double>()`` and everything else is left untouched.
+        if cpp_type in ("int", "int64_t", "bool", "std::string"):
+            return cpp_type
+        return None
+
     # ------------------------------------------------------------------
     # BUG C: user-defined-UDT lvalue aliasing
     # ------------------------------------------------------------------
