@@ -281,7 +281,7 @@ public:
         covReady = ((!(is_na(cov11)) && !(is_na(cov12))) && !(is_na(cov22)));
         lam = na<double>();
         if (covReady) {
-            lam = ((((double)m.eigenvalues().size() > 0)) ? (m.eigenvalues()[(0)]) : (na<double>()));
+            lam = ((([&]{ auto _pna_l = ((double)m.eigenvalues().size()); auto _pna_r = (0); double _pfc_l = static_cast<double>(_pna_l); double _pfc_r = static_cast<double>(_pna_r); bool _pfc_eq = (_pfc_l == _pfc_r) || (std::isfinite(_pfc_l) && std::isfinite(_pfc_r) && std::fabs(_pfc_l - _pfc_r) <= 1e-10); return !is_na(_pna_l) && !is_na(_pna_r) && ((_pfc_l > _pfc_r) && !_pfc_eq); }())) ? (m.eigenvalues()[(0)]) : (na<double>()));
         }
         lamSma = (history_advances_new_bar() ? _ta_sma_6.compute(lam) : _ta_sma_6.recompute(lam));
         if ((((covReady && !(is_na(lam))) && !(is_na(lamSma))) && (history_advances_new_bar() ? _ta_crossover_7.compute(lam, lamSma) : _ta_crossover_7.recompute(lam, lamSma)))) {
