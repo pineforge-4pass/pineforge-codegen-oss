@@ -917,6 +917,18 @@ class TypeInferer:
             return "double"
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            # Nested trade-accessor calls bypass the flat namespace signature
+            # table.  Their textual metadata accessors return std::string from
+            # the runtime, so hintless locals must not use the double fallback.
+            if (isinstance(node.callee, MemberAccess)
+                    and isinstance(node.callee.object, MemberAccess)
+                    and isinstance(node.callee.object.object, Identifier)
+                    and node.callee.object.object.name == "strategy"
+                    and node.callee.object.member in ("closedtrades", "opentrades")
+                    and func_name in (
+                        "entry_id", "exit_id", "entry_comment", "exit_comment",
+                    )):
+                return "std::string"
             # Drawing scalar getter return type (get_text -> std::string,
             # get_x* -> int64_t, get_y*/get_price/get_top/get_bottom -> double).
             if getattr(self, "_uses_drawing", False):

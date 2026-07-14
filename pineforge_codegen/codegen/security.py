@@ -96,6 +96,11 @@ class SecurityEmitter:
         """
         if isinstance(tf_node, StringLiteral):
             return tf_node.value, None
+        if isinstance(tf_node, SwitchStmt):
+            # Keep diagnostics from the registration-time switch renderer
+            # visible; the broad expression fallback below intentionally
+            # catches ordinary unresolved expressions.
+            return None, self._security_tf_runtime_expr(tf_node)
         if isinstance(tf_node, Identifier):
             name = tf_node.name
             if name in self._timeframe_period_vars:
@@ -148,8 +153,81 @@ class SecurityEmitter:
         """
         if node is None:
             return None
+        if isinstance(node, SwitchStmt):
+            return self._security_tf_switch_runtime_expr(node, resolving or set())
         substituted = self._substitute_tf_input_reads(node, resolving or set())
         return self._visit_expr(substituted)
+
+    def _security_tf_switch_runtime_expr(
+        self, node: SwitchStmt, resolving: set[str]
+    ) -> str:
+        """Render a pure switch expression for evaluator registration.
+
+        Pine parses ``tf = switch timeframe.period ...`` as a ``SwitchStmt``
+        even though it is the right-hand side of a declaration.  The regular
+        expression visitor deliberately does not render statement nodes, so
+        passing that alias to ``request.security`` previously produced the
+        truthy placeholder ``/* unknown */`` in generated C++.  Registration
+        only needs the value selection, which can be represented as nested
+        conditional expressions over setup-time-safe leaves such as
+        ``script_tf_`` and direct input getters.
+
+        Only pure, single-expression arms with an explicit default are accepted
+        here.  Other shapes cannot be registered deterministically and produce
+        a clear codegen diagnostic.
+        """
+
+        def arm_value(body: list) -> str:
+            if len(body) != 1 or not isinstance(body[0], ExprStmt):
+                self._codegen_error(
+                    node,
+                    "request.security timeframe switch arms must contain one expression",
+                    hint=(
+                        "Compute multi-statement timeframe logic before the "
+                        "request.security call or rewrite it as pure switch arms."
+                    ),
+                )
+            value = self._security_tf_runtime_expr(body[0].expr, resolving)
+            if value is None:
+                self._codegen_error(
+                    node,
+                    "request.security timeframe switch arm could not be resolved at setup",
+                )
+            return value
+
+        if not node.default_body:
+            self._codegen_error(
+                node,
+                "request.security timeframe switch requires a default arm",
+                hint=(
+                    "An unmatched Pine switch yields na; add an explicit default "
+                    "timeframe so the evaluator can be registered deterministically."
+                ),
+            )
+        result = arm_value(node.default_body)
+
+        selector = None
+        if node.expr is not None:
+            selector = self._security_tf_runtime_expr(node.expr, resolving)
+            if selector is None:
+                self._codegen_error(
+                    node,
+                    "request.security timeframe switch selector could not be resolved at setup",
+                )
+
+        for case_expr, body in reversed(node.cases):
+            value = arm_value(body)
+            case = self._security_tf_runtime_expr(case_expr, resolving)
+            if case is None:
+                self._codegen_error(
+                    node,
+                    "request.security timeframe switch case could not be resolved at setup",
+                )
+            condition = (
+                f"(({selector}) == ({case}))" if selector is not None else case
+            )
+            result = f"(({condition}) ? ({value}) : ({result}))"
+        return result
 
     def _substitute_tf_input_reads(self, node, resolving: set[str]):
         """Return ``node`` with input-derived leaves rewritten to expressions

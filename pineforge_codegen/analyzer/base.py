@@ -1907,6 +1907,22 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if isinstance(obj, Identifier) and obj.name == "request":
                 return self._handle_request_call(member, node)
 
+            # strategy.closedtrades.*(idx) / strategy.opentrades.*(idx).
+            # The callee is a nested MemberAccess, so it does not enter the
+            # direct ``strategy.*`` branch above.  Its MemberAccess visitor
+            # already owns the authoritative accessor return-type mapping;
+            # preserve that type for the call instead of falling through to
+            # VOID (which later becomes a C++ double declaration).
+            if (isinstance(obj, MemberAccess)
+                    and isinstance(obj.object, Identifier)
+                    and obj.object.name == "strategy"
+                    and obj.member in ("closedtrades", "opentrades")):
+                for arg in node.args:
+                    self._visit(arg)
+                for val in node.kwargs.values():
+                    self._visit(val)
+                return self._visit(callee)
+
             # General member call (e.g., array.push, etc.)
             self._visit(obj)
             for arg in node.args:
