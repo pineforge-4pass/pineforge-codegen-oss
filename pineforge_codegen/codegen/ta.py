@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 from ..ast_nodes import (
     Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall,
     Identifier, MemberAccess, NaLiteral, NumberLiteral, StringLiteral,
-    Subscript, Ternary, TupleLiteral, UnaryOp, VarDecl,
+    Subscript, Ternary, TupleAssign, TupleLiteral, TypeDecl, UnaryOp, VarDecl,
 )
 from .tables import TA_IMPLICIT_APPEND, TA_IMPLICIT_COMPUTE_FULL
 
@@ -293,6 +293,140 @@ class TaSiteHelper:
             return False
         return False
 
+    def _ta_call_nodes_under_and_rhs(self) -> set[int]:
+        """``id(FuncCall)`` for ``ta.*`` sites below a lazy ``and`` RHS.
+
+        This is deliberately narrower than a general conditional-execution
+        classifier.  The campaign oracle pins chart-context ``ta.sma`` under
+        ``and``; it does not justify changing precalc for ``or``, ``?:``, or
+        other TA families.  ``under_and_rhs`` is propagated through nested
+        expression nodes so calls such as ``ta.change(ta.sma(...))`` retain the
+        enclosing ``and`` context.
+        """
+        cached = getattr(self, "_and_rhs_ta_call_nodes", None)
+        if cached is not None:
+            return cached
+
+        and_rhs: set[int] = set()
+
+        def note_ta_calls(expr, under_and_rhs: bool) -> None:
+            if expr is None:
+                return
+            if isinstance(expr, FuncCall):
+                callee = expr.callee
+                is_security = (
+                    isinstance(callee, MemberAccess)
+                    and isinstance(callee.object, Identifier)
+                    and callee.object.name == "request"
+                    and callee.member in ("security", "security_lower_tf")
+                )
+                if under_and_rhs and isinstance(expr.callee, MemberAccess):
+                    obj = expr.callee.object
+                    if isinstance(obj, Identifier) and obj.name == "ta":
+                        and_rhs.add(id(expr))
+                # A call target may itself be an evaluated expression, as in
+                # ``array.new_float(...).get(0)``. Walk the callee subtree so
+                # TA nested in a chained receiver inherits the surrounding
+                # lazy context. Plain identifiers and namespace receivers are
+                # leaves, so ordinary ``ta.sma`` / ``request.security`` calls
+                # remain unaffected here.
+                note_ta_calls(callee, under_and_rhs)
+                for idx, arg in enumerate(getattr(expr, "args", ()) or ()):
+                    # The third request.security* argument is evaluated by its
+                    # own security evaluator. Symbol, timeframe, and remaining
+                    # options are chart-context expressions and must still be
+                    # inspected for lazy chart TA.
+                    if is_security and idx == 2:
+                        continue
+                    note_ta_calls(arg, under_and_rhs)
+                for key, value in (getattr(expr, "kwargs", None) or {}).items():
+                    if is_security and key == "expression":
+                        continue
+                    note_ta_calls(value, under_and_rhs)
+                return
+            if isinstance(expr, BinOp):
+                if expr.op == "and":
+                    # LHS always runs first; RHS is short-circuit conditional.
+                    note_ta_calls(expr.left, under_and_rhs)
+                    note_ta_calls(expr.right, True)
+                else:
+                    # ``or`` is not a new opt-out boundary, but preserve an
+                    # enclosing ``and`` RHS while walking through it.
+                    note_ta_calls(expr.left, under_and_rhs)
+                    note_ta_calls(expr.right, under_and_rhs)
+                return
+            if isinstance(expr, Ternary):
+                # A ternary alone is not evidence for changing precalc.
+                note_ta_calls(expr.condition, under_and_rhs)
+                note_ta_calls(expr.true_val, under_and_rhs)
+                note_ta_calls(expr.false_val, under_and_rhs)
+                return
+            if isinstance(expr, UnaryOp):
+                note_ta_calls(expr.operand, under_and_rhs)
+                return
+            if isinstance(expr, (MemberAccess, Subscript)):
+                note_ta_calls(getattr(expr, "object", None), under_and_rhs)
+                note_ta_calls(getattr(expr, "index", None), under_and_rhs)
+                return
+            if isinstance(expr, TupleLiteral):
+                for elem in expr.elements:
+                    note_ta_calls(elem, under_and_rhs)
+                return
+
+        def walk_stmt(stmt) -> None:
+            if stmt is None:
+                return
+            if isinstance(stmt, VarDecl):
+                note_ta_calls(stmt.value, False)
+                return
+            if isinstance(stmt, ExprStmt):
+                note_ta_calls(getattr(stmt, "value", None) or getattr(stmt, "expr", None), False)
+                return
+            if isinstance(stmt, Assignment):
+                note_ta_calls(getattr(stmt, "target", None), False)
+                note_ta_calls(getattr(stmt, "value", None), False)
+                return
+            if isinstance(stmt, TupleAssign):
+                note_ta_calls(getattr(stmt, "value", None), False)
+                return
+            if isinstance(stmt, TypeDecl):
+                for field in getattr(stmt, "fields", ()) or ():
+                    note_ta_calls(getattr(field, "default", None), False)
+                return
+            # If / for / while / assign-like — best-effort field walk
+            for attr in ("condition", "body", "else_body", "else_ifs", "value", "target", "iterable"):
+                child = getattr(stmt, attr, None)
+                if child is None:
+                    continue
+                if isinstance(child, list):
+                    for item in child:
+                        if isinstance(item, (list, tuple)):
+                            for sub in item:
+                                walk_stmt(sub)
+                        elif hasattr(item, "body") or hasattr(item, "name") or hasattr(item, "value"):
+                            walk_stmt(item)
+                        else:
+                            note_ta_calls(item, False)
+                elif hasattr(child, "op") or hasattr(child, "args") or hasattr(child, "left"):
+                    note_ta_calls(child, False)
+                elif hasattr(child, "body") or hasattr(child, "value") or hasattr(child, "condition"):
+                    walk_stmt(child)
+
+        ast = getattr(self.ctx, "ast", None)
+        for stmt in getattr(ast, "body", ()) or ():
+            walk_stmt(stmt)
+        # User function bodies (original sites live here; clones share node ids
+        # only when they reuse the same FuncCall object — still best-effort).
+        for finfo in getattr(self.ctx, "func_infos", None) or []:
+            node = getattr(finfo, "node", None)
+            body = getattr(node, "body", None) if node is not None else None
+            if body:
+                for stmt in body:
+                    walk_stmt(stmt)
+
+        self._and_rhs_ta_call_nodes = and_rhs
+        return and_rhs
+
     def _ta_site_uses_precalc(self, site: "TACallSite") -> bool:
         """Whether a static TA site can safely read from ``_precalc_*``.
 
@@ -302,8 +436,20 @@ class TaSiteHelper:
         ``ha_close = close`` is static in that analyzer sense, yet its Series is
         empty during precompute, so ``ta.stdev(ha_close, 20)`` precalculates as
         all-``na``. Opting that site out preserves correctness; it simply uses
-        the ordinary stateful TA object during ``on_bar``."""
+        the ordinary stateful TA object during ``on_bar``.
+
+        A chart-context ``ta.sma`` nested under an ``and`` RHS is also opted
+        out: precalc advances it every bar, which is eager and TV-incorrect for
+        the pinned dual-volume-SMA case. Other TA families, ``or``/``?:``-only
+        sites, and request.security sites retain their existing behavior."""
         if not getattr(site, "is_static", False):
+            return False
+        node = getattr(site, "node", None)
+        if (
+            self._ta_name_from_site(site) == "sma"
+            and node is not None
+            and id(node) in self._ta_call_nodes_under_and_rhs()
+        ):
             return False
         return all(self._expr_safe_for_ta_precalc(arg) for arg in site.compute_args)
 

@@ -166,10 +166,11 @@ _BUILTIN_NAMESPACE_NAMES: frozenset[str] = frozenset({
 })
 
 
-# KI-71: Pine relational comparisons (``==`` ``!=`` ``<`` ``>`` ``<=`` ``>=``)
-# with an ``na`` operand evaluate *falsy*. Naive C++ relationals do not honour
-# this for the engine's na sentinels, so these ops route through na-aware
-# lowering when an operand can be na (see ``_visit_binop`` / ``_operand_na_kind``).
+# KI-71/KI-73: Pine relational comparisons (``==`` ``!=`` ``<`` ``>``
+# ``<=`` ``>=``) with an ``na`` operand evaluate *falsy*. Pine also treats
+# finite float operands at most 1e-10 apart as equal, independent of their
+# magnitude. Naive C++ relationals honour neither rule completely, so numeric
+# comparisons route through the shared lowering below.
 _RELATIONAL_OPS: frozenset[str] = frozenset({"==", "!=", "<", ">", "<=", ">="})
 
 # C++ scalar types carrying a detectable ``na`` sentinel via ``is_na``:
@@ -820,29 +821,62 @@ class ExprVisitor:
                 f"return !is_na(_pna_l) && !is_na(_pna_r) && "
                 f"(_pna_l {op} _pna_r); }}())")
 
+    def _emit_float_relational(self, op: str, left: str, right: str) -> str:
+        """Emit Pine's na-aware float comparator with its fixed equality band.
+
+        Pine evaluates each operand once, rejects ``na``, and converts an int
+        to float when paired with a float. TradingView oracle probes pin a
+        magnitude-independent comparison band: finite operands with
+        ``abs(left - right) <= 1e-10`` compare equal. Every ordered operator is
+        derived from that same predicate, so strict ``<``/``>`` are suppressed
+        inside the band while ``<=``/``>=`` accept it.
+
+        Exact equality is checked first so equal infinities remain equal;
+        opposite infinities and finite/infinite pairs remain normally ordered.
+        The subtraction can overflow only to infinity, which is safely outside
+        the equality band. The preceding ``is_na`` guard keeps every NaN
+        comparison falsy, including ``!=``.
+        """
+        compare = {
+            "==": "_pfc_eq",
+            "!=": "!_pfc_eq",
+            "<": "(_pfc_l < _pfc_r) && !_pfc_eq",
+            ">": "(_pfc_l > _pfc_r) && !_pfc_eq",
+            "<=": "(_pfc_l < _pfc_r) || _pfc_eq",
+            ">=": "(_pfc_l > _pfc_r) || _pfc_eq",
+        }[op]
+        return (
+            f"([&]{{ auto _pna_l = ({left}); auto _pna_r = ({right}); "
+            "double _pfc_l = static_cast<double>(_pna_l); "
+            "double _pfc_r = static_cast<double>(_pna_r); "
+            "bool _pfc_eq = (_pfc_l == _pfc_r) || "
+            "(std::isfinite(_pfc_l) && std::isfinite(_pfc_r) && "
+            "std::fabs(_pfc_l - _pfc_r) <= 1e-10); "
+            f"return !is_na(_pna_l) && !is_na(_pna_r) && "
+            f"({compare}); }}())"
+        )
+
     def _lower_relational(self, op: str, left_node, right_node,
                           left_cpp: str, right_cpp: str) -> str:
-        """Lower a Pine relational to C++, applying KI-71 na-aware wrapping.
+        """Lower a Pine relational with Pine's na and float-precision rules.
 
         Shared by ``_visit_binop`` and the ``request.security`` expression
-        builder so EVERY relational emission site honours Pine's falsy-on-na
-        rule. Wraps only the diverging cells: any na-capable *integer* operand
-        (the INT_MIN sentinel poisons all six operators) or a ``!=`` with an
-        na-capable *float* operand (the sole IEEE-diverging float cell). Pure
-        ``double`` ``==`` ``<`` ``>`` ``<=`` ``>=`` keep the naive emission —
-        IEEE is already falsy-on-NaN there, so wrapping would be a pure no-op.
-        Non-relational ``op`` (or non-scalar operands with no ``is_na``) fall
-        through to the naive ``(left op right)`` form unchanged.
+        builder so EVERY relational emission site honours Pine's rules. Any
+        numeric comparison involving an inferred float gets the fixed-band
+        wrapper for all six operators. Pure integer comparisons get the smaller
+        KI-71 wrapper only when an operand can carry the INT_MIN ``na`` sentinel.
+        Non-relational operators and nonnumeric operands fall through unchanged.
         """
         if op in _RELATIONAL_OPS:
             lt = self._infer_type(left_node)
             rt = self._infer_type(right_node)
             if lt in _NA_SCALAR_CPP and rt in _NA_SCALAR_CPP:
+                if "double" in (lt, rt):
+                    return self._emit_float_relational(op, left_cpp, right_cpp)
                 lk = self._operand_na_kind(left_node, lt)
                 rk = self._operand_na_kind(right_node, rt)
                 int_na = "int" in (lk, rk)
-                float_na = "float" in (lk, rk)
-                if int_na or (op == "!=" and float_na):
+                if int_na:
                     return self._emit_na_relational(op, left_cpp, right_cpp)
         return f"({left_cpp} {op} {right_cpp})"
 

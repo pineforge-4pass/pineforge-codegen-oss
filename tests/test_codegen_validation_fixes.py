@@ -496,6 +496,169 @@ def test_ta_precalc_skips_user_series_alias_source():
     assert "_ta_stdev_1.compute(ha_close)" in cpp
 
 
+def test_ta_precalc_skips_short_circuit_and_rhs_call_sites():
+    """Dual ta.sma under ``and`` must not use full-history precalc (lazy-stale).
+
+    Campaign pin: pf-probe-oliver-dual-vol-sma — TV dual-callsite volume SMAs
+    disagree with a hoisted SMA; eager precalc erased that independence.
+    """
+    cpp = _cpp(
+        "stPred = close > open\n"
+        "a = stPred and (volume < ta.sma(volume, 20))\n"
+        "b = stPred and (volume > ta.sma(volume, 20) * 1.2)\n"
+        "v = ta.sma(volume, 20)\n"
+        "c = stPred and (volume < v)\n"
+        "plot(close)"
+    )
+    # Hoisted always-evaluated SMA may still precalc; dual sites under `and` must not.
+    assert "_use_precalc ? _precalc__ta_sma_1" not in cpp
+    assert "_use_precalc ? _precalc__ta_sma_2" not in cpp
+    assert "stPred &&" in cpp
+    assert "_ta_sma_1.compute(current_bar_.volume)" in cpp
+    assert "_ta_sma_2.compute(current_bar_.volume)" in cpp
+    # Hoisted third SMA still eligible for precalc
+    assert "_precalc__ta_sma_3" in cpp
+
+
+def test_ta_precalc_skips_nested_sma_below_and_rhs():
+    """The SMA keeps the enclosing lazy context through an outer ta.change."""
+    cpp = _cpp(
+        "base = ta.mom(close, 20) > 0 and ta.change(ta.sma(close, 50)) > 0\n"
+        "plot(base ? 1 : 0)"
+    )
+    assert "std::vector<double> _precalc__ta_sma" not in cpp
+    assert "_use_precalc ? _precalc__ta_sma" not in cpp
+    assert "_ta_sma_" in cpp and ".compute(current_bar_.close)" in cpp
+
+
+def test_ta_precalc_and_rhs_scope_keeps_other_ta_and_other_lazy_constructs():
+    """Only SMA under an ``and`` RHS changes precalc eligibility."""
+    cpp = _cpp(
+        "pred = close > open\n"
+        "a = pred and ta.ema(close, 20) > close\n"
+        "b = pred and ta.roc(close, 3) > 0\n"
+        "c = pred and ta.lowest(close, 3) > low\n"
+        "d = pred and ta.highest(close, 3) < high\n"
+        "e = pred or close > ta.sma(close, 5)\n"
+        "f = pred ? ta.sma(close, 7) : close\n"
+        "plot((a or b or c or d or e) ? f : close)"
+    )
+    for name in ("ema", "roc", "lowest", "highest"):
+        assert f"std::vector<double> _precalc__ta_{name}_" in cpp
+        assert f"_use_precalc ? _precalc__ta_{name}_" in cpp
+    assert len(re.findall(r"std::vector<double> _precalc__ta_sma_", cpp)) == 2
+    assert len(re.findall(r"_use_precalc \? _precalc__ta_sma_", cpp)) >= 2
+
+
+def test_ta_precalc_keeps_security_context_and_rhs_sma():
+    """Security-local TA is distinct; a referenced chart expression is not."""
+    cpp = _cpp(
+        "pred = close > open\n"
+        "chart = pred and close > ta.sma(close, 3)\n"
+        "sec = request.security(syminfo.tickerid, \"60\", "
+        "close > open and close > ta.sma(close, 4))\n"
+        "secChart = request.security(syminfo.tickerid, \"60\", chart)\n"
+        "plot(chart ? sec + secChart : close)"
+    )
+    assert "std::vector<double> _precalc__ta_sma_1" not in cpp
+    assert "std::vector<double> _precalc__ta_sma_2" in cpp
+
+
+def test_ta_precalc_skips_and_rhs_sma_in_tuple_assignment():
+    """Top-level TupleAssign/TupleLiteral payloads participate in classification."""
+    cpp = _cpp(
+        "pred = close > open\n"
+        "[a, b] = [pred and ta.sma(close, 3) > close, close]\n"
+        "plot(a ? b : close)"
+    )
+    assert "std::vector<double> _precalc__ta_sma" not in cpp
+    assert "_use_precalc ? _precalc__ta_sma" not in cpp
+    assert "ta::SMA _ta_sma_1;" in cpp
+
+
+def test_ta_precalc_skips_and_rhs_sma_in_assignment_subscript_target():
+    """An assignment target can contain evaluated expressions in its index."""
+    cpp = _cpp(
+        "pred = close > open\n"
+        "xs = array.new_float(2, 0.0)\n"
+        "xs[pred and ta.sma(close, 3) > close ? 0 : 1] := close\n"
+        "plot(array.get(xs, 0))"
+    )
+    assert "std::vector<double> _precalc__ta_sma" not in cpp
+    assert "_use_precalc ? _precalc__ta_sma" not in cpp
+    assert "_ta_sma_1.compute(current_bar_.close)" in cpp
+
+
+def test_ta_precalc_walks_nested_func_call_keyword_values_under_and_rhs():
+    """Lazy context propagates through keyword values and nested calls."""
+    cpp = _cpp(
+        "pred = close > open\n"
+        "x = pred and label.get_x(id = "
+        "label.new(bar_index, ta.sma(close, 3))) > 0\n"
+        "plot(x ? 1 : 0)"
+    )
+    assert "std::vector<double> _precalc__ta_sma" not in cpp
+    assert "_use_precalc ? _precalc__ta_sma" not in cpp
+    assert "ta::SMA _ta_sma_1;" in cpp
+
+
+def test_ta_precalc_walks_chained_call_receiver_under_and_rhs():
+    """An evaluated call receiver inherits its enclosing lazy context."""
+    cpp = _cpp(
+        "pred = close > open\n"
+        "x = pred and label.new(x = bar_index, "
+        "y = ta.sma(close, 3)).get_y() > close\n"
+        "plot(x ? 1 : 0)"
+    )
+    assert "std::vector<double> _precalc__ta_sma" not in cpp
+    assert "_use_precalc ? _precalc__ta_sma" not in cpp
+    assert "_ta_sma_1.compute(current_bar_.close)" in cpp
+
+
+def test_ta_precalc_security_positional_skips_only_expression_payload():
+    """Security symbol/timeframe are chart context; its payload is not."""
+    cpp = _cpp(
+        "pred = close > open\n"
+        "sec = request.security("
+        "(pred and ta.sma(close, 3) > close) ? syminfo.tickerid : syminfo.tickerid, "
+        "(pred and ta.sma(close, 4) > close) ? \"60\" : \"60\", "
+        "pred and ta.sma(close, 5) > close)\n"
+        "plot(sec ? 1 : 0)"
+    )
+    assert "std::vector<double> _precalc__ta_sma_1" not in cpp
+    assert "std::vector<double> _precalc__ta_sma_2" not in cpp
+    assert "std::vector<double> _precalc__ta_sma_3" in cpp
+
+
+def test_ta_precalc_security_lower_tf_keywords_skip_only_expression_payload():
+    """Keyword-bound lower-TF payload has the same evaluator boundary."""
+    cpp = _cpp(
+        "pred = close > open\n"
+        "sec = request.security_lower_tf("
+        "symbol = (pred and ta.sma(close, 3) > close) "
+        "? syminfo.tickerid : syminfo.tickerid, "
+        "timeframe = (pred and ta.sma(close, 4) > close) ? \"15\" : \"15\", "
+        "expression = pred and ta.sma(close, 5) > close)\n"
+        "plot(array.size(sec))"
+    )
+    assert "std::vector<double> _precalc__ta_sma_1" not in cpp
+    assert "std::vector<double> _precalc__ta_sma_2" not in cpp
+    assert "std::vector<double> _precalc__ta_sma_3" in cpp
+
+
+def test_ta_precalc_walks_type_field_defaults():
+    """Accepted UDT field defaults participate in chart classification."""
+    cpp = _cpp(
+        "type State\n"
+        "    bool ready = close > open and ta.sma(close, 3) > close\n"
+        "s = State.new()\n"
+        "plot(s.ready ? 1 : 0)"
+    )
+    assert "std::vector<double> _precalc__ta_sma" not in cpp
+    assert "_use_precalc ? _precalc__ta_sma" not in cpp
+    assert "ta::SMA _ta_sma_1;" in cpp
+
+
 def test_text_align_wrapper_param_infers_string():
     cpp = _cpp(
         "var table dash = table.new(position.top_right, 1, 1)\n"
