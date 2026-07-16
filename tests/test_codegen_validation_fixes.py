@@ -531,8 +531,8 @@ def test_ta_precalc_skips_nested_sma_below_and_rhs():
     assert "_ta_sma_" in cpp and ".compute(current_bar_.close)" in cpp
 
 
-def test_ta_precalc_and_rhs_scope_keeps_other_ta_and_other_lazy_constructs():
-    """Only SMA under an ``and`` RHS changes precalc eligibility."""
+def test_ta_precalc_lazy_scope_routes_recursive_ema_only():
+    """EMA follows Pine-v6 lazy edges while unrelated TA stays precalculated."""
     cpp = _cpp(
         "pred = close > open\n"
         "a = pred and ta.ema(close, 20) > close\n"
@@ -541,13 +541,77 @@ def test_ta_precalc_and_rhs_scope_keeps_other_ta_and_other_lazy_constructs():
         "d = pred and ta.highest(close, 3) < high\n"
         "e = pred or close > ta.sma(close, 5)\n"
         "f = pred ? ta.sma(close, 7) : close\n"
-        "plot((a or b or c or d or e) ? f : close)"
+        "g = pred or ta.ema(close, 21) > close\n"
+        "h = pred ? ta.ema(close, 22) : close\n"
+        "i = ta.ema(close, 23)\n"
+        "plot((a or b or c or d or e or g) ? f + h + i : close)"
     )
-    for name in ("ema", "roc", "lowest", "highest"):
+    for name in ("roc", "lowest", "highest"):
         assert f"std::vector<double> _precalc__ta_{name}_" in cpp
         assert f"_use_precalc ? _precalc__ta_{name}_" in cpp
+    assert len(re.findall(r"std::vector<double> _precalc__ta_ema_", cpp)) == 1
     assert len(re.findall(r"std::vector<double> _precalc__ta_sma_", cpp)) == 2
     assert len(re.findall(r"_use_precalc \? _precalc__ta_sma_", cpp)) >= 2
+
+
+def test_recursive_ema_lazy_edges_preserve_eager_operand_positions():
+    """Only OR RHS / ternary arms opt out; eager positions still precalc."""
+    cpp = _cpp(
+        "pred = close > open\n"
+        "orLeft = ta.ema(close, 10) > close or pred\n"
+        "orRight = pred or ta.ema(close, 11) > close\n"
+        "ternaryCond = ta.ema(close, 12) > close ? close : open\n"
+        "ternaryTrue = pred ? ta.ema(close, 13) : close\n"
+        "ternaryFalse = pred ? close : ta.ema(close, 14)\n"
+        "plot(orLeft ? ternaryCond + ternaryTrue + ternaryFalse "
+        ": orRight ? close : open)"
+    )
+    for idx in (1, 3):
+        assert f"std::vector<double> _precalc__ta_ema_{idx}" in cpp
+        assert f"_use_precalc ? _precalc__ta_ema_{idx}" in cpp
+    for idx in (2, 4, 5):
+        assert f"ta::EMA _ta_ema_{idx};" in cpp
+        assert f"std::vector<double> _precalc__ta_ema_{idx}" not in cpp
+        assert f"_use_precalc ? _precalc__ta_ema_{idx}" not in cpp
+        assert f"_ta_ema_{idx}.compute(current_bar_.close)" in cpp
+
+
+def test_lazy_chart_ema_does_not_reclassify_security_evaluator_ema():
+    """Security payload EMA keeps evaluator-local state, not chart scope."""
+    cpp = _cpp(
+        "pred = close > open\n"
+        "chart = pred or ta.ema(close, 3) > close\n"
+        "sec = request.security(syminfo.tickerid, \"60\", "
+        "close > open or ta.ema(close, 4) > close)\n"
+        "plot(chart ? sec : close)"
+    )
+    assert "std::vector<double> _precalc__ta_ema_1" not in cpp
+    assert "_ta_ema_1.compute(current_bar_.close)" in cpp
+    security_body = cpp.split("void _eval_security_0", 1)[1].split("\n    }", 1)[0]
+    assert "ta::EMA _sec0__ta_ema_2;" in cpp
+    assert "_sec0__ta_ema_2.compute(bar.close)" in security_body
+    assert " || " in security_body
+
+
+def test_lazy_udf_ema_uses_callsite_state_without_precalc():
+    """A lazy UDF call keeps a distinct EMA clock from an eager sibling."""
+    cpp = _cpp(
+        "f() =>\n"
+        "    ta.ema(close, 3)\n"
+        "pred = close > open\n"
+        "lazy = pred and f() > close\n"
+        "eager = f()\n"
+        "plot(lazy ? eager : close)"
+    )
+    assert "std::vector<double> _precalc__ta_ema" not in cpp
+    assert "ta::EMA _ta_ema_1;" in cpp
+    assert "ta::EMA _ta_ema_1_cs1;" in cpp
+    lazy_body = cpp.split("double f_cs0()", 1)[1].split("\n    }", 1)[0]
+    eager_body = cpp.split("double f_cs1()", 1)[1].split("\n    }", 1)[0]
+    assert "_ta_ema_1.compute(current_bar_.close)" in lazy_body
+    assert "_ta_ema_1_cs1.compute(current_bar_.close)" in eager_body
+    assert "lazy = (pred &&" in cpp and "f_cs0()" in cpp
+    assert "eager = f_cs1();" in cpp
 
 
 def test_ta_precalc_keeps_security_context_and_rhs_sma():
