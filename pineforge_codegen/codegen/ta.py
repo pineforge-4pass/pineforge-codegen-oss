@@ -29,8 +29,9 @@ from typing import TYPE_CHECKING
 
 from ..ast_nodes import (
     Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall,
-    Identifier, MemberAccess, NaLiteral, NumberLiteral, StringLiteral,
-    Subscript, Ternary, TupleAssign, TupleLiteral, TypeDecl, UnaryOp, VarDecl,
+    ForInStmt, ForStmt, FuncDef, Identifier, MemberAccess, NaLiteral,
+    NumberLiteral, StringLiteral, Subscript, Ternary, TupleAssign,
+    TupleLiteral, TypeDecl, UnaryOp, VarDecl,
 )
 from .tables import TA_IMPLICIT_APPEND, TA_IMPLICIT_COMPUTE_FULL
 
@@ -293,14 +294,18 @@ class TaSiteHelper:
             return False
         return False
 
-    def _ta_call_nodes_by_lazy_scope(self) -> tuple[set[int], set[int]]:
+    def _ta_call_nodes_by_lazy_scope(self) -> tuple[set[int], set[int], set[int]]:
         """Classify chart ``ta.*`` sites below Pine-v6 lazy-expression edges.
 
         The first set contains sites below an ``and`` RHS, preserving the
         already accepted lazy-SMA scope.  The second contains sites below any
         Pine-v6 lazy edge: an ``and``/``or`` RHS or either ``?:`` branch.  The
         broader set is consumed only by the recursive-EMA route;
-        other TA families retain their current precalculation behavior.
+        other TA families retain their current precalculation behavior.  The
+        third is the narrow ``and``-only subset: the site is below an ``and``
+        RHS and is not nested anywhere inside an ``or`` or ternary expression.
+        It gives source-shaped lazy call clocks a stable AST identity without
+        inspecting generated member names.
         """
         cached = getattr(self, "_lazy_scope_ta_call_nodes", None)
         if cached is not None:
@@ -308,11 +313,13 @@ class TaSiteHelper:
 
         and_rhs: set[int] = set()
         lazy_rhs: set[int] = set()
+        plain_and_rhs: set[int] = set()
 
         def note_ta_calls(
             expr,
             under_and_rhs: bool,
             under_lazy_rhs: bool,
+            under_disallowed_shape: bool,
         ) -> None:
             if expr is None:
                 return
@@ -331,13 +338,20 @@ class TaSiteHelper:
                             and_rhs.add(id(expr))
                         if under_lazy_rhs:
                             lazy_rhs.add(id(expr))
+                        if under_and_rhs and not under_disallowed_shape:
+                            plain_and_rhs.add(id(expr))
                 # A call target may itself be an evaluated expression, as in
                 # ``array.new_float(...).get(0)``. Walk the callee subtree so
                 # TA nested in a chained receiver inherits the surrounding
                 # lazy context. Plain identifiers and namespace receivers are
                 # leaves, so ordinary ``ta.sma`` / ``request.security`` calls
                 # remain unaffected here.
-                note_ta_calls(callee, under_and_rhs, under_lazy_rhs)
+                note_ta_calls(
+                    callee,
+                    under_and_rhs,
+                    under_lazy_rhs,
+                    under_disallowed_shape,
+                )
                 for idx, arg in enumerate(getattr(expr, "args", ()) or ()):
                     # The third request.security* argument is evaluated by its
                     # own security evaluator. Symbol, timeframe, and remaining
@@ -345,70 +359,119 @@ class TaSiteHelper:
                     # inspected for lazy chart TA.
                     if is_security and idx == 2:
                         continue
-                    note_ta_calls(arg, under_and_rhs, under_lazy_rhs)
+                    note_ta_calls(
+                        arg,
+                        under_and_rhs,
+                        under_lazy_rhs,
+                        under_disallowed_shape,
+                    )
                 for key, value in (getattr(expr, "kwargs", None) or {}).items():
                     if is_security and key == "expression":
                         continue
-                    note_ta_calls(value, under_and_rhs, under_lazy_rhs)
+                    note_ta_calls(
+                        value,
+                        under_and_rhs,
+                        under_lazy_rhs,
+                        under_disallowed_shape,
+                    )
                 return
             if isinstance(expr, BinOp):
                 if expr.op == "and":
                     # LHS always runs first; RHS is short-circuit conditional.
-                    note_ta_calls(expr.left, under_and_rhs, under_lazy_rhs)
-                    note_ta_calls(expr.right, True, True)
+                    note_ta_calls(
+                        expr.left,
+                        under_and_rhs,
+                        under_lazy_rhs,
+                        under_disallowed_shape,
+                    )
+                    note_ta_calls(
+                        expr.right,
+                        True,
+                        True,
+                        under_disallowed_shape,
+                    )
                 elif expr.op == "or":
                     # ``or`` preserves an enclosing ``and`` scope, but its own
                     # RHS is a Pine-v6 lazy edge for the EMA classifier.
-                    note_ta_calls(expr.left, under_and_rhs, under_lazy_rhs)
-                    note_ta_calls(expr.right, under_and_rhs, True)
+                    note_ta_calls(expr.left, under_and_rhs, under_lazy_rhs, True)
+                    note_ta_calls(expr.right, under_and_rhs, True, True)
                 else:
-                    note_ta_calls(expr.left, under_and_rhs, under_lazy_rhs)
-                    note_ta_calls(expr.right, under_and_rhs, under_lazy_rhs)
+                    note_ta_calls(
+                        expr.left,
+                        under_and_rhs,
+                        under_lazy_rhs,
+                        under_disallowed_shape,
+                    )
+                    note_ta_calls(
+                        expr.right,
+                        under_and_rhs,
+                        under_lazy_rhs,
+                        under_disallowed_shape,
+                    )
                 return
             if isinstance(expr, Ternary):
-                note_ta_calls(expr.condition, under_and_rhs, under_lazy_rhs)
-                note_ta_calls(expr.true_val, under_and_rhs, True)
-                note_ta_calls(expr.false_val, under_and_rhs, True)
+                note_ta_calls(expr.condition, under_and_rhs, under_lazy_rhs, True)
+                note_ta_calls(expr.true_val, under_and_rhs, True, True)
+                note_ta_calls(expr.false_val, under_and_rhs, True, True)
                 return
             if isinstance(expr, UnaryOp):
-                note_ta_calls(expr.operand, under_and_rhs, under_lazy_rhs)
+                note_ta_calls(
+                    expr.operand,
+                    under_and_rhs,
+                    under_lazy_rhs,
+                    under_disallowed_shape,
+                )
                 return
             if isinstance(expr, (MemberAccess, Subscript)):
                 note_ta_calls(
-                    getattr(expr, "object", None), under_and_rhs, under_lazy_rhs
+                    getattr(expr, "object", None),
+                    under_and_rhs,
+                    under_lazy_rhs,
+                    under_disallowed_shape,
                 )
                 note_ta_calls(
-                    getattr(expr, "index", None), under_and_rhs, under_lazy_rhs
+                    getattr(expr, "index", None),
+                    under_and_rhs,
+                    under_lazy_rhs,
+                    under_disallowed_shape,
                 )
                 return
             if isinstance(expr, TupleLiteral):
                 for elem in expr.elements:
-                    note_ta_calls(elem, under_and_rhs, under_lazy_rhs)
+                    note_ta_calls(
+                        elem,
+                        under_and_rhs,
+                        under_lazy_rhs,
+                        under_disallowed_shape,
+                    )
                 return
 
         def walk_stmt(stmt) -> None:
             if stmt is None:
                 return
             if isinstance(stmt, VarDecl):
-                note_ta_calls(stmt.value, False, False)
+                note_ta_calls(stmt.value, False, False, False)
                 return
             if isinstance(stmt, ExprStmt):
                 note_ta_calls(
                     getattr(stmt, "value", None) or getattr(stmt, "expr", None),
                     False,
                     False,
+                    False,
                 )
                 return
             if isinstance(stmt, Assignment):
-                note_ta_calls(getattr(stmt, "target", None), False, False)
-                note_ta_calls(getattr(stmt, "value", None), False, False)
+                note_ta_calls(getattr(stmt, "target", None), False, False, False)
+                note_ta_calls(getattr(stmt, "value", None), False, False, False)
                 return
             if isinstance(stmt, TupleAssign):
-                note_ta_calls(getattr(stmt, "value", None), False, False)
+                note_ta_calls(getattr(stmt, "value", None), False, False, False)
                 return
             if isinstance(stmt, TypeDecl):
                 for field in getattr(stmt, "fields", ()) or ():
-                    note_ta_calls(getattr(field, "default", None), False, False)
+                    note_ta_calls(
+                        getattr(field, "default", None), False, False, False
+                    )
                 return
             # If / for / while / assign-like — best-effort field walk
             for attr in ("condition", "body", "else_body", "else_ifs", "value", "target", "iterable"):
@@ -423,9 +486,9 @@ class TaSiteHelper:
                         elif hasattr(item, "body") or hasattr(item, "name") or hasattr(item, "value"):
                             walk_stmt(item)
                         else:
-                            note_ta_calls(item, False, False)
+                            note_ta_calls(item, False, False, False)
                 elif hasattr(child, "op") or hasattr(child, "args") or hasattr(child, "left"):
-                    note_ta_calls(child, False, False)
+                    note_ta_calls(child, False, False, False)
                 elif hasattr(child, "body") or hasattr(child, "value") or hasattr(child, "condition"):
                     walk_stmt(child)
 
@@ -441,7 +504,7 @@ class TaSiteHelper:
                 for stmt in body:
                     walk_stmt(stmt)
 
-        result = (and_rhs, lazy_rhs)
+        result = (and_rhs, lazy_rhs, plain_and_rhs)
         self._lazy_scope_ta_call_nodes = result
         return result
 
@@ -450,6 +513,193 @@ class TaSiteHelper:
 
     def _ta_call_nodes_under_lazy_rhs(self) -> set[int]:
         return self._ta_call_nodes_by_lazy_scope()[1]
+
+    def _ta_call_nodes_under_plain_and_rhs(self) -> set[int]:
+        return self._ta_call_nodes_by_lazy_scope()[2]
+
+    def _ta_call_nodes_in_top_level_var_values(self) -> set[int]:
+        cached = getattr(self, "_top_level_var_value_ta_nodes", None)
+        if cached is not None:
+            return cached
+        result: set[int] = set()
+        ast = getattr(self.ctx, "ast", None)
+        for stmt in getattr(ast, "body", ()) or ():
+            if not isinstance(stmt, VarDecl):
+                continue
+            for child in self._walk_ast(stmt.value):
+                if isinstance(child, FuncCall):
+                    result.add(id(child))
+        self._top_level_var_value_ta_nodes = result
+        return result
+
+    def _script_has_user_binding(self, name: str) -> bool:
+        cache = getattr(self, "_user_binding_names", None)
+        if cache is None:
+            cache = set()
+            ast = getattr(self.ctx, "ast", None)
+            for node in self._walk_ast(ast):
+                if isinstance(node, VarDecl):
+                    cache.add(node.name)
+                elif isinstance(node, TupleAssign):
+                    cache.update(node.names)
+                elif isinstance(node, ForStmt):
+                    cache.add(node.var)
+                elif isinstance(node, ForInStmt):
+                    if node.var:
+                        cache.add(node.var)
+                    cache.update(node.vars or ())
+                elif isinstance(node, FuncDef):
+                    cache.add(node.name)
+                    cache.update(node.params)
+            self._user_binding_names = cache
+        return name in cache
+
+    def _is_lazy_saturated_roc3_site(self, site: "TACallSite") -> bool:
+        """Return whether ``site`` has the oracle-backed lazy ROC source shape.
+
+        Selection is deliberately syntactic and callsite-local: a direct
+        top-level variable value containing ``ta.roc(close, 3)`` below a plain
+        ``and`` RHS, where ``close`` is not shadowed by any user binding. User
+        functions, control-flow bodies, request.security evaluators,
+        aliases/other sources, named or dynamic lengths, shadowed built-ins,
+        and any surrounding ``or``/ternary shape remain on their existing eager
+        route. Comparator polarity is intentionally absent; two otherwise
+        identical callsites must not acquire different history semantics merely
+        because one compares above zero and one below it.
+        """
+        node = getattr(site, "node", None)
+        if (
+            node is None
+            or getattr(site, "owner_func", None) is not None
+            or self._ta_name_from_site(site) != "roc"
+            or id(node) not in self._ta_call_nodes_under_plain_and_rhs()
+            or id(node) not in self._ta_call_nodes_in_top_level_var_values()
+            or self._script_has_user_binding("close")
+            or not isinstance(node, FuncCall)
+            or getattr(node, "kwargs", None)
+            or len(getattr(node, "args", ())) != 2
+        ):
+            return False
+        source, length = node.args
+        return (
+            isinstance(source, Identifier)
+            and source.name == "close"
+            and isinstance(length, NumberLiteral)
+            and not isinstance(length.value, bool)
+            and length.value == 3
+        )
+
+    def _prepare_lazy_saturated_roc3_sites(self) -> None:
+        """Assign one copyable clock member to each selected AST callsite."""
+        if hasattr(self, "_lazy_saturated_roc3_clock_by_node"):
+            return
+
+        def allocate(base: str, reserved: set[str]) -> str:
+            candidate = base
+            suffix = 2
+            while candidate in reserved:
+                candidate = f"{base}_{suffix}"
+                suffix += 1
+            reserved.add(candidate)
+            return candidate
+
+        # Pine permits leading-underscore identifiers. Reserve every emitted
+        # user member, not only history/var members already tracked by
+        # _all_member_names, before minting generated support names.
+        reserved_members = set(getattr(self, "_all_member_names", set()))
+        reserved_members.update(
+            self._safe_name(name)
+            for name, _ptype in getattr(self.ctx, "global_var_decls", ())
+        )
+        reserved_members.update(
+            self._safe_name(name)
+            for name, _ptype, _init in getattr(self.ctx, "var_members", ())
+        )
+        reserved_types = set(getattr(self, "_udt_defs", {}))
+        for info in getattr(self.ctx, "func_infos", ()):
+            emitted = self._func_cpp_base_name(info.name)
+            reserved_members.add(emitted)
+            reserved_types.add(emitted)
+            total = self.ctx.func_call_site_counts.get(info.name, 0)
+            for callsite in range(total):
+                reserved_members.add(f"{emitted}_cs{callsite}")
+        for instance in getattr(self, "_fresh_instances", ()):
+            reserved_members.add(instance["name"])
+        self._lazy_saturated_roc3_type_name = allocate(
+            "_PFLazySaturatedROC3Clock", reserved_types
+        )
+        self._lazy_saturated_roc3_history_name = allocate(
+            "_pf_lazy_saturated_roc3_close_history", reserved_members
+        )
+
+        clocks: dict[int, str] = {}
+        for index, site in enumerate(self.ctx.ta_call_sites):
+            if index in getattr(self, "_dead_ta_indices", set()):
+                continue
+            if self._is_lazy_saturated_roc3_site(site):
+                clocks[id(site.node)] = allocate(
+                    f"_pf_lazy_saturated_roc3_clock_{len(clocks) + 1}",
+                    reserved_members,
+                )
+        self._lazy_saturated_roc3_clock_by_node = clocks
+
+    def _lazy_saturated_roc3_clock_name(self, site: "TACallSite") -> str:
+        self._prepare_lazy_saturated_roc3_sites()
+        return self._lazy_saturated_roc3_clock_by_node[id(site.node)]
+
+    def _lazy_saturated_roc3_expr(self, site: "TACallSite") -> str:
+        """Lower a reached lazy ROC site through its per-callsite clock."""
+        clock = self._lazy_saturated_roc3_clock_name(site)
+        history = self._lazy_saturated_roc3_history_name
+        return (
+            f"{clock}.evaluate(current_bar_.close, "
+            f"{history}[3], bar_index_)"
+        )
+
+    def _emit_lazy_saturated_roc3_helper(self, lines: list[str]) -> None:
+        """Emit the value-copyable generated runtime helper when needed."""
+        self._prepare_lazy_saturated_roc3_sites()
+        if not self._lazy_saturated_roc3_clock_by_node:
+            return
+        type_name = self._lazy_saturated_roc3_type_name
+        lines.extend(
+            [
+                f"struct {type_name} {{",
+                "    double committed_source = na<double>();",
+                "    int committed_bar = -1;",
+                "    double bar_base_source = na<double>();",
+                "    int bar_base_bar = -1;",
+                "    int working_bar = -1;",
+                "",
+                "    void reset() {",
+                "        committed_source = na<double>();",
+                "        committed_bar = -1;",
+                "        bar_base_source = na<double>();",
+                "        bar_base_bar = -1;",
+                "        working_bar = -1;",
+                "    }",
+                "",
+                "    double evaluate(double source, double eager_previous, int bar) {",
+                "        if (working_bar != bar) {",
+                "            bar_base_source = committed_source;",
+                "            bar_base_bar = committed_bar;",
+                "            working_bar = bar;",
+                "        }",
+                "        const bool saturated = bar_base_bar >= 0 &&",
+                "            bar - bar_base_bar >= 3;",
+                "        const double previous = saturated ? bar_base_source : eager_previous;",
+                "        double result = na<double>();",
+                "        if (!is_na(source) && !is_na(previous) && previous != 0.0) {",
+                "            result = (source - previous) / previous * 100.0;",
+                "        }",
+                "        committed_source = source;",
+                "        committed_bar = bar;",
+                "        return result;",
+                "    }",
+                "};",
+                "",
+            ]
+        )
 
     def _ta_site_uses_precalc(self, site: "TACallSite") -> bool:
         """Whether a static TA site can safely read from ``_precalc_*``.
@@ -468,6 +718,8 @@ class TaSiteHelper:
         any Pine-v6 lazy edge follow the same call-clock rule. Other TA families
         and request.security sites retain their existing behavior."""
         if not getattr(site, "is_static", False):
+            return False
+        if self._is_lazy_saturated_roc3_site(site):
             return False
         node = getattr(site, "node", None)
         ta_name = self._ta_name_from_site(site)

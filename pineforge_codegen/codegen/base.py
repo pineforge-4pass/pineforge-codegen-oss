@@ -2115,6 +2115,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # request.security helper-call results read at a history offset
         # (``myHelper()[k]``). Maps (sec_id, node-id) -> backing Series metadata.
         self._security_expr_hist_by_node: dict[tuple[int, int], dict] = {}
+        self._prepare_lazy_saturated_roc3_sites()
 
         lines: list[str] = []
 
@@ -2175,6 +2176,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     f"static const std::string {enum_name}_str_values[] = {{{parts}}};"
                 )
             lines.append("")
+
+        # Source-shaped lazy ROC call clocks are generated support types, not
+        # script state themselves. Their per-callsite instances are declared
+        # below inside GeneratedStrategy and therefore join the automatic COOF
+        # checkpoint inventory.
+        self._emit_lazy_saturated_roc3_helper(lines)
 
         # 2. Open class
         lines.append("class GeneratedStrategy : public BacktestEngine {")
@@ -2292,6 +2299,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 vtype = self._ta_return_type(site)
                 lines.append(f"    std::vector<{vtype}> _precalc_{site.member_name};")
         lines.append("    bool _use_precalc = false;")
+
+        for clock_name in self._lazy_saturated_roc3_clock_by_node.values():
+            lines.append(
+                f"    {self._lazy_saturated_roc3_type_name} {clock_name};"
+            )
+        if self._lazy_saturated_roc3_clock_by_node:
+            # Dedicated eager close[3] fallback. Its fixed four-slot capacity
+            # is independent of the user's max_bars_back directive, which may
+            # legitimately be smaller than the offset this generated route
+            # requires. It is ordinary copyable script state and therefore
+            # joins the automatic COOF checkpoint below.
+            lines.append(
+                "    Series<double> "
+                f"{self._lazy_saturated_roc3_history_name}{{4}};"
+            )
 
         # Security evaluator TA members (cloned from expression dependencies)
         # Skip for user function call expressions — their TA deps are internal to the function

@@ -67,6 +67,45 @@ def test_minimal_strategy_compiles():
     compile_cpp(cpp, label="minimal_strategy")
 
 
+def test_lazy_saturated_roc_call_clocks_compile_and_are_copyable():
+    """Both structurally identical long/short clocks compile with COOF state."""
+    skip_if_no_compile_env()
+    cpp = transpile('''//@version=6
+strategy("lazy ROC clocks", calc_on_order_fills=true)
+gate = close > open
+longish = gate and ta.roc(close, 3) > 0
+shortish = gate and ta.roc(close, 3) < 0
+if longish or shortish
+    strategy.entry("L", strategy.long)
+''')
+    compile_cpp(cpp, label="lazy_saturated_roc_call_clocks")
+
+
+def test_lazy_saturated_roc_generated_names_compile_with_user_collisions():
+    skip_if_no_compile_env()
+    cpp = transpile('''//@version=6
+strategy("lazy ROC name collisions")
+type _PFLazySaturatedROC3Clock
+    float value
+float _pf_lazy_saturated_roc3_clock_1 = 0.0
+float _pf_lazy_saturated_roc3_close_history = 0.0
+gate = close > open
+signal = gate and ta.roc(close, 3) > 0
+''')
+    compile_cpp(cpp, label="lazy_saturated_roc_name_collisions")
+
+
+def test_lazy_saturated_roc_clock_name_compiles_with_udf_collision():
+    skip_if_no_compile_env()
+    cpp = transpile('''//@version=6
+strategy("lazy ROC UDF collision")
+_pf_lazy_saturated_roc3_clock_1() => 1.0
+other = _pf_lazy_saturated_roc3_clock_1()
+signal = close > open and ta.roc(close, 3) > 0
+''')
+    compile_cpp(cpp, label="lazy_saturated_roc_udf_collision")
+
+
 def test_calc_on_order_fills_mixed_script_state_checkpoint_compiles():
     """The rollback aggregate must remain copyable across every state family."""
     skip_if_no_compile_env()

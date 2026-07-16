@@ -610,6 +610,31 @@ class TopLevelEmitter:
     def _emit_on_bar(self, lines: list[str]) -> None:
         lines.append("    void on_bar(const Bar& bar) override {")
 
+        # A GeneratedStrategy handle may execute multiple batch runs or
+        # streaming lifecycles. BacktestEngine resets broker/base state, but
+        # generated members survive. Reset source-shaped lazy ROC clocks and
+        # their forced eager-fallback close history at the first genuine slot
+        # of each lifecycle. This lives in on_bar rather than a generated run
+        # wrapper because stream_begin() enters the base run path directly.
+        # COOF post-close recalculations have history_advances_new_bar()==false
+        # and therefore preserve the current committed clock/base.
+        if self._lazy_saturated_roc3_clock_by_node:
+            lines.append(
+                "        if (history_advances_new_bar() && bar_index_ == 0) {"
+            )
+            for clock_name in self._lazy_saturated_roc3_clock_by_node.values():
+                lines.append(f"            {clock_name}.reset();")
+            lines.append(
+                f"            {self._lazy_saturated_roc3_history_name}.clear();"
+            )
+            lines.append("        }")
+            self._emit_history_series_write(
+                lines,
+                "        ",
+                self._lazy_saturated_roc3_history_name,
+                "current_bar_.close",
+            )
+
         # reset_run_state() owns engine/broker state, while these generated
         # Series members belong to the strategy object. Clear all of them on
         # the first genuine history slot of bar zero, unconditionally: a site
