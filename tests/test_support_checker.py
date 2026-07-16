@@ -422,6 +422,63 @@ def test_unsupported_strategy_entry_params_warn():
     assert not any("strategy.entry" in d.message and "qty_type" in d.message for d in warns)
 
 
+@pytest.mark.parametrize(
+    ("call", "param_name"),
+    [
+        ('strategy.close_all(alert_message="filled")', "alert_message"),
+        ('strategy.close_all(alert_message="")', "alert_message"),
+        ('strategy.close_all(alert_message=str.tostring(close))', "alert_message"),
+        ("strategy.close_all(disable_alert=true)", "disable_alert"),
+        ("strategy.close_all(disable_alert=false)", "disable_alert"),
+        ("strategy.close_all(disable_alert=close > open)", "disable_alert"),
+        ('strategy.close_all("flat", "filled")', "alert_message"),
+        ('strategy.close_all("flat", "", false, true)', "disable_alert"),
+        ('strategy.close("L", alert_message="filled")', "alert_message"),
+        ('strategy.close("L", alert_message="")', "alert_message"),
+        ('strategy.close("L", alert_message=str.tostring(close))', "alert_message"),
+        ('strategy.close("L", disable_alert=true)', "disable_alert"),
+        ('strategy.close("L", disable_alert=false)', "disable_alert"),
+        ('strategy.close("L", disable_alert=close > open)', "disable_alert"),
+        ('strategy.close("L", "flat", 1, 100, "filled")', "alert_message"),
+        ('strategy.close("L", "flat", 1, 100, "", false, true)', "disable_alert"),
+    ],
+)
+def test_strategy_close_alert_controls_warn_named_and_positional(call, param_name):
+    src = PRELUDE + call + "\n"
+    assert _errors(src) == []
+    function_name = "close_all" if "strategy.close_all" in call else "close"
+    warns = _warnings(src)
+    assert any(
+        d.message == (
+            f"strategy.{function_name} parameter '{param_name}' is not "
+            "supported by PineForge and is ignored."
+        )
+        for d in warns
+    )
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        'strategy.close_all(comment="flat", immediately=true)',
+        'strategy.close_all("flat", "", true)',
+        'strategy.close_all("flat", "", true, false)',
+        'strategy.close("L", comment="flat", immediately=true)',
+        'strategy.close("L", "flat", 1, 100, "", true)',
+        'strategy.close("L", "flat", 1, 100, "", true, false)',
+    ],
+)
+def test_strategy_close_comment_and_immediately_supported_named_and_positional(call):
+    src = PRELUDE + call + "\n"
+    assert _errors(src) == []
+    warns = _warnings(src)
+    assert not any(
+        "strategy.close" in d.message
+        and ("parameter 'comment'" in d.message or "parameter 'immediately'" in d.message)
+        for d in warns
+    )
+
+
 def test_strategy_exit_qty_supported():
     """``strategy.exit(..., qty=...)`` is honoured by the runtime (Pine v6
     semantics: absolute exit qty per bracket), so the support checker

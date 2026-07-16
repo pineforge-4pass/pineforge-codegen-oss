@@ -378,6 +378,30 @@ def test_strategy_close_forwards_qty_percent_and_immediately():
     assert 'strategy_close(std::string("Long"), "", na<double>(), 50, true)' in cpp
 
 
+def test_strategy_close_positional_immediately_uses_official_order():
+    src = ('//@version=6\nstrategy("T")\n'
+           'strategy.close("Long", "manual", 2, 50, "", true)\n')
+    cpp = transpile(src)
+    assert ('strategy_close(std::string("Long"), std::string("manual"), '
+            '2, 50, true)') in cpp
+
+
+def test_strategy_close_all_forwards_named_comment_and_immediately():
+    src = ('//@version=6\nstrategy("T")\n'
+           'strategy.close_all(comment="global flat", immediately=true)\n')
+    cpp = transpile(src)
+    assert ('strategy_close("", std::string("global flat"), '
+            'na<double>(), na<double>(), true)') in cpp
+
+
+def test_strategy_close_all_positional_immediately_uses_official_order():
+    src = ('//@version=6\nstrategy("T")\n'
+           'strategy.close_all("global flat", "", true)\n')
+    cpp = transpile(src)
+    assert ('strategy_close("", std::string("global flat"), '
+            'na<double>(), na<double>(), true)') in cpp
+
+
 def test_strategy_exit_forwards_comment_to_runtime():
     src = '//@version=6\nstrategy("T")\nstrategy.exit("X", "Long", stop=100.0, comment="stop exit")\n'
     cpp = _generate(src)

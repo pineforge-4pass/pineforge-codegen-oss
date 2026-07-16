@@ -307,13 +307,13 @@ _strat("exit", _sig([
 _strat("close", _sig([
     ("id", S), ("comment", S, None),
     ("qty", F, None), ("qty_percent", F, None),
-    ("alert_message", S, None), ("disable_alert", B, None),
-    ("immediately", B, False),
+    ("alert_message", S, None), ("immediately", B, False),
+    ("disable_alert", B, None),
 ], ret=VOID))
 
 _strat("close_all", _sig([
     ("comment", S, None), ("alert_message", S, None),
-    ("disable_alert", B, None), ("immediately", B, False),
+    ("immediately", B, False), ("disable_alert", B, None),
 ], ret=VOID))
 
 _strat("cancel", _sig([("id", S)], ret=VOID))

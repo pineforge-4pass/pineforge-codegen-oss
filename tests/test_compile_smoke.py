@@ -292,6 +292,8 @@ if ta.crossover(ta.sma(close, 10), ta.sma(close, 30))
     strategy.entry("L", strategy.long, qty=1, comment="enter")
 if ta.crossunder(ta.sma(close, 10), ta.sma(close, 30))
     strategy.close("L", comment="exit")
+if close < open
+    strategy.close_all(comment="global exit", immediately=true)
 
 strategy.exit("X", from_entry="L", profit=1.0, loss=0.5)
 strategy.exit("T", from_entry="L", trail_points=10, trail_offset=5)

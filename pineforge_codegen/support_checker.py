@@ -209,8 +209,12 @@ STRATEGY_UNSUPPORTED_PARAMS: dict[str, set[str]] = {
     "order": {"comment", "alert_message", "disable_alert", "qty_type"},
     "exit": {"comment_profit", "comment_loss", "comment_trailing", "alert_message", "alert_profit", "alert_loss", "alert_trailing", "disable_alert"},
     "close": {"alert_message", "disable_alert"},
-    "close_all": {"comment", "alert_message", "disable_alert", "immediately"},
+    "close_all": {"alert_message", "disable_alert"},
 }
+
+# Alert delivery remains outside the backtest runtime contract. Keep these
+# parameters warning-only so strategies that use webhook metadata still run;
+# a follow-up must plumb alert events before codegen may claim support.
 
 # strategy.closedtrades / strategy.opentrades accessor surfaces are NOT
 # symmetric in Pine v6. opentrades has no exit_* fields (a trade has not
