@@ -157,6 +157,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Track user-defined function tuple returns
         self._func_returns_tuple: dict[str, bool] = {}
         self._func_tuple_element_count: dict[str, int] = {}
+        self._func_tuple_element_types: dict[str, tuple[PineType, ...]] = {}
+        self._tuple_element_types_by_node: dict[int, tuple[PineType, ...]] = {}
         # Track user-defined functions whose body returns a UDT instance —
         # maps func_name -> UDT type name. Detected from the body's final
         # expression (``=> Sample.new(...)`` or last stmt ``Sample.new(...)``).
@@ -1484,6 +1486,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Detect if function returns a tuple (last stmt is TupleLiteral)
         self._func_returns_tuple[node.name] = False
         self._func_tuple_element_count[node.name] = 0
+        self._func_tuple_element_types[node.name] = ()
         if node.body:
             last_stmt = node.body[-1]
             tuple_node = None
@@ -1494,6 +1497,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if tuple_node is not None:
                 self._func_returns_tuple[node.name] = True
                 self._func_tuple_element_count[node.name] = len(tuple_node.elements)
+                self._func_tuple_element_types[node.name] = (
+                    self._tuple_element_types_by_node.get(id(tuple_node), ())
+                )
 
         # Detect if the function returns a UDT instance via ``T.new(...)`` —
         # used by codegen to emit the C++ return type as the struct name and
@@ -2329,6 +2335,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.COLOR
 
     def _visit_TupleLiteral(self, node: TupleLiteral) -> PineType:
-        for elem in node.elements:
-            self._visit(elem)
+        self._tuple_element_types_by_node[id(node)] = tuple(
+            self._visit(elem) for elem in node.elements
+        )
         return PineType.FLOAT

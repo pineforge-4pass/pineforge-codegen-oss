@@ -2185,6 +2185,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for item in self._security_calls:
             sec_id = item["sec_id"]
             expr_node = item["expr_node"]
+            self._validate_security_persistent_var_control_flow(expr_node)
             returns_tuple = item.get("returns_tuple", False)
             tuple_size = item.get("tuple_size", 0)
             if item.get("is_lower_tf_array"):
