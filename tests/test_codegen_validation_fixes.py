@@ -546,9 +546,15 @@ def test_ta_precalc_lazy_scope_routes_recursive_ema_only():
         "i = ta.ema(close, 23)\n"
         "plot((a or b or c or d or e or g) ? f + h + i : close)"
     )
-    for name in ("roc", "lowest", "highest"):
+    for name in ("lowest", "highest"):
         assert f"std::vector<double> _precalc__ta_{name}_" in cpp
         assert f"_use_precalc ? _precalc__ta_{name}_" in cpp
+    assert "std::vector<double> _precalc__ta_roc_" not in cpp
+    assert "_PFLazySaturatedROC3Clock" in cpp
+    assert (
+        ".evaluate(current_bar_.close, "
+        "_pf_lazy_saturated_roc3_close_history[3], bar_index_)"
+    ) in cpp
     assert len(re.findall(r"std::vector<double> _precalc__ta_ema_", cpp)) == 1
     assert len(re.findall(r"std::vector<double> _precalc__ta_sma_", cpp)) == 2
     assert len(re.findall(r"_use_precalc \? _precalc__ta_sma_", cpp)) >= 2
