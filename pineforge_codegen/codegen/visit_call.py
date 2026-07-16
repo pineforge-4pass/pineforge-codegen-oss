@@ -1362,7 +1362,13 @@ class CallVisitor:
             return f"strategy_close({close_id}, {comment}, {qty}, {qty_pct}, {immediately})"
 
         if func_name == "close_all":
-            return "strategy_close_all()"
+            p = self._resolve_func_args(node, "strategy.close_all")
+            comment = self._visit_expr(p.get("comment")) if p.get("comment") is not None else '""'
+            immediately = self._visit_expr(p.get("immediately")) if p.get("immediately") is not None else "false"
+            # The engine's ID-less strategy_close path closes the complete
+            # position. Reuse it so close_all preserves the Pine order comment
+            # and same-tick fill flag instead of silently discarding both.
+            return f'strategy_close("", {comment}, na<double>(), na<double>(), {immediately})'
 
         if func_name == "exit":
             p = self._resolve_func_args(node, "strategy.exit")

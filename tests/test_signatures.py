@@ -68,6 +68,15 @@ class TestSignaturesRegistry:
                       "convert_to_account", "convert_to_symbol", "default_entry_qty"]:
             assert name in sigs.STRATEGY_FUNCTIONS, f"strategy.{name} missing"
 
+    def test_strategy_close_positional_order_matches_pine_v6(self):
+        assert sigs.get_param_names("strategy", "close") == [
+            "id", "comment", "qty", "qty_percent", "alert_message",
+            "immediately", "disable_alert",
+        ]
+        assert sigs.get_param_names("strategy", "close_all") == [
+            "comment", "alert_message", "immediately", "disable_alert",
+        ]
+
     def test_str_functions_populated(self):
         for name in ["tostring", "tonumber", "format", "length",
                       "contains", "startswith", "endswith", "pos",
@@ -750,7 +759,7 @@ class TestStrategyKwargs:
 
     def test_strategy_close_all(self):
         cpp = _generate(_pine('strategy.close_all()'))
-        assert "strategy_close_all()" in cpp
+        assert 'strategy_close("", "", na<double>(), na<double>(), false)' in cpp
 
     def test_strategy_cancel_all(self):
         cpp = _generate(_pine('strategy.cancel_all()'))
