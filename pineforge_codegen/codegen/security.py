@@ -590,35 +590,202 @@ class SecurityEmitter:
             )
         return None
 
-    def _collect_security_ohlc_hist_fields(self, node) -> set[str]:
-        """Which security bar fields need HTF history (subscript index >= 1)."""
-        out: set[str] = set()
+    def _compose_security_helper_history_subscript(
+        self,
+        bound,
+        local_index,
+        source_node,
+    ) -> Subscript:
+        """Apply helper-local history to a supported bound bar series.
 
-        def walk(n):
-            if n is None:
+        The security runtime currently has native requested-context history
+        storage only for direct OHLC/time bar fields.  Keep that support fence
+        explicit instead of emitting a C++ subscript on a scalar expression
+        for bindings such as ``hl2`` or ``ta.ema(...)``.
+        """
+        if isinstance(bound, Subscript):
+            if not (
+                isinstance(bound.object, Identifier)
+                and bound.object.name in SECURITY_BAR_FIELDS
+            ):
+                self._codegen_error(
+                    source_node,
+                    "request.security helper-parameter history currently requires "
+                    "a direct OHLC/time bar-series binding",
+                )
+            bound_idx = self._literal_int_for_security_index(bound.index)
+            local_idx = self._literal_int_for_security_index(local_index)
+            if bound_idx is not None and local_idx is not None:
+                combined_index = NumberLiteral(value=bound_idx + local_idx)
+            else:
+                combined_index = BinOp(
+                    left=bound.index,
+                    op="+",
+                    right=local_index,
+                )
+            return Subscript(object=bound.object, index=combined_index)
+        if isinstance(bound, Identifier) and bound.name in SECURITY_BAR_FIELDS:
+            return Subscript(object=bound, index=local_index)
+        self._codegen_error(
+            source_node,
+            "request.security helper-parameter history currently requires "
+            "a direct OHLC/time bar-series binding",
+        )
+
+    def _collect_security_ohlc_hist_fields(
+        self,
+        node,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None = None,
+        resolving: set[str] | None = None,
+    ) -> set[str]:
+        """Which requested-context bar fields need completed-bar history.
+
+        This is the declaration prepass for ``_build_security_expr``.  It must
+        follow the same helper-argument bindings and offset composition as the
+        emitter; otherwise ``f(close)`` plus ``src[1]`` can emit a history read
+        without declaring, pushing, or clearing its backing Series.
+        """
+        out: set[str] = set()
+        if resolving is None:
+            resolving = set()
+
+        def walk(n, bindings) -> None:
+            if n is None or isinstance(n, str):
                 return
+
+            if isinstance(n, Identifier):
+                bound = self._security_lookup_helper_binding(n.name, bindings)
+                if bound is not None:
+                    if not isinstance(bound, str):
+                        key = f"bind:{id(bound)}"
+                        if key not in resolving:
+                            resolving.add(key)
+                            walk(bound, bindings)
+                            resolving.remove(key)
+                    return
+                mutable_info = self._global_mutable_infos.get(n.name)
+                if mutable_info is not None and n.name not in resolving:
+                    resolving.add(n.name)
+                    for stmt in getattr(mutable_info, "source_stmts", []) or []:
+                        walk(stmt, bindings)
+                    resolving.remove(n.name)
+                    return
+                global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+                if n.name in global_expr_map and n.name not in resolving:
+                    resolving.add(n.name)
+                    walk(global_expr_map[n.name], bindings)
+                    resolving.remove(n.name)
+                    return
+
             if isinstance(n, Subscript) and isinstance(n.object, Identifier):
+                bound = self._security_lookup_helper_binding(n.object.name, bindings)
+                if bound is not None:
+                    if not isinstance(bound, str):
+                        walk(
+                            self._compose_security_helper_history_subscript(
+                                bound,
+                                n.index,
+                                n,
+                            ),
+                            bindings,
+                        )
+                    return
                 if n.object.name in SECURITY_BAR_FIELDS:
-                    idx = self._literal_int_for_security_index(n.index)
-                    # high[0]/time[0] uses current HTF `bar`; k>=1 reads prior
-                    # completed HTF bars from Series history (filled before push
-                    # in _eval_security_*). Dynamic indices may be >=1 at
-                    # runtime, so they need the same backing Series.
+                    idx = self._resolve_security_index_literal(n.index, bindings)
+                    # field[0] uses the current requested bar; k>=1 reads the
+                    # completed-bar Series. Dynamic indices need that Series too.
                     if idx is None or idx >= 1:
                         out.add(n.object.name)
-            if isinstance(n, (list, tuple)):
-                for x in n:
-                    walk(x)
-                return
-            for _k, v in getattr(n, "__dict__", {}).items():
-                if isinstance(v, ASTNode):
-                    walk(v)
-                elif isinstance(v, (list, tuple)):
-                    for x in v:
-                        if isinstance(x, ASTNode):
-                            walk(x)
+                    return
+                global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+                if n.object.name in global_expr_map and n.object.name not in resolving:
+                    resolving.add(n.object.name)
+                    walk(
+                        Subscript(
+                            object=global_expr_map[n.object.name],
+                            index=n.index,
+                        ),
+                        bindings,
+                    )
+                    resolving.remove(n.object.name)
+                    return
 
-        walk(node)
+            if isinstance(n, FuncCall) and isinstance(n.callee, Identifier):
+                func_name = n.callee.name
+                if func_name in self._func_names:
+                    call_key = f"func:{func_name}"
+                    if call_key in resolving:
+                        return
+                    resolving.add(call_key)
+                    plan = self._security_helper_call_plan(n, bindings)
+                    if plan["mode"] == "expr":
+                        walk(plan["expr"], plan["binding_stack"])
+                    else:
+                        local_series_names = set(plan.get("local_series_names", ()))
+                        active: dict[str, object] = {}
+
+                        def walk_stmt(stmt, current: dict[str, object]) -> None:
+                            local_stack = plan["binding_stack"] + (current,)
+                            if isinstance(stmt, VarDecl):
+                                if stmt.value is not None:
+                                    walk(stmt.value, local_stack)
+                                if stmt.name in local_series_names or stmt.is_var:
+                                    current[stmt.name] = self._security_series_binding(
+                                        f"{plan['func_info'].name}:{stmt.name}"
+                                    )
+                                elif stmt.value is not None:
+                                    current[stmt.name] = stmt.value
+                                return
+                            if isinstance(stmt, Assignment):
+                                if stmt.value is not None:
+                                    walk(stmt.value, local_stack)
+                                target = self._get_target_name(stmt.target)
+                                existing = current.get(target) if target is not None else None
+                                if (
+                                    target in local_series_names
+                                    or (
+                                        isinstance(existing, str)
+                                        and self._security_series_binding_target(existing)
+                                        is not None
+                                    )
+                                ):
+                                    current[target] = self._security_series_binding(
+                                        f"{plan['func_info'].name}:{target}"
+                                    )
+                                elif target is not None and stmt.value is not None:
+                                    current[target] = stmt.value
+                                return
+                            if isinstance(stmt, IfStmt):
+                                walk(stmt.condition, local_stack)
+                                body_bindings = dict(current)
+                                for child in stmt.body:
+                                    walk_stmt(child, body_bindings)
+                                else_bindings = dict(current)
+                                for child in stmt.else_body:
+                                    walk_stmt(child, else_bindings)
+
+                        for stmt in plan["body"]:
+                            walk_stmt(stmt, active)
+                        walk(
+                            plan["expr"],
+                            plan["binding_stack"] + (active,),
+                        )
+                    resolving.remove(call_key)
+                    return
+
+            if isinstance(n, (list, tuple)):
+                for child in n:
+                    walk(child, bindings)
+                return
+            for value in getattr(n, "__dict__", {}).values():
+                if isinstance(value, ASTNode):
+                    walk(value, bindings)
+                elif isinstance(value, (list, tuple)):
+                    for child in value:
+                        if isinstance(child, ASTNode):
+                            walk(child, bindings)
+
+        walk(node, helper_binding_stack or ())
         return out
 
     def _collect_security_ohlc_hist_fields_for_call(self, item: dict) -> set[str]:
@@ -918,7 +1085,8 @@ class SecurityEmitter:
             runtime_stack_local = plan["binding_stack"] + (active_bindings,)
 
             if isinstance(stmt, VarDecl):
-                if stmt.name in local_series_names:
+                is_persistent_var = stmt.is_var
+                if stmt.name in local_series_names or is_persistent_var:
                     binding = active_bindings.get(stmt.name)
                     if binding is None:
                         binding = self._security_series_binding(
@@ -937,13 +1105,52 @@ class SecurityEmitter:
                         lines,
                     )
                     active_bindings[stmt.name] = binding
-                    lines.append(f'{pad}if (_security_helper_series_["{series_name}"].size() == 0) {{')
-                    lines.append(f'{pad}    _security_helper_series_["{series_name}"].push({expr_cpp});')
-                    lines.append(f'{pad}}} else if (security_series_slot_is_new({sec_id})) {{')
-                    lines.append(f'{pad}    _security_helper_series_["{series_name}"].push({expr_cpp});')
-                    lines.append(f'{pad}}} else {{')
-                    lines.append(f'{pad}    _security_helper_series_["{series_name}"].update({expr_cpp});')
-                    lines.append(f'{pad}}}')
+                    if is_persistent_var:
+                        cpp_type = self._type_for_decl(stmt)
+                        if cpp_type not in {"double", "int", "bool"}:
+                            self._codegen_error(
+                                stmt,
+                                "request.security helper-local var state currently supports only int, float, and bool values",
+                                hint="Hoist collection, string, UDT, or drawing state outside request.security().",
+                            )
+                        # A Pine ``var`` initializer runs once per helper call
+                        # site in the requested context.  On a new requested
+                        # bar the prior committed value is carried forward; on
+                        # a lookahead/realtime recomputation of the current
+                        # requested bar it rolls back before the helper body is
+                        # evaluated again.  ``Series[1]`` is that rollback
+                        # value after the first bar.  The companion seed entry
+                        # preserves the once-only initializer for first-bar
+                        # recomputations without adding another generated
+                        # member/state family.
+                        seed_name = f"{series_name}@var_seed"
+                        lines.append(f'{pad}if (_security_helper_series_["{series_name}"].size() == 0) {{')
+                        lines.append(f'{pad}    _security_helper_series_["{seed_name}"].push({expr_cpp});')
+                        lines.append(
+                            f'{pad}    _security_helper_series_["{series_name}"].push('
+                            f'_security_helper_series_["{seed_name}"][0]);'
+                        )
+                        lines.append(f'{pad}}} else if (security_series_slot_is_new({sec_id})) {{')
+                        lines.append(
+                            f'{pad}    _security_helper_series_["{series_name}"].push('
+                            f'_security_helper_series_["{series_name}"][0]);'
+                        )
+                        lines.append(f'{pad}}} else {{')
+                        lines.append(
+                            f'{pad}    _security_helper_series_["{series_name}"].update('
+                            f'_security_helper_series_["{series_name}"].size() > 1 '
+                            f'? _security_helper_series_["{series_name}"][1] '
+                            f': _security_helper_series_["{seed_name}"][0]);'
+                        )
+                        lines.append(f'{pad}}}')
+                    else:
+                        lines.append(f'{pad}if (_security_helper_series_["{series_name}"].size() == 0) {{')
+                        lines.append(f'{pad}    _security_helper_series_["{series_name}"].push({expr_cpp});')
+                        lines.append(f'{pad}}} else if (security_series_slot_is_new({sec_id})) {{')
+                        lines.append(f'{pad}    _security_helper_series_["{series_name}"].push({expr_cpp});')
+                        lines.append(f'{pad}}} else {{')
+                        lines.append(f'{pad}    _security_helper_series_["{series_name}"].update({expr_cpp});')
+                        lines.append(f'{pad}}}')
                     return
 
                 local_name = active_bindings.get(stmt.name)
@@ -1202,11 +1409,11 @@ class SecurityEmitter:
                     "request.security multi-statement helpers may only use local declarations, assignments, and if-branches before the final expression",
                 )
             if isinstance(stmt, VarDecl):
-                if stmt.is_var or stmt.is_varip:
+                if stmt.is_varip:
                     self._codegen_error(
                         node,
-                        "request.security does not support multi-statement helpers with helper-local var state",
-                        hint="Rewrite helper-local state as plain temporaries or hoist it outside request.security().",
+                        "request.security does not support helper-local varip state",
+                        hint="Use var for requested-context bar state; varip tick state is unavailable in batch backtests.",
                     )
             if isinstance(stmt, Assignment):
                 target_name = self._get_target_name(stmt.target)
@@ -1225,6 +1432,92 @@ class SecurityEmitter:
             "body": stmt_body,
             "local_series_names": local_series_names,
         }
+
+    def _validate_security_persistent_var_control_flow(self, expr_node) -> None:
+        """Reject helper ``var`` state whose rollback would be conditional.
+
+        Persistent helper state is restored at its declaration before the body
+        mutates it. That is safe only when the declaration executes on every
+        requested-bar evaluation. Until rollback is hoisted to evaluator entry,
+        reject declarations reached through ``if``/``?:``/short-circuit paths,
+        including state owned by a nested helper called from such a path.
+        """
+        call_stack: set[str] = set()
+
+        def visit_expr(node, conditional: bool) -> None:
+            if node is None:
+                return
+            if isinstance(node, FuncCall) and isinstance(node.callee, Identifier):
+                name = node.callee.name
+                if name in self._func_names:
+                    if name in call_stack:
+                        return
+                    fi = self._func_info_map.get(name)
+                    if fi is not None and fi.node is not None:
+                        call_stack.add(name)
+                        for stmt in fi.node.body:
+                            visit_stmt(stmt, conditional)
+                        call_stack.remove(name)
+                    for arg in node.args:
+                        visit_expr(arg, conditional)
+                    for value in node.kwargs.values():
+                        if isinstance(value, ASTNode):
+                            visit_expr(value, conditional)
+                    return
+            if isinstance(node, Ternary):
+                visit_expr(node.condition, conditional)
+                visit_expr(node.true_val, True)
+                visit_expr(node.false_val, True)
+                return
+            if isinstance(node, BinOp) and node.op in ("and", "or"):
+                visit_expr(node.left, conditional)
+                visit_expr(node.right, True)
+                return
+            for value in getattr(node, "__dict__", {}).values():
+                if isinstance(value, ASTNode):
+                    visit_expr(value, conditional)
+                elif isinstance(value, (list, tuple)):
+                    for child in value:
+                        if isinstance(child, ASTNode):
+                            visit_expr(child, conditional)
+
+        def visit_stmt(stmt, conditional: bool) -> None:
+            if isinstance(stmt, VarDecl):
+                if stmt.is_var and conditional:
+                    self._codegen_error(
+                        stmt,
+                        "request.security helper-local var declarations inside "
+                        "conditional control flow are not supported",
+                        hint="Declare persistent requested-context state at the helper's top level.",
+                    )
+                # A persistent initializer runs only when its requested-context
+                # slot is first created.  Any nested persistent helper reached
+                # from that initializer would therefore need its rollback and
+                # mutation to remain inside the same once-only guard.  The
+                # current linear emitter hoists nested helper statements ahead
+                # of that guard, so treat the initializer as conditional and
+                # fail closed until it can preserve that execution boundary.
+                visit_expr(stmt.value, conditional or stmt.is_var)
+                return
+            if isinstance(stmt, IfStmt):
+                visit_expr(stmt.condition, conditional)
+                for child in stmt.body:
+                    visit_stmt(child, True)
+                for child in stmt.else_body:
+                    visit_stmt(child, True)
+                return
+            if isinstance(stmt, ExprStmt):
+                visit_expr(stmt.expr, conditional)
+                return
+            for value in getattr(stmt, "__dict__", {}).values():
+                if isinstance(value, ASTNode):
+                    visit_expr(value, conditional)
+                elif isinstance(value, (list, tuple)):
+                    for child in value:
+                        if isinstance(child, ASTNode):
+                            visit_expr(child, conditional)
+
+        visit_expr(expr_node, False)
 
     def _security_next_inline_name(self, sec_id: int, func_name: str, base_name: str) -> str:
         self._security_inline_counter += 1
@@ -2207,9 +2500,18 @@ class SecurityEmitter:
                         if series_name is not None:
                             return f'_security_helper_series_["{series_name}"][{index_cpp}]'
                         return bound
-                    obj_cpp = self._build_security_expr(
-                        sec_id,
+                    # Function parameters retain Pine's series identity. Apply
+                    # history to the supported bound bar series and compose
+                    # nested offsets before lowering. Unsupported scalar/
+                    # expression bindings fail closed in the shared helper.
+                    composed = self._compose_security_helper_history_subscript(
                         bound,
+                        expr_node.index,
+                        expr_node,
+                    )
+                    return self._build_security_expr(
+                        sec_id,
+                        composed,
                         ta_range,
                         ta_results,
                         resolving,
@@ -2217,10 +2519,12 @@ class SecurityEmitter:
                         helper_binding_stack,
                         emitted_lines,
                     )
-                    return f"{obj_cpp}[{index_cpp}]"
                 if expr_node.object.name in SECURITY_BAR_FIELDS:
                     field = expr_node.object.name
-                    idx_lit = self._literal_int_for_security_index(expr_node.index)
+                    idx_lit = self._resolve_security_index_literal(
+                        expr_node.index,
+                        helper_binding_stack,
+                    )
                     if idx_lit is not None:
                         if idx_lit == 0:
                             return self._security_bar_field_expr(field)

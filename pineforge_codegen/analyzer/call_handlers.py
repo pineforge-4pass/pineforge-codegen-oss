@@ -323,6 +323,26 @@ class CallHandlers:
                         and isinstance(expr_node.callee.object, Identifier)):
                     expr_ns = expr_node.callee.object.name
                     expr_func = expr_node.callee.member
+                elif isinstance(expr_node.callee, Identifier):
+                    expr_func = expr_node.callee.name
+                    if self._func_returns_tuple.get(expr_func, False):
+                        tuple_size = self._func_tuple_element_count.get(expr_func, 0)
+                        tuple_types = self._func_tuple_element_types.get(expr_func, ())
+                        if (
+                            tuple_size != 2
+                            or len(tuple_types) != 2
+                            or any(
+                                item not in (PineType.INT, PineType.FLOAT)
+                                for item in tuple_types
+                            )
+                        ):
+                            self._error(
+                                "request.security tuple-return helpers currently support "
+                                "exactly two numeric elements",
+                                expr_node.loc,
+                            )
+                        else:
+                            returns_tuple = True
                 if expr_ns == "ta":
                     if expr_func == "vwap":
                         merged_v = list(expr_node.args)
