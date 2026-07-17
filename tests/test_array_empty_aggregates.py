@@ -27,7 +27,7 @@ def _generate(body: str) -> str:
         ("array.mode(values)", "std::unordered_map"),
         ("array.percentile_linear_interpolation(values, 50)", "c.back()"),
         ("array.percentile_nearest_rank(values, 50)", "c[std::min"),
-        ("array.percentrank(values, 0)", "double v=values"),
+        ("array.percentrank(values, 0)", "double v=__pf_array"),
         ("array.covariance(values, peers)", "ma/=n"),
     ],
 )
@@ -101,7 +101,6 @@ def test_empty_temporary_array_aggregate_evaluates_receiver_once():
             "percentage()",
             "values.empty()",
         ),
-        ("array.percentrank(values, index())", "index()", "values.size()<=1"),
     ],
 )
 def test_empty_calculation_evaluates_stateful_argument_once_before_guard(
@@ -134,6 +133,29 @@ def test_empty_calculation_evaluates_stateful_argument_once_before_guard(
     assert argument_call in assignment
     assert guard in assignment
     assert assignment.index(argument_call) < assignment.index(guard)
+
+
+def test_empty_percentrank_evaluates_stateful_index_once_before_guard():
+    cpp = _generate(
+        "side_effects = array.new<float>(0)\n"
+        "index() =>\n"
+        "    array.push(side_effects, 1.0)\n"
+        "    0\n"
+        "values = array.new<float>(0)\n"
+        "ki48_result = array.percentrank(values, index())\n"
+        "plot(ki48_result)"
+    )
+
+    assignment = next(
+        line
+        for line in cpp.splitlines()
+        if line.startswith("        ki48_result =")
+    )
+    assert assignment.count("index()") == 1
+    assert "[&](auto&& __pf_array)" in assignment
+    assert "return [&](auto&& __pf_raw_index_value)" in assignment
+    assert "if(__pf_array.size()<=1) return na<double>()" in assignment
+    assert assignment.index("}((index()))") < assignment.index("}((values))")
 
 
 def test_temporary_receiver_is_bound_before_stateful_argument():

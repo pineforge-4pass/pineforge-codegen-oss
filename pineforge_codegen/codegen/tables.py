@@ -459,8 +459,20 @@ ORDER_DIRECTION_MAP = {
 # ---------------------------------------------------------------------------
 
 
-def _checked_array_index_prelude() -> str:
-    """C++ body shared by Pine v6 checked single-index operations."""
+def _checked_array_index_prelude(*, normalize_negative: bool = True) -> str:
+    """C++ body shared by checked single-index operations.
+
+    Pine v6 explicitly gives end-relative negative indices to the checked
+    ``get``, ``set``, and ``remove`` cluster. Other indexed functions such as
+    ``percentrank`` still need the same NA/non-finite/range checks, but must
+    reject negative indices instead of normalizing them. ``insert`` remains a
+    separately bounded residual.
+    """
+    checked_index = (
+        "__pf_raw_index<0?__pf_raw_index+__pf_array_size:__pf_raw_index"
+        if normalize_negative
+        else "__pf_raw_index"
+    )
     return (
         "using __pf_raw_index_type=std::decay_t<decltype(__pf_raw_index_value)>; "
         "if constexpr(!std::is_same_v<__pf_raw_index_type,bool>) { "
@@ -482,8 +494,7 @@ def _checked_array_index_prelude() -> str:
         "std::to_string((int64_t)__pf_array.size())); } "
         "int64_t __pf_raw_index=(int64_t)__pf_raw_index_value; "
         "int64_t __pf_array_size=(int64_t)__pf_array.size(); "
-        "int64_t __pf_array_index=__pf_raw_index<0?"
-        "__pf_raw_index+__pf_array_size:__pf_raw_index; "
+        f"int64_t __pf_array_index={checked_index}; "
         "if(__pf_array_index<0||__pf_array_index>=__pf_array_size) "
         "pine_runtime_error(std::string(\"Index \")+std::to_string(__pf_raw_index)+"
         "\" is out of bounds. Array size is \"+std::to_string(__pf_array_size)); "
@@ -566,6 +577,23 @@ def _checked_array_end_remove(a: str, method: str) -> str:
     )
 
 
+def _checked_array_percentrank(a: str, args: list[str]) -> str:
+    """Preserve degenerate results, then reject invalid PercentRank indices."""
+    check = _checked_array_index_prelude(normalize_negative=False)
+    return (
+        "[&](auto&& __pf_array){ "
+        "return [&](auto&& __pf_raw_index_value){ "
+        "if(__pf_array.size()<=1) return na<double>(); "
+        f"{check}"
+        "double v=__pf_array[(size_t)__pf_array_index]; "
+        "if(std::isnan(v)) return na<double>(); "
+        "int le=0; for(auto x:__pf_array) "
+        "if(!std::isnan(x) && x<=v) le++; "
+        "return (double)(le-1)/(__pf_array.size()-1)*100.0; "
+        f"}}(({args[0]})); }}(({a}))"
+    )
+
+
 # Methods called as ``array.method(arr, ...)`` or ``arr.method(...)``.
 ARRAY_METHODS = {
     "get":       _checked_array_get,
@@ -620,7 +648,7 @@ ARRAY_METHODS = {
     "mode":      lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); std::unordered_map<double,int> m; for(auto v:{a})m[v]++; double best=0; int bc=0; for(auto&[v,c]:m)if(c>bc||(c==bc&&v<best)){{bc=c;best=v;}} return best; }}()",
     "percentile_linear_interpolation": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); double k=({args[0]}/100.0)*c.size()-0.5; int i=std::max(0,(int)k); double f=k-i; if(i+1>=(int)c.size()) return c.back(); return c[i]*(1-f)+c[i+1]*f; }}()",
     "percentile_nearest_rank": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); int r=(int)std::ceil(({args[0]}/100.0)*c.size()); return (double)c[std::min(r-1,(int)c.size()-1)]; }}()",
-    "percentrank": lambda a, args: f"[&](){{ if({a}.size()<=1) return na<double>(); double v={a}[({args[0]})]; if(std::isnan(v)) return na<double>(); int le=0; for(auto x:{a}) if(!std::isnan(x) && x<=v) le++; return (double)(le-1)/({a}.size()-1)*100.0; }}()",
+    "percentrank": _checked_array_percentrank,
     "abs":       lambda a, args: f"[&](){{ std::vector<double> r; for(auto v:{a})r.push_back(std::abs(v)); return r; }}()",
     "join":      lambda a, args: "[&](){{ std::string r; for(size_t i=0;i<{arr}.size();i++){{ if(i>0)r+={sep}; r+=std::to_string({arr}[i]); }} return r; }}()".format(arr=a, sep=args[0] if args else 'std::string(",")'),
     "standardize": lambda a, args: f"[&](){{ double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); s=std::sqrt(s/{a}.size()); std::vector<double> r; for(auto v:{a})r.push_back(s==0?1.0:(v-m)/s); return r; }}()",

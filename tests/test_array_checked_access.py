@@ -127,6 +127,45 @@ def test_checked_index_rejects_na_nonfinite_and_range_before_integer_cast():
     assert assignment.index("std::numeric_limits<int64_t>::max()") < integer_cast
 
 
+def test_percentrank_checks_bounds_without_normalizing_negative_indices():
+    cpp = _generate(
+        "values = array.from(1.0, 2.0, 3.0)\n"
+        "idx() =>\n"
+        "    -1\n"
+        "rank = array.percentrank(values, idx())"
+    )
+    assignment = next(
+        line for line in cpp.splitlines() if line.startswith("        rank =")
+    )
+    assert assignment.count("idx()") == 1
+    assert "[&](auto&& __pf_array)" in assignment
+    assert "return [&](auto&& __pf_raw_index_value)" in assignment
+    assert "__pf_array.size()<=1" in assignment
+    assert "pine_runtime_error" in assignment
+    assert "int64_t __pf_array_index=__pf_raw_index;" in assignment
+    assert "__pf_raw_index<0?" not in assignment
+
+
+def test_percentrank_keeps_temporary_receiver_before_index_once():
+    cpp = _generate(
+        "values = array.from(1.0, 2.0, 3.0)\n"
+        "receiver() =>\n"
+        "    array.copy(values)\n"
+        "idx() =>\n"
+        "    2\n"
+        "rank = array.percentrank(receiver(), idx())"
+    )
+    assignment = next(
+        line for line in cpp.splitlines() if line.startswith("        rank =")
+    )
+    assert assignment.count("receiver()") == 1
+    assert assignment.count("idx()") == 1
+    assert assignment.index("[&](auto&& __pf_array)") < assignment.index(
+        "[&](auto&& __pf_raw_index_value)"
+    )
+    assert assignment.index("}((idx()))") < assignment.index("}((receiver()))")
+
+
 @pytest.mark.parametrize(
     "access",
     ["array.get(pivots, i)", "array.first(pivots)", "pivots.last()"],
@@ -281,6 +320,75 @@ else if selector == 13
 """
 
 
+_PERCENTRANK_BOUNDS_ERROR_SOURCE = """//@version=6
+strategy("PercentRank bounds errors")
+selector = close
+values = array.from(1.0, 2.0, 3.0)
+int missing = na
+rank = 0.0
+
+if selector == 1
+    rank := array.percentrank(values, -1)
+else if selector == 2
+    rank := array.percentrank(values, 3)
+else if selector == 3
+    rank := array.percentrank(values, missing)
+else if selector == 4
+    rank := array.percentrank(values, math.pow(10, 400))
+"""
+
+
+_PERCENTRANK_VALID_AND_DEGENERATE_SOURCE = """//@version=6
+strategy("PercentRank valid and degenerate indices")
+values = array.from(1.0, 2.0, 3.0)
+empty = array.new<float>(0)
+singleton = array.from(7.0)
+var calls = array.new<int>()
+
+empty_index() =>
+    array.push(calls, 1)
+    999
+
+singleton_index() =>
+    array.push(calls, 2)
+    -999
+
+low = array.percentrank(values, 0)
+high = array.percentrank(values, 2)
+empty_rank = array.percentrank(empty, empty_index())
+singleton_rank = array.percentrank(singleton, singleton_index())
+call_count = array.size(calls)
+call_code = array.get(calls, 0) * 10 + array.get(calls, 1)
+"""
+
+
+_PERCENTRANK_INTERNAL_NAME_SOURCE = """//@version=6
+strategy("PercentRank internal-name collision")
+__pf_array = array.from(1.0, 2.0, 3.0)
+__pf_raw_index_value = 2
+rank = array.percentrank(__pf_array, __pf_raw_index_value)
+"""
+
+
+_PERCENTRANK_ERROR_ORDER_SOURCE = """//@version=6
+strategy("PercentRank error evaluation order")
+var values = array.from(1.0, 2.0, 3.0)
+var order = array.new<int>()
+var after = 0
+
+receiver() =>
+    array.push(order, 1)
+    array.copy(values)
+
+bad_index() =>
+    array.push(order, 2)
+    -1
+
+rank = array.percentrank(receiver(), bad_index())
+after := 1
+"""
+
+
 def _find_engine_library() -> Path | None:
     explicit = os.environ.get("PINEFORGE_ENGINE_LIB")
     if explicit:
@@ -335,6 +443,96 @@ def _compile_and_run(cpp_source: str) -> str:
                 f"stdout:\n{ran.stdout}\nstderr:\n{ran.stderr}"
             )
         return ran.stdout
+
+
+def test_percentrank_valid_and_degenerate_indices_runtime():
+    driver = r"""
+#include <cmath>
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.run(&bar, 1);
+    if (!strategy.last_error().empty()) {
+        std::cerr << strategy.last_error() << "\n";
+        return 2;
+    }
+    std::cout << strategy.low << " " << strategy.high << " "
+              << std::isnan(strategy.empty_rank) << " "
+              << std::isnan(strategy.singleton_rank) << " "
+              << strategy.call_count << " " << strategy.call_code << "\n";
+}
+"""
+    output = _compile_and_run(
+        transpile(_PERCENTRANK_VALID_AND_DEGENERATE_SOURCE) + driver
+    )
+    assert tuple(int(float(value)) for value in output.split()) == (
+        0,
+        100,
+        1,
+        1,
+        2,
+        12,
+    )
+
+
+def test_percentrank_internal_names_compile_without_self_initialization():
+    cpp = transpile(_PERCENTRANK_INTERNAL_NAME_SOURCE)
+    assert "auto&& __pf_array=(__pf_array)" not in cpp
+    driver = r"""
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.run(&bar, 1);
+    if (!strategy.last_error().empty()) {
+        std::cerr << strategy.last_error() << "\n";
+        return 2;
+    }
+    std::cout << strategy.rank << "\n";
+}
+"""
+    assert float(_compile_and_run(cpp + driver)) == 100.0
+
+
+def test_percentrank_oob_indices_surface_deterministic_last_error():
+    driver = r"""
+#include <iostream>
+int main() {
+    for (int selector = 1; selector <= 4; ++selector) {
+        GeneratedStrategy strategy;
+        double value = static_cast<double>(selector);
+        Bar bar{value, value, value, value, 1.0, selector};
+        strategy.run(&bar, 1);
+        std::cout << selector << "\t" << strategy.last_error() << "\n";
+    }
+}
+"""
+    output = _compile_and_run(transpile(_PERCENTRANK_BOUNDS_ERROR_SOURCE) + driver)
+    assert output.splitlines() == [
+        "1\tIndex -1 is out of bounds. Array size is 3",
+        "2\tIndex 3 is out of bounds. Array size is 3",
+        "3\tIndex na is out of bounds. Array size is 3",
+        "4\tIndex inf is out of bounds. Array size is 3",
+    ]
+
+
+def test_percentrank_error_preserves_receiver_index_order_and_halts():
+    driver = r"""
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.run(&bar, 1);
+    std::cout << strategy.last_error() << "\n";
+    for (auto value : strategy.order) std::cout << value;
+    std::cout << " " << strategy.after << "\n";
+}
+"""
+    output = _compile_and_run(
+        transpile(_PERCENTRANK_ERROR_ORDER_SOURCE) + driver
+    ).splitlines()
+    assert output == ["Index -1 is out of bounds. Array size is 3", "12 0"]
 
 
 @pytest.mark.parametrize(
