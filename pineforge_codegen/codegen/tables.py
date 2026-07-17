@@ -683,6 +683,17 @@ def _math_minmax_na_expr(func_name: str, args: list[str]) -> str:
     )
 
 
+# Pine ``math.sign`` returns a float, propagates numeric ``na``, and must not
+# evaluate its argument more than once.  Keep the callable separate from the
+# call template because the stable-runtime TA reset fallback also substitutes
+# bare ``math.sign`` member text with this same C++ function expression.
+_MATH_SIGN_CPP_FN = (
+    "([](const auto _pf_sign_v) -> double { "
+    "return is_na(_pf_sign_v) ? na<double>() "
+    ": (double)((_pf_sign_v > 0) - (_pf_sign_v < 0)); })"
+)
+
+
 MATH_FUNC_MAP = {
     "abs": "std::abs", "max": "std::max", "min": "std::min",
     "ceil": "std::ceil", "floor": "std::floor", "round": "std::round",
@@ -691,7 +702,7 @@ MATH_FUNC_MAP = {
     "sin": "std::sin", "cos": "std::cos", "tan": "std::tan",
     "asin": "std::asin", "acos": "std::acos", "atan": "std::atan",
     "atan2": "std::atan2({0}, {1})",
-    "sign": "((({0}) > 0) - (({0}) < 0))",
+    "sign": _MATH_SIGN_CPP_FN,
     "avg": "(({0} + {1}) / 2.0)",
 }
 

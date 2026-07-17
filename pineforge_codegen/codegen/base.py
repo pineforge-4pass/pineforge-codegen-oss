@@ -63,6 +63,7 @@ from .tables import (
     MATRIX_SORT_ALLOWED_GENERIC_ELEMS,
     MATH_FUNC_MAP,
     STR_FUNC_MAP,
+    _MATH_SIGN_CPP_FN,
     _merge_kwargs,
 )
 
@@ -2939,7 +2940,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         "exp": "std::exp", "pow": "std::pow",
         "sin": "std::sin", "cos": "std::cos", "tan": "std::tan",
         "asin": "std::asin", "acos": "std::acos", "atan": "std::atan",
-        "sign": "(double)([] (double _v) { return (_v>0) - (_v<0); })",
+        "sign": _MATH_SIGN_CPP_FN,
     }
 
     # Pine logical operators (word form) -> C++ operator, used when rendering
