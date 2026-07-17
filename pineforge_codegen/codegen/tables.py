@@ -686,6 +686,22 @@ MAP_METHODS = {
     "put_all":  lambda m, args: f"{m}.insert({args[0]}.begin(), {args[0]}.end())",
 }
 
+# Declared signature order after removing the method receiver ``id``.  This is
+# consumed by the typed-map UDF-parameter lane; established global/local and
+# namespace map lowerings intentionally retain their existing output.
+MAP_METHOD_KWARGS: dict[str, list[str]] = {
+    "put": ["key", "value"],
+    "get": ["key"],
+    "remove": ["key"],
+    "contains": ["key"],
+    "size": [],
+    "clear": [],
+    "keys": [],
+    "values": [],
+    "copy": [],
+    "put_all": ["id2"],
+}
+
 
 def _matrix_add_row(m: str, args: list) -> str:
     """Pine ``matrix.add_row`` codegen.

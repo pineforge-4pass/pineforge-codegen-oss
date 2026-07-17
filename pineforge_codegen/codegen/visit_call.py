@@ -152,6 +152,7 @@ from .tables import (
     DRAWING_NS,
     DRAWING_TYPE_TO_CPP,
     MAP_METHODS,
+    MAP_METHOD_KWARGS,
     MATH_FUNC_MAP,
     MATRIX_METHODS,
     MATRIX_METHOD_KWARGS,
@@ -298,6 +299,47 @@ class CallVisitor:
             node.args, node.kwargs, ["id", *param_names], lambda arg: arg
         )
 
+    def _map_param_method_arg_nodes(self, method: str, node: FuncCall) -> list:
+        """Merge typed-map parameter method kwargs into signature order."""
+        param_names = MAP_METHOD_KWARGS.get(method)
+        if param_names is None:
+            return list(node.args)
+        return _merge_kwargs(node.args, node.kwargs, param_names, lambda arg: arg)
+
+    def _map_param_method_expr(
+        self, map_expr: str, method: str, arg_nodes: list, spec: TypeSpec,
+    ) -> str:
+        """Lower one typed-map parameter method with ordered, single-use args.
+
+        Existing map templates may reference a key more than once (``get`` /
+        ``contains`` / ``remove``), while C++ assignment evaluates the RHS of
+        ``put`` before its subscript LHS.  Bind supplied expressions through
+        nested lambdas so this lane deterministically evaluates key then value
+        exactly once without changing established global/local map output.
+        """
+        args = [self._visit_expr(arg) for arg in arg_nodes]
+        occupied = "\n".join((map_expr, *args))
+        counter = getattr(self, "_map_param_arg_counter", 0)
+        bindings: list[tuple[str, str]] = []
+        for arg in args:
+            while True:
+                token = f"__pf_map_param_arg_{counter}"
+                counter += 1
+                if token not in occupied:
+                    break
+            bindings.append((token, arg))
+        self._map_param_arg_counter = counter
+
+        lowered = self._map_method_expr(
+            map_expr, method, [token for token, _arg in bindings], spec
+        )
+        for token, arg in reversed(bindings):
+            lowered = (
+                f"[&](auto&& {token})->decltype(auto){{ "
+                f"return {lowered}; }}(({arg}))"
+            )
+        return lowered
+
     def _visit_func_call(self, node: FuncCall) -> str:
         callee = node.callee
         if isinstance(callee, MemberAccess):
@@ -417,6 +459,18 @@ class CallVisitor:
                         )
                         return self._array_method_expr(
                             arr, meth_raw, margs, param_spec
+                        )
+                    if (
+                        param_spec is not None
+                        and param_spec.kind == "map"
+                        and meth_raw in MAP_METHODS
+                    ):
+                        m = self._safe_name(oname)
+                        arg_nodes = self._map_param_method_arg_nodes(
+                            meth_raw, node
+                        )
+                        return self._map_param_method_expr(
+                            m, meth_raw, arg_nodes, param_spec
                         )
                     # map.put / map.get / … must lower to unordered_map ops, not `.put` on C++
                     if oname in self._map_vars and meth_raw in MAP_METHODS:
