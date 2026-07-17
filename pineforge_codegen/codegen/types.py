@@ -402,7 +402,44 @@ class TypeInferer:
                     f"codegen: unhandled array method '{method}' — analyzer should have "
                     f"rejected. Add it to ARRAY_METHODS."
                 )
-            lower_receiver = lambda recv: ARRAY_METHODS[method](recv, args)
+            # Pine evaluates call arguments before entering the array
+            # calculation, even when an empty receiver makes the result ``na``.
+            # The empty guards in these methods must therefore consume a
+            # one-evaluation binding rather than leaving the original argument
+            # expression after the guard.  Build the binding into
+            # ``lower_receiver`` so a temporary receiver is still evaluated
+            # first by ``_array_receiver_once_expr``.
+            eager_scalar_arg_methods = {
+                "stdev": (0,),
+                "variance": (0,),
+                "percentile_linear_interpolation": (0,),
+                "percentile_nearest_rank": (0,),
+                "percentrank": (0,),
+            }
+            bound_args = list(args)
+            arg_bindings: list[tuple[str, str]] = []
+            occupied = "\n".join((array_expr, *args))
+            counter = getattr(self, "_array_arg_counter", 0)
+            for arg_index in eager_scalar_arg_methods.get(method, ()):
+                if arg_index >= len(args):
+                    continue
+                while True:
+                    token = f"__pf_array_arg_{counter}"
+                    counter += 1
+                    if token not in occupied:
+                        break
+                bound_args[arg_index] = token
+                arg_bindings.append((token, args[arg_index]))
+            self._array_arg_counter = counter
+
+            def lower_receiver(recv: str) -> str:
+                lowered = ARRAY_METHODS[method](recv, bound_args)
+                for token, original in reversed(arg_bindings):
+                    lowered = (
+                        f"[&](){{ auto {token}=({original}); "
+                        f"return {lowered}; }}()"
+                    )
+                return lowered
 
         return self._array_receiver_once_expr(array_expr, args, lower_receiver)
 

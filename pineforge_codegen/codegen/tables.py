@@ -485,39 +485,38 @@ ARRAY_METHODS = {
     "copy":      lambda a, args: f"std::vector<double>({a})",
     "slice":     lambda a, args: f"std::vector<double>({a}.begin()+(int)({args[0]}),{a}.begin()+(int)({args[1]}))",
     "concat":    lambda a, args: f"{a}.insert({a}.end(),{args[0]}.begin(),{args[0]}.end())",
-    "sum":       lambda a, args: f"std::accumulate({a}.begin(),{a}.end(),0.0)",
-    "avg":       lambda a, args: f"({a}.empty()?0.0:std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size())",
-    "min":       lambda a, args: f"*std::min_element({a}.begin(),{a}.end())",
-    "max":       lambda a, args: f"*std::max_element({a}.begin(),{a}.end())",
-    "range":     lambda a, args: f"(*std::max_element({a}.begin(),{a}.end())-*std::min_element({a}.begin(),{a}.end()))",
+    "sum":       lambda a, args: f"({a}.empty()?na<double>():std::accumulate({a}.begin(),{a}.end(),0.0))",
+    "avg":       lambda a, args: f"({a}.empty()?na<double>():std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size())",
+    "min":       lambda a, args: f"({a}.empty()?na<double>():*std::min_element({a}.begin(),{a}.end()))",
+    "max":       lambda a, args: f"({a}.empty()?na<double>():*std::max_element({a}.begin(),{a}.end()))",
+    "range":     lambda a, args: f"({a}.empty()?na<double>():*std::max_element({a}.begin(),{a}.end())-*std::min_element({a}.begin(),{a}.end()))",
     "every":     lambda a, args: f"std::all_of({a}.begin(),{a}.end(),[](double v){{return v!=0.0;}})",
     "some":      lambda a, args: f"std::any_of({a}.begin(),{a}.end(),[](double v){{return v!=0.0;}})",
     # stdev/variance honor the optional 2nd ``biased`` arg (Pine v6:
-    # biased=true → population (default), false → sample / n-1). The no-arg
-    # form keeps the original population emission byte-identical.
+    # biased=true → population (default), false → sample / n-1).
     "stdev":     lambda a, args: (
-        f"[&](){{ double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); "
+        f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); "
         f"double _d=({args[0]})?(double){a}.size():((double){a}.size()-1.0); "
         f"return _d>0?std::sqrt(s/_d):na<double>(); }}()"
         if args else
-        f"[&](){{ double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); return std::sqrt(s/{a}.size()); }}()"
+        f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); return std::sqrt(s/{a}.size()); }}()"
     ),
     "variance":  lambda a, args: (
-        f"[&](){{ double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); "
+        f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); "
         f"double _d=({args[0]})?(double){a}.size():((double){a}.size()-1.0); "
         f"return _d>0?s/_d:na<double>(); }}()"
         if args else
-        f"[&](){{ double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); return s/{a}.size(); }}()"
+        f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); return s/{a}.size(); }}()"
     ),
-    "median":    lambda a, args: f"[&](){{ auto c={a}; std::sort(c.begin(),c.end()); int n=c.size(); return n%2?c[n/2]:(c[n/2-1]+c[n/2])/2.0; }}()",
-    "mode":      lambda a, args: f"[&](){{ std::unordered_map<double,int> m; for(auto v:{a})m[v]++; double best=0; int bc=0; for(auto&[v,c]:m)if(c>bc||(c==bc&&v<best)){{bc=c;best=v;}} return best; }}()",
-    "percentile_linear_interpolation": lambda a, args: f"[&](){{ auto c={a}; std::sort(c.begin(),c.end()); double k=({args[0]}/100.0)*c.size()-0.5; int i=std::max(0,(int)k); double f=k-i; if(i+1>=(int)c.size()) return c.back(); return c[i]*(1-f)+c[i+1]*f; }}()",
-    "percentile_nearest_rank": lambda a, args: f"[&](){{ auto c={a}; std::sort(c.begin(),c.end()); int r=(int)std::ceil(({args[0]}/100.0)*c.size()); return c[std::min(r-1,(int)c.size()-1)]; }}()",
+    "median":    lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); int n=c.size(); return n%2?c[n/2]:(c[n/2-1]+c[n/2])/2.0; }}()",
+    "mode":      lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); std::unordered_map<double,int> m; for(auto v:{a})m[v]++; double best=0; int bc=0; for(auto&[v,c]:m)if(c>bc||(c==bc&&v<best)){{bc=c;best=v;}} return best; }}()",
+    "percentile_linear_interpolation": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); double k=({args[0]}/100.0)*c.size()-0.5; int i=std::max(0,(int)k); double f=k-i; if(i+1>=(int)c.size()) return c.back(); return c[i]*(1-f)+c[i+1]*f; }}()",
+    "percentile_nearest_rank": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); int r=(int)std::ceil(({args[0]}/100.0)*c.size()); return (double)c[std::min(r-1,(int)c.size()-1)]; }}()",
     "percentrank": lambda a, args: f"[&](){{ if({a}.size()<=1) return na<double>(); double v={a}[({args[0]})]; if(std::isnan(v)) return na<double>(); int le=0; for(auto x:{a}) if(!std::isnan(x) && x<=v) le++; return (double)(le-1)/({a}.size()-1)*100.0; }}()",
     "abs":       lambda a, args: f"[&](){{ std::vector<double> r; for(auto v:{a})r.push_back(std::abs(v)); return r; }}()",
     "join":      lambda a, args: "[&](){{ std::string r; for(size_t i=0;i<{arr}.size();i++){{ if(i>0)r+={sep}; r+=std::to_string({arr}[i]); }} return r; }}()".format(arr=a, sep=args[0] if args else 'std::string(",")'),
     "standardize": lambda a, args: f"[&](){{ double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); s=std::sqrt(s/{a}.size()); std::vector<double> r; for(auto v:{a})r.push_back(s==0?1.0:(v-m)/s); return r; }}()",
-    "covariance": lambda a, args: f"[&](){{ auto&b={args[0]}; int n=std::min({a}.size(),b.size()); double ma=0,mb=0; for(int i=0;i<n;i++){{ma+={a}[i];mb+=b[i];}} ma/=n;mb/=n; double c=0; for(int i=0;i<n;i++)c+=({a}[i]-ma)*(b[i]-mb); return c/n; }}()",
+    "covariance": lambda a, args: f"[&](){{ auto&&b=({args[0]}); int n=std::min({a}.size(),b.size()); if(n<=0) return na<double>(); double ma=0,mb=0; for(int i=0;i<n;i++){{ma+={a}[i];mb+=b[i];}} ma/=n;mb/=n; double c=0; for(int i=0;i<n;i++)c+=({a}[i]-ma)*(b[i]-mb); return c/n; }}()",
     "binary_search": lambda a, args: f"[&](){{ auto it=std::lower_bound({a}.begin(),{a}.end(),{args[0]}); return (it!={a}.end()&&*it=={args[0]})?(double)(it-{a}.begin()):-1.0; }}()",
     "binary_search_leftmost": lambda a, args: f"[&](){{ auto it=std::lower_bound({a}.begin(),{a}.end(),{args[0]}); return (it!={a}.end()&&*it=={args[0]})?(double)(it-{a}.begin()):(double)(it-{a}.begin()-1); }}()",
     "binary_search_rightmost": lambda a, args: f"[&](){{ auto it=std::upper_bound({a}.begin(),{a}.end(),{args[0]}); return (it!={a}.begin()&&*(it-1)=={args[0]})?(double)(it-{a}.begin()-1):(double)(it-{a}.begin()); }}()",

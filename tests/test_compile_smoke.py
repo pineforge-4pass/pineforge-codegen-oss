@@ -419,6 +419,31 @@ plot(mx + mn)
 """)
 
 
+def test_empty_numeric_array_calculations_compile():
+    _check("empty_numeric_array_calculations", """
+values = array.new<float>(0)
+peers = array.new<float>(0)
+ints = array.new<int>(0)
+sum_v = array.sum(values)
+avg_v = array.avg(values)
+min_v = array.min(values)
+max_v = array.max(values)
+range_v = array.range(values)
+stdev_v = array.stdev(values, false)
+variance_v = array.variance(values, false)
+median_v = array.median(values)
+mode_v = array.mode(values)
+linear_v = array.percentile_linear_interpolation(values, 50)
+nearest_v = array.percentile_nearest_rank(ints, 50)
+rank_v = array.percentrank(values, 0)
+covariance_v = array.covariance(values, peers)
+covariance_temp_v = array.covariance(values, array.copy(peers))
+plot(sum_v + avg_v + min_v + max_v + range_v + stdev_v + variance_v +
+     median_v + mode_v + linear_v + nearest_v + rank_v + covariance_v +
+     covariance_temp_v)
+""")
+
+
 def test_descending_for_by_array_remove_compiles():
     _check("descending_for_by_array_remove", """
 var levels = array.new<float>()
