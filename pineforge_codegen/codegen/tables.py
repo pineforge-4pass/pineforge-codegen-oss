@@ -659,13 +659,14 @@ ARRAY_METHODS = {
     "sort_indices": lambda a, args: f"[&](){{ std::vector<double> idx({a}.size()); std::iota(idx.begin(),idx.end(),0); std::sort(idx.begin(),idx.end(),[&](int i,int j){{return {a}[i]<{a}[j];}}); return idx; }}()",
 }
 
-# Pine parameter order for the checked-access subset.  Keeping the receiver
+# Pine parameter order for the checked-index subset. Keeping the receiver
 # (``id``) separate lets method syntax merge ``a.get(index = i)`` while the
 # namespace-functional path merges ``array.get(id = a, index = i)``.
 CHECKED_ARRAY_METHOD_KWARGS: dict[str, list[str]] = {
     "get": ["index"],
     "set": ["index", "value"],
     "remove": ["index"],
+    "percentrank": ["index"],
     "first": [],
     "last": [],
     "pop": [],
