@@ -126,8 +126,10 @@ plot(close)
 """
     cpp = transpile(src)
     body = _func_body(cpp, "upd")
-    assert "pivot& p = pivots[(i)];" in body
-    assert "pivot p = pivots[(i)];" not in body
+    assert "pivot& p =" in body
+    assert "pine_runtime_error" in body
+    assert "}((i)); }((pivots));" in body
+    assert "pivot p =" not in body
     assert "p.currentLevel = " in body
     assert "p.crossed = true;" in body
 
@@ -156,8 +158,10 @@ plot(close)
 """
     cpp = transpile(src)
     # Fresh per-iteration reference to the array element (write-back), not copy.
-    assert re.search(r"pivot& p = pivots\[\(wi\)\];", cpp)
-    assert "pivot p = pivots[(wi)];" not in cpp
+    assert "pivot& p =" in cpp
+    assert "pine_runtime_error" in cpp
+    assert "}((wi)); }((pivots));" in cpp
+    assert "pivot p =" not in cpp
     # The hoisted value member is suppressed (the alias replaces it).
     assert "pivot p = pivot{};" not in cpp
     # Mutations write through the reference with ``.`` member access.
@@ -177,8 +181,10 @@ for fi = 0 to array.size(pivots) - 1
 plot(close)
 """
     cpp = transpile(src)
-    assert re.search(r"pivot& p = pivots\[\(fi\)\];", cpp)
-    assert "pivot p = pivots[(fi)];" not in cpp
+    assert "pivot& p =" in cpp
+    assert "pine_runtime_error" in cpp
+    assert "}((fi)); }((pivots));" in cpp
+    assert "pivot p =" not in cpp
     assert "p.currentLevel = " in cpp
     assert "p.crossed = true;" in cpp
 
@@ -199,7 +205,9 @@ plot(acc)
     assert "pivot& p" not in cpp
     assert "pivot* p" not in cpp
     # Plain value copy of the element remains.
-    assert "pivot p = pivots[(ri)];" in cpp
+    assert "pivot p =" in cpp
+    assert "pine_runtime_error" in cpp
+    assert "}((ri)); }((pivots));" in cpp
 
 
 def test_drawing_style_constant_into_string_param_coerced():

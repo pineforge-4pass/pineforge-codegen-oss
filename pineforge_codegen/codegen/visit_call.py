@@ -148,6 +148,7 @@ from .tables import (
     ARRAY_METHODS,
     BAR_FIELDS,
     BAR_SERIES_PUSH,
+    CHECKED_ARRAY_METHOD_KWARGS,
     DRAWING_NS,
     DRAWING_TYPE_TO_CPP,
     MAP_METHODS,
@@ -281,6 +282,22 @@ class CallVisitor:
             for idx, arg in enumerate(arg_nodes)
         ]
 
+    def _array_method_arg_nodes(self, method: str, node: FuncCall) -> list:
+        """Merge checked-array method kwargs into Pine signature order."""
+        param_names = CHECKED_ARRAY_METHOD_KWARGS.get(method)
+        if param_names is None:
+            return list(node.args)
+        return _merge_kwargs(node.args, node.kwargs, param_names, lambda arg: arg)
+
+    def _array_function_arg_nodes(self, method: str, node: FuncCall) -> list:
+        """Merge ``array.method(id=..., ...)`` arguments in signature order."""
+        param_names = CHECKED_ARRAY_METHOD_KWARGS.get(method)
+        if param_names is None:
+            return list(node.args)
+        return _merge_kwargs(
+            node.args, node.kwargs, ["id", *param_names], lambda arg: arg
+        )
+
     def _visit_func_call(self, node: FuncCall) -> str:
         callee = node.callee
         if isinstance(callee, MemberAccess):
@@ -320,6 +337,21 @@ class CallVisitor:
                     list(node.args), node,
                 )
 
+        # Array method on an arbitrary expression receiver, e.g.
+        # ``make_array().get(-1)``, ``m.row(0).last()``, or
+        # ``(cond ? a : b).get(-1)``. Identifier and member receivers have
+        # dedicated paths below; other receiver shapes used to fall through to
+        # ``None(...)`` despite carrying a known array spec.
+        if (isinstance(callee, MemberAccess)
+                and not isinstance(callee.object, (Identifier, MemberAccess))
+                and callee.member in ARRAY_METHODS):
+            recv_spec = self._type_spec_from_expr(callee.object)
+            if recv_spec is not None and recv_spec.kind == "array":
+                recv = self._visit_expr(callee.object)
+                arg_nodes = self._array_method_arg_nodes(callee.member, node)
+                args = self._array_method_args(callee.member, arg_nodes, recv_spec)
+                return self._array_method_expr(recv, callee.member, args, recv_spec)
+
         # chart.point.now/new/from_index/from_time/copy — REAL data (a ChartPoint
         # aggregate). Routed here BEFORE the obj.field.method receiver logic,
         # which would otherwise mis-treat ``chart.point`` as a receiver object
@@ -342,8 +374,12 @@ class CallVisitor:
                     meth = callee.member
                     raw_args = [self._visit_expr(a) for a in node.args]
                     if recv_spec is not None and recv_spec.kind == "array" and meth in ARRAY_METHODS:
+                        arg_nodes = self._array_method_arg_nodes(meth, node)
                         return self._array_method_expr(
-                            recv, meth, self._array_method_args(meth, node.args, recv_spec), recv_spec
+                            recv,
+                            meth,
+                            self._array_method_args(meth, arg_nodes, recv_spec),
+                            recv_spec,
                         )
                     if recv_spec is not None and recv_spec.kind == "map" and meth in MAP_METHODS:
                         return self._map_method_expr(recv, meth, raw_args, recv_spec)
@@ -368,8 +404,9 @@ class CallVisitor:
                         return self._map_method_expr(m, meth_raw, margs, self._map_spec_for_name(oname))
                     if oname in self._array_vars and meth_raw in ARRAY_METHODS:
                         arr = self._safe_name(oname)
+                        arg_nodes = self._array_method_arg_nodes(meth_raw, node)
                         margs = self._array_method_args(
-                            meth_raw, node.args, self._array_spec_for_name(oname)
+                            meth_raw, arg_nodes, self._array_spec_for_name(oname)
                         )
                         return self._array_method_expr(arr, meth_raw, margs, self._array_spec_for_name(oname))
                     if oname in self._matrix_specs and meth_raw in MATRIX_METHODS:
@@ -538,7 +575,8 @@ class CallVisitor:
         if namespace is not None and namespace in self._array_vars and func_name in ARRAY_METHODS:
             arr = self._safe_name(namespace)
             spec = self._array_spec_for_name(namespace)
-            args = self._array_method_args(func_name, node.args, spec)
+            arg_nodes = self._array_method_arg_nodes(func_name, node)
+            args = self._array_method_args(func_name, arg_nodes, spec)
             return self._array_method_expr(arr, func_name, args, spec)
 
         # Array operations — emit proper C++ vector operations
@@ -561,10 +599,13 @@ class CallVisitor:
                 elems = ", ".join(self._visit_expr(a) for a in node.args)
                 return f"{self._type_spec_to_cpp(spec)}{{{elems}}}"
             # Method calls: array.method(arr, args...)
-            if func_name in ARRAY_METHODS and node.args:
-                arr = self._visit_expr(node.args[0])
-                spec = self._type_spec_from_expr(node.args[0])
-                rest = self._array_method_args(func_name, node.args[1:], spec)
+            if func_name in ARRAY_METHODS and (node.args or node.kwargs):
+                all_nodes = self._array_function_arg_nodes(func_name, node)
+                if not all_nodes:
+                    return "0"
+                arr = self._visit_expr(all_nodes[0])
+                spec = self._type_spec_from_expr(all_nodes[0])
+                rest = self._array_method_args(func_name, all_nodes[1:], spec)
                 return self._array_method_expr(arr, func_name, rest, spec)
             return "0"
 
