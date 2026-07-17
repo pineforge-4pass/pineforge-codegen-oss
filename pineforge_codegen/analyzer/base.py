@@ -1497,6 +1497,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 inferred_param_specs[i] = spec
         self._func_param_type_specs[node.name] = inferred_param_specs
 
+        # Capture direct terminal map-call metadata before leaving the lexical
+        # function scope. Local map variables and typed map parameters are no
+        # longer resolvable from the symbol table after ``exit_scope()``. Keep
+        # this narrow to map terminals so general/nonterminal inference and
+        # generated output remain unchanged.
+        terminal_ret_expr = self._direct_terminal_return_expr(node)
+        terminal_map_return = self._terminal_map_call_return(
+            terminal_ret_expr,
+            {
+                name: spec
+                for name, spec in zip(node.params, inferred_param_specs)
+            },
+        )
+
         self._symbols.exit_scope()
 
         # Detect if function returns a tuple (last stmt is TupleLiteral)
@@ -1522,13 +1536,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # to propagate UDT typing onto the caller's local. Probe:
         # data/validation/udt-method-probe-20-udt-return-from-func.
         if node.body:
-            last_stmt = node.body[-1]
-            ret_expr = None
-            if isinstance(last_stmt, ExprStmt):
-                ret_expr = last_stmt.expr
-            elif not isinstance(last_stmt, (TupleLiteral,)):
-                # last_stmt is itself an expression node (single-expr funcs)
-                ret_expr = last_stmt if hasattr(last_stmt, "loc") else None
+            ret_expr = terminal_ret_expr
             udt_ret = self._udt_name_from_ctor(ret_expr) if ret_expr is not None else None
             if udt_ret is None:
                 # Drawing-handle returns wrapped in an if-statement terminal
@@ -1547,6 +1555,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 ret_spec = self._type_spec_from_expr(ret_expr)
                 if ret_spec is not None and ret_spec.kind == "array":
                     self._func_return_type_specs[node.name] = ret_spec
+
+        if terminal_map_return is not None:
+            body_type, terminal_spec = terminal_map_return
+            if terminal_spec is not None:
+                self._func_return_type_specs[node.name] = terminal_spec
 
         # Store return type
         self._func_return_types[node.name] = body_type

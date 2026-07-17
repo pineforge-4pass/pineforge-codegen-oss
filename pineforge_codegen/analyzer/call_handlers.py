@@ -1165,7 +1165,6 @@ class CallHandlers:
         # Forward UDT-return inference (set in _visit_FuncDef) so codegen can
         # emit the struct return type. Probe: udt-method-probe-20.
         udt_ret = self._func_udt_return_types.get(func_name)
-        ret_spec = getattr(self, "_func_return_type_specs", {}).get(func_name)
         # Per-param TypeSpec: declared hints are authoritative; for untyped
         # params, infer from the call-site argument's type_spec (so an untyped
         # ``s`` used as a string, or a UDT passed by value, emits correctly).
@@ -1178,6 +1177,32 @@ class CallHandlers:
             if param_specs[i] is None and i < len(arg_specs):
                 param_specs[i] = arg_specs[i]
         existing = [fi for fi in self._func_infos if fi.name == func_name]
+
+        # A direct terminal map call on an untyped parameter cannot be typed
+        # while the function definition is first visited: its map TypeSpec is
+        # learned only here, from the call-site argument. Re-run only the
+        # terminal-map classifier with those established parameter specs; do
+        # not re-analyze the body or participate in general return inference.
+        effective_param_specs = list(param_specs)
+        if existing and existing[0].param_type_specs:
+            for i, spec in enumerate(existing[0].param_type_specs):
+                if i < len(effective_param_specs) and spec is not None:
+                    effective_param_specs[i] = spec
+        terminal_map_return = self._terminal_map_call_return(
+            self._direct_terminal_return_expr(func_def),
+            {
+                name: spec
+                for name, spec in zip(func_def.params, effective_param_specs)
+            },
+        )
+        ret_spec = getattr(self, "_func_return_type_specs", {}).get(func_name)
+        if terminal_map_return is not None:
+            return_type, inferred_ret_spec = terminal_map_return
+            self._func_return_types[func_name] = return_type
+            if inferred_ret_spec is not None:
+                self._func_return_type_specs[func_name] = inferred_ret_spec
+                ret_spec = inferred_ret_spec
+
         if not existing:
             fi = FuncInfo(
                 name=func_name,
@@ -1194,7 +1219,10 @@ class CallHandlers:
         else:
             # Update with better type info if available
             fi = existing[0]
-            if fi.return_type in (PineType.UNKNOWN, PineType.VOID) and return_type not in (PineType.UNKNOWN, PineType.VOID):
+            if terminal_map_return is not None:
+                fi.return_type = return_type
+                fi.return_type_spec = ret_spec
+            elif fi.return_type in (PineType.UNKNOWN, PineType.VOID) and return_type not in (PineType.UNKNOWN, PineType.VOID):
                 fi.return_type = return_type
             for i, pt in enumerate(param_types):
                 if i < len(fi.param_types) and fi.param_types[i] == PineType.UNKNOWN:

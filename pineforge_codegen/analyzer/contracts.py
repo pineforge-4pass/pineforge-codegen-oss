@@ -89,9 +89,9 @@ class FuncInfo:
     # untyped ``s`` used as a string emits as ``std::string s``.
     param_type_specs: list = field(default_factory=list)
     # ``TypeSpec`` of the function's return value when it is a collection the
-    # coarse ``return_type`` (PineType) cannot represent — today this covers
-    # array-returning functions (``buildPDLevels() => array.from(...)`` ->
-    # ``std::vector<double>``). UDT / drawing-handle returns use
+    # coarse ``return_type`` (PineType) cannot represent — arrays and maps
+    # (e.g. ``buildPDLevels() => array.from(...)`` -> ``std::vector<double>``).
+    # UDT / drawing-handle returns use
     # ``udt_return_type``; tuple returns use ``returns_tuple``.
     return_type_spec: Any = None
 
@@ -231,7 +231,7 @@ class AnalyzerContext:
     # Per-function var_members + series_vars (used when emitting per-function call-site variants):
     func_var_members: dict = field(default_factory=dict)
     func_series_vars: dict = field(default_factory=dict)
-    # Per-function array-return TypeSpec (see FuncInfo.return_type_spec).
+    # Per-function collection-return TypeSpec (see FuncInfo.return_type_spec).
     func_return_type_specs: dict = field(default_factory=dict)
     # var_name -> UDT type name for variables instantiated via TypeName.new(...)
     udt_var_types: dict[str, str] = field(default_factory=dict)
