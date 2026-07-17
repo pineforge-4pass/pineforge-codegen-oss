@@ -10,14 +10,11 @@ Buckets:
 * HARD_REJECT_FUNC / HARD_REJECT_NAMESPACE - calls that have no PineForge
   semantics at all (e.g. ``request.financial``, ``ticker.*``).
 * DIVERGENT_VARS - built-in variables whose PineForge value diverges from
-  TradingView. Most are reported as WARNING (e.g. ``bar_index`` depends on the
-  data window, ``timenow`` is not wall-clock) — these often appear in visual or
-  logging code that does not affect trade outcomes. A subset
-  (DIVERGENT_VARS_ERROR: ``last_bar_index`` aliased to the *current* bar index,
-  ``time_close`` aliased to the bar *open* timestamp) are silent MIS-ALIASES:
-  they produce a plausible-looking but wrong value that flows straight into
-  trade logic, so a backtest would be silently wrong. Those are escalated to
-  ERROR (rejected) rather than merely warned.
+  TradingView. They are reported as WARNING (e.g. ``bar_index`` and
+  ``last_bar_index`` depend on the fed data window, ``timenow`` is not
+  wall-clock) — these often appear in visual or logging code that does not
+  affect trade outcomes. DIVERGENT_VARS_ERROR is reserved for silent
+  mis-aliases severe enough to reject; it is currently empty.
 * NOT_YET - calls the runtime could support but the transpiler does not yet
   emit (e.g. ``max_bars_back``, bare ``barssince``).
 * request.security - only ``symbol`` / ``timeframe`` / ``expression`` allowed,
@@ -174,11 +171,11 @@ HARD_REJECT_NAMESPACE: dict[str, str] = {
 # logging or visual logic that does not affect trade outcomes. The checker still
 # flags divergence so users see the risk.
 #
-# DIVERGENT_VARS_ERROR is a SUBSET that is escalated to ERROR (rejected): these
-# are silent MIS-ALIASES, not merely data-window divergences. They return a
-# plausible value that is the WRONG quantity (last_bar_index -> current bar
-# index) and that value flows directly into trade logic, so the backtest would
-# be silently wrong. A WARNING is not enough.
+# DIVERGENT_VARS_ERROR is a SUBSET reserved for silent MIS-ALIASES that must be
+# escalated to ERROR (rejected), rather than merely warned. It is currently
+# empty: last_bar_index lowers to the true final index of the fed data window,
+# but that index can still differ from TradingView when the window does not
+# cover the same chart history.
 #
 # NOTE: the bare ``time_close`` variable is NOT divergent — codegen lowers it to
 # the engine's ``time_close()`` accessor, which returns the true bar-close
@@ -188,20 +185,32 @@ HARD_REJECT_NAMESPACE: dict[str, str] = {
 # separate supported builtin handled in visit_call.)
 DIVERGENT_VARS: dict[str, str] = {
     "bar_index":      "bar_index depends on the data window; PineForge and TradingView produce different values for the same script.",
-    "last_bar_index": "last_bar_index is aliased to the CURRENT bar index in PineForge codegen (not the index of the last bar); backtest would be silently wrong — rejected.",
+    "last_bar_index": "last_bar_index is the final index of PineForge's fed data window; it can diverge from TradingView when the window does not cover the same chart history.",
     "timenow":        "timenow is aliased to the current bar timestamp in PineForge; it is not real wall-clock time.",
 }
 
 # Subset of DIVERGENT_VARS escalated from WARNING to ERROR (see comment above).
-DIVERGENT_VARS_ERROR: frozenset[str] = frozenset({"last_bar_index"})
+DIVERGENT_VARS_ERROR: frozenset[str] = frozenset()
 
 BARSTATE_APPROX_VARS: dict[str, str] = {
-    "barstate.islast": "barstate.islast is always false in PineForge batch backtests.",
+    "barstate.islast": (
+        "In direct batch chart-scope evaluation, barstate.islast is true only "
+        "on the final bar of PineForge's fed chart-data window. Inside a "
+        "request.security() history index, PineForge currently selects the "
+        "false branch; requested-context last-bar state is not modeled."
+    ),
     "barstate.ishistory": "barstate.ishistory is always true in PineForge batch backtests.",
     "barstate.isrealtime": "barstate.isrealtime is always false in PineForge batch backtests.",
     "barstate.isnew": "barstate.isnew follows PineForge first-tick execution state.",
     "barstate.isconfirmed": "barstate.isconfirmed follows PineForge last-tick execution state.",
-    "barstate.islastconfirmedhistory": "barstate.islastconfirmedhistory is always false in PineForge batch backtests.",
+    "barstate.islastconfirmedhistory": (
+        "In direct historical batch chart-scope evaluation, PineForge "
+        "approximates barstate.islastconfirmedhistory as true only on the "
+        "final bar of the fed chart-data window. Inside a request.security() "
+        "history index, PineForge currently selects the false branch; "
+        "TradingView's requested-context and realtime-boundary semantics are "
+        "not modeled."
+    ),
 }
 
 STRATEGY_UNSUPPORTED_PARAMS: dict[str, set[str]] = {

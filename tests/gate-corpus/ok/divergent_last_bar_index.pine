@@ -1,0 +1,7 @@
+//@version=6
+strategy("T")
+// last_bar_index is the final index of PineForge's fed data window. It is
+// accepted with a chart-history divergence warning rather than hard-rejected.
+isLast = bar_index == last_bar_index
+if isLast
+    strategy.close_all()

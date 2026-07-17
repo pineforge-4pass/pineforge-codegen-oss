@@ -480,11 +480,11 @@ class SecurityEmitter:
             return None
         return None
 
-    # In PineForge batch backtests these barstate flags are compile-time
-    # constants (see support_checker / codegen.visit_expr barstate emission):
-    # every bar is historical, none realtime/last. The other flags
-    # (isfirst/isnew/isconfirmed) depend on runtime tick state, so they are
-    # deliberately absent and leave a fold "unknown".
+    # Narrow approximations used only while resolving a request.security()
+    # history index to a literal. This is not chart-scope barstate lowering:
+    # visit_expr emits runtime state for islast/islastconfirmedhistory, whereas
+    # this security-index folder currently treats them as false. Other flags
+    # (isfirst/isnew/isconfirmed) remain unknown and are deliberately absent.
     _SECURITY_CONST_BARSTATE = {
         "isrealtime": False,
         "islast": False,
@@ -500,10 +500,10 @@ class SecurityEmitter:
     ) -> bool | None:
         """Fold a boolean expression to a compile-time constant, or None.
 
-        Only reduces expressions whose non-literal leaves are the batch-constant
-        barstate flags above; anything runtime-dependent returns None. Used to
-        resolve a request.security history index expressed as
-        ``barstate.isrealtime ? 1 : 0`` and friends."""
+        Only reduces expressions whose non-literal leaves have a narrow
+        request.security history-index approximation above; anything else
+        returns None. Used to resolve a request.security history index
+        expressed as ``barstate.isrealtime ? 1 : 0`` and friends."""
         if resolving is None:
             resolving = set()
         if isinstance(node, BoolLiteral):
@@ -555,11 +555,11 @@ class SecurityEmitter:
 
         Extends ``_literal_int_for_security_index`` by also resolving the index
         through helper-parameter bindings and global aliases and constant-folding
-        a ternary whose condition is a batch-constant barstate flag (e.g.
-        ``idxHigher = barstate.isrealtime ? 1 : 0`` -> 0). A literal index short-
-        circuits on the first line, so behaviour is unchanged for every already-
-        literal index. Returns None when the index cannot be reduced to a
-        compile-time literal, so the caller keeps its existing rejection."""
+        a ternary whose condition has a security-index barstate approximation
+        (e.g. ``idxHigher = barstate.isrealtime ? 1 : 0`` -> 0). A literal index
+        short-circuits on the first line, so behaviour is unchanged for every
+        already-literal index. Returns None when the index cannot be reduced to
+        a compile-time literal, so the caller keeps its existing rejection."""
         direct = self._literal_int_for_security_index(node)
         if direct is not None:
             return direct
