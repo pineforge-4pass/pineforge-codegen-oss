@@ -22,6 +22,8 @@ from __future__ import annotations
 from ..ast_nodes import FuncCall, Identifier, MemberAccess
 from .tables import DRAWING_TYPE_TO_CPP, DRAWING_ARENA, ARRAY_VOID_METHODS as _ARRAY_VOID_METHODS
 
+_MAP_VOID_METHODS = frozenset({"clear", "put_all"})
+
 # ---------------------------------------------------------------------------
 # Canonical Pine v6 constructor param-name lists (positional order).
 # Only the GEOMETRY names are consumed downstream; every other (visual) name is
@@ -478,11 +480,11 @@ class DrawingVisitor:
         expression and so cannot be used as a function's return value / RHS.
 
         Covers drawing setters/delete/visual-noop (delegated to
-        ``_drawing_call_is_void``) AND the Pine array MUTATOR methods whose C++
+        ``_drawing_call_is_void``), the Pine array MUTATOR methods whose C++
         lowering is void / an iterator (``array.push/insert/clear/set/fill/
-        sort/reverse/concat/unshift``) — a function ending in
-        ``array.clear(x)`` returns void in Pine, so it must emit as a statement
-        with a default return, not ``return x.clear();``.
+        sort/reverse/concat/unshift``), and terminal map ``clear``/``put_all``
+        calls. A function ending in one of these calls must emit it as a
+        statement with a default return, never ``return <void-expression>;``.
         """
         if self._drawing_call_is_void(node):
             return True
@@ -490,14 +492,43 @@ class DrawingVisitor:
             return False
         method = node.callee.member
         _fn, ns = self._resolve_callee(node.callee)
-        if method not in _ARRAY_VOID_METHODS:
+        if method in _ARRAY_VOID_METHODS:
+            # array.<method>(arr, ...) namespace form OR arr.<method>(...)
+            # method form on a std::vector receiver.
+            if ns == "array":
+                return True
+            recv_spec = self._type_spec_from_expr(node.callee.object)
+            if recv_spec is not None and recv_spec.kind == "array":
+                return True
+
+        if method not in _MAP_VOID_METHODS:
             return False
-        # array.<method>(arr, ...) namespace form OR arr.<method>(...) method
-        # form on a std::vector receiver.
-        if ns == "array":
-            return True
-        recv_spec = self._type_spec_from_expr(node.callee.object)
-        return recv_spec is not None and recv_spec.kind == "array"
+        # Preserve the unsupported arbitrary-map-receiver boundary. Namespace
+        # functional calls are established; method calls must use a named
+        # global/local/parameter receiver.
+        if ns == "map":
+            # The established namespace-functional form has a positional map
+            # receiver.  Keyword-only receiver routing remains unsupported
+            # and must retain its pre-KI-48g fallback output.
+            expected_arity = 1 if method == "clear" else 2
+            return len(node.args) == expected_arity and not node.kwargs
+        if not isinstance(node.callee.object, Identifier):
+            return False
+        name = node.callee.object.name
+        param_spec = getattr(self, "_current_func_param_specs", {}).get(name)
+        if method == "clear":
+            if node.args or node.kwargs:
+                return False
+        elif param_spec is not None and param_spec.kind == "map":
+            if not (
+                (len(node.args) == 1 and not node.kwargs)
+                or (not node.args and set(node.kwargs) == {"id2"})
+            ):
+                return False
+        elif len(node.args) != 1 or node.kwargs:
+            return False
+        recv_spec = param_spec or self._type_spec_from_expr(node.callee.object)
+        return recv_spec is not None and recv_spec.kind == "map"
 
     # ------------------------------------------------------------------
     # _uses_drawing detection + arena caps

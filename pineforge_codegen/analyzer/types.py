@@ -40,8 +40,8 @@ from __future__ import annotations
 from typing import Any
 
 from ..ast_nodes import (
-    ASTNode, BoolLiteral, FuncCall, Identifier, MemberAccess,
-    NaLiteral, NumberLiteral, StringLiteral, UnaryOp,
+    ASTNode, BoolLiteral, ExprStmt, FuncCall, Identifier, MemberAccess,
+    NaLiteral, NumberLiteral, StringLiteral, TupleLiteral, UnaryOp,
 )
 from ..symbols import PineType, TypeSpec
 
@@ -255,6 +255,145 @@ class TypeHelper:
             owner = self._type_spec_from_expr(value.object)
             if owner is not None and owner.kind == "udt" and owner.name:
                 return (self._udt_field_type_specs.get(owner.name) or {}).get(value.member)
+        return None
+
+    @staticmethod
+    def _direct_terminal_return_expr(func_def) -> ASTNode | None:
+        """Return a UDF's direct terminal expression, if it has one."""
+        if not func_def.body:
+            return None
+        last_stmt = func_def.body[-1]
+        if isinstance(last_stmt, ExprStmt):
+            return last_stmt.expr
+        if not isinstance(last_stmt, TupleLiteral) and hasattr(last_stmt, "loc"):
+            return last_stmt
+        return None
+
+    def _terminal_map_call_return(
+        self,
+        value: ASTNode | None,
+        parameter_specs: dict[str, TypeSpec | None] | None = None,
+    ) -> tuple[PineType, TypeSpec | None] | None:
+        """Return metadata for a direct terminal map call in a UDF.
+
+        This deliberately does not participate in general expression or
+        declaration inference. During function-definition analysis it uses
+        the active lexical scope for locals and typed parameters; for untyped
+        parameters it may be called again with call-site ``parameter_specs``.
+        Arbitrary-expression receivers stay out of scope because their map
+        method routing is not supported yet.
+        """
+        if not isinstance(value, FuncCall) or not isinstance(
+            value.callee, MemberAccess
+        ):
+            return None
+
+        callee = value.callee
+        method = callee.member
+        receiver = None
+        if isinstance(callee.object, Identifier) and callee.object.name == "map":
+            # Functional form: map.method(id, ...). Keyword-only receiver
+            # routing remains a separate residual, so require the established
+            # positional receiver here.
+            functional_arity = {
+                "clear": 1,
+                "keys": 1,
+                "values": 1,
+                "copy": 1,
+                "put_all": 2,
+                "get": 2,
+                "remove": 2,
+                "put": 3,
+            }.get(method)
+            if (
+                functional_arity is not None
+                and len(value.args) == functional_arity
+                and not value.kwargs
+            ):
+                receiver = value.args[0]
+        elif isinstance(callee.object, Identifier):
+            # Global/local/typed-parameter method forms only. Do not infer an
+            # arbitrary expression receiver that codegen cannot route.
+            is_parameter = (
+                parameter_specs is not None
+                and callee.object.name in parameter_specs
+            )
+            valid_method_shape = False
+            expected_arity = {
+                "clear": 0,
+                "keys": 0,
+                "values": 0,
+                "copy": 0,
+                "put_all": 1,
+                "get": 1,
+                "remove": 1,
+                "put": 2,
+            }.get(method)
+            if expected_arity is not None:
+                valid_method_shape = (
+                    len(value.args) == expected_arity and not value.kwargs
+                )
+            if is_parameter and not valid_method_shape:
+                if method == "put_all":
+                    valid_method_shape = (
+                        not value.args and set(value.kwargs) == {"id2"}
+                    )
+                elif method in ("get", "remove"):
+                    valid_method_shape = (
+                        not value.args and set(value.kwargs) == {"key"}
+                    )
+                elif method == "put":
+                    valid_method_shape = (
+                        (
+                            len(value.args) == 1
+                            and set(value.kwargs) == {"value"}
+                        )
+                        or (
+                            not value.args
+                            and set(value.kwargs) == {"key", "value"}
+                        )
+                    )
+            if valid_method_shape:
+                receiver = callee.object
+        if receiver is None:
+            return None
+
+        recv_spec = None
+        if (
+            isinstance(receiver, Identifier)
+            and parameter_specs is not None
+            and receiver.name in parameter_specs
+        ):
+            recv_spec = parameter_specs.get(receiver.name)
+            # An unresolved parameter still shadows any same-named global.
+            if recv_spec is None:
+                return None
+        else:
+            recv_spec = self._type_spec_from_expr(receiver)
+        if recv_spec is None or recv_spec.kind != "map":
+            return None
+
+        if method in ("clear", "put_all"):
+            return PineType.VOID, None
+        if method == "keys":
+            return (
+                PineType.VOID,
+                TypeSpec.array(recv_spec.key or TypeSpec.primitive("string")),
+            )
+        if method == "values":
+            return (
+                PineType.VOID,
+                TypeSpec.array(recv_spec.value or TypeSpec.primitive("float")),
+            )
+        if method == "copy":
+            return PineType.VOID, recv_spec
+        if (
+            method in ("put", "get", "remove")
+            and recv_spec.value is not None
+            and recv_spec.value.kind == "primitive"
+            and recv_spec.value.name == "string"
+        ):
+            return PineType.STRING, None
         return None
 
     @staticmethod
