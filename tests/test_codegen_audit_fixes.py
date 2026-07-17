@@ -208,7 +208,12 @@ def test_array_stdev_biased_arg():
         "arr = array.new<float>(0)\narray.push(arr, close)\n"
         "v = array.stdev(arr, false)\nplot(v)\n"
     )
-    assert "_d=(false)?" in cpp.replace(" ", "").replace("\n", "") or "_d=(false)" in cpp
+    assignment = next(line for line in cpp.splitlines() if line.startswith("        v ="))
+    token = assignment.split("auto ", 1)[1].split("=", 1)[0]
+    assert token.startswith("__pf_array_arg_")
+    assert f"auto {token}=(false);" in assignment
+    assert f"_d=({token})?" in assignment
+    assert assignment.index("(false)") < assignment.index("arr.empty()")
 
 
 def test_array_stdev_no_arg_unchanged():
