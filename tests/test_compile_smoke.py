@@ -410,6 +410,35 @@ av = array.avg(a)
 """)
 
 
+def test_array_typed_udf_parameter_methods_compile():
+    _check("array_typed_udf_parameter_methods", """
+type Pivot
+    float level
+rank(array<float> values, int index) =>
+    values.percentrank(index=index)
+mutate(array<int> values) =>
+    values.set(index=0, value=9)
+    values.push(10)
+    values.get(index=0)
+flip(array<bool> values) =>
+    values.set(0, false)
+    values.push(true)
+    values.last()
+mutate_pivot(array<Pivot> values) =>
+    Pivot p = values.get(0)
+    p.level := 7
+    p.level
+floats = array.from(1.0, 2.0, 3.0)
+ints = array.from(1, 2)
+flags = array.from(true)
+pivots = array.from(Pivot.new(1))
+rank_result = rank(floats, 2)
+int_result = mutate(ints)
+bool_result = flip(flags)
+pivot_result = mutate_pivot(pivots)
+""")
+
+
 def test_nested_array_slice_aggregates_compile():
     _check("nested_array_slice_aggregates", """
 a = array.from(1.0, 3.0, 2.0)

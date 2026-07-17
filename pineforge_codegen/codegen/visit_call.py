@@ -397,6 +397,27 @@ class CallVisitor:
                     or oname in self._global_member_vars
                 ):
                     meth_raw = callee.member
+                    # Function parameters have lexical precedence over the
+                    # global collection registries.  Route a declared/inferred
+                    # ``array<T>`` parameter before consulting same-named
+                    # global map/array/matrix entries, and retain its element
+                    # TypeSpec for checked reads and mutations.
+                    param_spec = getattr(
+                        self, "_current_func_param_specs", {}
+                    ).get(oname)
+                    if (
+                        param_spec is not None
+                        and param_spec.kind == "array"
+                        and meth_raw in ARRAY_METHODS
+                    ):
+                        arr = self._safe_name(oname)
+                        arg_nodes = self._array_method_arg_nodes(meth_raw, node)
+                        margs = self._array_method_args(
+                            meth_raw, arg_nodes, param_spec
+                        )
+                        return self._array_method_expr(
+                            arr, meth_raw, margs, param_spec
+                        )
                     # map.put / map.get / … must lower to unordered_map ops, not `.put` on C++
                     if oname in self._map_vars and meth_raw in MAP_METHODS:
                         m = self._safe_name(oname)
