@@ -412,6 +412,11 @@ class TopLevelEmitter:
             # own scope (with its active var remap for clones).
             if name in getattr(self, "_func_local_var_names", ()):
                 continue
+            # Runtime primitive initializers execute at their Pine declaration
+            # site under a per-member once flag.  This preserves source-order
+            # dependencies and first-entry semantics for conditional blocks.
+            if name in self._runtime_scalar_var_init_members:
+                continue
             # UDT-typed var members (``var SDZone z = na``) default-construct to
             # na via the struct's in-class ``__pf_na = true``; a ctor init like
             # ``z(na<double>())`` would not type-match the struct member.

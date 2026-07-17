@@ -247,8 +247,30 @@ class StmtVisitor:
         return None
 
     def _visit_var_decl(self, node: VarDecl, lines: list[str], pad: str) -> None:
-        # var/varip — handled as members in on_bar preamble
+        # Primitive runtime var/varip initializers execute at the declaration
+        # site under a dedicated once flag. This preserves source order (a
+        # preceding input/plain/TA declaration is already available) and Pine's
+        # first-entry semantics for declarations nested in conditional blocks.
+        # Series, aggregates, constructor constants, and function-local vars
+        # retain their specialized initialization paths.
         if node.is_var or node.is_varip:
+            info = self._runtime_scalar_var_init_by_node.get(id(node))
+            if info is not None:
+                member_name = info["member_name"]
+                target = self._safe_name(member_name)
+                previous_input_name = self._current_input_var_name
+                self._current_input_var_name = node.name
+                try:
+                    init_cpp = self._visit_expr(node.value)
+                finally:
+                    self._current_input_var_name = previous_input_name
+                init_cpp = self._typed_na_init(
+                    init_cpp, member_name, info["ptype"]
+                )
+                lines.append(f"{pad}if (!{info['flag']}) {{")
+                lines.append(f"{pad}    {target} = {init_cpp};")
+                lines.append(f"{pad}    {info['flag']} = true;")
+                lines.append(f"{pad}}}")
             return
 
         safe = self._safe_name(node.name)
@@ -695,12 +717,12 @@ class StmtVisitor:
 
         lines.append(f"{pad}/* unsupported tuple assignment */")
 
-    def _push_block_var_remap(self, node):
-        """Activate block-scoped var renames for ``node`` (BUG 1). Returns the
+    def _push_block_var_remap(self, owner):
+        """Activate block-scoped var renames for ``owner`` (BUG 1). Returns the
         previous ``_active_var_remap`` to restore (or ``_NO_BLOCK_REMAP`` if this
         block owns no renames). Renames are MERGED over the inherited remap so
         nested blocks keep any enclosing func-clone / outer-block mapping."""
-        renames = self._block_var_renames.get(id(node))
+        renames = self._block_var_renames.get(id(owner))
         if not renames:
             return _NO_BLOCK_REMAP
         saved = self._active_var_remap
@@ -711,12 +733,27 @@ class StmtVisitor:
         if saved is not _NO_BLOCK_REMAP:
             self._active_var_remap = saved
 
-    def _visit_if(self, node: IfStmt, lines: list[str], indent: int) -> None:
-        _blk_saved = self._push_block_var_remap(node)
+    def _visit_block_statements(self, body: list, lines: list[str],
+                                indent: int) -> None:
+        """Emit one lexical branch/loop body with its exact var remap."""
+        saved = self._push_block_var_remap(body)
         try:
-            self._visit_if_body(node, lines, indent)
+            for stmt in body:
+                self._visit_stmt(stmt, lines, indent)
         finally:
-            self._pop_block_var_remap(_blk_saved)
+            self._pop_block_var_remap(saved)
+
+    def _emit_block_with_assign(self, body: list, target: str,
+                                lines: list[str], indent: int) -> None:
+        """Expression-body counterpart of :meth:`_visit_block_statements`."""
+        saved = self._push_block_var_remap(body)
+        try:
+            self._emit_body_with_assign(body, target, lines, indent)
+        finally:
+            self._pop_block_var_remap(saved)
+
+    def _visit_if(self, node: IfStmt, lines: list[str], indent: int) -> None:
+        self._visit_if_body(node, lines, indent)
 
     def _visit_if_body(self, node: IfStmt, lines: list[str], indent: int) -> None:
         pad = "    " * indent
@@ -726,20 +763,29 @@ class StmtVisitor:
         # the result assignment in the condition.
         if self._in_ta_func_variant and self._if_body_has_ta(node.body):
             cond = self._visit_expr(node.condition)
-            self._hoist_if_body(node.body, cond, lines, pad, indent)
+            saved = self._push_block_var_remap(node.body)
+            try:
+                self._hoist_if_body(node.body, cond, lines, pad, indent)
+            finally:
+                self._pop_block_var_remap(saved)
             # Handle else_body similarly
             if node.else_body:
                 if len(node.else_body) == 1 and isinstance(node.else_body[0], IfStmt):
                     self._visit_if(node.else_body[0], lines, indent)
                 else:
                     neg_cond = f"!({cond})"
-                    self._hoist_if_body(node.else_body, neg_cond, lines, pad, indent)
+                    saved = self._push_block_var_remap(node.else_body)
+                    try:
+                        self._hoist_if_body(
+                            node.else_body, neg_cond, lines, pad, indent
+                        )
+                    finally:
+                        self._pop_block_var_remap(saved)
             return
 
         cond = self._visit_expr(node.condition)
         lines.append(f"{pad}if ({cond}) {{")
-        for s in node.body:
-            self._visit_stmt(s, lines, indent + 1)
+        self._visit_block_statements(node.body, lines, indent + 1)
         lines.append(f"{pad}}}")
         if node.else_body:
             if len(node.else_body) == 1 and isinstance(node.else_body[0], IfStmt):
@@ -747,8 +793,9 @@ class StmtVisitor:
                 self._visit_if(node.else_body[0], lines, indent)
             else:
                 lines[-1] = f"{pad}}} else {{"
-                for s in node.else_body:
-                    self._visit_stmt(s, lines, indent + 1)
+                self._visit_block_statements(
+                    node.else_body, lines, indent + 1
+                )
                 lines.append(f"{pad}}}")
 
     def _visit_for(self, node: ForStmt, lines: list[str], indent: int) -> None:
@@ -879,22 +926,21 @@ class StmtVisitor:
                 prefix = "if" if i == 0 else "else if"
                 case_val = self._visit_expr(case_expr)
                 lines.append(f"{pad}{prefix} ({expr_var} == {case_val}) {{")
-                for s in case_body:
-                    self._visit_stmt(s, lines, indent + 1)
+                self._visit_block_statements(case_body, lines, indent + 1)
                 lines.append(f"{pad}}}")
         else:
             for i, (case_expr, case_body) in enumerate(node.cases):
                 prefix = "if" if i == 0 else "else if"
                 cond = self._visit_expr(case_expr)
                 lines.append(f"{pad}{prefix} ({cond}) {{")
-                for s in case_body:
-                    self._visit_stmt(s, lines, indent + 1)
+                self._visit_block_statements(case_body, lines, indent + 1)
                 lines.append(f"{pad}}}")
 
         if node.default_body:
             lines.append(f"{pad}else {{")
-            for s in node.default_body:
-                self._visit_stmt(s, lines, indent + 1)
+            self._visit_block_statements(
+                node.default_body, lines, indent + 1
+            )
             lines.append(f"{pad}}}")
 
     # ------------------------------------------------------------------
@@ -941,7 +987,7 @@ class StmtVisitor:
         if isinstance(node, IfStmt):
             cond = self._visit_expr(node.condition)
             lines.append(f"{pad}if ({cond}) {{")
-            self._emit_body_with_assign(node.body, target, lines, indent + 1)
+            self._emit_block_with_assign(node.body, target, lines, indent + 1)
             lines.append(f"{pad}}}")
             if node.else_body:
                 if len(node.else_body) == 1 and isinstance(node.else_body[0], IfStmt):
@@ -949,7 +995,9 @@ class StmtVisitor:
                     self._visit_if_switch_expr(node.else_body[0], target, lines, indent)
                 else:
                     lines[-1] = f"{pad}}} else {{"
-                    self._emit_body_with_assign(node.else_body, target, lines, indent + 1)
+                    self._emit_block_with_assign(
+                        node.else_body, target, lines, indent + 1
+                    )
                     lines.append(f"{pad}}}")
         elif isinstance(node, SwitchStmt):
             if node.expr:
@@ -960,16 +1008,22 @@ class StmtVisitor:
                     prefix = "if" if i == 0 else "else if"
                     case_val = self._visit_expr(case_expr)
                     lines.append(f"{pad}{prefix} ({expr_var} == {case_val}) {{")
-                    self._emit_body_with_assign(case_body, target, lines, indent + 1)
+                    self._emit_block_with_assign(
+                        case_body, target, lines, indent + 1
+                    )
                     lines.append(f"{pad}}}")
             else:
                 for i, (case_expr, case_body) in enumerate(node.cases):
                     prefix = "if" if i == 0 else "else if"
                     cond = self._visit_expr(case_expr)
                     lines.append(f"{pad}{prefix} ({cond}) {{")
-                    self._emit_body_with_assign(case_body, target, lines, indent + 1)
+                    self._emit_block_with_assign(
+                        case_body, target, lines, indent + 1
+                    )
                     lines.append(f"{pad}}}")
             if node.default_body:
                 lines.append(f"{pad}else {{")
-                self._emit_body_with_assign(node.default_body, target, lines, indent + 1)
+                self._emit_block_with_assign(
+                    node.default_body, target, lines, indent + 1
+                )
                 lines.append(f"{pad}}}")
