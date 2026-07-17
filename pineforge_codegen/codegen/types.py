@@ -213,11 +213,11 @@ class TypeInferer:
             loop_specs = getattr(self, "_current_loop_var_specs", None)
             if loop_specs and node.name in loop_specs:
                 return loop_specs[node.name]
-            if node.name in self._collection_types:
-                return self._collection_types[node.name]
             param_specs = getattr(self, "_current_func_param_specs", {})
             if node.name in param_specs:
                 return param_specs[node.name]
+            if node.name in self._collection_types:
+                return self._collection_types[node.name]
             if node.name in self._udt_var_types:
                 return TypeSpec.udt(self._udt_var_types[node.name])
             # Drawing-typed method/function parameter (L.6d / U.5): a ``line ln``

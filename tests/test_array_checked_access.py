@@ -343,6 +343,79 @@ else if selector == 13
 """
 
 
+_TYPED_ARRAY_PARAM_METHOD_SOURCE = """//@version=6
+strategy("Typed array parameter methods")
+type Pivot
+    float level
+var order = array.new<int>()
+var array<float> shadow_array = array.from(99.0)
+var map<string, float> shadow_map = map.new<string, float>()
+var matrix<float> shadow_matrix = matrix.new<float>(1, 1, 99.0)
+
+next_index() =>
+    order.push(1)
+    0
+
+next_value() =>
+    order.push(2)
+    9
+
+rank_pos(array<float> source, int index) =>
+    source.percentrank(index)
+
+rank_kw(array<float> source, int index) =>
+    source.percentrank(index=index)
+
+mutate_int(array<int> source) =>
+    source.set(index=next_index(), value=next_value())
+    source.push(10)
+    source.get(index=0)
+
+probe_bool(array<bool> source) =>
+    bool before = source.first()
+    source.set(0, false)
+    source.push(true)
+    before and source.last() and not source.get(0)
+
+mutate_pivot(array<Pivot> source) =>
+    Pivot p = source.get(0)
+    p.level := 7
+    p.level
+
+shadow_array_probe(array<string> shadow_array) =>
+    array<string> copied = shadow_array.copy()
+    shadow_array.push("tail")
+    copied.size()
+
+shadow_map_rank(array<float> shadow_map, int index) =>
+    shadow_map.percentrank(index)
+
+shadow_matrix_rank(array<float> shadow_matrix, int index) =>
+    shadow_matrix.percentrank(index=index)
+
+float_values = array.from(1.0, 2.0, 3.0)
+int_values = array.from(1, 2)
+bool_values = array.from(true)
+pivot_values = array.from(Pivot.new(1))
+string_values = array.from("head")
+rank_pos_result = rank_pos(float_values, 2)
+rank_kw_result = rank_kw(float_values, 2)
+int_result = mutate_int(int_values)
+bool_result = probe_bool(bool_values)
+pivot_result = mutate_pivot(pivot_values)
+shadow_array_copy_size = shadow_array_probe(string_values)
+shadow_map_result = shadow_map_rank(float_values, 2)
+shadow_matrix_result = shadow_matrix_rank(float_values, 2)
+int_caller_value = int_values.get(0)
+int_caller_size = int_values.size()
+bool_caller_value = bool_values.get(0)
+bool_caller_size = bool_values.size()
+pivot_caller_value = pivot_values.get(0).level
+string_caller_size = string_values.size()
+order_code = order.get(0) * 10 + order.get(1)
+"""
+
+
 _PERCENTRANK_BOUNDS_ERROR_SOURCE = """//@version=6
 strategy("PercentRank bounds errors")
 selector = close
@@ -797,3 +870,124 @@ int main() {
         12: "Index na is out of bounds. Array size is 3",
         13: "Index inf is out of bounds. Array size is 3",
     }
+
+
+def test_array_typed_udf_parameter_methods_route_by_typespec():
+    cpp = transpile(_TYPED_ARRAY_PARAM_METHOD_SOURCE)
+
+    # Declared parameter element types survive into both the C++ reference
+    # signature and method lowering (including vector<bool>'s proxy type and a
+    # user-defined element type).
+    assert "double rank_pos(std::vector<double>& source, int index)" in cpp
+    assert "double rank_kw(std::vector<double>& source, int index)" in cpp
+    assert "double mutate_int(std::vector<int>& source)" in cpp
+    assert "bool probe_bool(std::vector<bool>& source)" in cpp
+    assert "double mutate_pivot(std::vector<Pivot>& source)" in cpp
+    assert (
+        "double shadow_array_probe(std::vector<std::string>& shadow_array)"
+        in cpp
+    )
+    assert (
+        "double shadow_map_rank(std::vector<double>& shadow_map, int index)"
+        in cpp
+    )
+    assert (
+        "double shadow_matrix_rank(std::vector<double>& shadow_matrix, int index)"
+        in cpp
+    )
+    assert (
+        "std::vector<std::string> copied = "
+        "std::vector<std::string>(shadow_array);"
+    ) in cpp
+
+    # Both positional and keyword PercentRank forms use the non-normalizing,
+    # checked lowering.  The remaining checked reads use the separate v6
+    # negative-index normalization expression.
+    assert cpp.count("int64_t __pf_array_index=__pf_raw_index;") == 4
+    assert "int64_t __pf_array_index=__pf_raw_index<0?" in cpp
+    assert cpp.count("pine_runtime_error") >= 2
+
+    # Read and mutation methods no longer leak as raw, invalid C++ member
+    # calls.  Mutation still targets the reference parameter directly.
+    for raw_call in (
+        "source.percentrank(",
+        "source.set(",
+        "source.push(",
+        "source.get(",
+        "source.first(",
+        "source.last(",
+        "shadow_array.push(",
+        "shadow_array.copy(",
+        "shadow_map.percentrank(",
+        "shadow_matrix.percentrank(",
+    ):
+        assert raw_call not in cpp
+    assert "source.push_back(10);" in cpp
+    assert "source.push_back(true);" in cpp
+    assert re.search(r"Pivot& p = .*pine_runtime_error", cpp)
+
+    # The checked set wrapper evaluates index then value exactly once.  Its
+    # nested-call spelling closes in reverse textual order, locking execution
+    # order the same way as the namespace/global/local receiver lanes.
+    statement = next(
+        line for line in cpp.splitlines()
+        if "next_index()" in line and "next_value()" in line
+    )
+    assert statement.count("next_index()") == 1
+    assert statement.count("next_value()") == 1
+    assert statement.index("[&](auto&& __pf_array)") < statement.index(
+        "[&](auto&& __pf_raw_index_value)"
+    ) < statement.index("[&](auto&& __pf_array_value)")
+    assert statement.index("}((next_value()))") < statement.index(
+        "}((next_index()))"
+    )
+
+
+def test_array_typed_udf_parameter_methods_preserve_runtime_aliases():
+    driver = r"""
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.run(&bar, 1);
+    if (!strategy.last_error().empty()) {
+        std::cerr << strategy.last_error() << "\n";
+        return 2;
+    }
+    std::cout << strategy.rank_pos_result << " "
+              << strategy.rank_kw_result << " "
+              << strategy.int_result << " "
+              << strategy.int_caller_value << " "
+              << strategy.int_caller_size << " "
+              << strategy.bool_result << " "
+              << strategy.bool_caller_value << " "
+              << strategy.bool_caller_size << " "
+              << strategy.pivot_result << " "
+              << strategy.pivot_caller_value << " "
+              << strategy.shadow_map_result << " "
+              << strategy.shadow_matrix_result << " "
+              << strategy.string_caller_size << " "
+              << strategy.shadow_array_copy_size << " "
+              << strategy.order_code << "\n";
+}
+"""
+    output = _compile_and_run(
+        transpile(_TYPED_ARRAY_PARAM_METHOD_SOURCE) + driver
+    )
+    assert tuple(int(float(value)) for value in output.split()) == (
+        100,
+        100,
+        9,
+        9,
+        3,
+        1,
+        0,
+        2,
+        7,
+        7,
+        100,
+        100,
+        2,
+        1,
+        12,
+    )
