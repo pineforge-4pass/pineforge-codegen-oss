@@ -426,7 +426,6 @@ class TypeInferer:
                 "variance": (0,),
                 "percentile_linear_interpolation": (0,),
                 "percentile_nearest_rank": (0,),
-                "percentrank": (0,),
             }
             bound_args = list(args)
             arg_bindings: list[tuple[str, str]] = []
