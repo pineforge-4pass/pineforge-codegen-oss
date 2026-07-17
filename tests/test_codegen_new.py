@@ -1,5 +1,7 @@
 """Tests for the new CodeGen that reads from AnalyzerContext."""
 
+import pytest
+
 from pineforge_codegen import transpile
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
@@ -1431,16 +1433,56 @@ x = isInSession("0900-1700")
     assert 'std::string("15")' not in cpp
 
 
-def test_barstate_members_use_runtime_state():
+def test_barstate_tick_members_use_runtime_state():
     cpp = _generate("""
-if barstate.isnew and barstate.isconfirmed and barstate.islast
+if barstate.isnew and barstate.isconfirmed
     strategy.entry("L", strategy.long)
-if barstate.islastconfirmedhistory
-    strategy.close("L")
 """)
     assert "is_first_tick_" in cpp
     assert "is_last_tick_" in cpp
+
+
+@pytest.mark.parametrize(
+    "var_name",
+    ["barstate.islast", "barstate.islastconfirmedhistory"],
+)
+def test_chart_scope_final_bar_members_use_runtime_state(var_name: str):
+    cpp = _generate(f"""
+if {var_name}
+    strategy.close("L")
+""")
     assert "barstate_islast_" in cpp
+    assert "if (false)" not in cpp
+
+
+@pytest.mark.parametrize(
+    "var_name",
+    ["barstate.islast", "barstate.islastconfirmedhistory"],
+)
+def test_security_history_index_final_bar_members_currently_fold_false(
+    var_name: str,
+):
+    cpp = _generate(f"""
+secured = request.security(
+    syminfo.tickerid,
+    "60",
+    close[{var_name} ? 1 : 0])
+plot(secured)
+""")
+    # This intentionally pins the current caveat, not the desired chart-scope
+    # semantics: the security history-index folder selects the false (zero)
+    # branch, so the requested evaluator reads its current bar close.
+    assert "_req_sec_0 = bar.close;" in cpp
+    assert "_sec0_hist_close" not in cpp
+
+
+def test_last_bar_index_uses_runtime_final_index_accessor():
+    cpp = _generate("""
+is_last = bar_index == last_bar_index
+if is_last
+    strategy.close_all()
+""")
+    assert "pine_last_bar_index()" in cpp
 
 
 

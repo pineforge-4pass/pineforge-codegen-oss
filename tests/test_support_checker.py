@@ -64,7 +64,7 @@ def test_indicator_decl_rejected():
 
 
 # ---------------------------------------------------------------------------
-# Divergent built-in variables — most WARN; the mis-alias subset ERRORs
+# Divergent built-in variables — WARN unless a true mis-alias enters the ERROR subset
 # ---------------------------------------------------------------------------
 
 _DIVERGENT_WARN_ONLY = sorted(set(DIVERGENT_VARS) - DIVERGENT_VARS_ERROR)
@@ -79,21 +79,16 @@ def test_divergent_variables_warn(var_name: str):
         f"expected divergence warning for {var_name}, got {[d.message for d in warns]}"
 
 
-@pytest.mark.parametrize("var_name", sorted(DIVERGENT_VARS_ERROR))
-def test_divergent_mis_alias_variables_error(var_name: str):
-    """last_bar_index is a silent mis-alias -> ERROR (rejected)."""
-    src = PRELUDE + f"x = {var_name}\n"
-    errs = _errors(src)
-    assert errs, f"{var_name} is a silent mis-alias and must ERROR, not warn"
-    assert any("diverges" in d.message for d in errs), \
-        f"expected divergence error for {var_name}, got {[d.message for d in errs]}"
-    # and it must NOT also be a warning (single diagnostic, escalated)
-    assert not any("diverges" in d.message for d in _warnings(src)), \
-        f"{var_name} should be ERROR-only, not also WARNING"
-
-
-def test_last_bar_index_errors():
-    _expect_error(PRELUDE + "x = last_bar_index\n", "last_bar_index")
+def test_last_bar_index_warns_about_fed_window_chart_history():
+    src = PRELUDE + "x = last_bar_index\n"
+    assert _errors(src) == []
+    warns = [d for d in _warnings(src) if "last_bar_index" in d.message]
+    assert len(warns) == 1
+    detail = f"{warns[0].message} {warns[0].hint or ''}".lower()
+    assert "final index" in detail
+    assert "fed data window" in detail
+    assert "chart history" in detail
+    assert "current bar index" not in detail
 
 
 def test_time_close_variable_accepted():
@@ -125,7 +120,8 @@ def test_divergent_error_subset_is_subset():
     # time_close is no longer rejected — codegen lowers it to the faithful
     # engine time_close() accessor.
     assert "time_close" not in DIVERGENT_VARS_ERROR
-    assert {"last_bar_index"} == set(DIVERGENT_VARS_ERROR)
+    assert "last_bar_index" not in DIVERGENT_VARS_ERROR
+    assert not DIVERGENT_VARS_ERROR
 
 
 def test_time_close_function_call_not_flagged_as_divergent_var():
@@ -408,10 +404,23 @@ def test_unknown_syminfo_member_rejected():
     _expect_error(src, "syminfo.not_a_real_field")
 
 
-def test_barstate_approximation_warns():
-    src = PRELUDE + "x = barstate.islast\n"
+@pytest.mark.parametrize(
+    "var_name",
+    ["barstate.islast", "barstate.islastconfirmedhistory"],
+)
+def test_barstate_final_fed_bar_approximation_warns(var_name: str):
+    src = PRELUDE + f"x = {var_name}\n"
     assert _errors(src) == []
-    assert any("barstate.islast" in d.message for d in _warnings(src))
+    warns = [d for d in _warnings(src) if var_name in d.message]
+    assert len(warns) == 1
+    detail = f"{warns[0].message} {warns[0].hint or ''}".lower()
+    assert "true only on the final bar" in detail
+    assert "fed chart-data window" in detail
+    assert "direct" in detail
+    assert "chart-scope" in detail
+    assert "inside a request.security() history index" in detail
+    assert "false branch" in detail
+    assert "requested-context" in detail
 
 
 def test_unsupported_strategy_entry_params_warn():

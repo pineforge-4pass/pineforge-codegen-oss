@@ -207,7 +207,7 @@ strategy. The taxonomy:
 | -------------------------------- | -------------------------------------------------------------------- |
 | `HARD_REJECT_FUNC`               | Calls with no PineForge semantics at all (e.g. `request.financial`). |
 | `HARD_REJECT_NAMESPACE`          | Whole-namespace rejects — currently EMPTY (the old `ticker.*` blanket reject became per-function `HARD_REJECT_FUNC` entries: `ticker.{renko,kagi,linebreak,pointfigure,new,modify}`; `ticker.inherit`/`ticker.standard` pass through, `ticker.heikinashi` allowed for the chart's own symbol). |
-| `DIVERGENT_VARS` (warning) / `DIVERGENT_VARS_ERROR` (reject) | Built-in variables whose value diverges from TV (e.g. `bar_index` warns); the ERROR subset (`last_bar_index` — would silently mis-alias to the CURRENT bar index) is rejected because the backtest would be silently wrong. |
+| `DIVERGENT_VARS` (warning) / `DIVERGENT_VARS_ERROR` (reject) | Built-in variables whose value can diverge from TV. `bar_index` and `last_bar_index` warn because they depend on the fed data window; `last_bar_index` lowers to the window's true final index. The ERROR subset is reserved for silent mis-aliases and is currently empty. |
 | `BARSTATE_APPROX_VARS` (warning) | Barstate flags PineForge approximates in batch mode.                 |
 | `STRATEGY_UNSUPPORTED_PARAMS`    | Per-strategy.* call kwargs that codegen drops silently.              |
 | `NOT_YET_FUNC`                   | Implementable but currently no codegen — reject loudly.              |
