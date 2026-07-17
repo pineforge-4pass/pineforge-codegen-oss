@@ -229,7 +229,7 @@ _math("round",
       _sig([("x", F)], ret=I),                             # round(x) → int
       _sig([("x", F), ("precision", I)]))                  # round(x, n) → float
 _math("round_to_mintick", _sig([("x", F)]))
-_math("sign",   _sig([("x", F)], ret=I))
+_math("sign",   _sig([("x", F)], ret=F))
 _math("max",
       _sig([("x", F), ("y", F)]),                          # 2-arg
       _sig([("x", F), ("y", F), ("z", F)]),                # 3-arg
