@@ -167,6 +167,29 @@ def test_percentrank_keeps_temporary_receiver_before_index_once():
 
 
 @pytest.mark.parametrize(
+    "expression",
+    [
+        "array.percentrank(id=values, index=2)",
+        "array.percentrank(index=2, id=values)",
+        "array.percentrank(values, index=2)",
+        "values.percentrank(index=2)",
+        "array.from(1.0, 2.0, 3.0).percentrank(index=2)",
+    ],
+)
+def test_percentrank_keyword_forms_route_to_checked_lowering(expression: str):
+    cpp = _generate(
+        "values = array.from(1.0, 2.0, 3.0)\n"
+        f"rank = {expression}"
+    )
+    assignment = next(
+        line for line in cpp.splitlines() if line.startswith("        rank =")
+    )
+    assert "pine_runtime_error" in assignment
+    assert "int64_t __pf_array_index=__pf_raw_index;" in assignment
+    assert "__pf_array[(size_t)__pf_array_index]" in assignment
+
+
+@pytest.mark.parametrize(
     "access",
     ["array.get(pivots, i)", "array.first(pivots)", "pivots.last()"],
 )
@@ -344,6 +367,7 @@ values = array.from(1.0, 2.0, 3.0)
 empty = array.new<float>(0)
 singleton = array.from(7.0)
 var calls = array.new<int>()
+var keyword_order = array.new<int>()
 
 empty_index() =>
     array.push(calls, 1)
@@ -353,12 +377,28 @@ singleton_index() =>
     array.push(calls, 2)
     -999
 
+keyword_receiver() =>
+    array.push(keyword_order, 1)
+    array.copy(values)
+
+keyword_index() =>
+    array.push(keyword_order, 2)
+    2
+
 low = array.percentrank(values, 0)
 high = array.percentrank(values, 2)
+keyword_function = array.percentrank(id=values, index=2)
+keyword_mixed = array.percentrank(values, index=2)
+keyword_method = values.percentrank(index=2)
+keyword_temporary = array.from(1.0, 2.0, 3.0).percentrank(index=2)
+keyword_stateful = array.percentrank(
+    id=keyword_receiver(),
+    index=keyword_index())
 empty_rank = array.percentrank(empty, empty_index())
 singleton_rank = array.percentrank(singleton, singleton_index())
 call_count = array.size(calls)
 call_code = array.get(calls, 0) * 10 + array.get(calls, 1)
+keyword_order_code = array.get(keyword_order, 0) * 10 + array.get(keyword_order, 1)
 """
 
 
@@ -458,6 +498,12 @@ int main() {
         return 2;
     }
     std::cout << strategy.low << " " << strategy.high << " "
+              << strategy.keyword_function << " "
+              << strategy.keyword_mixed << " "
+              << strategy.keyword_method << " "
+              << strategy.keyword_temporary << " "
+              << strategy.keyword_stateful << " "
+              << strategy.keyword_order_code << " "
               << std::isnan(strategy.empty_rank) << " "
               << std::isnan(strategy.singleton_rank) << " "
               << strategy.call_count << " " << strategy.call_code << "\n";
@@ -469,6 +515,12 @@ int main() {
     assert tuple(int(float(value)) for value in output.split()) == (
         0,
         100,
+        100,
+        100,
+        100,
+        100,
+        100,
+        12,
         1,
         1,
         2,
