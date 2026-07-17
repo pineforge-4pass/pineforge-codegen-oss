@@ -389,9 +389,9 @@ def test_comma_separated_statements_and_array_fill_emit_all_side_effects():
     assert "ys = std::vector<int>((size_t)(2), na<int>());" in cpp
     assert "lbs = std::vector<Label>((size_t)(2), Label{});" in cpp
     assert "std::fill(xs.begin(), xs.end(), na<double>());" in cpp
-    assert "xs[(1)] = 7;" in cpp
+    assert "}((7)); }((1)); }((xs));" in cpp
     assert "std::fill(ys.begin(), ys.end(), na<int>());" in cpp
-    assert "ys[(1)] = na<int>();" in cpp
+    assert "}((na<int>())); }((1)); }((ys));" in cpp
     assert "std::fill(lbs.begin(), lbs.end(), Label{});" in cpp
     assert "std::vector<double>((size_t)(3), 0.0)" not in cpp
 

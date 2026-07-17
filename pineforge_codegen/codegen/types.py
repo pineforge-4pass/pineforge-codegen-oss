@@ -230,6 +230,12 @@ class TypeInferer:
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return sym.type_spec
             return None
+        if isinstance(node, Ternary):
+            true_spec = self._type_spec_from_expr(node.true_val)
+            false_spec = self._type_spec_from_expr(node.false_val)
+            if true_spec is not None and true_spec == false_spec:
+                return true_spec
+            return None
         if isinstance(node, MemberAccess):
             owner = self._type_spec_from_expr(node.object)
             if owner is not None and owner.kind == "udt" and owner.name:
@@ -237,6 +243,11 @@ class TypeInferer:
             return None
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            if namespace is None:
+                func_info = self._func_info_map.get(func_name)
+                return_spec = getattr(func_info, "return_type_spec", None)
+                if return_spec is not None:
+                    return return_spec
             # ticker.* constructors (inherit/standard/heikinashi) return a symbol
             # string; without this the member-type inference defaults to double
             # and a ``haTicker = ticker.heikinashi(...)`` global mis-declares as
@@ -278,10 +289,11 @@ class TypeInferer:
             # Functional-form array element/copy accessors: the receiver is
             # the first argument (``array.copy(arr)``), mirroring the
             # method-form handling below (``arr.copy()``).
-            if (namespace == "array" and node.args
+            if (namespace == "array"
                     and func_name in ("copy", "slice", "get", "first", "last",
                                       "pop", "shift", "remove")):
-                arg_spec = self._type_spec_from_expr(node.args[0])
+                receiver_node = node.args[0] if node.args else node.kwargs.get("id")
+                arg_spec = self._type_spec_from_expr(receiver_node)
                 if arg_spec is not None and arg_spec.kind == "array":
                     if func_name in ("copy", "slice"):
                         return arg_spec
@@ -646,6 +658,46 @@ class TypeInferer:
     # BUG C: user-defined-UDT lvalue aliasing
     # ------------------------------------------------------------------
 
+    def _is_stable_lvalue_expr(self, expr) -> bool:
+        """Whether ``expr`` denotes storage that can safely back a C++ ref.
+
+        Checked array access deliberately returns by reference for lvalue
+        receivers and by value for temporary receivers.  The UDT alias pass
+        must make the same distinction or it can emit ``T&`` bound to the
+        checked helper's safe rvalue copy.
+        """
+        if isinstance(expr, Identifier):
+            return True
+        if isinstance(expr, MemberAccess):
+            return self._is_stable_lvalue_expr(expr.object)
+        if isinstance(expr, FuncCall):
+            # An element selected from a stable array is itself stable.  This
+            # must recurse independently of the element type so nested
+            # ``array<array<UDT>>`` access keeps the inner array lvalue and the
+            # eventual UDT element can still alias it.  Constructors, user
+            # function returns, matrix.row(), and other temporary producers do
+            # not enter this checked array-access shape.
+            func_name, namespace = self._resolve_callee(expr.callee)
+            receiver = None
+            if namespace == "array" and func_name in ("get", "first", "last"):
+                receiver = expr.args[0] if expr.args else expr.kwargs.get("id")
+            elif (isinstance(expr.callee, MemberAccess)
+                  and func_name in ("get", "first", "last")):
+                candidate = expr.callee.object
+                candidate_spec = self._type_spec_from_expr(candidate)
+                if candidate_spec is not None and candidate_spec.kind == "array":
+                    receiver = candidate
+            return (
+                receiver is not None
+                and self._is_stable_lvalue_expr(receiver)
+            )
+        if isinstance(expr, Ternary):
+            return (
+                self._is_stable_lvalue_expr(expr.true_val)
+                and self._is_stable_lvalue_expr(expr.false_val)
+            )
+        return False
+
     def _is_udt_lvalue(self, expr) -> str | None:
         """If ``expr`` is a *user-defined* UDT lvalue (a bare ``Identifier`` that
         names a class-scope ``var``/global UDT member, e.g. ``wyckoffSwingLow``,
@@ -659,12 +711,14 @@ class TypeInferer:
             callee = expr.callee
             func_name, namespace = self._resolve_callee(callee)
             receiver = None
-            if namespace == "array" and func_name in ("get", "first", "last") and expr.args:
-                receiver = expr.args[0]
+            if namespace == "array" and func_name in ("get", "first", "last"):
+                receiver = expr.args[0] if expr.args else expr.kwargs.get("id")
             elif (isinstance(callee, MemberAccess)
                   and func_name in ("get", "first", "last")):
                 receiver = callee.object
             if receiver is not None:
+                if not self._is_stable_lvalue_expr(receiver):
+                    return None
                 spec = self._type_spec_from_expr(receiver)
                 elem = spec.element if spec is not None and spec.kind == "array" else None
                 if (elem is not None and elem.kind == "udt" and elem.name in self._udt_defs

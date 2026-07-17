@@ -458,18 +458,126 @@ ORDER_DIRECTION_MAP = {
 # Array / Map / Matrix method dispatch
 # ---------------------------------------------------------------------------
 
+
+def _checked_array_index_prelude() -> str:
+    """C++ body shared by Pine v6 checked single-index operations."""
+    return (
+        "using __pf_raw_index_type=std::decay_t<decltype(__pf_raw_index_value)>; "
+        "if constexpr(!std::is_same_v<__pf_raw_index_type,bool>) { "
+        "if(is_na(__pf_raw_index_value)) "
+        "pine_runtime_error(std::string(\"Index na is out of bounds. Array size is \")+"
+        "std::to_string((int64_t)__pf_array.size())); } "
+        "if constexpr(std::is_floating_point_v<__pf_raw_index_type>) { "
+        "if(!std::isfinite(__pf_raw_index_value)) { "
+        "std::string __pf_raw_index_text=__pf_raw_index_value>0?\"inf\":\"-inf\"; "
+        "pine_runtime_error(std::string(\"Index \")+__pf_raw_index_text+"
+        "\" is out of bounds. Array size is \"+"
+        "std::to_string((int64_t)__pf_array.size())); } "
+        "long double __pf_raw_index_wide=(long double)__pf_raw_index_value; "
+        "if(__pf_raw_index_wide<(long double)std::numeric_limits<int64_t>::min()||"
+        "__pf_raw_index_wide>(long double)std::numeric_limits<int64_t>::max()) "
+        "pine_runtime_error(std::string(\"Index \")+"
+        "std::to_string((double)__pf_raw_index_value)+"
+        "\" is out of bounds. Array size is \"+"
+        "std::to_string((int64_t)__pf_array.size())); } "
+        "int64_t __pf_raw_index=(int64_t)__pf_raw_index_value; "
+        "int64_t __pf_array_size=(int64_t)__pf_array.size(); "
+        "int64_t __pf_array_index=__pf_raw_index<0?"
+        "__pf_raw_index+__pf_array_size:__pf_raw_index; "
+        "if(__pf_array_index<0||__pf_array_index>=__pf_array_size) "
+        "pine_runtime_error(std::string(\"Index \")+std::to_string(__pf_raw_index)+"
+        "\" is out of bounds. Array size is \"+std::to_string(__pf_array_size)); "
+    )
+
+
+def _checked_array_get(a: str, args: list[str]) -> str:
+    check = _checked_array_index_prelude()
+    return (
+        "[&](auto&& __pf_array)->decltype(auto){ "
+        "return [&](auto&& __pf_raw_index_value)->decltype(auto){ "
+        f"{check}"
+        "if constexpr(std::is_lvalue_reference_v<decltype(__pf_array)>) "
+        "return (__pf_array[(size_t)__pf_array_index]); "
+        "else { using __pf_array_value_type=typename "
+        "std::decay_t<decltype(__pf_array)>::value_type; "
+        "return __pf_array_value_type(__pf_array[(size_t)__pf_array_index]); } "
+        f"}}(({args[0]})); }}(({a}))"
+    )
+
+
+def _checked_array_set(a: str, args: list[str]) -> str:
+    check = _checked_array_index_prelude()
+    return (
+        "[&](auto&& __pf_array){ "
+        "return [&](auto&& __pf_raw_index_value){ "
+        "return [&](auto&& __pf_array_value){ "
+        f"{check}"
+        "__pf_array[(size_t)__pf_array_index]=__pf_array_value; "
+        f"}}(({args[1]})); }}(({args[0]})); }}(({a}))"
+    )
+
+
+def _checked_array_remove(a: str, args: list[str]) -> str:
+    check = _checked_array_index_prelude()
+    return (
+        "[&](auto&& __pf_array){ "
+        "return [&](auto&& __pf_raw_index_value){ "
+        f"{check}"
+        "using __pf_array_value_type=typename "
+        "std::decay_t<decltype(__pf_array)>::value_type; "
+        "__pf_array_value_type __pf_array_value="
+        "__pf_array[(size_t)__pf_array_index]; "
+        "__pf_array.erase(__pf_array.begin()+(size_t)__pf_array_index); "
+        "return __pf_array_value; "
+        f"}}(({args[0]})); }}(({a}))"
+    )
+
+
+def _checked_array_end_get(a: str, method: str) -> str:
+    access = "front" if method == "first" else "back"
+    return (
+        "[&](auto&& __pf_array)->decltype(auto){ "
+        f"if(__pf_array.empty()) pine_runtime_error(\"Cannot use {method}() "
+        "if array is empty.\"); "
+        "if constexpr(std::is_lvalue_reference_v<decltype(__pf_array)>) "
+        f"return (__pf_array.{access}()); "
+        "else { using __pf_array_value_type=typename "
+        "std::decay_t<decltype(__pf_array)>::value_type; "
+        f"return __pf_array_value_type(__pf_array.{access}()); }} "
+        f"}}(({a}))"
+    )
+
+
+def _checked_array_end_remove(a: str, method: str) -> str:
+    access = "back" if method == "pop" else "front"
+    mutation = (
+        "__pf_array.pop_back();"
+        if method == "pop"
+        else "__pf_array.erase(__pf_array.begin());"
+    )
+    return (
+        "[&](auto&& __pf_array){ "
+        f"if(__pf_array.empty()) pine_runtime_error(\"Cannot use {method}() "
+        "if array is empty.\"); "
+        "using __pf_array_value_type=typename "
+        "std::decay_t<decltype(__pf_array)>::value_type; "
+        f"__pf_array_value_type __pf_array_value=__pf_array.{access}(); "
+        f"{mutation} return __pf_array_value; }}(({a}))"
+    )
+
+
 # Methods called as ``array.method(arr, ...)`` or ``arr.method(...)``.
 ARRAY_METHODS = {
-    "get":       lambda a, args: f"{a}[({args[0]})]",
-    "set":       lambda a, args: f"{a}[({args[0]})] = {args[1]}",
+    "get":       _checked_array_get,
+    "set":       _checked_array_set,
     "push":      lambda a, args: f"{a}.push_back({args[0]})",
     "unshift":   lambda a, args: f"{a}.insert({a}.begin(), {args[0]})",
     "insert":    lambda a, args: f"{a}.insert({a}.begin() + (int)({args[0]}), {args[1]})",
-    "pop":       lambda a, args: f"[&](){{ auto v={a}.back(); {a}.pop_back(); return v; }}()",
-    "shift":     lambda a, args: f"[&](){{ auto v={a}.front(); {a}.erase({a}.begin()); return v; }}()",
-    "remove":    lambda a, args: f"[&](){{ auto v={a}[({args[0]})]; {a}.erase({a}.begin()+(int)({args[0]})); return v; }}()",
-    "first":     lambda a, args: f"{a}.front()",
-    "last":      lambda a, args: f"{a}.back()",
+    "pop":       lambda a, args: _checked_array_end_remove(a, "pop"),
+    "shift":     lambda a, args: _checked_array_end_remove(a, "shift"),
+    "remove":    _checked_array_remove,
+    "first":     lambda a, args: _checked_array_end_get(a, "first"),
+    "last":      lambda a, args: _checked_array_end_get(a, "last"),
     "size":      lambda a, args: f"(double){a}.size()",
     "clear":     lambda a, args: f"{a}.clear()",
     "fill":      lambda a, args: f"std::fill({a}.begin(), {a}.end(), {args[0]})" if len(args) == 1
@@ -521,6 +629,19 @@ ARRAY_METHODS = {
     "binary_search_leftmost": lambda a, args: f"[&](){{ auto it=std::lower_bound({a}.begin(),{a}.end(),{args[0]}); return (it!={a}.end()&&*it=={args[0]})?(double)(it-{a}.begin()):(double)(it-{a}.begin()-1); }}()",
     "binary_search_rightmost": lambda a, args: f"[&](){{ auto it=std::upper_bound({a}.begin(),{a}.end(),{args[0]}); return (it!={a}.begin()&&*(it-1)=={args[0]})?(double)(it-{a}.begin()-1):(double)(it-{a}.begin()); }}()",
     "sort_indices": lambda a, args: f"[&](){{ std::vector<double> idx({a}.size()); std::iota(idx.begin(),idx.end(),0); std::sort(idx.begin(),idx.end(),[&](int i,int j){{return {a}[i]<{a}[j];}}); return idx; }}()",
+}
+
+# Pine parameter order for the checked-access subset.  Keeping the receiver
+# (``id``) separate lets method syntax merge ``a.get(index = i)`` while the
+# namespace-functional path merges ``array.get(id = a, index = i)``.
+CHECKED_ARRAY_METHOD_KWARGS: dict[str, list[str]] = {
+    "get": ["index"],
+    "set": ["index", "value"],
+    "remove": ["index"],
+    "first": [],
+    "last": [],
+    "pop": [],
+    "shift": [],
 }
 
 MAP_METHODS = {
