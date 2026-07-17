@@ -742,6 +742,114 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # history reads off security-helper series.
         self._max_bars_back_cap: int | None = self._compute_max_bars_back_cap()
 
+        # Non-series persistent scalars whose initializer cannot run in the
+        # C++ constructor are initialized at their Pine declaration site.  The
+        # source-order metadata and collision-safe once flags must be prepared
+        # before function-instance naming and class-member emission begin.
+        self._prepare_runtime_scalar_var_initializers()
+
+    def _scalar_var_init_depends_on_runtime_input(self, init_ast) -> bool:
+        """Whether a nominally constant initializer depends on input state.
+
+        ``_resolve_known`` intentionally folds input defaults for constructor
+        sizing and other compile-time decisions.  A Pine ``var`` initializer,
+        however, must observe any host override installed before the first
+        bar.  Treat direct input aliases and arithmetic aliases derived from
+        them as declaration-time expressions even when their default happens
+        to fold to a C++ literal.
+        """
+        if init_ast is None:
+            return False
+        runtime_names = set(self._input_backed_vars) | set(self._derived_input_expr)
+        for node in self._walk_ast(init_ast):
+            if isinstance(node, FuncCall) and self._is_input_call(node):
+                return True
+            if isinstance(node, Identifier) and node.name in runtime_names:
+                return True
+        return False
+
+    def _is_runtime_scalar_var_initializer(
+            self, name: str, ptype, init_str: str, init_ast) -> bool:
+        """Return True for a persistent primitive that must init in execution.
+
+        Series and aggregate state keep their existing specialized preamble
+        routes. Function-local vars keep their per-function-variant route. This
+        predicate only selects primitive global/on-bar-scope members for the
+        declaration-site once guards prepared below.
+        """
+        if init_ast is None or name in self.ctx.series_vars:
+            return False
+        if name in self._visual_drop_vars:
+            return False
+        if name in self._array_vars or name in self._map_vars \
+                or name in self._matrix_specs:
+            return False
+        type_spec = self._collection_types.get(name)
+        if type_spec is not None and type_spec.kind in {
+            "array", "map", "matrix", "udt",
+        }:
+            return False
+        udt_type = self._udt_var_types.get(name)
+        if udt_type in self._udt_defs or udt_type in DRAWING_TYPE_TO_CPP:
+            return False
+
+        ctor_val = self._resolve_known(init_str)
+        ctor_val = self._typed_na_init(ctor_val, name, ptype)
+        return (
+            not self._is_compile_time_value(ctor_val)
+            or self._scalar_var_init_depends_on_runtime_input(init_ast)
+        )
+
+    def _prepare_runtime_scalar_var_initializers(self) -> None:
+        """Index declaration-site scalar ``var`` initialization and flags.
+
+        The analyzer supplies exact metadata for every VarDecl, including
+        sibling-block disambiguation and callable ownership. Its insertion
+        order follows source analysis and reaches declarations nested inside
+        if/switch expressions, while the ownership bit excludes function and
+        method bodies. This lets emission preserve ordinary dependency order
+        and Pine's lazy first-entry semantics for conditional declarations.
+        """
+        self._runtime_scalar_var_init_by_node: dict[int, dict] = {}
+        self._runtime_scalar_var_init_members: set[str] = set()
+
+        used_names = set(self._all_member_names)
+        # ``_all_member_names`` historically covers persistent ``var`` and
+        # Series members only.  Plain global declarations are class members as
+        # well, so include them before minting a generated flag; otherwise a
+        # legal user binding such as ``_pf_var_init_seeded = 1`` can collide
+        # with the flag for ``var seeded = low``.
+        used_names.update(
+            self._safe_name(name) for name, _ptype in self.ctx.global_var_decls
+        )
+        metadata_by_node = getattr(
+            self.ctx, "var_member_metadata_by_node", {}
+        ) or {}
+        for node_id, meta in metadata_by_node.items():
+            stmt, member_name, ptype, init_str, is_callable_scoped = meta
+            if is_callable_scoped:
+                continue
+            if not isinstance(stmt, VarDecl) or not (stmt.is_var or stmt.is_varip):
+                continue
+            if not self._is_runtime_scalar_var_initializer(
+                    member_name, ptype, init_str, stmt.value):
+                continue
+
+            base_flag = f"_pf_var_init_{self._safe_name(member_name)}"
+            flag = base_flag
+            suffix = 2
+            while flag in used_names:
+                flag = f"{base_flag}_{suffix}"
+                suffix += 1
+            used_names.add(flag)
+            self._all_member_names.add(flag)
+            self._runtime_scalar_var_init_members.add(member_name)
+            self._runtime_scalar_var_init_by_node[node_id] = {
+                "member_name": member_name,
+                "ptype": ptype,
+                "flag": flag,
+            }
+
     # ------------------------------------------------------------------
     # Context-sensitive (call-path) instance machinery
     # ------------------------------------------------------------------
@@ -1099,7 +1207,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         a separate scope and must not be attributed to a global member. The
         ``in_loop`` flag is True once inside any for/while loop body."""
         for s in stmts:
-            if isinstance(s, FuncDef):
+            if isinstance(s, (FuncDef, MethodDef)):
                 continue
             yield s, in_loop
             child_in_loop = in_loop or isinstance(s, (ForStmt, ForInStmt, WhileStmt))
@@ -2408,7 +2516,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if name in self.ctx.series_vars:
                 lines.append(f"    Series<{cpp_type}> {safe}{_mbb};")
             else:
-                lines.append(f"    {cpp_type} {safe};")
+                if name in self._runtime_scalar_var_init_members:
+                    # A conditional declaration may not execute for many bars,
+                    # while COOF rollback still value-copies every member. Give
+                    # pending runtime vars a typed Pine-na sentinel so that copy
+                    # is always defined; the declaration-site guard overwrites
+                    # it on the first actual execution.
+                    pending = self._typed_na_init("na<double>()", name, ptype)
+                    lines.append(f"    {cpp_type} {safe} = {pending};")
+                else:
+                    lines.append(f"    {cpp_type} {safe};")
 
         # 6. Non-var series vars
         for name in sorted(self.ctx.series_vars):
@@ -2532,7 +2649,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if self.ctx.var_members:
             lines.append("    bool _var_initialized = false;")
 
-        # 9a. Per-function-variant ``var`` init flags. A function-scoped
+        # 9a. Per-member flags for primitive runtime ``var`` / ``varip``
+        # initializers. Unlike the global aggregate/Series latch above, these
+        # live at the declaration site so prior statements are available and a
+        # conditional declaration initializes on its first actual execution.
+        for info in self._runtime_scalar_var_init_by_node.values():
+            lines.append(f"    bool {info['flag']} = false;")
+
+        # 9b. Per-function-variant ``var`` init flags. A function-scoped
         #     ``var`` (Pine "init once" semantics) is a function-local static:
         #     its initializer runs on the FIRST call to that function variant
         #     (with the first bar's values the function actually sees) and the
@@ -2550,21 +2674,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             else:
                 lines.append(f"    bool _fvinit_{self._func_safe_name(fi.name)} = false;")
 
-        # 9a2. ``var`` init flags for fresh context-sensitive helper instances.
+        # 9b2. ``var`` init flags for fresh context-sensitive helper instances.
         for inst in self._fresh_instances:
             if inst["fname"] in self.ctx.func_var_members and inst["var_remap"]:
                 lines.append(f"    bool _fvinit_{inst['name']} = false;")
 
-        # 9b. _ta_initialized_ flag for runtime TA re-sizing (first on_bar only).
+        # 9c. _ta_initialized_ flag for runtime TA re-sizing (first on_bar only).
         if self.ctx.ta_call_sites:
             lines.append("    bool _ta_initialized_ = false;")
 
-        # 9c. _inputs_initialized_ flag for cached global inputs.
+        # 9d. _inputs_initialized_ flag for cached global inputs.
         lines.append("    bool _inputs_initialized_ = false;")
 
         lines.append("")
 
-        # 9d. Historical execution rollback checkpoint.  Derive the member
+        # 9e. Historical execution rollback checkpoint.  Derive the member
         # inventory from the declarations above so every future generated
         # state category is captured automatically (or generation fails loudly
         # if it introduces an unfamiliar declaration form).

@@ -199,6 +199,9 @@ class AnalyzerContext:
     global_var_decls: list = field(default_factory=list)  # [(name, PineType)] non-var global scope vars
     global_expr_map: dict = field(default_factory=dict)   # name -> defining AST expr (global, non-var)
     var_member_init_exprs: dict = field(default_factory=dict)  # var-member name -> init AST expr
+    # id(VarDecl) -> (node, emitted member name, PineType, rendered initializer,
+    #                 is function/method scoped)
+    var_member_metadata_by_node: dict = field(default_factory=dict)
     # Per-call-site TA member cloning for user functions:
     func_ta_ranges: dict = field(default_factory=dict)    # func_name -> (start_idx, end_idx)
     func_call_cs_map: dict = field(default_factory=dict)  # call_node_id -> (func_name, call_site_index)

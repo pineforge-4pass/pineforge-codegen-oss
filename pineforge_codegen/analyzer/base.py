@@ -127,14 +127,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._global_var_decls: list[tuple[str, PineType]] = []
         self._global_expr_map: dict[str, Any] = {}
         self._var_member_init_exprs: dict[str, Any] = {}
+        # Exact declaration-node ownership for persistent vars.  The member
+        # name can differ from ``node.name`` when sibling blocks declare the
+        # same raw identifier, so codegen must not reconstruct this mapping
+        # from names when it emits declaration-site initialization.
+        self._var_member_metadata_by_node: dict[int, tuple] = {}
         # Block-scoped ``var``/``varip`` name-collision disambiguation.
         # Two same-named block-scoped vars in SIBLING non-global, non-function
         # scopes (e.g. ``var bool valid`` declared inside ``if A`` and again
         # inside ``if B``) would otherwise dedupe to ONE C++ member and
         # cross-contaminate. ``_block_node_stack`` tracks the enclosing
-        # block AST nodes during analysis; ``_block_var_owner`` maps a raw
-        # block-var name to the id() of the FIRST block that declared it;
-        # ``_block_var_renames`` maps id(block_node) -> {raw_name: unique}
+        # branch/loop body owners during analysis; ``_block_var_owner`` maps a
+        # raw block-var name to the id() of the FIRST body that declared it;
+        # ``_block_var_renames`` maps id(body_owner) -> {raw_name: unique}
         # for every later colliding block so codegen can activate the
         # rename via ``_active_var_remap`` while emitting that block.
         self._block_node_stack: list[Any] = []
@@ -341,6 +346,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             global_var_decls=self._global_var_decls,
             global_expr_map=pure_global_expr_map,
             var_member_init_exprs=self._var_member_init_exprs,
+            var_member_metadata_by_node=self._var_member_metadata_by_node,
             func_ta_ranges=self._func_ta_ranges,
             func_call_cs_map=self._func_call_cs_map,
             func_call_site_counts=self._func_call_site_count,
@@ -1277,6 +1283,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     member_name = f"{node.name}__blk{self._block_var_seq}"
                     self._block_var_renames.setdefault(block_id, {})[node.name] = member_name
             self._var_members.append((member_name, val_type, init_str))
+            scope_cursor = self._symbols.current_scope
+            is_callable_scoped = False
+            while scope_cursor is not None:
+                if scope_cursor.name.startswith(("func_", "method_")):
+                    is_callable_scoped = True
+                    break
+                scope_cursor = scope_cursor.parent
+            self._var_member_metadata_by_node[id(node)] = (
+                node, member_name, val_type, init_str, is_callable_scoped,
+            )
             # Capture the init AST too so codegen can inspect the RHS callee
             # (used to detect int64-returning builtins like ``time()`` and
             # promote the symbol storage type to ``int64_t``).
@@ -1675,16 +1691,23 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _visit_IfStmt(self, node: IfStmt) -> PineType:
         old_global = self._global_scope
         self._global_scope = False
-        self._block_node_stack.append(node)
         try:
             self._visit(node.condition)
             body_type = PineType.VOID
-            for stmt in node.body:
-                body_type = self._visit(stmt)
-            for stmt in node.else_body:
-                self._visit(stmt)
+            self._block_node_stack.append(node.body)
+            try:
+                for stmt in node.body:
+                    body_type = self._visit(stmt)
+            finally:
+                self._block_node_stack.pop()
+            if node.else_body:
+                self._block_node_stack.append(node.else_body)
+                try:
+                    for stmt in node.else_body:
+                        self._visit(stmt)
+                finally:
+                    self._block_node_stack.pop()
         finally:
-            self._block_node_stack.pop()
             self._global_scope = old_global
         # If used as expression (x = if ...), return last expr type
         return body_type
@@ -1776,10 +1799,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             for case_expr, case_body in node.cases:
                 if case_expr:
                     self._visit(case_expr)
-                for stmt in case_body:
-                    result_type = self._visit(stmt)
-            for stmt in node.default_body:
-                self._visit(stmt)
+                self._block_node_stack.append(case_body)
+                try:
+                    for stmt in case_body:
+                        result_type = self._visit(stmt)
+                finally:
+                    self._block_node_stack.pop()
+            if node.default_body:
+                self._block_node_stack.append(node.default_body)
+                try:
+                    for stmt in node.default_body:
+                        self._visit(stmt)
+                finally:
+                    self._block_node_stack.pop()
         finally:
             self._global_scope = old_global
         # If used as expression (x = switch ...), return last expr type
