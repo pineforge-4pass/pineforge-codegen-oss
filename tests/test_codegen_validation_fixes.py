@@ -560,6 +560,48 @@ def test_ta_precalc_lazy_scope_routes_recursive_ema_only():
     assert len(re.findall(r"_use_precalc \? _precalc__ta_sma_", cpp)) >= 2
 
 
+def test_precalculated_extrema_direct_history_uses_chart_bar_clock():
+    """``ta.highest/lowest(...)[k]`` must index their precalculated series.
+
+    The surrounding Pine-v6 boolean remains lazy. Only the already-computed
+    direct-call history changes from a sparse evaluation clock to the chart-bar
+    clock used by the same TA site's ``_precalc_*`` values.
+    """
+    cpp = _cpp(
+        "pred = close > open\n"
+        "lo = pred and close < ta.lowest(low, 20)[1]\n"
+        "hi = pred and close > ta.highest(high, 10)[2]\n"
+        "plot((lo or hi) ? 1 : 0)"
+    )
+
+    assert "pred &&" in cpp
+    assert "std::vector<double> _precalc__ta_lowest_1" in cpp
+    assert "std::vector<double> _precalc__ta_highest_2" in cpp
+    assert "static_cast<std::size_t>(bar_index_) - _pf_hist_offset" in cpp
+    assert "_pf_hist_offset_numeric < 0.0L" in cpp
+    assert "static_cast<long double>(bar_index_)" in cpp
+    assert "return _precalc__ta_lowest_1[(std::size_t)_pf_hist_bar]" in cpp
+    assert "return _precalc__ta_highest_2[(std::size_t)_pf_hist_bar]" in cpp
+    # Dynamic/non-precalculated execution retains the rollback-safe synthetic
+    # history fallback rather than silently becoming eager.
+    assert cpp.count("if (history_advances_new_bar()) _hist_call_") >= 2
+
+
+def test_nonprecalculated_extrema_direct_history_keeps_evaluation_clock():
+    """Unsafe extrema inputs must retain their call-local history clock."""
+    cpp = _cpp(
+        "src = close\n"
+        "pred = close > open\n"
+        "signal = pred and close > ta.highest(src, 20)[1]\n"
+        "plot(signal ? 1 : 0)"
+    )
+
+    assert "std::vector<double> _precalc__ta_highest" not in cpp
+    assert "_pf_hist_bar" not in cpp
+    assert "_ta_highest_1.compute(src)" in cpp
+    assert "if (history_advances_new_bar()) _hist_call_" in cpp
+
+
 def test_recursive_ema_lazy_edges_preserve_eager_operand_positions():
     """Only OR RHS / ternary arms opt out; eager positions still precalc."""
     cpp = _cpp(
