@@ -78,6 +78,9 @@ SUPPORTED_INPUT: frozenset[str] = frozenset(sigs.INPUT_FUNCTIONS)
 SUPPORTED_ARRAY: frozenset[str] = frozenset(set(ARRAY_METHODS) | {"new", "new_float", "new_int", "new_bool", "new_string", "from"} | set(ARRAY_DRAWING_NEW_CTORS))
 SUPPORTED_MAP: frozenset[str] = frozenset(set(MAP_METHODS) | {"new"})
 SUPPORTED_MATRIX: frozenset[str] = frozenset(set(MATRIX_METHODS) | {"new"})
+_SUPPORTED_MAP_VALUE_TYPES: frozenset[str] = frozenset(
+    {"float", "int", "bool", "string"}
+)
 SUPPORTED_SYMINFO: frozenset[str] = frozenset(SYMINFO_MEMBER_MAP)
 # Drawing-objects-as-data (spec §4.5). Geometry methods are REAL (route to the
 # per-type arena); *_NOOP visual setters are accepted no-ops (Level.WARNING).
@@ -583,6 +586,116 @@ class SupportChecker:
                         self._map_bearing_udts.add(udt_name)
                         changed = True
 
+        # Constructor checks alone are insufficient: a typed ``na``
+        # declaration, UDT field, or unused callable parameter can introduce
+        # the same unsupported runtime shape without ever calling map.new() or
+        # matrix.new().  Validate every declared type boundary after the UDT
+        # fixed point is known so unsupported shapes fail with a Pine source
+        # diagnostic instead of a generated-C++ static_assert.
+        for stmt in ast.body:
+            if isinstance(stmt, TypeDecl):
+                for field in stmt.fields:
+                    self._validate_declared_type_hint(
+                        stmt,
+                        field.type_name,
+                        context=f"field '{stmt.name}.{field.name}'",
+                    )
+            elif isinstance(stmt, (FuncDef, MethodDef)):
+                hints = (
+                    (getattr(stmt, "annotations", None) or {})
+                    .get("param_type_hints")
+                    or []
+                )
+                for index, param_name in enumerate(stmt.params):
+                    hint = hints[index] if index < len(hints) else None
+                    if hint:
+                        self._validate_declared_type_hint(
+                            stmt,
+                            hint,
+                            context=f"parameter '{param_name}'",
+                        )
+
+    @staticmethod
+    def _split_declared_type_args(text: str) -> list[str]:
+        """Split ``K,V`` while preserving nested generic arguments."""
+        args: list[str] = []
+        current: list[str] = []
+        depth = 0
+        for char in text:
+            if char == "<":
+                depth += 1
+            elif char == ">":
+                depth -= 1
+            if char == "," and depth == 0:
+                args.append("".join(current))
+                current = []
+            else:
+                current.append(char)
+        if current:
+            args.append("".join(current))
+        return args
+
+    def _validate_declared_type_hint(
+        self,
+        node: ASTNode,
+        type_name: str | None,
+        *,
+        context: str,
+    ) -> None:
+        """Fail closed for runtime collection limits at every type boundary."""
+        if not type_name:
+            return
+        compact = str(type_name).replace(" ", "")
+        if compact.endswith("[]"):
+            compact = f"array<{compact[:-2]}>"
+
+        if compact.startswith("map<") and compact.endswith(">"):
+            parts = self._split_declared_type_args(compact[4:-1])
+            if len(parts) != 2:
+                return
+            key_type, value_type = parts
+            if key_type != "string":
+                self._err(
+                    node,
+                    f"{context}: map keys must be string in PineForge's "
+                    "supported map subset.",
+                )
+            if value_type not in _SUPPORTED_MAP_VALUE_TYPES:
+                self._err(
+                    node,
+                    f"{context}: map values must be primitive in PineForge's "
+                    "supported map subset.",
+                )
+            return
+
+        if compact.startswith("matrix<") and compact.endswith(">"):
+            element_type = compact[len("matrix<"):-1]
+            if element_type in self._map_bearing_udts:
+                self._err(
+                    node,
+                    f"matrix<{element_type}> is not supported when the UDT "
+                    "contains a map field; rollback would retain live map "
+                    "aliases.",
+                    hint="Use array<UDT> for recursively checkpointed state.",
+                )
+                return
+            if "<" in element_type:
+                self._err(
+                    node,
+                    f"matrix<{element_type}>: nested collection element types "
+                    "not supported in v1.",
+                )
+                return
+
+        # Arrays are recursively checkpointed and may contain valid maps, but
+        # the nested map still has the same key/value boundary.
+        if compact.startswith("array<") and compact.endswith(">"):
+            self._validate_declared_type_hint(
+                node,
+                compact[len("array<"):-1],
+                context=context,
+            )
+
     def _collect_visual_container_params(self, fn) -> None:
         """Register a function's parameters that are declared with a scalar
         visual-container type (``table panel``, ``line ln``) so method calls on
@@ -861,16 +974,12 @@ class SupportChecker:
         # so a direct ``dash.cell(..., text.align_left)`` is treated as a visual
         # sink (mirrors the table/box/line/label/linefill PARAM tracking).
         decl_hint = str(node.type_hint).replace(" ", "") if node.type_hint else None
-        if decl_hint and decl_hint.startswith("matrix<") and decl_hint.endswith(">"):
-            matrix_element = decl_hint[len("matrix<"):-1]
-            if matrix_element in self._map_bearing_udts:
-                self._err(
-                    node,
-                    f"matrix<{matrix_element}> is not supported when "
-                    "the UDT contains a map field; rollback would retain "
-                    "live map aliases.",
-                    hint="Use array<UDT> for recursively checkpointed state.",
-                )
+        if decl_hint:
+            self._validate_declared_type_hint(
+                node,
+                decl_hint,
+                context=f"variable '{node.name}'",
+            )
         if decl_hint in _VISUAL_CONTAINER_TYPES:
             self._visual_container_vars.add(node.name)
         elif isinstance(node.value, FuncCall):
@@ -1217,7 +1326,7 @@ class SupportChecker:
             targs = [str(t).replace(" ", "") for t in targs]
             if targs and targs[0] != "string":
                 self._err(node, "map keys must be string in PineForge's supported map subset.")
-            if len(targs) > 1 and targs[1] not in {"float", "int", "bool", "string"}:
+            if len(targs) > 1 and targs[1] not in _SUPPORTED_MAP_VALUE_TYPES:
                 self._err(node, "map values must be primitive in PineForge's supported map subset.")
         if ns == "matrix" and name == "new":
             targs = (getattr(node.callee, "annotations", None) or {}).get("template_args") or []

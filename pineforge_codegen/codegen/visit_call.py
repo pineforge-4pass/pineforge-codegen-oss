@@ -133,6 +133,7 @@ all tables it needs come from ``codegen/tables.py``, AST classes from
 from __future__ import annotations
 
 from ..ast_nodes import (
+    ASTNode,
     FuncCall,
     Identifier,
     MemberAccess,
@@ -512,6 +513,123 @@ class CallVisitor:
             f"return {lowered}; }}(({map_expr}))"
         )
 
+    def _expr_contains_map_operation(
+        self,
+        node,
+        visiting_callables: frozenset[str] = frozenset(),
+    ) -> bool:
+        """Whether an expression directly or transitively operates on a map.
+
+        C++17 does not order sibling function arguments.  We keep ordinary
+        calls byte-identical and only stage calls whose argument tree can
+        observe map identity/state (including a user helper whose body performs
+        such an operation).
+        """
+        if not isinstance(node, ASTNode):
+            return False
+        if isinstance(node, FuncCall):
+            callee = node.callee
+            if isinstance(callee, MemberAccess):
+                if (
+                    isinstance(callee.object, Identifier)
+                    and callee.object.name == "map"
+                    and callee.member in (set(MAP_METHODS) | {"new"})
+                ):
+                    return True
+                receiver_spec = self._type_spec_from_expr(callee.object)
+                if (
+                    receiver_spec is not None
+                    and receiver_spec.kind == "map"
+                    and callee.member in MAP_METHODS
+                ):
+                    return True
+
+            func_name, namespace = self._resolve_callee(callee)
+            info_key = func_name if namespace is None else f"{namespace}.{func_name}"
+            func_info = self._func_info_map.get(info_key)
+            if (
+                func_info is not None
+                and getattr(func_info, "node", None) is not None
+                and info_key not in visiting_callables
+            ):
+                next_visiting = visiting_callables | {info_key}
+                if any(
+                    self._expr_contains_map_operation(child, next_visiting)
+                    for child in func_info.node.body
+                ):
+                    return True
+
+        for value in vars(node).values():
+            if isinstance(value, ASTNode):
+                if self._expr_contains_map_operation(value, visiting_callables):
+                    return True
+            elif isinstance(value, list):
+                if any(
+                    self._expr_contains_map_operation(item, visiting_callables)
+                    for item in value
+                    if isinstance(item, ASTNode)
+                ):
+                    return True
+            elif isinstance(value, dict):
+                if any(
+                    self._expr_contains_map_operation(item, visiting_callables)
+                    for item in value.values()
+                    if isinstance(item, ASTNode)
+                ):
+                    return True
+        return False
+
+    def _ordered_user_call_expr(
+        self,
+        call_head: str,
+        arg_nodes: list,
+        arg_exprs: list[str],
+        *,
+        source_order_nodes: list | None = None,
+    ) -> str:
+        """Emit a user call with deterministic argument evaluation when needed.
+
+        ``arg_nodes``/``arg_exprs`` are in destination parameter order.
+        ``source_order_nodes`` records the caller's written order, allowing
+        named arguments to be evaluated as written while still occupying their
+        declared parameter slots.
+        """
+        raw = f"{call_head}({', '.join(arg_exprs)})"
+        if len(arg_exprs) < 2 or not any(
+            self._expr_contains_map_operation(node) for node in arg_nodes
+        ):
+            return raw
+
+        occupied = "\n".join((call_head, *arg_exprs))
+        counter = getattr(self, "_ordered_call_arg_counter", 0)
+        tokens: list[str] = []
+        for _ in arg_exprs:
+            while True:
+                token = f"__pf_call_arg_{counter}"
+                counter += 1
+                if token not in occupied:
+                    break
+            tokens.append(token)
+        self._ordered_call_arg_counter = counter
+
+        remaining = list(range(len(arg_nodes)))
+        evaluation_order: list[int] = []
+        for source_node in source_order_nodes or arg_nodes:
+            for index in remaining:
+                if arg_nodes[index] is source_node:
+                    evaluation_order.append(index)
+                    remaining.remove(index)
+                    break
+        evaluation_order.extend(remaining)
+
+        lowered = f"{call_head}({', '.join(tokens)})"
+        for index in reversed(evaluation_order):
+            lowered = (
+                f"[&](auto&& {tokens[index]})->decltype(auto){{ "
+                f"return {lowered}; }}(({arg_exprs[index]}))"
+            )
+        return lowered
+
     def _visit_func_call(self, node: FuncCall) -> str:
         callee = node.callee
         if isinstance(callee, MemberAccess):
@@ -554,7 +672,16 @@ class CallVisitor:
                         param_defaults, lambda x: x,
                     )
                     rest = [self._visit_expr(a) for a in rest_nodes]
-                    return f"{fn_cpp}({', '.join([recv_e] + rest)})"
+                    return self._ordered_user_call_expr(
+                        fn_cpp,
+                        [callee.object, *rest_nodes],
+                        [recv_e, *rest],
+                        source_order_nodes=[
+                            callee.object,
+                            *node.args,
+                            *node.kwargs.values(),
+                        ],
+                    )
 
         # Drawing method dispatch (spec §4.3 / L.1). A KNOWN drawing method on a
         # receiver that resolves to a drawing udt — gated on the METHOD NAME
@@ -782,7 +909,16 @@ class CallVisitor:
                                 param_defaults, lambda x: x,
                             )
                             rest = [self._visit_expr(a) for a in rest_nodes]
-                            return f"{fn_cpp}({', '.join([recv_e] + rest)})"
+                            return self._ordered_user_call_expr(
+                                fn_cpp,
+                                [obj, *rest_nodes],
+                                [recv_e, *rest],
+                                source_order_nodes=[
+                                    obj,
+                                    *node.args,
+                                    *node.kwargs.values(),
+                                ],
+                            )
                     args = ", ".join(self._visit_expr(a) for a in node.args)
                     recv = self._visit_expr(obj)
                     meth = meth_raw
@@ -1613,6 +1749,7 @@ class CallVisitor:
                 )
             return self._visit_expr(arg_node)
 
+        ordered_arg_nodes: list = []
         if node.kwargs:
             # Try to resolve kwargs using FuncInfo params for user-defined functions
             fi = self._func_info_map.get(func_name)
@@ -1620,16 +1757,28 @@ class CallVisitor:
                 param_names = list(fi.node.params)  # params is list[str]
                 # Merge kwargs then visit with series awareness
                 merged = _merge_kwargs(node.args, node.kwargs, param_names, lambda a: a)
+                ordered_arg_nodes = list(merged)
                 all_args = [_visit_arg_for_series(a, i) for i, a in enumerate(merged)]
             elif sigs.is_intrinsic_function(namespace, func_name):
                 # Known intrinsic — use signature registry for kwargs resolution
                 param_names = sigs.get_param_names(namespace, func_name)
-                all_args = _merge_kwargs(node.args, node.kwargs, param_names, self._visit_expr)
+                merged = _merge_kwargs(
+                    node.args, node.kwargs, param_names, lambda a: a
+                )
+                ordered_arg_nodes = list(merged)
+                all_args = [self._visit_expr(a) for a in merged]
             else:
                 # Unknown function: positional args + kwargs values as fallback
-                all_args = [_visit_arg_for_series(a, i) for i, a in enumerate(node.args)]
-                all_args.extend(self._visit_expr(v) for v in node.kwargs.values())
+                ordered_arg_nodes = [*node.args, *node.kwargs.values()]
+                all_args = [
+                    _visit_arg_for_series(a, i)
+                    for i, a in enumerate(node.args)
+                ]
+                all_args.extend(
+                    self._visit_expr(v) for v in node.kwargs.values()
+                )
         else:
+            ordered_arg_nodes = list(node.args)
             all_args = [_visit_arg_for_series(a, i) for i, a in enumerate(node.args)]
         # Drawing-style/visual CONSTANT passed positionally into a user function's
         # ``string`` parameter: ``label.style_*`` / ``size.*`` / other
@@ -1648,6 +1797,7 @@ class CallVisitor:
             if fi and fi.node and fi.name == "isInSession" and len(fi.node.params) >= 2 and len(all_args) == 1:
                 # Mirror Pine default `timeframe.period` instead of hard-coding 15m.
                 all_args.append("script_tf_")
+                ordered_arg_nodes.append(None)
         prefix = f"{namespace}::" if namespace else ""
         # Use safe name for user-defined functions to avoid member name collision
         emit_name = self._func_safe_name(func_name) if func_name in self._func_names else func_name
@@ -1677,7 +1827,15 @@ class CallVisitor:
             # Inside a per-call-site variant: propagate call-site index to
             # sub-functions that also have variants (for state isolation)
             emit_name = f"{self._func_safe_name(func_name)}_cs{self._active_call_site_idx}"
-        return f"{prefix}{emit_name}({', '.join(all_args)})"
+        call_head = f"{prefix}{emit_name}"
+        if namespace is None and func_name in self._func_names:
+            return self._ordered_user_call_expr(
+                call_head,
+                ordered_arg_nodes,
+                all_args,
+                source_order_nodes=[*node.args, *node.kwargs.values()],
+            )
+        return f"{call_head}({', '.join(all_args)})"
 
     def _coerce_drawing_style_string_args(self, func_name, arg_nodes, all_args) -> None:
         """In-place coerce positional args bound to a ``std::string`` user-function
