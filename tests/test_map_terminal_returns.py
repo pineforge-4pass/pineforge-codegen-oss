@@ -7,6 +7,7 @@ from hashlib import sha256
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 
 
@@ -393,31 +394,32 @@ def test_nonterminal_map_output_stays_byte_identical():
     )
 
 
-def test_keyword_only_map_void_residuals_stay_byte_identical():
+def test_keyword_only_namespace_map_residuals_fail_closed():
     expected = {
-        "clear": "85c4764c212b3199040e8ef49df06a45102bc53c62aa15b0ddf22c7ace8b823a",
-        "put_all": "cfa61dfc7aee7ef5ed01e5f26d2f641f8392d07d2246825d8647f5ed954c5218",
+        "clear": "keyword arguments are not supported",
+        "put_all": "unknown keyword argument 'from'",
     }
     for name, source in _KEYWORD_RESIDUAL_SOURCES.items():
-        cpp = transpile(source)
-        assert sha256(cpp.encode()).hexdigest() == expected[name]
-
-
-def test_mixed_keyword_namespace_map_residuals_keep_failure_parity():
-    for source in _MIXED_KEYWORD_RESIDUAL_SOURCES.values():
-        with pytest.raises(IndexError, match="list index out of range"):
+        with pytest.raises(CompileError, match=expected[name]):
             transpile(source)
 
 
-def test_invalid_terminal_map_shapes_stay_byte_identical():
-    for name, (expression, expected) in _INVALID_TERMINAL_EXPRESSIONS.items():
+def test_mixed_keyword_map_residuals_raise_compile_errors():
+    for source in _MIXED_KEYWORD_RESIDUAL_SOURCES.values():
+        with pytest.raises(CompileError, match=r"map\."):
+            transpile(source)
+
+
+def test_invalid_terminal_map_shapes_raise_compile_errors():
+    for name, (expression, _old_output_hash) in _INVALID_TERMINAL_EXPRESSIONS.items():
         source = f"""//@version=6
 strategy("Map invalid terminal {name}")
 f(map<string, string> m) =>
     {expression}
 observed = f(map.new<string, string>())
 """
-        assert sha256(transpile(source).encode()).hexdigest() == expected
+        with pytest.raises(CompileError, match=r"map\."):
+            transpile(source)
 
 
 def test_unresolved_parameter_keeps_lexical_precedence_over_global_map():
