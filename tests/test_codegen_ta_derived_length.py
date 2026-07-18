@@ -327,24 +327,27 @@ plot(out)
 
 
 # ---------------------------------------------------------------------------
-# Guardrail (negative): a ternary length whose condition depends on a
-# series (ta.*) result stays rejected — it is NOT a stable scalar.
+# Bounded series choice: Highest/Lowest can select between two fixed,
+# input-backed histories even when the selector changes from bar to bar.
+# Both histories must exist; rebuilding one fixed object would lose the older
+# bars needed when the choice grows again.
 # ---------------------------------------------------------------------------
 
-def test_series_dependent_ternary_length_rejected():
+def test_series_dependent_finite_choice_extrema_length_expands():
     src = """//@version=6
 strategy("series-dep-ternary")
-normalSwingLookback = input.int(10, "Normal")
-highVolSwingLookback = input.int(20, "High Vol")
+normalSwingLookback = input.int(10, "Normal", minval=1)
+highVolSwingLookback = input.int(20, "High Vol", minval=1)
 highVolThreshold = input.float(2.0, "Threshold")
-volatilityRatio = ta.rma(close, 14) / ta.atr(14)
+volatilityRatio = ta.atr(14) / ta.atr(20)
 activeSwingLookback = volatilityRatio >= highVolThreshold ? highVolSwingLookback : normalSwingLookback
 x = ta.lowest(low, activeSwingLookback)
 plot(x)
 """
-    with pytest.raises(CompileError) as ei:
-        transpile(src)
-    assert "Unsupported TA constructor length" in str(ei.value)
+    cpp = transpile(src)
+    members = re.findall(r"(_ta_lowest_\d+)\(", cpp)
+    assert len(members) == 2
+    assert sorted(_ctor_period(cpp, member) for member in members) == ["10", "20"]
 
 
 # ---------------------------------------------------------------------------
@@ -417,10 +420,8 @@ plot(pivHi)
 
 
 # ---------------------------------------------------------------------------
-# Guardrail (negative): the wellmanapex shape — a reassigned scalar whose
-# value depends on a SERIES (ta.rma result) — stays rejected even though
-# the structure (initial VarDecl + reassigned in a ternary) superficially
-# resembles the stable case above.
+# Guardrail (negative): a genuinely reassigned scalar whose value depends on a
+# series remains outside the bounded, expression-level finite-choice route.
 # ---------------------------------------------------------------------------
 
 def test_series_reassigned_ternary_length_rejected():
@@ -430,7 +431,9 @@ normalSwingLookback = input.int(10, "Normal")
 highVolSwingLookback = input.int(20, "High Vol")
 highVolThreshold = input.float(2.0, "Threshold")
 volatilityRatio = ta.rma(close, 14) / ta.atr(14)
-activeSwingLookback = volatilityRatio >= highVolThreshold ? highVolSwingLookback : normalSwingLookback
+activeSwingLookback = normalSwingLookback
+if volatilityRatio >= highVolThreshold
+    activeSwingLookback := highVolSwingLookback
 x = ta.lowest(low, activeSwingLookback)
 plot(x)
 """
@@ -610,11 +613,11 @@ plot(ta.ema(close, lenv))
 #          and NEVER reassigned (``var int _tfSec = timeframe.in_seconds()``)
 #          was treated as mutable persistent state.
 #
-# The sentinel that MUST stay rejected: a length that is genuinely series-
-# dynamic (wellmanapex ``activeSwingLookback`` — a ternary over a ta.atr
-# ratio). Covered by ``test_series_dependent_ternary_length_rejected`` /
-# ``test_series_reassigned_ternary_length_rejected`` above, plus the UDF-over-
-# series and reassigned-var-body guards below.
+# Arbitrary series-dynamic lengths still stay rejected.  The one accepted
+# exception is the bounded Highest/Lowest ternary whose leaves are fixed input
+# lengths (covered above and in ``test_codegen_ta_finite_choice_length``).
+# Reassigned-series, UDF-over-series, and reassigned-var-body guards below keep
+# the broader constructor boundary intact.
 # ---------------------------------------------------------------------------
 
 
@@ -764,4 +767,3 @@ plot(ta.ema(close, n))
     with pytest.raises(CompileError) as ei:
         transpile(src)
     assert "Unsupported TA constructor length" in str(ei.value)
-
