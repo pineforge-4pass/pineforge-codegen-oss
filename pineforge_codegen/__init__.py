@@ -4,6 +4,7 @@ from .lexer import Lexer
 from .parser import Parser
 from .analyzer import Analyzer
 from .codegen import CodeGen
+from .finite_ta_length import expand_finite_choice_extrema_lengths
 from .pragmas import extract_pf_trace_pragmas
 from .support_checker import check_support_or_raise
 
@@ -44,6 +45,7 @@ def transpile(pine_source: str, *, check_support: bool = True, filename: str = "
     ast = Parser(tokens, source=pine_source, filename=filename).parse()
     if check_support:
         check_support_or_raise(ast, filename=filename)
+    ast = expand_finite_choice_extrema_lengths(ast)
     ctx = Analyzer(ast, filename=filename).analyze()
     # Attach after analysis: pragma expressions are not part of the
     # program body, so the analyzer never inspects them; the codegen
@@ -81,6 +83,7 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
     ast = Parser(tokens, source=pine_source, filename=filename).parse()
     if check_support:
         check_support_or_raise(ast, filename=filename)
+    ast = expand_finite_choice_extrema_lengths(ast)
     ctx = Analyzer(ast, filename=filename).analyze()
     ctx.pf_trace_pragmas = pragmas
     gen = CodeGen(ctx)
