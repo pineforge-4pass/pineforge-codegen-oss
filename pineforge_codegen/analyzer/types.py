@@ -666,6 +666,114 @@ class TypeHelper:
             return PineType.STRING, None
         return None
 
+    def _terminal_array_get_return(
+        self,
+        value: ASTNode | None,
+        parameter_specs: dict[str, TypeSpec | None] | None = None,
+    ) -> tuple[PineType, TypeSpec] | None:
+        """Return exact metadata for a direct terminal ``array.get`` call.
+
+        The regular expression ``TypeSpec`` pass already knows the element
+        type of both ``array.get(values, index)`` and ``values.get(index)``.
+        The coarse visitor, however, deliberately returns ``VOID`` for most
+        array methods.  When such a call is the final expression of a UDF,
+        that ``VOID`` used to make codegen emit a ``double`` return type even
+        for primitive elements such as strings, booleans, and integers.
+
+        Keep the refinement intentionally narrow: only the established
+        positional/keyword shapes of ``get`` participate, and the receiver
+        must resolve to an exact array ``TypeSpec``.  Other array accessors,
+        mutations, range/view semantics, reference/ID-like elements, and
+        unresolved receivers remain on their existing paths.  Returning UDTs
+        or nested collections by value would lose Pine reference identity even
+        when the generated C++ happens to compile, so this helper must not
+        expose those specs as an apparent fix.
+        """
+        if not isinstance(value, FuncCall) or not isinstance(
+            value.callee, MemberAccess
+        ):
+            return None
+
+        callee = value.callee
+        if callee.member != "get":
+            return None
+
+        receiver: ASTNode | None = None
+        object_spec = None
+        object_is_parameter = False
+        object_is_visible_binding = False
+        if isinstance(callee.object, Identifier):
+            object_is_visible_binding = (
+                self._symbols.resolve(callee.object.name) is not None
+            )
+            object_is_parameter = (
+                parameter_specs is not None
+                and callee.object.name in parameter_specs
+            )
+            if object_is_parameter:
+                object_spec = parameter_specs.get(callee.object.name)
+            else:
+                object_spec = self._type_spec_from_expr(callee.object)
+        object_is_array_value = (
+            object_spec is not None and object_spec.kind == "array"
+        )
+        if (
+            isinstance(callee.object, Identifier)
+            and callee.object.name == "array"
+            and not object_is_array_value
+            and not object_is_visible_binding
+        ):
+            # Functional forms supported by the checked-array emitter:
+            #   array.get(values, index)
+            #   array.get(values, index=index)
+            #   array.get(id=values, index=index)
+            if len(value.args) == 2 and not value.kwargs:
+                receiver = value.args[0]
+            elif len(value.args) == 1 and set(value.kwargs) == {"index"}:
+                receiver = value.args[0]
+            elif not value.args and set(value.kwargs) == {"id", "index"}:
+                receiver = value.kwargs["id"]
+        else:
+            # Method forms supported by the checked-array emitter:
+            #   values.get(index)
+            #   values.get(index=index)
+            if len(value.args) == 1 and not value.kwargs:
+                receiver = callee.object
+            elif not value.args and set(value.kwargs) == {"index"}:
+                receiver = callee.object
+
+        if receiver is None:
+            return None
+        # Temporary/arbitrary receivers have their own stateful-call and
+        # reference-identity questions. Re-inferring them here would revisit
+        # nested calls and mint extra call-site state. The registered residual
+        # is limited to exact identifier receivers.
+        if not isinstance(receiver, Identifier):
+            return None
+
+        recv_spec = None
+        if parameter_specs is not None and receiver.name in parameter_specs:
+            recv_spec = parameter_specs.get(receiver.name)
+            # An unresolved parameter shadows any same-named global.
+            if recv_spec is None:
+                return None
+        else:
+            recv_spec = self._type_spec_from_expr(receiver)
+        if (
+            recv_spec is None
+            or recv_spec.kind != "array"
+            or recv_spec.element is None
+        ):
+            return None
+
+        element_spec = recv_spec.element
+        if element_spec.kind != "primitive":
+            return None
+        return_type = self._element_pine_type(element_spec)
+        if return_type == PineType.VOID:
+            return None
+        return return_type, element_spec
+
     @staticmethod
     def _pine_type_to_spec(pine_type: PineType) -> TypeSpec:
         mapping = {

@@ -880,7 +880,7 @@ def test_array_typed_udf_parameter_methods_route_by_typespec():
     # user-defined element type).
     assert "double rank_pos(std::vector<double>& source, int index)" in cpp
     assert "double rank_kw(std::vector<double>& source, int index)" in cpp
-    assert "double mutate_int(std::vector<int>& source)" in cpp
+    assert "int mutate_int(std::vector<int>& source)" in cpp
     assert "bool probe_bool(std::vector<bool>& source)" in cpp
     assert "double mutate_pivot(std::vector<Pivot>& source)" in cpp
     assert (

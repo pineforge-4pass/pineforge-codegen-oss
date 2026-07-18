@@ -1989,6 +1989,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 for name, spec in zip(node.params, inferred_param_specs)
             },
         )
+        terminal_array_get_return = self._terminal_array_get_return(
+            terminal_ret_expr,
+            {
+                name: spec
+                for name, spec in zip(node.params, inferred_param_specs)
+            },
+        )
 
         self._symbols.exit_scope()
 
@@ -2048,6 +2055,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             body_type, terminal_spec = terminal_map_return
             if terminal_spec is not None:
                 self._func_return_type_specs[node.name] = terminal_spec
+
+        if terminal_array_get_return is not None:
+            body_type, terminal_spec = terminal_array_get_return
+            # Preserve the exact primitive TypeSpec as well as the coarse
+            # PineType. Downstream collection construction consults this cache
+            # directly; without it, asking for the UDF's element type can
+            # re-visit the call and duplicate stateful call sites.
+            self._func_return_type_specs[node.name] = terminal_spec
 
         # Store return type
         self._func_return_types[node.name] = body_type
