@@ -1098,6 +1098,26 @@ class CallHandlers:
         while len(param_types) < len(func_def.params):
             param_types.append(PineType.UNKNOWN)
 
+        # Per-param TypeSpec: declared hints are authoritative; for untyped
+        # params, infer from this call site's argument.  Validate deferred
+        # history receivers before series propagation/cloning can reinterpret
+        # a map handle (or map-bearing UDT) as ``Series<double>``.
+        param_specs = list(
+            getattr(self, "_func_param_type_specs", {}).get(func_name)
+            or self._param_type_specs_from_def(func_def)
+        )
+        arg_specs = [self._type_spec_from_expr(arg) for arg in node.args]
+        for i in range(len(param_specs)):
+            if param_specs[i] is None and i < len(arg_specs):
+                param_specs[i] = arg_specs[i]
+        self._validate_deferred_param_history_refs(
+            func_name,
+            {
+                name: spec
+                for name, spec in zip(func_def.params, param_specs)
+            },
+        )
+
         # Determine return type: re-analyze the function body with known param types
         # For now, use the cached return type from initial analysis
         return_type = self._func_return_types.get(func_name, PineType.FLOAT)
@@ -1165,17 +1185,6 @@ class CallHandlers:
         # Forward UDT-return inference (set in _visit_FuncDef) so codegen can
         # emit the struct return type. Probe: udt-method-probe-20.
         udt_ret = self._func_udt_return_types.get(func_name)
-        # Per-param TypeSpec: declared hints are authoritative; for untyped
-        # params, infer from the call-site argument's type_spec (so an untyped
-        # ``s`` used as a string, or a UDT passed by value, emits correctly).
-        param_specs = list(
-            getattr(self, "_func_param_type_specs", {}).get(func_name)
-            or self._param_type_specs_from_def(func_def)
-        )
-        arg_specs = [self._type_spec_from_expr(arg) for arg in node.args]
-        for i in range(len(param_specs)):
-            if param_specs[i] is None and i < len(arg_specs):
-                param_specs[i] = arg_specs[i]
         existing = [fi for fi in self._func_infos if fi.name == func_name]
 
         # A direct terminal map call on an untyped parameter cannot be typed

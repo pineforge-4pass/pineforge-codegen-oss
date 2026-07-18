@@ -248,10 +248,47 @@ observed = previous(map.new<string, int>())
         ),
         (
             '''//@version=6
+strategy("inferred map parameter history")
+previous(values) => values[1]
+observed = previous(map.new<string, int>())
+''',
+            "History references on map IDs",
+        ),
+        (
+            '''//@version=6
+strategy("inferred map-bearing UDT parameter history")
+type Holder
+    map<string, int> values
+previous(holder) => holder[1]
+var Holder holder = Holder.new(map.new<string, int>())
+observed = previous(holder)
+''',
+            "History references on map-bearing UDTs",
+        ),
+        (
+            '''//@version=6
 strategy("map alias history")
 var root = map.new<string, int>()
 alias = root
 previous = alias[1]
+''',
+            "History references on map IDs",
+        ),
+        (
+            '''//@version=6
+strategy("map ternary history")
+var left = map.new<string, int>()
+var right = map.new<string, int>()
+condition = true
+previous = (condition ? left : right)[1]
+''',
+            "History references on map IDs",
+        ),
+        (
+            '''//@version=6
+strategy("map current history")
+var root = map.new<string, int>()
+current = root[0]
 ''',
             "History references on map IDs",
         ),
@@ -302,6 +339,45 @@ observed = previous(close)
     cpp = transpile(source)
     assert "double previous_cs0(const Series<double>& values)" in cpp
     compile_env.compile_cpp(cpp, label="pinemap-history-scalar-shadow")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '''probe() =>
+    float slot = close
+    slot[1]
+''',
+        '''probe() =>
+    if close > 0
+        float slot = close
+        previous = slot[1]
+    0.0
+''',
+        '''probe() =>
+    for slot = 0 to 1
+        previous = slot[1]
+    0.0
+''',
+        '''probe() =>
+    for slot in array.from(0, 1)
+        previous = slot[1]
+    0.0
+''',
+    ],
+    ids=["local", "block-local", "range-loop-binder", "for-in-binder"],
+)
+def test_scalar_bindings_shadowing_map_history_fail_closed(body: str) -> None:
+    source = f'''//@version=6
+strategy("map history scalar binding shadow")
+var slot = map.new<string, int>()
+{body}observed = probe()
+'''
+    with pytest.raises(
+        CompileError,
+        match="scalar local or loop bindings that shadow a map ID",
+    ):
+        transpile(source)
 
 
 def test_handle_alias_copy_rebind_and_order_runtime() -> None:
@@ -412,6 +488,83 @@ for [key, value] in pairs
     assert "auto __pf_map_iter_1 = pairs;" in cpp
     assert "auto __pf_map_iter_0 = pairs;" not in cpp
     compile_env.compile_cpp(cpp, label="pinemap-pair-loop-collision")
+
+
+@pytest.mark.parametrize(
+    ("as_method", "parameter", "key_name"),
+    [
+        (False, "__pf_map_iter_0", "key"),
+        (False, "__pf_map_key_0", "_"),
+        (True, "__pf_map_iter_0", "key"),
+        (True, "__pf_map_key_0", "_"),
+    ],
+    ids=["udf-iter", "udf-key", "method-iter", "method-key"],
+)
+def test_map_pair_loop_temporary_avoids_parameter_collisions(
+    as_method: bool, parameter: str, key_name: str
+) -> None:
+    if as_method:
+        prelude = '''type Accumulator
+    int seed
+'''
+        declaration = (
+            "method probe(Accumulator self, int "
+            f"{parameter}, map<string, int> pairs) =>"
+        )
+        setup = '''var Accumulator accumulator = Accumulator.new(0)
+observed = accumulator.probe(10, pairs)
+'''
+    else:
+        prelude = ""
+        declaration = (
+            f"probe(int {parameter}, map<string, int> pairs) =>"
+        )
+        setup = "observed = probe(10, pairs)\n"
+    source = f'''//@version=6
+strategy("PineMap pair loop parameter collision")
+{prelude}{declaration}
+    total = {parameter}
+    for [{key_name}, value] in pairs
+        total += value
+    total + {parameter}
+var pairs = map.new<string, int>()
+pairs.put("a", 1)
+pairs.put("b", 2)
+{setup}'''
+    cpp = transpile(source)
+    if parameter == "__pf_map_iter_0":
+        assert "auto __pf_map_iter_0 = pairs;" not in cpp
+    else:
+        assert "for (auto __pf_map_key_0 :" not in cpp
+    assert f"return (total + {parameter});" in cpp
+    compile_env.compile_cpp(
+        cpp,
+        label=(
+            "pinemap-pair-loop-method-param-collision"
+            if as_method
+            else "pinemap-pair-loop-udf-param-collision"
+        ),
+    )
+
+    driver = r'''
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.run(&bar, 1);
+    if (!strategy.last_error().empty()) return 2;
+    if (strategy.observed != 23) return 3;
+    std::cout << "ok\n";
+}
+'''
+    assert _compile_and_run(
+        cpp + driver,
+        label=(
+            "pinemap-pair-loop-method-param-runtime"
+            if as_method
+            else "pinemap-pair-loop-udf-param-runtime"
+        ),
+    ) == "ok\n"
 
 
 def test_coof_recursive_snapshot_restore_runtime() -> None:

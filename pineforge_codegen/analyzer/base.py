@@ -171,6 +171,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_udt_return_types: dict[str, str] = {}
         self._func_return_type_specs: dict[str, "TypeSpec"] = {}
         self._func_param_type_specs: dict[str, list] = {}
+        # History receivers can mention an untyped UDF parameter before its
+        # concrete TypeSpec is learned from a call site.  Keep the exact AST
+        # identifier identities that resolved to parameters during the
+        # definition pass; call handling re-checks those receivers once the
+        # argument specs are available.  Node identity (rather than raw name)
+        # prevents a later local/loop binding with the same spelling from
+        # being mistaken for the parameter it shadows.
+        self._deferred_param_history_refs: dict[
+            str, list[tuple[Subscript, dict[int, str]]]
+        ] = {}
         # Per-function var_members and series_vars (for call-site cloning)
         self._func_var_members: dict[str, list] = {}  # func_name -> [(name, PineType, init_str)]
         self._func_series_vars: dict[str, set] = {}   # func_name -> set[str]
@@ -1262,6 +1272,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._collection_types[name] = spec
 
     def _visit_VarDecl(self, node: VarDecl) -> PineType:
+        outer_symbol = self._symbols.resolve(node.name)
+        outer_spec = (
+            getattr(outer_symbol, "type_spec", None)
+            if outer_symbol is not None
+            else self._collection_types.get(node.name)
+        )
         # Infer type from the value expression
         val_type = self._visit(node.value)
         type_spec = self._type_spec_from_hint(node.type_hint) if node.type_hint else None
@@ -1329,6 +1345,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             udt_type_name=udt_ctor,
             type_spec=type_spec,
         )
+        if (
+            not self._global_scope
+            and self._type_spec_contains_map(outer_spec)
+            and not self._type_spec_contains_map(type_spec)
+        ):
+            setattr(sym, "_pf_shadows_map_state", True)
         if node.name in self._static_vars:
             setattr(sym, "is_static_series", True)
         self._symbols.define(sym)
@@ -1564,6 +1586,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 loc=loc,
                 type_spec=pspec,
             )
+            setattr(sym, "_pf_parameter_owner", node.name)
             self._symbols.define(sym)
 
         # Record TA counter before visiting body
@@ -1758,13 +1781,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             pspec = self._type_spec_from_hint(hint) if hint else None
             param_types.append(ptype)
             param_specs.append(pspec)
-            self._symbols.define(Symbol(
+            sym = Symbol(
                 name=p, pine_type=ptype, is_series=False,
                 is_var=False, is_const=False, const_value=None,
                 scope=self._symbols.current_scope.name, loc=loc,
                 udt_type_name=udt_self,
                 type_spec=pspec,
-            ))
+            )
+            setattr(sym, "_pf_parameter_owner", method_key)
+            self._symbols.define(sym)
         ret_type = PineType.VOID
         old_global = self._global_scope
         self._global_scope = False
@@ -1854,6 +1879,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return body_type
 
     def _visit_ForStmt(self, node: ForStmt) -> PineType:
+        outer_symbol = self._symbols.resolve(node.var)
+        outer_spec = (
+            getattr(outer_symbol, "type_spec", None)
+            if outer_symbol is not None
+            else self._collection_types.get(node.var)
+        )
         self._symbols.enter_scope("for")
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
 
@@ -1869,6 +1900,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             loc=loc,
             type_spec=TypeSpec.primitive("int"),
         )
+        if self._type_spec_contains_map(outer_spec):
+            setattr(sym, "_pf_shadows_map_state", True)
         self._symbols.define(sym)
 
         old_global = self._global_scope
@@ -1909,12 +1942,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 pine_type = self._element_pine_type(element_spec)
                 if pine_type == PineType.VOID:
                     pine_type = PineType.FLOAT
-                self._symbols.define(Symbol(
+                outer_symbol = self._symbols.resolve(node.var)
+                outer_spec = (
+                    getattr(outer_symbol, "type_spec", None)
+                    if outer_symbol is not None
+                    else self._collection_types.get(node.var)
+                )
+                sym = Symbol(
                     name=node.var, pine_type=pine_type, is_series=False,
                     is_var=False, is_const=False, const_value=None,
                     scope=self._symbols.current_scope.name, loc=loc,
                     type_spec=element_spec,
-                ))
+                )
+                if self._type_spec_contains_map(outer_spec):
+                    setattr(sym, "_pf_shadows_map_state", True)
+                self._symbols.define(sym)
             if node.vars:
                 loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
                 for idx, v in enumerate(node.vars):
@@ -1926,12 +1968,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     pine_type = self._element_pine_type(binder_spec)
                     if pine_type == PineType.VOID:
                         pine_type = PineType.FLOAT
-                    self._symbols.define(Symbol(
+                    outer_symbol = self._symbols.resolve(v)
+                    outer_spec = (
+                        getattr(outer_symbol, "type_spec", None)
+                        if outer_symbol is not None
+                        else self._collection_types.get(v)
+                    )
+                    sym = Symbol(
                         name=v, pine_type=pine_type, is_series=False,
                         is_var=False, is_const=False, const_value=None,
                         scope=self._symbols.current_scope.name, loc=loc,
                         type_spec=binder_spec,
-                    ))
+                    )
+                    if self._type_spec_contains_map(outer_spec):
+                        setattr(sym, "_pf_shadows_map_state", True)
+                    self._symbols.define(sym)
             for stmt in node.body:
                 self._visit(stmt)
             self._symbols.exit_scope()
@@ -2249,28 +2300,172 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             )
         return False
 
+    def _history_receiver_type_spec(
+        self,
+        node: ASTNode,
+        parameter_specs_by_node: dict[int, TypeSpec | None] | None = None,
+    ) -> TypeSpec | None:
+        """Resolve the value shape on the left of Pine's history operator.
+
+        General expression inference intentionally stays conservative.  The
+        history safety gate needs two extra, narrow facts: a ternary selecting
+        two equal aggregate handles keeps that aggregate type, and an untyped
+        parameter can be substituted with the TypeSpec learned at its call
+        site.  The substitution is keyed by AST identifier identity so a
+        same-spelled local or loop binder is never confused with the parameter.
+        """
+        overrides = parameter_specs_by_node or {}
+        if isinstance(node, Identifier):
+            if id(node) in overrides:
+                return overrides[id(node)]
+            return self._type_spec_from_expr(node)
+        if isinstance(node, Ternary):
+            true_spec = self._history_receiver_type_spec(
+                node.true_val, overrides
+            )
+            false_spec = self._history_receiver_type_spec(
+                node.false_val, overrides
+            )
+            if true_spec is not None and true_spec == false_spec:
+                return true_spec
+            # ``na`` is context-typed by the opposite branch in Pine.  Keep
+            # this rule local to the history gate rather than broadening all
+            # declaration inference.
+            if isinstance(node.true_val, NaLiteral):
+                return false_spec
+            if isinstance(node.false_val, NaLiteral):
+                return true_spec
+            return None
+        if isinstance(node, MemberAccess):
+            owner = self._history_receiver_type_spec(node.object, overrides)
+            if owner is not None and owner.kind == "udt" and owner.name:
+                return (self._udt_field_type_specs.get(owner.name) or {}).get(
+                    node.member
+                )
+            return self._type_spec_from_expr(node)
+        if isinstance(node, FuncCall) and isinstance(
+            node.callee, MemberAccess
+        ):
+            callee = node.callee
+            receiver = None
+            if (
+                isinstance(callee.object, Identifier)
+                and callee.object.name == "map"
+                and node.args
+            ):
+                receiver = node.args[0]
+            elif not (
+                isinstance(callee.object, Identifier)
+                and callee.object.name in {
+                    "array", "matrix", "map", "request", "ta"
+                }
+            ):
+                receiver = callee.object
+            if receiver is not None:
+                recv_spec = self._history_receiver_type_spec(
+                    receiver, overrides
+                )
+                if recv_spec is not None and recv_spec.kind == "map":
+                    if callee.member == "copy":
+                        return recv_spec
+                    if callee.member in {"put", "get", "remove"}:
+                        return recv_spec.value
+                    if callee.member == "keys":
+                        return TypeSpec.array(
+                            recv_spec.key or TypeSpec.primitive("string")
+                        )
+                    if callee.member == "values":
+                        return TypeSpec.array(
+                            recv_spec.value or TypeSpec.primitive("float")
+                        )
+        return self._type_spec_from_expr(node)
+
+    def _parameter_identifiers_in_expr(
+        self, node: ASTNode
+    ) -> dict[str, dict[int, str]]:
+        """Return parameter identifier nodes grouped by their callable owner."""
+        grouped: dict[str, dict[int, str]] = {}
+
+        def visit(value) -> None:
+            if value is None:
+                return
+            if isinstance(value, Identifier):
+                sym = self._symbols.resolve(value.name)
+                owner = getattr(sym, "_pf_parameter_owner", None)
+                if owner:
+                    grouped.setdefault(owner, {})[id(value)] = value.name
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item)
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    visit(item)
+                return
+            if isinstance(value, ASTNode):
+                for child in vars(value).values():
+                    visit(child)
+
+        visit(node)
+        return grouped
+
+    def _reject_unsupported_map_history(
+        self, spec: TypeSpec, node: Subscript
+    ) -> None:
+        if spec.kind == "map":
+            message = (
+                "History references on map IDs are not supported in "
+                "PineForge; map rollback uses identity snapshots rather "
+                "than Series<PineMap>."
+            )
+        else:
+            message = (
+                "History references on map-bearing UDTs or collections "
+                "are not supported in PineForge; their Series value copy "
+                "would retain live map aliases."
+            )
+        self._error(message, node.loc)
+
+    def _validate_deferred_param_history_refs(
+        self,
+        owner: str,
+        parameter_specs: dict[str, TypeSpec | None],
+    ) -> None:
+        """Re-run map-history safety after untyped UDF args are known."""
+        for node, parameter_nodes in self._deferred_param_history_refs.get(
+            owner, []
+        ):
+            overrides = {
+                node_id: parameter_specs.get(name)
+                for node_id, name in parameter_nodes.items()
+            }
+            object_spec = self._history_receiver_type_spec(
+                node.object, overrides
+            )
+            if self._type_spec_contains_map(object_spec):
+                assert object_spec is not None
+                self._reject_unsupported_map_history(object_spec, node)
+
     def _visit_Subscript(self, node: Subscript) -> PineType:
         obj_type = self._visit(node.object)
         self._visit(node.index)
 
-        is_current_value = (
-            isinstance(node.index, NumberLiteral) and node.index.value == 0
-        )
-        object_spec = self._type_spec_from_expr(node.object)
-        if not is_current_value and self._type_spec_contains_map(object_spec):
-            if object_spec is not None and object_spec.kind == "map":
-                message = (
-                    "History references on map IDs are not supported in "
-                    "PineForge; map rollback uses identity snapshots rather "
-                    "than Series<PineMap>."
-                )
-            else:
-                message = (
-                    "History references on map-bearing UDTs or collections "
-                    "are not supported in PineForge; their Series value copy "
-                    "would retain live map aliases."
-                )
-            self._error(message, node.loc)
+        object_spec = self._history_receiver_type_spec(node.object)
+        if self._type_spec_contains_map(object_spec):
+            assert object_spec is not None
+            self._reject_unsupported_map_history(object_spec, node)
+
+        # An untyped parameter has no aggregate TypeSpec during the function
+        # definition pass.  Remember only the identifier nodes that resolved
+        # to actual parameters; the call handler validates them before any
+        # codegen state is committed.
+        for owner, parameter_nodes in self._parameter_identifiers_in_expr(
+            node.object
+        ).items():
+            self._deferred_param_history_refs.setdefault(owner, []).append(
+                (node, parameter_nodes)
+            )
 
         # Detect series vars / bar fields
         if isinstance(node.object, Identifier):
@@ -2280,6 +2475,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             else:
                 sym = self._symbols.resolve(name)
                 if sym is not None:
+                    if getattr(sym, "_pf_shadows_map_state", False):
+                        self._error(
+                            "History references on scalar local or loop "
+                            "bindings that shadow a map ID are not supported "
+                            "until PineForge can allocate a lexically scoped "
+                            "Series buffer for that binding.",
+                            node.loc,
+                        )
                     if getattr(sym, "type_spec", None) is None or sym.type_spec.kind not in ("array", "map"):
                         global_sym = self._symbols.global_scope.symbols.get(name)
                         shadows_map_state = (

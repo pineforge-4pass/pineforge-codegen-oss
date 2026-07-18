@@ -1109,6 +1109,17 @@ class StmtVisitor:
             occupied_names = set(self._all_bound_names) | {
                 self._safe_name(name) for name in self._all_bound_names
             }
+            # Parameters are not statement bindings, so they are absent from
+            # ``_all_bound_names``.  Include both their authored and C++-safe
+            # spellings before minting loop temporaries; otherwise a legal UDF
+            # or method parameter named ``__pf_map_iter_0`` (or, for ``_`` key
+            # loops, ``__pf_map_key_0``) is redeclared and then shadowed by the
+            # generated loop machinery.
+            active_params = set(self._current_func_param_types)
+            occupied_names.update(active_params)
+            occupied_names.update(
+                self._safe_name(name) for name in active_params
+            )
             while True:
                 fid = self._for_counter
                 self._for_counter += 1
