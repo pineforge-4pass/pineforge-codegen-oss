@@ -1863,11 +1863,22 @@ class CallVisitor:
                     # Bar field: pass _s_close instead of current_bar_.close
                     if aname in BAR_FIELDS or aname in BAR_SERIES_PUSH:
                         return f"_s_{aname}"
-                    # Series var: pass the Series object directly
-                    if aname in self.ctx.series_vars:
-                        safe = self._safe_name(aname)
-                        if self._active_var_remap and safe in self._active_var_remap:
-                            safe = self._active_var_remap[safe]
+                    # Exact Series binding: pass the Series object directly.
+                    # A raw name can also denote a scalar sibling/callable
+                    # shadow, in which case lexical state must override the
+                    # legacy ``ctx.series_vars`` union and fall through to the
+                    # synthetic history bridge below.
+                    safe = self._safe_name(aname)
+                    # Function parameters are lexical C++ arguments in every
+                    # emitted variant.  The legacy function-series clone table
+                    # can contain the same raw name, but applying it here makes
+                    # cs1+ ignore the actual parameter and read an unrelated
+                    # class member instead.
+                    if aname in self._current_func_param_types:
+                        return safe
+                    if self._active_var_remap and safe in self._active_var_remap:
+                        safe = self._active_var_remap[safe]
+                    if self._binding_is_series(aname, safe):
                         return safe
                 expr_cpp = self._visit_expr(arg_node)
                 cpp_t = self._infer_type(arg_node)

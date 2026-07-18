@@ -1185,6 +1185,29 @@ class CallHandlers:
                                 caller_name = sym.scope[5:]
                                 self._func_series_vars.setdefault(caller_name, set()).add(arg.name)
                             else:
+                                # Keep the exact declaration/member registries
+                                # in lockstep with the legacy raw-name series
+                                # promotion.  Codegen uses those identities to
+                                # distinguish the real global binding from a
+                                # same-named lexical scalar tombstone.
+                                exact_member = getattr(
+                                    sym, "_pf_var_member_name", None
+                                )
+                                if exact_member is not None:
+                                    self._series_var_members.add(exact_member)
+                                decl_node_id = getattr(
+                                    sym, "_pf_decl_node_id", None
+                                )
+                                if decl_node_id is not None:
+                                    self._series_decl_nodes.add(decl_node_id)
+                                    binding_name = getattr(
+                                        sym,
+                                        "_pf_decl_binding_name",
+                                        arg.name,
+                                    )
+                                    self._series_decl_bindings.add(
+                                        (decl_node_id, binding_name)
+                                    )
                                 self._series_vars.add(arg.name)
 
         # Per-call-site cloning: TA, series/var, and fixnan state all advance

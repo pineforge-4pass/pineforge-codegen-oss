@@ -101,6 +101,7 @@ from ..ast_nodes import (
 from ..symbols import TypeSpec
 from .tables import (
     ARRAY_NEW_CTORS,
+    DRAWING_TYPE_TO_CPP,
     TA_RETURNS_BOOL,
     TA_TUPLE_FIELDS,
     MATRIX_RETURNING_METHODS,
@@ -200,6 +201,60 @@ class StmtVisitor:
                     node.name,
                     activation_spec,
                 )
+            metadata = getattr(
+                self.ctx, "var_member_metadata_by_node", {}
+            ).get(id(node))
+            if metadata is not None:
+                member_name = metadata[1]
+                if member_name != node.name:
+                    # The declaration RHS was emitted against the inherited
+                    # binding.  Only now activate the collision-safe member for
+                    # later statements in this exact lexical block.
+                    exact_storage = self._safe_name(member_name)
+                    # A callable variant may already map the exact member to a
+                    # per-call-site clone (``x__blk1`` -> ``x__blk1_cs1``).
+                    # Preserve that outer clone mapping when exposing the raw
+                    # lexical spelling after the declaration.
+                    exact_storage = self._active_var_remap.get(
+                        exact_storage, exact_storage
+                    )
+                    self._active_var_remap = dict(self._active_var_remap)
+                    self._active_var_remap[self._safe_name(node.name)] = (
+                        exact_storage
+                    )
+                drawing_info = self._drawing_var_decl_info_by_node.get(id(node))
+                if (drawing_info is not None
+                        and drawing_info.get("is_callable_scoped")):
+                    raw_safe = self._safe_name(node.name)
+                    storage = self._active_var_remap.get(
+                        raw_safe, self._safe_name(member_name)
+                    )
+                    if storage.startswith("this->"):
+                        storage = storage[len("this->"):]
+                    self._active_var_remap = dict(self._active_var_remap)
+                    self._active_var_remap[raw_safe] = f"this->{storage}"
+                self._lexical_series_bindings[node.name] = (
+                    self._safe_name(member_name)
+                    in self._series_var_member_names
+                )
+            else:
+                self._lexical_series_bindings[node.name] = (
+                    self._decl_binding_is_series(id(node), node.name)
+                )
+            decl_spec = getattr(
+                self.ctx, "var_member_type_specs_by_node", {}
+            ).get(id(node))
+            if decl_spec is None:
+                decl_spec = (
+                    self._type_spec_from_hint_name(node.type_hint)
+                    if node.type_hint
+                    else self._type_spec_from_expr(node.value)
+                )
+            self._lexical_drawing_types[node.name] = (
+                DRAWING_TYPE_TO_CPP.get(decl_spec.name)
+                if decl_spec is not None and decl_spec.kind == "udt"
+                else None
+            )
             if (
                 node.name == "map"
                 and getattr(self, "_block_map_visibility_depth", 0) > 0
@@ -217,6 +272,30 @@ class StmtVisitor:
                 for name in node.names:
                     if name and name != "_":
                         self._activate_callable_collection_binding(name, None)
+            scalar_names = [
+                name
+                for name in node.names
+                if name
+                and name != "_"
+                and not self._decl_binding_is_series(id(node), name)
+            ]
+            if any(
+                self._safe_name(name) in self._active_var_remap
+                for name in scalar_names
+            ):
+                # Tuple declarations are lexical bindings.  A scalar element
+                # must shadow any same-spelled Series storage inherited from a
+                # broad callable call-site remap; otherwise a later read can
+                # silently resolve to an unrelated ``x_csN`` member even
+                # though the structured binding declared a local ``x``.
+                self._active_var_remap = dict(self._active_var_remap)
+                for name in scalar_names:
+                    self._active_var_remap.pop(self._safe_name(name), None)
+            for name in node.names:
+                if name and name != "_":
+                    self._lexical_series_bindings[name] = (
+                        self._decl_binding_is_series(id(node), name)
+                    )
         elif isinstance(node, IfStmt):
             self._visit_if(node, lines, indent)
         elif isinstance(node, ForStmt):
@@ -348,6 +427,18 @@ class StmtVisitor:
         return self._type_spec_to_cpp(spec)
 
     def _visit_var_decl(self, node: VarDecl, lines: list[str], pad: str) -> None:
+        member_meta = getattr(
+            self.ctx, "var_member_metadata_by_node", {}
+        ).get(id(node))
+        if member_meta is not None:
+            declaration_is_series = (
+                self._safe_name(member_meta[1])
+                in self._series_var_member_names
+            )
+        else:
+            declaration_is_series = (
+                self._decl_binding_is_series(id(node), node.name)
+            )
         # Primitive runtime var/varip initializers execute at the declaration
         # site under a dedicated once flag. This preserves source order (a
         # preceding input/plain/TA declaration is already available) and Pine's
@@ -359,18 +450,50 @@ class StmtVisitor:
             if info is not None:
                 member_name = info["member_name"]
                 target = self._safe_name(member_name)
+                if self._active_var_remap and target in self._active_var_remap:
+                    target = self._active_var_remap[target]
+                flag = self._runtime_var_init_flags.get(
+                    (info["node_id"], target),
+                    info["flag"],
+                )
+                target_expr = (
+                    f"this->{target}"
+                    if info.get("is_callable_scoped")
+                    else target
+                )
+                flag_expr = (
+                    f"this->{flag}"
+                    if info.get("is_callable_scoped")
+                    else flag
+                )
                 previous_input_name = self._current_input_var_name
                 self._current_input_var_name = node.name
                 try:
-                    init_cpp = self._visit_expr(node.value)
+                    if info.get("drawing_cpp") is not None:
+                        init_cpp = self._visit_rhs_value(
+                            node.value,
+                            member_name,
+                            target_cpp_type=info["drawing_cpp"],
+                        )
+                    else:
+                        init_cpp = self._visit_expr(node.value)
                 finally:
                     self._current_input_var_name = previous_input_name
-                init_cpp = self._typed_na_init(
-                    init_cpp, member_name, info["ptype"]
-                )
-                lines.append(f"{pad}if (!{info['flag']}) {{")
-                lines.append(f"{pad}    {target} = {init_cpp};")
-                lines.append(f"{pad}    {info['flag']} = true;")
+                if info.get("drawing_cpp") is None:
+                    init_cpp = self._typed_na_init(
+                        init_cpp, member_name, info["ptype"]
+                    )
+                lines.append(f"{pad}if (!{flag_expr}) {{")
+                # A history-referenced persistent primitive is a Series<T> too,
+                # not just a drawing handle.  The per-bar carry has already
+                # advanced it before this declaration-site one-shot runs, so
+                # replace the current slot rather than assigning a scalar to
+                # the Series object (or pushing a duplicate bar).
+                if info.get("is_series"):
+                    lines.append(f"{pad}    {target_expr}.update({init_cpp});")
+                else:
+                    lines.append(f"{pad}    {target_expr} = {init_cpp};")
+                lines.append(f"{pad}    {flag_expr} = true;")
                 lines.append(f"{pad}}}")
             return
 
@@ -378,8 +501,15 @@ class StmtVisitor:
         # Apply per-call-site var remap (for function-local vars)
         if self._active_var_remap and safe in self._active_var_remap:
             safe = self._active_var_remap[safe]
-        # Global-scope non-var vars are class members — emit assignment, not declaration
-        is_global_member = node.name in self._global_member_vars
+        # Only a declaration in the script body can bind a hoisted global
+        # member.  A callable-local declaration may legally shadow that global
+        # with the same raw name; treating it as the member emits an assignment
+        # into unrelated storage (and can assign a scalar into Series<T> when
+        # the global was promoted for an indirect history call).
+        is_global_member = (
+            getattr(self, "_active_func_name", None) is None
+            and node.name in self._global_member_vars
+        )
 
         def remember_local_type(cpp_type: str | None) -> None:
             if cpp_type and not is_global_member:
@@ -410,7 +540,7 @@ class StmtVisitor:
                 self._enforce_enum_declared_before_input_enum(node.value)
             title = self._get_input_title(node.value, var_name=node.name)
             cpp_val = self._render_input_value(node.value, func_name_i, namespace_i, title)
-            if node.name in self.ctx.series_vars:
+            if declaration_is_series:
                 self._emit_history_series_write(lines, pad, safe, cpp_val)
             elif is_global_member:
                 lines.append(f"{pad}{safe} = {cpp_val};")
@@ -539,7 +669,7 @@ class StmtVisitor:
                 f"(history_advances_new_bar() ? {ta_name}.compute({compute_args}) "
                 f": {ta_name}.recompute({compute_args}))"
             )
-            if node.name in self.ctx.series_vars:
+            if declaration_is_series:
                 self._emit_history_series_write(lines, pad, safe, ta_expr)
             elif is_global_member:
                 lines.append(f"{pad}{safe} = {ta_expr};")
@@ -548,32 +678,49 @@ class StmtVisitor:
             return
 
         # Non-var series variable — push instead of declare
-        if node.name in self.ctx.series_vars:
-            cpp_val = self._visit_expr(node.value)
+        if declaration_is_series:
+            target_cpp_type = self._type_for_decl(node)
+            cpp_val = self._visit_rhs_value(
+                node.value,
+                node.name,
+                target_cpp_type=(
+                    target_cpp_type
+                    if target_cpp_type in DRAWING_TYPE_TO_CPP.values()
+                    else None
+                ),
+            )
             self._emit_history_series_write(lines, pad, safe, cpp_val)
             return
 
         # If/switch expression: x = if cond ... else ...
         if isinstance(node.value, (IfStmt, SwitchStmt)):
             cpp_type = self._type_for_decl(node) if not is_global_member else None
-            map_cpp_type = (
+            selection_cpp_type = (
                 cpp_type
-                if cpp_type is not None and cpp_type.startswith("PineMap<")
+                if (cpp_type is not None
+                    and (cpp_type.startswith("PineMap<")
+                         or cpp_type in DRAWING_TYPE_TO_CPP.values()))
                 else self._map_target_cpp_type(
                     name=node.name,
                     type_hint=node.type_hint,
                 )
             )
+            if selection_cpp_type is None:
+                selection_cpp_type = self._drawing_target_cpp_type(
+                    node.name,
+                    cpp_type,
+                )
             if not is_global_member:
                 default = self._default_for_type(cpp_type)
                 lines.append(f"{pad}{cpp_type} {safe} = {default};")
+                remember_local_type(cpp_type)
             indent = len(pad) // 4
             self._visit_if_switch_expr(
                 node.value,
                 safe,
                 lines,
                 indent,
-                target_cpp_type=map_cpp_type,
+                target_cpp_type=selection_cpp_type,
             )
             return
 
@@ -687,17 +834,22 @@ class StmtVisitor:
         if isinstance(node.value, (IfStmt, SwitchStmt)):
             target_name = self._get_target_name(node.target)
             safe = self._safe_name(target_name) if target_name else self._visit_expr(node.target)
-            map_cpp_type = self._map_target_cpp_type(
+            selection_cpp_type = self._map_target_cpp_type(
                 name=target_name,
                 target_node=node.target if target_name is None else None,
             )
+            if selection_cpp_type is None:
+                selection_cpp_type = self._drawing_target_cpp_type(
+                    target_name,
+                    None,
+                )
             indent = len(pad) // 4
             self._visit_if_switch_expr(
                 node.value,
                 safe,
                 lines,
                 indent,
-                target_cpp_type=map_cpp_type,
+                target_cpp_type=selection_cpp_type,
             )
             return
 
@@ -748,8 +900,15 @@ class StmtVisitor:
             lines.append(f"{pad}{safe} = {self._addr_of_udt_selection(node.value, target_name)};")
             return
 
-        if target_name in self.ctx.series_vars:
-            val_cpp = self._visit_expr(node.value)
+        if self._binding_is_series(target_name, safe):
+            val_cpp = self._visit_rhs_value(
+                node.value,
+                target_name,
+                target_cpp_type=self._drawing_target_cpp_type(
+                    target_name,
+                    None,
+                ),
+            )
             if node.op == ":=":
                 lines.append(f"{pad}{safe}.update({val_cpp});")
             else:
@@ -821,6 +980,43 @@ class StmtVisitor:
                     lines.append(f"{pad}{safe} {node.op} {val_cpp};")
 
     def _visit_tuple_assign(self, node: TupleAssign, lines: list[str], pad: str) -> None:
+        def emit_call_tuple(call_expr: str) -> None:
+            """Destructure once, routing exact history elements to Series.
+
+            A structured binding always creates scalar C++ locals, which would
+            shadow the class Series storage required by a later ``x[n]`` read.
+            Materialize the tuple once whenever any element is exact-Series;
+            scalar elements remain locals while Series elements advance their
+            per-call-site remapped members.
+            """
+            series_names = {
+                name
+                for name in node.names
+                if name != "_"
+                and self._decl_binding_is_series(id(node), name)
+            }
+            if not series_names:
+                binding_names = ", ".join(node.names)
+                lines.append(f"{pad}auto [{binding_names}] = {call_expr};")
+                return
+
+            temp = f"_tuple_result_{self._tuple_assign_counter}"
+            self._tuple_assign_counter += 1
+            lines.append(f"{pad}auto {temp} = {call_expr};")
+            for idx, name in enumerate(node.names):
+                if name == "_":
+                    continue
+                value = f"std::get<{idx}>({temp})"
+                safe = self._safe_name(name)
+                if name in series_names:
+                    if safe in self._active_var_remap:
+                        safe = self._active_var_remap[safe]
+                    self._emit_history_series_write(
+                        lines, pad, safe, value
+                    )
+                else:
+                    lines.append(f"{pad}auto {safe} = {value};")
+
         site = self._get_ta_site(node.value)
         if site is not None:
             compute_args = self._ta_compute_args_for_site(site)
@@ -848,8 +1044,10 @@ class StmtVisitor:
                     # fresh ``double`` local would shadow the member and make
                     # ``dir[n]`` a scalar subscript (clang error). Non-series
                     # destructured names keep the plain scalar declaration.
-                    if name in self.ctx.series_vars:
+                    if self._decl_binding_is_series(id(node), name):
                         safe = self._safe_name(name)
+                        if safe in self._active_var_remap:
+                            safe = self._active_var_remap[safe]
                         self._emit_history_series_write(
                             lines, pad, safe, field_expr
                         )
@@ -861,14 +1059,12 @@ class StmtVisitor:
         if isinstance(node.value, FuncCall):
             func_name, namespace = self._resolve_callee(node.value.callee)
             if namespace == "request" and func_name == "security":
-                binding_names = ", ".join(n for n in node.names if n != "_")
                 call_expr = self._visit_func_call(node.value)
-                lines.append(f"{pad}auto [{binding_names}] = {call_expr};")
+                emit_call_tuple(call_expr)
                 return
             if func_name and namespace is None and func_name in self._func_names:
-                binding_names = ", ".join(node.names)
                 call_expr = self._visit_func_call(node.value)
-                lines.append(f"{pad}auto [{binding_names}] = {call_expr};")
+                emit_call_tuple(call_expr)
                 return
 
             # UDT instance method returning a tuple: ``[a, b, c] = receiver.method(...)``.
@@ -890,9 +1086,8 @@ class StmtVisitor:
                     if (fi_u is not None
                             and getattr(fi_u, "is_udt_method", False)
                             and getattr(fi_u, "returns_tuple", False)):
-                        binding_names = ", ".join(node.names)
                         call_expr = self._visit_func_call(node.value)
-                        lines.append(f"{pad}auto [{binding_names}] = {call_expr};")
+                        emit_call_tuple(call_expr)
                         return
 
         lines.append(f"{pad}/* unsupported tuple assignment */")
@@ -900,8 +1095,9 @@ class StmtVisitor:
     def _push_block_var_remap(self, owner):
         """Activate exact lexical metadata for one branch/loop body.
 
-        Persistent-var renames are merged over the inherited remap. Collection
-        registries use copy-on-write; declarations activate their bindings in
+        Persistent-var renames use copy-on-write and activate only after their
+        declarations. Collection registries likewise use copy-on-write and
+        declarations activate their bindings in
         source order, and block exit restores the outer state. Thus a sibling
         block can reuse the same raw name without either pre-shadowing earlier
         statements or controlling dispatch in the other branch.
@@ -911,6 +1107,10 @@ class StmtVisitor:
         )
         previous_map_depth = getattr(self, "_block_map_visibility_depth", 0)
         self._block_map_visibility_depth = previous_map_depth + 1
+        saved_drawing_types = self._lexical_drawing_types
+        self._lexical_drawing_types = dict(saved_drawing_types)
+        saved_series_bindings = self._lexical_series_bindings
+        self._lexical_series_bindings = dict(saved_series_bindings)
 
         renames = self._block_var_renames.get(id(owner))
         collection_specs = self._block_collection_types.get(id(owner))
@@ -920,10 +1120,14 @@ class StmtVisitor:
                 None,
                 previous_map_visible,
                 previous_map_depth,
+                saved_drawing_types,
+                saved_series_bindings,
             )
         saved_remap = self._active_var_remap
         if renames:
-            self._active_var_remap = {**saved_remap, **renames}
+            # Do not pre-shadow an outer binding at block entry.  _visit_stmt
+            # installs each exact rename immediately after that VarDecl's RHS.
+            self._active_var_remap = dict(saved_remap)
 
         saved_collections = None
         if collection_specs is not None:
@@ -950,6 +1154,8 @@ class StmtVisitor:
             saved_collections,
             previous_map_visible,
             previous_map_depth,
+            saved_drawing_types,
+            saved_series_bindings,
         )
 
     def _pop_block_var_remap(self, saved) -> None:
@@ -958,6 +1164,8 @@ class StmtVisitor:
             saved_collections,
             previous_map_visible,
             previous_map_depth,
+            saved_drawing_types,
+            saved_series_bindings,
         ) = saved
         try:
             if saved_remap is not _NO_BLOCK_REMAP:
@@ -972,6 +1180,8 @@ class StmtVisitor:
                         self._matrix_specs,
                     ) = saved_collections
         finally:
+            self._lexical_drawing_types = saved_drawing_types
+            self._lexical_series_bindings = saved_series_bindings
             self._block_map_binding_visible = previous_map_visible
             self._block_map_visibility_depth = previous_map_depth
 
@@ -1070,8 +1280,24 @@ class StmtVisitor:
         e_var = f"_for_end_{fid}"
         step_var = f"_for_step_{fid}"
         down_var = f"_for_down_{fid}"
+        end_mentions_binder = bool(
+            node.var
+            and any(
+                isinstance(part, Identifier) and part.name == node.var
+                for part in self._walk_ast(node.end)
+            )
+        )
+        end_eval = f"_for_end_eval_{fid}" if end_mentions_binder else None
+        if end_eval is not None:
+            # The ``to`` expression is authored outside the loop-binder scope,
+            # but its refresh executes inside the generated C++ ``for`` where
+            # the binder would shadow a same-named outer member/parameter. A
+            # pre-binder lambda preserves the authored lexical binding while
+            # still reevaluating the expression after every iteration.
+            lines.append(f"{pad}auto {end_eval} = [&]() {{ return ({end}); }};")
         lines.append(f"{pad}int {s_var} = ({start});")
-        lines.append(f"{pad}int {e_var} = ({end});")
+        end_expr = f"{end_eval}()" if end_eval is not None else f"({end})"
+        lines.append(f"{pad}int {e_var} = {end_expr};")
         lines.append(f"{pad}int {step_var} = ({step});")
         lines.append(f"{pad}if ({step_var} < 0) {step_var} = -{step_var};")
         lines.append(f"{pad}if ({step_var} == 0) {step_var} = 1;")
@@ -1079,7 +1305,8 @@ class StmtVisitor:
         lines.append(
             f"{pad}for (int {var} = {s_var}; "
             f"({down_var} ? ({var} >= {e_var}) : ({var} <= {e_var})); "
-            f"{var} += ({down_var} ? -{step_var} : {step_var}), {e_var} = ({end})) {{"
+            f"{var} += ({down_var} ? -{step_var} : {step_var}), "
+            f"{e_var} = {end_expr}) {{"
         )
         # Register the loop counter so reads of it inside the body resolve (the
         # unknown-identifier guard in _visit_ident would otherwise flag it).
@@ -1091,6 +1318,8 @@ class StmtVisitor:
             self._current_loop_vars.add(node.var)
             self._current_loop_var_specs[node.var] = TypeSpec.primitive("int")
         _blk_saved = self._push_block_var_remap(node)
+        if node.var:
+            self._lexical_series_bindings[node.var] = False
         try:
             for s in node.body:
                 self._visit_stmt(s, lines, indent + 1)
@@ -1216,6 +1445,12 @@ class StmtVisitor:
             bindings = ", ".join(node.vars)
             lines.append(f"{pad}for (auto [{bindings}] : {iterable}) {{")
         _blk_saved = self._push_block_var_remap(node)
+        loop_binding_names = (
+            [node.var] if node.var else list(node.vars or [])
+        )
+        for name in loop_binding_names:
+            if name and name != "_":
+                self._lexical_series_bindings[name] = False
         try:
             for s in node.body:
                 self._visit_stmt(s, lines, indent + 1)

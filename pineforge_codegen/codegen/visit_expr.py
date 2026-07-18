@@ -222,7 +222,21 @@ class ExprVisitor:
         if isinstance(node, Subscript):
             return self._visit_subscript(node)
         if isinstance(node, TupleLiteral):
-            elems = ", ".join(self._visit_expr(e) for e in node.elements)
+            elems = []
+            for element in node.elements:
+                element_spec = self._type_spec_from_expr(element)
+                element_target = None
+                if (element_spec is not None
+                        and element_spec.kind == "udt"
+                        and element_spec.name in DRAWING_TYPE_TO_CPP):
+                    element_target = self._type_spec_to_cpp(element_spec)
+                elems.append(
+                    self._visit_rhs_value(
+                        element,
+                        target_cpp_type=element_target,
+                    )
+                )
+            elems = ", ".join(elems)
             return f"std::make_tuple({elems})"
         return "/* unknown */"
 
@@ -234,16 +248,52 @@ class ExprVisitor:
         return (isinstance(node, NaLiteral)
                 or (isinstance(node, Identifier) and node.name == "na"))
 
-    def _drawing_na_default(self, target_name: str | None) -> str | None:
-        """If ``target_name`` is a drawing-handle variable (line/box/label/
-        linefill/chart.point), return its na default literal (e.g. ``Box{}`` —
-        a default-constructed handle whose id == -1 == na); otherwise None."""
+    def _drawing_target_cpp_type(
+        self,
+        target_name: str | None,
+        target_cpp_type: str | None,
+    ) -> str | None:
+        """Resolve a drawing target without leaking a shadowed global type.
+
+        An explicit contextual type always wins.  For reassignments, where the
+        caller may not have one, consult function-local and parameter types
+        before the analyzer's flat global drawing registry.  A same-named
+        scalar local/parameter must therefore block the global fallback.
+        """
+        if target_cpp_type is not None:
+            return (
+                target_cpp_type
+                if target_cpp_type in DRAWING_TYPE_TO_CPP.values()
+                else None
+            )
         if not target_name:
             return None
-        udt = self._udt_var_types.get(target_name)
-        if udt in DRAWING_TYPE_TO_CPP:
-            return f"{DRAWING_TYPE_TO_CPP[udt]}{{}}"
-        return None
+        if target_name in self._lexical_drawing_types:
+            return self._lexical_drawing_types[target_name]
+        param_spec = getattr(self, "_current_func_param_specs", {}).get(
+            target_name
+        )
+        if (param_spec is not None
+                and param_spec.kind == "udt"
+                and param_spec.name in DRAWING_TYPE_TO_CPP):
+            return DRAWING_TYPE_TO_CPP[param_spec.name]
+        for scoped_types in (
+            getattr(self, "_current_func_local_types", {}),
+            getattr(self, "_current_func_param_types", {}),
+        ):
+            if target_name in scoped_types:
+                scoped_type = scoped_types[target_name].removesuffix("&")
+                return (
+                    scoped_type
+                    if scoped_type in DRAWING_TYPE_TO_CPP.values()
+                    else None
+                )
+        # Only declarations already emitted into the current lexical path may
+        # shadow a global.  Scanning the whole future function body makes a
+        # later local declaration pre-shadow earlier statements.  Exact
+        # top-level types are captured separately because the analyzer's flat
+        # raw-name registry can be overwritten by a same-named local.
+        return self._global_drawing_cpp_types.get(target_name)
 
     def _visit_rhs_value(self, value_node, target_name: str | None = None,
                          target_cpp_type: str | None = None) -> str:
@@ -256,34 +306,39 @@ class ExprVisitor:
         ``string s = na;`` would both emit ``na<double>()`` and fail to compile
         (no viable ``operator=`` / conversion). Every other RHS lowers unchanged.
         """
+        drawing_target = self._drawing_target_cpp_type(
+            target_name,
+            target_cpp_type,
+        )
         if self._is_na_expr(value_node):
-            draw_default = self._drawing_na_default(target_name)
-            if draw_default is not None:
-                return draw_default
+            if drawing_target is not None:
+                return f"{drawing_target}{{}}"
             if target_cpp_type and target_cpp_type.startswith("PineMap<"):
                 # PineMap's default constructor is the typed ``na`` ID.  A
                 # map.new call is the only operation that allocates storage.
                 return f"{target_cpp_type}{{}}"
             if target_cpp_type in ("std::string", "int", "int64_t", "bool"):
                 return f"na<{target_cpp_type}>()"
-        if (target_cpp_type
-                and target_cpp_type.startswith("PineMap<")
-                and isinstance(value_node, Ternary)):
+        if (isinstance(value_node, Ternary)
+                and ((target_cpp_type
+                      and target_cpp_type.startswith("PineMap<"))
+                     or drawing_target is not None)):
             # C++ cannot deduce a common type for ``na<double>()`` and a
-            # PineMap handle.  Pine's ternary is target typed, so propagate the
-            # declared/reassignment target into both arms.  Keep this map-only:
-            # every non-map ternary remains byte-for-byte on the established
-            # generic expression path.
+            # PineMap/drawing handle.  Pine's ternary is target typed, so
+            # propagate the exact declared/reassignment target into both arms.
+            # Arbitrary UDTs, arrays, matrices, and scalar ternaries retain the
+            # established generic expression path.
+            branch_target = drawing_target or target_cpp_type
             condition = self._visit_expr(value_node.condition)
             true_value = self._visit_rhs_value(
                 value_node.true_val,
                 target_name,
-                target_cpp_type=target_cpp_type,
+                target_cpp_type=branch_target,
             )
             false_value = self._visit_rhs_value(
                 value_node.false_val,
                 target_name,
-                target_cpp_type=target_cpp_type,
+                target_cpp_type=branch_target,
             )
             return (
                 f"(({condition}) ? ({true_value}) : ({false_value}))"
@@ -346,7 +401,7 @@ class ExprVisitor:
         # Apply per-call-site var remap (for function-local vars)
         if self._active_var_remap and safe in self._active_var_remap:
             safe = self._active_var_remap[safe]
-        if name in self.ctx.series_vars:
+        if self._binding_is_series(name, safe):
             return f"{safe}[0]"
         # Safety net: by here the name resolved to none of the builtins,
         # constants, parameters, or declared variables handled above, so
@@ -956,11 +1011,12 @@ class ExprVisitor:
             if name in BAR_FIELDS or name in BAR_SERIES_PUSH:
                 # Index matches Pine: [0] current bar, [k] k bars ago (runtime Series deque).
                 return f"_s_{name}[{idx}]"
-            if name in self.ctx.series_vars:
-                safe = self._safe_name(name)
-                # Apply per-call-site var remap
-                if self._active_var_remap and safe in self._active_var_remap:
-                    safe = self._active_var_remap[safe]
+            safe = self._safe_name(name)
+            # Apply per-call-site / exact block-member remap before deciding
+            # whether the current lexical binding is a Series.
+            if self._active_var_remap and safe in self._active_var_remap:
+                safe = self._active_var_remap[safe]
+            if self._binding_is_series(name, safe):
                 # Same Pine [k] semantics as Series in runtime/series.hpp
                 return f"{safe}[{idx}]"
             spec = self._collection_spec_for_name(name)

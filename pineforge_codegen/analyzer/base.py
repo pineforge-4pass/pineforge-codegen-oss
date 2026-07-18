@@ -118,6 +118,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._symbols = SymbolTable()
         self._ta_call_sites: list[TACallSite] = []
         self._series_vars: set[str] = set()
+        self._series_var_members: set[str] = set()
+        self._series_decl_nodes: set[int] = set()
+        self._series_decl_bindings: set[tuple[int, str]] = set()
         self._series_bar_fields: set[str] = set()
         self._var_members: list[tuple[str, PineType, str]] = []
         self._func_infos: list[FuncInfo] = []
@@ -132,6 +135,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # same raw identifier, so codegen must not reconstruct this mapping
         # from names when it emits declaration-site initialization.
         self._var_member_metadata_by_node: dict[int, tuple] = {}
+        self._var_member_type_specs_by_node: dict[int, TypeSpec | None] = {}
+        self._var_member_owners_by_node: dict[int, str | None] = {}
         # Block-scoped ``var``/``varip`` name-collision disambiguation.
         # Two same-named block-scoped vars in SIBLING non-global, non-function
         # scopes (e.g. ``var bool valid`` declared inside ``if A`` and again
@@ -348,6 +353,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._ensure_pine_v6()
         self._visit(self._ast)
         self._check_cross_callable_series_collection_collisions()
+        self._check_persistent_drawing_member_collisions()
 
         # Propagate call-site counts to sub-functions called within
         # multi-call-site functions. If f() has N call sites and calls g()
@@ -381,6 +387,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             symbols=self._symbols,
             ta_call_sites=self._ta_call_sites,
             series_vars=self._series_vars,
+            series_var_members=self._series_var_members,
+            series_decl_nodes=self._series_decl_nodes,
+            series_decl_bindings=self._series_decl_bindings,
             series_bar_fields=self._series_bar_fields,
             var_members=self._var_members,
             func_infos=self._func_infos,
@@ -394,6 +403,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             global_expr_map=pure_global_expr_map,
             var_member_init_exprs=self._var_member_init_exprs,
             var_member_metadata_by_node=self._var_member_metadata_by_node,
+            var_member_type_specs_by_node=self._var_member_type_specs_by_node,
+            var_member_owners_by_node=self._var_member_owners_by_node,
             func_ta_ranges=self._func_ta_ranges,
             func_call_cs_map=self._func_call_cs_map,
             func_call_site_counts=self._func_call_site_count,
@@ -469,6 +480,191 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         "storage is not implemented yet.",
                         node.loc if node is not None else None,
                     )
+
+    def _check_persistent_drawing_member_collisions(self) -> None:
+        """Fail closed when two lexical drawing vars share one C++ member.
+
+        Persistent callable locals and the first block-scoped declaration still
+        use their raw Pine spelling as the class-member identity.  Reusing that
+        spelling in another callable/global scope would silently share state
+        (and can emit uncompilable C++ when the handle kinds differ).  Sibling
+        on-bar blocks that received ``__blkN`` identities are already safe.
+        Until all callable storage is owner-qualified, reject only the drawing
+        collisions made reachable by drawing-handle target typing.
+        """
+        from .types import _DRAWING_TYPE_NAMES
+
+        persistent_groups: dict[str, list[tuple[ASTNode, TypeSpec | None]]] = {}
+        for node_id, meta in self._var_member_metadata_by_node.items():
+            node, member_name, _ptype, _init, _callable = meta
+            spec = self._var_member_type_specs_by_node.get(node_id)
+            persistent_groups.setdefault(member_name, []).append((node, spec))
+
+        def is_drawing(spec: TypeSpec | None) -> bool:
+            return bool(
+                spec is not None
+                and spec.kind == "udt"
+                and spec.name in _DRAWING_TYPE_NAMES
+            )
+
+        for member_name, bindings in persistent_groups.items():
+            if len(bindings) < 2 or not any(is_drawing(spec) for _, spec in bindings):
+                continue
+            node = bindings[1][0]
+            self._error(
+                "Persistent drawing bindings named "
+                f"'{getattr(node, 'name', member_name)}' in distinct lexical "
+                "owners would share one generated state member; rename one "
+                "binding until callable-owned persistent storage is "
+                "owner-qualified.",
+                node.loc,
+            )
+
+        global_names = {name for name, _ptype in self._global_var_decls}
+        global_drawing_names: set[str] = set()
+        for stmt in self._ast.body:
+            if not isinstance(stmt, VarDecl) or stmt.is_var or stmt.is_varip:
+                continue
+            spec = (
+                self._type_spec_from_hint(stmt.type_hint)
+                if stmt.type_hint
+                else self._type_spec_from_expr(stmt.value)
+            )
+            if is_drawing(spec):
+                global_drawing_names.add(stmt.name)
+
+        for member_name, bindings in persistent_groups.items():
+            if member_name not in global_names:
+                continue
+            if not (
+                member_name in global_drawing_names
+                or any(is_drawing(spec) for _, spec in bindings)
+            ):
+                continue
+            node = bindings[0][0]
+            self._error(
+                "Persistent drawing state named "
+                f"'{getattr(node, 'name', member_name)}' collides with a "
+                "top-level class-member binding; rename one binding until "
+                "persistent storage is owner-qualified.",
+                node.loc,
+            )
+
+        # Callable persistent drawing storage is currently cloned as a class
+        # member and remapped by raw Pine name.  If such a declaration shadows
+        # an ancestor local or parameter, the preloaded clone remap and C++
+        # lexical scope disagree about which binding is visible before/after
+        # the declaration.  Reject this narrow shape instead of silently
+        # reading the parameter/local from the wrong storage.  Independent
+        # sibling branches receive separate lexical inventories here (the
+        # existing distinct-owner collision gate above may still reject two
+        # persistent drawings that would share the same member identity).
+        callable_drawing_nodes = {
+            node_id
+            for node_id, meta in self._var_member_metadata_by_node.items()
+            if meta[4] and is_drawing(
+                self._var_member_type_specs_by_node.get(node_id)
+            )
+        }
+
+        def walk_callable_body(
+            body: list[ASTNode],
+            inherited_names: set[str],
+        ) -> None:
+            def walk_embedded_controls(value: Any, visible: set[str]) -> None:
+                """Find block-valued if/switch expressions inside an RHS.
+
+                Pine permits ``x = if ...``.  Those branch declarations have
+                the same storage hazard as statement-level blocks, and the RHS
+                must be inspected against the pre-declaration environment.
+                """
+                if value is None:
+                    return
+                if isinstance(value, IfStmt):
+                    walk_embedded_controls(value.condition, visible)
+                    walk_callable_body(value.body, visible)
+                    walk_callable_body(value.else_body, visible)
+                    return
+                if isinstance(value, SwitchStmt):
+                    walk_embedded_controls(value.expr, visible)
+                    for case_expr, case_body in value.cases:
+                        walk_embedded_controls(case_expr, visible)
+                        walk_callable_body(case_body, visible)
+                    walk_callable_body(value.default_body, visible)
+                    return
+                if isinstance(value, (FuncDef, MethodDef)):
+                    return
+                if isinstance(value, (list, tuple)):
+                    for item in value:
+                        walk_embedded_controls(item, visible)
+                    return
+                if isinstance(value, dict):
+                    for item in value.values():
+                        walk_embedded_controls(item, visible)
+                    return
+                if isinstance(value, ASTNode):
+                    for child in vars(value).values():
+                        walk_embedded_controls(child, visible)
+
+            visible = set(inherited_names)
+            for stmt in body:
+                if isinstance(stmt, VarDecl):
+                    walk_embedded_controls(stmt.value, visible)
+                    if (id(stmt) in callable_drawing_nodes
+                            and stmt.name in visible):
+                        self._error(
+                            "Persistent drawing binding "
+                            f"'{stmt.name}' shadows an ancestor callable "
+                            "parameter or local; rename one binding until "
+                            "callable-owned persistent storage has lexical "
+                            "owner qualification.",
+                            stmt.loc,
+                        )
+                    visible.add(stmt.name)
+                    continue
+                if isinstance(stmt, TupleAssign):
+                    walk_embedded_controls(stmt.value, visible)
+                    visible.update(stmt.names)
+                    continue
+                if isinstance(stmt, Assignment):
+                    walk_embedded_controls(stmt.target, visible)
+                    walk_embedded_controls(stmt.value, visible)
+                    continue
+                if isinstance(stmt, ExprStmt):
+                    walk_embedded_controls(stmt.expr, visible)
+                    continue
+                if isinstance(stmt, IfStmt):
+                    walk_embedded_controls(stmt.condition, visible)
+                    walk_callable_body(stmt.body, visible)
+                    walk_callable_body(stmt.else_body, visible)
+                    continue
+                if isinstance(stmt, WhileStmt):
+                    walk_embedded_controls(stmt.condition, visible)
+                    walk_callable_body(stmt.body, visible)
+                    continue
+                if isinstance(stmt, ForStmt):
+                    walk_embedded_controls(stmt.start, visible)
+                    walk_embedded_controls(stmt.end, visible)
+                    walk_embedded_controls(stmt.step, visible)
+                    walk_callable_body(stmt.body, visible | {stmt.var})
+                    continue
+                if isinstance(stmt, ForInStmt):
+                    walk_embedded_controls(stmt.iterable, visible)
+                    loop_names = set(stmt.vars or [])
+                    if stmt.var:
+                        loop_names.add(stmt.var)
+                    walk_callable_body(stmt.body, visible | loop_names)
+                    continue
+                if isinstance(stmt, SwitchStmt):
+                    walk_embedded_controls(stmt.expr, visible)
+                    for case_expr, case_body in stmt.cases:
+                        walk_embedded_controls(case_expr, visible)
+                        walk_callable_body(case_body, visible)
+                    walk_callable_body(stmt.default_body, visible)
+
+        for stmt in self._ast.body:
+            if isinstance(stmt, (FuncDef, MethodDef)):
+                walk_callable_body(stmt.body, set(stmt.params))
 
     def _record_global_binding_stmt(self, name: str, pine_type: PineType,
                                     is_var: bool, decl_node: ASTNode | None = None) -> None:
@@ -1233,59 +1429,124 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if not body:
             return None
 
-        # Map a drawing-handle local var name -> drawing type. Seeded from
-        # declared drawing type hints (``line result``) and the function's own
-        # drawing-typed parameters, plus any local first bound to a drawing
-        # ``<ns>.new(...)`` constructor.
-        local_drawing: dict[str, str] = {}
+        # Build a source-ordered lexical binding map.  ``None`` is an explicit
+        # non-drawing tombstone: it prevents a same-named drawing declaration
+        # from a nested or earlier block from poisoning a later scalar return.
+        bindings: dict[str, str | None] = {}
         param_hints = (func_node.annotations or {}).get("param_type_hints", [])
         for i, p in enumerate(func_node.params):
             hint = param_hints[i] if i < len(param_hints) else None
-            if hint in _DRAWING_TYPE_NAMES:
-                local_drawing[p] = hint
+            bindings[p] = hint if hint in _DRAWING_TYPE_NAMES else None
 
-        def _scan(stmts):
-            for st in stmts:
-                if isinstance(st, VarDecl):
-                    if st.type_hint in _DRAWING_TYPE_NAMES:
-                        local_drawing[st.name] = st.type_hint
-                    else:
-                        dt = self._udt_name_from_ctor(st.value)
-                        if dt in _DRAWING_TYPE_NAMES:
-                            local_drawing.setdefault(st.name, dt)
-                elif isinstance(st, Assignment) and isinstance(st.target, Identifier):
-                    dt = self._udt_name_from_ctor(st.value)
-                    if dt in _DRAWING_TYPE_NAMES:
-                        local_drawing.setdefault(st.target.name, dt)
-                elif isinstance(st, IfStmt):
-                    _scan(st.body)
-                    _scan(st.else_body)
+        def _decl_drawing_type(stmt: VarDecl) -> str | None:
+            if stmt.type_hint in _DRAWING_TYPE_NAMES:
+                return stmt.type_hint
+            direct = self._udt_name_from_ctor(stmt.value)
+            if direct in _DRAWING_TYPE_NAMES:
+                return direct
+            exact = self._var_member_type_specs_by_node.get(id(stmt))
+            if (exact is not None
+                    and exact.kind == "udt"
+                    and exact.name in _DRAWING_TYPE_NAMES):
+                return exact.name
+            spec = self._type_spec_from_expr(stmt.value)
+            if (spec is not None
+                    and spec.kind == "udt"
+                    and spec.name in _DRAWING_TYPE_NAMES):
+                return spec.name
+            return None
 
-        _scan(body)
+        def _scan_direct_prefix(
+            stmts: list[ASTNode],
+            env: dict[str, str | None],
+        ) -> None:
+            # Declarations inside nested control-flow bodies never leak into
+            # this lexical environment.  Their own branch environment is
+            # created only when that control node is the terminal expression.
+            for stmt in stmts:
+                if isinstance(stmt, VarDecl):
+                    env[stmt.name] = _decl_drawing_type(stmt)
+                elif isinstance(stmt, TupleAssign):
+                    for name in stmt.names:
+                        env[name] = None
 
-        def _resolve_terminal(stmt):
-            # An if used as the function's return expression: the value is the
-            # terminal of the executed branch — recurse into the body's (then
-            # else's) terminal statement.
-            if isinstance(stmt, IfStmt):
-                for branch in (stmt.body, stmt.else_body):
-                    if branch:
-                        t = _resolve_terminal(branch[-1])
-                        if t is not None:
-                            return t
-                return None
-            expr = None
+        terminal_na = object()
+
+        def _resolve_terminal(
+            stmt: ASTNode,
+            env: dict[str, str | None],
+        ) -> str | None | object:
             if isinstance(stmt, ExprStmt):
-                expr = stmt.expr
-            elif not isinstance(stmt, TupleLiteral) and hasattr(stmt, "loc"):
-                expr = stmt
-            if expr is None:
-                return None
-            if isinstance(expr, Identifier) and expr.name in local_drawing:
-                return local_drawing[expr.name]
-            return self._udt_name_from_ctor(expr)
+                return _resolve_terminal(stmt.expr, env)
+            if (isinstance(stmt, NaLiteral)
+                    or (isinstance(stmt, Identifier)
+                        and stmt.name == "na")):
+                return terminal_na
+            if isinstance(stmt, IfStmt):
+                branch_results: list[str | None | object] = []
+                for branch in (stmt.body, stmt.else_body):
+                    if not branch:
+                        continue  # implicit na arm inherits the drawing type
+                    branch_env = dict(env)
+                    _scan_direct_prefix(branch[:-1], branch_env)
+                    branch_results.append(
+                        _resolve_terminal(branch[-1], branch_env)
+                    )
+                concrete = [
+                    item for item in branch_results if item is not terminal_na
+                ]
+                if not concrete:
+                    return terminal_na
+                first = concrete[0]
+                return (
+                    first
+                    if all(item == first for item in concrete)
+                    else None
+                )
+            if isinstance(stmt, SwitchStmt):
+                branch_results: list[str | None | object] = []
+                for _case_expr, branch in stmt.cases:
+                    if not branch:
+                        continue
+                    branch_env = dict(env)
+                    _scan_direct_prefix(branch[:-1], branch_env)
+                    branch_results.append(
+                        _resolve_terminal(branch[-1], branch_env)
+                    )
+                if stmt.default_body:
+                    branch_env = dict(env)
+                    _scan_direct_prefix(stmt.default_body[:-1], branch_env)
+                    branch_results.append(
+                        _resolve_terminal(stmt.default_body[-1], branch_env)
+                    )
+                concrete = [
+                    item for item in branch_results if item is not terminal_na
+                ]
+                if not concrete:
+                    return terminal_na
+                first = concrete[0]
+                return (
+                    first
+                    if all(item == first for item in concrete)
+                    else None
+                )
+            if isinstance(stmt, VarDecl):
+                return _decl_drawing_type(stmt)
+            if isinstance(stmt, Identifier):
+                return env.get(stmt.name)
+            direct = self._udt_name_from_ctor(stmt)
+            if direct in _DRAWING_TYPE_NAMES:
+                return direct
+            spec = self._type_spec_from_expr(stmt)
+            if (spec is not None
+                    and spec.kind == "udt"
+                    and spec.name in _DRAWING_TYPE_NAMES):
+                return spec.name
+            return None
 
-        return _resolve_terminal(body[-1])
+        _scan_direct_prefix(body[:-1], bindings)
+        resolved = _resolve_terminal(body[-1], bindings)
+        return resolved if isinstance(resolved, str) else None
 
     def _record_collection_type(
         self,
@@ -1416,6 +1677,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if node.name in self._static_vars:
             setattr(sym, "is_static_series", True)
         self._symbols.define(sym)
+        setattr(sym, "_pf_decl_node_id", id(node))
+        setattr(sym, "_pf_decl_binding_name", node.name)
         if (type_spec is None
                 and self._collection_scope_stack
                 and self._block_node_stack
@@ -1439,19 +1702,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             init_str = self._expr_to_str(node.value)
             scope_name = self._symbols.current_scope.name
             # Block-scoped var name-collision disambiguation. A ``var``/``varip``
-            # declared inside a non-global, non-function block (an ``if`` / ``for``
-            # / ``while`` body at on_bar scope) is keyed by RAW name. Two sibling
-            # blocks declaring the same name would dedupe to ONE C++ member and
-            # cross-contaminate (proven: egoigor1976-1-trendline-strategy's
-            # ``var bool valid`` in the upper- and lower-trendline ``if`` blocks).
+            # declared inside any non-global block (an ``if`` / ``for`` /
+            # ``while`` body, including one nested in a callable) is keyed by
+            # RAW name. Two sibling blocks declaring the same name would dedupe
+            # to ONE C++ member and cross-contaminate (proven:
+            # egoigor1976-1-trendline-strategy's ``var bool valid`` in the
+            # upper- and lower-trendline ``if`` blocks).
             # When such a name already belongs to a DIFFERENT block, mint a
             # scope-unique member name and record the rename so codegen activates
             # it (via ``_active_var_remap``) while emitting that block.
             member_name = node.name
             is_block_scoped = (
                 not self._global_scope
-                and not scope_name.startswith("func_")
-                and not scope_name.startswith("method_")
                 and bool(self._block_node_stack)
             )
             if is_block_scoped:
@@ -1468,14 +1730,26 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._var_members.append((member_name, val_type, init_str))
             scope_cursor = self._symbols.current_scope
             is_callable_scoped = False
+            callable_owner: str | None = None
             while scope_cursor is not None:
                 if scope_cursor.name.startswith(("func_", "method_")):
                     is_callable_scoped = True
+                    callable_owner = (
+                        self._collection_scope_stack[-1]
+                        if self._collection_scope_stack
+                        else scope_cursor.name.split("_", 1)[1]
+                    )
                     break
                 scope_cursor = scope_cursor.parent
             self._var_member_metadata_by_node[id(node)] = (
                 node, member_name, val_type, init_str, is_callable_scoped,
             )
+            self._var_member_type_specs_by_node[id(node)] = type_spec
+            self._var_member_owners_by_node[id(node)] = callable_owner
+            # Preserve the emitted storage identity on the lexical Symbol so a
+            # later history read can mark the exact sibling member rather than
+            # only the legacy raw spelling.
+            setattr(sym, "_pf_var_member_name", member_name)
             # Capture the init AST too so codegen can inspect the RHS callee
             # (used to detect int64-returning builtins like ``time()`` and
             # promote the symbol storage type to ``int64_t``).
@@ -1486,7 +1760,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 func_name = scope_name[5:]  # strip "func_" prefix
                 if func_name not in self._func_var_members:
                     self._func_var_members[func_name] = []
-                self._func_var_members[func_name].append((node.name, val_type, init_str))
+                self._func_var_members[func_name].append(
+                    (member_name, val_type, init_str)
+                )
 
         # Track global-scope non-var declarations (needed as class members
         # so user functions can reference them)
@@ -1590,6 +1866,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if name in self._static_vars:
                 setattr(sym, "is_static_series", True)
             self._symbols.define(sym)
+            setattr(sym, "_pf_decl_node_id", id(node))
+            setattr(sym, "_pf_decl_binding_name", name)
 
             if (self._collection_scope_stack
                     and self._block_node_stack
@@ -1739,6 +2017,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if node.body:
             ret_expr = terminal_ret_expr
             udt_ret = self._udt_name_from_ctor(ret_expr) if ret_expr is not None else None
+            if (udt_ret is None
+                    and terminal_direct_return_spec is not None
+                    and terminal_direct_return_spec.kind == "udt"):
+                from .types import _DRAWING_TYPE_NAMES
+                if terminal_direct_return_spec.name in _DRAWING_TYPE_NAMES:
+                    udt_ret = terminal_direct_return_spec.name
             if udt_ret is None:
                 # Drawing-handle returns wrapped in an if-statement terminal
                 # branch (``makeEventLabel``) or returned as a bare drawing-handle
@@ -2900,6 +3184,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             node.loc,
                         )
                     if getattr(sym, "type_spec", None) is None or sym.type_spec.kind not in ("array", "map"):
+                        exact_member = getattr(sym, "_pf_var_member_name", None)
+                        if exact_member is not None:
+                            self._series_var_members.add(exact_member)
+                        decl_node_id = getattr(sym, "_pf_decl_node_id", None)
+                        if decl_node_id is not None:
+                            self._series_decl_nodes.add(decl_node_id)
+                            binding_name = getattr(
+                                sym, "_pf_decl_binding_name", name
+                            )
+                            self._series_decl_bindings.add(
+                                (decl_node_id, binding_name)
+                            )
                         global_sym = self._symbols.global_scope.symbols.get(name)
                         shadows_map_state = (
                             sym.scope != "global"

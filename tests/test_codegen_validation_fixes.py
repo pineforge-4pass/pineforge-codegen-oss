@@ -24,6 +24,7 @@ Covers ten fix families:
 import re
 
 from pineforge_codegen import transpile
+from tests._compile import compile_cpp
 
 
 def _cpp(body: str) -> str:
@@ -444,9 +445,268 @@ def test_input_source_passed_to_history_udf_is_series_arg():
         "plot(z)"
     )
     assert "Series<double> src" in cpp
+    assert "src.push(get_input_source" in cpp
+    assert "src.update(get_input_source" in cpp
+    assert "src = get_input_source" not in cpp
     assert "lagged_cs0(src, 10)" in cpp or "lagged(src, 10)" in cpp
     assert "lagged_cs0(src[0], 10)" not in cpp
     assert "lagged(src[0], 10)" not in cpp
+    compile_cpp(cpp, label="input-source-indirect-history-series")
+
+
+def test_ta_value_passed_to_history_udf_keeps_exact_series_declaration():
+    cpp = _cpp(
+        "lagged(series float value) => value[1]\n"
+        "vol = ta.atr(14)\n"
+        "prior = lagged(vol)\n"
+        "scaled = vol * 2.0\n"
+        "plot(prior + scaled)"
+    )
+    assert "Series<double> vol" in cpp
+    assert "vol.push(" in cpp
+    assert "vol.update(" in cpp
+    assert "vol = (history_advances_new_bar()" not in cpp
+    assert "vol[0] * 2.0" in cpp
+    compile_cpp(cpp, label="ta-indirect-history-series")
+
+
+def test_general_value_passed_to_history_udf_keeps_exact_series_declaration():
+    cpp = _cpp(
+        "lagged(series float value) => value[1]\n"
+        "flow = close * volume\n"
+        "prior = lagged(flow)\n"
+        "scaled = flow * 2.0\n"
+        "plot(prior + scaled)"
+    )
+    assert "Series<double> flow" in cpp
+    assert "flow.push(" in cpp
+    assert "flow.update(" in cpp
+    assert "flow = (current_bar_.close * current_bar_.volume)" not in cpp
+    assert "flow[0] * 2.0" in cpp
+    compile_cpp(cpp, label="general-indirect-history-series")
+
+
+def test_only_exact_persistent_sibling_passed_to_history_udf_is_series():
+    cpp = _cpp(
+        "lagged(series float value) => value[1]\n"
+        "if close > open\n"
+        "    var float x = close\n"
+        "    scaled = x * 2.0\n"
+        "if close < open\n"
+        "    var float x = open\n"
+        "    prior = lagged(x)\n"
+        "plot(close)"
+    )
+    assert "double x;" in cpp
+    assert "Series<double> x__blk1" in cpp
+    assert "Series<double> x;" not in cpp
+    assert "x__blk1.push(" in cpp
+    assert "x__blk1[0]" in cpp
+    compile_cpp(cpp, label="exact-persistent-sibling-history-series")
+
+
+def test_callable_local_history_bridge_can_shadow_promoted_global_series():
+    cpp = _cpp(
+        "lag(series float value) => value[1]\n"
+        "x = close * volume\n"
+        "globalPrior = lag(x)\n"
+        "wrap(float src) =>\n"
+        "    x = src * 2.0\n"
+        "    lag(x)\n"
+        "a = wrap(close)\n"
+        "b = wrap(open)\n"
+        "plot(globalPrior + a + b)"
+    )
+    assert "Series<double> x" in cpp
+    assert "double x = (src * 2.0)" in cpp
+    assert "double x_cs1 = (src * 2.0)" in cpp
+    assert "x = (src * 2.0);" not in cpp.replace(
+        "double x = (src * 2.0);", ""
+    )
+    compile_cpp(cpp, label="callable-local-shadows-promoted-global-series")
+
+
+def test_callable_persistent_siblings_keep_exact_clone_storage():
+    cpp = _cpp(
+        "lag(series float value) => value[1]\n"
+        "wrap(float src) =>\n"
+        "    if src > open\n"
+        "        var float x = src\n"
+        "        scaled = x * 2.0\n"
+        "    if src < open\n"
+        "        var float x = open\n"
+        "        prior = lag(x)\n"
+        "    src\n"
+        "a = wrap(close)\n"
+        "b = wrap(open)\n"
+        "plot(a + b)"
+    )
+    assert "double x;" in cpp
+    assert "double x__blk1;" in cpp
+    assert "double x_cs1;" in cpp
+    assert "double x__blk1_cs1;" in cpp
+    assert "scaled = (x * 2.0)" in cpp
+    assert "scaled = (x_cs1 * 2.0)" in cpp
+    assert "double _sv = (x__blk1)" in cpp
+    assert "double _sv = (x__blk1_cs1)" in cpp
+    compile_cpp(cpp, label="callable-persistent-sibling-clone-storage")
+
+
+def test_series_parameter_shadowing_global_is_not_remapped_to_clone_member():
+    cpp = _cpp(
+        "lag(series float value) => value[1]\n"
+        "x = close * volume\n"
+        "globalPrior = lag(x)\n"
+        "wrap(float x) => lag(x)\n"
+        "a = wrap(close)\n"
+        "b = wrap(open)\n"
+        "plot(globalPrior + a + b)"
+    )
+    assert "double wrap_cs0(const Series<double>& x)" in cpp
+    assert "double wrap_cs1(const Series<double>& x)" in cpp
+    assert cpp.count("return lag_cs1(x);") == 2
+    assert "return lag_cs1(x_cs1);" not in cpp
+    compile_cpp(cpp, label="series-parameter-shadow-global-clone-remap")
+
+
+def test_counted_loop_binder_shadows_global_series_and_uses_history_bridge():
+    cpp = _cpp(
+        "lag(series float value) => value[1]\n"
+        "i = close * volume\n"
+        "globalPrior = lag(i)\n"
+        "total = 0.0\n"
+        "for i = 0 to 2\n"
+        "    total += i + lag(i)\n"
+        "plot(globalPrior + total)"
+    )
+    assert "total += (i + lag_cs1(" in cpp
+    assert "double _sv = (i)" in cpp
+    assert "total += (i[0]" not in cpp
+    compile_cpp(cpp, label="counted-loop-binder-shadows-global-series")
+
+
+def test_for_in_binder_shadows_global_series_as_scalar():
+    cpp = _cpp(
+        "lag(series float value) => value[1]\n"
+        "i = close * volume\n"
+        "globalPrior = lag(i)\n"
+        "values = array.from(1.0, 2.0)\n"
+        "total = 0.0\n"
+        "for i in values\n"
+        "    total += i\n"
+        "plot(globalPrior + total)"
+    )
+    assert "for (auto i : values)" in cpp
+    assert "total += i;" in cpp
+    assert "total += i[0];" not in cpp
+    compile_cpp(cpp, label="for-in-binder-shadows-global-series")
+
+
+def test_block_tuple_binding_shadows_global_series_as_scalar():
+    cpp = _cpp(
+        "lag(series float value) => value[1]\n"
+        "x = close * volume\n"
+        "globalPrior = lag(x)\n"
+        "pair() => [1.0, 2.0]\n"
+        "if close > open\n"
+        "    [x, y] = pair()\n"
+        "    combined = x + y\n"
+        "plot(globalPrior)"
+    )
+    assert "auto [x, y] = pair();" in cpp
+    assert "combined = (x + y);" in cpp
+    assert "combined = (x[0] + y);" not in cpp
+    compile_cpp(cpp, label="block-tuple-binding-shadows-global-series")
+
+
+def test_callable_tuple_binding_shadows_global_series_as_scalar():
+    cpp = _cpp(
+        "lag(series float value) => value[1]\n"
+        "x = close * volume\n"
+        "globalPrior = lag(x)\n"
+        "pair() => [1.0, 2.0]\n"
+        "wrap() =>\n"
+        "    [x, y] = pair()\n"
+        "    x + y\n"
+        "a = wrap()\n"
+        "b = wrap()\n"
+        "plot(globalPrior + a + b)"
+    )
+    assert cpp.count("auto [x, y] = pair();") == 1
+    assert "return (x + y);" in cpp
+    assert "return (x[0] + y);" not in cpp
+    compile_cpp(cpp, label="callable-tuple-binding-shadows-global-series")
+
+
+def test_counted_loop_dynamic_end_uses_outer_same_named_series():
+    cpp = _cpp(
+        "lag(series float value) => value[1]\n"
+        "i = close + 2\n"
+        "prior = lag(i)\n"
+        "total = 0.0\n"
+        "for i = 0 to i\n"
+        "    total += i\n"
+        "plot(prior + total)"
+    )
+    assert "auto _for_end_eval_0 = [&]() { return (i[0]); };" in cpp
+    assert "int _for_end_0 = _for_end_eval_0();" in cpp
+    assert "_for_end_0 = _for_end_eval_0()" in cpp
+    assert "_for_end_0 = (i)" not in cpp
+    compile_cpp(cpp, label="counted-loop-dynamic-end-outer-series")
+
+
+def test_udf_tuple_history_binding_uses_exact_call_site_series_storage():
+    cpp = _cpp(
+        "pair(float src) => [src, src * 2.0]\n"
+        "wrap(float src) =>\n"
+        "    [x, y] = pair(src)\n"
+        "    x[1] + y\n"
+        "a = wrap(close)\n"
+        "b = wrap(open)\n"
+        "plot(a + b)"
+    )
+    assert "auto _tuple_result_0 = pair(src);" in cpp
+    assert "x.push(std::get<0>(_tuple_result_0))" in cpp
+    assert "auto _tuple_result_1 = pair(src);" in cpp
+    assert "x_cs1.push(std::get<0>(_tuple_result_1))" in cpp
+    assert "return (x_cs1[1] + y);" in cpp
+    compile_cpp(cpp, label="udf-tuple-history-exact-call-site-storage")
+
+
+def test_ta_tuple_history_binding_writes_second_call_site_clone():
+    cpp = _cpp(
+        "wrap(float src) =>\n"
+        "    [st, dir] = ta.supertrend(3.0, 10)\n"
+        "    dir[1] + src * 0.0\n"
+        "a = wrap(close)\n"
+        "b = wrap(open)\n"
+        "plot(a + b)"
+    )
+    assert "dir.push(_result__ta_supertrend_1.direction)" in cpp
+    assert "dir_cs1.push(_result__ta_supertrend_1_cs1.direction)" in cpp
+    assert "return (dir_cs1[1] + (src * 0.0));" in cpp
+    assert "dir.push(_result__ta_supertrend_1_cs1.direction)" not in cpp
+    compile_cpp(cpp, label="ta-tuple-history-second-call-site-clone")
+
+
+def test_scalar_tuple_binding_tombstones_inherited_series_storage_remap():
+    cpp = _cpp(
+        "pair(float src) => [src, src * 2.0]\n"
+        "state(float src) =>\n"
+        "    x = src\n"
+        "    x[1]\n"
+        "use(float src) =>\n"
+        "    [x, y] = pair(src)\n"
+        "    ta.sma(src, 2) + x + y\n"
+        "s = state(close)\n"
+        "a = use(close)\n"
+        "b = use(open)\n"
+        "plot(s + a + b)"
+    )
+    assert cpp.count("auto [x, y] = pair(src);") == 2
+    assert cpp.count(") + x) + y);") == 2
+    assert ") + x_cs1) + y);" not in cpp
+    compile_cpp(cpp, label="scalar-tuple-tombstones-inherited-series-remap")
 
 
 def test_syminfo_pointvalue_infers_numeric_udf_return():
@@ -977,7 +1237,7 @@ def test_function_scoped_var_drawing_handle_init_runs_once():
         "plot(_a)"
     )
     assert "pf_line_new(" in cpp
-    assert "_fvinit_f" in cpp
+    assert "if (!this->_pf_var_init_topLine)" in cpp
     # The constructor must NOT eagerly initialize the handle (no bar values
     # available at construction time).
     assert "topLine(pf_line_new" not in cpp
@@ -996,12 +1256,12 @@ def test_function_scoped_var_drawing_handle_per_clone_init():
         "plot(_a)"
     )
     # cs0 inits topLine, cs1 inits topLine_cs1 — each with its own flag.
-    assert "if (!_fvinit_f_cs0)" in cpp
-    assert "if (!_fvinit_f_cs1)" in cpp
+    assert "if (!this->_pf_var_init_topLine)" in cpp
+    assert "if (!this->_pf_var_init_topLine_cs1)" in cpp
     assert "topLine = pf_line_new(" in cpp
     assert "topLine_cs1 = pf_line_new(" in cpp
-    assert "bool _fvinit_f_cs0 = false;" in cpp
-    assert "bool _fvinit_f_cs1 = false;" in cpp
+    assert "bool _pf_var_init_topLine = false;" in cpp
+    assert "bool _pf_var_init_topLine_cs1 = false;" in cpp
 
 
 def test_function_scoped_var_udt_init_runs_once():

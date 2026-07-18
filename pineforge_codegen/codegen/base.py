@@ -173,6 +173,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
     def __init__(self, ctx: AnalyzerContext) -> None:
         self.ctx = ctx
+        # Security metadata collection can render runtime timeframe
+        # expressions before the rest of the constructor state is prepared.
+        # Exact persistent-member identity is immutable analyzer output, so
+        # initialize it first for every expression visitor.
+        self._persistent_var_member_names: set[str] = {
+            self._safe_name(name) for name, _, _ in ctx.var_members
+        }
+        self._series_var_member_names: set[str] = {
+            self._safe_name(name)
+            for name in getattr(ctx, "series_var_members", set())
+        }
         # Build lookup: node id -> TACallSite (only for non-function-local sites)
         self._ta_site_map: dict[int, TACallSite] = {}
         # Build per-call-site TA member name remapping for user functions
@@ -382,6 +393,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_inline_counter = 0
         self._random_call_counter = 0
         self._for_counter = 0
+        self._tuple_assign_counter = 0
         # Synthetic history buffers used by inline call-history and by scalar
         # expressions passed to UDF series parameters.  They are pre-registered
         # at generate() time so declarations precede method emission, then
@@ -625,6 +637,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Locals declared in the function currently being emitted (symbol table loses them after analysis)
         self._current_func_locals: set[str] = set()
         self._current_func_local_types: dict[str, str] = {}
+        # Source-ordered drawing-handle bindings in the currently emitted
+        # lexical block. Values are exact C++ handle types; ``None`` is a
+        # scalar/non-drawing tombstone that prevents an outer same-named handle
+        # from leaking inward. Block push/pop provides sibling isolation.
+        self._lexical_drawing_types: dict[str, str | None] = {}
+        # Source-ordered lexical Series status.  A False tombstone prevents a
+        # scalar local from inheriting a same-spelled global entry from the
+        # legacy raw-name ``ctx.series_vars`` union.
+        self._lexical_series_bindings: dict[str, bool] = {}
         # for-in loop iterator names (must resolve member access, not enum fallback)
         self._current_loop_vars: set[str] = set()
         self._current_loop_var_specs: dict[str, "TypeSpec"] = {}
@@ -749,7 +770,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._all_member_names.add(self._safe_name(name))
         for name, _, _ in ctx.var_members:
             self._all_member_names.add(self._safe_name(name))
-
         self._register_global_aggregate_member_types()
         self._register_udt_array_get_ref_locals()
         self._uses_map = self._detect_map_usage()
@@ -811,7 +831,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return False
 
     def _is_runtime_scalar_var_initializer(
-            self, name: str, ptype, init_str: str, init_ast) -> bool:
+            self, name: str, ptype, init_str: str, init_ast,
+            drawing_cpp: str | None = None,
+            is_series: bool = False) -> bool:
         """Return True for a persistent primitive that must init in execution.
 
         Series and aggregate state keep their existing specialized preamble
@@ -819,20 +841,31 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         predicate only selects primitive global/on-bar-scope members for the
         declaration-site once guards prepared below.
         """
-        if init_ast is None or name in self.ctx.series_vars:
+        if init_ast is None:
             return False
         if name in self._visual_drop_vars:
             return False
         if name in self._array_vars or name in self._map_vars \
                 or name in self._matrix_specs:
             return False
+        if drawing_cpp is not None:
+            # A nontrivial drawing-handle initializer may depend on preceding
+            # source-order state. Default construction already represents a
+            # bare ``na``, so only real expressions need a declaration-site
+            # once guard.
+            return (
+                is_series
+                or not self._is_na_expr(init_ast)
+            )
+        if name in self.ctx.series_vars:
+            return False
+        udt_type = self._udt_var_types.get(name)
+        if udt_type in self._udt_defs:
+            return False
         type_spec = self._collection_types.get(name)
         if type_spec is not None and type_spec.kind in {
             "array", "map", "matrix", "udt",
         }:
-            return False
-        udt_type = self._udt_var_types.get(name)
-        if udt_type in self._udt_defs or udt_type in DRAWING_TYPE_TO_CPP:
             return False
 
         ctor_val = self._resolve_known(init_str)
@@ -853,7 +886,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         and Pine's lazy first-entry semantics for conditional declarations.
         """
         self._runtime_scalar_var_init_by_node: dict[int, dict] = {}
+        self._runtime_scalar_var_init_by_member: dict[str, dict] = {}
         self._runtime_scalar_var_init_members: set[str] = set()
+        self._drawing_var_member_cpp_types: dict[str, str] = {}
+        self._drawing_var_decl_info_by_node: dict[int, dict] = {}
+        self._global_drawing_cpp_types: dict[str, str] = {}
+        self._runtime_var_init_flags: dict[tuple[int, str], str] = {}
 
         used_names = set(self._all_member_names)
         # ``_all_member_names`` historically covers persistent ``var`` and
@@ -867,14 +905,50 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         metadata_by_node = getattr(
             self.ctx, "var_member_metadata_by_node", {}
         ) or {}
+        type_specs_by_node = getattr(
+            self.ctx, "var_member_type_specs_by_node", {}
+        ) or {}
+        owners_by_node = getattr(
+            self.ctx, "var_member_owners_by_node", {}
+        ) or {}
+        top_level_node_ids = {id(stmt) for stmt in self.ctx.ast.body}
         for node_id, meta in metadata_by_node.items():
             stmt, member_name, ptype, init_str, is_callable_scoped = meta
-            if is_callable_scoped:
-                continue
             if not isinstance(stmt, VarDecl) or not (stmt.is_var or stmt.is_varip):
                 continue
+            stmt_spec = type_specs_by_node.get(node_id)
+            if stmt_spec is None:
+                stmt_spec = (
+                    self._type_spec_from_hint_name(stmt.type_hint)
+                    if stmt.type_hint
+                    else self._type_spec_from_expr(stmt.value)
+                )
+            drawing_cpp = (
+                DRAWING_TYPE_TO_CPP.get(stmt_spec.name)
+                if stmt_spec is not None and stmt_spec.kind == "udt"
+                else None
+            )
+            if drawing_cpp is not None:
+                self._drawing_var_member_cpp_types[member_name] = drawing_cpp
+                self._drawing_var_decl_info_by_node[node_id] = {
+                    "node_id": node_id,
+                    "raw_name": stmt.name,
+                    "member_name": member_name,
+                    "drawing_cpp": drawing_cpp,
+                    "is_callable_scoped": is_callable_scoped,
+                    "owner": owners_by_node.get(node_id),
+                    "type_spec": stmt_spec,
+                }
+                if node_id in top_level_node_ids:
+                    self._global_drawing_cpp_types[stmt.name] = drawing_cpp
+            is_series = self._safe_name(member_name) in self._series_var_member_names
+            if node_id in self._drawing_var_decl_info_by_node:
+                self._drawing_var_decl_info_by_node[node_id]["is_series"] = is_series
+            if is_callable_scoped and drawing_cpp is None:
+                continue
             if not self._is_runtime_scalar_var_initializer(
-                    member_name, ptype, init_str, stmt.value):
+                    member_name, ptype, init_str, stmt.value, drawing_cpp,
+                    is_series):
                 continue
 
             base_flag = f"_pf_var_init_{self._safe_name(member_name)}"
@@ -886,11 +960,58 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             used_names.add(flag)
             self._all_member_names.add(flag)
             self._runtime_scalar_var_init_members.add(member_name)
-            self._runtime_scalar_var_init_by_node[node_id] = {
+            info = {
                 "member_name": member_name,
+                "node_id": node_id,
+                "owner": owners_by_node.get(node_id),
+                "is_callable_scoped": is_callable_scoped,
                 "ptype": ptype,
                 "flag": flag,
+                "drawing_cpp": drawing_cpp,
+                "is_series": is_series,
             }
+            self._runtime_scalar_var_init_by_node[node_id] = info
+            base_storage = self._safe_name(member_name)
+            self._runtime_var_init_flags[(node_id, base_storage)] = flag
+            if is_callable_scoped:
+                owner = owners_by_node.get(node_id)
+                for (remap_owner, _cs_idx), remap in self._func_cs_var_remap.items():
+                    if remap_owner != owner or base_storage not in remap:
+                        continue
+                    storage = remap[base_storage]
+                    if storage == base_storage:
+                        continue
+                    clone_base = f"_pf_var_init_{storage}"
+                    clone_flag = clone_base
+                    clone_suffix = 2
+                    while clone_flag in used_names:
+                        clone_flag = f"{clone_base}_{clone_suffix}"
+                        clone_suffix += 1
+                    used_names.add(clone_flag)
+                    self._all_member_names.add(clone_flag)
+                    self._runtime_var_init_flags[(node_id, storage)] = clone_flag
+            if not is_callable_scoped:
+                self._runtime_scalar_var_init_by_member[member_name] = info
+
+        self._runtime_var_init_flag_used_names = used_names
+
+        # Top-level non-persistent drawing declarations are not represented in
+        # var-member metadata.  Record their exact source declaration type so
+        # functions can resolve globals without consulting the analyzer's
+        # legacy raw-name UDT registry (which later locals may overwrite).
+        for stmt in self.ctx.ast.body:
+            if not isinstance(stmt, VarDecl) or stmt.is_var or stmt.is_varip:
+                continue
+            spec = (
+                self._type_spec_from_hint_name(stmt.type_hint)
+                if stmt.type_hint
+                else self._type_spec_from_expr(stmt.value)
+            )
+            if (spec is not None and spec.kind == "udt"
+                    and spec.name in DRAWING_TYPE_TO_CPP):
+                self._global_drawing_cpp_types[stmt.name] = (
+                    DRAWING_TYPE_TO_CPP[spec.name]
+                )
 
     # ------------------------------------------------------------------
     # Context-sensitive (call-path) instance machinery
@@ -1135,7 +1256,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 collection_spec = self._callable_var_collection_spec(
                     vname, owner_func
                 )
-                if vname in self.ctx.series_vars:
+                drawing_cpp = self._drawing_var_member_cpp_types.get(vname)
+                if (drawing_cpp is not None
+                        and orig_safe in self._series_var_member_names):
+                    lines.append(
+                        f"    Series<{drawing_cpp}> {cloned_safe}{series_suffix};"
+                    )
+                elif vname in self.ctx.series_vars:
                     lines.append(f"    Series<{cpp_type}> {cloned_safe}{series_suffix};")
                 elif collection_spec is not None:
                     lines.append(
@@ -1147,6 +1274,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(f"    {self._type_spec_to_cpp(self._array_spec_for_name(vname))} {cloned_safe};")
                 elif vname in self._map_vars:
                     lines.append(f"    {self._type_spec_to_cpp(self._map_spec_for_name(vname))} {cloned_safe};")
+                elif drawing_cpp is not None:
+                    lines.append(
+                        f"    {drawing_cpp} {cloned_safe} = {drawing_cpp}{{}};"
+                    )
                 elif vname in self._udt_var_types:
                     # Drawing handle / UDT var clone must match the original's
                     # type (Line/Label/Box/<UDT>), not the coarse PineType
@@ -1164,6 +1295,45 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.append(f"    Series<{cpp_type}> {cloned_safe}{series_suffix};")
         else:
             lines.append(f"    double {cloned_safe} = 0.0;")
+
+    def _binding_is_series(
+        self,
+        raw_name: str,
+        resolved_safe_name: str | None = None,
+    ) -> bool:
+        """Resolve Series-ness without conflating renamed persistent siblings.
+
+        ``ctx.series_vars`` is a legacy raw-name union.  When a persistent
+        member identity is known, its exact membership wins; otherwise keep the
+        established raw-name behavior for ordinary non-var series, bar
+        builtins, and parameters.  A call-site clone resolves to ``h_cs1`` but
+        inherits the base member ``h`` status, while a sibling rename such as
+        ``x__blk1`` is itself an exact member and therefore wins directly.
+        """
+        base_safe = self._safe_name(raw_name)
+        resolved = resolved_safe_name or base_safe
+        if raw_name in self._lexical_series_bindings:
+            return self._lexical_series_bindings[raw_name]
+        if resolved in self._persistent_var_member_names:
+            return resolved in self._series_var_member_names
+        if base_safe in self._persistent_var_member_names:
+            return base_safe in self._series_var_member_names
+        return raw_name in self.ctx.series_vars
+
+    def _decl_binding_is_series(self, node_id: int, raw_name: str) -> bool:
+        """Return exact history status for one declaration binding.
+
+        A VarDecl has one name, but a TupleAssign node owns several names.  The
+        node-only legacy set therefore cannot distinguish ``[x, y]`` when only
+        one element is history-referenced.  Prefer the exact analyzer key and
+        retain the node-only fallback for older/manually-built contexts.
+        """
+        exact = getattr(self.ctx, "series_decl_bindings", set()) or set()
+        if (node_id, raw_name) in exact:
+            return True
+        if any(binding_node == node_id for binding_node, _ in exact):
+            return False
+        return node_id in getattr(self.ctx, "series_decl_nodes", set())
 
     @staticmethod
     def _int_literal_value(node: ASTNode | None) -> int | None:
@@ -2294,6 +2464,56 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for child in walk_nodes(fi.node):
                 owner_by_node[id(child)] = fi.name
 
+        # ``ctx.series_vars`` is a legacy raw-name union.  A raw name can bind
+        # both an exact Series declaration and an unrelated scalar declaration
+        # (sibling blocks, or a callable local shadowing a global).  Such calls
+        # may need a synthetic history bridge even though the raw name appears
+        # in that union, so reserve the bridge up front; source-order lexical
+        # state decides whether the emitted call actually uses it.
+        binding_series_states: dict[str, set[bool]] = {}
+        var_metadata = getattr(
+            self.ctx, "var_member_metadata_by_node", {}
+        ) or {}
+        for decl in walk_nodes(self.ctx.ast):
+            if isinstance(decl, VarDecl):
+                metadata = var_metadata.get(id(decl))
+                if metadata is not None:
+                    exact_member = self._safe_name(metadata[1])
+                    is_series = exact_member in self._series_var_member_names
+                else:
+                    is_series = self._decl_binding_is_series(
+                        id(decl), decl.name
+                    )
+                binding_series_states.setdefault(decl.name, set()).add(
+                    is_series
+                )
+            elif isinstance(decl, TupleAssign):
+                for name in decl.names:
+                    if name != "_":
+                        binding_series_states.setdefault(name, set()).add(
+                            self._decl_binding_is_series(id(decl), name)
+                        )
+            elif isinstance(decl, ForStmt):
+                if decl.var:
+                    binding_series_states.setdefault(decl.var, set()).add(
+                        False
+                    )
+            elif isinstance(decl, ForInStmt):
+                loop_names = (
+                    [decl.var]
+                    if decl.var
+                    else list(decl.vars or [])
+                )
+                for name in loop_names:
+                    if name and name != "_":
+                        binding_series_states.setdefault(name, set()).add(
+                            False
+                        )
+        ambiguous_series_names = {
+            name for name, states in binding_series_states.items()
+            if len(states) > 1
+        }
+
         def register(kind: str, source_key: tuple, cpp_type: str,
                      owner: str | None) -> None:
             if cpp_type not in ("double", "int", "bool"):
@@ -2343,7 +2563,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if isinstance(arg, Identifier):
                     if arg.name in BAR_FIELDS or arg.name in BAR_SERIES_PUSH:
                         continue
-                    if arg.name in self.ctx.series_vars:
+                    if (arg.name in self.ctx.series_vars
+                            and arg.name not in ambiguous_series_names):
                         continue
                 register(
                     "series_arg", (id(node), idx), self._infer_type(arg), owner
@@ -2684,9 +2905,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # C++ handle struct (Series<Line> when also history-referenced).
             # Drawing names are NOT in _udt_defs, so the udt branch below would
             # self-zero them to double; handle them first.
-            _draw_cpp = DRAWING_TYPE_TO_CPP.get(self._udt_var_types.get(name))
+            _draw_cpp = (
+                self._drawing_var_member_cpp_types.get(name)
+                or DRAWING_TYPE_TO_CPP.get(self._udt_var_types.get(name))
+            )
             if _draw_cpp is not None:
-                if name in self.ctx.series_vars:
+                if safe in self._series_var_member_names:
                     lines.append(f"    Series<{_draw_cpp}> {safe}{_mbb};")
                 else:
                     lines.append(f"    {_draw_cpp} {safe};")
@@ -2707,7 +2931,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # (time/time_close/timestamp), otherwise the na sentinel narrows.
             if cpp_type == "int" and self._is_int64_builtin_init(name):
                 cpp_type = "int64_t"
-            if name in self.ctx.series_vars:
+            # Persistent declarations have collision-safe exact member names
+            # (for example ``x`` and ``x__blk1`` for sibling lexical blocks).
+            # ``ctx.series_vars`` is only the legacy raw-name union, so using it
+            # here can invert the storage types: the unreferenced sibling gets
+            # Series<T> while the exact history-referenced sibling stays a
+            # scalar.  Exact analyzer identity must win for every persistent
+            # primitive, just as it already does for drawing handles above.
+            if safe in self._series_var_member_names:
                 lines.append(f"    Series<{cpp_type}> {safe}{_mbb};")
             else:
                 if name in self._runtime_scalar_var_init_members:
@@ -2851,8 +3082,36 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # initializers. Unlike the global aggregate/Series latch above, these
         # live at the declaration site so prior statements are available and a
         # conditional declaration initializes on its first actual execution.
+        used_runtime_flags = set(self._runtime_var_init_flag_used_names)
         for info in self._runtime_scalar_var_init_by_node.values():
-            lines.append(f"    bool {info['flag']} = false;")
+            if not info.get("is_callable_scoped"):
+                continue
+            node_id = info["node_id"]
+            base_storage = self._safe_name(info["member_name"])
+            for inst in self._fresh_instances:
+                if inst.get("fname") != info.get("owner"):
+                    continue
+                storage = inst.get("var_remap", {}).get(
+                    base_storage, base_storage
+                )
+                key = (node_id, storage)
+                if key in self._runtime_var_init_flags:
+                    continue
+                flag_base = f"_pf_var_init_{storage}"
+                flag = flag_base
+                suffix = 2
+                while flag in used_runtime_flags:
+                    flag = f"{flag_base}_{suffix}"
+                    suffix += 1
+                used_runtime_flags.add(flag)
+                self._runtime_var_init_flags[key] = flag
+
+        emitted_runtime_flags: set[str] = set()
+        for flag in self._runtime_var_init_flags.values():
+            if flag in emitted_runtime_flags:
+                continue
+            emitted_runtime_flags.add(flag)
+            lines.append(f"    bool {flag} = false;")
 
         # 9b. Per-function-variant ``var`` init flags. A function-scoped
         #     ``var`` (Pine "init once" semantics) is a function-local static:
