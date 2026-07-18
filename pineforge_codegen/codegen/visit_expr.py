@@ -266,6 +266,28 @@ class ExprVisitor:
                 return f"{target_cpp_type}{{}}"
             if target_cpp_type in ("std::string", "int", "int64_t", "bool"):
                 return f"na<{target_cpp_type}>()"
+        if (target_cpp_type
+                and target_cpp_type.startswith("PineMap<")
+                and isinstance(value_node, Ternary)):
+            # C++ cannot deduce a common type for ``na<double>()`` and a
+            # PineMap handle.  Pine's ternary is target typed, so propagate the
+            # declared/reassignment target into both arms.  Keep this map-only:
+            # every non-map ternary remains byte-for-byte on the established
+            # generic expression path.
+            condition = self._visit_expr(value_node.condition)
+            true_value = self._visit_rhs_value(
+                value_node.true_val,
+                target_name,
+                target_cpp_type=target_cpp_type,
+            )
+            false_value = self._visit_rhs_value(
+                value_node.false_val,
+                target_name,
+                target_cpp_type=target_cpp_type,
+            )
+            return (
+                f"(({condition}) ? ({true_value}) : ({false_value}))"
+            )
         return self._visit_expr(value_node)
 
     def _visit_ident(self, node: Identifier) -> str:

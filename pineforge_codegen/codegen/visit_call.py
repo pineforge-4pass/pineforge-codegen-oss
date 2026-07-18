@@ -1628,21 +1628,21 @@ class CallVisitor:
         if namespace in self._udt_defs and func_name == "new":
             fields = self._udt_defs[namespace]
             field_names = [f.name for f in fields]
-            init_vals = {}
+            init_nodes = {}
             for i, a in enumerate(node.args):
                 if i < len(field_names):
-                    init_vals[field_names[i]] = self._visit_expr(a)
+                    init_nodes[field_names[i]] = a
             for k, v in node.kwargs.items():
-                init_vals[k] = self._visit_expr(v)
+                init_nodes[k] = v
             field_inits = []
             field_specs = self._udt_field_type_specs.get(namespace, {})
             for f in fields:
-                val = None
-                if f.name in init_vals:
-                    val = init_vals[f.name]
+                value_node = None
+                if f.name in init_nodes:
+                    value_node = init_nodes[f.name]
                 elif f.default:
-                    val = self._visit_expr(f.default)
-                if val is not None:
+                    value_node = f.default
+                if value_node is not None:
                     # Fix narrowing: brace-init (``T{.field = v}``) disallows
                     # narrowing. Pine ``int`` UDT fields are emitted as
                     # ``int64_t`` (see base.py) but are initialised from
@@ -1651,6 +1651,14 @@ class CallVisitor:
                     f_cpp_type = self._type_spec_to_cpp(field_specs.get(f.name) or self._type_spec_from_hint_name(f.type_name))
                     if f_cpp_type == "int":
                         f_cpp_type = "int64_t"
+                    val = self._visit_rhs_value(
+                        value_node,
+                        target_cpp_type=(
+                            f_cpp_type
+                            if f_cpp_type.startswith("PineMap<")
+                            else None
+                        ),
+                    )
                     if f_cpp_type == "int64_t":
                         if "na<double>" in val:
                             val = val.replace("na<double>()", "na<int64_t>()")

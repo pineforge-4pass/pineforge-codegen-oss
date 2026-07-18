@@ -40,8 +40,9 @@ from __future__ import annotations
 from typing import Any
 
 from ..ast_nodes import (
-    ASTNode, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier, MemberAccess,
-    NaLiteral, NumberLiteral, StringLiteral, TupleLiteral, UnaryOp,
+    ASTNode, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier, IfStmt,
+    MemberAccess, NaLiteral, NumberLiteral, StringLiteral, Ternary,
+    TupleLiteral, UnaryOp,
 )
 from ..symbols import PineType, TypeSpec
 
@@ -181,6 +182,51 @@ class TypeHelper:
     def _type_spec_from_expr(self, value: ASTNode | None) -> TypeSpec | None:
         if value is None:
             return None
+        if isinstance(value, Ternary):
+            true_spec = self._type_spec_from_expr(value.true_val)
+            false_spec = self._type_spec_from_expr(value.false_val)
+            if (true_spec is not None
+                    and true_spec.kind == "map"
+                    and true_spec == false_spec):
+                return true_spec
+            # A Pine ``na`` arm acquires the other arm's map type.  Keep this
+            # narrow to maps so unrelated scalar/array inference and generated
+            # output retain their established behavior.
+            if (true_spec is not None
+                    and true_spec.kind == "map"
+                    and isinstance(value.false_val, NaLiteral)):
+                return true_spec
+            if (false_spec is not None
+                    and false_spec.kind == "map"
+                    and isinstance(value.true_val, NaLiteral)):
+                return false_spec
+            return None
+        if isinstance(value, IfStmt):
+            def terminal_expr(body):
+                if not body:
+                    return None
+                terminal = body[-1]
+                return terminal.expr if isinstance(terminal, ExprStmt) else terminal
+
+            true_node = terminal_expr(value.body)
+            false_node = terminal_expr(value.else_body)
+            if true_node is None or false_node is None:
+                return None
+            true_spec = self._type_spec_from_expr(true_node)
+            false_spec = self._type_spec_from_expr(false_node)
+            if (true_spec is not None
+                    and true_spec.kind == "map"
+                    and true_spec == false_spec):
+                return true_spec
+            if (true_spec is not None
+                    and true_spec.kind == "map"
+                    and isinstance(false_node, NaLiteral)):
+                return true_spec
+            if (false_spec is not None
+                    and false_spec.kind == "map"
+                    and isinstance(true_node, NaLiteral)):
+                return false_spec
+            return None
         if isinstance(value, FuncCall):
             cal = value.callee
             func = cal.member if isinstance(cal, MemberAccess) else None
@@ -306,6 +352,24 @@ class TypeHelper:
                         return recv_spec.element
                     if func == "eigenvalues":
                         return TypeSpec.array(TypeSpec.primitive("float"))
+                if (recv_spec is not None
+                        and recv_spec.kind == "udt"
+                        and recv_spec.name):
+                    method_key = f"{recv_spec.name}.{func}"
+                    method_info = next(
+                        (
+                            info
+                            for info in getattr(self, "_func_infos", ())
+                            if info.name == method_key
+                            and getattr(info, "is_udt_method", False)
+                        ),
+                        None,
+                    )
+                    return_spec = getattr(
+                        method_info, "return_type_spec", None
+                    )
+                    if return_spec is not None:
+                        return return_spec
                 # Drawing method-form: a.copy() -> same handle; lf.get_line*() -> line.
                 if (recv_spec is not None and recv_spec.kind == "udt"
                         and recv_spec.name in _DRAWING_TYPE_NAMES):

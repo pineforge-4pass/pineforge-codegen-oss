@@ -461,6 +461,17 @@ class TypeInferer:
                         return TypeSpec.primitive("bool")
                     if member_name == "size":
                         return TypeSpec.primitive("int")
+                if (recv_spec is not None
+                        and recv_spec.kind == "udt"
+                        and recv_spec.name):
+                    method_info = self._func_info_map.get(
+                        f"{recv_spec.name}.{member_name}"
+                    )
+                    return_spec = getattr(
+                        method_info, "return_type_spec", None
+                    )
+                    if return_spec is not None:
+                        return return_spec
                 if recv_spec is not None and recv_spec.kind == "matrix":
                     if func_name in ("copy", "submatrix", "transpose", "concat"):
                         return recv_spec
@@ -1216,6 +1227,8 @@ class TypeInferer:
                 if recv_spec is not None and recv_spec.kind == "udt" and recv_spec.name:
                     fi_u = self._func_info_map.get(f"{recv_spec.name}.{member_name}")
                     if fi_u is not None:
+                        if getattr(fi_u, "return_type_spec", None) is not None:
+                            return self._type_spec_to_cpp(fi_u.return_type_spec)
                         return PINE_TYPE_TO_CPP.get(fi_u.return_type, "double")
             spec = self._type_spec_from_expr(node)
             if spec is not None:

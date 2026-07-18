@@ -1260,6 +1260,9 @@ class TopLevelEmitter:
             ret_type = self._type_spec_to_cpp(fi.return_type_spec)
         else:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")
+        map_return_cpp_type = (
+            ret_type if ret_type.startswith("PineMap<") else None
+        )
 
         # For per-call-site variants, suffix the function name and activate TA + var remapping
         func_name = self._emit_udt_method_cpp_name(fi) if is_udt else self._func_safe_name(fi.name)
@@ -1370,7 +1373,10 @@ class TopLevelEmitter:
                 # through to the default return.
                 self._visit_stmt(node.body[0], lines, indent=2)
             elif expr:
-                lines.append(f"        return {self._visit_expr(expr)};")
+                lines.append(
+                    "        return "
+                    f"{self._visit_rhs_value(expr, target_cpp_type=map_return_cpp_type)};"
+                )
                 emitted_return = True
         else:
             for i, s in enumerate(node.body):
@@ -1384,7 +1390,10 @@ class TopLevelEmitter:
                     if self._call_is_void(s.expr) or self._is_skip_expr(s.expr):
                         self._visit_stmt(s, lines, indent=2)
                     else:
-                        lines.append(f"        return {self._visit_expr(s.expr)};")
+                        lines.append(
+                            "        return "
+                            f"{self._visit_rhs_value(s.expr, target_cpp_type=map_return_cpp_type)};"
+                        )
                         emitted_return = True
                 elif i == len(node.body) - 1 and isinstance(s, (SwitchStmt, IfStmt)):
                     # Switch/if as last statement = return expression in PineScript
@@ -1398,7 +1407,13 @@ class TopLevelEmitter:
                     else:
                         default_ret = self._default_for_type(ret_type)
                     lines.append(f"        {ret_type} _func_ret = {default_ret};")
-                    self._visit_if_switch_expr(s, "_func_ret", lines, indent=2)
+                    self._visit_if_switch_expr(
+                        s,
+                        "_func_ret",
+                        lines,
+                        indent=2,
+                        target_cpp_type=map_return_cpp_type,
+                    )
                     lines.append(f"        return _func_ret;")
                     emitted_return = True
                 else:

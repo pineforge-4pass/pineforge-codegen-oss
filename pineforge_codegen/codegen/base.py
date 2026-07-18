@@ -2410,7 +2410,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if cpp_type == "int":
                     cpp_type = "int64_t"
                 if f.default:
-                    default = self._visit_expr(f.default)
+                    default = self._visit_rhs_value(
+                        f.default,
+                        target_cpp_type=(
+                            cpp_type
+                            if cpp_type.startswith("PineMap<")
+                            else None
+                        ),
+                    )
                 else:
                     default = self._default_for_spec(spec)
                 lines.append(f"    {cpp_type} {f.name} = {default};")

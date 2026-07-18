@@ -122,6 +122,92 @@ for [key, value] in pairs
 '''
 
 
+_CONTEXTUAL_NA_SOURCE = '''//@version=6
+strategy("PineMap contextual na")
+type H
+    map<string, int> defaulted = na
+    map<string, int> ternary_field
+    map<string, int> if_field
+bool cond = true
+map<string, int> global_bare = na
+map<string, int> global_left = cond ? na : map.new<string, int>()
+map<string, int> global_right = cond ? map.new<string, int>() : na
+map<string, int> global_if_left = if cond
+    na
+else
+    map.new<string, int>()
+map<string, int> global_if_right = if cond
+    map.new<string, int>()
+else
+    na
+var map<string, int> persistent_na = na
+var H holder = H.new()
+var H explicit_na = H.new(na, map.new<string, int>(), map.new<string, int>())
+local_contexts(bool choose_na) =>
+    map<string, int> local_bare = na
+    map<string, int> local_left = choose_na ? na : map.new<string, int>()
+    map<string, int> local_right = choose_na ? map.new<string, int>() : na
+    map<string, int> local_if_left = if choose_na
+        na
+    else
+        map.new<string, int>()
+    map<string, int> local_if_right = if choose_na
+        map.new<string, int>()
+    else
+        na
+    local_left := choose_na ? map.new<string, int>() : na
+    local_right := choose_na ? na : map.new<string, int>()
+    local_if_left := if choose_na
+        map.new<string, int>()
+    else
+        na
+    local_if_right := if choose_na
+        na
+    else
+        map.new<string, int>()
+    na(local_bare) and not na(local_left) and na(local_right) and not na(local_if_left) and na(local_if_right)
+local_ok = local_contexts(cond)
+holder.ternary_field := cond ? na : map.new<string, int>()
+holder.if_field := if cond
+    map.new<string, int>()
+else
+    na
+holder.defaulted := na
+'''
+
+
+_MAP_RETURN_PROPAGATION_SOURCE = '''//@version=6
+strategy("PineMap return propagation")
+type H
+    map<string, int> m
+method get(H h) => h.m
+direct(H h) => h.m
+identity(map<string, int> m) => m
+make() => map.new<string, int>()
+choose(bool cond, map<string, int> a, map<string, int> b) => cond ? a : b
+choose_if(bool cond, map<string, int> a, map<string, int> b) =>
+    if cond
+        a
+    else
+        b
+var map<string, int> base = map.new<string, int>()
+base.put("seed", 7)
+var H holder = H.new(base)
+var method_lhs = holder.get()
+var direct_lhs = direct(holder)
+var identity_lhs = identity(base)
+var made_copy = make().copy()
+var selected_ternary = choose(true, base, make())
+var selected_if = choose_if(false, make(), base)
+method_previous = holder.get().put("method", 1)
+ternary_previous = choose(true, base, make()).put("ternary", 2)
+if_previous = choose_if(false, make(), base).put("if", 3)
+direct_previous = direct(holder).put("direct", 4)
+identity_previous = identity(base).put("identity", 5)
+copy_previous = made_copy.put("copy", 6)
+'''
+
+
 def _find_engine_library() -> Path | None:
     explicit = os.environ.get("PINEFORGE_ENGINE_LIB")
     if explicit:
@@ -625,4 +711,99 @@ int main() {
 '''
     assert _compile_and_run(
         transpile(_COOF_SOURCE) + driver, label="pinemap-coof-runtime"
+    ) == "ok\n"
+
+
+def test_contextual_map_na_forms_emit_typed_handles_and_compile() -> None:
+    cpp = transpile(_CONTEXTUAL_NA_SOURCE)
+    assert "PineMap<std::string, int> defaulted = PineMap<std::string, int>{};" in cpp
+    assert "global_bare = PineMap<std::string, int>{};" in cpp
+    assert "holder.defaulted = PineMap<std::string, int>{};" in cpp
+    assert not [
+        line
+        for line in cpp.splitlines()
+        if "PineMap<std::string, int>" in line and "na<double>()" in line
+    ]
+    compile_env.compile_cpp(cpp, label="pinemap-contextual-na")
+
+
+def test_contextual_map_na_forms_runtime() -> None:
+    driver = r'''
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.run(&bar, 1);
+    if (!strategy.last_error().empty()) return 2;
+    if (!strategy.global_bare.is_na() || !strategy.global_left.is_na()) return 3;
+    if (strategy.global_right.is_na() || !strategy.global_if_left.is_na()) return 4;
+    if (strategy.global_if_right.is_na() || !strategy.persistent_na.is_na()) return 5;
+    if (!strategy.local_ok) return 6;
+    if (!strategy.holder.defaulted.is_na()
+            || !strategy.holder.ternary_field.is_na()) return 7;
+    if (strategy.holder.if_field.is_na()) return 8;
+    if (!strategy.explicit_na.defaulted.is_na()) return 9;
+    if (strategy.explicit_na.ternary_field.is_na()
+            || strategy.explicit_na.if_field.is_na()) return 10;
+    std::cout << "ok\n";
+}
+'''
+    assert _compile_and_run(
+        transpile(_CONTEXTUAL_NA_SOURCE) + driver,
+        label="pinemap-contextual-na-runtime",
+    ) == "ok\n"
+
+
+def test_map_return_specs_reach_lhs_and_arbitrary_receivers_compile() -> None:
+    cpp = transpile(_MAP_RETURN_PROPAGATION_SOURCE)
+    map_type = "PineMap<std::string, int>"
+    assert f"{map_type} _udt_H_get(H& h)" in cpp
+    assert f"{map_type} choose(bool cond" in cpp
+    assert f"{map_type} choose_if(bool cond" in cpp
+    for name in (
+        "method_lhs",
+        "direct_lhs",
+        "identity_lhs",
+        "made_copy",
+        "selected_ternary",
+        "selected_if",
+    ):
+        assert f"{map_type} {name};" in cpp
+    assert "None(" not in cpp
+    compile_env.compile_cpp(cpp, label="pinemap-return-propagation")
+
+
+def test_map_return_specs_runtime() -> None:
+    driver = r'''
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.run(&bar, 1);
+    if (!strategy.last_error().empty()) return 2;
+    const std::vector<std::string> shared_keys{
+        "seed", "method", "ternary", "if", "direct", "identity"
+    };
+    for (const auto& key : shared_keys) {
+        if (!strategy.base.contains(key)) return 3;
+        if (!strategy.method_lhs.contains(key)) return 4;
+        if (!strategy.direct_lhs.contains(key)) return 5;
+        if (!strategy.identity_lhs.contains(key)) return 6;
+        if (!strategy.selected_ternary.contains(key)) return 7;
+        if (!strategy.selected_if.contains(key)) return 8;
+    }
+    if (!strategy.made_copy.contains("copy")
+            || strategy.base.contains("copy")) return 9;
+    if (!is_na(strategy.method_previous)
+            || !is_na(strategy.ternary_previous)) return 10;
+    if (!is_na(strategy.if_previous)
+            || !is_na(strategy.direct_previous)) return 11;
+    if (!is_na(strategy.identity_previous)
+            || !is_na(strategy.copy_previous)) return 12;
+    std::cout << "ok\n";
+}
+'''
+    assert _compile_and_run(
+        transpile(_MAP_RETURN_PROPAGATION_SOURCE) + driver,
+        label="pinemap-return-propagation-runtime",
     ) == "ok\n"
