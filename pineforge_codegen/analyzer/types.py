@@ -408,6 +408,80 @@ class TypeHelper:
             return last_stmt
         return None
 
+    def _terminal_map_selection_return_spec(
+        self,
+        value: ASTNode | None,
+        parameter_specs: dict[str, TypeSpec | None],
+    ) -> TypeSpec | None:
+        """Infer a map returned by a terminal ternary/block selection.
+
+        Untyped UDF parameters do not have a lexical ``TypeSpec`` while their
+        definition is first analyzed.  At a concrete call site, however, the
+        argument specs are known.  Propagate those specs through only the two
+        Pine selection shapes whose result type is determined by compatible
+        branches: ``condition ? a : b`` and terminal ``if`` expressions.
+
+        A direct ``na`` arm is context-typed by the opposite map arm.  All
+        other unresolved or incompatible shapes return ``None`` so this helper
+        cannot turn a scalar/non-map UDF into a map-returning function.
+        """
+
+        def branch_terminal(node: ASTNode | None) -> ASTNode | None:
+            if not isinstance(node, IfStmt):
+                return node
+            if not node.body or not node.else_body:
+                return None
+            return node
+
+        def body_terminal(body: list[ASTNode] | None) -> ASTNode | None:
+            if not body:
+                return None
+            terminal = body[-1]
+            return terminal.expr if isinstance(terminal, ExprStmt) else terminal
+
+        def resolve(node: ASTNode | None) -> TypeSpec | None:
+            if node is None or isinstance(node, NaLiteral):
+                return None
+            if isinstance(node, Identifier) and node.name in parameter_specs:
+                spec = parameter_specs[node.name]
+                return spec if spec is not None and spec.kind == "map" else None
+            if isinstance(node, Ternary):
+                return compatible(node.true_val, node.false_val)
+            if isinstance(node, IfStmt):
+                return compatible(
+                    body_terminal(node.body),
+                    body_terminal(node.else_body),
+                )
+            spec = self._type_spec_from_expr(node)
+            return spec if spec is not None and spec.kind == "map" else None
+
+        def compatible(
+            left_node: ASTNode | None,
+            right_node: ASTNode | None,
+        ) -> TypeSpec | None:
+            left_node = branch_terminal(left_node)
+            right_node = branch_terminal(right_node)
+            if left_node is None or right_node is None:
+                return None
+            left = resolve(left_node)
+            right = resolve(right_node)
+            if left is not None and right is not None:
+                return left if left == right else None
+            if left is not None and isinstance(right_node, NaLiteral):
+                return left
+            if right is not None and isinstance(left_node, NaLiteral):
+                return right
+            return None
+
+        if isinstance(value, Ternary):
+            return compatible(value.true_val, value.false_val)
+        if isinstance(value, IfStmt):
+            return compatible(
+                body_terminal(value.body),
+                body_terminal(value.else_body),
+            )
+        return None
+
     def _terminal_map_call_return(
         self,
         value: ASTNode | None,

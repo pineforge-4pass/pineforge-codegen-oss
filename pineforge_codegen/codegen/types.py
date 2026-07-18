@@ -660,6 +660,15 @@ class TypeInferer:
             if node.type_hint in self._udt_defs:
                 return node.type_hint
             return PINE_TYPE_TO_CPP.get(node.type_hint, "double")
+        # The analyzer records exact callable-local collection bindings before
+        # its lexical scopes are popped.  In particular, an inferred local
+        # such as ``selected = cond ? na : global_map`` has a map TypeSpec even
+        # though generic C++ expression inference sees ``na`` as ``double``.
+        # Consume only the map form here; arrays/matrices and every non-map
+        # declaration retain their established inference/output paths.
+        captured = self._callable_collection_bindings.get(id(node))
+        if captured is not None and captured.kind == "map":
+            return self._type_spec_to_cpp(captured)
         # Drawing handle local (L-N6): a hintless local whose RHS resolves to a
         # drawing udt must declare as the handle struct, not the analyzer's
         # scalar default. Covers ``ln = arr.get(i)``, alias ``b = a``, field read

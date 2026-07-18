@@ -555,12 +555,16 @@ class StmtVisitor:
 
         # If/switch expression: x = if cond ... else ...
         if isinstance(node.value, (IfStmt, SwitchStmt)):
-            map_cpp_type = self._map_target_cpp_type(
-                name=node.name,
-                type_hint=node.type_hint,
+            cpp_type = self._type_for_decl(node) if not is_global_member else None
+            map_cpp_type = (
+                cpp_type
+                if cpp_type is not None and cpp_type.startswith("PineMap<")
+                else self._map_target_cpp_type(
+                    name=node.name,
+                    type_hint=node.type_hint,
+                )
             )
             if not is_global_member:
-                cpp_type = self._type_for_decl(node)
                 default = self._default_for_type(cpp_type)
                 lines.append(f"{pad}{cpp_type} {safe} = {default};")
             indent = len(pad) // 4

@@ -1225,6 +1225,15 @@ class CallHandlers:
         )
         ret_spec = getattr(self, "_func_return_type_specs", {}).get(func_name)
         terminal_expr = self._direct_terminal_return_expr(func_def)
+        terminal_selection_spec = self._terminal_map_selection_return_spec(
+            terminal_expr,
+            {
+                name: spec
+                for name, spec in zip(
+                    func_def.params, effective_param_specs
+                )
+            },
+        )
         if (
             terminal_map_return is None
             and isinstance(terminal_expr, Identifier)
@@ -1243,6 +1252,9 @@ class CallHandlers:
                 # backing ID rather than cloning map contents.
                 self._func_return_type_specs[func_name] = terminal_identity_spec
                 ret_spec = terminal_identity_spec
+        if terminal_selection_spec is not None:
+            self._func_return_type_specs[func_name] = terminal_selection_spec
+            ret_spec = terminal_selection_spec
         if terminal_map_return is not None:
             return_type, inferred_ret_spec = terminal_map_return
             self._func_return_types[func_name] = return_type

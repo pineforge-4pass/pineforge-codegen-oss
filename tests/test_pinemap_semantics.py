@@ -208,6 +208,49 @@ copy_previous = made_copy.put("copy", 6)
 '''
 
 
+_UNTYPED_MAP_SELECTION_SOURCE = '''//@version=6
+strategy("PineMap untyped selection returns")
+choose(cond, a, b) => cond ? a : b
+branch(cond, a, b) =>
+    if cond
+        a
+    else
+        b
+choose_na(cond, a) => cond ? na : a
+branch_na(cond, a) =>
+    if cond
+        a
+    else
+        na
+var left = map.new<string, int>()
+var right = map.new<string, int>()
+left.put("seed-left", 1)
+right.put("seed-right", 2)
+local_ternary(cond) =>
+    local = cond ? na : left
+    local
+local_if(cond) =>
+    local = if cond
+        na
+    else
+        right
+    local
+selected = choose(true, left, right)
+branched = branch(false, left, right)
+nullable_selected = choose_na(false, left)
+nullable_branched = branch_na(true, right)
+nullable_absent = choose_na(true, left)
+branch_absent = branch_na(false, right)
+local_selected = local_ternary(false)
+local_branched = local_if(false)
+selected_previous = choose(true, left, right).put("selected", 10)
+branched_previous = branch(false, left, right).put("branched", 20)
+deep_previous = choose(false, left, right).copy().put("deep-copy", 30)
+nullable_previous = choose_na(false, left).put("nullable", 40)
+local_previous = local_if(false).put("local-if", 50)
+'''
+
+
 def _find_engine_library() -> Path | None:
     explicit = os.environ.get("PINEFORGE_ENGINE_LIB")
     if explicit:
@@ -806,4 +849,74 @@ int main() {
     assert _compile_and_run(
         transpile(_MAP_RETURN_PROPAGATION_SOURCE) + driver,
         label="pinemap-return-propagation-runtime",
+    ) == "ok\n"
+
+
+def test_untyped_map_selection_returns_reach_lhs_and_chained_receivers() -> None:
+    cpp = transpile(_UNTYPED_MAP_SELECTION_SOURCE)
+    map_type = "PineMap<std::string, int>"
+    for function in (
+        "choose",
+        "branch",
+        "choose_na",
+        "branch_na",
+        "local_ternary",
+        "local_if",
+    ):
+        assert f"{map_type} {function}(" in cpp
+    for name in (
+        "selected",
+        "branched",
+        "nullable_selected",
+        "nullable_branched",
+        "nullable_absent",
+        "branch_absent",
+        "local_selected",
+        "local_branched",
+    ):
+        assert f"{map_type} {name};" in cpp
+    assert (
+        f"{map_type} local = ((cond) ? ({map_type}{{}}) : (left));"
+        in cpp
+    )
+    assert f"{map_type} local = {map_type}();" in cpp
+    assert "None(" not in cpp
+    assert not [
+        line
+        for line in cpp.splitlines()
+        if map_type in line and "na<double>()" in line
+    ]
+    compile_env.compile_cpp(cpp, label="pinemap-untyped-selection-return")
+
+
+def test_untyped_map_selection_returns_runtime() -> None:
+    driver = r'''
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.run(&bar, 1);
+    if (!strategy.last_error().empty()) return 2;
+    if (!strategy.selected.contains("seed-left")
+            || !strategy.selected.contains("selected")) return 3;
+    if (!strategy.branched.contains("seed-right")
+            || !strategy.branched.contains("branched")) return 4;
+    if (!strategy.nullable_selected.contains("nullable")) return 5;
+    if (!strategy.nullable_branched.contains("local-if")) return 6;
+    if (!strategy.local_selected.contains("selected")) return 7;
+    if (!strategy.local_branched.contains("local-if")) return 8;
+    if (!strategy.nullable_absent.is_na()
+            || !strategy.branch_absent.is_na()) return 9;
+    if (strategy.right.contains("deep-copy")) return 10;
+    if (!is_na(strategy.selected_previous)
+            || !is_na(strategy.branched_previous)) return 11;
+    if (!is_na(strategy.deep_previous)
+            || !is_na(strategy.nullable_previous)
+            || !is_na(strategy.local_previous)) return 12;
+    std::cout << "ok\n";
+}
+'''
+    assert _compile_and_run(
+        transpile(_UNTYPED_MAP_SELECTION_SOURCE) + driver,
+        label="pinemap-untyped-selection-return-runtime",
     ) == "ok\n"
