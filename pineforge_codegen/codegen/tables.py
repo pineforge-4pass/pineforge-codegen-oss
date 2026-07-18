@@ -674,16 +674,16 @@ CHECKED_ARRAY_METHOD_KWARGS: dict[str, list[str]] = {
 }
 
 MAP_METHODS = {
-    "put":      lambda m, args: f"({m}[{args[0]}] = {args[1]})",
-    "get":      lambda m, args: f"({m}.count({args[0]}) ? {m}[{args[0]}] : na<double>())",
-    "remove":   lambda m, args: f"[&](){{ auto it={m}.find({args[0]}); if(it!={m}.end()){{ auto v=it->second; {m}.erase(it); return v; }} return na<double>(); }}()",
-    "contains": lambda m, args: f"({m}.count({args[0]}) > 0)",
-    "size":     lambda m, args: f"(double){m}.size()",
+    "put":      lambda m, args: f"{m}.put({args[0]}, {args[1]})",
+    "get":      lambda m, args: f"{m}.get({args[0]})",
+    "remove":   lambda m, args: f"{m}.remove({args[0]})",
+    "contains": lambda m, args: f"{m}.contains({args[0]})",
+    "size":     lambda m, args: f"{m}.size()",
     "clear":    lambda m, args: f"{m}.clear()",
-    "keys":     lambda m, args: f"[&](){{ std::vector<std::string> v; for(auto& p:{m}) v.push_back(p.first); return v; }}()",
-    "values":   lambda m, args: f"[&](){{ std::vector<double> v; for(auto& p:{m}) v.push_back(p.second); return v; }}()",
-    "copy":     lambda m, args: f"std::unordered_map<std::string,double>({m})",
-    "put_all":  lambda m, args: f"{m}.insert({args[0]}.begin(), {args[0]}.end())",
+    "keys":     lambda m, args: f"{m}.keys()",
+    "values":   lambda m, args: f"{m}.values()",
+    "copy":     lambda m, args: f"{m}.copy()",
+    "put_all":  lambda m, args: f"{m}.put_all({args[0]})",
 }
 
 # Declared signature order after removing the method receiver ``id``.  This is

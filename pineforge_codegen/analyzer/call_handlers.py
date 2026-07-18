@@ -1196,6 +1196,25 @@ class CallHandlers:
             },
         )
         ret_spec = getattr(self, "_func_return_type_specs", {}).get(func_name)
+        terminal_expr = self._direct_terminal_return_expr(func_def)
+        if (
+            terminal_map_return is None
+            and isinstance(terminal_expr, Identifier)
+            and terminal_expr.name in func_def.params
+        ):
+            terminal_index = func_def.params.index(terminal_expr.name)
+            terminal_identity_spec = (
+                effective_param_specs[terminal_index]
+                if terminal_index < len(effective_param_specs)
+                else None
+            )
+            if (terminal_identity_spec is not None
+                    and terminal_identity_spec.kind == "map"):
+                # An untyped identity UDF learns the map handle type from its
+                # call site. The handle is returned by value, preserving the
+                # backing ID rather than cloning map contents.
+                self._func_return_type_specs[func_name] = terminal_identity_spec
+                ret_spec = terminal_identity_spec
         if terminal_map_return is not None:
             return_type, inferred_ret_spec = terminal_map_return
             self._func_return_types[func_name] = return_type

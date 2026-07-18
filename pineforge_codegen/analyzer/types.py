@@ -237,6 +237,28 @@ class TypeHelper:
                 key = self._type_spec_from_hint(targs[0]) if len(targs) > 0 else TypeSpec.primitive("string")
                 val = self._type_spec_from_hint(targs[1]) if len(targs) > 1 else TypeSpec.primitive("float")
                 return TypeSpec.map(key or TypeSpec.primitive("string"), val or TypeSpec.primitive("float"))
+            if ns == "map" and func in {
+                "put", "get", "remove", "contains", "size", "keys",
+                "values", "copy", "put_all", "clear",
+            } and value.args:
+                recv_spec = self._type_spec_from_expr(value.args[0])
+                if recv_spec is not None and recv_spec.kind == "map":
+                    if func in ("put", "get", "remove"):
+                        return recv_spec.value
+                    if func == "keys":
+                        return TypeSpec.array(
+                            recv_spec.key or TypeSpec.primitive("string")
+                        )
+                    if func == "values":
+                        return TypeSpec.array(
+                            recv_spec.value or TypeSpec.primitive("float")
+                        )
+                    if func == "copy":
+                        return recv_spec
+                    if func == "contains":
+                        return TypeSpec.primitive("bool")
+                    if func == "size":
+                        return TypeSpec.primitive("int")
             if ns == "str" and func == "split":
                 return TypeSpec.array(TypeSpec.primitive("string"))
             if ns == "ta" and func == "pivot_point_levels":
@@ -263,12 +285,18 @@ class TypeHelper:
                     if func in ("copy", "slice"):
                         return recv_spec
                 if recv_spec is not None and recv_spec.kind == "map":
-                    if func in ("get", "remove"):
+                    if func in ("put", "get", "remove"):
                         return recv_spec.value
                     if func == "keys":
                         return TypeSpec.array(recv_spec.key or TypeSpec.primitive("string"))
                     if func == "values":
                         return TypeSpec.array(recv_spec.value or TypeSpec.primitive("float"))
+                    if func == "copy":
+                        return recv_spec
+                    if func == "contains":
+                        return TypeSpec.primitive("bool")
+                    if func == "size":
+                        return TypeSpec.primitive("int")
                 if recv_spec is not None and recv_spec.kind == "matrix":
                     if func in ("copy", "submatrix", "transpose", "concat"):
                         return recv_spec

@@ -483,10 +483,11 @@ class StmtVisitor:
                 self._map_vars.add(node.name)
                 self._collection_types.setdefault(node.name, spec)
                 cpp_type = self._type_spec_to_cpp(spec)
+                init = f"{cpp_type}::new_()"
                 if is_global_member:
-                    lines.append(f"{pad}{safe} = {cpp_type}();")
+                    lines.append(f"{pad}{safe} = {init};")
                 else:
-                    lines.append(f"{pad}{cpp_type} {safe};")
+                    lines.append(f"{pad}{cpp_type} {safe} = {init};")
                 return
 
         # Visual/drawing function assignments (line.new, label.new, box.new,
@@ -580,7 +581,12 @@ class StmtVisitor:
                     self._map_vars.add(node.name)
                 elif coll_spec.kind == "matrix":
                     self._matrix_specs[node.name] = coll_spec
-                lines.append(f"{pad}{cpp_type}& {safe} = {cpp_val};")
+                # PineMap is itself a shared-ID handle. Copying it by value is
+                # the correct alias operation and, unlike a C++ reference,
+                # keeps a later local rebind local. Arrays/matrices still need
+                # their established reference alias route.
+                ref = "" if coll_spec.kind == "map" else "&"
+                lines.append(f"{pad}{cpp_type}{ref} {safe} = {cpp_val};")
                 return
 
         # Global-scope UDT array-element alias (BUG: Pine array elements of a
@@ -659,7 +665,19 @@ class StmtVisitor:
                 return
             # General expression target (e.g., member access)
             target_cpp = self._visit_expr(node.target)
-            val_cpp = self._visit_expr(node.value)
+            target_spec = (
+                self._type_spec_from_expr(node.target)
+                if self._is_na_expr(node.value)
+                else None
+            )
+            target_cpp_type = (
+                self._type_spec_to_cpp(target_spec)
+                if target_spec is not None and target_spec.kind == "map"
+                else None
+            )
+            val_cpp = self._visit_rhs_value(
+                node.value, target_cpp_type=target_cpp_type
+            )
             if node.op == ":=":
                 lines.append(f"{pad}{target_cpp} = {val_cpp};")
             else:
@@ -1070,10 +1088,49 @@ class StmtVisitor:
                     if (idx < len(tuple_specs)
                             and tuple_specs[idx] is not None):
                         self._current_loop_var_specs[v] = tuple_specs[idx]
+        map_pair_loop = (
+            iterable_spec is not None
+            and iterable_spec.kind == "map"
+            and node.vars is not None
+            and len(node.vars) == 2
+        )
         if node.var:
             v_cpp = self._safe_name(node.var)
             ref = "&" if self._loop_elem_is_writeback_udt(node.iterable) else ""
             lines.append(f"{pad}for (auto{ref} {v_cpp} : {iterable}) {{")
+        elif map_pair_loop:
+            # Pine map iteration exposes insertion-ordered ``[key, value]``
+            # pairs. PineMap intentionally keeps its storage private, so take
+            # one handle copy (which aliases the same map ID), iterate keys(),
+            # and obtain each value through the public API. Binding the
+            # iterable once also preserves single-evaluation semantics for an
+            # arbitrary map-producing expression.
+            key_name, value_name = node.vars
+            occupied_names = set(self._all_bound_names) | {
+                self._safe_name(name) for name in self._all_bound_names
+            }
+            while True:
+                fid = self._for_counter
+                self._for_counter += 1
+                map_token = f"__pf_map_iter_{fid}"
+                internal_key = f"__pf_map_key_{fid}"
+                generated_names = {map_token}
+                if key_name == "_":
+                    generated_names.add(internal_key)
+                if not (generated_names & occupied_names):
+                    break
+            key_cpp = (
+                self._safe_name(key_name)
+                if key_name != "_"
+                else internal_key
+            )
+            lines.append(f"{pad}auto {map_token} = {iterable};")
+            lines.append(f"{pad}for (auto {key_cpp} : {map_token}.keys()) {{")
+            if value_name != "_":
+                value_cpp = self._safe_name(value_name)
+                lines.append(
+                    f"{pad}    auto {value_cpp} = {map_token}.get({key_cpp});"
+                )
         elif node.vars:
             bindings = ", ".join(node.vars)
             lines.append(f"{pad}for (auto [{bindings}] : {iterable}) {{")

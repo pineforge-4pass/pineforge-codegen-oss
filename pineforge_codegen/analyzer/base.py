@@ -1616,6 +1616,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # this narrow to map terminals so general/nonterminal inference and
         # generated output remain unchanged.
         terminal_ret_expr = self._direct_terminal_return_expr(node)
+        terminal_direct_return_spec = self._type_spec_from_expr(
+            terminal_ret_expr
+        )
         terminal_map_return = self._terminal_map_call_return(
             terminal_ret_expr,
             {
@@ -1668,6 +1671,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 ret_spec = self._type_spec_from_expr(ret_expr)
                 if ret_spec is not None and ret_spec.kind == "array":
                     self._func_return_type_specs[node.name] = ret_spec
+            if (terminal_direct_return_spec is not None
+                    and terminal_direct_return_spec.kind == "map"):
+                self._func_return_type_specs[node.name] = terminal_direct_return_spec
 
         if terminal_map_return is not None:
             body_type, terminal_spec = terminal_map_return
@@ -1763,9 +1769,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         old_global = self._global_scope
         self._global_scope = False
         self._collection_scope_stack.append(method_key)
+        terminal_ret_expr = self._direct_terminal_return_expr(node)
+        return_type_spec = None
         try:
             for stmt in node.body:
                 ret_type = self._visit(stmt)
+            if terminal_ret_expr is not None:
+                terminal_spec = self._type_spec_from_expr(terminal_ret_expr)
+                if terminal_spec is not None and terminal_spec.kind == "map":
+                    return_type_spec = terminal_spec
         finally:
             self._global_scope = old_global
             self._collection_scope_stack.pop()
@@ -1808,6 +1820,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             tuple_element_count=tuple_element_count,
             param_defaults=param_defaults,
             param_type_specs=param_specs,
+            return_type_spec=return_type_spec,
         )
         self._func_infos.append(fi)
         return PineType.VOID
@@ -2204,9 +2217,60 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._visit(val)
         return PineType.VOID
 
+    def _type_spec_contains_map(
+        self,
+        spec: TypeSpec | None,
+        visiting_udts: frozenset[str] = frozenset(),
+    ) -> bool:
+        """Whether a lexical TypeSpec recursively owns a PineMap handle.
+
+        History buffers value-copy their elements. A map ID anywhere in that
+        shape would therefore retain live storage across bars and silently
+        turn ``[1]`` into a current-state alias. This check belongs in the
+        analyzer, where symbol resolution is scope-aware: a scalar parameter
+        or block local can safely shadow a same-named global map, while typed
+        map parameters and inferred aliases are still rejected.
+        """
+        if spec is None:
+            return False
+        if spec.kind == "map":
+            return True
+        if spec.kind in {"array", "matrix"}:
+            return self._type_spec_contains_map(spec.element, visiting_udts)
+        if spec.kind == "udt" and spec.name:
+            if spec.name in visiting_udts:
+                return False
+            nested_visiting = visiting_udts | {spec.name}
+            return any(
+                self._type_spec_contains_map(field_spec, nested_visiting)
+                for field_spec in self._udt_field_type_specs.get(
+                    spec.name, {}
+                ).values()
+            )
+        return False
+
     def _visit_Subscript(self, node: Subscript) -> PineType:
         obj_type = self._visit(node.object)
         self._visit(node.index)
+
+        is_current_value = (
+            isinstance(node.index, NumberLiteral) and node.index.value == 0
+        )
+        object_spec = self._type_spec_from_expr(node.object)
+        if not is_current_value and self._type_spec_contains_map(object_spec):
+            if object_spec is not None and object_spec.kind == "map":
+                message = (
+                    "History references on map IDs are not supported in "
+                    "PineForge; map rollback uses identity snapshots rather "
+                    "than Series<PineMap>."
+                )
+            else:
+                message = (
+                    "History references on map-bearing UDTs or collections "
+                    "are not supported in PineForge; their Series value copy "
+                    "would retain live map aliases."
+                )
+            self._error(message, node.loc)
 
         # Detect series vars / bar fields
         if isinstance(node.object, Identifier):
@@ -2217,7 +2281,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 sym = self._symbols.resolve(name)
                 if sym is not None:
                     if getattr(sym, "type_spec", None) is None or sym.type_spec.kind not in ("array", "map"):
-                        self._series_vars.add(name)
+                        global_sym = self._symbols.global_scope.symbols.get(name)
+                        shadows_map_state = (
+                            sym.scope != "global"
+                            and global_sym is not None
+                            and self._type_spec_contains_map(global_sym.type_spec)
+                        )
+                        # ``_series_vars`` is a legacy global-by-name set. Do
+                        # not let a lexical scalar series parameter poison a
+                        # same-named global PineMap member; the scoped series
+                        # registry below is authoritative for the function.
+                        if not shadows_map_state:
+                            self._series_vars.add(name)
                         sym.is_series = True
                         # Track function-scoped series vars
                         if sym.scope and sym.scope.startswith("func_"):

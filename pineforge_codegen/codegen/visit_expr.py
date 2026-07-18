@@ -256,10 +256,14 @@ class ExprVisitor:
         ``string s = na;`` would both emit ``na<double>()`` and fail to compile
         (no viable ``operator=`` / conversion). Every other RHS lowers unchanged.
         """
-        if target_name and self._is_na_expr(value_node):
+        if self._is_na_expr(value_node):
             draw_default = self._drawing_na_default(target_name)
             if draw_default is not None:
                 return draw_default
+            if target_cpp_type and target_cpp_type.startswith("PineMap<"):
+                # PineMap's default constructor is the typed ``na`` ID.  A
+                # map.new call is the only operation that allocates storage.
+                return f"{target_cpp_type}{{}}"
             if target_cpp_type in ("std::string", "int", "int64_t", "bool"):
                 return f"na<{target_cpp_type}>()"
         return self._visit_expr(value_node)

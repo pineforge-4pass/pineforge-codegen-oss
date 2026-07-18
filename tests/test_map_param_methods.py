@@ -139,11 +139,11 @@ def _function_body(cpp: str, signature: str) -> str:
 def test_typed_map_parameter_methods_route_by_typespec_and_keywords():
     cpp = transpile(_SOURCE)
 
-    assert "double mutate_int(std::unordered_map<std::string, int>& target)" in cpp
-    assert "double mutate_float(std::unordered_map<std::string, double>& target)" in cpp
-    assert "bool probe_bool(std::unordered_map<std::string, bool>& target)" in cpp
+    assert "double mutate_int(PineMap<std::string, int> target)" in cpp
+    assert "double mutate_float(PineMap<std::string, double> target)" in cpp
+    assert "bool probe_bool(PineMap<std::string, bool> target)" in cpp
     assert (
-        "bool probe_string(std::unordered_map<std::string, std::string>& target)"
+        "bool probe_string(PineMap<std::string, std::string> target)"
         in cpp
     )
 
@@ -182,30 +182,33 @@ def test_typed_map_parameter_methods_route_by_typespec_and_keywords():
     )
     assert get_line.count("read_key()") == 1
 
-    # Primitive missing-key defaults retain the parameter's value TypeSpec.
-    assert ": 0.0)" in _function_body(cpp, "bool missing_float(")
-    assert ": 0)" in _function_body(cpp, "bool missing_int(")
-    assert ": false)" in _function_body(cpp, "bool missing_bool(")
-    assert 'std::string("")' in _function_body(cpp, "bool missing_string(")
+    # Missing values are supplied by PineMap's typed Pine-na runtime contract.
+    for signature in (
+        "bool missing_float(", "bool missing_int(", "bool missing_bool(",
+        "bool missing_string(",
+    ):
+        body = _function_body(cpp, signature)
+        assert ".get(" in body
+        assert ".count(" not in body
 
     # Zero-argument methods and typed collection results route through the
     # helper without synthetic arguments.
     inspect = _function_body(cpp, "double inspect_int(")
-    assert "std::vector<std::string> v" in inspect
-    assert "std::vector<int> v" in inspect
-    assert "std::unordered_map<std::string, int>(target)" in inspect
-    assert "(double)target.size()" in inspect
-    assert "target.clear();" in _function_body(cpp, "double clear_int(")
+    assert ".keys()" in inspect
+    assert ".values()" in inspect
+    assert "PineMap<std::string, int> copied" in inspect
+    assert ".copy()" in inspect
+    assert ".size()" in inspect
+    assert ".clear()" in _function_body(cpp, "double clear_int(")
 
     # Parameter TypeSpecs win over same-named global array/map/matrix entries.
-    assert ": 0)" in _function_body(cpp, "double shadow_array_probe(")
-    assert 'std::string("")' in _function_body(cpp, "bool shadow_map_probe(")
-    assert ": false)" in _function_body(cpp, "double shadow_matrix_probe(")
+    assert ".get(" in _function_body(cpp, "double shadow_array_probe(")
+    assert ".get(" in _function_body(cpp, "bool shadow_map_probe(")
+    assert ".get(" in _function_body(cpp, "double shadow_matrix_probe(")
 
     merge = _function_body(cpp, "double merge_int(")
-    assert "target.insert(" in merge
-    assert ".begin(), __pf_map_param_arg_" in merge
-    assert ".end()); }((source));" in merge
+    assert ".put_all(__pf_map_param_arg_" in merge
+    assert merge.count("}((source))") == 1
 
 
 def test_udt_valued_map_parameter_remains_outside_supported_subset():
@@ -324,8 +327,8 @@ int main() {
         2.5,
         1.0,
         1.0,
-        1.0,
-        1.0,
+        0.0,
+        0.0,
         1.0,
         1.0,
         8.0,

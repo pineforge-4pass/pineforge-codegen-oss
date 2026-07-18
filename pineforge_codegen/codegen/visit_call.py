@@ -470,13 +470,13 @@ class CallVisitor:
     def _map_param_method_expr(
         self, map_expr: str, method: str, arg_nodes: list, spec: TypeSpec,
     ) -> str:
-        """Lower one typed-map parameter method with ordered, single-use args.
+        """Lower one map operation with receiver-first, ordered single use.
 
-        Existing map templates may reference a key more than once (``get`` /
-        ``contains`` / ``remove``), while C++ assignment evaluates the RHS of
-        ``put`` before its subscript LHS.  Bind supplied expressions through
-        nested lambdas so this lane deterministically evaluates key then value
-        exactly once without changing established global/local map output.
+        C++17 sequences a member-call receiver before its arguments but does
+        not order sibling arguments. Pine requires receiver, key, then value.
+        Nested immediately-invoked lambdas bind the receiver first and every
+        argument in source/signature order, while retaining lvalue aliases and
+        extending temporary receiver lifetime through the operation.
         """
         args = [self._visit_expr(arg) for arg in arg_nodes]
         occupied = "\n".join((map_expr, *args))
@@ -491,20 +491,53 @@ class CallVisitor:
             bindings.append((token, arg))
         self._map_param_arg_counter = counter
 
+        receiver_counter = getattr(self, "_map_receiver_counter", 0)
+        while True:
+            receiver_token = f"__pf_map_receiver_{receiver_counter}"
+            receiver_counter += 1
+            if receiver_token not in occupied:
+                break
+        self._map_receiver_counter = receiver_counter
+
         lowered = self._map_method_expr(
-            map_expr, method, [token for token, _arg in bindings], spec
+            receiver_token, method, [token for token, _arg in bindings], spec
         )
         for token, arg in reversed(bindings):
             lowered = (
                 f"[&](auto&& {token})->decltype(auto){{ "
                 f"return {lowered}; }}(({arg}))"
             )
-        return lowered
+        return (
+            f"[&](auto&& {receiver_token})->decltype(auto){{ "
+            f"return {lowered}; }}(({map_expr}))"
+        )
 
     def _visit_func_call(self, node: FuncCall) -> str:
         callee = node.callee
         if isinstance(callee, MemberAccess):
             recv_spec = self._type_spec_from_expr(callee.object)
+            if (
+                recv_spec is not None
+                and recv_spec.kind == "map"
+                and not isinstance(callee.object, (Identifier, MemberAccess))
+                and callee.member in MAP_METHODS
+            ):
+                # Returned, constructed and selected map IDs are ordinary
+                # receivers too. Parenthesize the expression so ternaries and
+                # other compound producers remain one C++ receiver expression.
+                arg_nodes = self._map_call_arg_nodes(
+                    callee.member,
+                    node,
+                    functional=False,
+                    allow_keywords=False,
+                )
+                receiver = f"({self._visit_expr(callee.object)})"
+                return self._map_param_method_expr(
+                    receiver,
+                    callee.member,
+                    arg_nodes,
+                    recv_spec,
+                )
             if recv_spec is not None and recv_spec.kind == "udt" and recv_spec.name:
                 mk = f"{recv_spec.name}.{callee.member}"
                 fi_u = self._func_info_map.get(mk)
@@ -596,10 +629,10 @@ class CallVisitor:
                             functional=False,
                             allow_keywords=False,
                         )
-                        return self._map_method_expr(
+                        return self._map_param_method_expr(
                             recv,
                             meth,
-                            [self._visit_expr(arg) for arg in arg_nodes],
+                            arg_nodes,
                             recv_spec,
                         )
                     raw_args = [self._visit_expr(a) for a in node.args]
@@ -692,8 +725,9 @@ class CallVisitor:
                             functional=False,
                             allow_keywords=False,
                         )
-                        margs = [self._visit_expr(a) for a in arg_nodes]
-                        return self._map_method_expr(m, meth_raw, margs, recv_spec)
+                        return self._map_param_method_expr(
+                            m, meth_raw, arg_nodes, recv_spec
+                        )
                     if (
                         recv_spec is not None
                         and recv_spec.kind == "array"
@@ -860,8 +894,9 @@ class CallVisitor:
                 functional=False,
                 allow_keywords=False,
             )
-            args = [self._visit_expr(a) for a in arg_nodes]
-            return self._map_method_expr(m, func_name, args, namespace_spec)
+            return self._map_param_method_expr(
+                m, func_name, arg_nodes, namespace_spec
+            )
 
         # map.method(m, args...) — functional form
         if namespace == "map":
@@ -877,12 +912,13 @@ class CallVisitor:
                 )
             if func_name == "new":
                 spec = self._type_spec_from_expr(node) or TypeSpec.map(TypeSpec.primitive("string"), TypeSpec.primitive("float"))
-                return f"{self._type_spec_to_cpp(spec)}()"
+                return f"{self._type_spec_to_cpp(spec)}::new_()"
             if func_name in MAP_METHODS and node.args:
                 m = self._visit_expr(node.args[0])
-                rest = [self._visit_expr(a) for a in node.args[1:]]
                 spec = self._type_spec_from_expr(node.args[0]) if node.args else None
-                return self._map_method_expr(m, func_name, rest, spec)
+                return self._map_param_method_expr(
+                    m, func_name, list(node.args[1:]), spec
+                )
             return "0"
 
         if (
@@ -1484,6 +1520,9 @@ class CallVisitor:
                             val = val.replace("na<double>()", "na<int64_t>()")
                         else:
                             val = f"(int64_t)({val})"
+                    elif (f_cpp_type.startswith("PineMap<")
+                          and val == "na<double>()"):
+                        val = f"{f_cpp_type}{{}}"
                     field_inits.append(f".{f.name} = {val}")
             # Mark the constructed object non-na (the struct's ``__pf_na`` is the
             # last declared field, so this designator stays in declaration order).

@@ -245,7 +245,7 @@ var line marker = na
         "grid = PineMatrix::new_(1, 1, current_bar_.low);"
     ) == 1
     assert init_block.count(
-        "lookup = std::unordered_map<std::string, double>();"
+        "lookup = PineMap<std::string, double>::new_();"
     ) == 1
     assert init_block.count(
         "point = Point{.x = current_bar_.low, .__pf_na = false};"

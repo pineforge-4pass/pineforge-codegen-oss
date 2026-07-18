@@ -752,6 +752,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         self._register_global_aggregate_member_types()
         self._register_udt_array_get_ref_locals()
+        self._uses_map = self._detect_map_usage()
         self._uses_matrix = self._detect_matrix_usage()
         # Drawing-objects-as-data: gate all new emission (drawing.hpp include +
         # the per-type arenas) on this flag so non-drawing strategies stay
@@ -1428,6 +1429,64 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if isinstance(node, FuncCall):
                 _fn, ns = self._resolve_callee(node.callee)
                 if ns == "matrix":
+                    return True
+        return False
+
+    def _detect_map_usage(self) -> bool:
+        """True when emitted C++ needs the PineMap handle/runtime helpers.
+
+        The call scan catches constructors and built-in operations. TypeSpec
+        scans additionally catch typed ``na`` maps and map fields that never
+        execute a map call, so their declarations still receive map.hpp and
+        map-aware COOF checkpoint support.
+        """
+        def contains_map(
+            spec: TypeSpec | None, visiting_udts: frozenset[str] = frozenset()
+        ) -> bool:
+            if spec is None:
+                return False
+            if spec.kind == "map":
+                return True
+            if spec.kind in {"array", "matrix"}:
+                return contains_map(spec.element, visiting_udts)
+            if spec.kind == "udt" and spec.name:
+                if spec.name in visiting_udts:
+                    return False
+                nested_visiting = visiting_udts | {spec.name}
+                return any(
+                    contains_map(field_spec, nested_visiting)
+                    for field_spec in self._udt_field_type_specs.get(
+                        spec.name, {}
+                    ).values()
+                )
+            return False
+
+        if self._map_vars:
+            return True
+        if any(contains_map(spec) for spec in self._collection_types.values()):
+            return True
+        if any(
+            contains_map(spec)
+            for fields in self._udt_field_type_specs.values()
+            for spec in fields.values()
+        ):
+            return True
+        for specs in self._func_collection_types.values():
+            if any(contains_map(spec) for spec in specs.values()):
+                return True
+        for fi in self._func_info_map.values():
+            if any(contains_map(spec) for spec in fi.param_type_specs):
+                return True
+            if contains_map(getattr(fi, "return_type_spec", None)):
+                return True
+        for node in self._walk_ast(self.ctx.ast):
+            if isinstance(node, FuncCall):
+                _fn, namespace = self._resolve_callee(node.callee)
+                if namespace == "map":
+                    return True
+            if isinstance(node, VarDecl):
+                spec = self._type_spec_from_hint_name(node.type_hint)
+                if contains_map(spec):
                     return True
         return False
 
@@ -2366,6 +2425,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.append(f"inline bool is_na(const {type_name}& _z) {{ return _z.__pf_na; }}")
             lines.append("")
 
+        if self._uses_map:
+            self._emit_map_checkpoint_traits(lines)
+
         # 1c. Enum constants + string tables for str.tostring(enumVar)
         for enum_name, members in self._enum_defs.items():
             for i, member in enumerate(members):
@@ -2579,7 +2641,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if "ta.pivot_point_levels" in str(init_str):
                 lines.append(f"    std::vector<double> {safe};")
                 continue
-            if "map.new" in str(init_str) or name in self._map_vars:
+            if (not _is_udt_ctor_init) and (
+                "map.new" in str(init_str) or name in self._map_vars
+            ):
                 self._map_vars.add(name)
                 lines.append(f"    {self._type_spec_to_cpp(self._map_spec_for_name(name))} {safe};")
                 continue

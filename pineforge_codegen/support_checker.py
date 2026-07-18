@@ -474,6 +474,12 @@ class SupportChecker:
         # shapes before codegen.
         self._udt_drawing_fields: dict[str, set[str]] = {}
         self._var_udt_types: dict[str, str] = {}
+        # PineMap IDs require runtime snapshots during COOF rollback. History
+        # buffers and generic matrices still value-copy their elements, so
+        # map-bearing shapes that would silently retain live aliases are gated
+        # until those containers have recursive checkpoint adapters.
+        self._udt_field_type_names: dict[str, dict[str, str]] = {}
+        self._map_bearing_udts: set[str] = set()
         # Names (vars and function params) declared as a scalar visual-container
         # type (table/box/line/label/linefill). A method call on one of these
         # (``panel.cell(...)``) is a visual sink whose args may carry visual
@@ -528,6 +534,10 @@ class SupportChecker:
         for stmt in ast.body:
             if isinstance(stmt, TypeDecl):
                 self._user_types.add(stmt.name)
+                self._udt_field_type_names[stmt.name] = {
+                    field.name: str(field.type_name or "").replace(" ", "")
+                    for field in stmt.fields
+                }
                 drawing_fields = {
                     field.name
                     for field in stmt.fields
@@ -548,6 +558,30 @@ class SupportChecker:
             elif isinstance(stmt, MethodDef):
                 self._user_methods.add(stmt.name)
                 self._collect_visual_container_params(stmt)
+
+        # Resolve direct and transitively nested map-bearing UDTs. Pine type
+        # declarations are normally dependency ordered, but the fixed point
+        # also keeps this guard deterministic for synthetic test ASTs.
+        changed = True
+        while changed:
+            changed = False
+            for udt_name, fields in self._udt_field_type_names.items():
+                bearing_fields = {
+                    field_name
+                    for field_name, type_name in fields.items()
+                    if type_name.startswith("map<")
+                    or any(
+                        type_name == nested
+                        or f"<{nested}>" in type_name
+                        or f"<{nested}," in type_name
+                        or f",{nested}>" in type_name
+                        for nested in self._map_bearing_udts
+                    )
+                }
+                if bearing_fields:
+                    if udt_name not in self._map_bearing_udts:
+                        self._map_bearing_udts.add(udt_name)
+                        changed = True
 
     def _collect_visual_container_params(self, fn) -> None:
         """Register a function's parameters that are declared with a scalar
@@ -827,6 +861,16 @@ class SupportChecker:
         # so a direct ``dash.cell(..., text.align_left)`` is treated as a visual
         # sink (mirrors the table/box/line/label/linefill PARAM tracking).
         decl_hint = str(node.type_hint).replace(" ", "") if node.type_hint else None
+        if decl_hint and decl_hint.startswith("matrix<") and decl_hint.endswith(">"):
+            matrix_element = decl_hint[len("matrix<"):-1]
+            if matrix_element in self._map_bearing_udts:
+                self._err(
+                    node,
+                    f"matrix<{matrix_element}> is not supported when "
+                    "the UDT contains a map field; rollback would retain "
+                    "live map aliases.",
+                    hint="Use array<UDT> for recursively checkpointed state.",
+                )
         if decl_hint in _VISUAL_CONTAINER_TYPES:
             self._visual_container_vars.add(node.name)
         elif isinstance(node.value, FuncCall):
@@ -1185,6 +1229,15 @@ class SupportChecker:
                     self._visit_children(node)
                     return
                 allowed_prim = {"float", "int", "bool", "string", "color"}
+                if t in self._map_bearing_udts:
+                    self._err(
+                        node,
+                        f"matrix<{t}> is not supported when the UDT contains "
+                        "a map field; rollback would retain live map aliases.",
+                        hint="Use array<UDT> for recursively checkpointed state.",
+                    )
+                    self._visit_children(node)
+                    return
                 if t not in allowed_prim and t not in self._user_types:
                     self._err(node, f"matrix<{t}> element type not supported. Allowed: float, int, bool, string, color, or a declared UDT.")
                     self._visit_children(node)
