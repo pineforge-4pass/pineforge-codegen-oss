@@ -2626,12 +2626,24 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             _is_udt_ctor_init = any(
                 _init_str_s.startswith(f"{u}.new") for u in self._udt_defs
             )
-            if (not _is_udt_ctor_init) and (
-                "array.new" in _init_str_s or "array.from" in _init_str_s
-                or name in self._array_vars
+            exact_member_spec = self._global_collection_types.get(name)
+            exact_array_member = (
+                exact_member_spec is not None
+                and exact_member_spec.kind == "array"
+            )
+            if exact_array_member or (
+                not _is_udt_ctor_init
+                and (
+                    "array.new" in _init_str_s
+                    or "array.from" in _init_str_s
+                    or name in self._array_vars
+                )
             ):
                 self._array_vars.add(name)
-                lines.append(f"    {self._type_spec_to_cpp(self._array_spec_for_name(name))} {safe};")
+                array_spec = exact_member_spec or self._array_spec_for_name(name)
+                lines.append(
+                    f"    {self._type_spec_to_cpp(array_spec)} {safe};"
+                )
                 continue
             # Detect matrix vars from init expression OR from the set
             # populated by ``_register_global_aggregate_member_types``
@@ -2648,11 +2660,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if "ta.pivot_point_levels" in str(init_str):
                 lines.append(f"    std::vector<double> {safe};")
                 continue
-            if (not _is_udt_ctor_init) and (
-                "map.new" in str(init_str) or name in self._map_vars
+            exact_map_member = (
+                exact_member_spec is not None
+                and exact_member_spec.kind == "map"
+            )
+            if exact_map_member or (
+                not _is_udt_ctor_init
+                and ("map.new" in str(init_str) or name in self._map_vars)
             ):
                 self._map_vars.add(name)
-                lines.append(f"    {self._type_spec_to_cpp(self._map_spec_for_name(name))} {safe};")
+                map_spec = exact_member_spec or self._map_spec_for_name(name)
+                lines.append(f"    {self._type_spec_to_cpp(map_spec)} {safe};")
                 continue
             # Detect UDT vars. Two signals: (1) the analyzer recorded an
             # explicit UDT type annotation in ``_udt_var_types`` - this is the
