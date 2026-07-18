@@ -200,6 +200,15 @@ class StmtVisitor:
                     node.name,
                     activation_spec,
                 )
+            if (
+                node.name == "map"
+                and getattr(self, "_block_map_visibility_depth", 0) > 0
+            ):
+                # The declaration RHS was emitted against the outer lexical
+                # state. Only subsequent statements in this exact block see
+                # the new ``map`` value; block pop restores sibling/outside
+                # visibility.
+                self._block_map_binding_visible = True
         elif isinstance(node, Assignment):
             self._visit_assignment(node, lines, pad)
         elif isinstance(node, TupleAssign):
@@ -828,10 +837,21 @@ class StmtVisitor:
         block can reuse the same raw name without either pre-shadowing earlier
         statements or controlling dispatch in the other branch.
         """
+        previous_map_visible = getattr(
+            self, "_block_map_binding_visible", False
+        )
+        previous_map_depth = getattr(self, "_block_map_visibility_depth", 0)
+        self._block_map_visibility_depth = previous_map_depth + 1
+
         renames = self._block_var_renames.get(id(owner))
         collection_specs = self._block_collection_types.get(id(owner))
         if not renames and collection_specs is None:
-            return _NO_BLOCK_REMAP
+            return (
+                _NO_BLOCK_REMAP,
+                None,
+                previous_map_visible,
+                previous_map_depth,
+            )
         saved_remap = self._active_var_remap
         if renames:
             self._active_var_remap = {**saved_remap, **renames}
@@ -856,22 +876,35 @@ class StmtVisitor:
             self._array_vars = set(self._array_vars)
             self._map_vars = set(self._map_vars)
             self._matrix_specs = dict(self._matrix_specs)
-        return saved_remap, saved_collections
+        return (
+            saved_remap,
+            saved_collections,
+            previous_map_visible,
+            previous_map_depth,
+        )
 
     def _pop_block_var_remap(self, saved) -> None:
-        if saved is _NO_BLOCK_REMAP:
-            return
-        saved_remap, saved_collections = saved
-        self._active_var_remap = saved_remap
-        if saved_collections is not None:
-            (
-                self._current_func_collection_specs,
-                self._current_func_collection_shadows,
-                self._collection_types,
-                self._array_vars,
-                self._map_vars,
-                self._matrix_specs,
-            ) = saved_collections
+        (
+            saved_remap,
+            saved_collections,
+            previous_map_visible,
+            previous_map_depth,
+        ) = saved
+        try:
+            if saved_remap is not _NO_BLOCK_REMAP:
+                self._active_var_remap = saved_remap
+                if saved_collections is not None:
+                    (
+                        self._current_func_collection_specs,
+                        self._current_func_collection_shadows,
+                        self._collection_types,
+                        self._array_vars,
+                        self._map_vars,
+                        self._matrix_specs,
+                    ) = saved_collections
+        finally:
+            self._block_map_binding_visible = previous_map_visible
+            self._block_map_visibility_depth = previous_map_depth
 
     def _visit_block_statements(self, body: list, lines: list[str],
                                 indent: int) -> None:

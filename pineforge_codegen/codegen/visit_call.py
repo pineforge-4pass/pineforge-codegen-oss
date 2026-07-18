@@ -139,6 +139,7 @@ from ..ast_nodes import (
     NaLiteral,
     TupleLiteral,
     StringLiteral,
+    VarDecl,
 )
 from ..symbols import TypeSpec
 from .. import signatures as sigs
@@ -299,12 +300,172 @@ class CallVisitor:
             node.args, node.kwargs, ["id", *param_names], lambda arg: arg
         )
 
-    def _map_param_method_arg_nodes(self, method: str, node: FuncCall) -> list:
-        """Merge typed-map parameter method kwargs into signature order."""
-        param_names = MAP_METHOD_KWARGS.get(method)
-        if param_names is None:
-            return list(node.args)
-        return _merge_kwargs(node.args, node.kwargs, param_names, lambda arg: arg)
+    def _map_identifier_is_visible_binding(self, node: FuncCall) -> bool:
+        """Whether ``map`` is a lexical value at this exact source position.
+
+        Global collection registries are intentionally pre-populated before
+        code emission, so raw membership in ``_var_names`` / collection maps
+        cannot answer this question: a later ``map`` declaration must not
+        capture an earlier built-in ``map.*`` call.  Callable/block overlays,
+        by contrast, are activated in source order and therefore take first
+        refusal.  For a direct top-level binding, compare the containing
+        top-level statement indexes; the binding becomes visible only after
+        its declaration statement, never inside its own RHS.
+        """
+        name = "map"
+        if (
+            name in getattr(self, "_current_func_param_types", {})
+            or name in getattr(self, "_current_func_collection_specs", {})
+            or name in getattr(self, "_current_func_collection_shadows", set())
+            or name in getattr(self, "_current_func_local_types", {})
+            or name in getattr(self, "_current_loop_vars", set())
+            or getattr(self, "_block_map_binding_visible", False)
+        ):
+            return True
+
+        top_index_by_node = getattr(self, "_top_level_index_by_ast_node", None)
+        top_index_by_span = getattr(self, "_top_level_index_by_source_span", None)
+        map_decl_index = getattr(self, "_top_level_map_decl_index", None)
+        if top_index_by_node is None or top_index_by_span is None:
+            top_index_by_node = {}
+            top_index_by_span = {}
+            ambiguous_spans = set()
+            map_decl_index = None
+            for index, statement in enumerate(self.ctx.ast.body):
+                for candidate in self._walk_ast(statement):
+                    top_index_by_node[id(candidate)] = index
+                    loc = getattr(candidate, "loc", None)
+                    if loc is not None:
+                        span = (
+                            type(candidate), loc.file, loc.line, loc.col, loc.end_col,
+                        )
+                        previous = top_index_by_span.get(span)
+                        if previous is None:
+                            top_index_by_span[span] = index
+                        elif previous != index:
+                            ambiguous_spans.add(span)
+                if (
+                    map_decl_index is None
+                    and isinstance(statement, VarDecl)
+                    and statement.name == name
+                ):
+                    map_decl_index = index
+            for span in ambiguous_spans:
+                top_index_by_span.pop(span, None)
+            self._top_level_index_by_ast_node = top_index_by_node
+            self._top_level_index_by_source_span = top_index_by_span
+            self._top_level_map_decl_index = map_decl_index
+
+        if map_decl_index is None:
+            return False
+        call_index = top_index_by_node.get(id(node))
+        if call_index is None:
+            # Setup-time rewrites (notably request.security timeframe input
+            # substitution) may clone an expression.  Those clones retain the
+            # original source span, so recover their containing top-level
+            # statement from the unmodified AST instead of treating every
+            # synthetic node as if all globals were already visible.
+            loc = getattr(node, "loc", None)
+            if loc is not None:
+                call_index = top_index_by_span.get(
+                    (type(node), loc.file, loc.line, loc.col, loc.end_col)
+                )
+        if call_index is None:
+            # With no identity or source ancestry there is no evidence that a
+            # later global binding was visible.  Fail closed to the built-in
+            # namespace; synthetic lexical receivers must preserve provenance.
+            return False
+        return map_decl_index < call_index
+
+    def _map_call_arg_nodes(
+        self,
+        method: str,
+        node: FuncCall,
+        *,
+        functional: bool,
+        allow_keywords: bool,
+    ) -> list:
+        """Validate and bind one established map-call form.
+
+        Map lowerings index directly into their argument arrays.  Before this
+        guard, malformed calls therefore either reached a raw ``IndexError``
+        or, for keyword-only ``map.*`` functional calls, silently lowered to
+        ``0``.  Keep routing policy separate from signature validation: only
+        the typed-map UDF-parameter method lane currently accepts canonical
+        keywords; all other lanes retain their established positional-only
+        semantics and fail closed when keywords are supplied.
+        """
+        if method == "new":
+            param_names: list[str] = []
+        else:
+            method_params = MAP_METHOD_KWARGS.get(method)
+            if method_params is None:
+                return list(node.args)
+            param_names = (["id", *method_params] if functional
+                           else list(method_params))
+
+        signature = f"map.{method}({', '.join(param_names)})"
+        unknown = sorted(set(node.kwargs) - set(param_names))
+        if unknown:
+            name = unknown[0]
+            hint = f"Expected {signature}."
+            if method == "put_all" and name == "from":
+                hint = f"Use 'id2=' for the source map. Expected {signature}."
+            self._codegen_error(
+                node,
+                f"map.{method}: unknown keyword argument '{name}'",
+                hint=hint,
+            )
+
+        if len(node.args) > len(param_names):
+            self._codegen_error(
+                node,
+                (
+                    f"map.{method}: too many positional arguments "
+                    f"(expected {len(param_names)}, got {len(node.args)})"
+                ),
+                hint=f"Expected {signature}.",
+            )
+
+        for name in param_names[:len(node.args)]:
+            if name in node.kwargs:
+                self._codegen_error(
+                    node,
+                    (
+                        f"map.{method}: argument '{name}' passed both "
+                        "positionally and by keyword"
+                    ),
+                    hint=f"Expected {signature}; bind each argument once.",
+                )
+
+        bound: list = [None] * len(param_names)
+        for index, arg in enumerate(node.args):
+            bound[index] = arg
+        for name, value in node.kwargs.items():
+            bound[param_names.index(name)] = value
+
+        missing = [
+            name for name, value in zip(param_names, bound) if value is None
+        ]
+        if missing:
+            self._codegen_error(
+                node,
+                f"map.{method}: missing required argument '{missing[0]}'",
+                hint=f"Expected {signature}.",
+            )
+
+        if node.kwargs and not allow_keywords:
+            form = "functional" if functional else "receiver-method"
+            self._codegen_error(
+                node,
+                (
+                    f"map.{method}: keyword arguments are not supported "
+                    f"for this {form} call form"
+                ),
+                hint=f"Use the established positional form: {signature}.",
+            )
+
+        return bound
 
     def _map_param_method_expr(
         self, map_expr: str, method: str, arg_nodes: list, spec: TypeSpec,
@@ -407,13 +568,40 @@ class CallVisitor:
             obj = callee.object
             if isinstance(obj, MemberAccess):
                 root = obj.object
-                if not (isinstance(root, Identifier) and root.name in (
+                root_is_builtin_namespace = (
+                    isinstance(root, Identifier)
+                    and root.name in (
                     "strategy", "ta", "math", "input", "str", "timeframe", "syminfo",
                     "barstate", "color", "request", "runtime", "array", "matrix", "map",
-                )):
+                    )
+                )
+                if (
+                    root_is_builtin_namespace
+                    and root.name == "map"
+                    and self._map_identifier_is_visible_binding(node)
+                ):
+                    root_is_builtin_namespace = False
+                if not root_is_builtin_namespace:
                     recv_spec = self._type_spec_from_expr(obj)
                     recv = self._visit_expr(obj)
                     meth = callee.member
+                    if (
+                        recv_spec is not None
+                        and recv_spec.kind == "map"
+                        and meth in MAP_METHODS
+                    ):
+                        arg_nodes = self._map_call_arg_nodes(
+                            meth,
+                            node,
+                            functional=False,
+                            allow_keywords=False,
+                        )
+                        return self._map_method_expr(
+                            recv,
+                            meth,
+                            [self._visit_expr(arg) for arg in arg_nodes],
+                            recv_spec,
+                        )
                     raw_args = [self._visit_expr(a) for a in node.args]
                     if recv_spec is not None and recv_spec.kind == "array" and meth in ARRAY_METHODS:
                         arg_nodes = self._array_method_arg_nodes(meth, node)
@@ -423,8 +611,6 @@ class CallVisitor:
                             self._array_method_args(meth, arg_nodes, recv_spec),
                             recv_spec,
                         )
-                    if recv_spec is not None and recv_spec.kind == "map" and meth in MAP_METHODS:
-                        return self._map_method_expr(recv, meth, raw_args, recv_spec)
                     args = ", ".join(raw_args)
                     if meth == "delete":
                         meth = "_delete_"
@@ -432,7 +618,11 @@ class CallVisitor:
             # obj.method() where obj is a user var/param — not namespace::method
             if isinstance(obj, Identifier):
                 oname = obj.name
-                if (
+                receiver_is_visible = (
+                    oname != "map"
+                    or self._map_identifier_is_visible_binding(node)
+                )
+                if receiver_is_visible and (
                     oname in self._var_names
                     or oname in self._current_func_param_types
                     or oname in self._current_loop_vars
@@ -476,8 +666,11 @@ class CallVisitor:
                         and meth_raw in MAP_METHODS
                     ):
                         m = self._collection_receiver_expr(oname)
-                        arg_nodes = self._map_param_method_arg_nodes(
-                            meth_raw, node
+                        arg_nodes = self._map_call_arg_nodes(
+                            meth_raw,
+                            node,
+                            functional=False,
+                            allow_keywords=True,
                         )
                         return self._map_param_method_expr(
                             m, meth_raw, arg_nodes, param_spec
@@ -493,7 +686,13 @@ class CallVisitor:
                         and meth_raw in MAP_METHODS
                     ):
                         m = self._collection_receiver_expr(oname)
-                        margs = [self._visit_expr(a) for a in node.args]
+                        arg_nodes = self._map_call_arg_nodes(
+                            meth_raw,
+                            node,
+                            functional=False,
+                            allow_keywords=False,
+                        )
+                        margs = [self._visit_expr(a) for a in arg_nodes]
                         return self._map_method_expr(m, meth_raw, margs, recv_spec)
                     if (
                         recv_spec is not None
@@ -643,16 +842,39 @@ class CallVisitor:
             else None
         )
         if (
+            namespace == "map"
+            and not self._map_identifier_is_visible_binding(node)
+        ):
+            # A later global named ``map`` is already present in the flat
+            # collection registry, but is not yet a lexical receiver here.
+            namespace_spec = None
+        if (
             namespace_spec is not None
             and namespace_spec.kind == "map"
             and func_name in MAP_METHODS
         ):
             m = self._collection_receiver_expr(namespace)
-            args = [self._visit_expr(a) for a in node.args]
+            arg_nodes = self._map_call_arg_nodes(
+                func_name,
+                node,
+                functional=False,
+                allow_keywords=False,
+            )
+            args = [self._visit_expr(a) for a in arg_nodes]
             return self._map_method_expr(m, func_name, args, namespace_spec)
 
         # map.method(m, args...) — functional form
         if namespace == "map":
+            if func_name == "new" or func_name in MAP_METHODS:
+                # This dispatch point comes after lexical receiver routing, so
+                # a parameter/local/global named ``map`` retains precedence
+                # over the built-in namespace.
+                self._map_call_arg_nodes(
+                    func_name,
+                    node,
+                    functional=True,
+                    allow_keywords=False,
+                )
             if func_name == "new":
                 spec = self._type_spec_from_expr(node) or TypeSpec.map(TypeSpec.primitive("string"), TypeSpec.primitive("float"))
                 return f"{self._type_spec_to_cpp(spec)}()"

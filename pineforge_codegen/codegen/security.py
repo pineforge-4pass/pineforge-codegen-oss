@@ -58,6 +58,8 @@ tables and types come from ``codegen/tables.py``, ``..ast_nodes``,
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, BreakStmt, ContinueStmt, ExprStmt,
     ForStmt, ForInStmt, FuncCall, FuncDef, Identifier, IfStmt, MemberAccess,
@@ -253,12 +255,21 @@ class SecurityEmitter:
         if isinstance(node, Identifier):
             name = node.name
             if name in self._timeframe_period_vars:
-                return MemberAccess(object=Identifier(name="timeframe"), member="period")
+                return MemberAccess(
+                    object=Identifier(name="timeframe", loc=node.loc),
+                    member="period",
+                    loc=node.loc,
+                    annotations=node.annotations,
+                )
             if name in self._input_backed_vars and name in self._input_var_to_call:
                 return self._input_var_to_call[name]
             if (name in self._known_vars and name not in self._input_backed_vars
                     and isinstance(self._known_vars[name], str)):
-                return StringLiteral(value=self._known_vars[name])
+                return StringLiteral(
+                    value=self._known_vars[name],
+                    loc=node.loc,
+                    annotations=node.annotations,
+                )
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
             if name in global_expr_map and name not in resolving:
                 return self._substitute_tf_input_reads(
@@ -270,18 +281,18 @@ class SecurityEmitter:
             fv = self._substitute_tf_input_reads(node.false_val, resolving)
             if cond is node.condition and tv is node.true_val and fv is node.false_val:
                 return node
-            return Ternary(condition=cond, true_val=tv, false_val=fv)
+            return replace(node, condition=cond, true_val=tv, false_val=fv)
         if isinstance(node, BinOp):
             left = self._substitute_tf_input_reads(node.left, resolving)
             right = self._substitute_tf_input_reads(node.right, resolving)
             if left is node.left and right is node.right:
                 return node
-            return BinOp(left=left, op=node.op, right=right)
+            return replace(node, left=left, right=right)
         if isinstance(node, UnaryOp):
             operand = self._substitute_tf_input_reads(node.operand, resolving)
             if operand is node.operand:
                 return node
-            return UnaryOp(op=node.op, operand=operand)
+            return replace(node, operand=operand)
         if isinstance(node, FuncCall):
             new_args = [self._substitute_tf_input_reads(a, resolving) for a in node.args]
             new_kwargs = {
@@ -295,13 +306,19 @@ class SecurityEmitter:
             )
             if unchanged:
                 return node
-            return FuncCall(callee=node.callee, args=new_args, kwargs=new_kwargs)
+            # Preserve the source span and annotations of the original call.
+            # Namespace/receiver resolution uses that provenance to decide
+            # whether a same-named global binding was visible at this call's
+            # source position.  Rebuilding a bare FuncCall here used to turn
+            # the span into synthetic 1:1 and could let a later ``map`` global
+            # capture this earlier built-in ``map.get(...)``.
+            return replace(node, args=new_args, kwargs=new_kwargs)
         if isinstance(node, Subscript):
             obj = self._substitute_tf_input_reads(node.object, resolving)
             idx = self._substitute_tf_input_reads(node.index, resolving)
             if obj is node.object and idx is node.index:
                 return node
-            return Subscript(object=obj, index=idx)
+            return replace(node, object=obj, index=idx)
         return node
 
     def _resolve_param_tf_from_callsites(self, func_name: str, param_name: str):

@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 
 from .lexer import Token, TokenType
-from .errors import SourceLocation
+from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from .ast_nodes import (
     ASTNode,
     Program, StrategyDecl, ImportStmt,
@@ -1228,6 +1228,24 @@ class Parser:
                     and self._peek().type == TokenType.EQUALS
                     and self._peek(2).type != TokenType.EQUALS):
                 key_tok = self._advance()
+                if key_tok.value in kwargs:
+                    raise CompileError(
+                        [
+                            Diagnostic(
+                                level=Level.ERROR,
+                                phase=Phase.PARSER,
+                                location=self._loc(key_tok),
+                                message=(
+                                    "duplicate keyword argument "
+                                    f"'{key_tok.value}'"
+                                ),
+                                hint=(
+                                    f"Remove one '{key_tok.value}=' binding; "
+                                    "a keyword argument may be specified only once."
+                                ),
+                            )
+                        ]
+                    )
                 self._advance()  # consume =
                 val = self._parse_expression()
                 kwargs[key_tok.value] = val
