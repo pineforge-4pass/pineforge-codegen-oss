@@ -251,6 +251,39 @@ local_previous = local_if(false).put("local-if", 50)
 '''
 
 
+_UNTYPED_MAP_CHAIN_SOURCE = '''//@version=6
+strategy("PineMap untyped wrapper chains")
+choose(cond, a, b) => cond ? a : b
+select_layer(cond, a, b) => choose(cond, a, b)
+choose_nullable(cond, a, b) => cond ? a : b
+nullable_layer(cond, value) => choose_nullable(cond, value, na)
+identity(value) => value
+identity_layer(value) => identity(value)
+deep_select(cond, a, b) => identity_layer(select_layer(cond, a, b))
+effect_leaf(value) => value.put("effect", "propagated")
+effect_middle(value) => effect_leaf(value)
+effect_outer(value) => effect_middle(value)
+cycle_passthrough(value) =>
+    if false
+        cycle_passthrough(value)
+    value
+var left = map.new<string, int>()
+var right = map.new<string, int>()
+var words = map.new<string, string>()
+left.put("seed-left", 1)
+right.put("seed-right", 2)
+words.put("seed-text", "present")
+selected = deep_select(true, left, right)
+copied = deep_select(false, left, right).copy()
+cycled = cycle_passthrough(left)
+nullable_selected = nullable_layer(true, left)
+nullable_absent = nullable_layer(false, left)
+selected_previous = deep_select(true, left, right).put("selected", 10)
+effect_previous = effect_outer(words)
+copy_previous = copied.put("copy-only", 20)
+'''
+
+
 def _find_engine_library() -> Path | None:
     explicit = os.environ.get("PINEFORGE_ENGINE_LIB")
     if explicit:
@@ -920,3 +953,75 @@ int main() {
         transpile(_UNTYPED_MAP_SELECTION_SOURCE) + driver,
         label="pinemap-untyped-selection-return-runtime",
     ) == "ok\n"
+
+
+def test_untyped_map_specs_propagate_through_deep_wrapper_chains() -> None:
+    cpp = transpile(_UNTYPED_MAP_CHAIN_SOURCE)
+    map_type = "PineMap<std::string, int>"
+    for function in (
+        "choose",
+        "select_layer",
+        "choose_nullable",
+        "nullable_layer",
+        "identity",
+        "identity_layer",
+        "deep_select",
+        "cycle_passthrough",
+    ):
+        assert f"{map_type} {function}(" in cpp
+    text_map_type = "PineMap<std::string, std::string>"
+    for function in ("effect_leaf", "effect_middle", "effect_outer"):
+        assert f"std::string {function}({text_map_type} value)" in cpp
+    for name in (
+        "selected", "copied", "cycled",
+        "nullable_selected", "nullable_absent",
+    ):
+        assert f"{map_type} {name};" in cpp
+    assert 'std::string effect_previous = std::string("");' in cpp
+    assert "None(" not in cpp
+    compile_env.compile_cpp(cpp, label="pinemap-untyped-wrapper-chain")
+
+
+def test_untyped_map_wrapper_chains_runtime() -> None:
+    driver = r'''
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.run(&bar, 1);
+    if (!strategy.last_error().empty()) return 2;
+    if (!strategy.selected.contains("seed-left")
+            || !strategy.selected.contains("selected")) return 3;
+    if (!strategy.cycled.contains("selected")) return 4;
+    if (strategy.words.get("effect") != "propagated") return 5;
+    if (!strategy.copied.contains("seed-right")
+            || !strategy.copied.contains("copy-only")) return 6;
+    if (strategy.right.contains("copy-only")) return 7;
+    if (!strategy.nullable_selected.contains("selected")
+            || !strategy.nullable_absent.is_na()) return 10;
+    if (!is_na(strategy.selected_previous)
+            || !is_na(strategy.copy_previous)) return 8;
+    if (!strategy.effect_previous.empty()) return 9;
+    std::cout << "ok\n";
+}
+'''
+    assert _compile_and_run(
+        transpile(_UNTYPED_MAP_CHAIN_SOURCE) + driver,
+        label="pinemap-untyped-wrapper-chain-runtime",
+    ) == "ok\n"
+
+
+def test_untyped_function_rejects_incompatible_map_specializations() -> None:
+    source = '''//@version=6
+strategy("PineMap incompatible untyped specializations")
+identity(value) => value
+var ints = map.new<string, int>()
+var strings = map.new<string, string>()
+first = identity(ints)
+second = identity(strings)
+'''
+    with pytest.raises(
+        CompileError,
+        match="cannot emit multiple map specializations",
+    ):
+        transpile(source)

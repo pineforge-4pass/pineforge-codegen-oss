@@ -1883,6 +1883,21 @@ class CallVisitor:
                     f"else {member}.update(_sv); "
                     f"return {member}; }}())"
                 )
+            # A concrete map specialization learned through an untyped
+            # wrapper chain also target-types its call arguments.  In
+            # particular, ``choose(cond, value, na)`` must pass a typed null
+            # PineMap handle rather than the generic ``na<double>()``.  Every
+            # non-map destination remains on the byte-identical expression
+            # path below.
+            if fi_lookup is not None:
+                param_specs = getattr(fi_lookup, "param_type_specs", []) or []
+                if arg_idx < len(param_specs):
+                    param_spec = param_specs[arg_idx]
+                    if param_spec is not None and param_spec.kind == "map":
+                        return self._visit_rhs_value(
+                            arg_node,
+                            target_cpp_type=self._type_spec_to_cpp(param_spec),
+                        )
             return self._visit_expr(arg_node)
 
         ordered_arg_nodes: list = []

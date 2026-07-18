@@ -2648,6 +2648,221 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 next_visiting,
             )
 
+    def _propagate_deferred_map_callable_specs(
+        self,
+        owner: str,
+        parameter_specs: dict[str, TypeSpec | None],
+        visiting: frozenset[str] = frozenset(),
+    ) -> bool:
+        """Monomorphize an all-untyped wrapper chain for one concrete map call.
+
+        Function definitions are analyzed before their concrete top-level call
+        sites.  Consequently ``wrapper(a) => identity(a)`` initially creates
+        both ``FuncInfo`` records with scalar fallbacks.  The definition pass
+        already captured identity-keyed parameter-flow edges for deferred map
+        history validation; reuse those exact edges to carry a later map
+        ``TypeSpec`` inward, then infer map returns on the way back out.
+
+        This is deliberately bounded and map-triggered.  Cycles stop at the
+        active owner, incompatible previously-established parameter specs stop
+        that edge, and scalar-only call graphs never mutate.  PineForge emits
+        one C++ body per ordinary UDF, so silently replacing one concrete map
+        specialization with a different one would be a false polymorphic
+        inference rather than a valid widening.
+        """
+        if owner in visiting:
+            return False
+        if not any(
+            spec is not None and spec.kind == "map"
+            for spec in parameter_specs.values()
+        ):
+            return False
+
+        func_info = next(
+            (info for info in self._func_infos if info.name == owner),
+            None,
+        )
+        func_def = self._func_defs.get(owner)
+        if func_info is None or func_def is None:
+            return False
+
+        changed = False
+        while len(func_info.param_type_specs) < len(func_def.params):
+            func_info.param_type_specs.append(None)
+        declared_specs = list(
+            self._func_param_type_specs.get(owner)
+            or self._param_type_specs_from_def(func_def)
+        )
+        while len(declared_specs) < len(func_def.params):
+            declared_specs.append(None)
+
+        # Refuse to overwrite a declared or previously learned concrete map
+        # specialization.  Equal specs and still-unresolved slots are safe.
+        for index, param_name in enumerate(func_def.params):
+            incoming = parameter_specs.get(param_name)
+            if incoming is None:
+                continue
+            established = declared_specs[index] or func_info.param_type_specs[index]
+            if (
+                established is not None
+                and established != incoming
+                and (established.kind == "map" or incoming.kind == "map")
+            ):
+                self._error(
+                    f"User function '{owner}' is called with incompatible "
+                    "map parameter types; PineForge cannot emit multiple "
+                    "map specializations for one untyped function.",
+                    func_def.loc,
+                )
+        for index, param_name in enumerate(func_def.params):
+            incoming = parameter_specs.get(param_name)
+            if incoming is None or func_info.param_type_specs[index] is not None:
+                continue
+            func_info.param_type_specs[index] = incoming
+            changed = True
+
+        next_visiting = visiting | {owner}
+        edges = self._deferred_param_call_edges.get(owner, [])
+        # Nested actual arguments can depend on a sibling edge's newly learned
+        # return spec.  A bounded local fixed point removes source-order
+        # dependence without turning this into whole-program re-analysis.
+        for _ in range(max(1, len(edges) + 1)):
+            pass_changed = False
+            for (
+                _call_id,
+                callee_owner,
+                callee_param_names,
+                bound_args,
+                parameter_nodes_by_arg,
+            ) in edges:
+                callee_specs: dict[str, TypeSpec | None] = {}
+                for index, param_name in enumerate(callee_param_names):
+                    arg = bound_args[index] if index < len(bound_args) else None
+                    if arg is None:
+                        callee_specs[param_name] = None
+                        continue
+                    parameter_nodes = (
+                        parameter_nodes_by_arg[index]
+                        if index < len(parameter_nodes_by_arg)
+                        else {}
+                    )
+                    overrides = {
+                        node_id: parameter_specs.get(name)
+                        for node_id, name in parameter_nodes.items()
+                    }
+                    callee_specs[param_name] = self._history_receiver_type_spec(
+                        arg, overrides
+                    )
+                # A bare ``na`` actual argument acquires the one unambiguous
+                # map type carried by its sibling arguments.  This is needed
+                # for wrappers such as ``select(c, m) => choose(c, m, na)``;
+                # without it the inner untyped parameter remains scalar even
+                # though Pine context-types the na handle.  Multiple distinct
+                # map specs stay unresolved rather than guessing.
+                concrete_map_specs = {
+                    spec
+                    for spec in callee_specs.values()
+                    if spec is not None and spec.kind == "map"
+                }
+                if len(concrete_map_specs) == 1:
+                    contextual_map_spec = next(iter(concrete_map_specs))
+                    for index, param_name in enumerate(callee_param_names):
+                        arg = (
+                            bound_args[index]
+                            if index < len(bound_args)
+                            else None
+                        )
+                        if (
+                            callee_specs.get(param_name) is None
+                            and (
+                                isinstance(arg, NaLiteral)
+                                or (
+                                    isinstance(arg, Identifier)
+                                    and arg.name == "na"
+                                )
+                            )
+                        ):
+                            callee_specs[param_name] = contextual_map_spec
+                if self._propagate_deferred_map_callable_specs(
+                    callee_owner,
+                    callee_specs,
+                    next_visiting,
+                ):
+                    pass_changed = True
+            changed = changed or pass_changed
+            if not pass_changed:
+                break
+
+        terminal = self._direct_terminal_return_expr(func_def)
+        return_spec = None
+        scalar_return_type = None
+        if isinstance(terminal, Identifier) and terminal.name in parameter_specs:
+            candidate = parameter_specs.get(terminal.name)
+            if candidate is not None and candidate.kind == "map":
+                return_spec = candidate
+        if return_spec is None:
+            return_spec = self._terminal_map_selection_return_spec(
+                terminal, parameter_specs
+            )
+        if return_spec is None:
+            terminal_map_call = self._terminal_map_call_return(
+                terminal, parameter_specs
+            )
+            if terminal_map_call is not None:
+                terminal_return_type, candidate = terminal_map_call
+                if candidate is not None and candidate.kind == "map":
+                    return_spec = candidate
+                elif terminal_return_type not in {
+                    PineType.UNKNOWN, PineType.VOID
+                }:
+                    scalar_return_type = terminal_return_type
+        if return_spec is None:
+            candidate = self._type_spec_from_expr(terminal)
+            if candidate is not None and candidate.kind == "map":
+                return_spec = candidate
+        if return_spec is not None:
+            established_return = self._func_return_type_specs.get(owner)
+            if established_return is None:
+                self._func_return_type_specs[owner] = return_spec
+                func_info.return_type_spec = return_spec
+                changed = True
+            elif established_return == return_spec:
+                if func_info.return_type_spec is None:
+                    func_info.return_type_spec = return_spec
+                    changed = True
+            # A different established return belongs to another concrete map
+            # specialization.  Keep it unchanged rather than falsely widening.
+
+        if scalar_return_type is None and isinstance(terminal, FuncCall):
+            callee = terminal.callee
+            callee_name = (
+                callee.name if isinstance(callee, Identifier) else None
+            )
+            callee_info = next(
+                (
+                    info
+                    for info in self._func_infos
+                    if info.name == callee_name
+                ),
+                None,
+            )
+            if (
+                callee_info is not None
+                and callee_info.return_type
+                not in {PineType.UNKNOWN, PineType.VOID}
+            ):
+                scalar_return_type = callee_info.return_type
+        if (
+            return_spec is None
+            and scalar_return_type is not None
+            and func_info.return_type != scalar_return_type
+        ):
+            func_info.return_type = scalar_return_type
+            self._func_return_types[owner] = scalar_return_type
+            changed = True
+
+        return changed
+
     def _visit_Subscript(self, node: Subscript) -> PineType:
         obj_type = self._visit(node.object)
         self._visit(node.index)

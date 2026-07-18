@@ -1299,4 +1299,17 @@ class CallHandlers:
             if fi.return_type_spec is None and ret_spec is not None:
                 fi.return_type_spec = ret_spec
 
-        return return_type
+        # A concrete map can arrive only at an outer wrapper's eventual call
+        # site, after every nested untyped UDF was initially analyzed with
+        # scalar fallbacks.  Propagate the concrete specs through the exact
+        # definition-time call edges and infer returns in post-order before
+        # codegen snapshots the FuncInfo table.
+        self._propagate_deferred_map_callable_specs(
+            func_name,
+            {
+                name: spec
+                for name, spec in zip(func_def.params, param_specs)
+            },
+        )
+
+        return self._func_return_types.get(func_name, return_type)
