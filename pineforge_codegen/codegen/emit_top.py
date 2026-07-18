@@ -1303,8 +1303,8 @@ class TopLevelEmitter:
             # struct (Line/Box/Label/Linefill), not the unknown lowercase name.
             ret_type = DRAWING_TYPE_TO_CPP.get(fi.udt_return_type, fi.udt_return_type)
         elif getattr(fi, "return_type_spec", None) is not None:
-            # Collection-returning function (array or map terminal) — emit the
-            # concrete C++ collection type from its inferred TypeSpec.
+            # Exact return TypeSpec (collections plus narrowly cached primitive
+            # terminal reads) takes precedence over the coarse PineType slot.
             ret_type = self._type_spec_to_cpp(fi.return_type_spec)
         else:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")
