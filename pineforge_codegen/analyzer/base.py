@@ -214,6 +214,23 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # var_name -> UDT type for variables holding UDT instances
         self._udt_var_types: dict[str, str] = {}
         self._collection_types: dict[str, TypeSpec] = {}
+        # Collection metadata for callable locals must retain lexical identity.
+        # Keys match FuncInfo.name: ``func`` for ordinary UDFs and
+        # ``Type.method`` for UDT methods.  ``_collection_types`` remains the
+        # top-level/on_bar registry consumed outside callable emission.
+        self._func_collection_types: dict[str, dict[str, TypeSpec]] = {}
+        # id(immediate branch/loop owner) -> raw local name -> TypeSpec.
+        # A callable may legally reuse one raw name for unrelated collections
+        # in sibling lexical blocks; keeping those bindings in the flat
+        # callable inventory would make the last analyzed branch win.
+        self._block_collection_types: dict[int, dict[str, TypeSpec | None]] = {}
+        self._block_collection_owners: dict[int, str] = {}
+        # id(callable-local VarDecl) -> its exact collection TypeSpec, or None
+        # for a scalar/UDT tombstone. Codegen activates these in source order
+        # after emitting each declaration RHS.
+        self._callable_collection_bindings: dict[int, TypeSpec | None] = {}
+        self._callable_collection_binding_owners: dict[int, str] = {}
+        self._collection_scope_stack: list[str] = []
         self._udt_field_type_specs: dict[str, dict[str, TypeSpec]] = {}
         # Enum definitions: enum_name -> list of member names
         self._enum_defs: dict[str, list[str]] = {}
@@ -362,6 +379,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             func_return_type_specs=dict(self._func_return_type_specs),
             udt_var_types=dict(self._udt_var_types),
             collection_types=dict(self._collection_types),
+            func_collection_types={
+                name: dict(specs)
+                for name, specs in self._func_collection_types.items()
+            },
+            block_collection_types={
+                owner_id: dict(specs)
+                for owner_id, specs in self._block_collection_types.items()
+            },
+            block_collection_owners=dict(self._block_collection_owners),
+            callable_collection_bindings=dict(
+                self._callable_collection_bindings
+            ),
+            callable_collection_binding_owners=dict(
+                self._callable_collection_binding_owners
+            ),
             udt_field_type_specs=dict(self._udt_field_type_specs),
             block_var_renames=dict(self._block_var_renames),
         )
@@ -1183,12 +1215,68 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         return _resolve_terminal(body[-1])
 
+    def _record_collection_type(
+        self,
+        name: str,
+        spec: TypeSpec,
+        *,
+        symbol_scope: str | None = None,
+    ) -> None:
+        """Record collection metadata without erasing another callable's local.
+
+        ``symbol_scope`` is supplied for reassignments so a UDF that mutates a
+        top-level collection keeps updating the top-level binding.  A VarDecl
+        inside an active callable is necessarily lexical to that callable.
+        UDT TypeSpecs retain their established registry path; this overlay is
+        intentionally limited to array/map/matrix dispatch.
+        """
+        callable_key = (
+            self._collection_scope_stack[-1]
+            if self._collection_scope_stack
+            else None
+        )
+        if (callable_key is not None
+                and symbol_scope != "global"
+                and self._block_node_stack):
+            owner_id = id(self._block_node_stack[-1])
+            self._block_collection_owners[owner_id] = callable_key
+            self._block_collection_types.setdefault(owner_id, {})[name] = (
+                spec if spec.kind in {"array", "map", "matrix"} else None
+            )
+            if spec.kind in {"array", "map", "matrix"}:
+                return
+        if spec.kind not in {"array", "map", "matrix"}:
+            # Primitive locals have no collection metadata to export and must
+            # not overwrite a same-named top-level collection.  Preserve the
+            # established UDT registry path until UDT identity gets its own
+            # lexical migration.
+            if (callable_key is not None
+                    and symbol_scope != "global"
+                    and spec.kind == "primitive"):
+                return
+            self._collection_types[name] = spec
+            return
+        if callable_key is not None and symbol_scope != "global":
+            self._func_collection_types.setdefault(callable_key, {})[name] = spec
+            return
+        self._collection_types[name] = spec
+
     def _visit_VarDecl(self, node: VarDecl) -> PineType:
         # Infer type from the value expression
         val_type = self._visit(node.value)
         type_spec = self._type_spec_from_hint(node.type_hint) if node.type_hint else None
         if type_spec is None:
             type_spec = self._type_spec_from_expr(node.value)
+        if self._collection_scope_stack:
+            self._callable_collection_bindings[id(node)] = (
+                type_spec
+                if type_spec is not None
+                    and type_spec.kind in {"array", "map", "matrix"}
+                else None
+            )
+            self._callable_collection_binding_owners[id(node)] = (
+                self._collection_scope_stack[-1]
+            )
 
         # Check for type hint override
         if node.type_hint:
@@ -1244,10 +1332,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if node.name in self._static_vars:
             setattr(sym, "is_static_series", True)
         self._symbols.define(sym)
+        if (type_spec is None
+                and self._collection_scope_stack
+                and self._block_node_stack
+                and self._symbols.current_scope.name != "global"):
+            owner_id = id(self._block_node_stack[-1])
+            self._block_collection_owners[owner_id] = self._collection_scope_stack[-1]
+            self._block_collection_types.setdefault(owner_id, {})[node.name] = None
         if udt_ctor is not None:
             self._udt_var_types[node.name] = udt_ctor
         if type_spec is not None:
-            self._collection_types[node.name] = type_spec
+            self._record_collection_type(
+                node.name,
+                type_spec,
+                symbol_scope=self._symbols.current_scope.name,
+            )
             if type_spec.kind == "udt" and type_spec.name:
                 self._udt_var_types[node.name] = type_spec.name
 
@@ -1333,7 +1432,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if isinstance(node.target, Identifier):
             spec = self._type_spec_from_expr(node.value)
             if spec is not None:
-                self._collection_types[node.target.name] = spec
+                target_sym = self._symbols.resolve(node.target.name)
+                self._record_collection_type(
+                    node.target.name,
+                    spec,
+                    symbol_scope=(target_sym.scope if target_sym is not None else None),
+                )
 
         # Resolve the target
         if isinstance(node.target, Identifier):
@@ -1403,6 +1507,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 setattr(sym, "is_static_series", True)
             self._symbols.define(sym)
 
+            if (self._collection_scope_stack
+                    and self._block_node_stack
+                    and self._symbols.current_scope.name != "global"):
+                owner_id = id(self._block_node_stack[-1])
+                self._block_collection_owners[owner_id] = self._collection_scope_stack[-1]
+                self._block_collection_types.setdefault(owner_id, {})[name] = None
+
             # Track global-scope tuple-assign targets (e.g.
             # ``[pdH, pdL] = request.security(...)``) as class members so user
             # functions / later references resolve — mirroring _visit_VarDecl.
@@ -1464,12 +1575,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._global_scope = False
         self._enclosing_func_params.append(set(node.params))
         self._enclosing_func_names.append(node.name)
+        self._collection_scope_stack.append(node.name)
         self._nested_ta_touched = set()
         try:
             for stmt in node.body:
                 body_type = self._visit(stmt)
         finally:
             self._global_scope = old_global
+            self._collection_scope_stack.pop()
             self._enclosing_func_params.pop()
             self._enclosing_func_names.pop()
             nested_touched = self._nested_ta_touched
@@ -1649,11 +1762,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         ret_type = PineType.VOID
         old_global = self._global_scope
         self._global_scope = False
+        self._collection_scope_stack.append(method_key)
         try:
             for stmt in node.body:
                 ret_type = self._visit(stmt)
         finally:
             self._global_scope = old_global
+            self._collection_scope_stack.pop()
         self._symbols.exit_scope()
 
         # Detect tuple return on UDT methods (mirrors the regular FuncDef logic
@@ -1739,6 +1854,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             const_value=None,
             scope="for",
             loc=loc,
+            type_spec=TypeSpec.primitive("int"),
         )
         self._symbols.define(sym)
 
@@ -1765,21 +1881,43 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._block_node_stack.append(node)
         try:
             self._visit(node.iterable)
+            iterable_spec = self._type_spec_from_expr(node.iterable)
+            element_spec = (
+                iterable_spec.element
+                if iterable_spec is not None and iterable_spec.kind == "array"
+                else None
+            )
+            tuple_specs: list[TypeSpec | None] = []
+            if iterable_spec is not None and iterable_spec.kind == "map":
+                tuple_specs = [iterable_spec.key, iterable_spec.value]
             self._symbols.enter_scope("for_in")
             if node.var:
                 loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
+                pine_type = self._element_pine_type(element_spec)
+                if pine_type == PineType.VOID:
+                    pine_type = PineType.FLOAT
                 self._symbols.define(Symbol(
-                    name=node.var, pine_type=PineType.FLOAT, is_series=False,
+                    name=node.var, pine_type=pine_type, is_series=False,
                     is_var=False, is_const=False, const_value=None,
                     scope=self._symbols.current_scope.name, loc=loc,
+                    type_spec=element_spec,
                 ))
             if node.vars:
                 loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
-                for v in node.vars:
+                for idx, v in enumerate(node.vars):
+                    binder_spec = (
+                        tuple_specs[idx]
+                        if idx < len(tuple_specs)
+                        else None
+                    )
+                    pine_type = self._element_pine_type(binder_spec)
+                    if pine_type == PineType.VOID:
+                        pine_type = PineType.FLOAT
                     self._symbols.define(Symbol(
-                        name=v, pine_type=PineType.FLOAT, is_series=False,
+                        name=v, pine_type=pine_type, is_series=False,
                         is_var=False, is_const=False, const_value=None,
                         scope=self._symbols.current_scope.name, loc=loc,
+                        type_spec=binder_spec,
                     ))
             for stmt in node.body:
                 self._visit(stmt)
@@ -1988,7 +2126,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # arithmetic inference) honest. See call_handlers.py
             # ``_handle_matrix_method``.
             if isinstance(obj, Identifier):
-                recv_spec = self._collection_types.get(obj.name)
+                recv_sym = self._symbols.resolve(obj.name)
+                recv_spec = (
+                    getattr(recv_sym, "type_spec", None)
+                    if recv_sym is not None
+                    else None
+                )
+                # Only fall back to the top-level raw registry when lexical
+                # resolution did not find a shadowing local/parameter.
+                if recv_sym is None or recv_sym.scope == "global":
+                    recv_spec = recv_spec or self._collection_types.get(obj.name)
                 if recv_spec is not None and recv_spec.kind == "matrix":
                     return self._handle_matrix_method(member, recv_spec)
             return PineType.VOID

@@ -558,6 +558,14 @@ class DrawingVisitor:
         for spec in self._collection_types.values():
             if self._spec_mentions_drawing(spec):
                 return True
+        for specs in self._func_collection_types.values():
+            for spec in specs.values():
+                if self._spec_mentions_drawing(spec):
+                    return True
+        for specs in self._block_collection_types.values():
+            for spec in specs.values():
+                if self._spec_mentions_drawing(spec):
+                    return True
         for fields in self._udt_field_type_specs.values():
             for spec in fields.values():
                 if self._spec_mentions_drawing(spec):

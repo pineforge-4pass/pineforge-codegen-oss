@@ -447,12 +447,21 @@ class CallVisitor:
                     param_spec = getattr(
                         self, "_current_func_param_specs", {}
                     ).get(oname)
+                    active_local_shadow = (
+                        oname in getattr(
+                            self, "_current_func_collection_specs", {}
+                        )
+                        or oname in getattr(
+                            self, "_current_func_collection_shadows", set()
+                        )
+                    )
                     if (
                         param_spec is not None
                         and param_spec.kind == "array"
+                        and not active_local_shadow
                         and meth_raw in ARRAY_METHODS
                     ):
-                        arr = self._safe_name(oname)
+                        arr = self._collection_receiver_expr(oname)
                         arg_nodes = self._array_method_arg_nodes(meth_raw, node)
                         margs = self._array_method_args(
                             meth_raw, arg_nodes, param_spec
@@ -463,30 +472,47 @@ class CallVisitor:
                     if (
                         param_spec is not None
                         and param_spec.kind == "map"
+                        and not active_local_shadow
                         and meth_raw in MAP_METHODS
                     ):
-                        m = self._safe_name(oname)
+                        m = self._collection_receiver_expr(oname)
                         arg_nodes = self._map_param_method_arg_nodes(
                             meth_raw, node
                         )
                         return self._map_param_method_expr(
                             m, meth_raw, arg_nodes, param_spec
                         )
-                    # map.put / map.get / … must lower to unordered_map ops, not `.put` on C++
-                    if oname in self._map_vars and meth_raw in MAP_METHODS:
-                        m = self._safe_name(oname)
+                    recv_spec = self._collection_spec_for_name(oname)
+                    # Resolve the lexical TypeSpec once and route by its exact
+                    # kind.  Raw membership sets can contain a same-named
+                    # binding from another scope; overlapping methods such as
+                    # ``get`` must never use those as a tie-breaker.
+                    if (
+                        recv_spec is not None
+                        and recv_spec.kind == "map"
+                        and meth_raw in MAP_METHODS
+                    ):
+                        m = self._collection_receiver_expr(oname)
                         margs = [self._visit_expr(a) for a in node.args]
-                        return self._map_method_expr(m, meth_raw, margs, self._map_spec_for_name(oname))
-                    if oname in self._array_vars and meth_raw in ARRAY_METHODS:
-                        arr = self._safe_name(oname)
+                        return self._map_method_expr(m, meth_raw, margs, recv_spec)
+                    if (
+                        recv_spec is not None
+                        and recv_spec.kind == "array"
+                        and meth_raw in ARRAY_METHODS
+                    ):
+                        arr = self._collection_receiver_expr(oname)
                         arg_nodes = self._array_method_arg_nodes(meth_raw, node)
                         margs = self._array_method_args(
-                            meth_raw, arg_nodes, self._array_spec_for_name(oname)
+                            meth_raw, arg_nodes, recv_spec
                         )
-                        return self._array_method_expr(arr, meth_raw, margs, self._array_spec_for_name(oname))
-                    if oname in self._matrix_specs and meth_raw in MATRIX_METHODS:
-                        arr = self._safe_name(oname)
-                        self._check_matrix_method_allowed(meth_raw, self._matrix_specs[oname], node)
+                        return self._array_method_expr(arr, meth_raw, margs, recv_spec)
+                    if (
+                        recv_spec is not None
+                        and recv_spec.kind == "matrix"
+                        and meth_raw in MATRIX_METHODS
+                    ):
+                        arr = self._collection_receiver_expr(oname)
+                        self._check_matrix_method_allowed(meth_raw, recv_spec, node)
                         param_names = MATRIX_METHOD_KWARGS.get(meth_raw)
                         if param_names and node.kwargs:
                             margs = _merge_kwargs(
@@ -611,10 +637,19 @@ class CallVisitor:
             return self._visit_str_call(func_name, node)
 
         # Map method syntax: m.put(key, val) where namespace is the map variable name
-        if namespace is not None and namespace in self._map_vars and func_name in MAP_METHODS:
-            m = self._safe_name(namespace)
+        namespace_spec = (
+            self._collection_spec_for_name(namespace)
+            if namespace is not None
+            else None
+        )
+        if (
+            namespace_spec is not None
+            and namespace_spec.kind == "map"
+            and func_name in MAP_METHODS
+        ):
+            m = self._collection_receiver_expr(namespace)
             args = [self._visit_expr(a) for a in node.args]
-            return self._map_method_expr(m, func_name, args, self._map_spec_for_name(namespace))
+            return self._map_method_expr(m, func_name, args, namespace_spec)
 
         # map.method(m, args...) — functional form
         if namespace == "map":
@@ -628,9 +663,13 @@ class CallVisitor:
                 return self._map_method_expr(m, func_name, rest, spec)
             return "0"
 
-        if namespace is not None and namespace in self._matrix_specs and func_name in MATRIX_METHODS:
-            arr = self._safe_name(namespace)
-            self._check_matrix_method_allowed(func_name, self._matrix_specs[namespace], node)
+        if (
+            namespace_spec is not None
+            and namespace_spec.kind == "matrix"
+            and func_name in MATRIX_METHODS
+        ):
+            arr = self._collection_receiver_expr(namespace)
+            self._check_matrix_method_allowed(func_name, namespace_spec, node)
             param_names = MATRIX_METHOD_KWARGS.get(func_name)
             if param_names and node.kwargs:
                 args = _merge_kwargs(node.args, node.kwargs, param_names, self._visit_expr)
@@ -647,9 +686,13 @@ class CallVisitor:
                 )
 
         # Array method syntax: arr.push(val) where namespace is the array variable name
-        if namespace is not None and namespace in self._array_vars and func_name in ARRAY_METHODS:
-            arr = self._safe_name(namespace)
-            spec = self._array_spec_for_name(namespace)
+        if (
+            namespace_spec is not None
+            and namespace_spec.kind == "array"
+            and func_name in ARRAY_METHODS
+        ):
+            arr = self._collection_receiver_expr(namespace)
+            spec = namespace_spec
             arg_nodes = self._array_method_arg_nodes(func_name, node)
             args = self._array_method_args(func_name, arg_nodes, spec)
             return self._array_method_expr(arr, func_name, args, spec)
@@ -1135,14 +1178,16 @@ class CallVisitor:
                     if not isinstance(node.args[0], _Ident):
                         self._codegen_error(node, f"matrix.{func_name} receiver must be a variable reference")
                     recv_name = node.args[0].name
-                    if recv_name not in self._matrix_specs:
+                    recv_spec = self._collection_spec_for_name(recv_name)
+                    if recv_spec is None or recv_spec.kind != "matrix":
                         self._codegen_error(node, f"matrix.{func_name}: receiver '{recv_name}' is not a known matrix variable")
-                    self._check_matrix_method_allowed(func_name, self._matrix_specs[recv_name], node)
+                    self._check_matrix_method_allowed(func_name, recv_spec, node)
                 if func_name == "sort":
                     if isinstance(node.args[0], _Ident):
                         recv_name = node.args[0].name
-                        if recv_name in self._matrix_specs:
-                            self._check_matrix_method_allowed(func_name, self._matrix_specs[recv_name], node)
+                        recv_spec = self._collection_spec_for_name(recv_name)
+                        if recv_spec is not None and recv_spec.kind == "matrix":
+                            self._check_matrix_method_allowed(func_name, recv_spec, node)
                 obj = self._visit_expr(node.args[0])
                 param_names = MATRIX_METHOD_KWARGS.get(func_name)
                 if param_names:

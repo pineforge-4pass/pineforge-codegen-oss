@@ -137,7 +137,26 @@ class TopLevelEmitter:
             # matrix.hpp; pulling in the generic header otherwise is a wasted
             # include.
             float_spec = TypeSpec.primitive("float")
-            if any(spec.element != float_spec for spec in self._matrix_specs.values()):
+            scoped_matrix_specs = (
+                spec
+                for specs in self._func_collection_types.values()
+                for spec in specs.values()
+                if spec.kind == "matrix"
+            )
+            block_matrix_specs = (
+                spec
+                for specs in self._block_collection_types.values()
+                for spec in specs.values()
+                if spec is not None and spec.kind == "matrix"
+            )
+            if any(
+                spec.element != float_spec
+                for spec in (
+                    *self._matrix_specs.values(),
+                    *scoped_matrix_specs,
+                    *block_matrix_specs,
+                )
+            ):
                 lines.append('#include <pineforge/generic_matrix.hpp>')
         # Drawing-objects-as-data runtime (line/box/label/linefill arenas +
         # ChartPoint). Gated on _uses_drawing so non-drawing strategies stay
@@ -978,12 +997,44 @@ class TopLevelEmitter:
         if node is None:
             return
 
+        # Collection registries historically used raw variable names for the
+        # whole translation unit.  Emit each callable against copy-on-write
+        # registries overlaid with its analyzer-captured lexical TypeSpecs, then
+        # restore the top-level state.  This keeps legacy readers working while
+        # preventing local declarations/method dispatch from contaminating a
+        # sibling UDF, UDT method, clone, or on_bar.
+        prev_func_collection_specs = self._current_func_collection_specs
+        prev_func_collection_shadows = self._current_func_collection_shadows
+        prev_collection_types = self._collection_types
+        prev_array_vars = self._array_vars
+        prev_map_vars = self._map_vars
+        prev_matrix_specs = self._matrix_specs
+        # Start from top-level state only. Callable locals become visible at
+        # their declaration statement (after its RHS), not at function entry:
+        # preloading the analyzer's final inventory would make a later local
+        # shadow an earlier read of a same-named global collection.
+        self._current_func_collection_specs = {}
+        self._current_func_collection_shadows = set()
+        self._collection_types = dict(prev_collection_types)
+        self._array_vars = set(prev_array_vars)
+        self._map_vars = set(prev_map_vars)
+        self._matrix_specs = dict(prev_matrix_specs)
+
         is_udt = bool(getattr(fi, "is_udt_method", False)) and fi.udt_type_name
 
         # Determine param types and set context for type inference inside body
         param_strs = []
         self._current_func_param_types = {}
         self._current_func_param_specs = {}
+        param_hints = (getattr(node, "annotations", None) or {}).get(
+            "param_type_hints", []
+        )
+        self._current_func_declared_param_names = {
+            alias
+            for i, param in enumerate(node.params)
+            if i < len(param_hints) and param_hints[i]
+            for alias in (param, self._safe_name(param))
+        }
         self._current_func_series_params = set()
         self._udt_param_udt = {}
         func_sv = self.ctx.func_series_vars.get(fi.name, set())
@@ -1118,7 +1169,42 @@ class TopLevelEmitter:
         # function is a function-local static — its initializer runs exactly
         # once, on the first call to THIS variant, with the first bar's values
         # the function actually sees. Each clone (cs0/cs1/…) is independent.
-        self._emit_func_var_init_block(fi, call_site_idx, lines, flag_override=var_init_flag)
+        # Generate that initializer against its own source-ordered lexical
+        # state. Persistent declarations must be visible to later persistent
+        # initializers (``var copy = seed.copy()``), but preloading them into
+        # the ordinary body would make future declarations shadow earlier
+        # reads. Copy-on-write here provides both properties.
+        init_collection_state = (
+            self._current_func_collection_specs,
+            self._current_func_collection_shadows,
+            self._collection_types,
+            self._array_vars,
+            self._map_vars,
+            self._matrix_specs,
+        )
+        self._current_func_collection_specs = dict(
+            self._current_func_collection_specs
+        )
+        self._current_func_collection_shadows = set(
+            self._current_func_collection_shadows
+        )
+        self._collection_types = dict(self._collection_types)
+        self._array_vars = set(self._array_vars)
+        self._map_vars = set(self._map_vars)
+        self._matrix_specs = dict(self._matrix_specs)
+        try:
+            self._emit_func_var_init_block(
+                fi, call_site_idx, lines, flag_override=var_init_flag
+            )
+        finally:
+            (
+                self._current_func_collection_specs,
+                self._current_func_collection_shadows,
+                self._collection_types,
+                self._array_vars,
+                self._map_vars,
+                self._matrix_specs,
+            ) = init_collection_state
 
         emitted_return = False
         if node.is_single_expr and node.body:
@@ -1178,6 +1264,7 @@ class TopLevelEmitter:
         lines.append("    }")
         self._current_func_param_types = {}
         self._current_func_param_specs = {}
+        self._current_func_declared_param_names = set()
         self._current_func_series_params = set()
         self._udt_param_udt = {}
         self._current_func_locals = prev_func_locals
@@ -1185,6 +1272,12 @@ class TopLevelEmitter:
         self._current_func_body = prev_func_body
         self._active_func_name = prev_func_name
         self._udt_ptr_alias_locals = prev_ptr_alias
+        self._current_func_collection_specs = prev_func_collection_specs
+        self._current_func_collection_shadows = prev_func_collection_shadows
+        self._collection_types = prev_collection_types
+        self._array_vars = prev_array_vars
+        self._map_vars = prev_map_vars
+        self._matrix_specs = prev_matrix_specs
         self._active_ta_remap = {}
         self._active_var_remap = {}
         self._active_fixnan_remap = {}
@@ -1225,16 +1318,26 @@ class TopLevelEmitter:
             init_ast = self.ctx.var_member_init_exprs.get(name)
             safe = self._safe_name(name)
             target = self._active_var_remap.get(safe, safe)
+            collection_spec = self._callable_var_collection_spec(name, fi.name)
+
+            def activate_member() -> None:
+                self._activate_callable_collection_binding(
+                    name, collection_spec
+                )
+
             if name in self.ctx.series_vars:
                 if init_ast is None:
+                    activate_member()
                     continue
                 init_cpp = self._visit_expr(init_ast)
                 init_cpp = self._typed_na_init(init_cpp, name, ptype)
                 init_lines.append(f"        {target}.push({init_cpp});")
+                activate_member()
                 continue
             if init_ast is None:
                 # No initializer to lower (e.g. bare ``var box b``); leave the
                 # member at its default-constructed value.
+                activate_member()
                 continue
             # Skip a plain ``na`` initializer for drawing handles / UDTs whose
             # default-constructed member is already the na sentinel; assigning
@@ -1244,6 +1347,7 @@ class TopLevelEmitter:
             is_udt = udt_t in self._udt_defs if udt_t else False
             from ..ast_nodes import NaLiteral
             if (is_drawing or is_udt) and isinstance(init_ast, NaLiteral):
+                activate_member()
                 continue
             init_cpp = self._visit_expr(init_ast)
             # A bare-``na`` initializer for an int/int64_t/bool ``var`` member
@@ -1252,6 +1356,7 @@ class TopLevelEmitter:
             # NaN stored into an int member is UB and defeats is_na<T>().
             init_cpp = self._typed_na_init(init_cpp, name, ptype)
             init_lines.append(f"        {target} = {init_cpp};")
+            activate_member()
         if not init_lines:
             return
         lines.append(f"        if (!{flag}) {{")

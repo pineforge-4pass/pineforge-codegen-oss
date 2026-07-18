@@ -269,6 +269,9 @@ class ExprVisitor:
         # Bare 'na' identifier → na<double>()
         if name == "na":
             return "na<double>()"
+        pending_outer = getattr(self, "_pending_decl_outer_alias", {})
+        if name in pending_outer:
+            return pending_outer[name]
         # Function parameters that are series — read current value
         if name in self._current_func_series_params:
             return f"{self._safe_name(name)}[0]"
@@ -934,9 +937,9 @@ class ExprVisitor:
                     safe = self._active_var_remap[safe]
                 # Same Pine [k] semantics as Series in runtime/series.hpp
                 return f"{safe}[{idx}]"
-            spec = self._collection_types.get(name)
+            spec = self._collection_spec_for_name(name)
             if spec is not None and spec.kind in ("array", "map"):
-                return f"{self._safe_name(name)}[{idx}]"
+                return f"{self._collection_receiver_expr(name)}[{idx}]"
         # Handle strategy.* history access (e.g., strategy.position_size[1])
         if isinstance(node.object, MemberAccess):
             if isinstance(node.object.object, Identifier):
