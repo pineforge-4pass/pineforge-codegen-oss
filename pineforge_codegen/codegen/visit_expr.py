@@ -995,6 +995,54 @@ class ExprVisitor:
             if cpp_t not in ("double", "int", "bool"):
                 cpp_t = "double"
             member = self._inline_history_member("hist_call", node)
+            ta_site = self._get_ta_site(node.object)
+            ta_name = (
+                self._ta_name_from_site(ta_site)
+                if ta_site is not None
+                else ""
+            )
+            if (
+                ta_site is not None
+                and ta_name in {"highest", "lowest"}
+                and self._ta_site_uses_precalc(ta_site)
+            ):
+                # Static chart Highest/Lowest sites already advance in the
+                # full-bar precalculation pass, including when the source call
+                # sits behind a Pine-v6 lazy boolean edge. Their direct history
+                # operator must use that same chart-bar clock. Advancing only
+                # ``_hist_call`` when the lazy RHS is reached changes ``[1]``
+                # into "previous evaluation" and can permanently miss a first
+                # qualifying signal (Filter V2's source-bound v6 oracle).
+                #
+                # Keep evaluation lazy: this branch only reads the immutable
+                # precalculated result when the expression is reached. Dynamic
+                # runs, UDF sites, and non-precalculated calls retain the
+                # established call-local history fallback below.
+                ta_mem = self._ta_member_name(ta_site)
+                precalc = f"_precalc_{ta_mem}"
+                return (
+                    f"([&]() -> {cpp_t} {{ "
+                    f"if (_use_precalc) {{ "
+                    f"auto _pf_hist_offset_raw = ({idx}); "
+                    f"if (is_na(_pf_hist_offset_raw)) return na<{cpp_t}>(); "
+                    f"long double _pf_hist_offset_numeric = "
+                    f"static_cast<long double>(_pf_hist_offset_raw); "
+                    f"if (bar_index_ < 0 || _pf_hist_offset_numeric < 0.0L || "
+                    f"_pf_hist_offset_numeric > "
+                    f"static_cast<long double>(bar_index_)) "
+                    f"return na<{cpp_t}>(); "
+                    f"std::size_t _pf_hist_offset = "
+                    f"static_cast<std::size_t>(_pf_hist_offset_numeric); "
+                    f"std::size_t _pf_hist_bar = "
+                    f"static_cast<std::size_t>(bar_index_) - _pf_hist_offset; "
+                    f"if (_pf_hist_bar >= {precalc}.size()) "
+                    f"return na<{cpp_t}>(); "
+                    f"return {precalc}[(std::size_t)_pf_hist_bar]; }} "
+                    f"{cpp_t} _hv = ({inner}); "
+                    f"if (history_advances_new_bar()) {member}.push(_hv); "
+                    f"else {member}.update(_hv); "
+                    f"return {member}[(int)({idx})]; }}())"
+                )
             return (
                 f"([&]() -> {cpp_t} {{ "
                 f"{cpp_t} _hv = ({inner}); "
