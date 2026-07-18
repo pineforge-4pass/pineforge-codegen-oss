@@ -36,7 +36,7 @@ from __future__ import annotations
 from ..ast_nodes import (
     BinOp, BoolLiteral, ExprStmt, FuncCall, FuncDef, Identifier, IfStmt,
     MemberAccess, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
-    Ternary, TupleLiteral, UnaryOp, VarDecl,
+    Subscript, Ternary, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..symbols import PineType, TypeSpec
 from .. import signatures as sigs
@@ -162,6 +162,8 @@ class TypeInferer:
             return "false"
         if cpp_type == "int":
             return "0"
+        if cpp_type in DRAWING_TYPE_TO_CPP.values():
+            return f"{cpp_type}{{}}"
         if cpp_type.startswith("std::vector") or cpp_type.startswith("PineMap"):
             return f"{cpp_type}()"
         return "0.0"
@@ -327,6 +329,30 @@ class TypeInferer:
             collection_spec = self._collection_spec_for_name(node.name)
             if collection_spec is not None:
                 return collection_spec
+            if node.name in getattr(self, "_lexical_drawing_types", {}):
+                lexical_cpp = self._lexical_drawing_types[node.name]
+                if lexical_cpp is None:
+                    return None
+                for pine_name, cpp_name in DRAWING_TYPE_TO_CPP.items():
+                    if cpp_name == lexical_cpp:
+                        return TypeSpec.udt(pine_name)
+                return None
+            local_cpp = getattr(self, "_current_func_local_types", {}).get(
+                node.name
+            )
+            if local_cpp is not None:
+                local_cpp = local_cpp.removesuffix("&")
+                for pine_name, cpp_name in DRAWING_TYPE_TO_CPP.items():
+                    if cpp_name == local_cpp:
+                        return TypeSpec.udt(pine_name)
+                return None
+            global_cpp = getattr(self, "_global_drawing_cpp_types", {}).get(
+                node.name
+            )
+            if global_cpp is not None:
+                for pine_name, cpp_name in DRAWING_TYPE_TO_CPP.items():
+                    if cpp_name == global_cpp:
+                        return TypeSpec.udt(pine_name)
             if node.name in self._udt_var_types:
                 return TypeSpec.udt(self._udt_var_types[node.name])
             # Drawing-typed method/function parameter (L.6d / U.5): a ``line ln``
@@ -341,11 +367,74 @@ class TypeInferer:
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return sym.type_spec
             return None
+        if isinstance(node, Subscript):
+            # History access preserves the scalar drawing-handle type.  This
+            # is intentionally not generalized to arrays/maps: their
+            # subscripting rules are handled by the collection paths below.
+            receiver_spec = self._type_spec_from_expr(node.object)
+            if (receiver_spec is not None
+                    and receiver_spec.kind == "udt"
+                    and receiver_spec.name in DRAWING_TYPE_TO_CPP):
+                return receiver_spec
+            return None
         if isinstance(node, Ternary):
             true_spec = self._type_spec_from_expr(node.true_val)
             false_spec = self._type_spec_from_expr(node.false_val)
             if true_spec is not None and true_spec == false_spec:
                 return true_spec
+            if (true_spec is not None
+                    and true_spec.kind == "udt"
+                    and true_spec.name in DRAWING_TYPE_TO_CPP
+                    and isinstance(node.false_val, NaLiteral)):
+                return true_spec
+            if (false_spec is not None
+                    and false_spec.kind == "udt"
+                    and false_spec.name in DRAWING_TYPE_TO_CPP
+                    and isinstance(node.true_val, NaLiteral)):
+                return false_spec
+            return None
+        if isinstance(node, IfStmt):
+            def terminal_expr(body):
+                if not body:
+                    return None
+                terminal = body[-1]
+                return (
+                    terminal.expr
+                    if isinstance(terminal, ExprStmt)
+                    else terminal
+                )
+
+            true_node = terminal_expr(node.body)
+            false_node = terminal_expr(node.else_body)
+            if true_node is None or false_node is None:
+                return None
+            true_spec = self._type_spec_from_expr(true_node)
+            false_spec = self._type_spec_from_expr(false_node)
+            true_is_na = (
+                isinstance(true_node, NaLiteral)
+                or (isinstance(true_node, Identifier)
+                    and true_node.name == "na")
+            )
+            false_is_na = (
+                isinstance(false_node, NaLiteral)
+                or (isinstance(false_node, Identifier)
+                    and false_node.name == "na")
+            )
+            if (true_spec is not None
+                    and true_spec.kind == "udt"
+                    and true_spec.name in DRAWING_TYPE_TO_CPP
+                    and true_spec == false_spec):
+                return true_spec
+            if (true_spec is not None
+                    and true_spec.kind == "udt"
+                    and true_spec.name in DRAWING_TYPE_TO_CPP
+                    and false_is_na):
+                return true_spec
+            if (false_spec is not None
+                    and false_spec.kind == "udt"
+                    and false_spec.name in DRAWING_TYPE_TO_CPP
+                    and true_is_na):
+                return false_spec
             return None
         if isinstance(node, MemberAccess):
             owner = self._type_spec_from_expr(node.object)
@@ -359,6 +448,9 @@ class TypeInferer:
                 return_spec = getattr(func_info, "return_type_spec", None)
                 if return_spec is not None:
                     return return_spec
+                udt_return = getattr(func_info, "udt_return_type", None)
+                if udt_return in DRAWING_TYPE_TO_CPP:
+                    return TypeSpec.udt(udt_return)
             # ticker.* constructors (inherit/standard/heikinashi) return a symbol
             # string; without this the member-type inference defaults to double
             # and a ``haTicker = ticker.heikinashi(...)`` global mis-declares as
@@ -1288,6 +1380,11 @@ class TypeInferer:
             if spec is not None:
                 return self._type_spec_to_cpp(spec)
         if isinstance(node, Ternary):
+            ternary_spec = self._type_spec_from_expr(node)
+            if (ternary_spec is not None
+                    and ternary_spec.kind == "udt"
+                    and ternary_spec.name in DRAWING_TYPE_TO_CPP):
+                return self._type_spec_to_cpp(ternary_spec)
             tt = self._infer_type(node.true_val)
             ft = self._infer_type(node.false_val)
             if tt.startswith("std::vector") or ft.startswith("std::vector"):
@@ -1304,6 +1401,11 @@ class TypeInferer:
         # Block-as-expression cases: read the type of the last statement of
         # the first branch / case; matches Pine semantics for ``x = if...``.
         if isinstance(node, IfStmt):
+            block_spec = self._type_spec_from_expr(node)
+            if (block_spec is not None
+                    and block_spec.kind == "udt"
+                    and block_spec.name in DRAWING_TYPE_TO_CPP):
+                return self._type_spec_to_cpp(block_spec)
             if node.body:
                 last = node.body[-1]
                 if isinstance(last, ExprStmt):

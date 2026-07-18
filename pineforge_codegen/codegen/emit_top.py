@@ -581,7 +581,9 @@ class TopLevelEmitter:
             # default-construct to {-1} (na). A ``b(na<double>())`` ctor init
             # would not type-match the handle struct — skip it (the in-class
             # member default is the once-only persistent na init).
-            if name in self._udt_var_types and self._udt_var_types[name] in DRAWING_TYPE_TO_CPP:
+            if (name in self._drawing_var_member_cpp_types
+                    or (name in self._udt_var_types
+                        and self._udt_var_types[name] in DRAWING_TYPE_TO_CPP)):
                 continue
             if name not in self.ctx.series_vars:
                 cpp_val = self._resolve_known(init_expr)
@@ -768,6 +770,8 @@ class TopLevelEmitter:
         lines.append(f"{pad}else {member}.update({value});")
 
     def _emit_on_bar(self, lines: list[str]) -> None:
+        self._lexical_drawing_types = {}
+        self._lexical_series_bindings = {}
         lines.append("    void on_bar(const Bar& bar) override {")
 
         # A GeneratedStrategy handle may execute multiple batch runs or
@@ -849,6 +853,17 @@ class TopLevelEmitter:
                 if name in getattr(self, "_func_local_var_names", ()):
                     continue
                 safe = self._safe_name(name)
+                runtime_info = self._runtime_scalar_var_init_by_member.get(name)
+                if (runtime_info is not None
+                        and runtime_info.get("drawing_cpp") is not None):
+                    if runtime_info.get("is_series"):
+                        self._emit_history_series_write(
+                            lines,
+                            "            ",
+                            safe,
+                            f"{runtime_info['drawing_cpp']}{{}}",
+                        )
+                    continue
                 if name in self._array_vars:
                     for stmt in self.ctx.ast.body:
                         if isinstance(stmt, VarDecl) and stmt.name == name:
@@ -877,6 +892,8 @@ class TopLevelEmitter:
                             lines.append(f"            {safe} = {cpp_val};")
                             break
                     continue
+                if name in self._runtime_scalar_var_init_members:
+                    continue
                 # UDT vars: init with constructor expression
                 init_s = str(init_expr)
                 is_udt_init = False
@@ -895,7 +912,7 @@ class TopLevelEmitter:
                         break
                 if is_udt_init:
                     continue
-                if name in self.ctx.series_vars:
+                if self._binding_is_series(name, safe):
                     cpp_val = self._resolve_known(init_expr)
                     cpp_val = self._typed_na_init(cpp_val, name, ptype)
                     lines.append(f"            {safe}.push({cpp_val});")
@@ -913,9 +930,26 @@ class TopLevelEmitter:
             lines.append("        } else {")
             for name, _, _ in self.ctx.var_members:
                 safe = self._safe_name(name)
+                runtime_info = self._runtime_scalar_var_init_by_member.get(name)
+                if (runtime_info is not None
+                        and runtime_info.get("drawing_cpp") is not None):
+                    if runtime_info.get("is_series"):
+                        lines.append(f"            if ({runtime_info['flag']}) {{")
+                        self._emit_history_series_write(
+                            lines, "                ", safe, f"{safe}[0]"
+                        )
+                        lines.append("            } else {")
+                        self._emit_history_series_write(
+                            lines,
+                            "                ",
+                            safe,
+                            f"{runtime_info['drawing_cpp']}{{}}",
+                        )
+                        lines.append("            }")
+                    continue
                 if name in self._array_vars:
                     continue
-                if name in self.ctx.series_vars:
+                if self._binding_is_series(name, safe):
                     self._emit_history_series_write(
                         lines, "            ", safe, f"{safe}[0]"
                     )
@@ -931,6 +965,20 @@ class TopLevelEmitter:
                                 self._emit_history_series_write(
                                     lines, "            ", cloned, f"{cloned}[0]"
                                 )
+                    # Context-sensitive nested helper instances own fresh
+                    # Series members outside the flat cs remap table.  Advance
+                    # each exact fresh member once per bar as well; otherwise a
+                    # valid ``fresh[1]`` history read never moves past slot 0.
+                    for _owner, orig_safe, fresh_safe in self._fresh_var_members:
+                        if orig_safe != safe or fresh_safe in carry_emitted:
+                            continue
+                        carry_emitted.add(fresh_safe)
+                        self._emit_history_series_write(
+                            lines,
+                            "            ",
+                            fresh_safe,
+                            f"{fresh_safe}[0]",
+                        )
             lines.append("        }")
 
         # c. Push non-var series (they start fresh each bar with a push)
@@ -1260,8 +1308,11 @@ class TopLevelEmitter:
             ret_type = self._type_spec_to_cpp(fi.return_type_spec)
         else:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")
-        map_return_cpp_type = (
-            ret_type if ret_type.startswith("PineMap<") else None
+        rhs_return_cpp_type = (
+            ret_type
+            if (ret_type.startswith("PineMap<")
+                or ret_type in DRAWING_TYPE_TO_CPP.values())
+            else None
         )
 
         # For per-call-site variants, suffix the function name and activate TA + var remapping
@@ -1303,6 +1354,8 @@ class TopLevelEmitter:
 
         prev_func_locals = self._current_func_locals
         prev_func_local_types = self._current_func_local_types
+        prev_lexical_drawing_types = self._lexical_drawing_types
+        prev_lexical_series_bindings = self._lexical_series_bindings
         prev_func_body = getattr(self, "_current_func_body", None)
         prev_func_name = getattr(self, "_active_func_name", None)
         # The function body is the lexical scope used by the UDT-alias analysis
@@ -1317,6 +1370,11 @@ class TopLevelEmitter:
         self._udt_ptr_alias_locals = set()
         self._current_func_locals = {n for n, _, _ in self.ctx.func_var_members.get(fi.name, [])}
         self._current_func_local_types = {}
+        self._lexical_drawing_types = {}
+        self._lexical_series_bindings = {
+            param: param in self._current_func_series_params
+            for param in node.params
+        }
         # Plain (non-persistent) scalar locals are emitted inline and live in
         # no other set; collect them so the unknown-identifier guard in
         # _visit_ident does not mistake them for undeclared symbols.
@@ -1375,7 +1433,7 @@ class TopLevelEmitter:
             elif expr:
                 lines.append(
                     "        return "
-                    f"{self._visit_rhs_value(expr, target_cpp_type=map_return_cpp_type)};"
+                    f"{self._visit_rhs_value(expr, target_cpp_type=rhs_return_cpp_type)};"
                 )
                 emitted_return = True
         else:
@@ -1392,7 +1450,7 @@ class TopLevelEmitter:
                     else:
                         lines.append(
                             "        return "
-                            f"{self._visit_rhs_value(s.expr, target_cpp_type=map_return_cpp_type)};"
+                            f"{self._visit_rhs_value(s.expr, target_cpp_type=rhs_return_cpp_type)};"
                         )
                         emitted_return = True
                 elif i == len(node.body) - 1 and isinstance(s, (SwitchStmt, IfStmt)):
@@ -1412,7 +1470,7 @@ class TopLevelEmitter:
                         "_func_ret",
                         lines,
                         indent=2,
-                        target_cpp_type=map_return_cpp_type,
+                        target_cpp_type=rhs_return_cpp_type,
                     )
                     lines.append(f"        return _func_ret;")
                     emitted_return = True
@@ -1440,6 +1498,8 @@ class TopLevelEmitter:
         self._udt_param_udt = {}
         self._current_func_locals = prev_func_locals
         self._current_func_local_types = prev_func_local_types
+        self._lexical_drawing_types = prev_lexical_drawing_types
+        self._lexical_series_bindings = prev_lexical_series_bindings
         self._current_func_body = prev_func_body
         self._active_func_name = prev_func_name
         self._udt_ptr_alias_locals = prev_ptr_alias
@@ -1485,7 +1545,15 @@ class TopLevelEmitter:
         # so lowering each init expression here correctly resolves references
         # to sibling var members (which are themselves remapped for clones).
         init_lines: list[str] = []
+        declaration_site_drawing_names = {
+            info["raw_name"]
+            for info in self._drawing_var_decl_info_by_node.values()
+            if info.get("owner") == fi.name
+            and info.get("node_id") in self._runtime_scalar_var_init_by_node
+        }
         for name, ptype, _init_str in members:
+            if name in declaration_site_drawing_names:
+                continue
             init_ast = self.ctx.var_member_init_exprs.get(name)
             safe = self._safe_name(name)
             target = self._active_var_remap.get(safe, safe)
@@ -1496,13 +1564,22 @@ class TopLevelEmitter:
                     name, collection_spec
                 )
 
-            if name in self.ctx.series_vars:
+            if self._safe_name(name) in self._series_var_member_names:
                 if init_ast is None:
                     activate_member()
                     continue
-                init_cpp = self._visit_expr(init_ast)
-                init_cpp = self._typed_na_init(init_cpp, name, ptype)
-                init_lines.append(f"        {target}.push({init_cpp});")
+                drawing_cpp = self._drawing_var_member_cpp_types.get(name)
+                if drawing_cpp is not None:
+                    init_cpp = self._visit_rhs_value(
+                        init_ast,
+                        name,
+                        target_cpp_type=drawing_cpp,
+                    )
+                    init_lines.append(f"        {target}.update({init_cpp});")
+                else:
+                    init_cpp = self._visit_expr(init_ast)
+                    init_cpp = self._typed_na_init(init_cpp, name, ptype)
+                    init_lines.append(f"        {target}.push({init_cpp});")
                 activate_member()
                 continue
             if init_ast is None:
@@ -1514,7 +1591,11 @@ class TopLevelEmitter:
             # default-constructed member is already the na sentinel; assigning
             # ``na<double>()`` would not type-match the handle / struct.
             udt_t = self._udt_var_types.get(name)
-            is_drawing = udt_t in DRAWING_TYPE_TO_CPP if udt_t else False
+            drawing_cpp = (
+                self._drawing_var_member_cpp_types.get(name)
+                or DRAWING_TYPE_TO_CPP.get(udt_t)
+            )
+            is_drawing = drawing_cpp is not None
             is_udt = udt_t in self._udt_defs if udt_t else False
             from ..ast_nodes import NaLiteral
             if (is_drawing or is_udt) and isinstance(init_ast, NaLiteral):
@@ -1527,7 +1608,7 @@ class TopLevelEmitter:
                     self._type_spec_to_cpp(collection_spec)
                     if collection_spec is not None
                     and collection_spec.kind == "map"
-                    else None
+                    else drawing_cpp
                 ),
             )
             # A bare-``na`` initializer for an int/int64_t/bool ``var`` member

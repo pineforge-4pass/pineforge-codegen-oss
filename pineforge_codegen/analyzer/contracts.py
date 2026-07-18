@@ -181,6 +181,18 @@ class AnalyzerContext:
     symbols: Any               # SymbolTable
     ta_call_sites: list = field(default_factory=list)
     series_vars: set = field(default_factory=set)
+    # Exact emitted member identities for persistent ``var``/``varip``
+    # bindings that are history-referenced.  Unlike ``series_vars`` this set
+    # preserves sibling-block renames such as ``x__blk1``.
+    series_var_members: set = field(default_factory=set)
+    # Exact VarDecl node ids whose binding is history-referenced.  This lets
+    # codegen distinguish a scalar local shadow from a same-named global
+    # Series without relying on the raw-name union above.
+    series_decl_nodes: set = field(default_factory=set)
+    # Exact declaration binding keys ``(node_id, raw_name)``.  TupleAssign has
+    # one AST node for several independently scoped names, so node identity
+    # alone cannot say which destructured element owns history storage.
+    series_decl_bindings: set = field(default_factory=set)
     series_bar_fields: set = field(default_factory=set)
     var_members: list = field(default_factory=list)   # [(name, PineType, init_expr_str)]
     func_infos: list = field(default_factory=list)
@@ -202,6 +214,12 @@ class AnalyzerContext:
     # id(VarDecl) -> (node, emitted member name, PineType, rendered initializer,
     #                 is function/method scoped)
     var_member_metadata_by_node: dict = field(default_factory=dict)
+    # id(VarDecl) -> exact structured declaration type.  Name-keyed type
+    # registries cannot distinguish sibling/callable persistent bindings.
+    var_member_type_specs_by_node: dict = field(default_factory=dict)
+    # id(VarDecl) -> owning callable key (``FuncInfo.name``), or None for
+    # top-level/on-bar persistent bindings.
+    var_member_owners_by_node: dict = field(default_factory=dict)
     # Per-call-site TA member cloning for user functions:
     func_ta_ranges: dict = field(default_factory=dict)    # func_name -> (start_idx, end_idx)
     func_call_cs_map: dict = field(default_factory=dict)  # call_node_id -> (func_name, call_site_index)

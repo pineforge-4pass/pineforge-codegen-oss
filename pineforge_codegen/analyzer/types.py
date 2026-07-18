@@ -41,7 +41,7 @@ from typing import Any
 
 from ..ast_nodes import (
     ASTNode, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier, IfStmt,
-    MemberAccess, NaLiteral, NumberLiteral, StringLiteral, Ternary,
+    MemberAccess, NaLiteral, NumberLiteral, StringLiteral, Subscript, Ternary,
     TupleLiteral, UnaryOp,
 )
 from ..symbols import PineType, TypeSpec
@@ -200,6 +200,34 @@ class TypeHelper:
                     and false_spec.kind == "map"
                     and isinstance(value.true_val, NaLiteral)):
                 return false_spec
+            # Drawing handles are nullable reference-like values in Pine.  A
+            # bare ``na`` arm therefore acquires the other arm's exact handle
+            # type, just like the established PineMap path above.  Keep this
+            # intentionally narrower than arbitrary UDTs/collections: their
+            # target-typed selection semantics are not established here.
+            if (true_spec is not None
+                    and true_spec.kind == "udt"
+                    and true_spec.name in _DRAWING_TYPE_NAMES
+                    and isinstance(value.false_val, NaLiteral)):
+                return true_spec
+            if (false_spec is not None
+                    and false_spec.kind == "udt"
+                    and false_spec.name in _DRAWING_TYPE_NAMES
+                    and isinstance(value.true_val, NaLiteral)):
+                return false_spec
+            return None
+        if isinstance(value, Subscript):
+            # Pine's history operator preserves the value type: a
+            # ``Series<line>`` read such as ``h[1]`` is a scalar ``line``
+            # handle, not the legacy numeric fallback.  Keep this refinement
+            # drawing-only; collection subscripts have separate array/map
+            # semantics and primitive history inference already flows through
+            # PineType in ``_visit_Subscript``.
+            receiver_spec = self._type_spec_from_expr(value.object)
+            if (receiver_spec is not None
+                    and receiver_spec.kind == "udt"
+                    and receiver_spec.name in _DRAWING_TYPE_NAMES):
+                return receiver_spec
             return None
         if isinstance(value, IfStmt):
             def terminal_expr(body):
@@ -214,6 +242,16 @@ class TypeHelper:
                 return None
             true_spec = self._type_spec_from_expr(true_node)
             false_spec = self._type_spec_from_expr(false_node)
+            true_is_na = (
+                isinstance(true_node, NaLiteral)
+                or (isinstance(true_node, Identifier)
+                    and true_node.name == "na")
+            )
+            false_is_na = (
+                isinstance(false_node, NaLiteral)
+                or (isinstance(false_node, Identifier)
+                    and false_node.name == "na")
+            )
             if (true_spec is not None
                     and true_spec.kind == "map"
                     and true_spec == false_spec):
@@ -225,6 +263,21 @@ class TypeHelper:
             if (false_spec is not None
                     and false_spec.kind == "map"
                     and isinstance(true_node, NaLiteral)):
+                return false_spec
+            if (true_spec is not None
+                    and true_spec.kind == "udt"
+                    and true_spec.name in _DRAWING_TYPE_NAMES
+                    and true_spec == false_spec):
+                return true_spec
+            if (true_spec is not None
+                    and true_spec.kind == "udt"
+                    and true_spec.name in _DRAWING_TYPE_NAMES
+                    and false_is_na):
+                return true_spec
+            if (false_spec is not None
+                    and false_spec.kind == "udt"
+                    and false_spec.name in _DRAWING_TYPE_NAMES
+                    and true_is_na):
                 return false_spec
             return None
         if isinstance(value, FuncCall):
@@ -390,6 +443,10 @@ class TypeHelper:
                 cal.name if isinstance(cal, Identifier) else None)
             if fname and fname in getattr(self, "_func_return_type_specs", {}):
                 return self._func_return_type_specs[fname]
+            if fname and fname in getattr(self, "_func_udt_return_types", {}):
+                udt_return = self._func_udt_return_types[fname]
+                if udt_return in _DRAWING_TYPE_NAMES:
+                    return TypeSpec.udt(udt_return)
         if isinstance(value, MemberAccess):
             owner = self._type_spec_from_expr(value.object)
             if owner is not None and owner.kind == "udt" and owner.name:

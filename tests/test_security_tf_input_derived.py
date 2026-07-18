@@ -20,6 +20,7 @@ from __future__ import annotations
 import pytest
 
 from pineforge_codegen import transpile
+from tests._compile import compile_cpp
 
 
 PRELUDE = '//@version=6\nstrategy("t")\n'
@@ -101,6 +102,27 @@ def test_r3_lower_tf_conditional_over_input_uses_input_getter():
     assert line.startswith("register_security_lower_tf_eval("), line
     assert 'get_input_string("Exec"' in line, line
     assert "(mode == std::string" not in line, line
+
+
+def test_lower_tf_runtime_persistent_timeframe_leaf_initializes_series_metadata_first():
+    src = (
+        PRELUDE
+        + "var int seconds = 60\n"
+        + "seconds := int(close)\n"
+        + 'string sub = seconds > 30 ? "1" : "5"\n'
+        + "a = request.security_lower_tf(syminfo.tickerid, sub, close)\n"
+        + "plot(array.size(a))\n"
+    )
+    cpp = transpile(src)
+    line = next(
+        ln.strip()
+        for ln in cpp.splitlines()
+        if "register_security_lower_tf_eval(" in ln
+    )
+    assert "seconds" in line
+    assert 'std::string("1")' in line
+    assert 'std::string("5")' in line
+    compile_cpp(cpp, label="lower-tf-runtime-persistent-leaf")
 
 
 # ---------------------------------------------------------------------------

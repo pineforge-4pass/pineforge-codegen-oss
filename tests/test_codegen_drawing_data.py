@@ -8,7 +8,10 @@ prove the generated C++ type-checks against ``pineforge/drawing.hpp``.
 
 from __future__ import annotations
 
+import pytest
+
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp, skip_if_no_compile_env
 
 
@@ -139,6 +142,548 @@ def test_var_handle_na_default_no_ctor_init():
     cpp = _cpp("var line x = na\nx := line.new(bar_index, close, bar_index, close)")
     assert "Line x;" in cpp
     assert "x(na<double>())" not in cpp
+
+
+def test_drawing_handle_ternary_na_uses_exact_handle_types():
+    """A drawing constructor selected against ``na`` is target-typed.
+
+    Without both TypeSpec propagation and typed arm lowering, the declaration
+    becomes ``double`` and C++ sees incompatible ``Handle``/``double`` arms.
+    Cover every real drawing handle type while leaving visual-only types out.
+    """
+    cpp = _cpp(
+        "cond = close > open\n"
+        "ln1 = cond ? line.new(bar_index, close, bar_index + 1, close) : na\n"
+        "ln2 = line.new(bar_index, open, bar_index + 1, open)\n"
+        "bx = cond ? box.new(bar_index, high, bar_index + 1, low) : na\n"
+        'lb = cond ? label.new(bar_index, close, "x") : na\n'
+        "lf = cond ? linefill.new(ln1, ln2, color.red) : na\n"
+        "pt = cond ? chart.point.now(close) : na"
+    )
+    for cpp_type, name in (
+        ("Line", "ln1"),
+        ("Box", "bx"),
+        ("Label", "lb"),
+        ("Linefill", "lf"),
+        ("ChartPoint", "pt"),
+    ):
+        assert f"{cpp_type} {name} =" in cpp
+        assert f": ({cpp_type}{{}})" in cpp
+        assert f"double {name} =" not in cpp
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-ternary-all-handles")
+
+
+def test_drawing_handle_ternary_na_reverse_arm_and_reassignment_compile():
+    src = '''//@version=6
+strategy("drawing ternary na")
+cond = close > open
+reverse = cond ? na : label.new(bar_index, close, "reverse")
+var label reassigned = na
+reassigned := cond ? label.new(bar_index, high, "next") : na
+if not na(reverse) and not na(reassigned)
+    strategy.entry("L", strategy.long)
+'''
+    cpp = transpile(src)
+    assert "Label reverse =" in cpp
+    assert "(Label{}) : (pf_label_new" in cpp
+    assert "reassigned = ((cond) ? (pf_label_new" in cpp
+    assert ": (Label{}))" in cpp
+    assert "double reverse =" not in cpp
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-ternary-na")
+
+
+def test_drawing_handle_ternary_na_respects_shadowed_scalar_local():
+    cpp = _cpp(
+        "var line x = na\n"
+        "f() =>\n"
+        "    float x = close > open ? close : na\n"
+        "    x := close > open ? open : na\n"
+        "    x\n"
+        "value = f()"
+    )
+    function_body = cpp.split("double f() {", 1)[1].split("    }", 1)[0]
+    assert "double x = ((" in function_body
+    assert "x = ((" in function_body
+    assert "Line{}" not in function_body
+    assert function_body.count("na<double>()") == 2
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-ternary-shadowed-scalar")
+
+
+def test_drawing_handle_ternary_na_function_return_and_global_var_compile():
+    src = '''//@version=6
+strategy("drawing ternary return")
+cond = close > open
+makeLabel() => cond ? label.new(bar_index, close, "returned") : na
+var label globalLabel = cond ? label.new(bar_index, close, "initial") : na
+globalLabel := cond ? makeLabel() : na
+if not na(globalLabel)
+    strategy.entry("L", strategy.long)
+'''
+    cpp = transpile(src)
+    assert "Label makeLabel(" in cpp
+    assert "return ((cond) ? (pf_label_new" in cpp
+    assert ": (Label{}));" in cpp
+    assert "globalLabel = ((cond) ? (makeLabel()) : (Label{}));" in cpp
+    cond_pos = cpp.index("cond = ([&]{")
+    init_pos = cpp.index("if (!_pf_var_init_globalLabel) {")
+    init_end = cpp.index("_pf_var_init_globalLabel = true;", init_pos)
+    init_block = cpp[init_pos:init_end]
+    assert cond_pos < init_pos
+    assert "globalLabel = ((cond) ? (pf_label_new" in init_block
+    assert 'std::string("initial")' in init_block
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-ternary-return-global")
+
+
+def test_drawing_handle_udf_arm_and_tuple_element_compile():
+    src = '''//@version=6
+strategy("drawing ternary udf and tuple")
+cond = close > open
+makeLine() => line.new(bar_index, close, bar_index + 1, close)
+makePair() => [cond ? makeLine() : na, makeLine()]
+h = cond ? makeLine() : na
+[a, b] = makePair()
+if not na(h) and not na(a) and not na(b)
+    strategy.entry("L", strategy.long)
+'''
+    cpp = transpile(src)
+    assert "Line makeLine(" in cpp
+    assert "std::tuple<Line, Line> makePair(" in cpp
+    assert "std::make_tuple(((cond) ? (makeLine()) : (Line{})), makeLine())" in cpp
+    assert "Line h = Line{};" in cpp
+    assert "h = ((cond) ? (makeLine()) : (Line{}));" in cpp
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-ternary-udf-tuple")
+
+
+def test_drawing_handle_ternary_na_drawing_parameter_reassignment_compile():
+    src = '''//@version=6
+strategy("drawing ternary parameter")
+cond = close > open
+update(line h) =>
+    h := cond ? line.new(bar_index, close, bar_index + 1, close) : na
+    h
+var line globalLine = na
+globalLine := update(globalLine)
+if not na(globalLine)
+    strategy.entry("L", strategy.long)
+'''
+    cpp = transpile(src)
+    body = cpp.split("Line update(Line& h) {", 1)[1].split("    }", 1)[0]
+    assert "h = ((cond) ? (pf_line_new" in body
+    assert ": (Line{}));" in body
+    assert "na<double>()" not in body
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-ternary-parameter")
+
+
+def test_drawing_handle_ternary_na_function_var_reassignment_compile():
+    src = '''//@version=6
+strategy("drawing ternary function var")
+cond = close > open
+make() =>
+    var line h = na
+    h := cond ? line.new(bar_index, close, bar_index + 1, close) : na
+    h
+result = make()
+if not na(result)
+    strategy.entry("L", strategy.long)
+'''
+    cpp = transpile(src)
+    body = cpp.split("Line make_cs0() {", 1)[1].split("    }", 1)[0]
+    assert "h = ((cond) ? (pf_line_new" in body
+    assert ": (Line{}));" in body
+    assert "na<double>()" not in body
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-ternary-function-var")
+
+
+def test_function_drawing_var_initializes_at_declaration_after_prior_local():
+    src = '''//@version=6
+strategy("function drawing declaration init")
+make() =>
+    bool cond = close > open
+    var line h = cond ? line.new(bar_index, close, bar_index + 1, close) : na
+    h
+result = make()
+'''
+    cpp = transpile(src)
+    body = cpp.split("Line make_cs0() {", 1)[1].split("    }", 1)[0]
+    cond_pos = body.index("bool cond =")
+    guard_pos = body.index("if (!this->_pf_var_init_h) {")
+    assert cond_pos < guard_pos
+    assert "h = ((cond) ? (pf_line_new" in body
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-function-declaration-init")
+
+
+def test_conditional_function_drawing_var_keeps_lazy_first_entry_guard():
+    src = '''//@version=6
+strategy("conditional function drawing init")
+make(bool cond) =>
+    if cond
+        var line h = line.new(bar_index, close, bar_index + 1, close)
+    0.0
+value = make(close > open)
+'''
+    cpp = transpile(src)
+    body = cpp.split("double make_cs0(bool cond) {", 1)[1].split(
+        "        return 0.0;", 1
+    )[0]
+    branch_pos = body.index("if (cond) {")
+    guard_pos = body.index("if (!this->_pf_var_init_h) {")
+    assert branch_pos < guard_pos
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-function-conditional-init")
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        """f(float h, bool cond) =>
+    before = h
+    if cond
+        var line h = line.new(bar_index, h, bar_index + 1, h)
+        line.delete(h)
+    before
+a = f(close, close > open)
+b = f(open, close < open)""",
+        """f(bool cond) =>
+    float h = close
+    if cond
+        var line h = line.new(bar_index, h, bar_index + 1, h)
+        line.delete(h)
+    h
+value = f(close > open)""",
+        """f(bool cond) =>
+    line h = line.new(bar_index, close, bar_index + 1, close)
+    if cond
+        var line h = line.copy(h)
+        line.delete(h)
+    h
+value = f(close > open)""",
+        """f(float h, bool cond) =>
+    result = if cond
+        var line h = line.new(bar_index, h, bar_index + 1, h)
+        h
+    else
+        na
+    result
+value = f(close, close > open)""",
+    ),
+)
+def test_callable_persistent_drawing_ancestor_shadow_fails_closed(body):
+    with pytest.raises(CompileError) as exc:
+        _cpp(body)
+    assert "Persistent drawing binding 'h' shadows an ancestor callable" in str(
+        exc.value
+    )
+
+
+def test_later_scalar_local_is_not_poisoned_by_nested_drawing_binding():
+    src = '''//@version=6
+strategy("later local source order")
+f(bool cond) =>
+    if cond
+        var line h = line.new(bar_index, close, bar_index + 1, close)
+        line.delete(h)
+    float h = close
+    h
+value = f(close > open)
+'''
+    cpp = transpile(src)
+    assert "double f_cs0(bool cond)" in cpp
+    assert "double h = current_bar_.close;" in cpp
+    assert "return h;" in cpp
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-later-scalar-source-order")
+
+
+def test_function_terminal_drawing_if_accepts_explicit_na_arm():
+    src = '''//@version=6
+strategy("block if drawing na")
+make(bool cond) =>
+    if cond
+        label.new(bar_index, close, "x")
+    else
+        na
+result = make(close > open)
+'''
+    cpp = transpile(src)
+    assert "Label make(bool cond)" in cpp
+    assert "_func_ret = Label{};" in cpp
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-terminal-explicit-na")
+
+
+def test_block_valued_drawing_if_propagates_through_wrappers_and_fresh_clone():
+    src = '''//@version=6
+strategy("block drawing fresh return")
+cond = close > open
+leg(int size, bool arm) =>
+    peak = ta.highest(size)
+    result = if arm
+        var line l = arm ? na : line.new(bar_index, peak, bar_index + 1, peak)
+        old = l[1]
+        l
+    else
+        na
+    result
+f_get(int len, bool arm) => leg(len, arm)
+g_get(int len, bool arm) => leg(len, arm)
+a = f_get(10, cond)
+b = f_get(20, not cond)
+c = g_get(30, cond)
+'''
+    cpp = transpile(src)
+    assert "Line leg_cs0(int size, bool arm)" in cpp
+    assert "Line leg_cs1(int size, bool arm)" in cpp
+    assert "Line leg__ni1(int size, bool arm)" in cpp
+    assert "Series<Line> l__ni1;" in cpp
+    assert "l__ni1.push(l__ni1[0])" in cpp
+    assert "l__ni1.update(l__ni1[0])" in cpp
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-block-return-fresh-clone")
+
+
+def test_drawing_handle_ternary_na_cross_type_shadow_in_both_orders_compile():
+    sources = (
+        '''//@version=6
+strategy("drawing shadow global first")
+cond = close > open
+var line x = na
+make() =>
+    label x = cond ? label.new(bar_index, close, "local") : na
+    x
+result = make()
+''',
+        '''//@version=6
+strategy("drawing shadow function first")
+cond = close > open
+make() =>
+    label x = cond ? label.new(bar_index, close, "local") : na
+    x
+var line x = na
+result = make()
+''',
+    )
+    for index, src in enumerate(sources):
+        cpp = transpile(src)
+        body = cpp.split("Label make() {", 1)[1].split("    }", 1)[0]
+        assert "Label x = ((cond) ? (pf_label_new" in body
+        assert ": (Label{}));" in body
+        assert "Line{}" not in body
+        skip_if_no_compile_env()
+        compile_cpp(cpp, label=f"drawing-ternary-cross-shadow-{index}")
+
+
+def test_sibling_persistent_drawing_members_keep_exact_renamed_types():
+    src = '''//@version=6
+strategy("sibling drawing vars")
+cond = close > open
+if cond
+    var label x = label.new(bar_index, high, "upper")
+if not cond
+    var label x = label.new(bar_index, low, "lower")
+'''
+    cpp = transpile(src)
+    assert "Label x;" in cpp
+    assert "Label x__blk1;" in cpp
+    assert "double x__blk1" not in cpp
+    assert "_pf_var_init_x__blk1" in cpp
+    assert "x__blk1 = pf_label_new" in cpp
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-sibling-persistent-members")
+
+
+def test_only_history_read_sibling_becomes_exact_handle_series():
+    src = '''//@version=6
+strategy("sibling exact drawing series")
+cond = close > open
+if cond
+    var line x = line.new(bar_index, high, bar_index + 1, high)
+if not cond
+    var label x = label.new(bar_index, low, "lower")
+    prior = x[1]
+'''
+    cpp = transpile(src)
+    assert "Line x;" in cpp
+    assert "Series<Label> x__blk1;" in cpp
+    assert "Series<Line> x;" not in cpp
+    assert "prior = x__blk1[1];" in cpp
+    assert "x__blk1.update(pf_label_new" in cpp
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-sibling-exact-series")
+
+
+def test_later_local_drawing_decl_does_not_preshadow_global_assignment():
+    src = '''//@version=6
+strategy("drawing source order shadow")
+cond = close > open
+var line x = na
+f() =>
+    x := cond ? line.new(bar_index, close, bar_index + 1, close) : na
+    label x = cond ? label.new(bar_index, close, "local") : na
+    0.0
+v = f()
+'''
+    cpp = transpile(src)
+    body = cpp.split("double f() {", 1)[1].split("    }", 1)[0]
+    assert "x = ((cond) ? (pf_line_new" in body
+    assert ": (Line{}));" in body
+    assert "Label x = ((cond) ? (pf_label_new" in body
+    assert ": (Label{}));" in body
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-source-order-shadow")
+
+
+def test_cross_callable_persistent_drawing_name_collision_fails_closed():
+    src = '''//@version=6
+strategy("drawing callable member collision")
+cond = close > open
+makeLine() =>
+    var line h = cond ? line.new(bar_index, close, bar_index + 1, close) : na
+    h
+makeLabel() =>
+    var label h = cond ? label.new(bar_index, close, "label") : na
+    h
+a = makeLine()
+b = makeLabel()
+'''
+    with pytest.raises(
+        CompileError,
+        match="Persistent drawing bindings named 'h'",
+    ):
+        transpile(src)
+
+
+@pytest.mark.parametrize(
+    "global_decl,persistent_decl",
+    (
+        (
+            "float x = close",
+            "f() =>\n    var label x = na\n    x\nvalue = f()",
+        ),
+        (
+            "line x = line.new(bar_index, close, bar_index + 1, close)",
+            "f() =>\n    var float x = 1.0\n    x\nvalue = f()",
+        ),
+    ),
+)
+def test_global_member_and_persistent_drawing_identity_collision_fails_closed(
+    global_decl, persistent_decl
+):
+    src = (
+        '//@version=6\nstrategy("drawing global member collision")\n'
+        f"{global_decl}\n{persistent_decl}\n"
+    )
+    with pytest.raises(CompileError, match="collides with a top-level"):
+        transpile(src)
+
+
+def test_sibling_scalar_does_not_poison_function_var_drawing_target():
+    src = '''//@version=6
+strategy("sibling scalar and drawing var")
+cond = close > open
+f() =>
+    if cond
+        float h = close
+    if not cond
+        var line h = na
+        h := cond ? line.new(bar_index, close, bar_index + 1, close) : na
+    0.0
+v = f()
+'''
+    cpp = transpile(src)
+    body = cpp.split("double f_cs0() {", 1)[1].split("return 0.0;", 1)[0]
+    assert "double h = current_bar_.close;" in body
+    assert "h = ((cond) ? (pf_line_new" in body
+    assert ": (Line{}));" in body
+    assert "na<double>()" not in body
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-sibling-scalar-function-var")
+
+
+def test_history_drawing_var_initializes_typed_and_in_source_order():
+    src = '''//@version=6
+strategy("drawing history init")
+cond = close > open
+var label x = cond ? label.new(bar_index, close, "initial") : na
+if not na(x[1])
+    strategy.entry("L", strategy.long)
+'''
+    cpp = transpile(src)
+    assert "Series<Label> x;" in cpp
+    assert "x.push(Label{});" in cpp
+    cond_pos = cpp.index("cond = ([&]{")
+    init_pos = cpp.index("if (!_pf_var_init_x) {")
+    init_end = cpp.index("_pf_var_init_x = true;", init_pos)
+    init_block = cpp[init_pos:init_end]
+    assert cond_pos < init_pos
+    assert "x.update(((cond) ? (pf_label_new" in init_block
+    assert ": (Label{})));" in init_block
+    assert "x.push(cond ? label.new" not in cpp
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-history-var-init")
+
+
+def test_function_history_drawing_var_clones_keep_series_handle_type():
+    src = '''//@version=6
+strategy("function drawing history clones")
+cond = close > open
+make() =>
+    var line h = cond ? line.new(bar_index, close, bar_index + 1, close) : na
+    prior = h[1]
+    h
+a = make()
+b = make()
+'''
+    cpp = transpile(src)
+    assert "Series<Line> h;" in cpp
+    assert "Series<Line> h_cs1;" in cpp
+    assert "Series<double> h" not in cpp
+    assert "Line make_cs0()" in cpp
+    assert "Line make_cs1()" in cpp
+    assert "h.update(((cond) ? (pf_line_new" in cpp
+    assert "h_cs1.update(((cond) ? (pf_line_new" in cpp
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-function-history-clones")
+
+
+def test_context_sensitive_fresh_drawing_series_advances_history():
+    src = '''//@version=6
+strategy("nested drawing fresh variants")
+cond = close > open
+leg(int size, bool arm) =>
+    peak = ta.highest(size)
+    if arm
+        var line l = cond ? line.new(bar_index, peak, bar_index + 1, peak) : na
+        old = l[1]
+    peak
+f_get(int len, bool arm) => leg(len, arm)
+g_get(int len, bool arm) => leg(len, arm)
+a = f_get(10, cond)
+b = f_get(20, not cond)
+c = g_get(30, cond)
+'''
+    cpp = transpile(src)
+    assert "Series<Line> l__ni1;" in cpp
+    assert "bool _pf_var_init_l__ni1 = false;" in cpp
+    assert "if (!this->_pf_var_init_l__ni1)" in cpp
+    assert "l__ni1.update(((cond) ? (pf_line_new" in cpp
+    assert "l__ni1.push(l__ni1[0])" in cpp
+    assert "l__ni1.update(l__ni1[0])" in cpp
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-fresh-series-history")
+
+
+def test_numeric_ternary_na_remains_double():
+    cpp = _cpp("cond = close > open\nvalue = cond ? close : na")
+    assert "double value =" in cpp
+    assert "na<double>()" in cpp
 
 
 # ---------------------------------------------------------------------------
