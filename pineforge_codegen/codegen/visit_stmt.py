@@ -323,6 +323,30 @@ class StmtVisitor:
                 return recv
         return None
 
+    def _map_target_cpp_type(
+        self,
+        *,
+        name: str | None = None,
+        target_node=None,
+        type_hint: str | None = None,
+    ) -> str | None:
+        """Return the exact C++ map type for a contextual RHS target.
+
+        Declarations need the explicit hint before their lexical collection
+        binding is activated; reassignments can use the active name registry,
+        while UDT fields are resolved from the target expression itself.
+        Returning ``None`` for every non-map shape deliberately preserves the
+        established generic expression lowering byte-for-byte.
+        """
+        spec = self._type_spec_from_hint_name(type_hint) if type_hint else None
+        if spec is None and target_node is not None:
+            spec = self._type_spec_from_expr(target_node)
+        if spec is None and name is not None:
+            spec = self._collection_spec_for_name(name)
+        if spec is None or spec.kind != "map":
+            return None
+        return self._type_spec_to_cpp(spec)
+
     def _visit_var_decl(self, node: VarDecl, lines: list[str], pad: str) -> None:
         # Primitive runtime var/varip initializers execute at the declaration
         # site under a dedicated once flag. This preserves source order (a
@@ -483,10 +507,11 @@ class StmtVisitor:
                 self._map_vars.add(node.name)
                 self._collection_types.setdefault(node.name, spec)
                 cpp_type = self._type_spec_to_cpp(spec)
+                init = f"{cpp_type}::new_()"
                 if is_global_member:
-                    lines.append(f"{pad}{safe} = {cpp_type}();")
+                    lines.append(f"{pad}{safe} = {init};")
                 else:
-                    lines.append(f"{pad}{cpp_type} {safe};")
+                    lines.append(f"{pad}{cpp_type} {safe} = {init};")
                 return
 
         # Visual/drawing function assignments (line.new, label.new, box.new,
@@ -530,12 +555,26 @@ class StmtVisitor:
 
         # If/switch expression: x = if cond ... else ...
         if isinstance(node.value, (IfStmt, SwitchStmt)):
+            cpp_type = self._type_for_decl(node) if not is_global_member else None
+            map_cpp_type = (
+                cpp_type
+                if cpp_type is not None and cpp_type.startswith("PineMap<")
+                else self._map_target_cpp_type(
+                    name=node.name,
+                    type_hint=node.type_hint,
+                )
+            )
             if not is_global_member:
-                cpp_type = self._type_for_decl(node)
                 default = self._default_for_type(cpp_type)
                 lines.append(f"{pad}{cpp_type} {safe} = {default};")
             indent = len(pad) // 4
-            self._visit_if_switch_expr(node.value, safe, lines, indent)
+            self._visit_if_switch_expr(
+                node.value,
+                safe,
+                lines,
+                indent,
+                target_cpp_type=map_cpp_type,
+            )
             return
 
         # UDT lvalue alias (BUG C): a local initialised from a user-defined-UDT
@@ -580,7 +619,12 @@ class StmtVisitor:
                     self._map_vars.add(node.name)
                 elif coll_spec.kind == "matrix":
                     self._matrix_specs[node.name] = coll_spec
-                lines.append(f"{pad}{cpp_type}& {safe} = {cpp_val};")
+                # PineMap is itself a shared-ID handle. Copying it by value is
+                # the correct alias operation and, unlike a C++ reference,
+                # keeps a later local rebind local. Arrays/matrices still need
+                # their established reference alias route.
+                ref = "" if coll_spec.kind == "map" else "&"
+                lines.append(f"{pad}{cpp_type}{ref} {safe} = {cpp_val};")
                 return
 
         # Global-scope UDT array-element alias (BUG: Pine array elements of a
@@ -601,7 +645,15 @@ class StmtVisitor:
 
         # General declaration
         cpp_type = self._type_for_decl(node) if not is_global_member else None
-        cpp_val = self._visit_rhs_value(node.value, node.name, target_cpp_type=cpp_type)
+        target_cpp_type = cpp_type or self._map_target_cpp_type(
+            name=node.name,
+            type_hint=node.type_hint,
+        )
+        cpp_val = self._visit_rhs_value(
+            node.value,
+            node.name,
+            target_cpp_type=target_cpp_type,
+        )
         if is_global_member:
             lines.append(f"{pad}{safe} = {cpp_val};")
         else:
@@ -635,8 +687,18 @@ class StmtVisitor:
         if isinstance(node.value, (IfStmt, SwitchStmt)):
             target_name = self._get_target_name(node.target)
             safe = self._safe_name(target_name) if target_name else self._visit_expr(node.target)
+            map_cpp_type = self._map_target_cpp_type(
+                name=target_name,
+                target_node=node.target if target_name is None else None,
+            )
             indent = len(pad) // 4
-            self._visit_if_switch_expr(node.value, safe, lines, indent)
+            self._visit_if_switch_expr(
+                node.value,
+                safe,
+                lines,
+                indent,
+                target_cpp_type=map_cpp_type,
+            )
             return
 
         # Get target name
@@ -659,7 +721,12 @@ class StmtVisitor:
                 return
             # General expression target (e.g., member access)
             target_cpp = self._visit_expr(node.target)
-            val_cpp = self._visit_expr(node.value)
+            target_cpp_type = self._map_target_cpp_type(
+                target_node=node.target,
+            )
+            val_cpp = self._visit_rhs_value(
+                node.value, target_cpp_type=target_cpp_type
+            )
             if node.op == ":=":
                 lines.append(f"{pad}{target_cpp} = {val_cpp};")
             else:
@@ -727,8 +794,9 @@ class StmtVisitor:
             # a double NaN is stored into an int/int64_t/bool member (UB, defeats
             # is_na<T>()). Only computed for bare na — every other RHS is
             # unaffected.
-            tct = (self._na_reassign_cpp_type(target_name)
-                   if self._is_na_expr(node.value) else None)
+            tct = self._map_target_cpp_type(name=target_name)
+            if tct is None and self._is_na_expr(node.value):
+                tct = self._na_reassign_cpp_type(target_name)
             val_cpp = self._visit_rhs_value(node.value, target_name, target_cpp_type=tct)
             if node.op == ":=":
                 lines.append(f"{pad}{safe} = {val_cpp};")
@@ -739,8 +807,9 @@ class StmtVisitor:
                 else:
                     lines.append(f"{pad}{safe} {node.op} {val_cpp};")
         else:
-            tct = (self._na_reassign_cpp_type(target_name)
-                   if self._is_na_expr(node.value) else None)
+            tct = self._map_target_cpp_type(name=target_name)
+            if tct is None and self._is_na_expr(node.value):
+                tct = self._na_reassign_cpp_type(target_name)
             val_cpp = self._visit_rhs_value(node.value, target_name, target_cpp_type=tct)
             if node.op == ":=":
                 lines.append(f"{pad}{safe} = {val_cpp};")
@@ -916,12 +985,24 @@ class StmtVisitor:
         finally:
             self._pop_block_var_remap(saved)
 
-    def _emit_block_with_assign(self, body: list, target: str,
-                                lines: list[str], indent: int) -> None:
+    def _emit_block_with_assign(
+        self,
+        body: list,
+        target: str,
+        lines: list[str],
+        indent: int,
+        target_cpp_type: str | None = None,
+    ) -> None:
         """Expression-body counterpart of :meth:`_visit_block_statements`."""
         saved = self._push_block_var_remap(body)
         try:
-            self._emit_body_with_assign(body, target, lines, indent)
+            self._emit_body_with_assign(
+                body,
+                target,
+                lines,
+                indent,
+                target_cpp_type=target_cpp_type,
+            )
         finally:
             self._pop_block_var_remap(saved)
 
@@ -1070,10 +1151,67 @@ class StmtVisitor:
                     if (idx < len(tuple_specs)
                             and tuple_specs[idx] is not None):
                         self._current_loop_var_specs[v] = tuple_specs[idx]
+        map_pair_loop = (
+            iterable_spec is not None
+            and iterable_spec.kind == "map"
+            and node.vars is not None
+            and len(node.vars) == 2
+        )
         if node.var:
             v_cpp = self._safe_name(node.var)
             ref = "&" if self._loop_elem_is_writeback_udt(node.iterable) else ""
             lines.append(f"{pad}for (auto{ref} {v_cpp} : {iterable}) {{")
+        elif map_pair_loop:
+            # Pine map iteration exposes insertion-ordered ``[key, value]``
+            # pairs. PineMap intentionally keeps its storage private, so take
+            # one handle copy (which aliases the same map ID), iterate keys(),
+            # and obtain each value through the public API. Binding the
+            # iterable once also preserves single-evaluation semantics for an
+            # arbitrary map-producing expression.
+            key_name, value_name = node.vars
+            authored_names = (
+                set(self._all_bound_names)
+                | set(self._func_names)
+                | set(self._udt_defs)
+            )
+            occupied_names = authored_names | {
+                self._safe_name(name) for name in authored_names
+            } | {
+                self._func_safe_name(name) for name in self._func_names
+            }
+            # Parameters are not statement bindings, so they are absent from
+            # ``_all_bound_names``.  Include both their authored and C++-safe
+            # spellings before minting loop temporaries; otherwise a legal UDF
+            # or method parameter named ``__pf_map_iter_0`` (or, for ``_`` key
+            # loops, ``__pf_map_key_0``) is redeclared and then shadowed by the
+            # generated loop machinery.
+            active_params = set(self._current_func_param_types)
+            occupied_names.update(active_params)
+            occupied_names.update(
+                self._safe_name(name) for name in active_params
+            )
+            while True:
+                fid = self._for_counter
+                self._for_counter += 1
+                map_token = f"__pf_map_iter_{fid}"
+                internal_key = f"__pf_map_key_{fid}"
+                generated_names = {map_token}
+                if key_name == "_":
+                    generated_names.add(internal_key)
+                if not (generated_names & occupied_names):
+                    break
+            key_cpp = (
+                self._safe_name(key_name)
+                if key_name != "_"
+                else internal_key
+            )
+            lines.append(f"{pad}auto {map_token} = {iterable};")
+            lines.append(f"{pad}for (auto {key_cpp} : {map_token}.keys()) {{")
+            if value_name != "_":
+                value_cpp = self._safe_name(value_name)
+                lines.append(
+                    f"{pad}    auto {value_cpp} = {map_token}.get({key_cpp});"
+                )
         elif node.vars:
             bindings = ", ".join(node.vars)
             lines.append(f"{pad}for (auto [{bindings}] : {iterable}) {{")
@@ -1132,8 +1270,14 @@ class StmtVisitor:
 
     # _default_for_type lives on TypeInferer — see codegen/types.py.
 
-    def _emit_body_with_assign(self, body: list, target: str,
-                               lines: list[str], indent: int) -> None:
+    def _emit_body_with_assign(
+        self,
+        body: list,
+        target: str,
+        lines: list[str],
+        indent: int,
+        target_cpp_type: str | None = None,
+    ) -> None:
         """Emit a body block where the last expression becomes an assignment."""
         if not body:
             return
@@ -1150,36 +1294,73 @@ class StmtVisitor:
                     if self._call_is_void(stmt.expr):
                         self._visit_stmt(stmt, lines, indent)
                         return
-                    cpp = self._visit_expr(stmt.expr)
+                    cpp = self._visit_rhs_value(
+                        stmt.expr,
+                        target_cpp_type=target_cpp_type,
+                    )
                     pad = "    " * indent
                     lines.append(f"{pad}{target} = {cpp};")
                 elif isinstance(stmt, IfStmt):
                     # Nested if expression
-                    self._visit_if_switch_expr(stmt, target, lines, indent)
+                    self._visit_if_switch_expr(
+                        stmt,
+                        target,
+                        lines,
+                        indent,
+                        target_cpp_type=target_cpp_type,
+                    )
                 elif isinstance(stmt, SwitchStmt):
-                    self._visit_if_switch_expr(stmt, target, lines, indent)
+                    self._visit_if_switch_expr(
+                        stmt,
+                        target,
+                        lines,
+                        indent,
+                        target_cpp_type=target_cpp_type,
+                    )
                 else:
                     self._visit_stmt(stmt, lines, indent)
             else:
                 self._visit_stmt(stmt, lines, indent)
 
-    def _visit_if_switch_expr(self, node, target: str,
-                              lines: list[str], indent: int) -> None:
+    def _visit_if_switch_expr(
+        self,
+        node,
+        target: str,
+        lines: list[str],
+        indent: int,
+        target_cpp_type: str | None = None,
+    ) -> None:
         """Emit an if/switch used as an expression, assigning to target."""
         pad = "    " * indent
         if isinstance(node, IfStmt):
             cond = self._visit_expr(node.condition)
             lines.append(f"{pad}if ({cond}) {{")
-            self._emit_block_with_assign(node.body, target, lines, indent + 1)
+            self._emit_block_with_assign(
+                node.body,
+                target,
+                lines,
+                indent + 1,
+                target_cpp_type=target_cpp_type,
+            )
             lines.append(f"{pad}}}")
             if node.else_body:
                 if len(node.else_body) == 1 and isinstance(node.else_body[0], IfStmt):
                     lines[-1] = f"{pad}}} else"
-                    self._visit_if_switch_expr(node.else_body[0], target, lines, indent)
+                    self._visit_if_switch_expr(
+                        node.else_body[0],
+                        target,
+                        lines,
+                        indent,
+                        target_cpp_type=target_cpp_type,
+                    )
                 else:
                     lines[-1] = f"{pad}}} else {{"
                     self._emit_block_with_assign(
-                        node.else_body, target, lines, indent + 1
+                        node.else_body,
+                        target,
+                        lines,
+                        indent + 1,
+                        target_cpp_type=target_cpp_type,
                     )
                     lines.append(f"{pad}}}")
         elif isinstance(node, SwitchStmt):
@@ -1192,7 +1373,11 @@ class StmtVisitor:
                     case_val = self._visit_expr(case_expr)
                     lines.append(f"{pad}{prefix} ({expr_var} == {case_val}) {{")
                     self._emit_block_with_assign(
-                        case_body, target, lines, indent + 1
+                        case_body,
+                        target,
+                        lines,
+                        indent + 1,
+                        target_cpp_type=target_cpp_type,
                     )
                     lines.append(f"{pad}}}")
             else:
@@ -1201,12 +1386,20 @@ class StmtVisitor:
                     cond = self._visit_expr(case_expr)
                     lines.append(f"{pad}{prefix} ({cond}) {{")
                     self._emit_block_with_assign(
-                        case_body, target, lines, indent + 1
+                        case_body,
+                        target,
+                        lines,
+                        indent + 1,
+                        target_cpp_type=target_cpp_type,
                     )
                     lines.append(f"{pad}}}")
             if node.default_body:
                 lines.append(f"{pad}else {{")
                 self._emit_block_with_assign(
-                    node.default_body, target, lines, indent + 1
+                    node.default_body,
+                    target,
+                    lines,
+                    indent + 1,
+                    target_cpp_type=target_cpp_type,
                 )
                 lines.append(f"{pad}}}")

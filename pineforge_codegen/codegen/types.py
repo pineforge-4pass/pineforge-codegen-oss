@@ -145,7 +145,7 @@ class TypeInferer:
         if spec.kind == "array":
             return f"std::vector<{self._type_spec_to_cpp(spec.element)}>"
         if spec.kind == "map":
-            return f"std::unordered_map<{self._type_spec_to_cpp(spec.key)}, {self._type_spec_to_cpp(spec.value)}>"
+            return f"PineMap<{self._type_spec_to_cpp(spec.key)}, {self._type_spec_to_cpp(spec.value)}>"
         if spec.kind == "matrix":
             elem = self._type_spec_to_cpp(spec.element)
             if spec.element.kind == "primitive" and spec.element.name == "float":
@@ -162,7 +162,7 @@ class TypeInferer:
             return "false"
         if cpp_type == "int":
             return "0"
-        if cpp_type.startswith("std::vector") or cpp_type.startswith("std::unordered_map"):
+        if cpp_type.startswith("std::vector") or cpp_type.startswith("PineMap"):
             return f"{cpp_type}()"
         return "0.0"
 
@@ -180,7 +180,7 @@ class TypeInferer:
                 return f"{DRAWING_TYPE_TO_CPP[spec.name]}{{}}"
             return f"{spec.name}{{}}"
         cpp_type = self._type_spec_to_cpp(spec)
-        if cpp_type.startswith("std::vector") or cpp_type.startswith("std::unordered_map"):
+        if cpp_type.startswith("std::vector") or cpp_type.startswith("PineMap"):
             return f"{cpp_type}()"
         return self._default_for_type(cpp_type)
 
@@ -416,22 +416,62 @@ class TypeInferer:
                 key = self._type_spec_from_hint_name(targs[0]) if len(targs) > 0 else TypeSpec.primitive("string")
                 val = self._type_spec_from_hint_name(targs[1]) if len(targs) > 1 else TypeSpec.primitive("float")
                 return TypeSpec.map(key or TypeSpec.primitive("string"), val or TypeSpec.primitive("float"))
+            if namespace == "map" and func_name in {
+                "put", "get", "remove", "contains", "size", "keys",
+                "values", "copy", "put_all", "clear",
+            } and node.args:
+                receiver_spec = self._type_spec_from_expr(node.args[0])
+                if receiver_spec is not None and receiver_spec.kind == "map":
+                    if func_name in ("put", "get", "remove"):
+                        return receiver_spec.value
+                    if func_name == "keys":
+                        return TypeSpec.array(
+                            receiver_spec.key or TypeSpec.primitive("string")
+                        )
+                    if func_name == "values":
+                        return TypeSpec.array(
+                            receiver_spec.value or TypeSpec.primitive("float")
+                        )
+                    if func_name == "copy":
+                        return receiver_spec
+                    if func_name == "contains":
+                        return TypeSpec.primitive("bool")
+                    if func_name == "size":
+                        return TypeSpec.primitive("int")
             if namespace in self._udt_defs and func_name == "new":
                 return TypeSpec.udt(namespace)
             if isinstance(node.callee, MemberAccess):
                 recv_spec = self._type_spec_from_expr(node.callee.object)
+                member_name = node.callee.member
                 if recv_spec is not None and recv_spec.kind == "array":
                     if func_name in ("get", "first", "last", "pop", "shift", "remove"):
                         return recv_spec.element
                     if func_name in ("copy", "slice"):
                         return recv_spec
                 if recv_spec is not None and recv_spec.kind == "map":
-                    if func_name in ("get", "remove"):
+                    if member_name in ("put", "get", "remove"):
                         return recv_spec.value
-                    if func_name == "keys":
+                    if member_name == "keys":
                         return TypeSpec.array(recv_spec.key or TypeSpec.primitive("string"))
-                    if func_name == "values":
+                    if member_name == "values":
                         return TypeSpec.array(recv_spec.value or TypeSpec.primitive("float"))
+                    if member_name == "copy":
+                        return recv_spec
+                    if member_name == "contains":
+                        return TypeSpec.primitive("bool")
+                    if member_name == "size":
+                        return TypeSpec.primitive("int")
+                if (recv_spec is not None
+                        and recv_spec.kind == "udt"
+                        and recv_spec.name):
+                    method_info = self._func_info_map.get(
+                        f"{recv_spec.name}.{member_name}"
+                    )
+                    return_spec = getattr(
+                        method_info, "return_type_spec", None
+                    )
+                    if return_spec is not None:
+                        return return_spec
                 if recv_spec is not None and recv_spec.kind == "matrix":
                     if func_name in ("copy", "submatrix", "transpose", "concat"):
                         return recv_spec
@@ -571,35 +611,34 @@ class TypeInferer:
     def _map_method_expr(
         self, map_expr: str, method: str, args: list[str], spec: TypeSpec | None = None,
     ) -> str:
-        """Lower ``map.method(...)`` to its C++ form using the receiver's spec for default-key/value typing."""
-        spec = spec or TypeSpec.map(TypeSpec.primitive("string"), TypeSpec.primitive("float"))
-        key_cpp = self._type_spec_to_cpp(spec.key)
-        value_cpp = self._type_spec_to_cpp(spec.value)
-        map_cpp = self._type_spec_to_cpp(spec)
-        default_value = (
-            'std::string("")' if value_cpp == "std::string"
-            else ("false" if value_cpp == "bool" else self._default_for_type(value_cpp))
-        )
+        """Lower a Pine map operation to the ordered, alias-preserving runtime.
+
+        ``PineMap`` owns all missing-value, insertion-order and explicit-copy
+        semantics.  Keeping this lowering as a direct method delegation also
+        guarantees that each receiver and argument expression occurs exactly
+        once; the typed-parameter lane may still wrap arguments to impose
+        Pine's source evaluation order.
+        """
         if method == "put":
-            return f"({map_expr}[{args[0]}] = {args[1]})"
+            return f"{map_expr}.put({args[0]}, {args[1]})"
         if method == "get":
-            return f"({map_expr}.count({args[0]}) ? {map_expr}[{args[0]}] : {default_value})"
+            return f"{map_expr}.get({args[0]})"
         if method == "remove":
-            return f"[&](){{ auto it={map_expr}.find({args[0]}); if(it!={map_expr}.end()){{ auto v=it->second; {map_expr}.erase(it); return v; }} return {default_value}; }}()"
+            return f"{map_expr}.remove({args[0]})"
         if method == "contains":
-            return f"({map_expr}.count({args[0]}) > 0)"
+            return f"{map_expr}.contains({args[0]})"
         if method == "size":
-            return f"(double){map_expr}.size()"
+            return f"{map_expr}.size()"
         if method == "clear":
             return f"{map_expr}.clear()"
         if method == "keys":
-            return f"[&](){{ std::vector<{key_cpp}> v; for(auto& p:{map_expr}) v.push_back(p.first); return v; }}()"
+            return f"{map_expr}.keys()"
         if method == "values":
-            return f"[&](){{ std::vector<{value_cpp}> v; for(auto& p:{map_expr}) v.push_back(p.second); return v; }}()"
+            return f"{map_expr}.values()"
         if method == "copy":
-            return f"{map_cpp}({map_expr})"
+            return f"{map_expr}.copy()"
         if method == "put_all":
-            return f"{map_expr}.insert({args[0]}.begin(), {args[0]}.end())"
+            return f"{map_expr}.put_all({args[0]})"
         # Defensive: support_checker rejects any map.* method not in SUPPORTED_MAP
         # (derived from MAP_METHODS, which mirrors this if-chain). Reaching here
         # means the checker was bypassed or the tables drifted.
@@ -621,6 +660,15 @@ class TypeInferer:
             if node.type_hint in self._udt_defs:
                 return node.type_hint
             return PINE_TYPE_TO_CPP.get(node.type_hint, "double")
+        # The analyzer records exact callable-local collection bindings before
+        # its lexical scopes are popped.  In particular, an inferred local
+        # such as ``selected = cond ? na : global_map`` has a map TypeSpec even
+        # though generic C++ expression inference sees ``na`` as ``double``.
+        # Consume only the map form here; arrays/matrices and every non-map
+        # declaration retain their established inference/output paths.
+        captured = self._callable_collection_bindings.get(id(node))
+        if captured is not None and captured.kind == "map":
+            return self._type_spec_to_cpp(captured)
         # Drawing handle local (L-N6): a hintless local whose RHS resolves to a
         # drawing udt must declare as the handle struct, not the analyzer's
         # scalar default. Covers ``ln = arr.get(i)``, alias ``b = a``, field read
@@ -734,11 +782,13 @@ class TypeInferer:
         for ``double`` (already the default lowering), so those paths are
         unchanged.
         """
-        # Collections / UDT / drawing handles never take a scalar ``na<T>()``:
-        # leave them to the drawing-na / default lowering in _visit_rhs_value.
+        # Maps use their default-constructed null ID for Pine ``na``. Arrays,
+        # matrices, UDTs and drawing handles retain their established paths.
         collection_spec = self._collection_spec_for_name(name)
+        if collection_spec is not None and collection_spec.kind == "map":
+            return self._type_spec_to_cpp(collection_spec)
         if ((collection_spec is not None
-                and collection_spec.kind in {"array", "map", "matrix"})
+                and collection_spec.kind in {"array", "matrix"})
                 or name in self._udt_var_types):
             return None
         cpp_type: str | None = None
@@ -1186,6 +1236,8 @@ class TypeInferer:
                 if recv_spec is not None and recv_spec.kind == "udt" and recv_spec.name:
                     fi_u = self._func_info_map.get(f"{recv_spec.name}.{member_name}")
                     if fi_u is not None:
+                        if getattr(fi_u, "return_type_spec", None) is not None:
+                            return self._type_spec_to_cpp(fi_u.return_type_spec)
                         return PINE_TYPE_TO_CPP.get(fi_u.return_type, "double")
             spec = self._type_spec_from_expr(node)
             if spec is not None:

@@ -349,14 +349,14 @@ def test_collection_map_terminals_infer_exact_types_across_forms():
         "copy_functional", "copy_global", "copy_local", "copy_param",
         "copy_inferred",
     ):
-        assert f"std::unordered_map<std::string, int> {name}(" in cpp
+        assert f"PineMap<std::string, int> {name}(" in cpp
 
     for name in ("keys_a", "keys_b", "keys_c", "keys_d", "keys_e"):
         assert f"std::vector<std::string> {name};" in cpp
     for name in ("values_a", "values_b", "values_c", "values_d", "values_e"):
         assert f"std::vector<int> {name};" in cpp
     for name in ("copy_a", "copy_b", "copy_c", "copy_d", "copy_e"):
-        assert f"std::unordered_map<std::string, int> {name};" in cpp
+        assert f"PineMap<std::string, int> {name};" in cpp
 
 
 def test_string_map_terminals_infer_string_across_forms():
@@ -387,10 +387,10 @@ def test_map_terminal_return_forms_compile():
     compile_cpp(transpile(_TERMINAL_SOURCE), label="map_terminal_returns")
 
 
-def test_nonterminal_map_output_stays_byte_identical():
+def test_nonterminal_pinemap_output_hash_is_stable():
     cpp = transpile(_NONTERMINAL_SOURCE)
     assert sha256(cpp.encode()).hexdigest() == (
-        "d207acf7c4f53761cebd1ef6637380131f140ca5566c00d9436303af80a1cf40"
+        "73ae5680f7272cd61bb33c4ac8603159b1c441e986cff7ca59c355df140b5ef4"
     )
 
 
@@ -425,5 +425,5 @@ observed = f(map.new<string, string>())
 def test_unresolved_parameter_keeps_lexical_precedence_over_global_map():
     cpp = transpile(_SHADOWED_UNRESOLVED_PARAM_SOURCE)
     assert sha256(cpp.encode()).hexdigest() == (
-        "331d8306eb6d8868e5a25542cbacedcab77b10a13c18daf8dd523a3e283e196d"
+        "0b913b2fa8802be720aa171e1cf5d353aff3b56c6e3bf9df85f5e8d08ef066f8"
     )

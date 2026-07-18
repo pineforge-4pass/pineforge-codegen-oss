@@ -110,6 +110,8 @@ class TopLevelEmitter:
         lines.append('#include <pineforge/math.hpp>')
         lines.append('#include <pineforge/series.hpp>')
         lines.append('#include <pineforge/na.hpp>')
+        if getattr(self, "_uses_map", False):
+            lines.append('#include <pineforge/map.hpp>')
         lines.append("#include <cstdint>")
         lines.append("#include <cmath>")
         lines.append("#include <algorithm>")
@@ -296,6 +298,119 @@ class TopLevelEmitter:
             members.append(name)
         return members
 
+    def _emit_map_checkpoint_traits(self, lines: list[str]) -> None:
+        """Emit recursive rollback adapters for shared-ID PineMap state.
+
+        This support block is emitted only for map-using scripts. The primary
+        trait retains the historical value-copy checkpoint for ordinary
+        runtime state; PineMap, vectors and generated UDTs recursively replace
+        shared handles with immutable runtime snapshots.
+        """
+        lines.extend([
+            "template <typename _PFValue>",
+            "struct _PFCheckpointTraits {",
+            "    using snapshot_type = _PFValue;",
+            "    static snapshot_type take(const _PFValue& value) { return value; }",
+            "    static void restore(_PFValue& value, const snapshot_type& snapshot) {",
+            "        value = snapshot;",
+            "    }",
+            "};",
+            "",
+            "template <typename _PFKey, typename _PFValue>",
+            "struct _PFCheckpointTraits<PineMap<_PFKey, _PFValue>> {",
+            "    using map_type = PineMap<_PFKey, _PFValue>;",
+            "    static_assert(map_type::snapshot_supported,",
+            '                  "generated map checkpoints require primitive map values");',
+            "    using snapshot_type = std::optional<typename map_type::Snapshot>;",
+            "    static snapshot_type take(const map_type& value) {",
+            "        if (value.is_na()) return std::nullopt;",
+            "        return value.snapshot();",
+            "    }",
+            "    static void restore(map_type& value, const snapshot_type& snapshot) {",
+            "        if (!snapshot) {",
+            "            value = map_type{};",
+            "            return;",
+            "        }",
+            "        value.restore(*snapshot);",
+            "    }",
+            "};",
+            "",
+            "template <typename _PFElement, typename _PFAllocator>",
+            "struct _PFCheckpointTraits<std::vector<_PFElement, _PFAllocator>> {",
+            "    using element_traits = _PFCheckpointTraits<_PFElement>;",
+            "    using element_snapshot = typename element_traits::snapshot_type;",
+            "    using snapshot_type = std::vector<element_snapshot>;",
+            "    static snapshot_type take(",
+            "            const std::vector<_PFElement, _PFAllocator>& value) {",
+            "        snapshot_type snapshot;",
+            "        snapshot.reserve(value.size());",
+            "        for (std::size_t index = 0; index < value.size(); ++index) {",
+            "            const _PFElement element = value[index];",
+            "            snapshot.push_back(element_traits::take(element));",
+            "        }",
+            "        return snapshot;",
+            "    }",
+            "    static void restore(",
+            "            std::vector<_PFElement, _PFAllocator>& value,",
+            "            const snapshot_type& snapshot) {",
+            "        value.clear();",
+            "        value.reserve(snapshot.size());",
+            "        for (const auto& element_snapshot_value : snapshot) {",
+            "            _PFElement element{};",
+            "            element_traits::restore(element, element_snapshot_value);",
+            "            value.push_back(element);",
+            "        }",
+            "    }",
+            "};",
+            "",
+        ])
+
+        # Pine requires referenced UDT types to be declared before their use,
+        # so source/declaration order is also a valid dependency order for the
+        # corresponding checkpoint specializations.
+        for type_name, fields in self._udt_defs.items():
+            emitted_fields = [
+                field
+                for field in fields
+                if field.name not in self._udt_omitted_fields.get(type_name, set())
+            ]
+            checkpoint_fields = [field.name for field in emitted_fields]
+            checkpoint_fields.append("__pf_na")
+            lines.append("template <>")
+            lines.append(f"struct _PFCheckpointTraits<{type_name}> {{")
+            lines.append("    struct snapshot_type {")
+            for index, field_name in enumerate(checkpoint_fields):
+                lines.append(
+                    "        _PFCheckpointTraits<"
+                    f"decltype({type_name}::{field_name})>::snapshot_type "
+                    f"_pf_field_{index};"
+                )
+            lines.append("    };")
+            lines.append(
+                f"    static snapshot_type take(const {type_name}& value) {{"
+            )
+            lines.append("        return snapshot_type{")
+            for field_name in checkpoint_fields:
+                lines.append(
+                    "            _PFCheckpointTraits<"
+                    f"decltype({type_name}::{field_name})>::take(value.{field_name}),"
+                )
+            lines.append("        };")
+            lines.append("    }")
+            lines.append(
+                f"    static void restore({type_name}& value, "
+                "const snapshot_type& snapshot) {"
+            )
+            for index, field_name in enumerate(checkpoint_fields):
+                lines.append(
+                    "        _PFCheckpointTraits<"
+                    f"decltype({type_name}::{field_name})>::restore("
+                    f"value.{field_name}, snapshot._pf_field_{index});"
+                )
+            lines.append("    }")
+            lines.append("};")
+            lines.append("")
+
     def _emit_script_state_hooks(self, lines: list[str], members: list[str]) -> None:
         """Emit the engine's Pine rollback checkpoint hook implementation.
 
@@ -311,11 +426,19 @@ class TopLevelEmitter:
         broker/order state lives in the base class and is intentionally absent:
         fills must survive while Pine script variables roll back.
         """
+        map_aware = getattr(self, "_uses_map", False)
         lines.append("    struct _PFScriptState {")
         for idx, name in enumerate(members):
-            lines.append(
-                f"        decltype(GeneratedStrategy::{name}) _pf_value_{idx};"
-            )
+            if map_aware:
+                lines.append(
+                    "        _PFCheckpointTraits<"
+                    f"decltype(GeneratedStrategy::{name})>::snapshot_type "
+                    f"_pf_value_{idx};"
+                )
+            else:
+                lines.append(
+                    f"        decltype(GeneratedStrategy::{name}) _pf_value_{idx};"
+                )
         lines.append("    };")
         lines.append(
             "    static_assert(std::is_copy_constructible_v<_PFScriptState>, "
@@ -330,16 +453,29 @@ class TopLevelEmitter:
         lines.append("    void snapshot_script_state() override {")
         lines.append("        _pf_script_state_checkpoint_.emplace(_PFScriptState{")
         for name in members:
-            lines.append(f"            {name},")
+            if map_aware:
+                lines.append(
+                    "            _PFCheckpointTraits<"
+                    f"decltype(GeneratedStrategy::{name})>::take({name}),"
+                )
+            else:
+                lines.append(f"            {name},")
         lines.append("        });")
         lines.append("    }")
         lines.append("")
         lines.append("    void restore_script_state() override {")
         lines.append("        if (!_pf_script_state_checkpoint_) return;")
         for idx, name in enumerate(members):
-            lines.append(
-                f"        this->{name} = _pf_script_state_checkpoint_->_pf_value_{idx};"
-            )
+            if map_aware:
+                lines.append(
+                    "        _PFCheckpointTraits<"
+                    f"decltype(GeneratedStrategy::{name})>::restore("
+                    f"this->{name}, _pf_script_state_checkpoint_->_pf_value_{idx});"
+                )
+            else:
+                lines.append(
+                    f"        this->{name} = _pf_script_state_checkpoint_->_pf_value_{idx};"
+                )
         lines.append("    }")
         lines.append("")
         lines.append("    void commit_script_state() override {")
@@ -731,7 +867,13 @@ class TopLevelEmitter:
                 if name in self._map_vars:
                     for stmt in self.ctx.ast.body:
                         if isinstance(stmt, VarDecl) and stmt.name == name:
-                            cpp_val = self._visit_expr(stmt.value)
+                            cpp_val = self._visit_rhs_value(
+                                stmt.value,
+                                name,
+                                target_cpp_type=self._type_spec_to_cpp(
+                                    self._map_spec_for_name(name)
+                                ),
+                            )
                             lines.append(f"            {safe} = {cpp_val};")
                             break
                     continue
@@ -1045,11 +1187,24 @@ class TopLevelEmitter:
                 # (egoigor's ``method slope(line ln)``) must emit ``Line&`` not
                 # the unknown ``line&``. Register _udt_param_udt so the body's
                 # getters dispatch through the §4.3 drawing path (L.6d / U.5).
-                recv_cpp = DRAWING_TYPE_TO_CPP.get(fi.udt_type_name, fi.udt_type_name)
-                cpp_t = f"{recv_cpp}&"
-                safe_p = self._safe_name(p)
-                self._udt_param_udt[safe_p] = fi.udt_type_name
-                self._udt_param_udt[p] = fi.udt_type_name
+                recv_spec = (
+                    fi.param_type_specs[i]
+                    if i < len(fi.param_type_specs)
+                    else None
+                )
+                if recv_spec is not None and recv_spec.kind == "map":
+                    # A map method receiver is a copied ID handle. Mutations
+                    # reach the caller's map while rebinds stay method-local.
+                    spec = recv_spec
+                    cpp_t = self._type_spec_to_cpp(recv_spec)
+                else:
+                    recv_cpp = DRAWING_TYPE_TO_CPP.get(
+                        fi.udt_type_name, fi.udt_type_name
+                    )
+                    cpp_t = f"{recv_cpp}&"
+                    safe_p = self._safe_name(p)
+                    self._udt_param_udt[safe_p] = fi.udt_type_name
+                    self._udt_param_udt[p] = fi.udt_type_name
             elif fi.name == "isInSession" and i < 2:
                 cpp_t = "std::string"
             elif p in func_sv:
@@ -1073,7 +1228,8 @@ class TopLevelEmitter:
                     if elem is not None and elem.kind == "udt":
                         self._udt_param_udt[p] = elem.name
                         self._udt_param_udt[self._safe_name(p)] = elem.name
-                    cpp_t = f"{cpp_t}&"
+                    if spec.kind == "array":
+                        cpp_t = f"{cpp_t}&"
             elif i < len(fi.param_types):
                 pt = fi.param_types[i]
                 cpp_t = PINE_TYPE_TO_CPP.get(pt, "double")
@@ -1104,6 +1260,9 @@ class TopLevelEmitter:
             ret_type = self._type_spec_to_cpp(fi.return_type_spec)
         else:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")
+        map_return_cpp_type = (
+            ret_type if ret_type.startswith("PineMap<") else None
+        )
 
         # For per-call-site variants, suffix the function name and activate TA + var remapping
         func_name = self._emit_udt_method_cpp_name(fi) if is_udt else self._func_safe_name(fi.name)
@@ -1214,7 +1373,10 @@ class TopLevelEmitter:
                 # through to the default return.
                 self._visit_stmt(node.body[0], lines, indent=2)
             elif expr:
-                lines.append(f"        return {self._visit_expr(expr)};")
+                lines.append(
+                    "        return "
+                    f"{self._visit_rhs_value(expr, target_cpp_type=map_return_cpp_type)};"
+                )
                 emitted_return = True
         else:
             for i, s in enumerate(node.body):
@@ -1228,7 +1390,10 @@ class TopLevelEmitter:
                     if self._call_is_void(s.expr) or self._is_skip_expr(s.expr):
                         self._visit_stmt(s, lines, indent=2)
                     else:
-                        lines.append(f"        return {self._visit_expr(s.expr)};")
+                        lines.append(
+                            "        return "
+                            f"{self._visit_rhs_value(s.expr, target_cpp_type=map_return_cpp_type)};"
+                        )
                         emitted_return = True
                 elif i == len(node.body) - 1 and isinstance(s, (SwitchStmt, IfStmt)):
                     # Switch/if as last statement = return expression in PineScript
@@ -1242,7 +1407,13 @@ class TopLevelEmitter:
                     else:
                         default_ret = self._default_for_type(ret_type)
                     lines.append(f"        {ret_type} _func_ret = {default_ret};")
-                    self._visit_if_switch_expr(s, "_func_ret", lines, indent=2)
+                    self._visit_if_switch_expr(
+                        s,
+                        "_func_ret",
+                        lines,
+                        indent=2,
+                        target_cpp_type=map_return_cpp_type,
+                    )
                     lines.append(f"        return _func_ret;")
                     emitted_return = True
                 else:
@@ -1349,7 +1520,16 @@ class TopLevelEmitter:
             if (is_drawing or is_udt) and isinstance(init_ast, NaLiteral):
                 activate_member()
                 continue
-            init_cpp = self._visit_expr(init_ast)
+            init_cpp = self._visit_rhs_value(
+                init_ast,
+                name,
+                target_cpp_type=(
+                    self._type_spec_to_cpp(collection_spec)
+                    if collection_spec is not None
+                    and collection_spec.kind == "map"
+                    else None
+                ),
+            )
             # A bare-``na`` initializer for an int/int64_t/bool ``var`` member
             # must be typed (``na<int>()``), mirroring the class-scope ctor
             # init (``_typed_na_init`` at _emit_constructor); a raw ``na<double>()``

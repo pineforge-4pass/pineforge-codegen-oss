@@ -40,8 +40,9 @@ from __future__ import annotations
 from typing import Any
 
 from ..ast_nodes import (
-    ASTNode, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier, MemberAccess,
-    NaLiteral, NumberLiteral, StringLiteral, TupleLiteral, UnaryOp,
+    ASTNode, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier, IfStmt,
+    MemberAccess, NaLiteral, NumberLiteral, StringLiteral, Ternary,
+    TupleLiteral, UnaryOp,
 )
 from ..symbols import PineType, TypeSpec
 
@@ -181,6 +182,51 @@ class TypeHelper:
     def _type_spec_from_expr(self, value: ASTNode | None) -> TypeSpec | None:
         if value is None:
             return None
+        if isinstance(value, Ternary):
+            true_spec = self._type_spec_from_expr(value.true_val)
+            false_spec = self._type_spec_from_expr(value.false_val)
+            if (true_spec is not None
+                    and true_spec.kind == "map"
+                    and true_spec == false_spec):
+                return true_spec
+            # A Pine ``na`` arm acquires the other arm's map type.  Keep this
+            # narrow to maps so unrelated scalar/array inference and generated
+            # output retain their established behavior.
+            if (true_spec is not None
+                    and true_spec.kind == "map"
+                    and isinstance(value.false_val, NaLiteral)):
+                return true_spec
+            if (false_spec is not None
+                    and false_spec.kind == "map"
+                    and isinstance(value.true_val, NaLiteral)):
+                return false_spec
+            return None
+        if isinstance(value, IfStmt):
+            def terminal_expr(body):
+                if not body:
+                    return None
+                terminal = body[-1]
+                return terminal.expr if isinstance(terminal, ExprStmt) else terminal
+
+            true_node = terminal_expr(value.body)
+            false_node = terminal_expr(value.else_body)
+            if true_node is None or false_node is None:
+                return None
+            true_spec = self._type_spec_from_expr(true_node)
+            false_spec = self._type_spec_from_expr(false_node)
+            if (true_spec is not None
+                    and true_spec.kind == "map"
+                    and true_spec == false_spec):
+                return true_spec
+            if (true_spec is not None
+                    and true_spec.kind == "map"
+                    and isinstance(false_node, NaLiteral)):
+                return true_spec
+            if (false_spec is not None
+                    and false_spec.kind == "map"
+                    and isinstance(true_node, NaLiteral)):
+                return false_spec
+            return None
         if isinstance(value, FuncCall):
             cal = value.callee
             func = cal.member if isinstance(cal, MemberAccess) else None
@@ -237,6 +283,28 @@ class TypeHelper:
                 key = self._type_spec_from_hint(targs[0]) if len(targs) > 0 else TypeSpec.primitive("string")
                 val = self._type_spec_from_hint(targs[1]) if len(targs) > 1 else TypeSpec.primitive("float")
                 return TypeSpec.map(key or TypeSpec.primitive("string"), val or TypeSpec.primitive("float"))
+            if ns == "map" and func in {
+                "put", "get", "remove", "contains", "size", "keys",
+                "values", "copy", "put_all", "clear",
+            } and value.args:
+                recv_spec = self._type_spec_from_expr(value.args[0])
+                if recv_spec is not None and recv_spec.kind == "map":
+                    if func in ("put", "get", "remove"):
+                        return recv_spec.value
+                    if func == "keys":
+                        return TypeSpec.array(
+                            recv_spec.key or TypeSpec.primitive("string")
+                        )
+                    if func == "values":
+                        return TypeSpec.array(
+                            recv_spec.value or TypeSpec.primitive("float")
+                        )
+                    if func == "copy":
+                        return recv_spec
+                    if func == "contains":
+                        return TypeSpec.primitive("bool")
+                    if func == "size":
+                        return TypeSpec.primitive("int")
             if ns == "str" and func == "split":
                 return TypeSpec.array(TypeSpec.primitive("string"))
             if ns == "ta" and func == "pivot_point_levels":
@@ -263,12 +331,18 @@ class TypeHelper:
                     if func in ("copy", "slice"):
                         return recv_spec
                 if recv_spec is not None and recv_spec.kind == "map":
-                    if func in ("get", "remove"):
+                    if func in ("put", "get", "remove"):
                         return recv_spec.value
                     if func == "keys":
                         return TypeSpec.array(recv_spec.key or TypeSpec.primitive("string"))
                     if func == "values":
                         return TypeSpec.array(recv_spec.value or TypeSpec.primitive("float"))
+                    if func == "copy":
+                        return recv_spec
+                    if func == "contains":
+                        return TypeSpec.primitive("bool")
+                    if func == "size":
+                        return TypeSpec.primitive("int")
                 if recv_spec is not None and recv_spec.kind == "matrix":
                     if func in ("copy", "submatrix", "transpose", "concat"):
                         return recv_spec
@@ -278,6 +352,24 @@ class TypeHelper:
                         return recv_spec.element
                     if func == "eigenvalues":
                         return TypeSpec.array(TypeSpec.primitive("float"))
+                if (recv_spec is not None
+                        and recv_spec.kind == "udt"
+                        and recv_spec.name):
+                    method_key = f"{recv_spec.name}.{func}"
+                    method_info = next(
+                        (
+                            info
+                            for info in getattr(self, "_func_infos", ())
+                            if info.name == method_key
+                            and getattr(info, "is_udt_method", False)
+                        ),
+                        None,
+                    )
+                    return_spec = getattr(
+                        method_info, "return_type_spec", None
+                    )
+                    if return_spec is not None:
+                        return return_spec
                 # Drawing method-form: a.copy() -> same handle; lf.get_line*() -> line.
                 if (recv_spec is not None and recv_spec.kind == "udt"
                         and recv_spec.name in _DRAWING_TYPE_NAMES):
@@ -314,6 +406,80 @@ class TypeHelper:
             return last_stmt.expr
         if not isinstance(last_stmt, TupleLiteral) and hasattr(last_stmt, "loc"):
             return last_stmt
+        return None
+
+    def _terminal_map_selection_return_spec(
+        self,
+        value: ASTNode | None,
+        parameter_specs: dict[str, TypeSpec | None],
+    ) -> TypeSpec | None:
+        """Infer a map returned by a terminal ternary/block selection.
+
+        Untyped UDF parameters do not have a lexical ``TypeSpec`` while their
+        definition is first analyzed.  At a concrete call site, however, the
+        argument specs are known.  Propagate those specs through only the two
+        Pine selection shapes whose result type is determined by compatible
+        branches: ``condition ? a : b`` and terminal ``if`` expressions.
+
+        A direct ``na`` arm is context-typed by the opposite map arm.  All
+        other unresolved or incompatible shapes return ``None`` so this helper
+        cannot turn a scalar/non-map UDF into a map-returning function.
+        """
+
+        def branch_terminal(node: ASTNode | None) -> ASTNode | None:
+            if not isinstance(node, IfStmt):
+                return node
+            if not node.body or not node.else_body:
+                return None
+            return node
+
+        def body_terminal(body: list[ASTNode] | None) -> ASTNode | None:
+            if not body:
+                return None
+            terminal = body[-1]
+            return terminal.expr if isinstance(terminal, ExprStmt) else terminal
+
+        def resolve(node: ASTNode | None) -> TypeSpec | None:
+            if node is None or isinstance(node, NaLiteral):
+                return None
+            if isinstance(node, Identifier) and node.name in parameter_specs:
+                spec = parameter_specs[node.name]
+                return spec if spec is not None and spec.kind == "map" else None
+            if isinstance(node, Ternary):
+                return compatible(node.true_val, node.false_val)
+            if isinstance(node, IfStmt):
+                return compatible(
+                    body_terminal(node.body),
+                    body_terminal(node.else_body),
+                )
+            spec = self._type_spec_from_expr(node)
+            return spec if spec is not None and spec.kind == "map" else None
+
+        def compatible(
+            left_node: ASTNode | None,
+            right_node: ASTNode | None,
+        ) -> TypeSpec | None:
+            left_node = branch_terminal(left_node)
+            right_node = branch_terminal(right_node)
+            if left_node is None or right_node is None:
+                return None
+            left = resolve(left_node)
+            right = resolve(right_node)
+            if left is not None and right is not None:
+                return left if left == right else None
+            if left is not None and isinstance(right_node, NaLiteral):
+                return left
+            if right is not None and isinstance(left_node, NaLiteral):
+                return right
+            return None
+
+        if isinstance(value, Ternary):
+            return compatible(value.true_val, value.false_val)
+        if isinstance(value, IfStmt):
+            return compatible(
+                body_terminal(value.body),
+                body_terminal(value.else_body),
+            )
         return None
 
     def _terminal_map_call_return(

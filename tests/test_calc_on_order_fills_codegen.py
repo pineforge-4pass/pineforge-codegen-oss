@@ -76,7 +76,8 @@ def test_script_state_checkpoint_covers_every_mutable_state_family():
     fields = {
         name: int(index)
         for name, index in re.findall(
-            r"decltype\(GeneratedStrategy::(\w+)\) _pf_value_(\d+);", cpp
+            r"_PFCheckpointTraits<decltype\(GeneratedStrategy::(\w+)\)>::snapshot_type _pf_value_(\d+);",
+            cpp,
         )
     }
 
@@ -112,9 +113,15 @@ def test_script_state_checkpoint_covers_every_mutable_state_family():
     # catches mutations which leave the struct populated but omit snapshot or
     # restore plumbing for one member.
     for name, index in fields.items():
-        assert re.search(rf"^\s+{re.escape(name)},$", cpp, re.MULTILINE)
+        assert re.search(
+            rf"^\s+_PFCheckpointTraits<decltype\(GeneratedStrategy::{re.escape(name)}\)>::take\({re.escape(name)}\),$",
+            cpp,
+            re.MULTILINE,
+        )
         assert (
-            f"this->{name} = _pf_script_state_checkpoint_->_pf_value_{index};" in cpp
+            f"_PFCheckpointTraits<decltype(GeneratedStrategy::{name})>::restore("
+            f"this->{name}, _pf_script_state_checkpoint_->_pf_value_{index});"
+            in cpp
         )
 
     # Full-dataset precalc output is immutable during a broker walk.  It must

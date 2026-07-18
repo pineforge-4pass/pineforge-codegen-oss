@@ -133,6 +133,7 @@ all tables it needs come from ``codegen/tables.py``, AST classes from
 from __future__ import annotations
 
 from ..ast_nodes import (
+    ASTNode,
     FuncCall,
     Identifier,
     MemberAccess,
@@ -470,13 +471,13 @@ class CallVisitor:
     def _map_param_method_expr(
         self, map_expr: str, method: str, arg_nodes: list, spec: TypeSpec,
     ) -> str:
-        """Lower one typed-map parameter method with ordered, single-use args.
+        """Lower one map operation with receiver-first, ordered single use.
 
-        Existing map templates may reference a key more than once (``get`` /
-        ``contains`` / ``remove``), while C++ assignment evaluates the RHS of
-        ``put`` before its subscript LHS.  Bind supplied expressions through
-        nested lambdas so this lane deterministically evaluates key then value
-        exactly once without changing established global/local map output.
+        C++17 sequences a member-call receiver before its arguments but does
+        not order sibling arguments. Pine requires receiver, key, then value.
+        Nested immediately-invoked lambdas bind the receiver first and every
+        argument in source/signature order, while retaining lvalue aliases and
+        extending temporary receiver lifetime through the operation.
         """
         args = [self._visit_expr(arg) for arg in arg_nodes]
         occupied = "\n".join((map_expr, *args))
@@ -491,13 +492,260 @@ class CallVisitor:
             bindings.append((token, arg))
         self._map_param_arg_counter = counter
 
+        receiver_counter = getattr(self, "_map_receiver_counter", 0)
+        while True:
+            receiver_token = f"__pf_map_receiver_{receiver_counter}"
+            receiver_counter += 1
+            if receiver_token not in occupied:
+                break
+        self._map_receiver_counter = receiver_counter
+
         lowered = self._map_method_expr(
-            map_expr, method, [token for token, _arg in bindings], spec
+            receiver_token, method, [token for token, _arg in bindings], spec
         )
         for token, arg in reversed(bindings):
             lowered = (
                 f"[&](auto&& {token})->decltype(auto){{ "
                 f"return {lowered}; }}(({arg}))"
+            )
+        return (
+            f"[&](auto&& {receiver_token})->decltype(auto){{ "
+            f"return {lowered}; }}(({map_expr}))"
+        )
+
+    def _expr_contains_map_operation(
+        self,
+        node,
+        visiting_callables: frozenset[str] = frozenset(),
+        lexical_specs: dict[str, TypeSpec | None] | None = None,
+    ) -> bool:
+        """Whether an expression directly or transitively operates on a map.
+
+        C++17 does not order sibling function arguments.  We keep ordinary
+        calls byte-identical and only stage calls whose argument tree can
+        observe map identity/state (including a user helper whose body performs
+        such an operation).
+        """
+        if not isinstance(node, ASTNode):
+            return False
+        lexical_specs = lexical_specs or {}
+        if isinstance(node, FuncCall):
+            callee = node.callee
+            if isinstance(callee, MemberAccess):
+                if (
+                    isinstance(callee.object, Identifier)
+                    and callee.object.name == "map"
+                    and callee.member in (set(MAP_METHODS) | {"new"})
+                ):
+                    return True
+                receiver_spec = self._map_effect_type_spec(
+                    callee.object, lexical_specs
+                )
+                if (
+                    receiver_spec is not None
+                    and receiver_spec.kind == "map"
+                    and callee.member in MAP_METHODS
+                ):
+                    return True
+
+            info_key, func_info = self._map_effect_callable_info(
+                node, lexical_specs
+            )
+            if (
+                func_info is not None
+                and getattr(func_info, "node", None) is not None
+                and info_key not in visiting_callables
+            ):
+                next_visiting = visiting_callables | {info_key}
+                child_specs = self._map_effect_callable_specs(
+                    func_info,
+                    node,
+                    lexical_specs,
+                )
+                if any(
+                    self._expr_contains_map_operation(
+                        child,
+                        next_visiting,
+                        child_specs,
+                    )
+                    for child in func_info.node.body
+                ):
+                    return True
+
+        for value in vars(node).values():
+            if isinstance(value, ASTNode):
+                if self._expr_contains_map_operation(
+                    value, visiting_callables, lexical_specs
+                ):
+                    return True
+            elif isinstance(value, list):
+                if any(
+                    self._expr_contains_map_operation(
+                        item, visiting_callables, lexical_specs
+                    )
+                    for item in value
+                    if isinstance(item, ASTNode)
+                ):
+                    return True
+            elif isinstance(value, dict):
+                if any(
+                    self._expr_contains_map_operation(
+                        item, visiting_callables, lexical_specs
+                    )
+                    for item in value.values()
+                    if isinstance(item, ASTNode)
+                ):
+                    return True
+        return False
+
+    def _map_effect_type_spec(
+        self,
+        node,
+        lexical_specs: dict[str, TypeSpec | None],
+    ) -> TypeSpec | None:
+        """Resolve an expression type in the callable being inspected.
+
+        The ordinary codegen resolver describes the function currently being
+        emitted, not a transitive helper whose AST is being audited for effects.
+        Respect that helper's parameter/local bindings first, then fall back to
+        the established expression inference for globals and constructors.
+        """
+        if isinstance(node, Identifier) and node.name in lexical_specs:
+            return lexical_specs[node.name]
+        if isinstance(node, MemberAccess):
+            owner = self._map_effect_type_spec(node.object, lexical_specs)
+            if owner is not None and owner.kind == "udt" and owner.name:
+                return (self._udt_field_type_specs.get(owner.name) or {}).get(
+                    node.member
+                )
+        if isinstance(node, FuncCall):
+            _key, info = self._map_effect_callable_info(node, lexical_specs)
+            return_spec = getattr(info, "return_type_spec", None)
+            if return_spec is not None:
+                return return_spec
+        return self._type_spec_from_expr(node)
+
+    def _map_effect_callable_info(
+        self,
+        node: FuncCall,
+        lexical_specs: dict[str, TypeSpec | None],
+    ):
+        """Resolve a plain UDF or UDT method for transitive effect analysis."""
+        callee = node.callee
+        if isinstance(callee, Identifier):
+            key = callee.name
+            return key, self._func_info_map.get(key)
+        if isinstance(callee, MemberAccess):
+            receiver_spec = self._map_effect_type_spec(
+                callee.object, lexical_specs
+            )
+            if (receiver_spec is not None
+                    and receiver_spec.kind == "udt"
+                    and receiver_spec.name):
+                key = f"{receiver_spec.name}.{callee.member}"
+                return key, self._func_info_map.get(key)
+        return "", None
+
+    def _map_effect_callable_specs(
+        self,
+        func_info,
+        call: FuncCall,
+        caller_specs: dict[str, TypeSpec | None],
+    ) -> dict[str, TypeSpec | None]:
+        """Build the inspected callee's lexical TypeSpec environment.
+
+        Declared and already-inferred parameter specs are authoritative.  Any
+        unresolved slot is filled from this exact call's argument in the
+        caller's lexical environment, which also lets an untyped map flow
+        through multiple helper layers before analyzer call-site inference has
+        materialized every nested parameter.
+        """
+        func_node = func_info.node
+        params = list(func_node.params) if func_node is not None else []
+        declared_specs = list(getattr(func_info, "param_type_specs", ()) or ())
+        result: dict[str, TypeSpec | None] = {
+            param: declared_specs[index] if index < len(declared_specs) else None
+            for index, param in enumerate(params)
+        }
+
+        is_method = bool(getattr(func_info, "is_udt_method", False))
+        positional = (
+            [call.callee.object, *call.args]
+            if is_method and isinstance(call.callee, MemberAccess)
+            else list(call.args)
+        )
+        for index, actual in enumerate(positional):
+            if index >= len(params) or result[params[index]] is not None:
+                continue
+            result[params[index]] = self._map_effect_type_spec(
+                actual, caller_specs
+            )
+
+        keyword_offset = 1 if is_method else 0
+        for name, actual in call.kwargs.items():
+            if name not in params[keyword_offset:]:
+                continue
+            if result[name] is None:
+                result[name] = self._map_effect_type_spec(
+                    actual, caller_specs
+                )
+
+        # Direct callable locals already carry analyzer-owned lexical
+        # provenance.  They override same-named parameters/globals exactly as
+        # they do during real function emission.
+        result.update(self._func_collection_types.get(func_info.name, {}))
+        return result
+
+    def _ordered_user_call_expr(
+        self,
+        call_head: str,
+        arg_nodes: list,
+        arg_exprs: list[str],
+        *,
+        source_order_nodes: list | None = None,
+        force_stage: bool = False,
+    ) -> str:
+        """Emit a user call with deterministic argument evaluation when needed.
+
+        ``arg_nodes``/``arg_exprs`` are in destination parameter order.
+        ``source_order_nodes`` records the caller's written order, allowing
+        named arguments to be evaluated as written while still occupying their
+        declared parameter slots.
+        """
+        raw = f"{call_head}({', '.join(arg_exprs)})"
+        has_map_effect = any(
+            self._expr_contains_map_operation(node) for node in arg_nodes
+        )
+        if not force_stage and (len(arg_exprs) < 2 or not has_map_effect):
+            return raw
+
+        occupied = "\n".join((call_head, *arg_exprs))
+        counter = getattr(self, "_ordered_call_arg_counter", 0)
+        tokens: list[str] = []
+        for _ in arg_exprs:
+            while True:
+                token = f"__pf_call_arg_{counter}"
+                counter += 1
+                if token not in occupied:
+                    break
+            tokens.append(token)
+        self._ordered_call_arg_counter = counter
+
+        remaining = list(range(len(arg_nodes)))
+        evaluation_order: list[int] = []
+        for source_node in source_order_nodes or arg_nodes:
+            for index in remaining:
+                if arg_nodes[index] is source_node:
+                    evaluation_order.append(index)
+                    remaining.remove(index)
+                    break
+        evaluation_order.extend(remaining)
+
+        lowered = f"{call_head}({', '.join(tokens)})"
+        for index in reversed(evaluation_order):
+            lowered = (
+                f"[&](auto&& {tokens[index]})->decltype(auto){{ "
+                f"return {lowered}; }}(({arg_exprs[index]}))"
             )
         return lowered
 
@@ -505,12 +753,38 @@ class CallVisitor:
         callee = node.callee
         if isinstance(callee, MemberAccess):
             recv_spec = self._type_spec_from_expr(callee.object)
+            if (
+                recv_spec is not None
+                and recv_spec.kind == "map"
+                and not isinstance(callee.object, (Identifier, MemberAccess))
+                and callee.member in MAP_METHODS
+            ):
+                # Returned, constructed and selected map IDs are ordinary
+                # receivers too. Parenthesize the expression so ternaries and
+                # other compound producers remain one C++ receiver expression.
+                arg_nodes = self._map_call_arg_nodes(
+                    callee.member,
+                    node,
+                    functional=False,
+                    allow_keywords=False,
+                )
+                receiver = f"({self._visit_expr(callee.object)})"
+                return self._map_param_method_expr(
+                    receiver,
+                    callee.member,
+                    arg_nodes,
+                    recv_spec,
+                )
             if recv_spec is not None and recv_spec.kind == "udt" and recv_spec.name:
                 mk = f"{recv_spec.name}.{callee.member}"
                 fi_u = self._func_info_map.get(mk)
                 if fi_u is not None and getattr(fi_u, "is_udt_method", False):
                     fn_cpp = self._udt_method_call_emit_name(fi_u, node)
                     recv_e = self._visit_expr(callee.object)
+                    receiver_root = callee.object
+                    while isinstance(receiver_root, MemberAccess):
+                        receiver_root = receiver_root.object
+                    stage_receiver = not isinstance(receiver_root, Identifier)
                     param_names = list(fi_u.node.params[1:]) if fi_u.node else []
                     # Drop the leading ``self`` slot from param_defaults so the
                     # parallel array lines up with ``param_names`` (rest of
@@ -521,7 +795,21 @@ class CallVisitor:
                         param_defaults, lambda x: x,
                     )
                     rest = [self._visit_expr(a) for a in rest_nodes]
-                    return f"{fn_cpp}({', '.join([recv_e] + rest)})"
+                    return self._ordered_user_call_expr(
+                        fn_cpp,
+                        [callee.object, *rest_nodes],
+                        [recv_e, *rest],
+                        source_order_nodes=[
+                            callee.object,
+                            *node.args,
+                            *node.kwargs.values(),
+                        ],
+                        # Generated UDT methods accept ``T&``. A constructor or
+                        # function-return receiver is a C++ rvalue; bind it to a
+                        # named forwarding-reference lambda parameter first so
+                        # the method sees a valid lvalue for the full call.
+                        force_stage=stage_receiver,
+                    )
 
         # Drawing method dispatch (spec §4.3 / L.1). A KNOWN drawing method on a
         # receiver that resolves to a drawing udt — gated on the METHOD NAME
@@ -596,10 +884,10 @@ class CallVisitor:
                             functional=False,
                             allow_keywords=False,
                         )
-                        return self._map_method_expr(
+                        return self._map_param_method_expr(
                             recv,
                             meth,
-                            [self._visit_expr(arg) for arg in arg_nodes],
+                            arg_nodes,
                             recv_spec,
                         )
                     raw_args = [self._visit_expr(a) for a in node.args]
@@ -692,8 +980,9 @@ class CallVisitor:
                             functional=False,
                             allow_keywords=False,
                         )
-                        margs = [self._visit_expr(a) for a in arg_nodes]
-                        return self._map_method_expr(m, meth_raw, margs, recv_spec)
+                        return self._map_param_method_expr(
+                            m, meth_raw, arg_nodes, recv_spec
+                        )
                     if (
                         recv_spec is not None
                         and recv_spec.kind == "array"
@@ -748,7 +1037,16 @@ class CallVisitor:
                                 param_defaults, lambda x: x,
                             )
                             rest = [self._visit_expr(a) for a in rest_nodes]
-                            return f"{fn_cpp}({', '.join([recv_e] + rest)})"
+                            return self._ordered_user_call_expr(
+                                fn_cpp,
+                                [obj, *rest_nodes],
+                                [recv_e, *rest],
+                                source_order_nodes=[
+                                    obj,
+                                    *node.args,
+                                    *node.kwargs.values(),
+                                ],
+                            )
                     args = ", ".join(self._visit_expr(a) for a in node.args)
                     recv = self._visit_expr(obj)
                     meth = meth_raw
@@ -860,8 +1158,9 @@ class CallVisitor:
                 functional=False,
                 allow_keywords=False,
             )
-            args = [self._visit_expr(a) for a in arg_nodes]
-            return self._map_method_expr(m, func_name, args, namespace_spec)
+            return self._map_param_method_expr(
+                m, func_name, arg_nodes, namespace_spec
+            )
 
         # map.method(m, args...) — functional form
         if namespace == "map":
@@ -877,12 +1176,13 @@ class CallVisitor:
                 )
             if func_name == "new":
                 spec = self._type_spec_from_expr(node) or TypeSpec.map(TypeSpec.primitive("string"), TypeSpec.primitive("float"))
-                return f"{self._type_spec_to_cpp(spec)}()"
+                return f"{self._type_spec_to_cpp(spec)}::new_()"
             if func_name in MAP_METHODS and node.args:
                 m = self._visit_expr(node.args[0])
-                rest = [self._visit_expr(a) for a in node.args[1:]]
                 spec = self._type_spec_from_expr(node.args[0]) if node.args else None
-                return self._map_method_expr(m, func_name, rest, spec)
+                return self._map_param_method_expr(
+                    m, func_name, list(node.args[1:]), spec
+                )
             return "0"
 
         if (
@@ -1456,21 +1756,21 @@ class CallVisitor:
         if namespace in self._udt_defs and func_name == "new":
             fields = self._udt_defs[namespace]
             field_names = [f.name for f in fields]
-            init_vals = {}
+            init_nodes = {}
             for i, a in enumerate(node.args):
                 if i < len(field_names):
-                    init_vals[field_names[i]] = self._visit_expr(a)
+                    init_nodes[field_names[i]] = a
             for k, v in node.kwargs.items():
-                init_vals[k] = self._visit_expr(v)
+                init_nodes[k] = v
             field_inits = []
             field_specs = self._udt_field_type_specs.get(namespace, {})
             for f in fields:
-                val = None
-                if f.name in init_vals:
-                    val = init_vals[f.name]
+                value_node = None
+                if f.name in init_nodes:
+                    value_node = init_nodes[f.name]
                 elif f.default:
-                    val = self._visit_expr(f.default)
-                if val is not None:
+                    value_node = f.default
+                if value_node is not None:
                     # Fix narrowing: brace-init (``T{.field = v}``) disallows
                     # narrowing. Pine ``int`` UDT fields are emitted as
                     # ``int64_t`` (see base.py) but are initialised from
@@ -1479,11 +1779,22 @@ class CallVisitor:
                     f_cpp_type = self._type_spec_to_cpp(field_specs.get(f.name) or self._type_spec_from_hint_name(f.type_name))
                     if f_cpp_type == "int":
                         f_cpp_type = "int64_t"
+                    val = self._visit_rhs_value(
+                        value_node,
+                        target_cpp_type=(
+                            f_cpp_type
+                            if f_cpp_type.startswith("PineMap<")
+                            else None
+                        ),
+                    )
                     if f_cpp_type == "int64_t":
                         if "na<double>" in val:
                             val = val.replace("na<double>()", "na<int64_t>()")
                         else:
                             val = f"(int64_t)({val})"
+                    elif (f_cpp_type.startswith("PineMap<")
+                          and val == "na<double>()"):
+                        val = f"{f_cpp_type}{{}}"
                     field_inits.append(f".{f.name} = {val}")
             # Mark the constructed object non-na (the struct's ``__pf_na`` is the
             # last declared field, so this designator stays in declaration order).
@@ -1572,8 +1883,24 @@ class CallVisitor:
                     f"else {member}.update(_sv); "
                     f"return {member}; }}())"
                 )
+            # A concrete map specialization learned through an untyped
+            # wrapper chain also target-types its call arguments.  In
+            # particular, ``choose(cond, value, na)`` must pass a typed null
+            # PineMap handle rather than the generic ``na<double>()``.  Every
+            # non-map destination remains on the byte-identical expression
+            # path below.
+            if fi_lookup is not None:
+                param_specs = getattr(fi_lookup, "param_type_specs", []) or []
+                if arg_idx < len(param_specs):
+                    param_spec = param_specs[arg_idx]
+                    if param_spec is not None and param_spec.kind == "map":
+                        return self._visit_rhs_value(
+                            arg_node,
+                            target_cpp_type=self._type_spec_to_cpp(param_spec),
+                        )
             return self._visit_expr(arg_node)
 
+        ordered_arg_nodes: list = []
         if node.kwargs:
             # Try to resolve kwargs using FuncInfo params for user-defined functions
             fi = self._func_info_map.get(func_name)
@@ -1581,16 +1908,28 @@ class CallVisitor:
                 param_names = list(fi.node.params)  # params is list[str]
                 # Merge kwargs then visit with series awareness
                 merged = _merge_kwargs(node.args, node.kwargs, param_names, lambda a: a)
+                ordered_arg_nodes = list(merged)
                 all_args = [_visit_arg_for_series(a, i) for i, a in enumerate(merged)]
             elif sigs.is_intrinsic_function(namespace, func_name):
                 # Known intrinsic — use signature registry for kwargs resolution
                 param_names = sigs.get_param_names(namespace, func_name)
-                all_args = _merge_kwargs(node.args, node.kwargs, param_names, self._visit_expr)
+                merged = _merge_kwargs(
+                    node.args, node.kwargs, param_names, lambda a: a
+                )
+                ordered_arg_nodes = list(merged)
+                all_args = [self._visit_expr(a) for a in merged]
             else:
                 # Unknown function: positional args + kwargs values as fallback
-                all_args = [_visit_arg_for_series(a, i) for i, a in enumerate(node.args)]
-                all_args.extend(self._visit_expr(v) for v in node.kwargs.values())
+                ordered_arg_nodes = [*node.args, *node.kwargs.values()]
+                all_args = [
+                    _visit_arg_for_series(a, i)
+                    for i, a in enumerate(node.args)
+                ]
+                all_args.extend(
+                    self._visit_expr(v) for v in node.kwargs.values()
+                )
         else:
+            ordered_arg_nodes = list(node.args)
             all_args = [_visit_arg_for_series(a, i) for i, a in enumerate(node.args)]
         # Drawing-style/visual CONSTANT passed positionally into a user function's
         # ``string`` parameter: ``label.style_*`` / ``size.*`` / other
@@ -1609,6 +1948,7 @@ class CallVisitor:
             if fi and fi.node and fi.name == "isInSession" and len(fi.node.params) >= 2 and len(all_args) == 1:
                 # Mirror Pine default `timeframe.period` instead of hard-coding 15m.
                 all_args.append("script_tf_")
+                ordered_arg_nodes.append(None)
         prefix = f"{namespace}::" if namespace else ""
         # Use safe name for user-defined functions to avoid member name collision
         emit_name = self._func_safe_name(func_name) if func_name in self._func_names else func_name
@@ -1638,7 +1978,15 @@ class CallVisitor:
             # Inside a per-call-site variant: propagate call-site index to
             # sub-functions that also have variants (for state isolation)
             emit_name = f"{self._func_safe_name(func_name)}_cs{self._active_call_site_idx}"
-        return f"{prefix}{emit_name}({', '.join(all_args)})"
+        call_head = f"{prefix}{emit_name}"
+        if namespace is None and func_name in self._func_names:
+            return self._ordered_user_call_expr(
+                call_head,
+                ordered_arg_nodes,
+                all_args,
+                source_order_nodes=[*node.args, *node.kwargs.values()],
+            )
+        return f"{call_head}({', '.join(all_args)})"
 
     def _coerce_drawing_style_string_args(self, func_name, arg_nodes, all_args) -> None:
         """In-place coerce positional args bound to a ``std::string`` user-function

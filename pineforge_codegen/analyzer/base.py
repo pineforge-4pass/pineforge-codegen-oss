@@ -171,6 +171,35 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_udt_return_types: dict[str, str] = {}
         self._func_return_type_specs: dict[str, "TypeSpec"] = {}
         self._func_param_type_specs: dict[str, list] = {}
+        # History receivers can mention an untyped UDF parameter before its
+        # concrete TypeSpec is learned from a call site.  Keep the exact AST
+        # identifier identities that resolved to parameters during the
+        # definition pass; call handling re-checks those receivers once the
+        # argument specs are available.  Node identity (rather than raw name)
+        # prevents a later local/loop binding with the same spelling from
+        # being mistaken for the parameter it shadows.
+        self._deferred_param_history_refs: dict[
+            str, list[tuple[Subscript, dict[int, str]]]
+        ] = {}
+        # Parameter flow between user callables, captured while the caller's
+        # lexical symbols are still in scope.  This lets a later concrete map
+        # call revalidate history hidden behind wrappers without re-analyzing
+        # whole function bodies or conflating same-spelled locals.
+        self._deferred_param_call_edges: dict[
+            str,
+            list[
+                tuple[
+                    int,
+                    str,
+                    list[str],
+                    list[ASTNode | None],
+                    list[dict[int, str]],
+                ]
+            ],
+        ] = {}
+        self._func_series_history_nodes: dict[
+            tuple[str, str], Subscript
+        ] = {}
         # Per-function var_members and series_vars (for call-site cloning)
         self._func_var_members: dict[str, list] = {}  # func_name -> [(name, PineType, init_str)]
         self._func_series_vars: dict[str, set] = {}   # func_name -> set[str]
@@ -318,6 +347,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         """Run semantic analysis and return the analyzer context."""
         self._ensure_pine_v6()
         self._visit(self._ast)
+        self._check_cross_callable_series_collection_collisions()
 
         # Propagate call-site counts to sub-functions called within
         # multi-call-site functions. If f() has N call sites and calls g()
@@ -397,6 +427,48 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             udt_field_type_specs=dict(self._udt_field_type_specs),
             block_var_renames=dict(self._block_var_renames),
         )
+
+    def _check_cross_callable_series_collection_collisions(self) -> None:
+        """Fail closed when legacy raw member names cannot preserve scoping.
+
+        Persistent callable locals are class members.  A scalar Series local
+        with the same spelling in another callable would otherwise bind to the
+        collection member during C++ emission (``slot.push`` on PineMap).  Keep
+        the valid source out of malformed C++ until callable-owned Series
+        members have fully namespaced storage.
+        """
+        persistent_collections: dict[str, set[str]] = {}
+        for owner, specs in self._func_collection_types.items():
+            persistent_names = {
+                item[0] for item in self._func_var_members.get(owner, [])
+            }
+            persistent_collections[owner] = {
+                name
+                for name, spec in specs.items()
+                if name in persistent_names
+                and self._type_spec_contains_map(spec)
+            }
+
+        emitted: set[tuple[str, str, str]] = set()
+        for series_owner, names in self._func_series_vars.items():
+            for collection_owner, collection_names in persistent_collections.items():
+                if series_owner == collection_owner:
+                    continue
+                for name in names & collection_names:
+                    key = (series_owner, collection_owner, name)
+                    if key in emitted:
+                        continue
+                    emitted.add(key)
+                    node = self._func_series_history_nodes.get(
+                        (series_owner, name)
+                    )
+                    self._error(
+                        "History references on a scalar callable local named "
+                        f"'{name}' conflict with a persistent map local of the "
+                        "same name in another callable; scoped Series member "
+                        "storage is not implemented yet.",
+                        node.loc if node is not None else None,
+                    )
 
     def _record_global_binding_stmt(self, name: str, pine_type: PineType,
                                     is_var: bool, decl_node: ASTNode | None = None) -> None:
@@ -1262,6 +1334,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._collection_types[name] = spec
 
     def _visit_VarDecl(self, node: VarDecl) -> PineType:
+        outer_symbol = self._symbols.resolve(node.name)
+        outer_spec = (
+            getattr(outer_symbol, "type_spec", None)
+            if outer_symbol is not None
+            else self._collection_types.get(node.name)
+        )
         # Infer type from the value expression
         val_type = self._visit(node.value)
         type_spec = self._type_spec_from_hint(node.type_hint) if node.type_hint else None
@@ -1329,6 +1407,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             udt_type_name=udt_ctor,
             type_spec=type_spec,
         )
+        if (
+            not self._global_scope
+            and self._type_spec_contains_map(outer_spec)
+            and not self._type_spec_contains_map(type_spec)
+        ):
+            setattr(sym, "_pf_shadows_map_state", True)
         if node.name in self._static_vars:
             setattr(sym, "is_static_series", True)
         self._symbols.define(sym)
@@ -1564,6 +1648,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 loc=loc,
                 type_spec=pspec,
             )
+            setattr(sym, "_pf_parameter_owner", node.name)
             self._symbols.define(sym)
 
         # Record TA counter before visiting body
@@ -1616,6 +1701,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # this narrow to map terminals so general/nonterminal inference and
         # generated output remain unchanged.
         terminal_ret_expr = self._direct_terminal_return_expr(node)
+        terminal_direct_return_spec = self._type_spec_from_expr(
+            terminal_ret_expr
+        )
         terminal_map_return = self._terminal_map_call_return(
             terminal_ret_expr,
             {
@@ -1668,6 +1756,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 ret_spec = self._type_spec_from_expr(ret_expr)
                 if ret_spec is not None and ret_spec.kind == "array":
                     self._func_return_type_specs[node.name] = ret_spec
+            if (terminal_direct_return_spec is not None
+                    and terminal_direct_return_spec.kind == "map"):
+                self._func_return_type_specs[node.name] = terminal_direct_return_spec
 
         if terminal_map_return is not None:
             body_type, terminal_spec = terminal_map_return
@@ -1752,20 +1843,28 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             pspec = self._type_spec_from_hint(hint) if hint else None
             param_types.append(ptype)
             param_specs.append(pspec)
-            self._symbols.define(Symbol(
+            sym = Symbol(
                 name=p, pine_type=ptype, is_series=False,
                 is_var=False, is_const=False, const_value=None,
                 scope=self._symbols.current_scope.name, loc=loc,
                 udt_type_name=udt_self,
                 type_spec=pspec,
-            ))
+            )
+            setattr(sym, "_pf_parameter_owner", method_key)
+            self._symbols.define(sym)
         ret_type = PineType.VOID
         old_global = self._global_scope
         self._global_scope = False
         self._collection_scope_stack.append(method_key)
+        terminal_ret_expr = self._direct_terminal_return_expr(node)
+        return_type_spec = None
         try:
             for stmt in node.body:
                 ret_type = self._visit(stmt)
+            if terminal_ret_expr is not None:
+                terminal_spec = self._type_spec_from_expr(terminal_ret_expr)
+                if terminal_spec is not None and terminal_spec.kind == "map":
+                    return_type_spec = terminal_spec
         finally:
             self._global_scope = old_global
             self._collection_scope_stack.pop()
@@ -1808,6 +1907,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             tuple_element_count=tuple_element_count,
             param_defaults=param_defaults,
             param_type_specs=param_specs,
+            return_type_spec=return_type_spec,
         )
         self._func_infos.append(fi)
         return PineType.VOID
@@ -1841,6 +1941,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return body_type
 
     def _visit_ForStmt(self, node: ForStmt) -> PineType:
+        outer_symbol = self._symbols.resolve(node.var)
+        outer_spec = (
+            getattr(outer_symbol, "type_spec", None)
+            if outer_symbol is not None
+            else self._collection_types.get(node.var)
+        )
         self._symbols.enter_scope("for")
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
 
@@ -1856,6 +1962,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             loc=loc,
             type_spec=TypeSpec.primitive("int"),
         )
+        if self._type_spec_contains_map(outer_spec):
+            setattr(sym, "_pf_shadows_map_state", True)
         self._symbols.define(sym)
 
         old_global = self._global_scope
@@ -1896,12 +2004,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 pine_type = self._element_pine_type(element_spec)
                 if pine_type == PineType.VOID:
                     pine_type = PineType.FLOAT
-                self._symbols.define(Symbol(
+                outer_symbol = self._symbols.resolve(node.var)
+                outer_spec = (
+                    getattr(outer_symbol, "type_spec", None)
+                    if outer_symbol is not None
+                    else self._collection_types.get(node.var)
+                )
+                sym = Symbol(
                     name=node.var, pine_type=pine_type, is_series=False,
                     is_var=False, is_const=False, const_value=None,
                     scope=self._symbols.current_scope.name, loc=loc,
                     type_spec=element_spec,
-                ))
+                )
+                if self._type_spec_contains_map(outer_spec):
+                    setattr(sym, "_pf_shadows_map_state", True)
+                self._symbols.define(sym)
             if node.vars:
                 loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
                 for idx, v in enumerate(node.vars):
@@ -1913,12 +2030,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     pine_type = self._element_pine_type(binder_spec)
                     if pine_type == PineType.VOID:
                         pine_type = PineType.FLOAT
-                    self._symbols.define(Symbol(
+                    outer_symbol = self._symbols.resolve(v)
+                    outer_spec = (
+                        getattr(outer_symbol, "type_spec", None)
+                        if outer_symbol is not None
+                        else self._collection_types.get(v)
+                    )
+                    sym = Symbol(
                         name=v, pine_type=pine_type, is_series=False,
                         is_var=False, is_const=False, const_value=None,
                         scope=self._symbols.current_scope.name, loc=loc,
                         type_spec=binder_spec,
-                    ))
+                    )
+                    if self._type_spec_contains_map(outer_spec):
+                        setattr(sym, "_pf_shadows_map_state", True)
+                    self._symbols.define(sym)
             for stmt in node.body:
                 self._visit(stmt)
             self._symbols.exit_scope()
@@ -2118,6 +2244,55 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._visit(arg)
             for val in node.kwargs.values():
                 self._visit(val)
+            # UDT method call-site typing.  Method definitions may contain an
+            # untyped parameter history read; resolve receiver + args here and
+            # apply the same deferred map-history gate as regular UDFs before
+            # codegen can emit the parameter as a scalar double.
+            receiver_spec = self._type_spec_from_expr(obj)
+            if (
+                receiver_spec is not None
+                and receiver_spec.kind == "udt"
+                and receiver_spec.name
+            ):
+                method_key = f"{receiver_spec.name}.{member}"
+                method_info = next(
+                    (
+                        info
+                        for info in self._func_infos
+                        if info.name == method_key
+                        and getattr(info, "is_udt_method", False)
+                    ),
+                    None,
+                )
+                if method_info is not None and method_info.node is not None:
+                    method_params = list(method_info.node.params)
+                    rest_params = method_params[1:]
+                    rest_bound = self._bind_callable_args(node, rest_params)
+                    full_bound: list[ASTNode | None] = [obj, *rest_bound]
+                    effective_specs = list(
+                        getattr(method_info, "param_type_specs", None) or []
+                    )
+                    while len(effective_specs) < len(method_params):
+                        effective_specs.append(None)
+                    for index, arg in enumerate(full_bound):
+                        if effective_specs[index] is None and arg is not None:
+                            effective_specs[index] = self._type_spec_from_expr(arg)
+                    self._record_deferred_param_call_edge(
+                        node,
+                        method_key,
+                        method_params,
+                        full_bound,
+                    )
+                    self._validate_deferred_param_history_refs(
+                        method_key,
+                        {
+                            name: spec
+                            for name, spec in zip(
+                                method_params, effective_specs
+                            )
+                        },
+                    )
+                    return method_info.return_type
             # Matrix method dispatch: ``m.get(0, 0)`` on ``matrix<int>`` must
             # type as INT, not VOID, so ``v = m.get(...)`` propagates the
             # element PineType. ``_type_spec_from_expr`` already carries the
@@ -2204,9 +2379,509 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._visit(val)
         return PineType.VOID
 
+    def _type_spec_contains_map(
+        self,
+        spec: TypeSpec | None,
+        visiting_udts: frozenset[str] = frozenset(),
+    ) -> bool:
+        """Whether a lexical TypeSpec recursively owns a PineMap handle.
+
+        History buffers value-copy their elements. A map ID anywhere in that
+        shape would therefore retain live storage across bars and silently
+        turn ``[1]`` into a current-state alias. This check belongs in the
+        analyzer, where symbol resolution is scope-aware: a scalar parameter
+        or block local can safely shadow a same-named global map, while typed
+        map parameters and inferred aliases are still rejected.
+        """
+        if spec is None:
+            return False
+        if spec.kind == "map":
+            return True
+        if spec.kind in {"array", "matrix"}:
+            return self._type_spec_contains_map(spec.element, visiting_udts)
+        if spec.kind == "udt" and spec.name:
+            if spec.name in visiting_udts:
+                return False
+            nested_visiting = visiting_udts | {spec.name}
+            return any(
+                self._type_spec_contains_map(field_spec, nested_visiting)
+                for field_spec in self._udt_field_type_specs.get(
+                    spec.name, {}
+                ).values()
+            )
+        return False
+
+    def _history_receiver_type_spec(
+        self,
+        node: ASTNode,
+        parameter_specs_by_node: dict[int, TypeSpec | None] | None = None,
+    ) -> TypeSpec | None:
+        """Resolve the value shape on the left of Pine's history operator.
+
+        General expression inference intentionally stays conservative.  The
+        history safety gate needs two extra, narrow facts: a ternary selecting
+        two equal aggregate handles keeps that aggregate type, and an untyped
+        parameter can be substituted with the TypeSpec learned at its call
+        site.  The substitution is keyed by AST identifier identity so a
+        same-spelled local or loop binder is never confused with the parameter.
+        """
+        overrides = parameter_specs_by_node or {}
+        if isinstance(node, Identifier):
+            if id(node) in overrides:
+                return overrides[id(node)]
+            return self._type_spec_from_expr(node)
+        if isinstance(node, Ternary):
+            true_spec = self._history_receiver_type_spec(
+                node.true_val, overrides
+            )
+            false_spec = self._history_receiver_type_spec(
+                node.false_val, overrides
+            )
+            if true_spec is not None and true_spec == false_spec:
+                return true_spec
+            # ``na`` is context-typed by the opposite branch in Pine.  Keep
+            # this rule local to the history gate rather than broadening all
+            # declaration inference.
+            if isinstance(node.true_val, NaLiteral):
+                return false_spec
+            if isinstance(node.false_val, NaLiteral):
+                return true_spec
+            return None
+        if isinstance(node, MemberAccess):
+            owner = self._history_receiver_type_spec(node.object, overrides)
+            if owner is not None and owner.kind == "udt" and owner.name:
+                return (self._udt_field_type_specs.get(owner.name) or {}).get(
+                    node.member
+                )
+            return self._type_spec_from_expr(node)
+        if isinstance(node, FuncCall) and isinstance(
+            node.callee, MemberAccess
+        ):
+            callee = node.callee
+            receiver = None
+            if (
+                isinstance(callee.object, Identifier)
+                and callee.object.name == "map"
+                and node.args
+            ):
+                receiver = node.args[0]
+            elif not (
+                isinstance(callee.object, Identifier)
+                and callee.object.name in {
+                    "array", "matrix", "map", "request", "ta"
+                }
+            ):
+                receiver = callee.object
+            if receiver is not None:
+                recv_spec = self._history_receiver_type_spec(
+                    receiver, overrides
+                )
+                if recv_spec is not None and recv_spec.kind == "map":
+                    if callee.member == "copy":
+                        return recv_spec
+                    if callee.member in {"put", "get", "remove"}:
+                        return recv_spec.value
+                    if callee.member == "keys":
+                        return TypeSpec.array(
+                            recv_spec.key or TypeSpec.primitive("string")
+                        )
+                    if callee.member == "values":
+                        return TypeSpec.array(
+                            recv_spec.value or TypeSpec.primitive("float")
+                        )
+        return self._type_spec_from_expr(node)
+
+    def _parameter_identifiers_in_expr(
+        self, node: ASTNode
+    ) -> dict[str, dict[int, str]]:
+        """Return parameter identifier nodes grouped by their callable owner."""
+        grouped: dict[str, dict[int, str]] = {}
+
+        def visit(value) -> None:
+            if value is None:
+                return
+            if isinstance(value, Identifier):
+                sym = self._symbols.resolve(value.name)
+                owner = getattr(sym, "_pf_parameter_owner", None)
+                if owner:
+                    grouped.setdefault(owner, {})[id(value)] = value.name
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item)
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    visit(item)
+                return
+            if isinstance(value, ASTNode):
+                for child in vars(value).values():
+                    visit(child)
+
+        visit(node)
+        return grouped
+
+    @staticmethod
+    def _bind_callable_args(
+        node: FuncCall,
+        param_names: list[str],
+    ) -> list[ASTNode | None]:
+        """Bind positional/keyword AST arguments into declaration order."""
+        bound: list[ASTNode | None] = [None] * len(param_names)
+        for index, arg in enumerate(node.args):
+            if index < len(bound):
+                bound[index] = arg
+        for name, value in node.kwargs.items():
+            if name in param_names:
+                bound[param_names.index(name)] = value
+        return bound
+
+    def _record_deferred_param_call_edge(
+        self,
+        call_node: FuncCall,
+        callee_owner: str,
+        callee_param_names: list[str],
+        bound_args: list[ASTNode | None],
+    ) -> None:
+        """Capture caller-param flow while lexical symbol identity is known."""
+        if not self._collection_scope_stack:
+            return
+        caller_owner = self._collection_scope_stack[-1]
+        parameter_nodes: list[dict[int, str]] = []
+        has_flow = False
+        for arg in bound_args:
+            grouped = (
+                self._parameter_identifiers_in_expr(arg)
+                if arg is not None
+                else {}
+            )
+            current = grouped.get(caller_owner, {})
+            parameter_nodes.append(current)
+            has_flow = has_flow or bool(current)
+        if not has_flow:
+            return
+        edges = self._deferred_param_call_edges.setdefault(caller_owner, [])
+        if any(edge[0] == id(call_node) for edge in edges):
+            return
+        edges.append(
+            (
+                id(call_node),
+                callee_owner,
+                list(callee_param_names),
+                list(bound_args),
+                parameter_nodes,
+            )
+        )
+
+    def _reject_unsupported_map_history(
+        self, spec: TypeSpec, node: Subscript
+    ) -> None:
+        if spec.kind == "map":
+            message = (
+                "History references on map IDs are not supported in "
+                "PineForge; map rollback uses identity snapshots rather "
+                "than Series<PineMap>."
+            )
+        else:
+            message = (
+                "History references on map-bearing UDTs or collections "
+                "are not supported in PineForge; their Series value copy "
+                "would retain live map aliases."
+            )
+        self._error(message, node.loc)
+
+    def _validate_deferred_param_history_refs(
+        self,
+        owner: str,
+        parameter_specs: dict[str, TypeSpec | None],
+        visiting: frozenset[str] = frozenset(),
+    ) -> None:
+        """Re-run map-history safety after untyped callable args are known."""
+        if owner in visiting:
+            return
+        next_visiting = visiting | {owner}
+        for node, parameter_nodes in self._deferred_param_history_refs.get(
+            owner, []
+        ):
+            overrides = {
+                node_id: parameter_specs.get(name)
+                for node_id, name in parameter_nodes.items()
+            }
+            object_spec = self._history_receiver_type_spec(
+                node.object, overrides
+            )
+            if self._type_spec_contains_map(object_spec):
+                assert object_spec is not None
+                self._reject_unsupported_map_history(object_spec, node)
+
+        # Propagate concrete caller specs through wrapper calls.  Each edge is
+        # identity-keyed from the definition pass, so a local that shadows a
+        # caller parameter cannot accidentally inherit its map TypeSpec.
+        for (
+            _call_id,
+            callee_owner,
+            callee_param_names,
+            bound_args,
+            parameter_nodes_by_arg,
+        ) in self._deferred_param_call_edges.get(owner, []):
+            callee_specs: dict[str, TypeSpec | None] = {}
+            for index, param_name in enumerate(callee_param_names):
+                arg = bound_args[index] if index < len(bound_args) else None
+                if arg is None:
+                    callee_specs[param_name] = None
+                    continue
+                parameter_nodes = (
+                    parameter_nodes_by_arg[index]
+                    if index < len(parameter_nodes_by_arg)
+                    else {}
+                )
+                overrides = {
+                    node_id: parameter_specs.get(name)
+                    for node_id, name in parameter_nodes.items()
+                }
+                callee_specs[param_name] = self._history_receiver_type_spec(
+                    arg, overrides
+                )
+            self._validate_deferred_param_history_refs(
+                callee_owner,
+                callee_specs,
+                next_visiting,
+            )
+
+    def _propagate_deferred_map_callable_specs(
+        self,
+        owner: str,
+        parameter_specs: dict[str, TypeSpec | None],
+        visiting: frozenset[str] = frozenset(),
+    ) -> bool:
+        """Monomorphize an all-untyped wrapper chain for one concrete map call.
+
+        Function definitions are analyzed before their concrete top-level call
+        sites.  Consequently ``wrapper(a) => identity(a)`` initially creates
+        both ``FuncInfo`` records with scalar fallbacks.  The definition pass
+        already captured identity-keyed parameter-flow edges for deferred map
+        history validation; reuse those exact edges to carry a later map
+        ``TypeSpec`` inward, then infer map returns on the way back out.
+
+        This is deliberately bounded and map-triggered.  Cycles stop at the
+        active owner, incompatible previously-established parameter specs stop
+        that edge, and scalar-only call graphs never mutate.  PineForge emits
+        one C++ body per ordinary UDF, so silently replacing one concrete map
+        specialization with a different one would be a false polymorphic
+        inference rather than a valid widening.
+        """
+        if owner in visiting:
+            return False
+        if not any(
+            spec is not None and spec.kind == "map"
+            for spec in parameter_specs.values()
+        ):
+            return False
+
+        func_info = next(
+            (info for info in self._func_infos if info.name == owner),
+            None,
+        )
+        func_def = self._func_defs.get(owner)
+        if func_info is None or func_def is None:
+            return False
+
+        changed = False
+        while len(func_info.param_type_specs) < len(func_def.params):
+            func_info.param_type_specs.append(None)
+        declared_specs = list(
+            self._func_param_type_specs.get(owner)
+            or self._param_type_specs_from_def(func_def)
+        )
+        while len(declared_specs) < len(func_def.params):
+            declared_specs.append(None)
+
+        # Refuse to overwrite a declared or previously learned concrete map
+        # specialization.  Equal specs and still-unresolved slots are safe.
+        for index, param_name in enumerate(func_def.params):
+            incoming = parameter_specs.get(param_name)
+            if incoming is None:
+                continue
+            established = declared_specs[index] or func_info.param_type_specs[index]
+            if (
+                established is not None
+                and established != incoming
+                and (established.kind == "map" or incoming.kind == "map")
+            ):
+                self._error(
+                    f"User function '{owner}' is called with incompatible "
+                    "map parameter types; PineForge cannot emit multiple "
+                    "map specializations for one untyped function.",
+                    func_def.loc,
+                )
+        for index, param_name in enumerate(func_def.params):
+            incoming = parameter_specs.get(param_name)
+            if incoming is None or func_info.param_type_specs[index] is not None:
+                continue
+            func_info.param_type_specs[index] = incoming
+            changed = True
+
+        next_visiting = visiting | {owner}
+        edges = self._deferred_param_call_edges.get(owner, [])
+        # Nested actual arguments can depend on a sibling edge's newly learned
+        # return spec.  A bounded local fixed point removes source-order
+        # dependence without turning this into whole-program re-analysis.
+        for _ in range(max(1, len(edges) + 1)):
+            pass_changed = False
+            for (
+                _call_id,
+                callee_owner,
+                callee_param_names,
+                bound_args,
+                parameter_nodes_by_arg,
+            ) in edges:
+                callee_specs: dict[str, TypeSpec | None] = {}
+                for index, param_name in enumerate(callee_param_names):
+                    arg = bound_args[index] if index < len(bound_args) else None
+                    if arg is None:
+                        callee_specs[param_name] = None
+                        continue
+                    parameter_nodes = (
+                        parameter_nodes_by_arg[index]
+                        if index < len(parameter_nodes_by_arg)
+                        else {}
+                    )
+                    overrides = {
+                        node_id: parameter_specs.get(name)
+                        for node_id, name in parameter_nodes.items()
+                    }
+                    callee_specs[param_name] = self._history_receiver_type_spec(
+                        arg, overrides
+                    )
+                # A bare ``na`` actual argument acquires the one unambiguous
+                # map type carried by its sibling arguments.  This is needed
+                # for wrappers such as ``select(c, m) => choose(c, m, na)``;
+                # without it the inner untyped parameter remains scalar even
+                # though Pine context-types the na handle.  Multiple distinct
+                # map specs stay unresolved rather than guessing.
+                concrete_map_specs = {
+                    spec
+                    for spec in callee_specs.values()
+                    if spec is not None and spec.kind == "map"
+                }
+                if len(concrete_map_specs) == 1:
+                    contextual_map_spec = next(iter(concrete_map_specs))
+                    for index, param_name in enumerate(callee_param_names):
+                        arg = (
+                            bound_args[index]
+                            if index < len(bound_args)
+                            else None
+                        )
+                        if (
+                            callee_specs.get(param_name) is None
+                            and (
+                                isinstance(arg, NaLiteral)
+                                or (
+                                    isinstance(arg, Identifier)
+                                    and arg.name == "na"
+                                )
+                            )
+                        ):
+                            callee_specs[param_name] = contextual_map_spec
+                if self._propagate_deferred_map_callable_specs(
+                    callee_owner,
+                    callee_specs,
+                    next_visiting,
+                ):
+                    pass_changed = True
+            changed = changed or pass_changed
+            if not pass_changed:
+                break
+
+        terminal = self._direct_terminal_return_expr(func_def)
+        return_spec = None
+        scalar_return_type = None
+        if isinstance(terminal, Identifier) and terminal.name in parameter_specs:
+            candidate = parameter_specs.get(terminal.name)
+            if candidate is not None and candidate.kind == "map":
+                return_spec = candidate
+        if return_spec is None:
+            return_spec = self._terminal_map_selection_return_spec(
+                terminal, parameter_specs
+            )
+        if return_spec is None:
+            terminal_map_call = self._terminal_map_call_return(
+                terminal, parameter_specs
+            )
+            if terminal_map_call is not None:
+                terminal_return_type, candidate = terminal_map_call
+                if candidate is not None and candidate.kind == "map":
+                    return_spec = candidate
+                elif terminal_return_type not in {
+                    PineType.UNKNOWN, PineType.VOID
+                }:
+                    scalar_return_type = terminal_return_type
+        if return_spec is None:
+            candidate = self._type_spec_from_expr(terminal)
+            if candidate is not None and candidate.kind == "map":
+                return_spec = candidate
+        if return_spec is not None:
+            established_return = self._func_return_type_specs.get(owner)
+            if established_return is None:
+                self._func_return_type_specs[owner] = return_spec
+                func_info.return_type_spec = return_spec
+                changed = True
+            elif established_return == return_spec:
+                if func_info.return_type_spec is None:
+                    func_info.return_type_spec = return_spec
+                    changed = True
+            # A different established return belongs to another concrete map
+            # specialization.  Keep it unchanged rather than falsely widening.
+
+        if scalar_return_type is None and isinstance(terminal, FuncCall):
+            callee = terminal.callee
+            callee_name = (
+                callee.name if isinstance(callee, Identifier) else None
+            )
+            callee_info = next(
+                (
+                    info
+                    for info in self._func_infos
+                    if info.name == callee_name
+                ),
+                None,
+            )
+            if (
+                callee_info is not None
+                and callee_info.return_type
+                not in {PineType.UNKNOWN, PineType.VOID}
+            ):
+                scalar_return_type = callee_info.return_type
+        if (
+            return_spec is None
+            and scalar_return_type is not None
+            and func_info.return_type != scalar_return_type
+        ):
+            func_info.return_type = scalar_return_type
+            self._func_return_types[owner] = scalar_return_type
+            changed = True
+
+        return changed
+
     def _visit_Subscript(self, node: Subscript) -> PineType:
         obj_type = self._visit(node.object)
         self._visit(node.index)
+
+        object_spec = self._history_receiver_type_spec(node.object)
+        if self._type_spec_contains_map(object_spec):
+            assert object_spec is not None
+            self._reject_unsupported_map_history(object_spec, node)
+
+        # An untyped parameter has no aggregate TypeSpec during the function
+        # definition pass.  Remember only the identifier nodes that resolved
+        # to actual parameters; the call handler validates them before any
+        # codegen state is committed.
+        for owner, parameter_nodes in self._parameter_identifiers_in_expr(
+            node.object
+        ).items():
+            self._deferred_param_history_refs.setdefault(owner, []).append(
+                (node, parameter_nodes)
+            )
 
         # Detect series vars / bar fields
         if isinstance(node.object, Identifier):
@@ -2216,8 +2891,27 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             else:
                 sym = self._symbols.resolve(name)
                 if sym is not None:
+                    if getattr(sym, "_pf_shadows_map_state", False):
+                        self._error(
+                            "History references on scalar local or loop "
+                            "bindings that shadow a map ID are not supported "
+                            "until PineForge can allocate a lexically scoped "
+                            "Series buffer for that binding.",
+                            node.loc,
+                        )
                     if getattr(sym, "type_spec", None) is None or sym.type_spec.kind not in ("array", "map"):
-                        self._series_vars.add(name)
+                        global_sym = self._symbols.global_scope.symbols.get(name)
+                        shadows_map_state = (
+                            sym.scope != "global"
+                            and global_sym is not None
+                            and self._type_spec_contains_map(global_sym.type_spec)
+                        )
+                        # ``_series_vars`` is a legacy global-by-name set. Do
+                        # not let a lexical scalar series parameter poison a
+                        # same-named global PineMap member; the scoped series
+                        # registry below is authoritative for the function.
+                        if not shadows_map_state:
+                            self._series_vars.add(name)
                         sym.is_series = True
                         # Track function-scoped series vars
                         if sym.scope and sym.scope.startswith("func_"):
@@ -2225,6 +2919,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             if func_name not in self._func_series_vars:
                                 self._func_series_vars[func_name] = set()
                             self._func_series_vars[func_name].add(name)
+                            self._func_series_history_nodes.setdefault(
+                                (func_name, name), node
+                            )
 
         return obj_type
 

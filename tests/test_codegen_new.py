@@ -1392,7 +1392,7 @@ var m = map.new<string, float>()
 map.put(m, "a", 1.0)
 k = map.keys(m)
 """)
-    assert "p.first" in cpp
+    assert ".keys()" in cpp
 
 
 def test_magnifier_series_guard():

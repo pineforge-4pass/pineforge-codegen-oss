@@ -1088,15 +1088,52 @@ class CallHandlers:
         """Handle calls to user-defined functions."""
         func_def = self._func_defs[func_name]
 
-        # Visit the call args
-        arg_types = []
+        # Visit every supplied argument in Pine source order, then bind both
+        # positional and keyword forms into declaration order.  The old
+        # positional-only path skipped kwargs entirely, hiding nested calls and
+        # leaving deferred map-history validation without a concrete TypeSpec.
+        bound_args = self._bind_callable_args(node, list(func_def.params))
+        visited_types: dict[int, PineType] = {}
         for arg in node.args:
-            arg_types.append(self._visit(arg))
+            visited_types[id(arg)] = self._visit(arg)
+        for arg in node.kwargs.values():
+            visited_types[id(arg)] = self._visit(arg)
 
-        # Determine param types from call-site args
-        param_types = arg_types[:len(func_def.params)]
-        while len(param_types) < len(func_def.params):
-            param_types.append(PineType.UNKNOWN)
+        param_types = [
+            visited_types.get(id(arg), PineType.UNKNOWN)
+            if arg is not None
+            else PineType.UNKNOWN
+            for arg in bound_args
+        ]
+
+        # Per-param TypeSpec: declared hints are authoritative; for untyped
+        # params, infer from this call site's argument.  Validate deferred
+        # history receivers before series propagation/cloning can reinterpret
+        # a map handle (or map-bearing UDT) as ``Series<double>``.
+        param_specs = list(
+            getattr(self, "_func_param_type_specs", {}).get(func_name)
+            or self._param_type_specs_from_def(func_def)
+        )
+        arg_specs = [
+            self._type_spec_from_expr(arg) if arg is not None else None
+            for arg in bound_args
+        ]
+        for i in range(len(param_specs)):
+            if param_specs[i] is None and i < len(arg_specs):
+                param_specs[i] = arg_specs[i]
+        self._record_deferred_param_call_edge(
+            node,
+            func_name,
+            list(func_def.params),
+            bound_args,
+        )
+        self._validate_deferred_param_history_refs(
+            func_name,
+            {
+                name: spec
+                for name, spec in zip(func_def.params, param_specs)
+            },
+        )
 
         # Determine return type: re-analyze the function body with known param types
         # For now, use the cached return type from initial analysis
@@ -1131,8 +1168,10 @@ class CallHandlers:
         func_sv = self._func_series_vars.get(func_name, set())
         if func_sv:
             for p_idx, param_name in enumerate(func_def.params):
-                if param_name in func_sv and p_idx < len(node.args):
-                    arg = node.args[p_idx]
+                if param_name in func_sv and p_idx < len(bound_args):
+                    arg = bound_args[p_idx]
+                    if arg is None:
+                        continue
                     if isinstance(arg, Identifier) and arg.name in BAR_FIELDS:
                         self._series_bar_fields.add(arg.name)
                     elif isinstance(arg, Identifier):
@@ -1165,17 +1204,6 @@ class CallHandlers:
         # Forward UDT-return inference (set in _visit_FuncDef) so codegen can
         # emit the struct return type. Probe: udt-method-probe-20.
         udt_ret = self._func_udt_return_types.get(func_name)
-        # Per-param TypeSpec: declared hints are authoritative; for untyped
-        # params, infer from the call-site argument's type_spec (so an untyped
-        # ``s`` used as a string, or a UDT passed by value, emits correctly).
-        param_specs = list(
-            getattr(self, "_func_param_type_specs", {}).get(func_name)
-            or self._param_type_specs_from_def(func_def)
-        )
-        arg_specs = [self._type_spec_from_expr(arg) for arg in node.args]
-        for i in range(len(param_specs)):
-            if param_specs[i] is None and i < len(arg_specs):
-                param_specs[i] = arg_specs[i]
         existing = [fi for fi in self._func_infos if fi.name == func_name]
 
         # A direct terminal map call on an untyped parameter cannot be typed
@@ -1196,6 +1224,37 @@ class CallHandlers:
             },
         )
         ret_spec = getattr(self, "_func_return_type_specs", {}).get(func_name)
+        terminal_expr = self._direct_terminal_return_expr(func_def)
+        terminal_selection_spec = self._terminal_map_selection_return_spec(
+            terminal_expr,
+            {
+                name: spec
+                for name, spec in zip(
+                    func_def.params, effective_param_specs
+                )
+            },
+        )
+        if (
+            terminal_map_return is None
+            and isinstance(terminal_expr, Identifier)
+            and terminal_expr.name in func_def.params
+        ):
+            terminal_index = func_def.params.index(terminal_expr.name)
+            terminal_identity_spec = (
+                effective_param_specs[terminal_index]
+                if terminal_index < len(effective_param_specs)
+                else None
+            )
+            if (terminal_identity_spec is not None
+                    and terminal_identity_spec.kind == "map"):
+                # An untyped identity UDF learns the map handle type from its
+                # call site. The handle is returned by value, preserving the
+                # backing ID rather than cloning map contents.
+                self._func_return_type_specs[func_name] = terminal_identity_spec
+                ret_spec = terminal_identity_spec
+        if terminal_selection_spec is not None:
+            self._func_return_type_specs[func_name] = terminal_selection_spec
+            ret_spec = terminal_selection_spec
         if terminal_map_return is not None:
             return_type, inferred_ret_spec = terminal_map_return
             self._func_return_types[func_name] = return_type
@@ -1240,4 +1299,17 @@ class CallHandlers:
             if fi.return_type_spec is None and ret_spec is not None:
                 fi.return_type_spec = ret_spec
 
-        return return_type
+        # A concrete map can arrive only at an outer wrapper's eventual call
+        # site, after every nested untyped UDF was initially analyzed with
+        # scalar fallbacks.  Propagate the concrete specs through the exact
+        # definition-time call edges and infer returns in post-order before
+        # codegen snapshots the FuncInfo table.
+        self._propagate_deferred_map_callable_specs(
+            func_name,
+            {
+                name: spec
+                for name, spec in zip(func_def.params, param_specs)
+            },
+        )
+
+        return self._func_return_types.get(func_name, return_type)

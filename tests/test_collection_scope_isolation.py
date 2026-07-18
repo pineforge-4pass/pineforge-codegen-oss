@@ -132,10 +132,10 @@ def test_callable_local_collection_specs_are_lexically_isolated(
     if family == "map-elements":
         text = _body(cpp, "std::string map_text(")
         numeric = _body(cpp, "double map_float(")
-        assert "std::unordered_map<std::string, std::string> slot" in text
-        assert 'return std::string("");' in text
-        assert "std::unordered_map<std::string, double> slot" in numeric
-        assert "return 0.0;" in numeric
+        assert "PineMap<std::string, std::string> slot" in text
+        assert ".remove(" in text
+        assert "PineMap<std::string, double> slot" in numeric
+        assert ".remove(" in numeric
     elif family == "array-elements":
         text = _body(cpp, "double array_text(")
         numeric = _body(cpp, "double array_int(")
@@ -144,13 +144,13 @@ def test_callable_local_collection_specs_are_lexically_isolated(
     elif family == "map-array":
         mapped = _body(cpp, "std::string kind_map(")
         arrayed = _body(cpp, "double kind_array(")
-        assert '.find(std::string("k"))' in mapped
+        assert ".remove(" in mapped
         assert "std::vector<int> copied = std::vector<int>(slot);" in arrayed
         assert ".count(" not in arrayed
     elif family == "map-matrix":
         mapped = _body(cpp, "double kind_map(")
         matrixed = _body(cpp, "int kind_matrix(")
-        assert 'slot.count(std::string("k"))' in mapped
+        assert ".get(" in mapped
         assert "PineGenericMatrix<int> slot" in matrixed
         assert "slot.get((int)(0), (int)(0))" in matrixed
         assert "slot.count(" not in matrixed
@@ -195,10 +195,10 @@ def _global_local_source(reverse: bool) -> str:
 @pytest.mark.parametrize("reverse", [False, True])
 def test_callable_local_collection_shadows_same_named_global(reverse: bool) -> None:
     cpp = transpile(_global_local_source(reverse))
-    assert "std::unordered_map<std::string, std::string> slot;" in cpp
+    assert "PineMap<std::string, std::string> slot;" in cpp
     global_body = _body(cpp, "std::string global_read(")
     local_body = _body(cpp, "double local_copy(")
-    assert '.find(std::string("k"))' in global_body
+    assert ".remove(" in global_body
     assert "std::vector<int> slot" in local_body
     assert "std::vector<int> copied = std::vector<int>(slot);" in local_body
     assert ".count(" not in local_body
@@ -233,8 +233,8 @@ def test_udf_and_udt_method_collection_locals_are_isolated(reverse: bool) -> Non
     assert "PineGenericMatrix<int> slot" in matrixed
     assert "slot.get((int)(0), (int)(0))" in matrixed
     assert "slot.count(" not in matrixed
-    assert "std::unordered_map<std::string, double> slot" in mapped
-    assert 'slot.count(std::string("k"))' in mapped
+    assert "PineMap<std::string, double> slot" in mapped
+    assert ".get(" in mapped
     compile_cpp(cpp, label=f"collection_scope_udf_method_{int(reverse)}")
 
 
@@ -264,7 +264,7 @@ def test_function_var_collection_members_and_clones_keep_exact_types() -> None:
     for name in ("ints", "ints_cs1"):
         assert f"std::vector<int> {name};" in cpp
     for name in ("weights", "weights_cs1"):
-        assert f"std::unordered_map<std::string, int> {name};" in cpp
+        assert f"PineMap<std::string, int> {name};" in cpp
     for name in ("grid", "grid_cs1"):
         assert f"PineGenericMatrix<int> {name};" in cpp
     compile_cpp(cpp, label="collection_scope_persistent_clones")
@@ -286,12 +286,12 @@ global_result = global_read()
 
 def test_scalar_local_does_not_erase_same_named_global_collection() -> None:
     cpp = transpile(_SCALAR_SHADOW_SOURCE)
-    assert "std::unordered_map<std::string, std::string> slot;" in cpp
+    assert "PineMap<std::string, std::string> slot;" in cpp
     assert "std::string local_scalar(" in cpp
     assert "std::string slot = std::string(\"local\")" in _body(
         cpp, "std::string local_scalar("
     )
-    assert '.find(std::string("k"))' in _body(cpp, "std::string global_read(")
+    assert ".remove(" in _body(cpp, "std::string global_read(")
     compile_cpp(cpp, label="collection_scope_scalar_shadow")
 
 
@@ -343,8 +343,8 @@ def test_sibling_blocks_keep_exact_collection_bindings(
 ) -> None:
     cpp = transpile(_sibling_branch_source(reverse, matrix))
     body = _body(cpp, "int mixed_branch(")
-    assert "std::unordered_map<std::string, int> slot" in body
-    assert '(slot[std::string("k")] = 1)' in body
+    assert "PineMap<std::string, int> slot" in body
+    assert ".put(" in body
     if matrix:
         assert "PineGenericMatrix<int> slot" in body
         assert "slot.set((int)(0), (int)(0), 8)" in body
@@ -380,13 +380,13 @@ def test_callable_binding_activates_after_declaration_rhs() -> None:
     cpp = transpile(_TEMPORAL_SOURCE)
     arrayed = _body(cpp, "double temporal_array(")
     matrixed = _body(cpp, "int temporal_matrix(")
-    assert '(slot[std::string("before")] = std::string("global"))' in arrayed
-    assert '.find(std::string("before"))' in arrayed
+    assert ".put(" in arrayed
+    assert ".remove(" in arrayed
     assert "std::vector<int> slot" in arrayed
     assert "slot.push_back(2)" in arrayed
-    assert '(slot[std::string("k")] = std::string("v"))' in matrixed
+    assert ".put(" in matrixed
     assert "auto& _pf_outer_slot_0 = this->slot" in matrixed
-    assert '_pf_outer_slot_0.count(std::string("k"))' in matrixed
+    assert ".contains(" in matrixed
     assert "PineGenericMatrix<int> slot" in matrixed
     compile_cpp(cpp, label="collection_scope_temporal_activation")
 
@@ -411,11 +411,11 @@ def test_global_collection_reassignment_is_not_a_local_shadow() -> None:
     cpp = transpile(_GLOBAL_REASSIGN_SOURCE)
     method = _body(cpp, "std::string method_reset(")
     functional = _body(cpp, "std::string functional_reset(")
-    assert "slot = std::unordered_map<std::string, std::string>()" in method
-    assert '(slot[std::string("method")] = std::string("ok"))' in method
-    assert '.find(std::string("method"))' in method
-    assert '(slot[std::string("functional")] = std::string("ok"))' in functional
-    assert '.find(std::string("functional"))' in functional
+    assert "slot = PineMap<std::string, std::string>::new_()" in method
+    assert ".put(" in method
+    assert ".remove(" in method
+    assert ".put(" in functional
+    assert ".remove(" in functional
     compile_cpp(cpp, label="collection_scope_global_reassignment")
 
 
@@ -449,14 +449,14 @@ def test_nested_scalar_and_collection_shadows_restore_outer_binding() -> None:
     cpp = transpile(_NESTED_SHADOW_SOURCE)
     local = _body(cpp, "double restore_local(")
     globally = _body(cpp, "std::string restore_global(")
-    assert "std::unordered_map<std::string, int> slot" in local
+    assert "PineMap<std::string, int> slot" in local
     assert 'std::string slot = std::string("scalar")' in local
     assert "std::string copied = slot" in local
     assert "slot.push_back(2)" in local
     assert 'std::string shared = std::string("scalar")' in globally
     assert "std::string copied = shared" in globally
-    assert '(shared[std::string("after")] = std::string("global"))' in globally
-    assert '.find(std::string("after"))' in globally
+    assert ".put(" in globally
+    assert ".remove(" in globally
     compile_cpp(cpp, label="collection_scope_nested_restore")
 
 
@@ -491,7 +491,7 @@ def test_block_scoped_persistent_collections_keep_exact_clone_types() -> None:
     for name in ("ints", "ints_cs1"):
         assert f"std::vector<int> {name};" in cpp
     for name in ("weights", "weights_cs1"):
-        assert f"std::unordered_map<std::string, int> {name};" in cpp
+        assert f"PineMap<std::string, int> {name};" in cpp
     for name in ("grid", "grid_cs1"):
         assert f"PineGenericMatrix<int> {name};" in cpp
     assert "#include <pineforge/generic_matrix.hpp>" in cpp
@@ -555,7 +555,7 @@ def test_temporal_outer_alias_avoids_callable_parameter_name() -> None:
     body = _body(cpp, "int param_alias(")
     assert "int _pf_outer_slot_0" in body
     assert "auto& _pf_outer_slot_1 = this->slot" in body
-    assert '_pf_outer_slot_1.count(std::string("k"))' in body
+    assert ".contains(" in body
     compile_cpp(cpp, label="collection_scope_param_alias_collision")
 
 
@@ -597,9 +597,9 @@ result = param_block(param_arg, true)
 def test_block_local_collection_shadows_collection_parameter() -> None:
     cpp = transpile(_PARAM_BLOCK_SHADOW_SOURCE)
     body = _body(cpp, "int param_block(")
-    assert "std::unordered_map<std::string, int> slot" in body
-    assert '(slot[std::string("k")] = 1)' in body
-    assert 'slot.count(std::string("k"))' in body
+    assert "PineMap<std::string, int> slot" in body
+    assert ".put(" in body
+    assert ".get(" in body
     compile_cpp(cpp, label="collection_scope_parameter_block_shadow")
 
 
@@ -714,9 +714,8 @@ def test_loop_binder_shadows_collection_only_inside_loop() -> None:
     # Keep general scalar lowering byte-compatible; exact loop TypeSpecs are
     # consumed only by collection inference/dispatch in this patch.
     assert "double local_copy = slot" in body
-    assert '(slot[std::string("before")] = std::string("global"))' in body
-    assert '(slot[std::string("after")] = std::string("global"))' in body
-    assert '.find(std::string("after"))' in body
+    assert body.count(".put(") == 2
+    assert ".remove(" in body
     compile_cpp(cpp, label="collection_scope_loop_shadow")
 
 
@@ -790,7 +789,9 @@ def test_loop_binder_specs_match_array_from_declaration(case: str) -> None:
     else:
         assert "std::vector<int> slot = std::vector<int>" in cpp
     if case == "map-pair":
-        assert "for (auto [key, value] : pairs)" in cpp
+        assert "auto __pf_map_iter_0 = pairs;" in cpp
+        assert "for (auto key : __pf_map_iter_0.keys())" in cpp
+        assert "auto value = __pf_map_iter_0.get(key);" in cpp
     compile_cpp(cpp, label=f"collection_scope_loop_binder_{case}")
 
 
@@ -832,9 +833,9 @@ matrix_result = matrix_probe()
 '''
 
 
-def test_unique_local_collection_output_stays_byte_identical() -> None:
+def test_unique_local_collection_output_hash_is_stable() -> None:
     cpp = transpile(_IDENTITY_SOURCE)
-    assert len(cpp) == 8892
+    assert len(cpp) == 12085
     assert sha256(cpp.encode()).hexdigest() == (
-        "b3cea2eab92d45874cfddb94f2a624e0d7c463cf2dbb3d27edbe06a0a5fbb8d0"
+        "fc0f8008f7f3dac180602891982fb2d28425b3d60ca527185345e0630efa6c7e"
     )
