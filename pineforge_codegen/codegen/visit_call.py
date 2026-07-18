@@ -517,6 +517,7 @@ class CallVisitor:
         self,
         node,
         visiting_callables: frozenset[str] = frozenset(),
+        lexical_specs: dict[str, TypeSpec | None] | None = None,
     ) -> bool:
         """Whether an expression directly or transitively operates on a map.
 
@@ -527,6 +528,7 @@ class CallVisitor:
         """
         if not isinstance(node, ASTNode):
             return False
+        lexical_specs = lexical_specs or {}
         if isinstance(node, FuncCall):
             callee = node.callee
             if isinstance(callee, MemberAccess):
@@ -536,7 +538,9 @@ class CallVisitor:
                     and callee.member in (set(MAP_METHODS) | {"new"})
                 ):
                     return True
-                receiver_spec = self._type_spec_from_expr(callee.object)
+                receiver_spec = self._map_effect_type_spec(
+                    callee.object, lexical_specs
+                )
                 if (
                     receiver_spec is not None
                     and receiver_spec.kind == "map"
@@ -544,40 +548,153 @@ class CallVisitor:
                 ):
                     return True
 
-            func_name, namespace = self._resolve_callee(callee)
-            info_key = func_name if namespace is None else f"{namespace}.{func_name}"
-            func_info = self._func_info_map.get(info_key)
+            info_key, func_info = self._map_effect_callable_info(
+                node, lexical_specs
+            )
             if (
                 func_info is not None
                 and getattr(func_info, "node", None) is not None
                 and info_key not in visiting_callables
             ):
                 next_visiting = visiting_callables | {info_key}
+                child_specs = self._map_effect_callable_specs(
+                    func_info,
+                    node,
+                    lexical_specs,
+                )
                 if any(
-                    self._expr_contains_map_operation(child, next_visiting)
+                    self._expr_contains_map_operation(
+                        child,
+                        next_visiting,
+                        child_specs,
+                    )
                     for child in func_info.node.body
                 ):
                     return True
 
         for value in vars(node).values():
             if isinstance(value, ASTNode):
-                if self._expr_contains_map_operation(value, visiting_callables):
+                if self._expr_contains_map_operation(
+                    value, visiting_callables, lexical_specs
+                ):
                     return True
             elif isinstance(value, list):
                 if any(
-                    self._expr_contains_map_operation(item, visiting_callables)
+                    self._expr_contains_map_operation(
+                        item, visiting_callables, lexical_specs
+                    )
                     for item in value
                     if isinstance(item, ASTNode)
                 ):
                     return True
             elif isinstance(value, dict):
                 if any(
-                    self._expr_contains_map_operation(item, visiting_callables)
+                    self._expr_contains_map_operation(
+                        item, visiting_callables, lexical_specs
+                    )
                     for item in value.values()
                     if isinstance(item, ASTNode)
                 ):
                     return True
         return False
+
+    def _map_effect_type_spec(
+        self,
+        node,
+        lexical_specs: dict[str, TypeSpec | None],
+    ) -> TypeSpec | None:
+        """Resolve an expression type in the callable being inspected.
+
+        The ordinary codegen resolver describes the function currently being
+        emitted, not a transitive helper whose AST is being audited for effects.
+        Respect that helper's parameter/local bindings first, then fall back to
+        the established expression inference for globals and constructors.
+        """
+        if isinstance(node, Identifier) and node.name in lexical_specs:
+            return lexical_specs[node.name]
+        if isinstance(node, MemberAccess):
+            owner = self._map_effect_type_spec(node.object, lexical_specs)
+            if owner is not None and owner.kind == "udt" and owner.name:
+                return (self._udt_field_type_specs.get(owner.name) or {}).get(
+                    node.member
+                )
+        if isinstance(node, FuncCall):
+            _key, info = self._map_effect_callable_info(node, lexical_specs)
+            return_spec = getattr(info, "return_type_spec", None)
+            if return_spec is not None:
+                return return_spec
+        return self._type_spec_from_expr(node)
+
+    def _map_effect_callable_info(
+        self,
+        node: FuncCall,
+        lexical_specs: dict[str, TypeSpec | None],
+    ):
+        """Resolve a plain UDF or UDT method for transitive effect analysis."""
+        callee = node.callee
+        if isinstance(callee, Identifier):
+            key = callee.name
+            return key, self._func_info_map.get(key)
+        if isinstance(callee, MemberAccess):
+            receiver_spec = self._map_effect_type_spec(
+                callee.object, lexical_specs
+            )
+            if (receiver_spec is not None
+                    and receiver_spec.kind == "udt"
+                    and receiver_spec.name):
+                key = f"{receiver_spec.name}.{callee.member}"
+                return key, self._func_info_map.get(key)
+        return "", None
+
+    def _map_effect_callable_specs(
+        self,
+        func_info,
+        call: FuncCall,
+        caller_specs: dict[str, TypeSpec | None],
+    ) -> dict[str, TypeSpec | None]:
+        """Build the inspected callee's lexical TypeSpec environment.
+
+        Declared and already-inferred parameter specs are authoritative.  Any
+        unresolved slot is filled from this exact call's argument in the
+        caller's lexical environment, which also lets an untyped map flow
+        through multiple helper layers before analyzer call-site inference has
+        materialized every nested parameter.
+        """
+        func_node = func_info.node
+        params = list(func_node.params) if func_node is not None else []
+        declared_specs = list(getattr(func_info, "param_type_specs", ()) or ())
+        result: dict[str, TypeSpec | None] = {
+            param: declared_specs[index] if index < len(declared_specs) else None
+            for index, param in enumerate(params)
+        }
+
+        is_method = bool(getattr(func_info, "is_udt_method", False))
+        positional = (
+            [call.callee.object, *call.args]
+            if is_method and isinstance(call.callee, MemberAccess)
+            else list(call.args)
+        )
+        for index, actual in enumerate(positional):
+            if index >= len(params) or result[params[index]] is not None:
+                continue
+            result[params[index]] = self._map_effect_type_spec(
+                actual, caller_specs
+            )
+
+        keyword_offset = 1 if is_method else 0
+        for name, actual in call.kwargs.items():
+            if name not in params[keyword_offset:]:
+                continue
+            if result[name] is None:
+                result[name] = self._map_effect_type_spec(
+                    actual, caller_specs
+                )
+
+        # Direct callable locals already carry analyzer-owned lexical
+        # provenance.  They override same-named parameters/globals exactly as
+        # they do during real function emission.
+        result.update(self._func_collection_types.get(func_info.name, {}))
+        return result
 
     def _ordered_user_call_expr(
         self,
@@ -586,6 +703,7 @@ class CallVisitor:
         arg_exprs: list[str],
         *,
         source_order_nodes: list | None = None,
+        force_stage: bool = False,
     ) -> str:
         """Emit a user call with deterministic argument evaluation when needed.
 
@@ -595,9 +713,10 @@ class CallVisitor:
         declared parameter slots.
         """
         raw = f"{call_head}({', '.join(arg_exprs)})"
-        if len(arg_exprs) < 2 or not any(
+        has_map_effect = any(
             self._expr_contains_map_operation(node) for node in arg_nodes
-        ):
+        )
+        if not force_stage and (len(arg_exprs) < 2 or not has_map_effect):
             return raw
 
         occupied = "\n".join((call_head, *arg_exprs))
@@ -662,6 +781,10 @@ class CallVisitor:
                 if fi_u is not None and getattr(fi_u, "is_udt_method", False):
                     fn_cpp = self._udt_method_call_emit_name(fi_u, node)
                     recv_e = self._visit_expr(callee.object)
+                    receiver_root = callee.object
+                    while isinstance(receiver_root, MemberAccess):
+                        receiver_root = receiver_root.object
+                    stage_receiver = not isinstance(receiver_root, Identifier)
                     param_names = list(fi_u.node.params[1:]) if fi_u.node else []
                     # Drop the leading ``self`` slot from param_defaults so the
                     # parallel array lines up with ``param_names`` (rest of
@@ -681,6 +804,11 @@ class CallVisitor:
                             *node.args,
                             *node.kwargs.values(),
                         ],
+                        # Generated UDT methods accept ``T&``. A constructor or
+                        # function-return receiver is a C++ rvalue; bind it to a
+                        # named forwarding-reference lambda parameter first so
+                        # the method sees a valid lvalue for the full call.
+                        force_stage=stage_receiver,
                     )
 
         # Drawing method dispatch (spec §4.3 / L.1). A KNOWN drawing method on a
