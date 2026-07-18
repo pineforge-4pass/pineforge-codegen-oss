@@ -181,6 +181,25 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._deferred_param_history_refs: dict[
             str, list[tuple[Subscript, dict[int, str]]]
         ] = {}
+        # Parameter flow between user callables, captured while the caller's
+        # lexical symbols are still in scope.  This lets a later concrete map
+        # call revalidate history hidden behind wrappers without re-analyzing
+        # whole function bodies or conflating same-spelled locals.
+        self._deferred_param_call_edges: dict[
+            str,
+            list[
+                tuple[
+                    int,
+                    str,
+                    list[str],
+                    list[ASTNode | None],
+                    list[dict[int, str]],
+                ]
+            ],
+        ] = {}
+        self._func_series_history_nodes: dict[
+            tuple[str, str], Subscript
+        ] = {}
         # Per-function var_members and series_vars (for call-site cloning)
         self._func_var_members: dict[str, list] = {}  # func_name -> [(name, PineType, init_str)]
         self._func_series_vars: dict[str, set] = {}   # func_name -> set[str]
@@ -328,6 +347,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         """Run semantic analysis and return the analyzer context."""
         self._ensure_pine_v6()
         self._visit(self._ast)
+        self._check_cross_callable_series_collection_collisions()
 
         # Propagate call-site counts to sub-functions called within
         # multi-call-site functions. If f() has N call sites and calls g()
@@ -407,6 +427,48 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             udt_field_type_specs=dict(self._udt_field_type_specs),
             block_var_renames=dict(self._block_var_renames),
         )
+
+    def _check_cross_callable_series_collection_collisions(self) -> None:
+        """Fail closed when legacy raw member names cannot preserve scoping.
+
+        Persistent callable locals are class members.  A scalar Series local
+        with the same spelling in another callable would otherwise bind to the
+        collection member during C++ emission (``slot.push`` on PineMap).  Keep
+        the valid source out of malformed C++ until callable-owned Series
+        members have fully namespaced storage.
+        """
+        persistent_collections: dict[str, set[str]] = {}
+        for owner, specs in self._func_collection_types.items():
+            persistent_names = {
+                item[0] for item in self._func_var_members.get(owner, [])
+            }
+            persistent_collections[owner] = {
+                name
+                for name, spec in specs.items()
+                if name in persistent_names
+                and self._type_spec_contains_map(spec)
+            }
+
+        emitted: set[tuple[str, str, str]] = set()
+        for series_owner, names in self._func_series_vars.items():
+            for collection_owner, collection_names in persistent_collections.items():
+                if series_owner == collection_owner:
+                    continue
+                for name in names & collection_names:
+                    key = (series_owner, collection_owner, name)
+                    if key in emitted:
+                        continue
+                    emitted.add(key)
+                    node = self._func_series_history_nodes.get(
+                        (series_owner, name)
+                    )
+                    self._error(
+                        "History references on a scalar callable local named "
+                        f"'{name}' conflict with a persistent map local of the "
+                        "same name in another callable; scoped Series member "
+                        "storage is not implemented yet.",
+                        node.loc if node is not None else None,
+                    )
 
     def _record_global_binding_stmt(self, name: str, pine_type: PineType,
                                     is_var: bool, decl_node: ASTNode | None = None) -> None:
@@ -2182,6 +2244,55 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._visit(arg)
             for val in node.kwargs.values():
                 self._visit(val)
+            # UDT method call-site typing.  Method definitions may contain an
+            # untyped parameter history read; resolve receiver + args here and
+            # apply the same deferred map-history gate as regular UDFs before
+            # codegen can emit the parameter as a scalar double.
+            receiver_spec = self._type_spec_from_expr(obj)
+            if (
+                receiver_spec is not None
+                and receiver_spec.kind == "udt"
+                and receiver_spec.name
+            ):
+                method_key = f"{receiver_spec.name}.{member}"
+                method_info = next(
+                    (
+                        info
+                        for info in self._func_infos
+                        if info.name == method_key
+                        and getattr(info, "is_udt_method", False)
+                    ),
+                    None,
+                )
+                if method_info is not None and method_info.node is not None:
+                    method_params = list(method_info.node.params)
+                    rest_params = method_params[1:]
+                    rest_bound = self._bind_callable_args(node, rest_params)
+                    full_bound: list[ASTNode | None] = [obj, *rest_bound]
+                    effective_specs = list(
+                        getattr(method_info, "param_type_specs", None) or []
+                    )
+                    while len(effective_specs) < len(method_params):
+                        effective_specs.append(None)
+                    for index, arg in enumerate(full_bound):
+                        if effective_specs[index] is None and arg is not None:
+                            effective_specs[index] = self._type_spec_from_expr(arg)
+                    self._record_deferred_param_call_edge(
+                        node,
+                        method_key,
+                        method_params,
+                        full_bound,
+                    )
+                    self._validate_deferred_param_history_refs(
+                        method_key,
+                        {
+                            name: spec
+                            for name, spec in zip(
+                                method_params, effective_specs
+                            )
+                        },
+                    )
+                    return method_info.return_type
             # Matrix method dispatch: ``m.get(0, 0)`` on ``matrix<int>`` must
             # type as INT, not VOID, so ``v = m.get(...)`` propagates the
             # element PineType. ``_type_spec_from_expr`` already carries the
@@ -2410,6 +2521,58 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         visit(node)
         return grouped
 
+    @staticmethod
+    def _bind_callable_args(
+        node: FuncCall,
+        param_names: list[str],
+    ) -> list[ASTNode | None]:
+        """Bind positional/keyword AST arguments into declaration order."""
+        bound: list[ASTNode | None] = [None] * len(param_names)
+        for index, arg in enumerate(node.args):
+            if index < len(bound):
+                bound[index] = arg
+        for name, value in node.kwargs.items():
+            if name in param_names:
+                bound[param_names.index(name)] = value
+        return bound
+
+    def _record_deferred_param_call_edge(
+        self,
+        call_node: FuncCall,
+        callee_owner: str,
+        callee_param_names: list[str],
+        bound_args: list[ASTNode | None],
+    ) -> None:
+        """Capture caller-param flow while lexical symbol identity is known."""
+        if not self._collection_scope_stack:
+            return
+        caller_owner = self._collection_scope_stack[-1]
+        parameter_nodes: list[dict[int, str]] = []
+        has_flow = False
+        for arg in bound_args:
+            grouped = (
+                self._parameter_identifiers_in_expr(arg)
+                if arg is not None
+                else {}
+            )
+            current = grouped.get(caller_owner, {})
+            parameter_nodes.append(current)
+            has_flow = has_flow or bool(current)
+        if not has_flow:
+            return
+        edges = self._deferred_param_call_edges.setdefault(caller_owner, [])
+        if any(edge[0] == id(call_node) for edge in edges):
+            return
+        edges.append(
+            (
+                id(call_node),
+                callee_owner,
+                list(callee_param_names),
+                list(bound_args),
+                parameter_nodes,
+            )
+        )
+
     def _reject_unsupported_map_history(
         self, spec: TypeSpec, node: Subscript
     ) -> None:
@@ -2431,8 +2594,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self,
         owner: str,
         parameter_specs: dict[str, TypeSpec | None],
+        visiting: frozenset[str] = frozenset(),
     ) -> None:
-        """Re-run map-history safety after untyped UDF args are known."""
+        """Re-run map-history safety after untyped callable args are known."""
+        if owner in visiting:
+            return
+        next_visiting = visiting | {owner}
         for node, parameter_nodes in self._deferred_param_history_refs.get(
             owner, []
         ):
@@ -2446,6 +2613,40 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if self._type_spec_contains_map(object_spec):
                 assert object_spec is not None
                 self._reject_unsupported_map_history(object_spec, node)
+
+        # Propagate concrete caller specs through wrapper calls.  Each edge is
+        # identity-keyed from the definition pass, so a local that shadows a
+        # caller parameter cannot accidentally inherit its map TypeSpec.
+        for (
+            _call_id,
+            callee_owner,
+            callee_param_names,
+            bound_args,
+            parameter_nodes_by_arg,
+        ) in self._deferred_param_call_edges.get(owner, []):
+            callee_specs: dict[str, TypeSpec | None] = {}
+            for index, param_name in enumerate(callee_param_names):
+                arg = bound_args[index] if index < len(bound_args) else None
+                if arg is None:
+                    callee_specs[param_name] = None
+                    continue
+                parameter_nodes = (
+                    parameter_nodes_by_arg[index]
+                    if index < len(parameter_nodes_by_arg)
+                    else {}
+                )
+                overrides = {
+                    node_id: parameter_specs.get(name)
+                    for node_id, name in parameter_nodes.items()
+                }
+                callee_specs[param_name] = self._history_receiver_type_spec(
+                    arg, overrides
+                )
+            self._validate_deferred_param_history_refs(
+                callee_owner,
+                callee_specs,
+                next_visiting,
+            )
 
     def _visit_Subscript(self, node: Subscript) -> PineType:
         obj_type = self._visit(node.object)
@@ -2503,6 +2704,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             if func_name not in self._func_series_vars:
                                 self._func_series_vars[func_name] = set()
                             self._func_series_vars[func_name].add(name)
+                            self._func_series_history_nodes.setdefault(
+                                (func_name, name), node
+                            )
 
         return obj_type
 

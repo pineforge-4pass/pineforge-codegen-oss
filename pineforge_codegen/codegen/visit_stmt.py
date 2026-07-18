@@ -1165,8 +1165,15 @@ class StmtVisitor:
             # iterable once also preserves single-evaluation semantics for an
             # arbitrary map-producing expression.
             key_name, value_name = node.vars
-            occupied_names = set(self._all_bound_names) | {
-                self._safe_name(name) for name in self._all_bound_names
+            authored_names = (
+                set(self._all_bound_names)
+                | set(self._func_names)
+                | set(self._udt_defs)
+            )
+            occupied_names = authored_names | {
+                self._safe_name(name) for name in authored_names
+            } | {
+                self._func_safe_name(name) for name in self._func_names
             }
             # Parameters are not statement bindings, so they are absent from
             # ``_all_bound_names``.  Include both their authored and C++-safe

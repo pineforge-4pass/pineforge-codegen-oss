@@ -572,7 +572,7 @@ class SupportChecker:
                 bearing_fields = {
                     field_name
                     for field_name, type_name in fields.items()
-                    if type_name.startswith("map<")
+                    if "map<" in type_name
                     or any(
                         type_name == nested
                         or f"<{nested}>" in type_name

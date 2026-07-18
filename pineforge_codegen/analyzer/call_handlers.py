@@ -1088,15 +1088,23 @@ class CallHandlers:
         """Handle calls to user-defined functions."""
         func_def = self._func_defs[func_name]
 
-        # Visit the call args
-        arg_types = []
+        # Visit every supplied argument in Pine source order, then bind both
+        # positional and keyword forms into declaration order.  The old
+        # positional-only path skipped kwargs entirely, hiding nested calls and
+        # leaving deferred map-history validation without a concrete TypeSpec.
+        bound_args = self._bind_callable_args(node, list(func_def.params))
+        visited_types: dict[int, PineType] = {}
         for arg in node.args:
-            arg_types.append(self._visit(arg))
+            visited_types[id(arg)] = self._visit(arg)
+        for arg in node.kwargs.values():
+            visited_types[id(arg)] = self._visit(arg)
 
-        # Determine param types from call-site args
-        param_types = arg_types[:len(func_def.params)]
-        while len(param_types) < len(func_def.params):
-            param_types.append(PineType.UNKNOWN)
+        param_types = [
+            visited_types.get(id(arg), PineType.UNKNOWN)
+            if arg is not None
+            else PineType.UNKNOWN
+            for arg in bound_args
+        ]
 
         # Per-param TypeSpec: declared hints are authoritative; for untyped
         # params, infer from this call site's argument.  Validate deferred
@@ -1106,10 +1114,19 @@ class CallHandlers:
             getattr(self, "_func_param_type_specs", {}).get(func_name)
             or self._param_type_specs_from_def(func_def)
         )
-        arg_specs = [self._type_spec_from_expr(arg) for arg in node.args]
+        arg_specs = [
+            self._type_spec_from_expr(arg) if arg is not None else None
+            for arg in bound_args
+        ]
         for i in range(len(param_specs)):
             if param_specs[i] is None and i < len(arg_specs):
                 param_specs[i] = arg_specs[i]
+        self._record_deferred_param_call_edge(
+            node,
+            func_name,
+            list(func_def.params),
+            bound_args,
+        )
         self._validate_deferred_param_history_refs(
             func_name,
             {
@@ -1151,8 +1168,10 @@ class CallHandlers:
         func_sv = self._func_series_vars.get(func_name, set())
         if func_sv:
             for p_idx, param_name in enumerate(func_def.params):
-                if param_name in func_sv and p_idx < len(node.args):
-                    arg = node.args[p_idx]
+                if param_name in func_sv and p_idx < len(bound_args):
+                    arg = bound_args[p_idx]
+                    if arg is None:
+                        continue
                     if isinstance(arg, Identifier) and arg.name in BAR_FIELDS:
                         self._series_bar_fields.add(arg.name)
                     elif isinstance(arg, Identifier):
