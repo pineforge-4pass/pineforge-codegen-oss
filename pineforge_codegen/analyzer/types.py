@@ -40,7 +40,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..ast_nodes import (
-    ASTNode, BoolLiteral, ExprStmt, FuncCall, Identifier, MemberAccess,
+    ASTNode, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier, MemberAccess,
     NaLiteral, NumberLiteral, StringLiteral, TupleLiteral, UnaryOp,
 )
 from ..symbols import PineType, TypeSpec
@@ -134,6 +134,50 @@ class TypeHelper:
         raw = ann.get("template_args") or []
         return [str(x).replace(" ", "") for x in raw]
 
+    def _array_from_element_spec(self, value: ASTNode | None) -> TypeSpec | None:
+        """Exact scalar element type for one ``array.from`` argument.
+
+        Keep this refinement local to array construction.  General BinOp
+        TypeSpec inference changes unrelated scalar comparator lowering across
+        the corpus; array declarations only need enough structure to keep the
+        analyzer's captured LHS type aligned with codegen's RHS vector type.
+        """
+        if value is None:
+            return None
+        if isinstance(value, NumberLiteral):
+            return TypeSpec.primitive(
+                "float" if isinstance(value.value, float) else "int"
+            )
+        if isinstance(value, BoolLiteral):
+            return TypeSpec.primitive("bool")
+        if isinstance(value, StringLiteral):
+            return TypeSpec.primitive("string")
+        if isinstance(value, BinOp):
+            left = self._array_from_element_spec(value.left)
+            right = self._array_from_element_spec(value.right)
+            if value.op in ("==", "!=", ">", "<", ">=", "<=", "and", "or"):
+                return TypeSpec.primitive("bool")
+            if (left is not None and right is not None
+                    and left.kind == "primitive" and right.kind == "primitive"):
+                if left.name == "string" or right.name == "string":
+                    return TypeSpec.primitive("string")
+                if value.op == "/" or left.name == "float" or right.name == "float":
+                    return TypeSpec.primitive("float")
+                if left.name == "int" and right.name == "int":
+                    return TypeSpec.primitive("int")
+            return None
+        spec = self._type_spec_from_expr(value)
+        if spec is not None:
+            return spec
+        if isinstance(value, Identifier):
+            sym = self._symbols.resolve(value.name)
+            if sym is not None and sym.pine_type in {
+                PineType.INT, PineType.FLOAT, PineType.BOOL,
+                PineType.STRING, PineType.COLOR,
+            }:
+                return self._pine_type_to_spec(sym.pine_type)
+        return None
+
     def _type_spec_from_expr(self, value: ASTNode | None) -> TypeSpec | None:
         if value is None:
             return None
@@ -166,6 +210,9 @@ class TypeHelper:
                     elem = self._type_spec_from_hint(targs[0]) or TypeSpec.udt(targs[0])
                     return TypeSpec.array(elem)
                 if func == "from" and value.args:
+                    first_spec = self._array_from_element_spec(value.args[0])
+                    if first_spec is not None:
+                        return TypeSpec.array(first_spec)
                     first = self._visit(value.args[0])
                     return TypeSpec.array(self._pine_type_to_spec(first))
                 return TypeSpec.array(TypeSpec.primitive("float"))

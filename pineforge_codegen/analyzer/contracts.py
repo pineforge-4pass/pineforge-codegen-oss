@@ -237,6 +237,26 @@ class AnalyzerContext:
     udt_var_types: dict[str, str] = field(default_factory=dict)
     # var_name -> structured collection/UDT type metadata
     collection_types: dict[str, TypeSpec] = field(default_factory=dict)
+    # Stable callable key -> raw local name -> collection TypeSpec.  Function
+    # and method locals are lexical: two callables may both declare ``values``
+    # with unrelated collection kinds/element types, so they cannot share the
+    # top-level raw-name registry above.
+    func_collection_types: dict[str, dict[str, TypeSpec]] = field(default_factory=dict)
+    # id(immediate branch/loop owner) -> raw local name -> collection TypeSpec.
+    # Sibling lexical blocks may reuse one raw name with unrelated kinds, so
+    # their bindings cannot be collapsed into ``func_collection_types``.
+    block_collection_types: dict[int, dict[str, TypeSpec | None]] = field(default_factory=dict)
+    # Block id -> owning FuncInfo key. Used for dead-callable header filtering
+    # and exact persistent-member TypeSpec lookup outside callable emission.
+    block_collection_owners: dict[int, str] = field(default_factory=dict)
+    # id(callable-local VarDecl) -> exact collection TypeSpec, or None for a
+    # non-collection declaration that lexically tombstones an outer binding.
+    callable_collection_bindings: dict[int, TypeSpec | None] = field(default_factory=dict)
+    # Declaration node id -> owning callable key.  Persistent-member emission
+    # happens outside the analyzer's lexical scope, so raw names alone cannot
+    # distinguish a real persistent collection from a same-named ordinary
+    # local in another callable.
+    callable_collection_binding_owners: dict[int, str] = field(default_factory=dict)
     # UDT name -> field_name -> structured type metadata
     udt_field_type_specs: dict[str, dict[str, TypeSpec]] = field(default_factory=dict)
     # id(block_node) -> {raw_var_name: scope_unique_member_name} for block-scoped

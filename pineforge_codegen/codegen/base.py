@@ -355,7 +355,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._current_instance_name: str | None = None
         self._instance_dispatch: dict[tuple[str | None, int], str] = {}
         self._fresh_instances: list[dict] = []
-        self._fresh_var_members: list[tuple[str, str]] = []
+        self._fresh_var_members: list[tuple[str, str, str]] = []
         # Fresh fixnan members for context-sensitive helper instances (nested
         # helpers reached through >1 distinct call path). Each fresh instance
         # gets its OWN previous-value member so two paths never share fixnan
@@ -549,7 +549,33 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._global_member_vars.add(name)
         self._global_mutable_infos: dict[str, object] = getattr(ctx, "global_mutable_infos", {}) or {}
         self._udt_var_types: dict[str, str] = getattr(ctx, "udt_var_types", {}) or {}
-        self._collection_types: dict[str, TypeSpec] = getattr(ctx, "collection_types", {}) or {}
+        self._global_collection_types: dict[str, TypeSpec] = dict(
+            getattr(ctx, "collection_types", {}) or {}
+        )
+        self._collection_types: dict[str, TypeSpec] = dict(
+            self._global_collection_types
+        )
+        self._func_collection_types: dict[str, dict[str, TypeSpec]] = {
+            name: dict(specs)
+            for name, specs in (
+                getattr(ctx, "func_collection_types", {}) or {}
+            ).items()
+        }
+        self._block_collection_types: dict[int, dict[str, TypeSpec | None]] = {
+            owner_id: dict(specs)
+            for owner_id, specs in (
+                getattr(ctx, "block_collection_types", {}) or {}
+            ).items()
+        }
+        self._block_collection_owners: dict[int, str] = dict(
+            getattr(ctx, "block_collection_owners", {}) or {}
+        )
+        self._callable_collection_bindings: dict[int, TypeSpec | None] = dict(
+            getattr(ctx, "callable_collection_bindings", {}) or {}
+        )
+        self._callable_collection_binding_owners: dict[int, str] = dict(
+            getattr(ctx, "callable_collection_binding_owners", {}) or {}
+        )
         # id(block_node) -> {raw_var_name: unique_member} for block-scoped var
         # name collisions (see Analyzer._visit_VarDecl). Activated into
         # ``_active_var_remap`` while emitting the owning block's statements.
@@ -580,6 +606,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Current function parameter types (set during _emit_func_def)
         self._current_func_param_types: dict[str, str] = {}
         self._current_func_param_specs: dict[str, "TypeSpec"] = {}
+        # Copy-on-write lexical collection inventory for the function/method
+        # currently being emitted.  Activated by _emit_func_def and restored
+        # together with the legacy raw-name registries at function exit.
+        self._current_func_collection_specs: dict[str, "TypeSpec"] = {}
+        # Direct callable-body declarations that shadow a top-level collection.
+        # Nested declarations are activated only by their block COW overlay.
+        self._current_func_collection_shadows: set[str] = set()
+        # While emitting ``name = RHS`` for a declaration that shadows an
+        # already-active same-named collection, RHS identifiers are redirected
+        # through a pre-declaration alias. C++ brings the new name into scope
+        # inside its own initializer, so raw ``name`` would otherwise self-bind.
+        self._pending_decl_outer_alias: dict[str, str] = {}
+        self._collection_shadow_tmp_counter = 0
+        self._collection_shadow_tmp_names: set[str] = set()
         # Current function params that are series (const Series<double>&)
         self._current_func_series_params: set[str] = set()
         # Locals declared in the function currently being emitted (symbol table loses them after analysis)
@@ -1006,7 +1046,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     for v in var_originals(g_name):
                         fresh_member = f"{v}__ni{fresh_counter}"
                         fvar_remap[v] = fresh_member
-                        self._fresh_var_members.append((v, fresh_member))
+                        self._fresh_var_members.append((g_name, v, fresh_member))
                     # Fresh fixnan members: each path gets its OWN previous-
                     # value member so two call paths never share fixnan state.
                     ffixnan_remap: dict[str, str] = {}
@@ -1035,8 +1075,55 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     worklist.append(ginst)
                 self._instance_dispatch[(inst["name"], id(callnode))] = ginst["name"]
 
+    def _callable_var_collection_spec(
+            self, name: str, owner_func: str | None = None) -> TypeSpec | None:
+        """Exact TypeSpec for a function-scoped persistent collection member.
+
+        Only declaration nodes that actually became callable-scoped persistent
+        members are eligible here.  A raw-name scan of the general callable
+        inventory can otherwise turn a global scalar member into a collection
+        merely because an unrelated helper has a same-named ordinary local.
+        Clone contexts may own state reachable through another callable, so an
+        explicit owner is preferred and the owner-less fallback remains
+        deliberately limited to a single unambiguous persistent TypeSpec.
+        """
+        safe = self._safe_name(name)
+
+        candidates_by_owner: dict[str, list[TypeSpec]] = {}
+        metadata = getattr(self.ctx, "var_member_metadata_by_node", {}) or {}
+        for node_id, meta in metadata.items():
+            _node, member_name, _ptype, _init_str, is_callable_scoped = meta
+            if (not is_callable_scoped
+                    or self._safe_name(member_name) != safe):
+                continue
+            spec = self._callable_collection_bindings.get(node_id)
+            owner = self._callable_collection_binding_owners.get(node_id)
+            if (owner is None or spec is None
+                    or spec.kind not in {"array", "map", "matrix"}):
+                continue
+            owner_candidates = candidates_by_owner.setdefault(owner, [])
+            if spec not in owner_candidates:
+                owner_candidates.append(spec)
+
+        if owner_func is not None:
+            owned = candidates_by_owner.get(owner_func, [])
+            if len(owned) == 1:
+                return owned[0]
+            # The existing clone inventory deliberately unions persistent vars
+            # from reachable helpers into an enclosing function's remap.  In
+            # that case ``owner_func`` names the clone context, not the lexical
+            # declaration owner; fall through to the unambiguous owner search.
+
+        candidates: list[TypeSpec] = []
+        for owned in candidates_by_owner.values():
+            for spec in owned:
+                if spec not in candidates:
+                    candidates.append(spec)
+        return candidates[0] if len(candidates) == 1 else None
+
     def _emit_cloned_var_decl(self, orig_safe: str, cloned_safe: str,
-                              series_suffix: str, lines: list[str]) -> None:
+                              series_suffix: str, lines: list[str],
+                              owner_func: str | None = None) -> None:
         """Declare a per-clone copy of a function-scoped ``var`` member, matching
         the original's C++ type (series / matrix / array / map / drawing-handle /
         UDT / scalar). Shared by the per-call-site clone loop and the fresh
@@ -1044,8 +1131,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for vname, ptype, _init_str in self.ctx.var_members:
             if self._safe_name(vname) == orig_safe:
                 cpp_type = PINE_TYPE_TO_CPP.get(ptype, "double")
+                collection_spec = self._callable_var_collection_spec(
+                    vname, owner_func
+                )
                 if vname in self.ctx.series_vars:
                     lines.append(f"    Series<{cpp_type}> {cloned_safe}{series_suffix};")
+                elif collection_spec is not None:
+                    lines.append(
+                        f"    {self._type_spec_to_cpp(collection_spec)} {cloned_safe};"
+                    )
                 elif vname in self._matrix_specs:
                     lines.append(f"    {self._type_spec_to_cpp(self._matrix_specs[vname])} {cloned_safe};")
                 elif vname in self._array_vars:
@@ -2443,6 +2537,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 continue
             seen_var_members.add(name)
             safe = self._safe_name(name)
+            callable_collection_spec = (
+                None
+                if name in self._global_collection_types
+                else self._callable_var_collection_spec(name)
+            )
+            if callable_collection_spec is not None:
+                lines.append(
+                    f"    {self._type_spec_to_cpp(callable_collection_spec)} {safe};"
+                )
+                continue
             # Detect array vars from init expression. Guard the substring
             # heuristic against a UDT constructor that merely WRAPS array.new /
             # array.from in its arguments — e.g.
@@ -2614,16 +2718,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if cloned_safe in emitted_clones:
                     continue  # already declared by another function's clone
                 emitted_clones.add(cloned_safe)
-                self._emit_cloned_var_decl(orig_safe, cloned_safe, _mbb, lines)
+                self._emit_cloned_var_decl(
+                    orig_safe, cloned_safe, _mbb, lines, owner_func=fname
+                )
 
         # 8c2. Fresh var members for context-sensitive helper instances (nested
         #      helpers reached through >1 distinct call path). Each fresh instance
         #      gets its OWN scalar/series state so two paths never collide.
-        for orig_safe, fresh_safe in self._fresh_var_members:
+        for owner_func, orig_safe, fresh_safe in self._fresh_var_members:
             if fresh_safe in emitted_clones:
                 continue
             emitted_clones.add(fresh_safe)
-            self._emit_cloned_var_decl(orig_safe, fresh_safe, _mbb, lines)
+            self._emit_cloned_var_decl(
+                orig_safe, fresh_safe, _mbb, lines, owner_func=owner_func
+            )
 
         # 8c3. Fresh fixnan members for context-sensitive helper instances.
         #      Each fresh instance gets its OWN previous-value member so two

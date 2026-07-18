@@ -1068,6 +1068,49 @@ class SecurityEmitter:
         lines: list[str],
         resolving: set[str] | None = None,
     ) -> str:
+        """Inline one linear helper against isolated lexical collection state."""
+        saved = (
+            self._current_func_collection_specs,
+            self._current_func_collection_shadows,
+            self._collection_types,
+            self._array_vars,
+            self._map_vars,
+            self._matrix_specs,
+        )
+        self._current_func_collection_specs = {}
+        self._current_func_collection_shadows = set()
+        self._collection_types = dict(self._collection_types)
+        self._array_vars = set(self._array_vars)
+        self._map_vars = set(self._map_vars)
+        self._matrix_specs = dict(self._matrix_specs)
+        try:
+            return self._emit_security_linear_helper_call_scoped(
+                sec_id,
+                plan,
+                ta_results,
+                security_mutable_names,
+                lines,
+                resolving,
+            )
+        finally:
+            (
+                self._current_func_collection_specs,
+                self._current_func_collection_shadows,
+                self._collection_types,
+                self._array_vars,
+                self._map_vars,
+                self._matrix_specs,
+            ) = saved
+
+    def _emit_security_linear_helper_call_scoped(
+        self,
+        sec_id: int,
+        plan: dict,
+        ta_results: dict,
+        security_mutable_names: set[str],
+        lines: list[str],
+        resolving: set[str] | None = None,
+    ) -> str:
         if plan["mode"] != "linear":
             self._codegen_error(
                 plan["func_info"].node,
@@ -1083,6 +1126,15 @@ class SecurityEmitter:
         def emit_stmt(stmt: ASTNode, active_bindings: dict[str, str], indent: int) -> None:
             pad = "    " * indent
             runtime_stack_local = plan["binding_stack"] + (active_bindings,)
+
+            def activate_decl() -> None:
+                spec = self._callable_collection_bindings.get(id(stmt))
+                if spec is None:
+                    inferred = self._type_spec_from_expr(stmt.value)
+                    if (inferred is not None
+                            and inferred.kind in {"array", "map", "matrix"}):
+                        spec = inferred
+                self._activate_callable_collection_binding(stmt.name, spec)
 
             if isinstance(stmt, VarDecl):
                 is_persistent_var = stmt.is_var
@@ -1151,6 +1203,7 @@ class SecurityEmitter:
                         lines.append(f'{pad}}} else {{')
                         lines.append(f'{pad}    _security_helper_series_["{series_name}"].update({expr_cpp});')
                         lines.append(f'{pad}}}')
+                    activate_decl()
                     return
 
                 local_name = active_bindings.get(stmt.name)
@@ -1185,6 +1238,7 @@ class SecurityEmitter:
                         lines,
                     )
                     lines.append(f"{pad}{local_name} = {expr_cpp};")
+                activate_decl()
                 return
 
             if isinstance(stmt, Assignment):
@@ -1241,13 +1295,69 @@ class SecurityEmitter:
                 )
                 lines.append(f"{pad}if ({cond_cpp}) {{")
                 body_bindings = dict(active_bindings)
-                for child in stmt.body:
-                    emit_stmt(child, body_bindings, indent + 1)
+                body_state = (
+                    self._current_func_collection_specs,
+                    self._current_func_collection_shadows,
+                    self._collection_types,
+                    self._array_vars,
+                    self._map_vars,
+                    self._matrix_specs,
+                )
+                self._current_func_collection_specs = dict(
+                    self._current_func_collection_specs
+                )
+                self._current_func_collection_shadows = set(
+                    self._current_func_collection_shadows
+                )
+                self._collection_types = dict(self._collection_types)
+                self._array_vars = set(self._array_vars)
+                self._map_vars = set(self._map_vars)
+                self._matrix_specs = dict(self._matrix_specs)
+                try:
+                    for child in stmt.body:
+                        emit_stmt(child, body_bindings, indent + 1)
+                finally:
+                    (
+                        self._current_func_collection_specs,
+                        self._current_func_collection_shadows,
+                        self._collection_types,
+                        self._array_vars,
+                        self._map_vars,
+                        self._matrix_specs,
+                    ) = body_state
                 if stmt.else_body:
                     lines.append(f"{pad}}} else {{")
                     else_bindings = dict(active_bindings)
-                    for child in stmt.else_body:
-                        emit_stmt(child, else_bindings, indent + 1)
+                    else_state = (
+                        self._current_func_collection_specs,
+                        self._current_func_collection_shadows,
+                        self._collection_types,
+                        self._array_vars,
+                        self._map_vars,
+                        self._matrix_specs,
+                    )
+                    self._current_func_collection_specs = dict(
+                        self._current_func_collection_specs
+                    )
+                    self._current_func_collection_shadows = set(
+                        self._current_func_collection_shadows
+                    )
+                    self._collection_types = dict(self._collection_types)
+                    self._array_vars = set(self._array_vars)
+                    self._map_vars = set(self._map_vars)
+                    self._matrix_specs = dict(self._matrix_specs)
+                    try:
+                        for child in stmt.else_body:
+                            emit_stmt(child, else_bindings, indent + 1)
+                    finally:
+                        (
+                            self._current_func_collection_specs,
+                            self._current_func_collection_shadows,
+                            self._collection_types,
+                            self._array_vars,
+                            self._map_vars,
+                            self._matrix_specs,
+                        ) = else_state
                 lines.append(f"{pad}}}")
                 return
 

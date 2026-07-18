@@ -184,19 +184,133 @@ class TypeInferer:
             return f"{cpp_type}()"
         return self._default_for_type(cpp_type)
 
+    def _collection_spec_for_name(self, name: str) -> TypeSpec | None:
+        """Resolve collection metadata with lexical precedence.
+
+        Source-ordered callable locals shadow loop bindings and parameters once
+        their declaration has executed; before that point, loop/parameter
+        bindings shadow top-level/on_bar state. The process-wide raw-name maps
+        are retained for top-level compatibility, but no callable may infer a
+        collection kind from a same-named sibling callable.
+        """
+        local_specs = getattr(self, "_current_func_collection_specs", {})
+        if name in local_specs:
+            return local_specs[name]
+        # A scalar/UDT local still shadows a same-named top-level collection.
+        # Returning None is semantically different from "not found locally": it
+        # prevents legacy global kind registries from resurrecting the hidden
+        # binding during member dispatch or alias analysis.
+        if name in getattr(self, "_current_func_collection_shadows", set()):
+            return None
+        loop_specs = getattr(self, "_current_loop_var_specs", None)
+        if loop_specs and name in loop_specs:
+            return loop_specs[name]
+        if name in getattr(self, "_current_loop_vars", set()):
+            return None
+        param_specs = getattr(self, "_current_func_param_specs", {})
+        if name in param_specs:
+            param_spec = param_specs[name]
+            # Keep the established unresolved/untyped-parameter compatibility
+            # route: scalar TypeSpecs inferred only from a call site did not
+            # historically mask a same-named top-level collection registry.
+            # Declared scalar/UDT parameters do shadow it, while inferred or
+            # declared collection parameters always carry their exact kind.
+            if (param_spec.kind in {"array", "map", "matrix"}
+                    or name in getattr(
+                        self, "_current_func_declared_param_names", set()
+                    )):
+                return param_spec
+        # During callable emission this is the copy-on-write lexical overlay;
+        # outside a callable it is the live top-level registry, including
+        # aliases discovered by codegen after construction.
+        return self._collection_types.get(name)
+
+    def _collection_name_is_lexically_shadowed(self, name: str) -> bool:
+        """Whether ``name`` is bound in the active callable/block scope.
+
+        A ``None`` collection lookup alone cannot distinguish a real scalar or
+        UDT tombstone from an absent name.  Callers that otherwise fall back to
+        the analyzer's popped symbol table use this predicate to avoid
+        resurrecting a hidden top-level collection. Untyped parameters retain
+        their established compatibility path and are intentionally not tested
+        here.
+        """
+        if name in getattr(self, "_current_loop_vars", set()):
+            return True
+        if name in getattr(self, "_current_func_collection_specs", {}):
+            return True
+        return name in getattr(self, "_current_func_collection_shadows", set())
+
+    def _activate_callable_collection_binding(
+        self, name: str, spec: TypeSpec | None
+    ) -> None:
+        """Install one callable-local binding after its declaration RHS.
+
+        Every raw kind marker is removed first. A collection installs its exact
+        TypeSpec; a scalar/UDT leaves a tombstone in the lexical shadow set.
+        Function and block entry already established copy-on-write state, so
+        this mutation is restored at the appropriate lexical boundary.
+        """
+        self._array_vars.discard(name)
+        self._map_vars.discard(name)
+        self._matrix_specs.pop(name, None)
+        self._current_func_collection_specs.pop(name, None)
+        self._collection_types.pop(name, None)
+        self._current_func_collection_shadows.add(name)
+        if spec is None or spec.kind not in {"array", "map", "matrix"}:
+            return
+        self._current_func_collection_specs[name] = spec
+        self._collection_types[name] = spec
+        if spec.kind == "array":
+            self._array_vars.add(name)
+        elif spec.kind == "map":
+            self._map_vars.add(name)
+        else:
+            self._matrix_specs[name] = spec
+
+    def _collection_receiver_expr(self, name: str) -> str:
+        """C++ receiver for an active collection identifier."""
+        return getattr(self, "_pending_decl_outer_alias", {}).get(
+            name, self._safe_name(name)
+        )
+
     def _array_spec_for_name(self, name: str) -> TypeSpec:
         """Spec for ``array<...>`` variable ``name`` (falls back to array<float>)."""
-        spec = self._collection_types.get(name)
+        spec = self._collection_spec_for_name(name)
         if spec is not None and spec.kind == "array":
             return spec
         return TypeSpec.array(TypeSpec.primitive("float"))
 
     def _map_spec_for_name(self, name: str) -> TypeSpec:
         """Spec for ``map<...>`` variable ``name`` (falls back to map<string, float>)."""
-        spec = self._collection_types.get(name)
+        spec = self._collection_spec_for_name(name)
         if spec is not None and spec.kind == "map":
             return spec
         return TypeSpec.map(TypeSpec.primitive("string"), TypeSpec.primitive("float"))
+
+    def _array_from_element_spec(self, node) -> TypeSpec | None:
+        """Exact scalar element spec used only by ``array.from`` lowering.
+
+        This intentionally does not make BinOp TypeSpecs globally visible:
+        doing so changes unrelated float-band comparator output.  Collection
+        construction needs the narrower fact so its vector type agrees with
+        the analyzer-captured declaration type, including lexical loop binders.
+        """
+        if isinstance(node, BinOp):
+            left = self._array_from_element_spec(node.left)
+            right = self._array_from_element_spec(node.right)
+            if node.op in ("==", "!=", ">", "<", ">=", "<=", "and", "or"):
+                return TypeSpec.primitive("bool")
+            if (left is not None and right is not None
+                    and left.kind == "primitive" and right.kind == "primitive"):
+                if left.name == "string" or right.name == "string":
+                    return TypeSpec.primitive("string")
+                if node.op == "/" or left.name == "float" or right.name == "float":
+                    return TypeSpec.primitive("float")
+                if left.name == "int" and right.name == "int":
+                    return TypeSpec.primitive("int")
+            return None
+        return self._type_spec_from_expr(node)
 
     def _type_spec_from_expr(self, node) -> TypeSpec | None:
         """Best-effort TypeSpec inference for an expression node.
@@ -210,14 +324,9 @@ class TypeInferer:
         if isinstance(node, StringLiteral):
             return TypeSpec.primitive("string")
         if isinstance(node, Identifier):
-            loop_specs = getattr(self, "_current_loop_var_specs", None)
-            if loop_specs and node.name in loop_specs:
-                return loop_specs[node.name]
-            param_specs = getattr(self, "_current_func_param_specs", {})
-            if node.name in param_specs:
-                return param_specs[node.name]
-            if node.name in self._collection_types:
-                return self._collection_types[node.name]
+            collection_spec = self._collection_spec_for_name(node.name)
+            if collection_spec is not None:
+                return collection_spec
             if node.name in self._udt_var_types:
                 return TypeSpec.udt(self._udt_var_types[node.name])
             # Drawing-typed method/function parameter (L.6d / U.5): a ``line ln``
@@ -226,6 +335,8 @@ class TypeInferer:
             _pu = getattr(self, "_udt_param_udt", None)
             if _pu and node.name in _pu and _pu[node.name] in DRAWING_TYPE_TO_CPP:
                 return TypeSpec.udt(_pu[node.name])
+            if self._collection_name_is_lexically_shadowed(node.name):
+                return None
             sym = self.ctx.symbols.resolve(node.name)
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return sym.type_spec
@@ -284,7 +395,10 @@ class TypeInferer:
                 if targs:
                     return TypeSpec.array(self._type_spec_from_hint_name(targs[0]) or TypeSpec.udt(targs[0]))
                 if func_name == "from" and node.args:
-                    return TypeSpec.array(self._type_spec_from_expr(node.args[0]) or TypeSpec.primitive("float"))
+                    return TypeSpec.array(
+                        self._array_from_element_spec(node.args[0])
+                        or TypeSpec.primitive("float")
+                    )
                 return TypeSpec.array(TypeSpec.primitive("float"))
             # Functional-form array element/copy accessors: the receiver is
             # the first argument (``array.copy(arr)``), mirroring the
@@ -523,6 +637,12 @@ class TypeInferer:
                 _dret = self._drawing_call_return_cpp(node.value)
                 if _dret is not None:
                     return _dret
+        # Analyzer scopes are popped before codegen, so ctx.symbols.resolve may
+        # find a same-named global instead of this active callable's plain
+        # local.  The local binding is known from the emitted body inventory;
+        # infer it from its own RHS rather than borrowing the global's PineType.
+        if node.name in getattr(self, "_current_func_locals", set()):
+            return self._infer_type(node.value)
         sym = self.ctx.symbols.resolve(node.name)
         if sym is not None:
             inferred = self._infer_type(node.value)
@@ -616,9 +736,9 @@ class TypeInferer:
         """
         # Collections / UDT / drawing handles never take a scalar ``na<T>()``:
         # leave them to the drawing-na / default lowering in _visit_rhs_value.
-        if (name in self._array_vars
-                or name in self._map_vars
-                or name in getattr(self, "_matrix_specs", {})
+        collection_spec = self._collection_spec_for_name(name)
+        if ((collection_spec is not None
+                and collection_spec.kind in {"array", "map", "matrix"})
                 or name in self._udt_var_types):
             return None
         cpp_type: str | None = None
@@ -835,15 +955,9 @@ class TypeInferer:
         if not isinstance(expr, Identifier):
             return None
         name = expr.name
-        if name in self._matrix_specs:
-            return self._matrix_specs[name]
-        spec = self._collection_types.get(name)
+        spec = self._collection_spec_for_name(name)
         if spec is not None and spec.kind in ("array", "map", "matrix"):
             return spec
-        if name in self._array_vars:
-            return self._array_spec_for_name(name)
-        if name in self._map_vars:
-            return self._map_spec_for_name(name)
         return None
 
     def _collection_lvalue_selection_spec(self, expr):
@@ -999,6 +1113,8 @@ class TypeInferer:
                 return self._current_func_param_types[node.name]
             if node.name in getattr(self, "_current_func_local_types", {}):
                 return self._current_func_local_types[node.name]
+            if node.name in getattr(self, "_current_loop_vars", set()):
+                return "double"
             sym = self.ctx.symbols.resolve(node.name)
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return self._type_spec_to_cpp(sym.type_spec)
@@ -1167,6 +1283,11 @@ class TypeInferer:
         local_types: dict[str, str] = {}
         for stmt in self._walk_ast(func_node):
             if isinstance(stmt, VarDecl) and stmt.value is not None and stmt.name:
+                captured = self._callable_collection_bindings.get(id(stmt))
+                if (captured is not None
+                        and captured.kind in {"array", "map", "matrix"}):
+                    local_types[stmt.name] = self._type_spec_to_cpp(captured)
+                    continue
                 if stmt.type_hint:
                     spec = self._type_spec_from_hint_name(stmt.type_hint)
                     if spec is not None:

@@ -106,8 +106,8 @@ from .tables import (
     MATRIX_RETURNING_METHODS,
 )
 
-# Sentinel for "no block-scoped var remap was activated" so an empty dict
-# saved-remap is still distinguishable from the no-op case.
+# Sentinel for "no block-scoped overlay was activated" so an empty saved map
+# is still distinguishable from the no-op case.
 _NO_BLOCK_REMAP = object()
 
 
@@ -137,11 +137,77 @@ class StmtVisitor:
         if isinstance(node, MethodDef):
             return  # handled as class method via FuncInfo
         if isinstance(node, VarDecl):
-            self._visit_var_decl(node, lines, pad)
+            is_callable_binding = (
+                getattr(self, "_active_func_name", None) is not None
+                and id(node) in self._callable_collection_bindings
+            )
+            activation_spec = (
+                self._callable_collection_bindings.get(id(node))
+                if is_callable_binding
+                else None
+            )
+            if is_callable_binding and activation_spec is None:
+                inferred_spec = self._type_spec_from_expr(node.value)
+                if (inferred_spec is not None
+                        and inferred_spec.kind in {"array", "map", "matrix"}):
+                    activation_spec = inferred_spec
+            previous_pending_alias = self._pending_decl_outer_alias
+            if (is_callable_binding
+                    and not node.is_var
+                    and not node.is_varip
+                    and self._collection_spec_for_name(node.name) is not None
+                    and any(
+                        isinstance(part, Identifier) and part.name == node.name
+                        for part in self._walk_ast(node.value)
+                    )):
+                safe_name = self._safe_name(node.name)
+                if (node.name in self._global_collection_types
+                        and node.name not in self._current_func_param_specs
+                        and node.name not in self._current_func_collection_specs
+                        and node.name not in self._current_loop_var_specs):
+                    outer_expr = f"this->{safe_name}"
+                else:
+                    outer_expr = self._active_var_remap.get(safe_name, safe_name)
+                occupied_alias_names = (
+                    set(self._all_bound_names)
+                    | set(self._collection_shadow_tmp_names)
+                    | set(self._current_func_param_types)
+                    | {
+                        self._safe_name(param)
+                        for param in self._current_func_param_types
+                    }
+                )
+                while True:
+                    alias = (
+                        f"_pf_outer_{safe_name}_"
+                        f"{self._collection_shadow_tmp_counter}"
+                    )
+                    self._collection_shadow_tmp_counter += 1
+                    if alias not in occupied_alias_names:
+                        break
+                self._collection_shadow_tmp_names.add(alias)
+                lines.append(f"{pad}auto& {alias} = {outer_expr};")
+                self._pending_decl_outer_alias = {
+                    **previous_pending_alias,
+                    node.name: alias,
+                }
+            try:
+                self._visit_var_decl(node, lines, pad)
+            finally:
+                self._pending_decl_outer_alias = previous_pending_alias
+            if is_callable_binding:
+                self._activate_callable_collection_binding(
+                    node.name,
+                    activation_spec,
+                )
         elif isinstance(node, Assignment):
             self._visit_assignment(node, lines, pad)
         elif isinstance(node, TupleAssign):
             self._visit_tuple_assign(node, lines, pad)
+            if getattr(self, "_active_func_name", None) is not None:
+                for name in node.names:
+                    if name and name != "_":
+                        self._activate_callable_collection_binding(name, None)
         elif isinstance(node, IfStmt):
             self._visit_if(node, lines, indent)
         elif isinstance(node, ForStmt):
@@ -234,7 +300,8 @@ class StmtVisitor:
         # m.concat(other, ...) — receiver is callee.object
         if isinstance(callee.object, Identifier):
             recv = callee.object.name
-            if recv in getattr(self, "_matrix_specs", {}):
+            recv_spec = self._collection_spec_for_name(recv)
+            if recv_spec is not None and recv_spec.kind == "matrix":
                 return recv
         # matrix.concat(m, other, ...) — receiver is first arg
         if (isinstance(callee.object, Identifier)
@@ -242,7 +309,8 @@ class StmtVisitor:
                 and expr.args
                 and isinstance(expr.args[0], Identifier)):
             recv = expr.args[0].name
-            if recv in getattr(self, "_matrix_specs", {}):
+            recv_spec = self._collection_spec_for_name(recv)
+            if recv_spec is not None and recv_spec.kind == "matrix":
                 return recv
         return None
 
@@ -323,10 +391,16 @@ class StmtVisitor:
         if isinstance(node.value, FuncCall):
             func_name, namespace = self._resolve_callee(node.value.callee)
             if namespace == "array" and func_name in ARRAY_NEW_CTORS | {"new", "from", "copy", "slice"}:
-                self._array_vars.add(node.name)
-                spec = self._type_spec_from_expr(node.value) or self._array_spec_for_name(node.name)
-                self._collection_types.setdefault(node.name, spec)
+                captured = self._callable_collection_bindings.get(id(node))
+                spec = (
+                    captured
+                    if captured is not None and captured.kind == "array"
+                    else self._type_spec_from_expr(node.value)
+                        or self._array_spec_for_name(node.name)
+                )
                 init = self._visit_expr(node.value)
+                self._array_vars.add(node.name)
+                self._collection_types.setdefault(node.name, spec)
                 cpp_type = self._type_spec_to_cpp(spec)
                 if is_global_member:
                     lines.append(f"{pad}{safe} = {init};")
@@ -340,9 +414,13 @@ class StmtVisitor:
             if namespace == "matrix" and func_name == "new":
                 targs = self._template_args_from_call(node.value) if hasattr(node.value, "annotations") else []
                 elem_spec = self._type_spec_from_hint_name(targs[0]) if targs else TypeSpec.primitive("float")
-                spec = TypeSpec.matrix(elem_spec)
-                self._matrix_specs[node.name] = spec
-                self._collection_types[node.name] = spec
+                captured = self._callable_collection_bindings.get(id(node))
+                spec = (
+                    captured
+                    if captured is not None and captured.kind == "matrix"
+                    else TypeSpec.matrix(elem_spec)
+                )
+                elem_spec = spec.element or elem_spec
                 cpp_type = self._type_spec_to_cpp(spec)
                 if len(node.value.args) >= 2:
                     r = self._visit_expr(node.value.args[0])
@@ -351,6 +429,8 @@ class StmtVisitor:
                     init = f"{cpp_type}::new_({r}, {c}, {v})"
                 else:
                     init = f"{cpp_type}::new_(0, 0, {self._default_for_spec(elem_spec)})"
+                self._matrix_specs[node.name] = spec
+                self._collection_types[node.name] = spec
                 if is_global_member:
                     lines.append(f"{pad}{safe} = {init};")
                 else:
@@ -363,12 +443,20 @@ class StmtVisitor:
             # rejects ``double = PineMatrix``. The RHS expression itself is
             # already lowered to the right ``m.inv()`` form by visit_call.
             if namespace == "matrix" and func_name in MATRIX_RETURNING_METHODS:
-                recv_spec = self._matrix_specs.get(self._extract_receiver_name(node.value))
-                if recv_spec is None:
+                recv_name = self._extract_receiver_name(node.value)
+                recv_spec = (
+                    self._collection_spec_for_name(recv_name)
+                    if recv_name is not None
+                    else None
+                )
+                if recv_spec is None or recv_spec.kind != "matrix":
                     recv_spec = TypeSpec.matrix(TypeSpec.primitive("float"))
+                captured = self._callable_collection_bindings.get(id(node))
+                if captured is not None and captured.kind == "matrix":
+                    recv_spec = captured
+                init = self._visit_expr(node.value)
                 self._matrix_specs[node.name] = recv_spec
                 self._collection_types[node.name] = recv_spec
-                init = self._visit_expr(node.value)
                 cpp_type = self._type_spec_to_cpp(recv_spec)
                 if is_global_member:
                     lines.append(f"{pad}{safe} = {init};")
@@ -376,8 +464,14 @@ class StmtVisitor:
                     lines.append(f"{pad}{cpp_type} {safe} = {init};")
                 return
             if namespace == "map" and func_name == "new":
+                captured = self._callable_collection_bindings.get(id(node))
+                spec = (
+                    captured
+                    if captured is not None and captured.kind == "map"
+                    else self._type_spec_from_expr(node.value)
+                        or self._map_spec_for_name(node.name)
+                )
                 self._map_vars.add(node.name)
-                spec = self._type_spec_from_expr(node.value) or self._map_spec_for_name(node.name)
                 self._collection_types.setdefault(node.name, spec)
                 cpp_type = self._type_spec_to_cpp(spec)
                 if is_global_member:
@@ -466,6 +560,8 @@ class StmtVisitor:
         if not is_global_member:
             coll_spec = self._collection_lvalue_selection_spec(node.value)
             if coll_spec is not None and self._collection_local_must_alias(node):
+                cpp_type = self._type_spec_to_cpp(coll_spec)
+                cpp_val = self._visit_rhs_value(node.value, node.name, target_cpp_type=cpp_type)
                 # Register the local's collection kind so subsequent
                 # ``.size()/.get()/.unshift()`` dispatch resolves correctly.
                 self._collection_types[node.name] = coll_spec
@@ -475,8 +571,6 @@ class StmtVisitor:
                     self._map_vars.add(node.name)
                 elif coll_spec.kind == "matrix":
                     self._matrix_specs[node.name] = coll_spec
-                cpp_type = self._type_spec_to_cpp(coll_spec)
-                cpp_val = self._visit_rhs_value(node.value, node.name, target_cpp_type=cpp_type)
                 lines.append(f"{pad}{cpp_type}& {safe} = {cpp_val};")
                 return
 
@@ -592,7 +686,11 @@ class StmtVisitor:
                     op_char = node.op[0]  # e.g., "+" from "+="
                     lines.append(f"{pad}{safe}.update({safe}[0] {op_char} {val_cpp});")
         elif target_name in self._var_names:
-            if node.op == ":=" and target_name in self._matrix_specs and isinstance(node.value, FuncCall):
+            target_spec = self._collection_spec_for_name(target_name)
+            if (node.op == ":="
+                    and target_spec is not None
+                    and target_spec.kind == "matrix"
+                    and isinstance(node.value, FuncCall)):
                 rhs_fn, rhs_ns = self._resolve_callee(node.value.callee)
                 rhs_spec = None
                 if rhs_ns == "matrix" and rhs_fn == "new":
@@ -601,9 +699,13 @@ class StmtVisitor:
                     rhs_spec = TypeSpec.matrix(elem)
                 elif rhs_ns == "matrix" and rhs_fn in MATRIX_RETURNING_METHODS:
                     rcv = self._extract_receiver_name(node.value)
-                    rhs_spec = self._matrix_specs.get(rcv)
+                    rhs_spec = (
+                        self._collection_spec_for_name(rcv)
+                        if rcv is not None
+                        else None
+                    )
                 if rhs_spec is not None:
-                    lhs_spec = self._matrix_specs[target_name]
+                    lhs_spec = target_spec
                     if rhs_spec.element != lhs_spec.element:
                         self._codegen_error(
                             node,
@@ -718,20 +820,58 @@ class StmtVisitor:
         lines.append(f"{pad}/* unsupported tuple assignment */")
 
     def _push_block_var_remap(self, owner):
-        """Activate block-scoped var renames for ``owner`` (BUG 1). Returns the
-        previous ``_active_var_remap`` to restore (or ``_NO_BLOCK_REMAP`` if this
-        block owns no renames). Renames are MERGED over the inherited remap so
-        nested blocks keep any enclosing func-clone / outer-block mapping."""
+        """Activate exact lexical metadata for one branch/loop body.
+
+        Persistent-var renames are merged over the inherited remap. Collection
+        registries use copy-on-write; declarations activate their bindings in
+        source order, and block exit restores the outer state. Thus a sibling
+        block can reuse the same raw name without either pre-shadowing earlier
+        statements or controlling dispatch in the other branch.
+        """
         renames = self._block_var_renames.get(id(owner))
-        if not renames:
+        collection_specs = self._block_collection_types.get(id(owner))
+        if not renames and collection_specs is None:
             return _NO_BLOCK_REMAP
-        saved = self._active_var_remap
-        self._active_var_remap = {**saved, **renames}
-        return saved
+        saved_remap = self._active_var_remap
+        if renames:
+            self._active_var_remap = {**saved_remap, **renames}
+
+        saved_collections = None
+        if collection_specs is not None:
+            saved_collections = (
+                self._current_func_collection_specs,
+                self._current_func_collection_shadows,
+                self._collection_types,
+                self._array_vars,
+                self._map_vars,
+                self._matrix_specs,
+            )
+            self._current_func_collection_specs = dict(
+                self._current_func_collection_specs
+            )
+            self._current_func_collection_shadows = set(
+                self._current_func_collection_shadows
+            )
+            self._collection_types = dict(self._collection_types)
+            self._array_vars = set(self._array_vars)
+            self._map_vars = set(self._map_vars)
+            self._matrix_specs = dict(self._matrix_specs)
+        return saved_remap, saved_collections
 
     def _pop_block_var_remap(self, saved) -> None:
-        if saved is not _NO_BLOCK_REMAP:
-            self._active_var_remap = saved
+        if saved is _NO_BLOCK_REMAP:
+            return
+        saved_remap, saved_collections = saved
+        self._active_var_remap = saved_remap
+        if saved_collections is not None:
+            (
+                self._current_func_collection_specs,
+                self._current_func_collection_shadows,
+                self._collection_types,
+                self._array_vars,
+                self._map_vars,
+                self._matrix_specs,
+            ) = saved_collections
 
     def _visit_block_statements(self, body: list, lines: list[str],
                                 indent: int) -> None:
@@ -830,9 +970,12 @@ class StmtVisitor:
         # Register the loop counter so reads of it inside the body resolve (the
         # unknown-identifier guard in _visit_ident would otherwise flag it).
         saved_loop = self._current_loop_vars
+        saved_loop_specs = self._current_loop_var_specs
         self._current_loop_vars = set(self._current_loop_vars)
+        self._current_loop_var_specs = dict(self._current_loop_var_specs)
         if node.var:
             self._current_loop_vars.add(node.var)
+            self._current_loop_var_specs[node.var] = TypeSpec.primitive("int")
         _blk_saved = self._push_block_var_remap(node)
         try:
             for s in node.body:
@@ -840,6 +983,7 @@ class StmtVisitor:
         finally:
             self._pop_block_var_remap(_blk_saved)
         self._current_loop_vars = saved_loop
+        self._current_loop_var_specs = saved_loop_specs
         lines.append(f"{pad}}}")
 
     def _loop_elem_is_writeback_udt(self, iterable) -> bool:
@@ -884,9 +1028,15 @@ class StmtVisitor:
             if elem_spec is not None:
                 self._current_loop_var_specs[node.var] = elem_spec
         if node.vars:
-            for v in node.vars:
+            tuple_specs: list[TypeSpec | None] = []
+            if iterable_spec is not None and iterable_spec.kind == "map":
+                tuple_specs = [iterable_spec.key, iterable_spec.value]
+            for idx, v in enumerate(node.vars):
                 if v != "_":
                     self._current_loop_vars.add(v)
+                    if (idx < len(tuple_specs)
+                            and tuple_specs[idx] is not None):
+                        self._current_loop_var_specs[v] = tuple_specs[idx]
         if node.var:
             v_cpp = self._safe_name(node.var)
             ref = "&" if self._loop_elem_is_writeback_udt(node.iterable) else ""
