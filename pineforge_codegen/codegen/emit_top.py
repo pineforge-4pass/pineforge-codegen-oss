@@ -585,7 +585,7 @@ class TopLevelEmitter:
                     or (name in self._udt_var_types
                         and self._udt_var_types[name] in DRAWING_TYPE_TO_CPP)):
                 continue
-            if name not in self.ctx.series_vars:
+            if safe not in self._series_var_member_names:
                 cpp_val = self._resolve_known(init_expr)
                 cpp_val = self._typed_na_init(cpp_val, name, ptype)
                 if self._is_compile_time_value(cpp_val):
@@ -772,6 +772,7 @@ class TopLevelEmitter:
     def _emit_on_bar(self, lines: list[str]) -> None:
         self._lexical_drawing_types = {}
         self._lexical_series_bindings = {}
+        self._lexical_known_var_tombstones = set()
         lines.append("    void on_bar(const Bar& bar) override {")
 
         # A GeneratedStrategy handle may execute multiple batch runs or
@@ -1356,6 +1357,7 @@ class TopLevelEmitter:
         prev_func_local_types = self._current_func_local_types
         prev_lexical_drawing_types = self._lexical_drawing_types
         prev_lexical_series_bindings = self._lexical_series_bindings
+        prev_known_var_tombstones = self._lexical_known_var_tombstones
         prev_func_body = getattr(self, "_current_func_body", None)
         prev_func_name = getattr(self, "_active_func_name", None)
         # The function body is the lexical scope used by the UDT-alias analysis
@@ -1375,6 +1377,7 @@ class TopLevelEmitter:
             param: param in self._current_func_series_params
             for param in node.params
         }
+        self._lexical_known_var_tombstones = set(node.params)
         # Plain (non-persistent) scalar locals are emitted inline and live in
         # no other set; collect them so the unknown-identifier guard in
         # _visit_ident does not mistake them for undeclared symbols.
@@ -1500,6 +1503,7 @@ class TopLevelEmitter:
         self._current_func_local_types = prev_func_local_types
         self._lexical_drawing_types = prev_lexical_drawing_types
         self._lexical_series_bindings = prev_lexical_series_bindings
+        self._lexical_known_var_tombstones = prev_known_var_tombstones
         self._current_func_body = prev_func_body
         self._active_func_name = prev_func_name
         self._udt_ptr_alias_locals = prev_ptr_alias
@@ -1551,34 +1555,49 @@ class TopLevelEmitter:
             if info.get("owner") == fi.name
             and info.get("node_id") in self._runtime_scalar_var_init_by_node
         }
+        # Initializers are lowered in declaration order.  A qualified member's
+        # raw lexical spelling becomes visible to *later initializers* only
+        # after its own RHS has been rendered.  Restore the storage-only clone
+        # map before emitting the ordinary body so a future local cannot shadow
+        # an earlier same-named global read.
+        body_var_remap = self._active_var_remap
+        self._active_var_remap = dict(body_var_remap)
         for name, ptype, _init_str in members:
             if name in declaration_site_drawing_names:
                 continue
-            init_ast = self.ctx.var_member_init_exprs.get(name)
-            safe = self._safe_name(name)
+            storage_name = self._func_var_storage_name(fi.name, name)
+            init_ast = self.ctx.var_member_init_exprs.get(storage_name)
+            safe = self._safe_name(storage_name)
             target = self._active_var_remap.get(safe, safe)
-            collection_spec = self._callable_var_collection_spec(name, fi.name)
+            collection_spec = self._callable_var_collection_spec(
+                storage_name, fi.name
+            )
 
             def activate_member() -> None:
                 self._activate_callable_collection_binding(
                     name, collection_spec
                 )
+                self._active_var_remap[self._safe_name(name)] = target
 
-            if self._safe_name(name) in self._series_var_member_names:
+            if self._safe_name(storage_name) in self._series_var_member_names:
                 if init_ast is None:
                     activate_member()
                     continue
-                drawing_cpp = self._drawing_var_member_cpp_types.get(name)
+                drawing_cpp = self._drawing_var_member_cpp_types.get(
+                    storage_name
+                )
                 if drawing_cpp is not None:
                     init_cpp = self._visit_rhs_value(
                         init_ast,
-                        name,
+                        storage_name,
                         target_cpp_type=drawing_cpp,
                     )
                     init_lines.append(f"        {target}.update({init_cpp});")
                 else:
                     init_cpp = self._visit_expr(init_ast)
-                    init_cpp = self._typed_na_init(init_cpp, name, ptype)
+                    init_cpp = self._typed_na_init(
+                        init_cpp, storage_name, ptype
+                    )
                     init_lines.append(f"        {target}.push({init_cpp});")
                 activate_member()
                 continue
@@ -1590,9 +1609,9 @@ class TopLevelEmitter:
             # Skip a plain ``na`` initializer for drawing handles / UDTs whose
             # default-constructed member is already the na sentinel; assigning
             # ``na<double>()`` would not type-match the handle / struct.
-            udt_t = self._udt_var_types.get(name)
+            udt_t = self._udt_var_types.get(storage_name)
             drawing_cpp = (
-                self._drawing_var_member_cpp_types.get(name)
+                self._drawing_var_member_cpp_types.get(storage_name)
                 or DRAWING_TYPE_TO_CPP.get(udt_t)
             )
             is_drawing = drawing_cpp is not None
@@ -1603,7 +1622,7 @@ class TopLevelEmitter:
                 continue
             init_cpp = self._visit_rhs_value(
                 init_ast,
-                name,
+                storage_name,
                 target_cpp_type=(
                     self._type_spec_to_cpp(collection_spec)
                     if collection_spec is not None
@@ -1615,9 +1634,12 @@ class TopLevelEmitter:
             # must be typed (``na<int>()``), mirroring the class-scope ctor
             # init (``_typed_na_init`` at _emit_constructor); a raw ``na<double>()``
             # NaN stored into an int member is UB and defeats is_na<T>().
-            init_cpp = self._typed_na_init(init_cpp, name, ptype)
+            init_cpp = self._typed_na_init(
+                init_cpp, storage_name, ptype
+            )
             init_lines.append(f"        {target} = {init_cpp};")
             activate_member()
+        self._active_var_remap = body_var_remap
         if not init_lines:
             return
         lines.append(f"        if (!{flag}) {{")
@@ -1642,7 +1664,7 @@ class TopLevelEmitter:
                 continue
             if not (isinstance(stmt.value, FuncCall) and self._is_source_input(stmt.value)):
                 continue
-            if stmt.name in self.ctx.series_vars:
+            if self._decl_binding_is_series(id(stmt), stmt.name):
                 replayed_source_series.append(self._safe_name(stmt.name))
         replayed_source_series = sorted(set(replayed_source_series))
 
@@ -1750,7 +1772,7 @@ class TopLevelEmitter:
             # the normal per-bar path's ``{safe}.push({cpp_val})`` (see
             # ``_visit_var_decl``'s ``node.name in self.ctx.series_vars``
             # branch) — a plain ``=`` there is a compile error.
-            if stmt.name in self.ctx.series_vars:
+            if self._decl_binding_is_series(id(stmt), stmt.name):
                 lines.append(f'            {safe}.push({cpp_val});')
             else:
                 lines.append(f'            {safe} = {cpp_val};')

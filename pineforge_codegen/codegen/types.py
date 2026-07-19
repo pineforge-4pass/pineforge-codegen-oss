@@ -272,9 +272,22 @@ class TypeInferer:
 
     def _collection_receiver_expr(self, name: str) -> str:
         """C++ receiver for an active collection identifier."""
-        return getattr(self, "_pending_decl_outer_alias", {}).get(
-            name, self._safe_name(name)
+        pending = getattr(self, "_pending_decl_outer_alias", {})
+        if name in pending:
+            return pending[name]
+        safe = self._safe_name(name)
+        owner = getattr(self, "_active_func_name", None)
+        exact = (
+            self._func_var_storage_name(owner, name)
+            if owner is not None
+            else name
         )
+        # Preserve byte-identical output for every non-qualified callable.  A
+        # qualified persistent array becomes visible through the raw lexical
+        # spelling only after its VarDecl installs this active remap.
+        if exact != name:
+            return self._active_var_remap.get(safe, safe)
+        return safe
 
     def _array_spec_for_name(self, name: str) -> TypeSpec:
         """Spec for ``array<...>`` variable ``name`` (falls back to array<float>)."""
@@ -1241,7 +1254,8 @@ class TypeInferer:
                 return "int64_t"
             if node.name in BAR_FIELDS or node.name in BAR_BUILTINS:
                 return "double"
-            if node.name in self._known_vars:
+            if (node.name in self._known_vars
+                    and not self._known_var_is_lexically_shadowed(node.name)):
                 val = self._known_vars[node.name]
                 if isinstance(val, bool):
                     return "bool"

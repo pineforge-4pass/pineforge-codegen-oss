@@ -108,9 +108,12 @@ class SecurityEmitter:
             if name in self._timeframe_period_vars:
                 return None, "script_tf_"
             if (name in self._known_vars and name not in self._input_backed_vars
+                    and not self._known_var_is_lexically_shadowed(name)
                     and isinstance(self._known_vars[name], str)):
                 return self._known_vars[name], None
-            if name in self._input_backed_vars and name in self._input_var_to_call:
+            if (name in self._input_backed_vars
+                    and name in self._input_var_to_call
+                    and not self._known_var_is_lexically_shadowed(name)):
                 return None, self._visit_expr(self._input_var_to_call[name])
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
             if name in global_expr_map:
@@ -261,9 +264,12 @@ class SecurityEmitter:
                     loc=node.loc,
                     annotations=node.annotations,
                 )
-            if name in self._input_backed_vars and name in self._input_var_to_call:
+            if (name in self._input_backed_vars
+                    and name in self._input_var_to_call
+                    and not self._known_var_is_lexically_shadowed(name)):
                 return self._input_var_to_call[name]
             if (name in self._known_vars and name not in self._input_backed_vars
+                    and not self._known_var_is_lexically_shadowed(name)
                     and isinstance(self._known_vars[name], str)):
                 return StringLiteral(
                     value=self._known_vars[name],

@@ -497,9 +497,13 @@ def test_only_exact_persistent_sibling_passed_to_history_udf_is_series():
         "    prior = lagged(x)\n"
         "plot(close)"
     )
-    assert "double x;" in cpp
+    assert "double x = na<double>();" in cpp
     assert "Series<double> x__blk1" in cpp
     assert "Series<double> x;" not in cpp
+    assert "if (!_pf_var_init_x)" in cpp
+    assert "x = current_bar_.close;" in cpp
+    assert "if (!_pf_var_init_x__blk1)" in cpp
+    assert "x__blk1.update(current_bar_.open);" in cpp
     assert "x__blk1.push(" in cpp
     assert "x__blk1[0]" in cpp
     compile_cpp(cpp, label="exact-persistent-sibling-history-series")

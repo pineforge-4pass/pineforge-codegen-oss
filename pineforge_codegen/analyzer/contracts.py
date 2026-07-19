@@ -194,6 +194,10 @@ class AnalyzerContext:
     # one AST node for several independently scoped names, so node identity
     # alone cannot say which destructured element owns history storage.
     series_decl_bindings: set = field(default_factory=set)
+    # Raw names of exact declaration-bound, non-persistent Series storage.
+    # This excludes history parameters and global reads observed from inside a
+    # callable, both of which also appear in legacy raw series inventories.
+    nonpersistent_series_decl_names: set = field(default_factory=set)
     series_bar_fields: set = field(default_factory=set)
     var_members: list = field(default_factory=list)   # [(name, PineType, init_expr_str)]
     func_infos: list = field(default_factory=list)
@@ -247,9 +251,31 @@ class AnalyzerContext:
     # request.security calls (see SecurityCallInfo):
     security_calls: list = field(default_factory=list)
     global_mutable_infos: dict = field(default_factory=dict)  # name -> MutableGlobalInfo
+    # AST-authoritative top-level non-var binding names.  Unlike
+    # ``global_var_decls``, this is not filtered through legacy raw Series
+    # tracking and therefore survives same-named callable history state.
+    ordinary_global_binding_names: set = field(default_factory=set)
+    # Exact subset whose own top-level declaration is history-bearing.  A raw
+    # callable Series name does not promote a same-named scalar/map global.
+    ordinary_global_series_names: set = field(default_factory=set)
     # Per-function var_members + series_vars (used when emitting per-function call-site variants):
     func_var_members: dict = field(default_factory=dict)
+    # Ordinary FuncDef persistent locals keep their Pine spelling in
+    # ``func_var_members`` for lexical/type analysis.  When its storage would
+    # collide with another persistent lexical declaration, this owner-scoped
+    # overlay carries the collision-safe class-member identity instead:
+    # ``func_name -> {raw_name: emitted_member_name}``.
+    #
+    # Keeping lexical and storage identity separate is important.  Clone maps
+    # operate on emitted members, while a function body must not see the new
+    # member until its declaration has executed (so an earlier same-named
+    # global read remains lexical Pine, not the future local).
+    func_var_storage_names: dict = field(default_factory=dict)
     func_series_vars: dict = field(default_factory=dict)
+    # FuncDef owner -> declaration-bound non-persistent history-local names.
+    # Parameters are deliberately excluded so a same-named qualified
+    # persistent member does not manufacture a bogus raw/clone Series.
+    func_nonpersistent_series_vars: dict = field(default_factory=dict)
     # Per-function exact return TypeSpec (see FuncInfo.return_type_spec).
     func_return_type_specs: dict = field(default_factory=dict)
     # var_name -> UDT type name for variables instantiated via TypeName.new(...)

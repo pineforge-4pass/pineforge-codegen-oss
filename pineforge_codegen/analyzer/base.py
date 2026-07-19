@@ -128,6 +128,47 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._strategy_params: dict = {}
         self._diagnostics: list[Diagnostic] = []
         self._global_var_decls: list[tuple[str, PineType]] = []
+        # Top-level ordinary bindings are lexical global state even when a
+        # same-named callable history reference has already polluted the
+        # legacy raw ``series_vars`` set and suppresses ``global_var_decls``.
+        # Keep an AST-authoritative inventory for storage collision routing.
+        self._ordinary_global_binding_names: set[str] = {
+            stmt.name
+            for stmt in ast.body
+            if isinstance(stmt, VarDecl)
+            and not stmt.is_var
+            and not stmt.is_varip
+        }
+        self._ordinary_global_binding_names.update(
+            name
+            for stmt in ast.body
+            if isinstance(stmt, TupleAssign)
+            for name in stmt.names
+            if name != "_"
+        )
+        self._direct_program_binding_names: set[str] = {
+            stmt.name
+            for stmt in ast.body
+            if isinstance(stmt, VarDecl)
+        }
+        self._direct_program_binding_names.update(
+            name
+            for stmt in ast.body
+            if isinstance(stmt, TupleAssign)
+            for name in stmt.names
+            if name != "_"
+        )
+        # Exact declaration typing retained only for lexical-boundary checks.
+        # The legacy symbol/type registries are raw-name keyed and therefore
+        # cannot distinguish a direct script binding from a same-spelled local
+        # declared inside a top-level control-flow block.
+        self._var_decl_types_by_node: dict[
+            int, tuple[PineType, TypeSpec | None]
+        ] = {}
+        self._ordinary_global_binding_info: dict[
+            str, tuple[int, PineType, ASTNode | None]
+        ] = {}
+        self._ordinary_global_series_names: set[str] = set()
         self._global_expr_map: dict[str, Any] = {}
         self._var_member_init_exprs: dict[str, Any] = {}
         # Exact declaration-node ownership for persistent vars.  The member
@@ -207,7 +248,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         ] = {}
         # Per-function var_members and series_vars (for call-site cloning)
         self._func_var_members: dict[str, list] = {}  # func_name -> [(name, PineType, init_str)]
+        # Ordinary FuncDef raw persistent name -> exact emitted member.  The
+        # map is identity for ordinary non-colliding functions and changes only
+        # when distinct persistent declarations would otherwise share a
+        # supported primitive/collection ``var`` owned by an ordinary FuncDef
+        # with the same raw spelling.  Methods and top-level bindings remain on
+        # their established paths.
+        self._func_var_storage_names: dict[str, dict[str, str]] = {}
         self._func_series_vars: dict[str, set] = {}   # func_name -> set[str]
+        # Declaration-bound non-persistent history locals are distinct from
+        # history parameters/global reads carried by ``func_series_vars``.
+        # Codegen needs this exact subset when a raw spelling also belongs to
+        # owner-qualified persistent state.
+        self._nonpersistent_series_decl_names: set[str] = set()
+        self._func_nonpersistent_series_vars: dict[str, set[str]] = {}
         # Per-call-site TA tracking for user functions
         self._func_ta_ranges: dict[str, tuple[int, int]] = {}  # func_name -> (start, end) indices
         self._func_call_site_count: dict[str, int] = {}  # func_name -> count
@@ -352,7 +406,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         """Run semantic analysis and return the analyzer context."""
         self._ensure_pine_v6()
         self._visit(self._ast)
+        self._check_top_level_block_shadow_boundaries()
+        self._qualify_colliding_func_var_members()
         self._check_cross_callable_series_collection_collisions()
+        self._check_declaration_exact_series_storage_boundaries()
         self._check_persistent_drawing_member_collisions()
 
         # Propagate call-site counts to sub-functions called within
@@ -415,8 +472,27 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             enum_member_strings=self._enum_member_strings,
             security_calls=getattr(self, "_security_calls", []),
             global_mutable_infos=mutable_global_infos,
+            ordinary_global_binding_names=set(
+                self._ordinary_global_binding_names
+            ),
+            ordinary_global_series_names=set(
+                self._ordinary_global_series_names
+            ),
             func_var_members=self._func_var_members,
+            func_var_storage_names={
+                owner: dict(names)
+                for owner, names in self._func_var_storage_names.items()
+            },
             func_series_vars=self._func_series_vars,
+            nonpersistent_series_decl_names=set(
+                self._nonpersistent_series_decl_names
+            ),
+            func_nonpersistent_series_vars={
+                owner: set(names)
+                for owner, names in (
+                    self._func_nonpersistent_series_vars.items()
+                )
+            },
             func_return_type_specs=dict(self._func_return_type_specs),
             udt_var_types=dict(self._udt_var_types),
             collection_types=dict(self._collection_types),
@@ -439,6 +515,594 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             block_var_renames=dict(self._block_var_renames),
         )
 
+    def _qualify_colliding_func_var_members(self) -> None:
+        """Give colliding ordinary-UDF primitive/collection vars distinct storage.
+
+        Pine function locals are lexical, but persistent locals are lowered to
+        generated class members.  Historically the direct FuncDef path used the
+        raw Pine spelling as that member identity, so two functions declaring
+        ``var float state`` shared both the member and the raw-name-keyed
+        initializer cache.  Separate init flags did not help: both flags still
+        guarded writes into one member, and the later definition's initializer
+        won for *both* functions.
+
+        Keep this first migration deliberately bounded:
+
+        * direct persistent declarations in ordinary ``FuncDef`` bodies only;
+        * only groups whose exact types are primitive or a supported collection;
+        * only when its member collides with another persistent/global binding;
+        * no output change for a non-colliding source.
+
+        ``func_var_members`` deliberately retains raw lexical names.  The new
+        ``func_var_storage_names`` overlay lets codegen clone exact members and
+        activate raw->storage remaps at each declaration site without making a
+        future local shadow earlier global reads.
+        """
+        direct_node_ids_by_owner = {
+            owner: {
+                id(stmt)
+                for stmt in func_def.body
+                if isinstance(stmt, VarDecl)
+                and (stmt.is_var or stmt.is_varip)
+            }
+            for owner, func_def in self._func_defs.items()
+        }
+
+        bindings_by_member: dict[str, list[int]] = {}
+        for node_id, meta in self._var_member_metadata_by_node.items():
+            bindings_by_member.setdefault(meta[1], []).append(node_id)
+        ordinary_global_members = set(self._ordinary_global_binding_names)
+        nonpersistent_series_raw_names = {
+            name
+            for node_id, name in self._series_decl_bindings
+            if node_id not in self._var_member_metadata_by_node
+        }
+
+        qualifiable_bindings: list[tuple[int, str, VarDecl]] = []
+        for node_id, meta in self._var_member_metadata_by_node.items():
+            node, _member_name, _ptype, _init, is_callable_scoped = meta
+            owner = self._var_member_owners_by_node.get(node_id)
+            if (not is_callable_scoped
+                    or owner not in self._func_defs
+                    or node_id not in direct_node_ids_by_owner.get(owner, set())
+                    or not isinstance(node, VarDecl)):
+                continue
+            self._func_var_storage_names.setdefault(owner, {})[node.name] = (
+                meta[1]
+            )
+            spec = self._var_member_type_specs_by_node.get(node_id)
+            reserves_raw_series = (
+                meta[1] in nonpersistent_series_raw_names
+                # Preserve the established, more specific scalar-Series vs
+                # persistent-map fail-closed diagnostic. Primitive/array/
+                # matrix storage can still move out of the raw Series name.
+                and (spec is None or spec.kind != "map")
+            )
+
+            # Only a storage identity that is currently shared needs
+            # migration.  This includes global-vs-UDF and method-vs-UDF
+            # collisions, plus a declaration-bound non-persistent Series that
+            # needs to retain the raw member spelling, not just two ordinary
+            # UDF owners.
+            if (len(bindings_by_member.get(meta[1], [])) < 2
+                    and meta[1] not in ordinary_global_members
+                    and not reserves_raw_series):
+                continue
+
+            # The current overlay is owner/raw keyed.  If this owner has two
+            # declaration nodes already sharing the member (for example a
+            # direct local plus a first nested-block shadow), it cannot route
+            # them independently.  Leave both untouched so the exact-member
+            # collision diagnostic below fails closed instead of pretending
+            # the owner was repaired while silently targeting the outer var.
+            same_owner_nodes = [
+                other_id
+                for other_id in bindings_by_member[meta[1]]
+                if self._var_member_owners_by_node.get(other_id) == owner
+            ]
+            if len(same_owner_nodes) > 1:
+                continue
+
+            if (spec is not None
+                    and spec.kind in {
+                        "primitive", "array", "map", "matrix",
+                    }):
+                qualifiable_bindings.append((node_id, owner, node))
+
+        # Protect every existing user/class identity, including names declared
+        # later in source.  The deterministic allocator advances its leading
+        # token when the user already occupies a base or derived clone spelling.
+        used_names = {
+            name for name, _ptype, _init in self._var_members
+        }
+        used_names.update(name for name, _ptype in self._global_var_decls)
+        used_names.update(self._series_vars)
+        used_names.update(self._func_defs)
+
+        # Generated members are referenced as bare identifiers inside emitted
+        # methods.  Protect against every authored identifier, not only class
+        # members: a parameter/plain local/loop binder named like the helper
+        # token (or one of its ``_csN`` / ``__niN`` clones) would otherwise
+        # shadow the intended member in C++.
+        authored_names: set[str] = set()
+
+        def collect_authored_names(value: Any) -> None:
+            if isinstance(value, Identifier):
+                authored_names.add(value.name)
+            if isinstance(value, VarDecl):
+                authored_names.add(value.name)
+            elif isinstance(value, TupleAssign):
+                authored_names.update(
+                    name for name in value.names if name != "_"
+                )
+            elif isinstance(value, ForStmt):
+                if value.var:
+                    authored_names.add(value.var)
+            elif isinstance(value, ForInStmt):
+                if value.var:
+                    authored_names.add(value.var)
+                authored_names.update(
+                    name for name in (value.vars or []) if name != "_"
+                )
+            elif isinstance(value, (FuncDef, MethodDef)):
+                authored_names.add(value.name)
+                authored_names.update(value.params)
+            if isinstance(value, ASTNode):
+                for child in vars(value).values():
+                    collect_authored_names(child)
+            elif isinstance(value, (list, tuple)):
+                for child in value:
+                    collect_authored_names(child)
+            elif isinstance(value, dict):
+                for child in value.values():
+                    collect_authored_names(child)
+
+        collect_authored_names(self._ast)
+        used_names.update(authored_names)
+
+        allocated_storage_names: set[str] = set()
+
+        def generated_namespace_overlaps(candidate: str, other: str) -> bool:
+            """Whether either base can be emitted as the other's clone.
+
+            Stateful call-site and nested-instance storage is derived by
+            appending ``_csN`` / ``__niN`` to the persistent member base.  A
+            distinct owner can legitimately make one of those suffixes part
+            of its authored function name (for example ``left`` and
+            ``left_cs1``), so exact-name reservation alone is insufficient.
+            Reserve the derived namespaces symmetrically, independent of
+            source-definition order.
+            """
+            return any(
+                candidate.startswith(f"{other}{suffix}")
+                or other.startswith(f"{candidate}{suffix}")
+                for suffix in ("_cs", "__ni")
+            )
+
+        def helper_name_conflicts(candidate: str) -> bool:
+            return (
+                candidate in used_names
+                or any(
+                    generated_namespace_overlaps(candidate, name)
+                    for name in used_names
+                )
+                or any(
+                    generated_namespace_overlaps(candidate, allocated)
+                    for allocated in allocated_storage_names
+                )
+            )
+
+        storage_sequence = 0
+        for node_id, owner, node in qualifiable_bindings:
+            # Start in a codegen-reserved namespace so an adversarial but
+            # valid raw name such as ``_fvinit_left`` cannot equal a
+            # generated function-init flag.  Put a monotonically allocated
+            # token before every authored component: appending ``_2`` to a
+            # clone-shaped base (``left_cs1``) would remain inside the
+            # earlier base's ``_cs*`` namespace forever.  Advancing this
+            # leading token instead always reaches a disjoint namespace.
+            # Non-colliding sources never enter this path and therefore
+            # retain byte-identical output.
+            while True:
+                storage_sequence += 1
+                member_name = (
+                    f"_pfv_{storage_sequence}_{node.name}__{owner}"
+                )
+                if not helper_name_conflicts(member_name):
+                    break
+            used_names.add(member_name)
+            allocated_storage_names.add(member_name)
+
+            old = self._var_member_metadata_by_node[node_id]
+            self._var_member_metadata_by_node[node_id] = (
+                old[0], member_name, old[2], old[3], old[4],
+            )
+            self._func_var_storage_names[owner][node.name] = member_name
+
+        qualified_raw_names = {
+            raw_name
+            for storage_names in self._func_var_storage_names.values()
+            for raw_name, storage_name in storage_names.items()
+            if storage_name != raw_name
+        }
+        exact_series_bindings = set(self._series_decl_bindings)
+        exact_series_node_ids = {
+            node_id for node_id, _name in exact_series_bindings
+        }
+        for name, (node_id, ptype, expr) in (
+            self._ordinary_global_binding_info.items()
+        ):
+            is_exact_series = (
+                (node_id, name) in exact_series_bindings
+                or (
+                    node_id in self._series_decl_nodes
+                    and node_id not in exact_series_node_ids
+                )
+            )
+            if is_exact_series:
+                self._ordinary_global_series_names.add(name)
+                continue
+            if name not in qualified_raw_names:
+                continue
+            # A same-named callable history binding can suppress this scalar
+            # or collection from the legacy raw ``global_var_decls`` list.
+            # Restore only collision-qualified globals from their exact
+            # declaration record; all unrelated generated output stays stable.
+            if not any(existing == name for existing, _ in self._global_var_decls):
+                self._global_var_decls.append((name, ptype))
+            if expr is not None:
+                self._global_expr_map[name] = expr
+
+        # Rebuild the two flat, member-keyed inventories from the exact
+        # declaration metadata.  Dict insertion order is source-analysis order;
+        # unresolved out-of-scope raw collisions retain their established
+        # last-initializer-wins behavior rather than being silently broadened.
+        self._var_members = []
+        self._var_member_init_exprs = {}
+        for _node_id, meta in self._var_member_metadata_by_node.items():
+            node, member_name, ptype, init_str, _callable = meta
+            self._var_members.append((member_name, ptype, init_str))
+            if node.value is not None:
+                self._var_member_init_exprs[member_name] = node.value
+
+        # History tracking is declaration-exact.  Replace only the persistent
+        # member portion of the set so renamed Series members (and later their
+        # call-site clones) keep the right storage type.
+        old_persistent_members = {
+            meta[1] for meta in self._var_member_metadata_by_node.values()
+        }
+        # The set above contains the post-rename names; include pre-rename raw
+        # spellings from every declaration to remove stale entries as well.
+        old_persistent_members.update(
+            meta[0].name for meta in self._var_member_metadata_by_node.values()
+        )
+        nonpersistent_series = (
+            self._series_var_members - old_persistent_members
+        )
+        exact_persistent_series = {
+            self._var_member_metadata_by_node[node_id][1]
+            for node_id in self._series_decl_nodes
+            if node_id in self._var_member_metadata_by_node
+        }
+        self._series_var_members = (
+            nonpersistent_series | exact_persistent_series
+        )
+
+        # Any exact member identity still owned by multiple persistent
+        # declarations is outside the owner/raw overlay's safe scope (for
+        # example two UDT methods, or a direct UDF var plus its first
+        # same-named nested-block shadow).  Do not retain the historical
+        # last-initializer-wins behavior: fail closed until that declaration
+        # shape has declaration-exact codegen remapping.  Drawing collisions
+        # keep their more specific diagnostic in the following check.
+        from .types import _DRAWING_TYPE_NAMES
+
+        remaining_by_member: dict[str, list[int]] = {}
+        for node_id, meta in self._var_member_metadata_by_node.items():
+            remaining_by_member.setdefault(meta[1], []).append(node_id)
+
+        for member_name, node_ids in remaining_by_member.items():
+            binding_count = len(node_ids) + int(
+                member_name in ordinary_global_members
+            )
+            if binding_count < 2:
+                continue
+            specs = [
+                self._var_member_type_specs_by_node.get(node_id)
+                for node_id in node_ids
+            ]
+            if any(
+                spec is not None
+                and spec.kind == "udt"
+                and spec.name in _DRAWING_TYPE_NAMES
+                for spec in specs
+            ):
+                continue
+            # An ordinary global contributes to ``binding_count`` without a
+            # persistent declaration-node entry, so a single unsupported
+            # persistent binding can still reach this diagnostic.
+            node = self._var_member_metadata_by_node[node_ids[-1]][0]
+            raw_name = getattr(node, "name", member_name)
+            self._error(
+                "Persistent bindings named "
+                f"'{raw_name}' still share generated storage across distinct "
+                "lexical declarations; this declaration shape is not "
+                "supported yet.",
+                node.loc,
+            )
+
+    def _check_declaration_exact_series_storage_boundaries(self) -> None:
+        """Reject raw Series identities that still cross lexical owners.
+
+        Non-persistent history locals are currently emitted as class-level
+        ``Series`` members under their raw Pine spelling.  That is safe for a
+        single declaration, but the raw member is shared (or suppressed by a
+        persistent member) when the spelling is reused by another lexical
+        declaration.  Parameters are intentionally absent from
+        ``series_decl_bindings`` and remain legal: their history buffers are
+        routed by the existing callable parameter path.
+
+        Keep this boundary declaration-exact and fail closed until ordinary
+        local Series storage has the same owner-qualified overlay as persistent
+        callable state.  Direct script Series declarations remain supported,
+        including a same-named persistent UDF member that was qualified above.
+        """
+        exact_series = set(self._series_decl_bindings)
+        if not exact_series:
+            return
+
+        # A helper reached exclusively through a request.security expression
+        # does not use the ordinary raw class Series member: the security
+        # emitter keys its local history by evaluator/function/source identity.
+        # Preserve that proven isolation (including transitive helper calls)
+        # while keeping any helper also reachable on the chart path subject to
+        # the ordinary raw-storage collision checks below.
+        known_func_names = set(self._func_defs)
+        security_expression_ids = {
+            id(sec.expression)
+            for sec in getattr(self, "_security_calls", []) or []
+            if getattr(sec, "expression", None) is not None
+        }
+        ordinary_roots: set[str] = set()
+        security_roots: set[str] = set()
+        call_edges: dict[str, set[str]] = {}
+
+        def scan_calls(
+            value: Any,
+            owner: str | None,
+            in_security: bool = False,
+        ) -> None:
+            if value is None:
+                return
+            in_security = in_security or id(value) in security_expression_ids
+            if isinstance(value, (FuncDef, MethodDef)):
+                return
+            if isinstance(value, FuncCall):
+                callee = value.callee
+                if (isinstance(callee, Identifier)
+                        and callee.name in known_func_names):
+                    if in_security:
+                        security_roots.add(callee.name)
+                    elif owner is None:
+                        ordinary_roots.add(callee.name)
+                    else:
+                        call_edges.setdefault(owner, set()).add(callee.name)
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    scan_calls(item, owner, in_security)
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    scan_calls(item, owner, in_security)
+                return
+            if isinstance(value, ASTNode):
+                for child in vars(value).values():
+                    scan_calls(child, owner, in_security)
+
+        scan_calls(self._ast.body, None)
+        for owner, func_def in self._func_defs.items():
+            scan_calls(func_def.body, owner)
+
+        def reachable(roots: set[str]) -> set[str]:
+            found = set(roots)
+            pending = list(roots)
+            while pending:
+                owner = pending.pop()
+                for callee in call_edges.get(owner, set()):
+                    if callee in found:
+                        continue
+                    found.add(callee)
+                    pending.append(callee)
+            return found
+
+        security_evaluator_only = (
+            reachable(security_roots) - reachable(ordinary_roots)
+        )
+
+        self._nonpersistent_series_decl_names = {
+            name
+            for node_id, name in exact_series
+            if node_id not in self._var_member_metadata_by_node
+        }
+        self._func_nonpersistent_series_vars = {}
+
+        persistent_raw_names = {
+            meta[0].name
+            for meta in self._var_member_metadata_by_node.values()
+            if isinstance(meta[0], VarDecl)
+        }
+        unqualified_persistent_raw_names = {
+            meta[0].name
+            for meta in self._var_member_metadata_by_node.values()
+            if (isinstance(meta[0], VarDecl)
+                and meta[1] == meta[0].name)
+        }
+        callable_nonpersistent: dict[
+            str, list[tuple[str, ASTNode]]
+        ] = {}
+        block_nonpersistent: dict[str, list[ASTNode]] = {}
+
+        def record_bindings(
+            stmt: ASTNode,
+            names: list[str],
+            callable_owner: str | None,
+            direct_program: bool,
+        ) -> None:
+            is_persistent = id(stmt) in self._var_member_metadata_by_node
+            if is_persistent:
+                return
+            for name in names:
+                if name == "_" or (id(stmt), name) not in exact_series:
+                    continue
+                if callable_owner is not None:
+                    self._func_nonpersistent_series_vars.setdefault(
+                        callable_owner, set()
+                    ).add(name)
+                    if (callable_owner in security_evaluator_only
+                            and name not in self._ordinary_global_binding_names
+                            and name not in unqualified_persistent_raw_names):
+                        continue
+                    callable_nonpersistent.setdefault(name, []).append(
+                        (callable_owner, stmt)
+                    )
+                elif not direct_program:
+                    block_nonpersistent.setdefault(name, []).append(stmt)
+
+        def walk_embedded(
+            value: Any,
+            callable_owner: str | None,
+        ) -> None:
+            """Visit expression-valued if/switch branches as lexical blocks."""
+            if value is None or isinstance(value, (FuncDef, MethodDef)):
+                return
+            if isinstance(value, IfStmt):
+                walk_embedded(value.condition, callable_owner)
+                walk_statements(value.body, callable_owner, False)
+                walk_statements(
+                    value.else_body or [], callable_owner, False
+                )
+                return
+            if isinstance(value, SwitchStmt):
+                walk_embedded(value.expr, callable_owner)
+                for case_expr, body in value.cases:
+                    walk_embedded(case_expr, callable_owner)
+                    walk_statements(body, callable_owner, False)
+                walk_statements(
+                    value.default_body or [], callable_owner, False
+                )
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    walk_embedded(item, callable_owner)
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    walk_embedded(item, callable_owner)
+                return
+            if isinstance(value, ASTNode):
+                for child in vars(value).values():
+                    walk_embedded(child, callable_owner)
+
+        def walk_statements(
+            stmts: list[ASTNode],
+            callable_owner: str | None,
+            direct_program: bool,
+        ) -> None:
+            for stmt in stmts:
+                if isinstance(stmt, FuncDef):
+                    walk_statements(stmt.body, stmt.name, False)
+                    continue
+                # Method state still uses a separate legacy ownership path.
+                # Do not misclassify a method-local declaration as a script
+                # block while this guard is deliberately scoped to FuncDef.
+                if isinstance(stmt, MethodDef):
+                    continue
+                if isinstance(stmt, VarDecl):
+                    walk_embedded(stmt.value, callable_owner)
+                    record_bindings(
+                        stmt, [stmt.name], callable_owner, direct_program
+                    )
+                elif isinstance(stmt, TupleAssign):
+                    walk_embedded(stmt.value, callable_owner)
+                    record_bindings(
+                        stmt, stmt.names, callable_owner, direct_program
+                    )
+                elif isinstance(stmt, Assignment):
+                    walk_embedded(stmt.target, callable_owner)
+                    walk_embedded(stmt.value, callable_owner)
+                elif isinstance(stmt, ExprStmt):
+                    walk_embedded(stmt.expr, callable_owner)
+
+                if isinstance(stmt, IfStmt):
+                    walk_embedded(stmt.condition, callable_owner)
+                    walk_statements(stmt.body, callable_owner, False)
+                    walk_statements(
+                        stmt.else_body or [], callable_owner, False
+                    )
+                elif isinstance(stmt, ForStmt):
+                    record_bindings(
+                        stmt, [stmt.var], callable_owner, False
+                    )
+                    walk_embedded(stmt.start, callable_owner)
+                    walk_embedded(stmt.end, callable_owner)
+                    walk_embedded(stmt.step, callable_owner)
+                    walk_statements(stmt.body, callable_owner, False)
+                elif isinstance(stmt, ForInStmt):
+                    record_bindings(
+                        stmt,
+                        ([stmt.var] if stmt.var else (stmt.vars or [])),
+                        callable_owner,
+                        False,
+                    )
+                    walk_embedded(stmt.iterable, callable_owner)
+                    walk_statements(stmt.body, callable_owner, False)
+                elif isinstance(stmt, WhileStmt):
+                    walk_embedded(stmt.condition, callable_owner)
+                    walk_statements(stmt.body, callable_owner, False)
+                elif isinstance(stmt, SwitchStmt):
+                    walk_embedded(stmt.expr, callable_owner)
+                    for _case, body in stmt.cases:
+                        walk_embedded(_case, callable_owner)
+                        walk_statements(body, callable_owner, False)
+                    walk_statements(
+                        stmt.default_body or [], callable_owner, False
+                    )
+
+        walk_statements(self._ast.body, None, True)
+
+        # A block-local history declaration is normally emitted as the raw
+        # class Series member.  A persistent or callable-local claimant with
+        # that spelling either suppresses the member or shares its buffer.
+        for name, bindings in block_nonpersistent.items():
+            if (name not in persistent_raw_names
+                    and name not in callable_nonpersistent
+                    and len(bindings) == 1):
+                continue
+            self._error(
+                "A top-level block history binding named "
+                f"'{name}' shares raw generated Series state with another "
+                "lexical declaration; declaration-exact block storage is not "
+                "supported yet.",
+                getattr(bindings[-1], "loc", None),
+            )
+
+        # A direct ordinary global reserves its class-member spelling even when
+        # it is scalar.  Persistent declarations reserve their raw spelling in
+        # legacy var inventories even after exact owner qualification.  Either
+        # conflicts with a raw non-persistent callable Series member.
+        for name, bindings in callable_nonpersistent.items():
+            if (name not in self._ordinary_global_binding_names
+                    and name not in persistent_raw_names
+                    and len(bindings) == 1):
+                continue
+            self._error(
+                "A callable history local named "
+                f"'{name}' shares raw generated Series state with another "
+                "lexical declaration; declaration-exact callable storage is "
+                "not supported yet.",
+                getattr(bindings[-1][1], "loc", None),
+            )
+
     def _check_cross_callable_series_collection_collisions(self) -> None:
         """Fail closed when legacy raw member names cannot preserve scoping.
 
@@ -454,7 +1118,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 item[0] for item in self._func_var_members.get(owner, [])
             }
             persistent_collections[owner] = {
-                name
+                self._func_var_storage_names.get(owner, {}).get(name, name)
                 for name, spec in specs.items()
                 if name in persistent_names
                 and self._type_spec_contains_map(spec)
@@ -462,24 +1126,239 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         emitted: set[tuple[str, str, str]] = set()
         for series_owner, names in self._func_series_vars.items():
+            exact_series_names = {
+                (
+                    self._func_var_storage_names.get(
+                        series_owner, {}
+                    ).get(name, name)
+                    if self._func_var_storage_names.get(
+                        series_owner, {}
+                    ).get(name, name) in self._series_var_members
+                    else name
+                )
+
+                for name in names
+            }
             for collection_owner, collection_names in persistent_collections.items():
                 if series_owner == collection_owner:
                     continue
-                for name in names & collection_names:
-                    key = (series_owner, collection_owner, name)
+                for exact_name in exact_series_names & collection_names:
+                    raw_name = next(
+                        (
+                            name for name in names
+                            if self._func_var_storage_names.get(
+                                series_owner, {}
+                            ).get(name, name) == exact_name
+                        ),
+                        exact_name,
+                    )
+                    key = (series_owner, collection_owner, exact_name)
                     if key in emitted:
                         continue
                     emitted.add(key)
                     node = self._func_series_history_nodes.get(
-                        (series_owner, name)
+                        (series_owner, raw_name)
                     )
                     self._error(
                         "History references on a scalar callable local named "
-                        f"'{name}' conflict with a persistent map local of the "
+                        f"'{raw_name}' conflict with a persistent map local of the "
                         "same name in another callable; scoped Series member "
                         "storage is not implemented yet.",
                         node.loc if node is not None else None,
                     )
+
+    def _check_top_level_block_shadow_boundaries(self) -> None:
+        """Fail closed for block shadows whose storage is not node-exact yet.
+
+        Same-typed primitive non-history declarations can use an ordinary C++
+        lexical local once the analyzer preserves the outer symbol (see the
+        scoped control-flow visitors below). Aggregate/UDT registries, local
+        history Series storage, and cross-type codegen typing remain raw-name
+        keyed, so allowing those shapes to shadow a direct script binding could
+        silently retarget the class member or emit invalid C++.
+        """
+        direct: dict[str, tuple[PineType, TypeSpec | None]] = {}
+        for stmt in self._ast.body:
+            if isinstance(stmt, VarDecl):
+                direct[stmt.name] = self._var_decl_types_by_node.get(
+                    id(stmt), (PineType.UNKNOWN, None)
+                )
+            elif isinstance(stmt, TupleAssign):
+                for name in stmt.names:
+                    if name != "_":
+                        direct[name] = (
+                            PineType.FLOAT, TypeSpec.primitive("float")
+                        )
+
+        def nested_bindings(
+            stmts: list[ASTNode], primitive_mismatch_unsafe: bool
+        ):
+            for stmt in stmts:
+                if isinstance(stmt, VarDecl):
+                    yield from embedded_bindings(stmt.value)
+                    yield stmt, stmt.name, primitive_mismatch_unsafe
+                    continue
+                if isinstance(stmt, TupleAssign):
+                    yield from embedded_bindings(stmt.value)
+                    for name in stmt.names:
+                        if name != "_":
+                            yield stmt, name, primitive_mismatch_unsafe
+                    continue
+                if isinstance(stmt, IfStmt):
+                    yield from embedded_bindings(stmt.condition)
+                    yield from nested_bindings(stmt.body, True)
+                    yield from nested_bindings(stmt.else_body or [], True)
+                elif isinstance(stmt, (ForStmt, ForInStmt)):
+                    if isinstance(stmt, ForStmt):
+                        yield from embedded_bindings(stmt.start)
+                        yield from embedded_bindings(stmt.end)
+                        yield from embedded_bindings(stmt.step)
+                    else:
+                        yield from embedded_bindings(stmt.iterable)
+                    yield from nested_bindings(stmt.body, True)
+                elif isinstance(stmt, WhileStmt):
+                    yield from embedded_bindings(stmt.condition)
+                    yield from nested_bindings(stmt.body, True)
+                elif isinstance(stmt, SwitchStmt):
+                    yield from embedded_bindings(stmt.expr)
+                    for _case, body in stmt.cases:
+                        yield from embedded_bindings(_case)
+                        yield from nested_bindings(body, True)
+                    yield from nested_bindings(stmt.default_body or [], True)
+                elif isinstance(stmt, Assignment):
+                    yield from embedded_bindings(stmt.target)
+                    yield from embedded_bindings(stmt.value)
+                elif isinstance(stmt, ExprStmt):
+                    yield from embedded_bindings(stmt.expr)
+
+        def embedded_bindings(value: Any):
+            """Yield declarations in expression-valued control-flow blocks."""
+            if value is None or isinstance(value, (FuncDef, MethodDef)):
+                return
+            if isinstance(value, IfStmt):
+                yield from embedded_bindings(value.condition)
+                yield from nested_bindings(value.body, True)
+                yield from nested_bindings(value.else_body or [], True)
+                return
+            if isinstance(value, SwitchStmt):
+                yield from embedded_bindings(value.expr)
+                for case_expr, body in value.cases:
+                    yield from embedded_bindings(case_expr)
+                    yield from nested_bindings(body, True)
+                yield from nested_bindings(value.default_body or [], True)
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    yield from embedded_bindings(item)
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    yield from embedded_bindings(item)
+                return
+            if isinstance(value, ASTNode):
+                for child in vars(value).values():
+                    yield from embedded_bindings(child)
+
+        top_level_blocks: list[tuple[list[ASTNode], bool]] = []
+        for stmt in self._ast.body:
+            if isinstance(stmt, IfStmt):
+                top_level_blocks.extend([
+                    (stmt.body, True), (stmt.else_body or [], True)
+                ])
+            elif isinstance(stmt, (ForStmt, ForInStmt)):
+                top_level_blocks.append((stmt.body, True))
+            elif isinstance(stmt, WhileStmt):
+                top_level_blocks.append((stmt.body, True))
+            elif isinstance(stmt, SwitchStmt):
+                top_level_blocks.extend(
+                    (body, True) for _case, body in stmt.cases
+                )
+                top_level_blocks.append((stmt.default_body or [], True))
+
+        # Pine control flow is also expression-valued (for example
+        # ``result = if ...``).  Inspect those blocks without treating the
+        # containing direct Program declaration itself as a nested binding.
+        embedded_top_level_bindings: list[
+            tuple[ASTNode, str, bool]
+        ] = []
+        for stmt in self._ast.body:
+            if isinstance(stmt, VarDecl):
+                embedded_top_level_bindings.extend(
+                    embedded_bindings(stmt.value)
+                )
+            elif isinstance(stmt, TupleAssign):
+                embedded_top_level_bindings.extend(
+                    embedded_bindings(stmt.value)
+                )
+            elif isinstance(stmt, Assignment):
+                embedded_top_level_bindings.extend(
+                    embedded_bindings(stmt.target)
+                )
+                embedded_top_level_bindings.extend(
+                    embedded_bindings(stmt.value)
+                )
+            elif isinstance(stmt, ExprStmt):
+                embedded_top_level_bindings.extend(
+                    embedded_bindings(stmt.expr)
+                )
+
+        exact_series = set(self._series_decl_bindings)
+        exact_series_nodes = {node_id for node_id, _name in exact_series}
+        aggregate_kinds = {"array", "map", "matrix", "udt"}
+        candidate_bindings = list(embedded_top_level_bindings)
+        for block, primitive_mismatch_unsafe in top_level_blocks:
+            candidate_bindings.extend(
+                nested_bindings(block, primitive_mismatch_unsafe)
+            )
+        for node, name, mismatch_unsafe in candidate_bindings:
+            if name not in direct:
+                continue
+            if isinstance(node, ForStmt):
+                nested_type, nested_spec = (
+                    PineType.INT, TypeSpec.primitive("int")
+                )
+            else:
+                nested_type, nested_spec = (
+                    self._var_decl_types_by_node.get(
+                        id(node), (PineType.FLOAT, None)
+                    )
+                    if isinstance(node, VarDecl)
+                    else (PineType.FLOAT, TypeSpec.primitive("float"))
+                )
+            direct_type, direct_spec = direct[name]
+            is_exact_series = (
+                (id(node), name) in exact_series
+                or (
+                    id(node) in self._series_decl_nodes
+                    and id(node) not in exact_series_nodes
+                )
+            )
+            has_aggregate = any(
+                spec is not None and spec.kind in aggregate_kinds
+                for spec in (direct_spec, nested_spec)
+            )
+            has_incompatible_primitive = (
+                mismatch_unsafe and nested_type != direct_type
+                # The standard corpus uses a loop-local inferred int under
+                # a direct float binding (Hexatrades ``base``).  C++ widens
+                # that RHS safely.  The reverse direction and all other
+                # cross-type shadows can truncate or fail compilation.
+                and not (
+                    direct_type == PineType.FLOAT
+                    and nested_type == PineType.INT
+                )
+            )
+            if (not is_exact_series
+                    and not has_aggregate
+                    and not has_incompatible_primitive):
+                continue
+            self._error(
+                "A top-level block binding named "
+                f"'{name}' shadows a direct script binding with history, "
+                "aggregate, or incompatible typed state; declaration-exact "
+                "block storage is not supported yet.",
+                getattr(node, "loc", None),
+            )
 
     def _check_persistent_drawing_member_collisions(self) -> None:
         """Fail closed when two lexical drawing vars share one C++ member.
@@ -520,7 +1399,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 node.loc,
             )
 
-        global_names = {name for name, _ptype in self._global_var_decls}
+        global_names = set(self._ordinary_global_binding_names)
         global_drawing_names: set[str] = set()
         for stmt in self._ast.body:
             if not isinstance(stmt, VarDecl) or stmt.is_var or stmt.is_varip:
@@ -1646,6 +2525,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 if udt_ctor is not None and type_spec is None:
                     type_spec = TypeSpec.udt(udt_ctor)
 
+        self._var_decl_types_by_node[id(node)] = (val_type, type_spec)
+
         if self._global_scope:
             if self._is_static_expression(node.value):
                 self._static_vars.add(node.name)
@@ -1668,10 +2549,27 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             udt_type_name=udt_ctor,
             type_spec=type_spec,
         )
+        # A direct persistent primitive in an ordinary UDF can safely shadow
+        # a top-level map once post-analysis owner qualification gives it exact
+        # storage.  Other scalar/map shadows still need the legacy fail-closed
+        # marker because their scoped Series identity is unresolved.
         if (
             not self._global_scope
             and self._type_spec_contains_map(outer_spec)
             and not self._type_spec_contains_map(type_spec)
+            and not (
+                (node.is_var or node.is_varip)
+                and not self._block_node_stack
+                and bool(self._collection_scope_stack)
+                and self._collection_scope_stack[-1] in self._func_defs
+                and (
+                    node.name in self._ordinary_global_binding_names
+                    or any(
+                        meta[1] == node.name
+                        for meta in self._var_member_metadata_by_node.values()
+                    )
+                )
+            )
         ):
             setattr(sym, "_pf_shadows_map_state", True)
         if node.name in self._static_vars:
@@ -1767,10 +2665,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Track global-scope non-var declarations (needed as class members
         # so user functions can reference them)
         if (not node.is_var and not node.is_varip
-                and self._symbols.current_scope.name == "global"
-                and node.name not in self._series_vars):
-            self._global_var_decls.append((node.name, val_type))
-            self._global_expr_map[node.name] = node.value
+                and self._symbols.current_scope.name == "global"):
+            if self._global_scope and not self._block_node_stack:
+                self._ordinary_global_binding_info[node.name] = (
+                    id(node), val_type, node.value,
+                )
+            if node.name not in self._series_vars:
+                self._global_var_decls.append((node.name, val_type))
+                self._global_expr_map[node.name] = node.value
 
         if self._symbols.current_scope.name == "global":
             self._record_global_binding_stmt(
@@ -1883,9 +2785,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # "use of undeclared identifier".
             if (self._global_scope
                     and self._symbols.current_scope.name == "global"
-                    and name not in self._series_vars):
-                self._global_var_decls.append((name, PineType.FLOAT))
-                self._global_expr_map[name] = node.value
+                    ):
+                self._ordinary_global_binding_info[name] = (
+                    id(node), PineType.FLOAT, node.value,
+                )
+                if name not in self._series_vars:
+                    self._global_var_decls.append((name, PineType.FLOAT))
+                    self._global_expr_map[name] = node.value
                 self._record_global_binding_stmt(
                     name, PineType.FLOAT, False, decl_node=node,
                 )
@@ -2044,12 +2950,27 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # returning an array returns a ``std::vector<...>``. The coarse
             # PineType return can't represent this, so carry the TypeSpec.
             if ret_expr is not None:
-                ret_spec = self._type_spec_from_expr(ret_expr)
+                # This exact spec was captured while the function's lexical
+                # symbols were still active.  Re-resolving the terminal after
+                # ``exit_scope()`` can bind a same-named top-level collection
+                # and falsely turn a scalar UDF return into an array.
+                ret_spec = terminal_direct_return_spec
                 if ret_spec is not None and ret_spec.kind == "array":
                     self._func_return_type_specs[node.name] = ret_spec
             if (terminal_direct_return_spec is not None
                     and terminal_direct_return_spec.kind == "map"):
                 self._func_return_type_specs[node.name] = terminal_direct_return_spec
+            if (isinstance(terminal_ret_expr, Identifier)
+                    and terminal_direct_return_spec is not None
+                    and terminal_direct_return_spec.kind == "primitive"):
+                # Preserve the lexical terminal identity before leaving the
+                # function. Deferred map propagation must not reinterpret a
+                # same-named scalar local through a top-level collection. Keep
+                # this to direct identifier returns so unrelated call results
+                # (for example ``map.size()``) retain legacy output typing.
+                self._func_return_type_specs[node.name] = (
+                    terminal_direct_return_spec
+                )
 
         if terminal_map_return is not None:
             body_type, terminal_spec = terminal_map_return
@@ -2215,25 +3136,70 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     # Control flow
     # ------------------------------------------------------------------
 
+    def _top_level_branch_needs_lexical_scope(
+        self, body: list[ASTNode]
+    ) -> bool:
+        """Whether a top-level branch declares over a direct script binding.
+
+        Functions already own a symbol-table scope and ``for``/``for in``
+        create one explicitly.  Top-level if/while/switch branches historically
+        reused the global Scope, so a local declaration could overwrite the
+        analyzer's outer Symbol even though codegen emits a C++ lexical local.
+        Add a child scope only for the collision shape handled by this change;
+        every unrelated program keeps the established analysis path.
+        """
+        if self._collection_scope_stack:
+            return False
+        for stmt in body:
+            if (isinstance(stmt, VarDecl)
+                    and stmt.name in self._direct_program_binding_names):
+                return True
+            if (isinstance(stmt, TupleAssign)
+                    and any(
+                        name in self._direct_program_binding_names
+                        for name in stmt.names
+                        if name != "_"
+                    )):
+                return True
+        return False
+
+    def _enter_top_level_branch_scope(
+        self, body: list[ASTNode], name: str
+    ) -> bool:
+        scoped = self._top_level_branch_needs_lexical_scope(body)
+        if scoped:
+            self._symbols.enter_scope(name)
+        return scoped
+
     def _visit_IfStmt(self, node: IfStmt) -> PineType:
         old_global = self._global_scope
         self._global_scope = False
         try:
             self._visit(node.condition)
             body_type = PineType.VOID
+            body_scoped = self._enter_top_level_branch_scope(
+                node.body, "top_if"
+            )
             self._block_node_stack.append(node.body)
             try:
                 for stmt in node.body:
                     body_type = self._visit(stmt)
             finally:
                 self._block_node_stack.pop()
+                if body_scoped:
+                    self._symbols.exit_scope()
             if node.else_body:
+                else_scoped = self._enter_top_level_branch_scope(
+                    node.else_body, "top_else"
+                )
                 self._block_node_stack.append(node.else_body)
                 try:
                     for stmt in node.else_body:
                         self._visit(stmt)
                 finally:
                     self._block_node_stack.pop()
+                    if else_scoped:
+                        self._symbols.exit_scope()
         finally:
             self._global_scope = old_global
         # If used as expression (x = if ...), return last expr type
@@ -2264,6 +3230,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if self._type_spec_contains_map(outer_spec):
             setattr(sym, "_pf_shadows_map_state", True)
         self._symbols.define(sym)
+        setattr(sym, "_pf_decl_node_id", id(node))
+        setattr(sym, "_pf_decl_binding_name", node.var)
 
         old_global = self._global_scope
         self._global_scope = False
@@ -2318,6 +3286,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 if self._type_spec_contains_map(outer_spec):
                     setattr(sym, "_pf_shadows_map_state", True)
                 self._symbols.define(sym)
+                setattr(sym, "_pf_decl_node_id", id(node))
+                setattr(sym, "_pf_decl_binding_name", node.var)
             if node.vars:
                 loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
                 for idx, v in enumerate(node.vars):
@@ -2344,6 +3314,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     if self._type_spec_contains_map(outer_spec):
                         setattr(sym, "_pf_shadows_map_state", True)
                     self._symbols.define(sym)
+                    setattr(sym, "_pf_decl_node_id", id(node))
+                    setattr(sym, "_pf_decl_binding_name", v)
             for stmt in node.body:
                 self._visit(stmt)
             self._symbols.exit_scope()
@@ -2355,6 +3327,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _visit_WhileStmt(self, node: WhileStmt) -> PineType:
         old_global = self._global_scope
         self._global_scope = False
+        body_scoped = self._enter_top_level_branch_scope(
+            node.body, "top_while"
+        )
         self._block_node_stack.append(node)
         try:
             self._visit(node.condition)
@@ -2362,6 +3337,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._visit(stmt)
         finally:
             self._block_node_stack.pop()
+            if body_scoped:
+                self._symbols.exit_scope()
             self._global_scope = old_global
         return PineType.VOID
 
@@ -2375,19 +3352,29 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             for case_expr, case_body in node.cases:
                 if case_expr:
                     self._visit(case_expr)
+                case_scoped = self._enter_top_level_branch_scope(
+                    case_body, "top_switch_case"
+                )
                 self._block_node_stack.append(case_body)
                 try:
                     for stmt in case_body:
                         result_type = self._visit(stmt)
                 finally:
                     self._block_node_stack.pop()
+                    if case_scoped:
+                        self._symbols.exit_scope()
             if node.default_body:
+                default_scoped = self._enter_top_level_branch_scope(
+                    node.default_body, "top_switch_default"
+                )
                 self._block_node_stack.append(node.default_body)
                 try:
                     for stmt in node.default_body:
                         self._visit(stmt)
                 finally:
                     self._block_node_stack.pop()
+                    if default_scoped:
+                        self._symbols.exit_scope()
         finally:
             self._global_scope = old_global
         # If used as expression (x = switch ...), return last expr type

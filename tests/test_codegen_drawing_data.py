@@ -560,28 +560,36 @@ b = makeLabel()
         transpile(src)
 
 
-@pytest.mark.parametrize(
-    "global_decl,persistent_decl",
-    (
-        (
-            "float x = close",
-            "f() =>\n    var label x = na\n    x\nvalue = f()",
-        ),
-        (
-            "line x = line.new(bar_index, close, bar_index + 1, close)",
-            "f() =>\n    var float x = 1.0\n    x\nvalue = f()",
-        ),
-    ),
-)
-def test_global_member_and_persistent_drawing_identity_collision_fails_closed(
-    global_decl, persistent_decl
-):
-    src = (
-        '//@version=6\nstrategy("drawing global member collision")\n'
-        f"{global_decl}\n{persistent_decl}\n"
-    )
+def test_global_scalar_and_persistent_drawing_identity_collision_fails_closed():
+    src = '''//@version=6
+strategy("drawing global member collision")
+float x = close
+f() =>
+    var label x = na
+    x
+value = f()
+'''
     with pytest.raises(CompileError, match="collides with a top-level"):
         transpile(src)
+
+
+def test_global_drawing_and_persistent_scalar_get_distinct_storage():
+    src = '''//@version=6
+strategy("drawing global member isolation")
+line x = line.new(bar_index, close, bar_index + 1, close)
+f() =>
+    var float x = 1.0
+    x
+value = f()
+'''
+    cpp = transpile(src)
+
+    assert "    Line x = Line{};" in cpp
+    assert "    double _pfv_1_x__f;" in cpp
+    assert "_pfv_1_x__f = 1.0;" in cpp
+    assert "x = pf_line_new(" in cpp
+    skip_if_no_compile_env()
+    compile_cpp(cpp, label="drawing-global-persistent-scalar-isolation")
 
 
 def test_sibling_scalar_does_not_poison_function_var_drawing_target():
