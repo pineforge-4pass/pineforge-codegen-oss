@@ -403,6 +403,8 @@ observed = read_value()
     (
         "array.get(make_values(), 0)",
         "array.copy(make_values()).get(0)",
+        "array.copy(id=make_values()).get(0)",
+        "make_values().copy().get(0)",
         "array.get(array.slice(values, 0, 1), 0)",
     ),
 )
@@ -419,6 +421,34 @@ observed = blocked()
     cpp = transpile(source)
     assert "std::string blocked(" not in cpp
     assert "double blocked(" in cpp
+
+
+def test_nested_method_copy_reference_element_remains_fail_closed():
+    source = r'''//@version=6
+strategy("Nested method copy reference boundary")
+type Item
+    int value
+blocked() =>
+    array.from(Item.new(1)).copy().get(0)
+observed = blocked()
+'''
+    cpp = transpile(source)
+    assert "Item blocked(" not in cpp
+    assert "double blocked(" in cpp
+
+
+def test_nested_method_copy_temporary_reader_recursion_is_rejected():
+    source = r'''//@version=6
+strategy("Nested method copy recursion boundary")
+reader() =>
+    array.get(array.from(reader()).copy(), 0)
+observed = reader()
+'''
+    with pytest.raises(
+        CompileError,
+        match="Recursive direct temporary-array reader cycle",
+    ):
+        transpile(source)
 
 
 def test_local_map_named_array_is_not_a_builtin_array_producer():
@@ -455,6 +485,221 @@ observed = read_value()
     cpp = transpile(source)
     assert "std::string read_value(" in cpp
     assert "double read_value(" not in cpp
+    compile_cpp(cpp)
+
+
+@pytest.mark.parametrize(
+    ("type_name", "literal", "expected_cpp"),
+    (
+        ("string", '"x"', "std::string"),
+        ("int", "7", "int"),
+    ),
+)
+@pytest.mark.parametrize(
+    "terminal",
+    (
+        "array.copy(id=source).get(0)",
+        "array.copy(id=source).get(index=0)",
+        "array.get(array.copy(id=source), 0)",
+        "array.get(array.copy(id=source), index=0)",
+        "array.get(id=array.copy(id=source), index=0)",
+    ),
+)
+def test_keyword_namespace_copy_representations_return_exact_type(
+    type_name: str,
+    literal: str,
+    expected_cpp: str,
+    terminal: str,
+):
+    source = f'''//@version=6
+strategy("Direct keyword copy producer representations")
+read_value() =>
+    array<{type_name}> source = array.from({literal})
+    {terminal}
+observed = read_value()
+'''
+    cpp = transpile(source)
+    assert f"{expected_cpp} read_value(" in cpp
+    if type_name == "string":
+        assert "double read_value(" not in cpp
+    assert f"std::vector<{expected_cpp}>(source)" in cpp
+    compile_cpp(cpp)
+
+
+@pytest.mark.parametrize(
+    "copy_call",
+    (
+        "array.copy()",
+        "array.copy(source, id=other)",
+        "array.copy(source=source)",
+    ),
+)
+def test_invalid_namespace_copy_receiver_shapes_fail_closed(copy_call: str):
+    source = f'''//@version=6
+strategy("Invalid direct keyword copy shape")
+blocked() =>
+    array<string> source = array.from("x")
+    array<string> other = array.from("y")
+    {copy_call}
+observed = blocked()
+'''
+    with pytest.raises(
+        CompileError,
+        match="array.copy: expected exactly one receiver 'id'",
+    ):
+        transpile(source)
+
+
+@pytest.mark.parametrize("producer_first", (False, True))
+def test_stateful_keyword_copy_direct_producer_is_exact_in_both_source_orders(
+    producer_first: bool,
+):
+    producer = '''produce() =>
+    unused = ta.sma(close, 2)
+    "x"
+'''
+    reader = '''read_value() =>
+    array.get(id=array.copy(id=array.from(produce())), index=0)
+'''
+    definitions = producer + reader if producer_first else reader + producer
+    source = (
+        "//@version=6\n"
+        'strategy("Stateful direct keyword copy producer")\n'
+        f"{definitions}"
+        "observed = read_value()\n"
+    )
+
+    cpp = transpile(source)
+    assert "std::string read_value_cs0(" in cpp
+    assert "double read_value_cs0(" not in cpp
+    assert "std::vector<std::string>(std::vector<std::string>{produce_cs0()})" in cpp
+    assert "produce_cs1" not in cpp
+    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    compile_cpp(cpp)
+
+
+@pytest.mark.parametrize("producer_first", (False, True))
+def test_keyword_copy_of_nested_method_copy_is_exact_in_both_source_orders(
+    producer_first: bool,
+):
+    """Exercise the analyzer, keyword emitter, and nested-copy typer together."""
+    producer = '''produce() =>
+    unused = ta.sma(close, 2)
+    "x"
+'''
+    reader = '''read_value() =>
+    array.get(id=array.copy(id=array.from(produce()).copy()), index=0)
+'''
+    definitions = producer + reader if producer_first else reader + producer
+    source = (
+        "//@version=6\n"
+        'strategy("Keyword copy of nested method copy")\n'
+        f"{definitions}"
+        "observed = read_value()\n"
+    )
+
+    cpp = transpile(source)
+    assert "std::string read_value_cs0(" in cpp
+    assert "double read_value_cs0(" not in cpp
+    assert cpp.count("std::vector<std::string>{produce_cs0()}") == 1
+    assert "produce_cs1" not in cpp
+    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    compile_cpp(cpp)
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    (
+        'array.from("x").copy().get(0)',
+        'array.from("x").copy().get(index=0)',
+        'array.get(array.from("x").copy(), 0)',
+        'array.get(id=array.from("x").copy(), index=0)',
+    ),
+)
+def test_nested_method_copy_direct_temporary_returns_exact_string(
+    terminal: str,
+):
+    source = f'''//@version=6
+strategy("Nested method copy direct temporary")
+read_value() =>
+    {terminal}
+observed = read_value()
+'''
+    cpp = transpile(source)
+    assert "std::string read_value(" in cpp
+    assert "double read_value(" not in cpp
+    compile_cpp(cpp)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    (
+        'array.from("x").copy().get(0)',
+        'array.copy(id=array.from("x")).get(0)',
+        'array.get(id=array.copy(id=array.from("x").copy()), index=0)',
+    ),
+)
+def test_copy_temporary_element_type_is_exact_outside_terminal_return(
+    expression: str,
+):
+    source = f'''//@version=6
+strategy("Copy temporary nonterminal typing")
+global_value = {expression}
+read_local() =>
+    local_value = {expression}
+    local_value == "x"
+observed = read_local()
+'''
+    cpp = transpile(source)
+    assert "std::string global_value =" in cpp
+    assert "bool read_local(" in cpp
+    assert 'local_value == std::string("x")' in cpp
+    compile_cpp(cpp)
+
+
+@pytest.mark.parametrize(
+    ("functional", "keyword", "producer_first"),
+    product((False, True), repeat=3),
+)
+def test_nested_method_copy_temporary_stateful_matrix(
+    functional: bool,
+    keyword: bool,
+    producer_first: bool,
+):
+    """All 2^3 get-shape/order cells keep one stateful element call site."""
+    producer = '''produce() =>
+    unused = ta.sma(close, 2)
+    "x"
+'''
+    receiver = 'array.from(produce()).copy()'
+    if functional:
+        terminal = (
+            f"array.get(id={receiver}, index=0)"
+            if keyword
+            else f"array.get({receiver}, 0)"
+        )
+    else:
+        terminal = (
+            f"{receiver}.get(index=0)"
+            if keyword
+            else f"{receiver}.get(0)"
+        )
+    reader = f"read_value() =>\n    {terminal}\n"
+    definitions = producer + reader if producer_first else reader + producer
+    source = (
+        "//@version=6\n"
+        'strategy("Nested method copy temporary matrix")\n'
+        f"{definitions}"
+        "observed = read_value()\n"
+    )
+
+    cpp = transpile(source)
+    assert "std::string read_value_cs0(" in cpp
+    assert "double read_value_cs0(" not in cpp
+    assert "std::vector<std::string>(" in cpp
+    assert "produce_cs0()" in cpp
+    assert "produce_cs1" not in cpp
+    assert cpp.count("ta::SMA _ta_sma_1;") == 1
     compile_cpp(cpp)
 
 

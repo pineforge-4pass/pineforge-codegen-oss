@@ -569,9 +569,11 @@ class TypeInferer:
                 recv_spec = self._type_spec_from_expr(node.callee.object)
                 member_name = node.callee.member
                 if recv_spec is not None and recv_spec.kind == "array":
-                    if func_name in ("get", "first", "last", "pop", "shift", "remove"):
+                    if member_name in (
+                        "get", "first", "last", "pop", "shift", "remove",
+                    ):
                         return recv_spec.element
-                    if func_name in ("copy", "slice"):
+                    if member_name in ("copy", "slice"):
                         return recv_spec
                 if recv_spec is not None and recv_spec.kind == "map":
                     if member_name in ("put", "get", "remove"):
