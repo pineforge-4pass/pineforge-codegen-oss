@@ -63,8 +63,8 @@ from dataclasses import replace
 from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, BreakStmt, ContinueStmt, ExprStmt,
     ForStmt, ForInStmt, FuncCall, FuncDef, Identifier, IfStmt, MemberAccess,
-    NumberLiteral, StringLiteral, Subscript, SwitchStmt, Ternary, TupleAssign,
-    TupleLiteral, UnaryOp, VarDecl, WhileStmt,
+    NaLiteral, NumberLiteral, StringLiteral, Subscript, SwitchStmt, Ternary,
+    TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
 )
 from ..analyzer import (
     FuncInfo, TACallSite, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
@@ -76,6 +76,19 @@ from .tables import (
     SECURITY_BAR_FIELD_EXPRS, SECURITY_BAR_FIELD_TYPES, _math_minmax_na_expr,
     _merge_kwargs,
 )
+
+
+class _SecurityHelperArgumentFrame(dict):
+    """Callee bindings whose argument ASTs belong to the caller scope.
+
+    A callee may reuse a caller parameter name. Keeping the caller binding
+    stack with the argument prevents that new callee frame from capturing
+    identifiers inside its own argument expression and falsely recursing.
+    """
+
+    def __init__(self, values: dict, caller_stack: tuple[dict, ...]) -> None:
+        super().__init__(values)
+        self.caller_stack = caller_stack
 
 
 class SecurityEmitter:
@@ -376,6 +389,9 @@ class SecurityEmitter:
                 "expr_node": item.expression,
                 "returns_tuple": item.returns_tuple,
                 "tuple_size": item.tuple_size,
+                "tuple_element_types": tuple(
+                    getattr(item, "tuple_element_types", ()) or ()
+                ),
                 "gaps_node": item.gaps,
                 "lookahead_node": item.lookahead,
                 "ta_range": item.ta_range,
@@ -392,6 +408,7 @@ class SecurityEmitter:
             "expr_node": item[2] if len(item) > 2 else None,
             "returns_tuple": item[3] if len(item) > 3 else False,
             "tuple_size": item[4] if len(item) > 4 else 0,
+            "tuple_element_types": (),
             "gaps_node": item[5] if len(item) > 5 else None,
             "lookahead_node": item[6] if len(item) > 6 else None,
             "ta_range": item[7] if len(item) > 7 else None,
@@ -472,6 +489,22 @@ class SecurityEmitter:
         name: str,
         helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
     ):
+        resolved = self._security_lookup_helper_binding_context(
+            name, helper_binding_stack
+        )
+        return resolved[0] if resolved is not None else None
+
+    def _security_lookup_helper_binding_context(
+        self,
+        name: str,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+    ):
+        """Return ``(bound_value, lexical_stack_for_value)``.
+
+        Ordinary helper-local bindings are authored in the current stack.
+        Callee argument bindings are authored in the caller stack captured by
+        ``_SecurityHelperArgumentFrame`` and must be expanded there.
+        """
         if not helper_binding_stack:
             return None
         for frame in reversed(helper_binding_stack):
@@ -480,7 +513,12 @@ class SecurityEmitter:
             bound = frame[name]
             if isinstance(bound, Identifier) and bound.name == name:
                 continue
-            return bound
+            lexical_stack = (
+                frame.caller_stack
+                if isinstance(frame, _SecurityHelperArgumentFrame)
+                else helper_binding_stack
+            )
+            return bound, lexical_stack
         return None
 
     def _literal_int_for_security_index(self, node) -> int | None:
@@ -553,10 +591,13 @@ class SecurityEmitter:
                 return None
             return (left and right) if node.op == "and" else (left or right)
         if isinstance(node, Identifier):
-            bound = self._security_lookup_helper_binding(node.name, helper_binding_stack)
-            if bound is not None:
+            binding = self._security_lookup_helper_binding_context(
+                node.name, helper_binding_stack
+            )
+            if binding is not None:
+                bound, bound_stack = binding
                 return self._fold_security_const_bool(
-                    bound, helper_binding_stack, resolving
+                    bound, bound_stack, resolving
                 )
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
             if node.name in global_expr_map and node.name not in resolving:
@@ -589,10 +630,13 @@ class SecurityEmitter:
         if resolving is None:
             resolving = set()
         if isinstance(node, Identifier):
-            bound = self._security_lookup_helper_binding(node.name, helper_binding_stack)
-            if bound is not None:
+            binding = self._security_lookup_helper_binding_context(
+                node.name, helper_binding_stack
+            )
+            if binding is not None:
+                bound, bound_stack = binding
                 return self._resolve_security_index_literal(
-                    bound, helper_binding_stack, resolving
+                    bound, bound_stack, resolving
                 )
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
             if node.name in global_expr_map and node.name not in resolving:
@@ -677,13 +721,16 @@ class SecurityEmitter:
                 return
 
             if isinstance(n, Identifier):
-                bound = self._security_lookup_helper_binding(n.name, bindings)
-                if bound is not None:
+                binding = self._security_lookup_helper_binding_context(
+                    n.name, bindings
+                )
+                if binding is not None:
+                    bound, bound_stack = binding
                     if not isinstance(bound, str):
                         key = f"bind:{id(bound)}"
                         if key not in resolving:
                             resolving.add(key)
-                            walk(bound, bindings)
+                            walk(bound, bound_stack)
                             resolving.remove(key)
                     return
                 mutable_info = self._global_mutable_infos.get(n.name)
@@ -701,16 +748,27 @@ class SecurityEmitter:
                     return
 
             if isinstance(n, Subscript) and isinstance(n.object, Identifier):
-                bound = self._security_lookup_helper_binding(n.object.name, bindings)
-                if bound is not None:
+                binding = self._security_lookup_helper_binding_context(
+                    n.object.name, bindings
+                )
+                if binding is not None:
+                    bound, bound_stack = binding
                     if not isinstance(bound, str):
+                        local_index = n.index
+                        resolved_local_index = self._resolve_security_index_literal(
+                            n.index, bindings
+                        )
+                        if resolved_local_index is not None:
+                            local_index = NumberLiteral(
+                                value=resolved_local_index
+                            )
                         walk(
                             self._compose_security_helper_history_subscript(
                                 bound,
-                                n.index,
+                                local_index,
                                 n,
                             ),
-                            bindings,
+                            bound_stack,
                         )
                     return
                 if n.object.name in SECURITY_BAR_FIELDS:
@@ -833,9 +891,42 @@ class SecurityEmitter:
         return SECURITY_BAR_FIELD_EXPRS.get(field, f"bar.{field}")
 
     @staticmethod
-    def _security_tuple_result_default(cpp_type: str, tuple_size: int) -> str:
-        vals = ", ".join("na<double>()" for _ in range(max(0, tuple_size)))
+    def _security_tuple_result_default(
+        cpp_type: str,
+        tuple_size: int,
+        tuple_element_types: tuple[PineType, ...] = (),
+    ) -> str:
+        is_bool_tuple = (
+            len(tuple_element_types) == tuple_size
+            and tuple_size > 0
+            and all(item == PineType.BOOL for item in tuple_element_types)
+        )
+        default_value = "false" if is_bool_tuple else "na<double>()"
+        vals = ", ".join(
+            default_value for _ in range(max(0, tuple_size))
+        )
         return f"{cpp_type}{{{vals}}}"
+
+    @staticmethod
+    def _security_helper_tuple_cpp_type(
+        tuple_size: int,
+        tuple_element_types: tuple[PineType, ...] = (),
+    ) -> str:
+        """C++ storage type for a supported helper tuple of arbitrary arity.
+
+        Numeric int/float families retain the established double-coercing
+        representation. Homogeneous bool families use real ``bool`` fields so
+        true/false semantics survive the requested-context boundary.
+        """
+        is_bool_tuple = (
+            len(tuple_element_types) == tuple_size
+            and tuple_size > 0
+            and all(item == PineType.BOOL for item in tuple_element_types)
+        )
+        element_cpp_type = "bool" if is_bool_tuple else "double"
+        return "std::tuple<" + ", ".join(
+            element_cpp_type for _ in range(max(0, tuple_size))
+        ) + ">"
 
     def _collect_security_ta_hist_indices(self, node) -> set[int]:
         """Which security TA call-site indices need HTF history (subscript index >= 1).
@@ -1416,7 +1507,7 @@ class SecurityEmitter:
 
         sig_frames = []
         for idx, frame in enumerate(helper_binding_stack):
-            if idx == 0:
+            if idx == 0 or isinstance(frame, _SecurityHelperArgumentFrame):
                 sig_frames.append(
                     tuple((name, _sig_value(node)) for name, node in sorted(frame.items()))
                 )
@@ -1469,8 +1560,14 @@ class SecurityEmitter:
                 "request.security helper calls must bind every parameter explicitly",
             )
 
-        new_frame = {param_name: bound_args[idx] for idx, param_name in enumerate(params)}
         base_stack = helper_binding_stack or ()
+        new_frame = _SecurityHelperArgumentFrame(
+            {
+                param_name: bound_args[idx]
+                for idx, param_name in enumerate(params)
+            },
+            base_stack,
+        )
         return fi, base_stack + (new_frame,)
 
     def _security_helper_call_plan(
@@ -1672,13 +1769,16 @@ class SecurityEmitter:
             resolving = set()
 
         if isinstance(expr_node, Identifier):
-            bound = self._security_lookup_helper_binding(expr_node.name, helper_binding_stack)
-            if bound is not None:
+            binding = self._security_lookup_helper_binding_context(
+                expr_node.name, helper_binding_stack
+            )
+            if binding is not None:
+                bound, bound_stack = binding
                 return self._expr_depends_on_security_mutables(
                     bound,
                     security_mutable_names,
                     resolving,
-                    helper_binding_stack,
+                    bound_stack,
                 )
             if expr_node.name in security_mutable_names:
                 return True
@@ -1800,6 +1900,156 @@ class SecurityEmitter:
             if idx < len(all_args) and all_args[idx] is not None
         ]
 
+    def _security_ta_ctor_args_for_variant(
+        self,
+        sec_id: int,
+        site: TACallSite,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+        fallback_args: list[str] | None = None,
+    ) -> tuple[list[str], list[bool] | None]:
+        """Resolve TA constructor args in one helper-call lexical context.
+
+        ``TACallSite.ctor_args`` is a source-string snapshot which ordinary
+        callable specialization mutates from the first call site.  A single
+        TA AST can also be reached several times while lowering one
+        ``request.security`` tuple (for example ``ema(src, 2)`` through
+        ``ema(src, 5)``).  Those requested-context variants share the AST but
+        must not share that first snapshot.  Re-lower the constructor AST
+        through the exact helper binding stack used to key the variant.
+
+        Calls outside an inlined helper retain the established string path so
+        input-backed runtime resets and direct top-level TA sites stay
+        byte-compatible.  The optional boolean list records, per argument,
+        whether the source AST is a bar-invariant scalar after resolving its
+        exact helper bindings.  Runtime-reset collection uses that provenance
+        to reuse trusted lowered C++ without allowing a mixed input + series
+        expression merely because it contains a generated ``get_input_*`` call.
+        """
+        fallback = list(
+            site.ctor_args if fallback_args is None else fallback_args
+        )
+        if not helper_binding_stack:
+            return fallback, None
+        arg_nodes = self._security_ta_ctor_arg_nodes(site)
+        if len(arg_nodes) != len(fallback):
+            return fallback, None
+        return (
+            [
+                self._build_security_expr(
+                    sec_id,
+                    arg,
+                    None,
+                    {},
+                    resolving=set(),
+                    security_mutable_names=set(),
+                    helper_binding_stack=helper_binding_stack,
+                    emitted_lines=None,
+                )
+                for arg in arg_nodes
+            ],
+            [
+                self._security_ta_ctor_arg_is_stable(
+                    arg,
+                    helper_binding_stack,
+                )
+                for arg in arg_nodes
+            ],
+        )
+
+    def _security_ta_ctor_arg_is_stable(
+        self,
+        node: ASTNode,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+    ) -> bool:
+        """Classify one helper-bound requested-context TA constructor arg.
+
+        ``_expr_is_stable`` already owns the compiler's conservative definition
+        of a per-run scalar.  Resolve helper parameters first, preserving the
+        authored AST shape, and then delegate to that shared classifier.  This
+        prevents a later helper call such as ``ema(src, inputLen + int(close))``
+        from bypassing the ordinary TA-length guard just because an earlier
+        call through the same source TA site used a safe length.
+        """
+        import dataclasses
+
+        def resolve(
+            current,
+            stack: tuple[dict[str, ASTNode], ...] | None,
+            seen: frozenset[tuple[str, int]] = frozenset(),
+            depth: int = 0,
+        ):
+            if current is None or depth > 32:
+                return None
+            if isinstance(current, Identifier):
+                binding = self._security_lookup_helper_binding_context(
+                    current.name,
+                    stack,
+                )
+                if binding is None:
+                    return current
+                bound, bound_stack = binding
+                if isinstance(bound, str):
+                    return None
+                key = (current.name, id(bound))
+                if key in seen:
+                    return None
+                return resolve(
+                    bound,
+                    bound_stack,
+                    seen | {key},
+                    depth + 1,
+                )
+            if isinstance(
+                current,
+                (NumberLiteral, StringLiteral, BoolLiteral, NaLiteral),
+            ):
+                return current
+            if isinstance(current, MemberAccess):
+                obj = resolve(current.object, stack, seen, depth + 1)
+                if obj is None:
+                    return None
+                return dataclasses.replace(current, object=obj)
+            if isinstance(current, BinOp):
+                left = resolve(current.left, stack, seen, depth + 1)
+                right = resolve(current.right, stack, seen, depth + 1)
+                if left is None or right is None:
+                    return None
+                return dataclasses.replace(current, left=left, right=right)
+            if isinstance(current, UnaryOp):
+                operand = resolve(current.operand, stack, seen, depth + 1)
+                if operand is None:
+                    return None
+                return dataclasses.replace(current, operand=operand)
+            if isinstance(current, Ternary):
+                condition = resolve(current.condition, stack, seen, depth + 1)
+                true_val = resolve(current.true_val, stack, seen, depth + 1)
+                false_val = resolve(current.false_val, stack, seen, depth + 1)
+                if condition is None or true_val is None or false_val is None:
+                    return None
+                return dataclasses.replace(
+                    current,
+                    condition=condition,
+                    true_val=true_val,
+                    false_val=false_val,
+                )
+            if isinstance(current, FuncCall):
+                args = [resolve(arg, stack, seen, depth + 1) for arg in current.args]
+                kwargs = {
+                    name: resolve(arg, stack, seen, depth + 1)
+                    for name, arg in current.kwargs.items()
+                }
+                if any(arg is None for arg in args) or any(
+                    arg is None for arg in kwargs.values()
+                ):
+                    return None
+                return dataclasses.replace(current, args=args, kwargs=kwargs)
+            # History, collections, and every other unhandled shape are not
+            # stable TA lengths.  Fail closed instead of inventing a buffer size.
+            return None
+
+        resolved = resolve(node, helper_binding_stack)
+        return resolved is not None and self._expr_is_stable(resolved)
+
     def _security_ta_ctor_depends_on_mutables(
         self,
         site: TACallSite,
@@ -1832,8 +2082,11 @@ class SecurityEmitter:
             resolving = set()
 
         if isinstance(expr_node, Identifier):
-            bound = self._security_lookup_helper_binding(expr_node.name, helper_binding_stack)
-            if bound is not None:
+            binding = self._security_lookup_helper_binding_context(
+                expr_node.name, helper_binding_stack
+            )
+            if binding is not None:
+                bound, bound_stack = binding
                 if isinstance(bound, str):
                     return collected
                 # Guard against a cyclic helper binding: an identifier bound to
@@ -1849,7 +2102,7 @@ class SecurityEmitter:
                 self._collect_security_ta_binding_stacks(
                     bound,
                     resolving,
-                    helper_binding_stack,
+                    bound_stack,
                     collected,
                     inline_ta_indices,
                     inline_helper,
@@ -2497,11 +2750,17 @@ class SecurityEmitter:
                     "bb": "ta::BBResult",
                     "kc": "ta::KCResult",
                     "vwap_bands": "ta::VWAPBandsResult",
-                }.get(ta_name, "std::tuple<double, double>")
+                }.get(
+                    ta_name,
+                    self._security_helper_tuple_cpp_type(
+                        tuple_size,
+                        item.get("tuple_element_types", ()),
+                    ),
+                )
                 lines.append(f"            case {sec_id}:")
                 lines.append(
                     f"                _req_sec_{sec_id} = "
-                    f"{self._security_tuple_result_default(ctype, tuple_size)};"
+                    f"{self._security_tuple_result_default(ctype, tuple_size, item.get('tuple_element_types', ()))};"
                 )
                 for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
                     lines.append(
@@ -2556,8 +2815,11 @@ class SecurityEmitter:
             helper_binding_stack = ()
 
         if isinstance(expr_node, Identifier):
-            bound = self._security_lookup_helper_binding(expr_node.name, helper_binding_stack)
-            if bound is not None:
+            binding = self._security_lookup_helper_binding_context(
+                expr_node.name, helper_binding_stack
+            )
+            if binding is not None:
+                bound, bound_stack = binding
                 if isinstance(bound, str):
                     series_name = self._security_series_binding_target(bound)
                     if series_name is not None:
@@ -2570,7 +2832,7 @@ class SecurityEmitter:
                     ta_results,
                     resolving,
                     security_mutable_names,
-                    helper_binding_stack,
+                    bound_stack,
                     emitted_lines,
                 )
             bar_fields = {
@@ -2626,8 +2888,11 @@ class SecurityEmitter:
                 emitted_lines,
             )
             if isinstance(expr_node.object, Identifier):
-                bound = self._security_lookup_helper_binding(expr_node.object.name, helper_binding_stack)
-                if bound is not None:
+                binding = self._security_lookup_helper_binding_context(
+                    expr_node.object.name, helper_binding_stack
+                )
+                if binding is not None:
+                    bound, bound_stack = binding
                     if isinstance(bound, str):
                         series_name = self._security_series_binding_target(bound)
                         if series_name is not None:
@@ -2637,9 +2902,15 @@ class SecurityEmitter:
                     # history to the supported bound bar series and compose
                     # nested offsets before lowering. Unsupported scalar/
                     # expression bindings fail closed in the shared helper.
+                    local_index = expr_node.index
+                    resolved_local_index = self._resolve_security_index_literal(
+                        expr_node.index, helper_binding_stack
+                    )
+                    if resolved_local_index is not None:
+                        local_index = NumberLiteral(value=resolved_local_index)
                     composed = self._compose_security_helper_history_subscript(
                         bound,
-                        expr_node.index,
+                        local_index,
                         expr_node,
                     )
                     return self._build_security_expr(
@@ -2649,7 +2920,7 @@ class SecurityEmitter:
                         ta_results,
                         resolving,
                         security_mutable_names,
-                        helper_binding_stack,
+                        bound_stack,
                         emitted_lines,
                     )
                 if expr_node.object.name in SECURITY_BAR_FIELDS:
@@ -2814,6 +3085,28 @@ class SecurityEmitter:
                 sec_id, expr_node.false_val, ta_range, ta_results, resolving, security_mutable_names, helper_binding_stack, emitted_lines
             )
             return f"(({cond}) ? ({tv}) : ({fv}))"
+
+        if isinstance(expr_node, TupleLiteral):
+            # A tuple returned by a user helper must lower every element in the
+            # requested context.  Falling through to the ordinary expression
+            # visitor loses AST-valued helper parameter bindings (for example
+            # ``f(src) => [src, src + 1]``) and can emit an undeclared ``src``.
+            # Recursive lowering also composes helper locals, HTF history, and
+            # TA results for arbitrary supported tuple arity.
+            elements = [
+                self._build_security_expr(
+                    sec_id,
+                    element,
+                    ta_range,
+                    ta_results,
+                    resolving,
+                    security_mutable_names,
+                    helper_binding_stack,
+                    emitted_lines,
+                )
+                for element in expr_node.elements
+            ]
+            return f"std::make_tuple({', '.join(elements)})"
 
         if isinstance(expr_node, FuncCall) and isinstance(expr_node.callee, Identifier):
             func_name = expr_node.callee.name

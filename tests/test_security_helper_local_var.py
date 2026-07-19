@@ -79,6 +79,20 @@ plot(sig15 + sig60 + sig240 + sigD + alma15 + alma60 + alma240 + almaD)
 """
 
 
+_FOUR_BOOL_TUPLE_SHAPE = """//@version=6
+strategy("generic four bool tuple")
+classify(float src) =>
+    [src > 1.0, src < 0.0, src >= 2.0, src == 3.0]
+
+[isPositive, isNegative, isAtLeastTwo, isThree] = request.security(syminfo.tickerid, "1", classify(close), barmerge.gaps_off, barmerge.lookahead_off)
+outPositive = isPositive ? 1 : 0
+outNegative = isNegative ? 1 : 0
+outAtLeastTwo = isAtLeastTwo ? 1 : 0
+outThree = isThree ? 1 : 0
+plot(outPositive + outNegative + outAtLeastTwo + outThree)
+"""
+
+
 def _eval_body(cpp: str, sec_id: int, next_sec_id: int | None) -> str:
     start = cpp.index(f"void _eval_security_{sec_id}(")
     marker = (
@@ -350,18 +364,78 @@ value = request.security(syminfo.tickerid, "2", outer())
         transpile(src)
 
 
-def test_security_tuple_helper_rejects_three_elements_before_codegen():
+def test_security_tuple_helpers_support_arbitrary_numeric_arity_and_bindings():
     src = """//@version=6
-strategy("three tuple reject")
-f(float src) =>
-    [src, src + 1.0, src + 2.0]
-[a, b, c] = request.security(syminfo.tickerid, "2", f(close))
+strategy("numeric tuple arity")
+pair(float src) =>
+    [src, 2]
+quad(float src) =>
+    float shifted = src + 1.0
+    [src, shifted, 3, src + 3.0]
+[p0, p1] = request.security(syminfo.tickerid, "2", pair(close))
+[q0, q1, q2, q3] = request.security(syminfo.tickerid, "2", quad(close))
+plot(p0 + p1 + q0 + q1 + q2 + q3)
 """
-    with pytest.raises(
-        CompileError,
-        match="exactly two numeric elements",
-    ):
-        transpile(src)
+    cpp = transpile(src)
+
+    # Preserve the established two-element representation while extending the
+    # same double-coercing storage contract to larger numeric tuples.
+    assert re.search(r"std::tuple<double, double> _req_sec_0\s*=", cpp)
+    assert re.search(
+        r"std::tuple<double, double, double, double> _req_sec_1\s*=",
+        cpp,
+    )
+    # Expression-only helper parameters and multi-statement helper locals are
+    # both lowered in the requested context; neither source identifier may
+    # leak into the generated evaluator as an undeclared C++ name.
+    body0 = _eval_body(cpp, 0, 1)
+    body1 = _eval_body(cpp, 1, None)
+    assert "std::make_tuple(bar.close, 2)" in body0
+    assert re.search(
+        r"double _sec1_quad_\d+_shifted = \(bar\.close \+ 1\.0\);",
+        body1,
+    )
+    assert re.search(
+        r"_req_sec_1 = std::make_tuple\(bar\.close, "
+        r"_sec1_quad_\d+_shifted, 3, \(bar\.close \+ 3\.0\)\);",
+        body1,
+    )
+    compile_env.compile_cpp(cpp, label="security-helper-numeric-tuple-arity")
+
+
+def test_security_tuple_helper_numeric_arity_executes_natively():
+    src = """//@version=6
+strategy("numeric tuple runtime")
+quad(float src) =>
+    float shifted = src + 1.0
+    [src, shifted, 3, src + 3.0]
+[a, b, c, d] = request.security(syminfo.tickerid, "1", quad(close))
+outA = a
+outB = b
+outC = c
+outD = d
+plot(outA + outB + outC + outD)
+"""
+    driver = r"""
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bars[] = {
+        Bar{1.0, 1.0, 1.0, 1.0, 1.0, 0},
+        Bar{2.0, 2.0, 2.0, 2.0, 1.0, 60000},
+        Bar{3.0, 3.0, 3.0, 3.0, 1.0, 120000},
+    };
+    strategy.run(bars, 3, "1", "1");
+    std::cout << strategy.outA << " " << strategy.outB << " "
+              << strategy.outC << " " << strategy.outD << "\n";
+    return 0;
+}
+"""
+    values = tuple(
+        float(value)
+        for value in _compile_and_run(transpile(src) + driver).split()
+    )
+    assert values == (3.0, 4.0, 3.0, 6.0)
 
 
 def test_security_tuple_helper_rejects_mixed_elements_before_codegen():
@@ -374,6 +448,138 @@ f(float src) =>
 """
     with pytest.raises(
         CompileError,
-        match="exactly two numeric elements",
+        match=(
+            r"two or more numeric int/float elements or homogeneous bool "
+            r"elements; "
+            r"inferred 2 element\(s\) \[float, string\]"
+        ),
     ):
         transpile(src)
+
+
+def test_security_tuple_helper_rejects_mixed_numeric_bool_shape_honestly():
+    src = """//@version=6
+strategy("mixed tuple reject")
+f(float src) =>
+    [src, src > 1.0, src + 2.0]
+[a, b, c] = request.security(syminfo.tickerid, "2", f(close))
+"""
+    with pytest.raises(
+        CompileError,
+        match=(
+            r"two or more numeric int/float elements or homogeneous bool "
+            r"elements; inferred 3 element\(s\) \[float, bool, float\]"
+        ),
+    ):
+        transpile(src)
+
+
+def test_security_tuple_helper_supports_generic_four_bool_shape():
+    cpp = transpile(_FOUR_BOOL_TUPLE_SHAPE)
+    assert re.search(
+        r"std::tuple<bool, bool, bool, bool> _req_sec_0\s*=\s*"
+        r"std::tuple<bool, bool, bool, bool>\{false, false, false, false\};",
+        cpp,
+    )
+    assert "_req_sec_0 = std::make_tuple(" in _eval_body(cpp, 0, None)
+    assert re.search(r"bool isPositive\s*=", cpp)
+    assert re.search(r"bool isNegative\s*=", cpp)
+    assert re.search(r"bool isAtLeastTwo\s*=", cpp)
+    assert re.search(r"bool isThree\s*=", cpp)
+    compile_env.compile_cpp(cpp, label="security-helper-generic-bool-tuple")
+
+
+def test_security_tuple_helper_generic_bool_values_execute_natively():
+    driver = r"""
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bars[] = {
+        Bar{1.0, 1.0, 1.0, 1.0, 1.0, 0},
+        Bar{2.0, 2.0, 2.0, 2.0, 1.0, 60000},
+    };
+    strategy.run(bars, 2, "1", "1");
+    std::cout << strategy.outPositive << " " << strategy.outNegative << " "
+              << strategy.outAtLeastTwo << " " << strategy.outThree << "\n";
+    return 0;
+}
+"""
+    values = tuple(
+        int(value)
+        for value in _compile_and_run(
+            transpile(_FOUR_BOOL_TUPLE_SHAPE) + driver
+        ).split()
+    )
+    assert values == (1, 0, 1, 0)
+
+
+def test_program_security_tuple_assign_writes_members_for_udf_reads():
+    src = """//@version=6
+strategy("program tuple member routing")
+pair() =>
+    [true, false, true, false]
+[b0, b1, b2, b3] = request.security(syminfo.tickerid, "1", pair())
+read() =>
+    b0
+out = read() ? 1 : 0
+plot(out)
+"""
+    cpp = transpile(src)
+    assert "auto [b0, b1, b2, b3] = _req_sec_0;" not in cpp
+    match = re.search(r"auto (_tuple_result_\d+) = _req_sec_0;", cpp)
+    assert match is not None
+    temp = match.group(1)
+    assert f"b0 = std::get<0>({temp});" in cpp
+    assert f"b1 = std::get<1>({temp});" in cpp
+    assert f"b2 = std::get<2>({temp});" in cpp
+    assert f"b3 = std::get<3>({temp});" in cpp
+    assert "return b0;" in cpp
+    compile_env.compile_cpp(cpp, label="program-security-tuple-member-routing")
+
+
+def test_program_security_tuple_assign_member_value_executes_natively():
+    src = """//@version=6
+strategy("program tuple member runtime")
+pair() =>
+    [true, false, true, false]
+[b0, b1, b2, b3] = request.security(syminfo.tickerid, "1", pair())
+read() =>
+    b0
+out = read() ? 1 : 0
+plot(out)
+"""
+    driver = r"""
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bars[] = {
+        Bar{1.0, 1.0, 1.0, 1.0, 1.0, 0},
+        Bar{2.0, 2.0, 2.0, 2.0, 1.0, 60000},
+    };
+    strategy.run(bars, 2, "1", "1");
+    std::cout << strategy.out << "\n";
+    return 0;
+}
+"""
+    value = int(
+        _compile_and_run(transpile(src) + driver).strip()
+    )
+    assert value == 1
+
+
+def test_callable_tuple_assign_keeps_lexical_structured_binding():
+    src = """//@version=6
+strategy("callable tuple lexical routing")
+pair() =>
+    [1.0, 2.0]
+readPair() =>
+    [left, right] = pair()
+    left + right
+out = readPair()
+plot(out)
+"""
+    cpp = transpile(src)
+    assert "auto [left, right] = pair();" in cpp
+    assert not re.search(r"left = std::get<0>\(", cpp)
+    assert not re.search(r"right = std::get<1>\(", cpp)
+    compile_env.compile_cpp(cpp, label="callable-tuple-lexical-routing")

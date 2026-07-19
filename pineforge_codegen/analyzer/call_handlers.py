@@ -316,6 +316,11 @@ class CallHandlers:
 
             returns_tuple = isinstance(expr_node, TupleLiteral)
             tuple_size = len(expr_node.elements) if returns_tuple else 0
+            tuple_element_types = (
+                self._tuple_element_types_by_node.get(id(expr_node), ())
+                if returns_tuple
+                else ()
+            )
             if not returns_tuple and isinstance(expr_node, FuncCall):
                 expr_func = None
                 expr_ns = None
@@ -328,21 +333,32 @@ class CallHandlers:
                     if self._func_returns_tuple.get(expr_func, False):
                         tuple_size = self._func_tuple_element_count.get(expr_func, 0)
                         tuple_types = self._func_tuple_element_types.get(expr_func, ())
-                        if (
-                            tuple_size != 2
-                            or len(tuple_types) != 2
-                            or any(
-                                item not in (PineType.INT, PineType.FLOAT)
+                        numeric_tuple = (
+                            tuple_size >= 2
+                            and len(tuple_types) == tuple_size
+                            and all(
+                                item in (PineType.INT, PineType.FLOAT)
                                 for item in tuple_types
                             )
-                        ):
+                        )
+                        bool_tuple = (
+                            tuple_size >= 2
+                            and len(tuple_types) == tuple_size
+                            and all(item == PineType.BOOL for item in tuple_types)
+                        )
+                        if not (numeric_tuple or bool_tuple):
+                            inferred_types = ", ".join(
+                                item.value for item in tuple_types
+                            ) or "unknown"
                             self._error(
-                                "request.security tuple-return helpers currently support "
-                                "exactly two numeric elements",
+                                "request.security tuple-return helpers support two or more "
+                                "numeric int/float elements or homogeneous bool elements; inferred "
+                                f"{tuple_size} element(s) [{inferred_types}]",
                                 expr_node.loc,
                             )
                         else:
                             returns_tuple = True
+                            tuple_element_types = tuple_types
                 if expr_ns == "ta":
                     if expr_func == "vwap":
                         merged_v = list(expr_node.args)
@@ -371,12 +387,15 @@ class CallHandlers:
             # so the codegen can resolve a parameter ``tf`` via the call sites.
             scope_name = self._symbols.current_scope.name
             containing_func = scope_name[5:] if scope_name.startswith("func_") else ""
+            if returns_tuple and tuple_element_types:
+                self._tuple_element_types_by_node[id(node)] = tuple_element_types
             self._security_calls.append(SecurityCallInfo(
                 sec_id=sec_id,
                 timeframe=tf_node,
                 expression=expr_node,
                 returns_tuple=returns_tuple,
                 tuple_size=tuple_size,
+                tuple_element_types=tuple_element_types,
                 gaps=gaps_node,
                 lookahead=lookahead_node,
                 ta_range=security_ta_range,
