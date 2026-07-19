@@ -7,7 +7,10 @@ from itertools import product
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.analyzer import Analyzer
 from pineforge_codegen.errors import CompileError
+from pineforge_codegen.lexer import Lexer
+from pineforge_codegen.parser import Parser
 from tests._compile import compile_cpp
 
 
@@ -966,6 +969,191 @@ observed = blocked()
     assert "std::string blocked(" not in cpp
 
 
+def _direct_terminal_element_shadow_source(
+    *,
+    shadow_kind: str | None,
+    producer_later: bool,
+    namespace_spelling: bool,
+) -> str:
+    """Build one direct-terminal lexical-shadow matrix cell."""
+    producer = '''produce() =>
+    unused = ta.sma(close, 2)
+    "x"
+'''
+    terminal = (
+        "array.get(array.copy(array.from(produce())), 0)"
+        if namespace_spelling
+        else "array.from(produce()).copy().get(0)"
+    )
+    if shadow_kind == "local":
+        reader = f'''read_value() =>
+    produce = 1
+    {terminal}
+'''
+        invocation = "read_value()"
+    elif shadow_kind == "parameter":
+        reader = f'''read_value(float produce) =>
+    {terminal}
+'''
+        invocation = "read_value(1.0)"
+    else:
+        reader = f'''read_value() =>
+    {terminal}
+'''
+        invocation = "read_value()"
+    definitions = reader + producer if producer_later else producer + reader
+    return (
+        "//@version=6\n"
+        'strategy("Direct terminal element shadow")\n'
+        f"{definitions}"
+        f"observed = {invocation}\n"
+    )
+
+
+def _direct_shadow_preflight_error(
+    source: str,
+    *,
+    filename: str,
+):
+    ast = Parser(
+        Lexer(source, filename=filename).tokenize(),
+        source=source,
+        filename=filename,
+    ).parse()
+    analyzer = Analyzer(ast, filename=filename)
+    with pytest.raises(CompileError) as caught:
+        analyzer.analyze()
+
+    # This rejection is a whole-program syntactic preflight. No function or
+    # call-site analysis may have begun, regardless of source order.
+    assert analyzer._func_defs == {}
+    assert analyzer._func_infos == []
+    assert analyzer._func_call_cs_map == {}
+    assert analyzer._func_call_site_count == {}
+    assert analyzer._func_ta_ranges == {}
+    assert analyzer._ta_call_sites == []
+    return caught.value.diagnostics
+
+
+@pytest.mark.parametrize(
+    ("shadow_kind", "producer_later", "namespace_spelling"),
+    product(("local", "parameter"), (False, True), (False, True)),
+)
+def test_direct_terminal_element_callee_shadow_matrix_is_rejected(
+    shadow_kind: str,
+    producer_later: bool,
+    namespace_spelling: bool,
+):
+    """All 2^3 lexical-shadow/order/spelling cells fail before codegen."""
+    source = _direct_terminal_element_shadow_source(
+        shadow_kind=shadow_kind,
+        producer_later=producer_later,
+        namespace_spelling=namespace_spelling,
+    )
+    filename = (
+        "direct-shadow:"
+        f"{shadow_kind}-{int(producer_later)}-{int(namespace_spelling)}.pine"
+    )
+
+    diagnostics = _direct_shadow_preflight_error(source, filename=filename)
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic.level.value == "error"
+    assert diagnostic.phase.value == "ANALYZER"
+    assert diagnostic.location.file == filename
+    expected_line = {
+        ("local", False): 8,
+        ("local", True): 5,
+        ("parameter", False): 7,
+        ("parameter", True): 4,
+    }[(shadow_kind, producer_later)]
+    expected_col = 44 if namespace_spelling else 23
+    assert (
+        diagnostic.location.line,
+        diagnostic.location.col,
+        diagnostic.location.end_col,
+    ) == (expected_line, expected_col, expected_col + 1)
+    assert diagnostic.message == (
+        "Direct temporary-array element call 'produce()' resolves to a local "
+        "or parameter, not a user-defined function."
+    )
+
+
+@pytest.mark.parametrize(
+    ("producer_later", "namespace_spelling"),
+    product((False, True), repeat=2),
+)
+def test_direct_terminal_element_callee_no_shadow_controls(
+    producer_later: bool,
+    namespace_spelling: bool,
+):
+    source = _direct_terminal_element_shadow_source(
+        shadow_kind=None,
+        producer_later=producer_later,
+        namespace_spelling=namespace_spelling,
+    )
+
+    cpp = transpile(source)
+    assert "std::string read_value_cs0(" in cpp
+    assert "double read_value_cs0(" not in cpp
+    assert "produce_cs0()" in cpp
+    assert "produce_cs1" not in cpp
+    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    compile_cpp(cpp)
+
+
+def test_direct_terminal_expired_block_local_does_not_shadow_element_callee():
+    source = r'''//@version=6
+strategy("Expired block shadow")
+produce() =>
+    unused = ta.sma(close, 2)
+    "x"
+reader() =>
+    if close > open
+        produce = 1
+    array.from(produce()).copy().get(0)
+observed = reader()
+'''
+
+    cpp = transpile(source)
+    assert "std::string reader_cs0(" in cpp
+    assert "double reader_cs0(" not in cpp
+    assert "produce_cs0()" in cpp
+    assert "produce_cs1" not in cpp
+    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    compile_cpp(cpp)
+
+
+def test_direct_terminal_top_level_tuple_binding_shadows_element_callee():
+    source = r'''//@version=6
+strategy("Direct terminal tuple shadow")
+produce() =>
+    unused = ta.sma(close, 2)
+    "x"
+reader() =>
+    [produce, other] = [1, 2]
+    array.from(produce()).copy().get(0)
+observed = reader()
+'''
+    diagnostics = _direct_shadow_preflight_error(
+        source,
+        filename="direct-shadow:tuple.pine",
+    )
+
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic.phase.value == "ANALYZER"
+    assert (
+        diagnostic.location.line,
+        diagnostic.location.col,
+        diagnostic.location.end_col,
+    ) == (8, 23, 24)
+    assert diagnostic.message == (
+        "Direct temporary-array element call 'produce()' resolves to a local "
+        "or parameter, not a user-defined function."
+    )
+
+
 @pytest.mark.parametrize(
     ("signature", "shadow_declaration", "call"),
     (
@@ -981,6 +1169,7 @@ def test_forward_local_identity_element_callee_shadow_remains_fail_closed(
     producer_first: bool,
 ):
     producer = '''produce() =>
+    unused = ta.sma(close, 2)
     "x"
 '''
     reader = f'''{signature} =>
@@ -995,11 +1184,177 @@ def test_forward_local_identity_element_callee_shadow_remains_fail_closed(
         f"observed = {call}\n"
     )
 
-    with pytest.raises(
-        CompileError,
-        match="resolves to a local or parameter",
-    ):
-        transpile(source)
+    shadow_kind = "local" if shadow_declaration else "parameter"
+    filename = f"alias-shadow:{shadow_kind}-{int(producer_first)}.pine"
+    diagnostics = _direct_shadow_preflight_error(
+        source,
+        filename=filename,
+    )
+
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic.level.value == "error"
+    assert diagnostic.phase.value == "ANALYZER"
+    assert diagnostic.location.file == filename
+    expected_line = {
+        ("local", False): 5,
+        ("local", True): 8,
+        ("parameter", False): 4,
+        ("parameter", True): 7,
+    }[(shadow_kind, producer_first)]
+    assert (
+        diagnostic.location.line,
+        diagnostic.location.col,
+        diagnostic.location.end_col,
+    ) == (expected_line, 37, 38)
+    assert diagnostic.message == (
+        "Direct temporary-array element call 'produce()' resolves to a local "
+        "or parameter, not a user-defined function."
+    )
+
+
+def test_forward_local_identity_expired_block_local_does_not_shadow_element_callee():
+    source = r'''//@version=6
+strategy("Expired block alias shadow")
+produce() =>
+    unused = ta.sma(close, 2)
+    "x"
+reader() =>
+    if close > open
+        produce = 1
+    local_value = array.from(produce()).copy().get(0)
+    local_value
+observed = reader()
+'''
+
+    cpp = transpile(source)
+    assert "std::string reader_cs0(" in cpp
+    assert "double reader_cs0(" not in cpp
+    assert "std::string local_value =" in cpp
+    assert "produce_cs0()" in cpp
+    assert "produce_cs1" not in cpp
+    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    compile_cpp(cpp)
+
+
+@pytest.mark.parametrize("producer_first", (False, True))
+def test_forward_local_identity_self_named_alias_rhs_uses_global_udf(
+    producer_first: bool,
+):
+    producer = '''produce() =>
+    unused = ta.sma(close, 2)
+    "x"
+'''
+    reader = '''reader() =>
+    produce = array.from(produce()).copy().get(0)
+    produce
+'''
+    definitions = producer + reader if producer_first else reader + producer
+    source = (
+        "//@version=6\n"
+        'strategy("Self-named alias RHS")\n'
+        f"{definitions}"
+        "observed = reader()\n"
+    )
+
+    cpp = transpile(source)
+    assert "std::string reader_cs0(" in cpp
+    assert "double reader_cs0(" not in cpp
+    assert "std::string produce =" in cpp
+    assert "produce_cs0()" in cpp
+    assert "produce_cs1" not in cpp
+    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    compile_cpp(cpp)
+
+
+@pytest.mark.parametrize(
+    ("producer_first", "namespace_spelling"),
+    product((False, True), repeat=2),
+)
+def test_forward_local_identity_top_level_tuple_binding_shadows_element_callee(
+    producer_first: bool,
+    namespace_spelling: bool,
+):
+    producer = '''produce() =>
+    unused = ta.sma(close, 2)
+    "x"
+'''
+    initializer = (
+        "array.get(array.copy(array.from(produce())), 0)"
+        if namespace_spelling
+        else "array.from(produce()).copy().get(0)"
+    )
+    reader = f'''reader() =>
+    [produce, other] = [1, 2]
+    local_value = {initializer}
+    local_value
+'''
+    definitions = producer + reader if producer_first else reader + producer
+    source = (
+        "//@version=6\n"
+        'strategy("Adjacent alias tuple shadow")\n'
+        f"{definitions}"
+        "observed = reader()\n"
+    )
+    filename = (
+        "alias-shadow:tuple-"
+        f"{int(producer_first)}-{int(namespace_spelling)}.pine"
+    )
+    diagnostics = _direct_shadow_preflight_error(
+        source,
+        filename=filename,
+    )
+
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic.level.value == "error"
+    assert diagnostic.phase.value == "ANALYZER"
+    assert diagnostic.location.file == filename
+    expected_line = 8 if producer_first else 5
+    expected_col = 58 if namespace_spelling else 37
+    assert (
+        diagnostic.location.line,
+        diagnostic.location.col,
+        diagnostic.location.end_col,
+    ) == (expected_line, expected_col, expected_col + 1)
+    assert diagnostic.message == (
+        "Direct temporary-array element call 'produce()' resolves to a local "
+        "or parameter, not a user-defined function."
+    )
+
+
+@pytest.mark.parametrize("alias_carrier", (False, True))
+def test_expired_block_tuple_binding_does_not_shadow_element_callee(
+    alias_carrier: bool,
+):
+    terminal = "array.from(produce()).copy().get(0)"
+    return_lines = (
+        f"    local_value = {terminal}\n    local_value\n"
+        if alias_carrier
+        else f"    {terminal}\n"
+    )
+    source = (
+        "//@version=6\n"
+        'strategy("Expired block tuple shadow")\n'
+        "produce() =>\n"
+        "    unused = ta.sma(close, 2)\n"
+        '    "x"\n'
+        "pair() =>\n"
+        "    [1, 2]\n"
+        "reader() =>\n"
+        "    if close > open\n"
+        "        [produce, other] = pair()\n"
+        f"{return_lines}"
+        "observed = reader()\n"
+    )
+
+    cpp = transpile(source)
+    assert "std::string reader_cs0(" in cpp
+    assert "double reader_cs0(" not in cpp
+    assert "produce_cs0()" in cpp
+    assert "produce_cs1" not in cpp
+    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    compile_cpp(cpp)
 
 
 @pytest.mark.parametrize(

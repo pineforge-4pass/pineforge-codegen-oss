@@ -403,6 +403,58 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 ]
             )
 
+    def _check_direct_terminal_array_element_callee_shadows(self) -> None:
+        """Reject terminal temporary reads whose element call is shadowed.
+
+        This is a whole-program syntactic preflight: it runs before the first
+        AST visit so definition order cannot leave partial function, call-site,
+        or TA state behind. Only bindings whose lexical lifetime reaches the
+        read are relevant: FuncDef parameters and declarations in the immediate
+        function body before the direct terminal or adjacent alias initializer.
+        The alias declaration is not active on its own RHS. Nested block locals
+        have expired and must not shadow the global UDF at either read point.
+        """
+        for func_def in self._ast.body:
+            if not isinstance(func_def, FuncDef):
+                continue
+            terminal = self._direct_terminal_return_expr(func_def)
+            element_call: FuncCall | None = None
+            read_index: int | None = None
+            if self._terminal_array_get_uses_direct_temporary(terminal):
+                element_call = (
+                    self._direct_terminal_array_temporary_element_call(
+                        terminal
+                    )
+                )
+                read_index = len(func_def.body) - 1
+            else:
+                alias_candidate = (
+                    self._direct_terminal_array_temporary_alias_candidate(
+                        func_def, terminal
+                    )
+                )
+                if alias_candidate is not None:
+                    read_index, _, element_call = alias_candidate
+            if element_call is None or read_index is None:
+                continue
+
+            bindings = set(func_def.params)
+            for statement in func_def.body[:read_index]:
+                if isinstance(statement, VarDecl):
+                    bindings.add(statement.name)
+                elif isinstance(statement, TupleAssign):
+                    bindings.update(
+                        name for name in statement.names if name != "_"
+                    )
+            if element_call.callee.name not in bindings:
+                continue
+            self._error(
+                "Direct temporary-array element call "
+                f"'{element_call.callee.name}()' resolves to a local or "
+                "parameter, not a user-defined function.",
+                element_call.loc,
+            )
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
@@ -410,6 +462,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def analyze(self) -> AnalyzerContext:
         """Run semantic analysis and return the analyzer context."""
         self._ensure_pine_v6()
+        self._check_direct_terminal_array_element_callee_shadows()
         self._visit(self._ast)
         self._check_direct_terminal_array_temporary_cycles()
         self._register_resolved_direct_terminal_array_forward_calls()
@@ -627,6 +680,40 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         """
         if self._terminal_array_get_uses_direct_temporary(terminal):
             return terminal
+        alias_candidate = self._direct_terminal_array_temporary_alias_candidate(
+            func_def, terminal
+        )
+        if alias_candidate is None:
+            return None
+        _, declaration, element_call = alias_candidate
+
+        # Raw-name lookup is safe only because the exact declaration identity
+        # was attached to its live lexical Symbol by _visit_VarDecl.
+        symbol = self._symbols.resolve(terminal.name)
+        if (
+            symbol is None
+            or getattr(symbol, "_pf_decl_node_id", None) != id(declaration)
+        ):
+            return None
+
+        known_definition = self._func_defs.get(element_call.callee.name)
+        if known_definition is not None and known_definition.params:
+            return None
+        return declaration.value
+
+    def _direct_terminal_array_temporary_alias_candidate(
+        self,
+        func_def: FuncDef,
+        terminal: ASTNode | None,
+    ) -> tuple[int, VarDecl, FuncCall] | None:
+        """Return one exact adjacent identity alias and its element call.
+
+        This helper is deliberately syntactic so the same program point can be
+        checked before any AST visit and captured later while declaration
+        identity is live. The declaration itself is therefore excluded from
+        the caller's active-binding scan: Pine evaluates its initializer before
+        introducing the new local name.
+        """
         if not isinstance(terminal, Identifier):
             return None
 
@@ -646,15 +733,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         ):
             return None
 
-        # Raw-name lookup is safe only because the exact declaration identity
-        # was attached to its live lexical Symbol by _visit_VarDecl.
-        symbol = self._symbols.resolve(terminal.name)
-        if (
-            symbol is None
-            or getattr(symbol, "_pf_decl_node_id", None) != id(declaration)
-        ):
-            return None
-
         initializer = declaration.value
         if not self._terminal_array_get_uses_direct_temporary(initializer):
             return None
@@ -667,20 +745,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             or element_call.kwargs
         ):
             return None
-        known_definition = self._func_defs.get(element_call.callee.name)
-        element_symbol = self._symbols.resolve(element_call.callee.name)
-        if element_symbol is not None and (
-            known_definition is None or element_symbol.scope != "global"
-        ):
-            self._error(
-                "Direct temporary-array element call "
-                f"'{element_call.callee.name}()' resolves to a local or "
-                "parameter, not a user-defined function.",
-                element_call.loc,
-            )
-        if known_definition is not None and known_definition.params:
-            return None
-        return initializer
+        return declaration_index, declaration, element_call
 
     @classmethod
     def _direct_terminal_array_temporary_element_call(
