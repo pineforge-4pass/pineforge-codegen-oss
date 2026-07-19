@@ -603,6 +603,85 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if not changed:
                 break
 
+    def _direct_terminal_array_temporary_return_expr(
+        self,
+        func_def: FuncDef,
+        terminal: ASTNode | None,
+    ) -> ASTNode | None:
+        """Return the exact temporary read that determines a UDF return.
+
+        The established path accepts a direct terminal ``array.get``.  A
+        single ordinary local may also carry that same value to a bare
+        terminal identity return::
+
+            reader() =>
+                value = array.from(later()).get(0)
+                value
+
+        Capture only that adjacent one-hop lexical shape while the function
+        scope is still live.  Deferred reconciliation can then reuse the
+        initializer AST without re-visiting it after ``later`` is known.
+        Persistent/typed locals, alias chains, intervening statements, block
+        bindings, argument-bearing element calls, and every non-direct
+        producer stay outside this path.
+        """
+        if self._terminal_array_get_uses_direct_temporary(terminal):
+            return terminal
+        if not isinstance(terminal, Identifier):
+            return None
+
+        declarations = [
+            (index, stmt)
+            for index, stmt in enumerate(func_def.body[:-1])
+            if isinstance(stmt, VarDecl) and stmt.name == terminal.name
+        ]
+        if len(declarations) != 1:
+            return None
+        declaration_index, declaration = declarations[0]
+        if (
+            declaration.is_var
+            or declaration.is_varip
+            or declaration.type_hint is not None
+            or declaration_index != len(func_def.body) - 2
+        ):
+            return None
+
+        # Raw-name lookup is safe only because the exact declaration identity
+        # was attached to its live lexical Symbol by _visit_VarDecl.
+        symbol = self._symbols.resolve(terminal.name)
+        if (
+            symbol is None
+            or getattr(symbol, "_pf_decl_node_id", None) != id(declaration)
+        ):
+            return None
+
+        initializer = declaration.value
+        if not self._terminal_array_get_uses_direct_temporary(initializer):
+            return None
+        element_call = self._direct_terminal_array_temporary_element_call(
+            initializer
+        )
+        if (
+            element_call is None
+            or element_call.args
+            or element_call.kwargs
+        ):
+            return None
+        known_definition = self._func_defs.get(element_call.callee.name)
+        element_symbol = self._symbols.resolve(element_call.callee.name)
+        if element_symbol is not None and (
+            known_definition is None or element_symbol.scope != "global"
+        ):
+            self._error(
+                "Direct temporary-array element call "
+                f"'{element_call.callee.name}()' resolves to a local or "
+                "parameter, not a user-defined function.",
+                element_call.loc,
+            )
+        if known_definition is not None and known_definition.params:
+            return None
+        return initializer
+
     @classmethod
     def _direct_terminal_array_temporary_element_call(
         cls,
@@ -3186,9 +3265,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # this narrow to map terminals so general/nonterminal inference and
         # generated output remain unchanged.
         terminal_ret_expr = self._direct_terminal_return_expr(node)
-        if self._terminal_array_get_uses_direct_temporary(terminal_ret_expr):
+        temporary_return_expr = (
+            self._direct_terminal_array_temporary_return_expr(
+                node, terminal_ret_expr
+            )
+        )
+        if temporary_return_expr is not None:
             self._direct_terminal_array_temporary_exprs[node.name] = (
-                terminal_ret_expr
+                temporary_return_expr
             )
         terminal_direct_return_spec = self._type_spec_from_expr(
             terminal_ret_expr

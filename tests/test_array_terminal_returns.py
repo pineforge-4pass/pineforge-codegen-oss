@@ -761,3 +761,376 @@ def test_temporary_builtin_array_producer_matrix(
     vector_type = "std::vector<std::string>" if string else "std::vector<int>"
     assert vector_type in cpp
     compile_cpp(cpp)
+
+
+@pytest.mark.parametrize(
+    ("literal", "expected_cpp"),
+    (
+        ("7", "int"),
+        ("1.5", "double"),
+        ("true", "bool"),
+        ('"x"', "std::string"),
+        ("color.red", "int"),
+    ),
+)
+def test_forward_local_identity_return_preserves_every_primitive_signature(
+    literal: str,
+    expected_cpp: str,
+):
+    source = f'''//@version=6
+strategy("Forward local identity primitive")
+read_value() =>
+    local_value = array.from(produce()).copy().get(0)
+    local_value
+produce() =>
+    {literal}
+observed = read_value()
+'''
+
+    cpp = transpile(source)
+    assert f"{expected_cpp} read_value(" in cpp
+    assert f"{expected_cpp} local_value =" in cpp
+    compile_cpp(cpp)
+
+
+@pytest.mark.parametrize(
+    ("functional", "keyword", "copy_layer", "producer_first"),
+    product((False, True), repeat=4),
+)
+def test_forward_local_identity_stateful_representation_matrix(
+    functional: bool,
+    keyword: bool,
+    copy_layer: bool,
+    producer_first: bool,
+):
+    """All 2^4 source-order/get/copy cells preserve one stateful call site."""
+    producer = '''produce() =>
+    unused = ta.sma(close, 2)
+    "x"
+'''
+    receiver = "array.from(produce())"
+    if copy_layer:
+        receiver = (
+            f"array.copy(id={receiver})"
+            if functional
+            else f"{receiver}.copy()"
+        )
+    if functional:
+        initializer = (
+            f"array.get(id={receiver}, index=0)"
+            if keyword
+            else f"array.get({receiver}, 0)"
+        )
+    else:
+        initializer = (
+            f"{receiver}.get(index=0)"
+            if keyword
+            else f"{receiver}.get(0)"
+        )
+    reader = (
+        "read_value() =>\n"
+        f"    local_value = {initializer}\n"
+        "    local_value\n"
+    )
+    definitions = producer + reader if producer_first else reader + producer
+    source = (
+        "//@version=6\n"
+        'strategy("Forward local identity representation matrix")\n'
+        f"{definitions}"
+        "observed = read_value()\n"
+    )
+
+    cpp = transpile(source)
+    assert "std::string read_value_cs0(" in cpp
+    assert "double read_value_cs0(" not in cpp
+    assert "std::string local_value =" in cpp
+    assert "produce_cs0()" in cpp
+    assert "produce_cs1" not in cpp
+    assert cpp.count("ta::SMA _ta_sma_1;") == 1
+    compile_cpp(cpp)
+
+
+@pytest.mark.parametrize(
+    "definitions",
+    (
+        '''reader() =>
+    local_value = array.from(reader()).copy().get(0)
+    local_value
+''',
+        '''first_reader() =>
+    local_value = array.from(second_reader()).copy().get(0)
+    local_value
+second_reader() =>
+    first_reader()
+''',
+    ),
+)
+def test_forward_local_identity_temporary_reader_recursion_is_rejected(
+    definitions: str,
+):
+    source = (
+        "//@version=6\n"
+        'strategy("Forward local identity recursion")\n'
+        f"{definitions}"
+        + (
+            "observed = reader()\n"
+            if definitions.startswith("reader")
+            else "observed = first_reader()\n"
+        )
+    )
+
+    with pytest.raises(
+        CompileError,
+        match="Recursive direct temporary-array reader cycle",
+    ):
+        transpile(source)
+
+
+@pytest.mark.parametrize("storage", ("var", "varip"))
+def test_forward_local_identity_persistent_local_remains_fail_closed(
+    storage: str,
+):
+    source = f'''//@version=6
+strategy("Forward persistent local boundary")
+blocked() =>
+    {storage} local_value = array.from(produce()).copy().get(0)
+    local_value
+produce() =>
+    "x"
+observed = blocked()
+'''
+
+    if storage == "varip":
+        with pytest.raises(CompileError, match="varip is not supported"):
+            transpile(source)
+        return
+    cpp = transpile(source)
+    assert "std::string blocked(" not in cpp
+
+
+@pytest.mark.parametrize(
+    ("type_hint", "literal", "expected_cpp", "compiles"),
+    (
+        ("float", "7", "double", True),
+        ("string", "7", "std::string", False),
+    ),
+)
+def test_forward_local_identity_explicit_type_hint_remains_authoritative(
+    type_hint: str,
+    literal: str,
+    expected_cpp: str,
+    compiles: bool,
+):
+    source = f'''//@version=6
+strategy("Forward typed local boundary")
+read_value() =>
+    {type_hint} local_value = array.from(produce()).copy().get(0)
+    local_value
+produce() =>
+    {literal}
+observed = read_value()
+'''
+
+    cpp = transpile(source)
+    assert f"{expected_cpp} read_value(" in cpp
+    assert f"{expected_cpp} local_value =" in cpp
+    assert "int read_value(" not in cpp
+    if compiles:
+        compile_cpp(cpp)
+    else:
+        # Pine rejects the incompatible declaration. Keep its authoritative
+        # hint instead of making the invalid source appear valid by refining
+        # the UDF return to the initializer's element type.
+        assert "std::vector<int>" in cpp
+
+
+@pytest.mark.parametrize(
+    "earlier_declaration",
+    ("float local_value = 0.0", "var local_value = 0.0"),
+)
+def test_forward_local_identity_requires_one_unique_same_named_declaration(
+    earlier_declaration: str,
+):
+    source = f'''//@version=6
+strategy("Forward duplicate local boundary")
+blocked() =>
+    {earlier_declaration}
+    local_value = array.from(produce()).copy().get(0)
+    local_value
+produce() =>
+    "x"
+observed = blocked()
+'''
+
+    cpp = transpile(source)
+    assert "std::string blocked(" not in cpp
+
+
+@pytest.mark.parametrize(
+    ("signature", "shadow_declaration", "call"),
+    (
+        ("blocked()", "    produce = 1\n", "blocked()"),
+        ("blocked(float produce)", "", "blocked(1.0)"),
+    ),
+)
+@pytest.mark.parametrize("producer_first", (False, True))
+def test_forward_local_identity_element_callee_shadow_remains_fail_closed(
+    signature: str,
+    shadow_declaration: str,
+    call: str,
+    producer_first: bool,
+):
+    producer = '''produce() =>
+    "x"
+'''
+    reader = f'''{signature} =>
+{shadow_declaration}    local_value = array.from(produce()).copy().get(0)
+    local_value
+'''
+    definitions = producer + reader if producer_first else reader + producer
+    source = (
+        "//@version=6\n"
+        'strategy("Forward element callee shadow boundary")\n'
+        f"{definitions}"
+        f"observed = {call}\n"
+    )
+
+    with pytest.raises(
+        CompileError,
+        match="resolves to a local or parameter",
+    ):
+        transpile(source)
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        '''    first_value = array.from(produce()).copy().get(0)
+    local_value = first_value
+    local_value
+''',
+        '''    local_value = array.from(produce()).copy().get(0)
+    local_value := "replacement"
+    local_value
+''',
+        '''    [local_value, other] = [array.from(produce()).copy().get(0), 1]
+    local_value
+''',
+        '''    if close > open
+        local_value = array.from(produce()).copy().get(0)
+    local_value
+''',
+        '''    local_value = array.from(produce()).copy().get(0)
+    extras = array.from(local_value)
+    local_value
+''',
+    ),
+)
+def test_forward_local_identity_non_direct_bindings_remain_fail_closed(
+    body: str,
+):
+    source = (
+        "//@version=6\n"
+        'strategy("Forward non-direct local boundary")\n'
+        "blocked() =>\n"
+        f"{body}"
+        "produce() =>\n"
+        '    "x"\n'
+        "observed = blocked()\n"
+    )
+
+    cpp = transpile(source)
+    assert "std::string blocked(" not in cpp
+
+
+@pytest.mark.parametrize(
+    "initializer",
+    (
+        'array.from(produce("x")).copy().get(0)',
+        "make_values().get(0)",
+        "array.slice(array.from(produce()), 0, 1).get(0)",
+    ),
+)
+def test_forward_local_identity_non_direct_producers_remain_fail_closed(
+    initializer: str,
+):
+    producer = (
+        '''produce(string value) =>
+    value
+'''
+        if 'produce("x")' in initializer
+        else '''produce() =>
+    "x"
+make_values() =>
+    array.from("x")
+'''
+    )
+    source = (
+        "//@version=6\n"
+        'strategy("Forward non-direct producer boundary")\n'
+        "blocked() =>\n"
+        f"    local_value = {initializer}\n"
+        "    local_value\n"
+        f"{producer}"
+        "observed = blocked()\n"
+    )
+
+    if 'produce("x")' in initializer:
+        with pytest.raises(CompileError, match="Unknown function 'produce"):
+            transpile(source)
+        return
+    cpp = transpile(source)
+    assert "std::string blocked(" not in cpp
+
+
+def test_forward_local_identity_defaulted_parameter_still_fails_closed():
+    source = r'''//@version=6
+strategy("Forward local default parameter boundary")
+blocked() =>
+    local_value = array.from(produce()).copy().get(0)
+    local_value
+produce(string value = "x") =>
+    value
+observed = blocked()
+'''
+
+    with pytest.raises(CompileError, match="Unknown function 'produce"):
+        transpile(source)
+
+
+@pytest.mark.parametrize(
+    "preamble_and_initializer",
+    (
+        '''type Item
+    int value
+blocked() =>
+    local_value = array.from(Item.new(1)).copy().get(0)
+''',
+        '''blocked() =>
+    local_value = array.from(array.from("x")).copy().get(0)
+''',
+        '''blocked() =>
+    int array = 1
+    local_value = array.get(array.from(produce()), 0)
+''',
+    ),
+)
+def test_forward_local_identity_reference_or_shadowed_boundaries_stay_closed(
+    preamble_and_initializer: str,
+):
+    source = (
+        "//@version=6\n"
+        'strategy("Forward reference boundary")\n'
+        f"{preamble_and_initializer}"
+        "    local_value\n"
+        "produce() =>\n"
+        '    "x"\n'
+        "observed = blocked()\n"
+    )
+
+    if "int array = 1" in preamble_and_initializer:
+        with pytest.raises(CompileError, match="Unknown function 'produce"):
+            transpile(source)
+        return
+    cpp = transpile(source)
+    assert "std::string blocked(" not in cpp
