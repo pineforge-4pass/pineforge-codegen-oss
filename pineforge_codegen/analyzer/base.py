@@ -603,8 +603,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if not changed:
                 break
 
-    @staticmethod
+    @classmethod
     def _direct_terminal_array_temporary_element_call(
+        cls,
         terminal: ASTNode | None,
     ) -> FuncCall | None:
         """Return a direct UDF element call from the registered shape."""
@@ -624,15 +625,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         else:
             receiver = callee.object
 
-        while (
-            isinstance(receiver, FuncCall)
-            and isinstance(receiver.callee, MemberAccess)
-            and isinstance(receiver.callee.object, Identifier)
-            and receiver.callee.object.name == "array"
-            and receiver.callee.member == "copy"
-            and receiver.args
-        ):
-            receiver = receiver.args[0]
+        while True:
+            copy_source = cls._direct_namespace_array_copy_source(receiver)
+            if copy_source is not None:
+                receiver = copy_source
+                continue
+            if (
+                isinstance(receiver, FuncCall)
+                and isinstance(receiver.callee, MemberAccess)
+                and receiver.callee.member == "copy"
+                and not receiver.args
+                and not receiver.kwargs
+            ):
+                receiver = receiver.callee.object
+                continue
+            break
         if not (
             isinstance(receiver, FuncCall)
             and isinstance(receiver.callee, MemberAccess)

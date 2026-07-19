@@ -294,6 +294,16 @@ class CallVisitor:
 
     def _array_function_arg_nodes(self, method: str, node: FuncCall) -> list:
         """Merge ``array.method(id=..., ...)`` arguments in signature order."""
+        if method == "copy":
+            if len(node.args) == 1 and not node.kwargs:
+                return list(node.args)
+            if not node.args and set(node.kwargs) == {"id"}:
+                return [node.kwargs["id"]]
+            self._codegen_error(
+                node,
+                "array.copy: expected exactly one receiver 'id'",
+                hint="Use array.copy(source) or array.copy(id=source).",
+            )
         param_names = CHECKED_ARRAY_METHOD_KWARGS.get(method)
         if param_names is None:
             return list(node.args)
@@ -1239,7 +1249,9 @@ class CallVisitor:
                 elems = ", ".join(self._visit_expr(a) for a in node.args)
                 return f"{self._type_spec_to_cpp(spec)}{{{elems}}}"
             # Method calls: array.method(arr, args...)
-            if func_name in ARRAY_METHODS and (node.args or node.kwargs):
+            if func_name in ARRAY_METHODS and (
+                node.args or node.kwargs or func_name == "copy"
+            ):
                 all_nodes = self._array_function_arg_nodes(func_name, node)
                 if not all_nodes:
                     return "0"

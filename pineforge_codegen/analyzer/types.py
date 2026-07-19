@@ -325,12 +325,20 @@ class TypeHelper:
                     return TypeSpec.array(self._pine_type_to_spec(first))
                 return TypeSpec.array(TypeSpec.primitive("float"))
             # Functional-form array element/copy accessors: the receiver is
-            # the first argument (``array.copy(arr)``), mirroring the
-            # method-form handling below (``arr.copy()``).
-            if (ns == "array" and value.args
+            # the first argument (``array.copy(arr)``), or the exact ``id``
+            # keyword for ``array.copy(id=arr)``.  The latter deliberately
+            # uses the shape validator shared by terminal-return recovery so
+            # duplicate/unknown keyword forms do not acquire a type by
+            # accident.
+            if (ns == "array"
                     and func in ("copy", "slice", "get", "first", "last",
                                  "pop", "shift", "remove")):
-                arg_spec = self._type_spec_from_expr(value.args[0])
+                receiver = None
+                if func == "copy":
+                    receiver = self._direct_namespace_array_copy_source(value)
+                elif value.args:
+                    receiver = value.args[0]
+                arg_spec = self._type_spec_from_expr(receiver)
                 if arg_spec is not None and arg_spec.kind == "array":
                     if func in ("copy", "slice"):
                         return arg_spec
@@ -708,6 +716,35 @@ class TypeHelper:
             return callee.object
         return None
 
+    @staticmethod
+    def _direct_namespace_array_copy_source(
+        value: ASTNode | None,
+    ) -> ASTNode | None:
+        """Return the sole receiver of an exact ``array.copy`` call shape.
+
+        Pine v6 accepts either ``array.copy(source)`` or
+        ``array.copy(id=source)``.  Keep this structural helper exact so an
+        invalid duplicate receiver or an unrelated keyword stays fail closed.
+        Namespace shadowing is intentionally checked by the callers whose
+        lexical scope is still live.
+        """
+        if not isinstance(value, FuncCall) or not isinstance(
+            value.callee, MemberAccess
+        ):
+            return None
+        callee = value.callee
+        if not (
+            isinstance(callee.object, Identifier)
+            and callee.object.name == "array"
+            and callee.member == "copy"
+        ):
+            return None
+        if len(value.args) == 1 and not value.kwargs:
+            return value.args[0]
+        if not value.args and set(value.kwargs) == {"id"}:
+            return value.kwargs["id"]
+        return None
+
     def _is_unshadowed_direct_array_value_producer(
         self,
         value: ASTNode | None,
@@ -727,19 +764,22 @@ class TypeHelper:
         if namespace_producer:
             if callee.member != "copy":
                 return True
-            if len(value.args) != 1 or value.kwargs:
+            source = self._direct_namespace_array_copy_source(value)
+            if source is None:
                 return False
-            source = value.args[0]
             if isinstance(source, Identifier):
                 source_spec = self._type_spec_from_expr(source)
                 return source_spec is not None and source_spec.kind == "array"
             return self._is_unshadowed_direct_array_value_producer(source)
-        if callee.member != "copy" or not isinstance(
-            callee.object, Identifier
-        ):
+        if callee.member != "copy" or value.args or value.kwargs:
             return False
-        receiver_spec = self._type_spec_from_expr(callee.object)
-        return receiver_spec is not None and receiver_spec.kind == "array"
+        if isinstance(callee.object, Identifier):
+            receiver_spec = self._type_spec_from_expr(callee.object)
+            return receiver_spec is not None and receiver_spec.kind == "array"
+        # A no-argument method copy preserves the value type of an existing
+        # direct producer. Recurse only through that already-bounded shape;
+        # arbitrary UDF/slice/map receivers remain excluded.
+        return self._is_unshadowed_direct_array_value_producer(callee.object)
 
     def _direct_array_value_spec_without_visiting(
         self,
@@ -760,10 +800,10 @@ class TypeHelper:
             and callee.object.name == "array"
             and self._symbols.resolve("array") is None
             and callee.member == "copy"
-            and value.args
-            and isinstance(value.args[0], Identifier)
         ):
-            source = value.args[0]
+            candidate = self._direct_namespace_array_copy_source(value)
+            if isinstance(candidate, Identifier):
+                source = candidate
         elif callee.member == "copy" and isinstance(
             callee.object, Identifier
         ):
@@ -832,6 +872,11 @@ class TypeHelper:
         ):
             return None
         callee = value.callee
+        if callee.member == "copy" and not value.args and not value.kwargs:
+            # Method syntax carries its source in the callee object rather
+            # than in ``args``. Peel only a direct producer and stay entirely
+            # on cached metadata so a stateful element call is never revisited.
+            return self._cached_direct_array_value_spec(callee.object)
         if not (
             isinstance(callee.object, Identifier)
             and callee.object.name == "array"
@@ -859,8 +904,10 @@ class TypeHelper:
         if producer == "from" and value.args:
             element = self._cached_primitive_expr_spec(value.args[0])
             return TypeSpec.array(element) if element is not None else None
-        if producer == "copy" and value.args:
-            return self._cached_direct_array_value_spec(value.args[0])
+        if producer == "copy":
+            source = self._direct_namespace_array_copy_source(value)
+            if source is not None:
+                return self._cached_direct_array_value_spec(source)
         return None
 
     def _cached_terminal_temporary_array_get_spec(
