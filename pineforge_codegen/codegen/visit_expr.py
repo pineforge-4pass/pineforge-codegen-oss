@@ -366,7 +366,9 @@ class ExprVisitor:
         # Inline known constants (literals). Input-backed names are NOT inlined
         # because strategy_set_input() can override them at runtime; emit the
         # variable name and let get_input_*() produce the current value.
-        if name in self._known_vars and name not in self._input_backed_vars:
+        if (name in self._known_vars
+                and name not in self._input_backed_vars
+                and not self._known_var_is_lexically_shadowed(name)):
             val = self._known_vars[name]
             if isinstance(val, bool):
                 return "true" if val else "false"
@@ -888,7 +890,8 @@ class ExprVisitor:
         # Inlined compile-time constants (non-input known vars) never hold na.
         if (isinstance(node, Identifier)
                 and node.name in self._known_vars
-                and node.name not in self._input_backed_vars):
+                and node.name not in self._input_backed_vars
+                and not self._known_var_is_lexically_shadowed(node.name)):
             return None
         return "int" if cpp_type in ("int", "int64_t") else "float"
 

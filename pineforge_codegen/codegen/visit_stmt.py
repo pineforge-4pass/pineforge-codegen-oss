@@ -241,6 +241,8 @@ class StmtVisitor:
                 self._lexical_series_bindings[node.name] = (
                     self._decl_binding_is_series(id(node), node.name)
                 )
+            if id(node) not in self._direct_program_var_decl_nodes:
+                self._lexical_known_var_tombstones.add(node.name)
             decl_spec = getattr(
                 self.ctx, "var_member_type_specs_by_node", {}
             ).get(id(node))
@@ -296,6 +298,8 @@ class StmtVisitor:
                     self._lexical_series_bindings[name] = (
                         self._decl_binding_is_series(id(node), name)
                     )
+                    if id(node) not in self._direct_program_tuple_decl_nodes:
+                        self._lexical_known_var_tombstones.add(name)
         elif isinstance(node, IfStmt):
             self._visit_if(node, lines, indent)
         elif isinstance(node, ForStmt):
@@ -509,6 +513,13 @@ class StmtVisitor:
         is_global_member = (
             getattr(self, "_active_func_name", None) is None
             and node.name in self._global_member_vars
+            and (
+                id(node) in self._ordinary_global_var_decl_nodes
+                or (
+                    node.name not in self._direct_program_binding_names
+                    and node.name not in self._callable_state_raw_names
+                )
+            )
         )
 
         def remember_local_type(cpp_type: str | None) -> None:
@@ -980,14 +991,23 @@ class StmtVisitor:
                     lines.append(f"{pad}{safe} {node.op} {val_cpp};")
 
     def _visit_tuple_assign(self, node: TupleAssign, lines: list[str], pad: str) -> None:
+        is_top_level = any(id(node) == id(stmt) for stmt in self.ctx.ast.body)
+        global_targets = (
+            set(getattr(self.ctx, "ordinary_global_binding_names", set()))
+            & self._qualified_func_var_raw_names
+            if is_top_level
+            else set()
+        )
+
         def emit_call_tuple(call_expr: str) -> None:
             """Destructure once, routing exact history elements to Series.
 
             A structured binding always creates scalar C++ locals, which would
             shadow the class Series storage required by a later ``x[n]`` read.
-            Materialize the tuple once whenever any element is exact-Series;
-            scalar elements remain locals while Series elements advance their
-            per-call-site remapped members.
+            It also cannot assign an existing top-level class member. Materialize
+            the tuple once whenever either case applies; ordinary lexical scalar
+            elements remain locals, Series elements advance their remapped
+            members, and top-level scalars assign their class storage.
             """
             series_names = {
                 name
@@ -995,7 +1015,7 @@ class StmtVisitor:
                 if name != "_"
                 and self._decl_binding_is_series(id(node), name)
             }
-            if not series_names:
+            if not series_names and not global_targets.intersection(node.names):
                 binding_names = ", ".join(node.names)
                 lines.append(f"{pad}auto [{binding_names}] = {call_expr};")
                 return
@@ -1014,6 +1034,8 @@ class StmtVisitor:
                     self._emit_history_series_write(
                         lines, pad, safe, value
                     )
+                elif name in global_targets:
+                    lines.append(f"{pad}{safe} = {value};")
                 else:
                     lines.append(f"{pad}auto {safe} = {value};")
 
@@ -1050,6 +1072,10 @@ class StmtVisitor:
                             safe = self._active_var_remap[safe]
                         self._emit_history_series_write(
                             lines, pad, safe, field_expr
+                        )
+                    elif name in global_targets:
+                        lines.append(
+                            f"{pad}{self._safe_name(name)} = {field_expr};"
                         )
                     else:
                         lines.append(f"{pad}double {name} = {field_expr};")
@@ -1111,6 +1137,10 @@ class StmtVisitor:
         self._lexical_drawing_types = dict(saved_drawing_types)
         saved_series_bindings = self._lexical_series_bindings
         self._lexical_series_bindings = dict(saved_series_bindings)
+        saved_known_tombstones = self._lexical_known_var_tombstones
+        self._lexical_known_var_tombstones = set(
+            saved_known_tombstones
+        )
 
         renames = self._block_var_renames.get(id(owner))
         collection_specs = self._block_collection_types.get(id(owner))
@@ -1122,6 +1152,7 @@ class StmtVisitor:
                 previous_map_depth,
                 saved_drawing_types,
                 saved_series_bindings,
+                saved_known_tombstones,
             )
         saved_remap = self._active_var_remap
         if renames:
@@ -1156,6 +1187,7 @@ class StmtVisitor:
             previous_map_depth,
             saved_drawing_types,
             saved_series_bindings,
+            saved_known_tombstones,
         )
 
     def _pop_block_var_remap(self, saved) -> None:
@@ -1166,6 +1198,7 @@ class StmtVisitor:
             previous_map_depth,
             saved_drawing_types,
             saved_series_bindings,
+            saved_known_tombstones,
         ) = saved
         try:
             if saved_remap is not _NO_BLOCK_REMAP:
@@ -1182,6 +1215,7 @@ class StmtVisitor:
         finally:
             self._lexical_drawing_types = saved_drawing_types
             self._lexical_series_bindings = saved_series_bindings
+            self._lexical_known_var_tombstones = saved_known_tombstones
             self._block_map_binding_visible = previous_map_visible
             self._block_map_visibility_depth = previous_map_depth
 
@@ -1320,6 +1354,7 @@ class StmtVisitor:
         _blk_saved = self._push_block_var_remap(node)
         if node.var:
             self._lexical_series_bindings[node.var] = False
+            self._lexical_known_var_tombstones.add(node.var)
         try:
             for s in node.body:
                 self._visit_stmt(s, lines, indent + 1)
@@ -1451,6 +1486,7 @@ class StmtVisitor:
         for name in loop_binding_names:
             if name and name != "_":
                 self._lexical_series_bindings[name] = False
+                self._lexical_known_var_tombstones.add(name)
         try:
             for s in node.body:
                 self._visit_stmt(s, lines, indent + 1)

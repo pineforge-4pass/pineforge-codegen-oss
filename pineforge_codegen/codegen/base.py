@@ -173,6 +173,86 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
     def __init__(self, ctx: AnalyzerContext) -> None:
         self.ctx = ctx
+        # Lexical Pine names remain in ``ctx.func_var_members``.  This overlay
+        # carries exact class-member identities only for collision-qualified
+        # ordinary FuncDefs (identity mappings for every other ordinary UDF).
+        self._func_var_storage_names: dict[str, dict[str, str]] = {
+            owner: dict(names)
+            for owner, names in getattr(
+                ctx, "func_var_storage_names", {}
+            ).items()
+        }
+        self._qualified_func_var_raw_names: set[str] = {
+            raw_name
+            for storage_names in self._func_var_storage_names.values()
+            for raw_name, storage_name in storage_names.items()
+            if storage_name != raw_name
+        }
+        self._ordinary_global_binding_names: set[str] = set(
+            getattr(ctx, "ordinary_global_binding_names", set())
+        )
+        self._ordinary_global_series_names: set[str] = set(
+            getattr(ctx, "ordinary_global_series_names", set())
+        )
+        self._nonpersistent_series_decl_names: set[str] = set(
+            getattr(ctx, "nonpersistent_series_decl_names", set())
+        )
+        self._func_nonpersistent_series_vars: dict[str, set[str]] = {
+            owner: set(names)
+            for owner, names in getattr(
+                ctx, "func_nonpersistent_series_vars", {}
+            ).items()
+        }
+        # Exact declarations that are direct children of Program.body.  A
+        # same-named declaration inside a top-level ``if``/loop is still a
+        # lexical block local; raw membership in ``_global_member_vars`` must
+        # not route that nested declaration into the hoisted class member.
+        self._ordinary_global_var_decl_nodes: set[int] = {
+            id(stmt)
+            for stmt in ctx.ast.body
+            if isinstance(stmt, VarDecl)
+            and not stmt.is_var
+            and not stmt.is_varip
+        }
+        self._direct_program_var_decl_nodes: set[int] = {
+            id(stmt)
+            for stmt in ctx.ast.body
+            if isinstance(stmt, VarDecl)
+        }
+        self._direct_program_tuple_decl_nodes: set[int] = {
+            id(stmt)
+            for stmt in ctx.ast.body
+            if isinstance(stmt, TupleAssign)
+        }
+        self._direct_program_binding_names: set[str] = {
+            stmt.name
+            for stmt in ctx.ast.body
+            if isinstance(stmt, VarDecl)
+        }
+        self._direct_program_binding_names.update(
+            name
+            for stmt in ctx.ast.body
+            if isinstance(stmt, TupleAssign)
+            for name in stmt.names
+            if name != "_"
+        )
+        self._callable_state_raw_names: set[str] = {
+            name
+            for members in ctx.func_var_members.values()
+            for name, _ptype, _init in members
+        }
+        self._callable_state_raw_names.update(
+            name
+            for names in ctx.func_series_vars.values()
+            for name in names
+        )
+
+        def func_var_storage(owner: str, raw_name: str) -> str:
+            return self._func_var_storage_names.get(owner, {}).get(
+                raw_name, raw_name
+            )
+
+        self._func_var_storage_name = func_var_storage
         # Security metadata collection can render runtime timeframe
         # expressions before the rest of the constructor state is prepared.
         # Exact persistent-member identity is immutable analyzer output, so
@@ -235,9 +315,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # function-local static equivalent), NOT in the constructor / on_bar
         # preamble. See ``_emit_func_var_init_block``.
         self._func_local_var_names: set[str] = set()
-        for _vlist in ctx.func_var_members.values():
+        for _owner, _vlist in ctx.func_var_members.items():
             for _n, _, _ in _vlist:
-                self._func_local_var_names.add(_n)
+                self._func_local_var_names.add(
+                    self._func_var_storage_name(_owner, _n)
+                )
 
         # Build per-function var/series name lists for cloning.
         # For each function with call-site variants, collect ALL function-scoped
@@ -253,17 +335,38 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # are themselves sets (analyzer stores ``dict[str, set]``), so we must
         # iterate each value in ``sorted`` order to be hash-seed independent.
         all_func_scoped_series: list[str] = []
-        for svars in ctx.func_series_vars.values():
+        for owner, svars in ctx.func_series_vars.items():
             for sv in sorted(svars):
-                if sv not in all_func_scoped_series:
-                    all_func_scoped_series.append(sv)
+                exact = self._func_var_storage_name(owner, sv)
+                # ``func_series_vars`` also carries history-referenced
+                # parameters/plain locals. Translate only a real persistent
+                # member whose analyzer-exact identity is Series storage.
+                if (self._safe_name(exact)
+                        in self._series_var_member_names):
+                    storage = exact
+                elif (sv in self._qualified_func_var_raw_names
+                      and sv not in self._func_nonpersistent_series_vars.get(
+                          owner, set()
+                      )):
+                    # A history parameter/plain local in an unrelated UDF may
+                    # reuse the Pine spelling of owner-qualified persistent
+                    # state. It has no class-member identity to propagate into
+                    # every other function's clone map; doing so remaps an
+                    # initializer's earlier global read to a bogus ``x_csN``
+                    # Series member before the persistent local is active.
+                    continue
+                else:
+                    storage = sv
+                if storage not in all_func_scoped_series:
+                    all_func_scoped_series.append(storage)
         # Also include function-scoped var_members (same ordered-list rationale).
         # ``ctx.func_var_members`` values are lists (already insertion-ordered).
         all_func_scoped_vars: list[str] = []
-        for vlist in ctx.func_var_members.values():
+        for owner, vlist in ctx.func_var_members.items():
             for n, _, _ in vlist:
-                if n not in all_func_scoped_vars:
-                    all_func_scoped_vars.append(n)
+                exact = self._func_var_storage_name(owner, n)
+                if exact not in all_func_scoped_vars:
+                    all_func_scoped_vars.append(exact)
 
         # For each function with call-site cloning (has TA ranges or is called multiple times),
         # include ALL function-scoped series/var vars that could be used in its body.
@@ -277,13 +380,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # Include function's own vars
             if fname in ctx.func_var_members:
                 for n, _, _ in ctx.func_var_members[fname]:
-                    if n not in orig_names:
-                        orig_names.append(n)
+                    exact = self._func_var_storage_name(fname, n)
+                    if exact not in orig_names:
+                        orig_names.append(exact)
             # Include function's own series vars (set -> sorted for determinism)
             if fname in ctx.func_series_vars:
                 for sv in sorted(ctx.func_series_vars[fname]):
-                    if sv not in orig_names:
-                        orig_names.append(sv)
+                    exact = self._func_var_storage_name(fname, sv)
+                    storage = (
+                        exact
+                        if self._safe_name(exact)
+                        in self._series_var_member_names
+                        else sv
+                    )
+                    if storage not in orig_names:
+                        orig_names.append(storage)
             # Include series vars from sub-functions (they share the same class members)
             for sv in all_func_scoped_series:
                 if sv not in orig_names:
@@ -421,6 +532,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._current_input_var_name: str | None = None
         # Build known_vars for constant propagation
         self._known_vars: dict[str, int | float | bool | str] = {}
+        # Source-ordered lexical declarations can shadow a same-named direct
+        # compile-time global.  Constant folding is raw-name keyed, so every
+        # fold path must consult this COW tombstone set before substituting a
+        # global literal inside the nested lexical scope.
+        self._lexical_known_var_tombstones: set[str] = set()
         # Subset of _known_vars whose value came from an input.*() call. These
         # MUST NOT be inlined at identifier use sites because strategy_set_input()
         # can override them at runtime. Ctor-time uses (TA buffer sizing,
@@ -453,11 +569,30 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._var_names: set[str] = set()
         for _vn, _, _ in ctx.var_members:
             self._var_names.add(_vn)
+        ordinary_global_member_names = self._ordinary_global_binding_names
+        for _vlist in ctx.func_var_members.values():
+            self._var_names.update(
+                _n
+                for _n, _, _ in _vlist
+                if _n not in ordinary_global_member_names
+            )
         self._collect_known_vars()
         # Track var names
         self._var_names = set()
         for name, _, _ in ctx.var_members:
             self._var_names.add(name)
+        # Preserve the established raw lexical allow-list even when the class
+        # member itself is owner-qualified. Declaration-site remapping resolves
+        # legal reads/writes to exact storage; this union also prevents the
+        # legacy non-var-Series loop from emitting a second raw class member.
+        # A real ordinary global with that spelling is deliberately excluded:
+        # it owns separate class state and must still be emitted.
+        for _vlist in ctx.func_var_members.values():
+            self._var_names.update(
+                _n
+                for _n, _, _ in _vlist
+                if _n not in ordinary_global_member_names
+            )
         # Every name bound ANYWHERE in the program (top-level, nested in
         # if/for/while/switch blocks, or inside function bodies). The
         # unknown-identifier guard in _visit_ident uses this as a generous
@@ -857,7 +992,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 is_series
                 or not self._is_na_expr(init_ast)
             )
-        if name in self.ctx.series_vars:
+        if is_series and name in self.ctx.series_vars:
             return False
         udt_type = self._udt_var_types.get(name)
         if udt_type in self._udt_defs:
@@ -1090,7 +1225,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return list(self._func_cs_ta_remap.get((fname, 0), {}).keys())
 
         def var_originals(fname: str) -> list[str]:
-            return [self._safe_name(n) for n, _, _ in ctx.func_var_members.get(fname, [])]
+            return [
+                self._safe_name(self._func_var_storage_name(fname, n))
+                for n, _, _ in ctx.func_var_members.get(fname, [])
+            ]
 
         def fixnan_originals(fname: str) -> list[str]:
             return list(self._func_cs_fixnan_remap.get((fname, 0), {}).keys())
@@ -1262,7 +1400,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(
                         f"    Series<{drawing_cpp}> {cloned_safe}{series_suffix};"
                     )
-                elif vname in self.ctx.series_vars:
+                elif (orig_safe in self._series_var_member_names
+                        or vname in self.ctx.series_vars):
                     lines.append(f"    Series<{cpp_type}> {cloned_safe}{series_suffix};")
                 elif collection_spec is not None:
                     lines.append(
@@ -1316,9 +1455,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return self._lexical_series_bindings[raw_name]
         if resolved in self._persistent_var_member_names:
             return resolved in self._series_var_member_names
+        if (raw_name in self._qualified_func_var_raw_names
+                and raw_name in self._ordinary_global_binding_names):
+            return raw_name in self._ordinary_global_series_names
         if base_safe in self._persistent_var_member_names:
             return base_safe in self._series_var_member_names
         return raw_name in self.ctx.series_vars
+
+    def _known_var_is_lexically_shadowed(self, name: str) -> bool:
+        """Whether a local/parameter/loop binder hides a known global name."""
+        return name in self._lexical_known_var_tombstones
 
     def _decl_binding_is_series(self, node_id: int, raw_name: str) -> bool:
         """Return exact history status for one declaration binding.
@@ -1737,7 +1883,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 continue
             if stmt.name in reassigned:
                 continue
-            if stmt.name in self.ctx.series_vars:
+            if self._decl_binding_is_series(id(stmt), stmt.name):
                 continue
             if stmt.value is None or not self._expr_is_stable(stmt.value):
                 continue
@@ -2051,7 +2197,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return True
         if isinstance(node, Identifier):
             name = node.name
-            if name in self._known_vars:
+            if self._known_var_is_lexically_shadowed(name):
+                return False
+            if (name in self._known_vars
+                    and not self._known_var_is_lexically_shadowed(name)):
                 return True
             if name in self._stable_runtime_vars:
                 return True
@@ -2226,7 +2375,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     def _collect_known_var(self, node: VarDecl) -> None:
         """Extract known constant value from a VarDecl."""
         # Don't inline series variables — their values change over time
-        if node.name in self.ctx.series_vars:
+        if self._decl_binding_is_series(id(node), node.name):
             return
         # Don't inline var/varip variables — they're mutable state that persists
         # across bars and can be reassigned with :=
@@ -2954,7 +3103,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 6. Non-var series vars
         for name in sorted(self.ctx.series_vars):
-            if name not in self._var_names:
+            if (name not in self._var_names
+                    or name in self._nonpersistent_series_decl_names):
+                if (name in self._qualified_func_var_raw_names
+                        and name in self._ordinary_global_binding_names
+                        and name not in self._ordinary_global_series_names):
+                    continue
                 safe = self._safe_name(name)
                 cpp_type = self._series_type_for(name)
                 lines.append(f"    Series<{cpp_type}> {safe}{_mbb};")
@@ -2988,7 +3142,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         #     (so user-defined functions can reference them)
         seen_global = set()
         for name, ptype in self.ctx.global_var_decls:
-            if name in seen_global or name in self.ctx.series_vars or name in self._var_names:
+            exact_scalar_override = (
+                name in self._qualified_func_var_raw_names
+                and name in self._ordinary_global_binding_names
+                and name not in self._ordinary_global_series_names
+            )
+            if (name in seen_global
+                    or (name in self.ctx.series_vars and not exact_scalar_override)
+                    or name in self._var_names):
                 continue
             # De-hoisted UDT array-element alias (Pine reference semantics): the
             # in-loop VarDecl is emitted as a fresh ``UDT& z = arr[i];`` local
@@ -3261,7 +3422,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if arg_str == "na":
             return "na<double>()"
         # Direct variable lookup
-        if arg_str in self._known_vars:
+        if (arg_str in self._known_vars
+                and not self._known_var_is_lexically_shadowed(arg_str)):
             val = self._known_vars[arg_str]
             if isinstance(val, bool):
                 return "true" if val else "false"
@@ -3278,6 +3440,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 resolved = arg_str
                 # Sort by length (longest first) to avoid partial replacements
                 for name in sorted(self._known_vars, key=len, reverse=True):
+                    if self._known_var_is_lexically_shadowed(name):
+                        continue
                     val = self._known_vars[name]
                     if isinstance(val, (int, float)):
                         import re
@@ -3521,7 +3685,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return s
             def _rep(p: re.Match) -> str:
                 nm = p.group(0)
-                if nm in self._derived_input_expr and nm not in seen:
+                if (nm in self._derived_input_expr
+                        and nm not in seen
+                        and not self._known_var_is_lexically_shadowed(nm)):
                     inner = self._derived_input_expr[nm]
                     return "(" + _expand_derived(inner, seen | {nm}, depth + 1) + ")"
                 return nm
@@ -3530,6 +3696,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         expanded = _expand_derived(arg_str)
 
         tokens = set(ident_re.findall(expanded))
+        if any(
+            self._known_var_is_lexically_shadowed(name)
+            for name in tokens
+        ):
+            return None
 
         # Gate: every identifier token must be renderable. If any token is an
         # unrecognised bare identifier (not an input, not a known const, not
@@ -3551,7 +3722,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Known compile-time consts that survived expansion (e.g. ``pi`` was
         # NOT tracked as a Python value but its name token is a stable var
         # already; pure numeric names are in _known_vars and covered above).
-        leftover = {t for t in leftover if t not in self._known_vars}
+        leftover = {
+            t for t in leftover
+            if (t not in self._known_vars
+                or self._known_var_is_lexically_shadowed(t))
+        }
         # Inline ``input(...)`` / ``input.<t>(...)`` calls (a bare input
         # expression passed straight as a length arg, e.g.
         # ``adx(input(15), input(15))``) are re-parsed and rendered below,
@@ -3622,6 +3797,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # reads, and inline known compile-time consts (non-input) as literals.
         def _sub(p: re.Match) -> str:
             name = p.group(0)
+            if self._known_var_is_lexically_shadowed(name):
+                return name
             if name in self._input_backed_vars:
                 call_node = self._input_var_to_call.get(name)
                 if call_node is None:
@@ -3629,7 +3806,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 func_name_i, namespace_i = self._resolve_callee(call_node.callee)
                 title = self._get_input_title(call_node, var_name=name)
                 return self._render_input_value(call_node, func_name_i, namespace_i, title)
-            if name in self._known_vars and name not in self._input_backed_vars:
+            if (name in self._known_vars
+                    and name not in self._input_backed_vars
+                    and not self._known_var_is_lexically_shadowed(name)):
                 val = self._known_vars[name]
                 if isinstance(val, bool):
                     return "true" if val else "false"

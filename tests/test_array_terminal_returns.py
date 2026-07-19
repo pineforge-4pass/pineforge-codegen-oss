@@ -254,5 +254,8 @@ observed = outer()
     cpp = transpile(source)
     assert "std::string outer_cs0(" not in cpp
     assert "double outer_cs0(" in cpp
-    assert "producer_cs3" in cpp
-    assert "producer_cs4" not in cpp
+    # Reuse the terminal TypeSpec captured while ``outer``'s lexical scope is
+    # active. Re-inferring it after scope exit revisits producer() as an
+    # analyzer side effect and mints one unused phantom clone.
+    assert "producer_cs2" in cpp
+    assert "producer_cs3" not in cpp
