@@ -1235,10 +1235,18 @@ class CallHandlers:
         has_series = func_name in self._func_series_vars or func_name in self._func_var_members
         has_fixnan = func_name in self._func_fixnan_indices
         if has_ta or has_series or has_fixnan:
-            cs_idx = self._func_call_site_count.get(func_name, 0)
-            self._func_call_site_count[func_name] = cs_idx + 1
-            self._func_call_cs_map[id(node)] = (func_name, cs_idx)
-            self._materialize_user_func_call_site_state(func_name, cs_idx, node)
+            existing_site = self._func_call_cs_map.get(id(node))
+            if existing_site is None or existing_site[0] != func_name:
+                # Type/return inference may revisit the same FuncCall AST node
+                # several times.  It is still one Pine textual call site, not
+                # a new state instance on every analyzer pass.  Real caller
+                # clones are expanded later by _propagate_call_site_counts().
+                cs_idx = self._func_call_site_count.get(func_name, 0)
+                self._func_call_site_count[func_name] = cs_idx + 1
+                self._func_call_cs_map[id(node)] = (func_name, cs_idx)
+                self._materialize_user_func_call_site_state(
+                    func_name, cs_idx, node
+                )
 
         # Create or update FuncInfo
         is_tuple = self._func_returns_tuple.get(func_name, False)

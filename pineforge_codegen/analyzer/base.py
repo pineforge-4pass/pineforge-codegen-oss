@@ -217,6 +217,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_udt_return_types: dict[str, str] = {}
         self._func_return_type_specs: dict[str, "TypeSpec"] = {}
         self._func_param_type_specs: dict[str, list] = {}
+        # Direct terminal gets on an unshadowed built-in temporary are
+        # registered while their lexical scope is live.  A later-defined UDF
+        # used by ``array.from`` may make the first-pass scalar fallback stale;
+        # a bounded, side-effect-free refresh corrects only this proven shape.
+        self._direct_terminal_array_temporary_exprs: dict[str, ASTNode] = {}
         # History receivers can mention an untyped UDF parameter before its
         # concrete TypeSpec is learned from a call site.  Keep the exact AST
         # identifier identities that resolved to parameters during the
@@ -406,6 +411,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         """Run semantic analysis and return the analyzer context."""
         self._ensure_pine_v6()
         self._visit(self._ast)
+        self._check_direct_terminal_array_temporary_cycles()
+        self._register_resolved_direct_terminal_array_forward_calls()
+        self._refresh_direct_terminal_array_temporary_returns()
         self._check_forward_tuple_helper_wrappers()
         self._check_top_level_block_shadow_boundaries()
         self._qualify_colliding_func_var_members()
@@ -549,6 +557,222 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 f"Move '{callee_name}' above '{wrapper_name}' before passing "
                 "the wrapper to request.security().",
                 terminal.loc,
+            )
+
+    def _refresh_direct_terminal_array_temporary_returns(self) -> None:
+        """Reconcile exact primitive returns without revisiting call sites.
+
+        ``array.from(later_defined_udf()).get(0)`` can be visited before the
+        producer's return type exists.  The ordinary fallback is then float,
+        while final codegen correctly learns the producer's primitive type.
+        Re-run only a preregistered, direct built-in temporary shape using the
+        cached structural resolver.  It never calls ``_visit`` and therefore
+        cannot mint phantom TA/series/fixnan call-site state.
+        """
+        pending = self._direct_terminal_array_temporary_exprs
+        if not pending:
+            return
+
+        # One new exact result can unlock one earlier direct dependency per
+        # pass.  Cycles retain their existing fail-closed fallback.
+        for _ in range(len(pending) + 1):
+            changed = False
+            for name, terminal in pending.items():
+                spec = self._cached_terminal_temporary_array_get_spec(terminal)
+                if spec is None or spec.kind != "primitive":
+                    continue
+                pine_type = self._element_pine_type(spec)
+                if pine_type in (PineType.UNKNOWN, PineType.VOID):
+                    continue
+                if (
+                    self._func_return_types.get(name) == pine_type
+                    and self._func_return_type_specs.get(name) == spec
+                ):
+                    continue
+                self._func_return_types[name] = pine_type
+                self._func_return_type_specs[name] = spec
+                symbol = self._symbols.resolve(name)
+                if symbol is not None:
+                    symbol.pine_type = pine_type
+                    symbol.type_spec = spec
+                for func_info in self._func_infos:
+                    if func_info.name == name:
+                        func_info.return_type = pine_type
+                        func_info.return_type_spec = spec
+                changed = True
+            if not changed:
+                break
+
+    @staticmethod
+    def _direct_terminal_array_temporary_element_call(
+        terminal: ASTNode | None,
+    ) -> FuncCall | None:
+        """Return a direct UDF element call from the registered shape."""
+        if not isinstance(terminal, FuncCall) or not isinstance(
+            terminal.callee, MemberAccess
+        ):
+            return None
+        callee = terminal.callee
+        if callee.member != "get":
+            return None
+        if isinstance(callee.object, Identifier) and callee.object.name == "array":
+            receiver = (
+                terminal.args[0]
+                if terminal.args
+                else terminal.kwargs.get("id")
+            )
+        else:
+            receiver = callee.object
+
+        while (
+            isinstance(receiver, FuncCall)
+            and isinstance(receiver.callee, MemberAccess)
+            and isinstance(receiver.callee.object, Identifier)
+            and receiver.callee.object.name == "array"
+            and receiver.callee.member == "copy"
+            and receiver.args
+        ):
+            receiver = receiver.args[0]
+        if not (
+            isinstance(receiver, FuncCall)
+            and isinstance(receiver.callee, MemberAccess)
+            and isinstance(receiver.callee.object, Identifier)
+            and receiver.callee.object.name == "array"
+            and receiver.callee.member == "from"
+            and receiver.args
+        ):
+            return None
+        element = receiver.args[0]
+        if (
+            isinstance(element, FuncCall)
+            and isinstance(element.callee, Identifier)
+        ):
+            return element
+        return None
+
+    @classmethod
+    def _direct_terminal_array_temporary_user_call(
+        cls,
+        terminal: ASTNode | None,
+    ) -> FuncCall | None:
+        """Return a forward-registerable namespace-functional element call."""
+        if not (
+            isinstance(terminal, FuncCall)
+            and isinstance(terminal.callee, MemberAccess)
+            and isinstance(terminal.callee.object, Identifier)
+            and terminal.callee.object.name == "array"
+        ):
+            return None
+        element = cls._direct_terminal_array_temporary_element_call(terminal)
+        if element is not None and not element.args and not element.kwargs:
+            return element
+        return None
+
+    def _register_resolved_direct_terminal_array_forward_calls(self) -> None:
+        """Register a formerly forward zero-argument element call once.
+
+        The initial lexical visit cannot dispatch a later-defined UDF.  Once
+        its definition exists, ordinary call handling can safely register the
+        call because this deliberately bounded shape has no arguments whose
+        lexical bindings could have gone out of scope.
+        """
+        for terminal in self._direct_terminal_array_temporary_exprs.values():
+            call = self._direct_terminal_array_temporary_user_call(terminal)
+            if call is None:
+                continue
+            name = call.callee.name
+            if name not in self._func_defs:
+                continue
+            # Regular UDF default arguments are not emitted in C++ today.
+            # A syntactically empty call is forward-registerable only when the
+            # declaration itself is genuinely zero-parameter.
+            if self._func_defs[name].params:
+                continue
+            stateful = (
+                name in self._func_ta_ranges
+                or name in self._func_series_vars
+                or name in self._func_var_members
+                or name in self._func_fixnan_indices
+            )
+            if stateful and id(call) in self._func_call_cs_map:
+                continue
+            if not stateful and any(
+                func_info.name == name for func_info in self._func_infos
+            ):
+                continue
+            self._handle_user_func_call(name, call)
+
+    def _check_direct_terminal_array_temporary_cycles(self) -> None:
+        """Reject recursion reached through a temporary-reader UDF edge.
+
+        Pine forbids recursive UDF execution.  Forward registration makes a
+        formerly unknown helper visible, so preserve the language boundary
+        explicitly instead of generating a C++ recursion that only fails at
+        runtime.
+        """
+        wrappers = self._direct_terminal_array_temporary_exprs
+        known = set(self._func_defs)
+
+        def callees(node: Any, seen: set[int] | None = None) -> set[str]:
+            if node is None:
+                return set()
+            if seen is None:
+                seen = set()
+            if isinstance(node, (list, tuple, dict)) or hasattr(node, "__dict__"):
+                node_id = id(node)
+                if node_id in seen:
+                    return set()
+                seen.add(node_id)
+            if isinstance(node, (list, tuple)):
+                return set().union(*(callees(item, seen) for item in node))
+            if isinstance(node, dict):
+                return set().union(*(callees(item, seen) for item in node.values()))
+            if not hasattr(node, "__dict__"):
+                return set()
+            found: set[str] = set()
+            if (
+                isinstance(node, FuncCall)
+                and isinstance(node.callee, Identifier)
+                and node.callee.name in known
+            ):
+                found.add(node.callee.name)
+            for value in vars(node).values():
+                found.update(callees(value, seen))
+            return found
+
+        graph = {
+            name: callees(func_def.body)
+            for name, func_def in self._func_defs.items()
+        }
+
+        def path_to(start: str, target: str) -> list[str] | None:
+            stack: list[tuple[str, list[str]]] = [(start, [start])]
+            visited: set[str] = set()
+            while stack:
+                name, path = stack.pop()
+                if name == target:
+                    return path
+                if name in visited:
+                    continue
+                visited.add(name)
+                for child in sorted(graph.get(name, ()), reverse=True):
+                    stack.append((child, [*path, child]))
+            return None
+
+        for owner, terminal in wrappers.items():
+            element = self._direct_terminal_array_temporary_element_call(
+                terminal
+            )
+            if element is None or element.callee.name not in known:
+                continue
+            return_path = path_to(element.callee.name, owner)
+            if return_path is None:
+                continue
+            cycle = [owner, *return_path]
+            self._error(
+                "Recursive direct temporary-array reader cycle is not "
+                f"supported: {' -> '.join(cycle)}.",
+                element.loc,
             )
 
     def _qualify_colliding_func_var_members(self) -> None:
@@ -2955,6 +3179,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # this narrow to map terminals so general/nonterminal inference and
         # generated output remain unchanged.
         terminal_ret_expr = self._direct_terminal_return_expr(node)
+        if self._terminal_array_get_uses_direct_temporary(terminal_ret_expr):
+            self._direct_terminal_array_temporary_exprs[node.name] = (
+                terminal_ret_expr
+            )
         terminal_direct_return_spec = self._type_spec_from_expr(
             terminal_ret_expr
         )
@@ -2971,6 +3199,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 name: spec
                 for name, spec in zip(node.params, inferred_param_specs)
             },
+            terminal_direct_return_spec,
         )
 
         self._symbols.exit_scope()
@@ -3132,6 +3361,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             loc=loc,
         )
         self._symbols.define(sym)
+
+        # A definition just completed may supply the primitive return needed
+        # by an earlier direct ``array.from(udf()).get(...)`` reader.  Refresh
+        # before the next top-level statement is analyzed so its call site
+        # observes the reconciled type.
+        self._register_resolved_direct_terminal_array_forward_calls()
+        self._refresh_direct_terminal_array_temporary_returns()
 
         return PineType.VOID
 

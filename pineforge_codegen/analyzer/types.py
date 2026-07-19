@@ -51,6 +51,15 @@ from ..symbols import PineType, TypeSpec
 # reverse would be a cycle). Mirrors codegen.tables.DRAWING_TYPE_TO_CPP keys.
 _DRAWING_TYPE_NAMES = frozenset({"line", "box", "label", "linefill", "chart.point"})
 _DRAWING_NS = frozenset({"line", "box", "label", "linefill"})
+_DIRECT_ARRAY_VALUE_PRODUCERS = frozenset({
+    "from",
+    "new",
+    "new_float",
+    "new_int",
+    "new_bool",
+    "new_string",
+    "copy",
+})
 
 
 class TypeHelper:
@@ -666,10 +675,237 @@ class TypeHelper:
             return PineType.STRING, None
         return None
 
+    def _terminal_array_get_receiver(
+        self,
+        value: ASTNode | None,
+    ) -> ASTNode | None:
+        """Return a lexically valid receiver for a direct terminal get."""
+        if not isinstance(value, FuncCall) or not isinstance(
+            value.callee, MemberAccess
+        ):
+            return None
+        callee = value.callee
+        if callee.member != "get":
+            return None
+
+        functional = (
+            isinstance(callee.object, Identifier)
+            and callee.object.name == "array"
+            and self._symbols.resolve("array") is None
+        )
+        if functional:
+            if len(value.args) == 2 and not value.kwargs:
+                return value.args[0]
+            if len(value.args) == 1 and set(value.kwargs) == {"index"}:
+                return value.args[0]
+            if not value.args and set(value.kwargs) == {"id", "index"}:
+                return value.kwargs["id"]
+            return None
+
+        if len(value.args) == 1 and not value.kwargs:
+            return callee.object
+        if not value.args and set(value.kwargs) == {"index"}:
+            return callee.object
+        return None
+
+    def _is_unshadowed_direct_array_value_producer(
+        self,
+        value: ASTNode | None,
+    ) -> bool:
+        """Whether ``value`` is one direct built-in array value producer."""
+        if not isinstance(value, FuncCall) or not isinstance(
+            value.callee, MemberAccess
+        ):
+            return False
+        callee = value.callee
+        namespace_producer = (
+            isinstance(callee.object, Identifier)
+            and callee.object.name == "array"
+            and self._symbols.resolve("array") is None
+            and callee.member in _DIRECT_ARRAY_VALUE_PRODUCERS
+        )
+        if namespace_producer:
+            if callee.member != "copy":
+                return True
+            if len(value.args) != 1 or value.kwargs:
+                return False
+            source = value.args[0]
+            if isinstance(source, Identifier):
+                source_spec = self._type_spec_from_expr(source)
+                return source_spec is not None and source_spec.kind == "array"
+            return self._is_unshadowed_direct_array_value_producer(source)
+        if callee.member != "copy" or not isinstance(
+            callee.object, Identifier
+        ):
+            return False
+        receiver_spec = self._type_spec_from_expr(callee.object)
+        return receiver_spec is not None and receiver_spec.kind == "array"
+
+    def _direct_array_value_spec_without_visiting(
+        self,
+        value: ASTNode | None,
+    ) -> TypeSpec | None:
+        """Exact direct-producer spec without re-visiting a nested call."""
+        cached = self._cached_direct_array_value_spec(value)
+        if cached is not None:
+            return cached
+        if not isinstance(value, FuncCall) or not isinstance(
+            value.callee, MemberAccess
+        ):
+            return None
+        callee = value.callee
+        source: ASTNode | None = None
+        if (
+            isinstance(callee.object, Identifier)
+            and callee.object.name == "array"
+            and self._symbols.resolve("array") is None
+            and callee.member == "copy"
+            and value.args
+            and isinstance(value.args[0], Identifier)
+        ):
+            source = value.args[0]
+        elif callee.member == "copy" and isinstance(
+            callee.object, Identifier
+        ):
+            source = callee.object
+        if source is None:
+            return None
+        spec = self._type_spec_from_expr(source)
+        return spec if spec is not None and spec.kind == "array" else None
+
+    def _terminal_array_get_uses_direct_temporary(
+        self,
+        value: ASTNode | None,
+    ) -> bool:
+        """Capture the narrow temporary shape while lexical scope is live."""
+        receiver = self._terminal_array_get_receiver(value)
+        return (
+            receiver is not None
+            and not isinstance(receiver, Identifier)
+            and self._is_unshadowed_direct_array_value_producer(receiver)
+        )
+
+    def _cached_primitive_expr_spec(
+        self,
+        value: ASTNode | None,
+    ) -> TypeSpec | None:
+        """Resolve a primitive without visiting calls or lexical symbols.
+
+        This helper exists only for the bounded forward-order reconciliation
+        of direct temporary array producers.  Calling ``_visit`` here would
+        allocate stateful UDF call sites a second time.
+        """
+        if isinstance(value, NumberLiteral):
+            return TypeSpec.primitive(
+                "float" if isinstance(value.value, float) else "int"
+            )
+        if isinstance(value, BoolLiteral):
+            return TypeSpec.primitive("bool")
+        if isinstance(value, StringLiteral):
+            return TypeSpec.primitive("string")
+        if isinstance(value, UnaryOp) and value.op in ("+", "-"):
+            return self._cached_primitive_expr_spec(value.operand)
+        if isinstance(value, FuncCall) and isinstance(value.callee, Identifier):
+            name = value.callee.name
+            spec = getattr(self, "_func_return_type_specs", {}).get(name)
+            if spec is not None and spec.kind == "primitive":
+                return spec
+            pine_type = getattr(self, "_func_return_types", {}).get(name)
+            primitive = {
+                PineType.INT: "int",
+                PineType.FLOAT: "float",
+                PineType.BOOL: "bool",
+                PineType.STRING: "string",
+                PineType.COLOR: "color",
+            }.get(pine_type)
+            if primitive is not None:
+                return TypeSpec.primitive(primitive)
+        return None
+
+    def _cached_direct_array_value_spec(
+        self,
+        value: ASTNode | None,
+    ) -> TypeSpec | None:
+        """Resolve one registered direct producer without analyzer effects."""
+        if not isinstance(value, FuncCall) or not isinstance(
+            value.callee, MemberAccess
+        ):
+            return None
+        callee = value.callee
+        if not (
+            isinstance(callee.object, Identifier)
+            and callee.object.name == "array"
+            and callee.member in _DIRECT_ARRAY_VALUE_PRODUCERS
+        ):
+            return None
+
+        producer = callee.member
+        typed = {
+            "new_float": "float",
+            "new_int": "int",
+            "new_bool": "bool",
+            "new_string": "string",
+        }.get(producer)
+        if typed is not None:
+            return TypeSpec.array(TypeSpec.primitive(typed))
+        if producer == "new":
+            targs = self._template_args_from_call(value)
+            if targs:
+                element = self._type_spec_from_hint(targs[0])
+                if element is None or element.kind != "primitive":
+                    return None
+                return TypeSpec.array(element)
+            return TypeSpec.array(TypeSpec.primitive("float"))
+        if producer == "from" and value.args:
+            element = self._cached_primitive_expr_spec(value.args[0])
+            return TypeSpec.array(element) if element is not None else None
+        if producer == "copy" and value.args:
+            return self._cached_direct_array_value_spec(value.args[0])
+        return None
+
+    def _cached_terminal_temporary_array_get_spec(
+        self,
+        value: ASTNode | None,
+    ) -> TypeSpec | None:
+        """Side-effect-free element spec for a preregistered temporary get."""
+        if not isinstance(value, FuncCall) or not isinstance(
+            value.callee, MemberAccess
+        ):
+            return None
+        callee = value.callee
+        if callee.member != "get":
+            return None
+        if isinstance(callee.object, Identifier) and callee.object.name == "array":
+            if len(value.args) == 2 and not value.kwargs:
+                receiver = value.args[0]
+            elif len(value.args) == 1 and set(value.kwargs) == {"index"}:
+                receiver = value.args[0]
+            elif not value.args and set(value.kwargs) == {"id", "index"}:
+                receiver = value.kwargs["id"]
+            else:
+                return None
+        elif len(value.args) == 1 and not value.kwargs:
+            receiver = callee.object
+        elif not value.args and set(value.kwargs) == {"index"}:
+            receiver = callee.object
+        else:
+            return None
+
+        receiver_spec = self._cached_direct_array_value_spec(receiver)
+        if (
+            receiver_spec is None
+            or receiver_spec.kind != "array"
+            or receiver_spec.element is None
+            or receiver_spec.element.kind != "primitive"
+        ):
+            return None
+        return receiver_spec.element
+
     def _terminal_array_get_return(
         self,
         value: ASTNode | None,
         parameter_specs: dict[str, TypeSpec | None] | None = None,
+        resolved_return_spec: TypeSpec | None = None,
     ) -> tuple[PineType, TypeSpec] | None:
         """Return exact metadata for a direct terminal ``array.get`` call.
 
@@ -682,74 +918,42 @@ class TypeHelper:
 
         Keep the refinement intentionally narrow: only the established
         positional/keyword shapes of ``get`` participate, and the receiver
-        must resolve to an exact array ``TypeSpec``.  Other array accessors,
-        mutations, range/view semantics, reference/ID-like elements, and
-        unresolved receivers remain on their existing paths.  Returning UDTs
-        or nested collections by value would lose Pine reference identity even
-        when the generated C++ happens to compile, so this helper must not
-        expose those specs as an apparent fix.
+        must resolve to an exact array ``TypeSpec``.  In addition to exact
+        identifiers, direct built-in array producers (``array.from/new/copy``)
+        may use the terminal expression spec that the caller already captured
+        while the lexical scope was active.  Reusing that snapshot is
+        load-bearing: re-inferring an effectful temporary here would revisit
+        nested calls and mint phantom call-site state.  Other array accessors,
+        mutations, range/view semantics, arbitrary UDF receivers,
+        reference/ID-like elements, and unresolved receivers remain on their
+        existing paths.  Returning UDTs or nested collections by value would
+        lose Pine reference identity even when the generated C++ happens to
+        compile, so this helper must not expose those specs as an apparent fix.
         """
-        if not isinstance(value, FuncCall) or not isinstance(
-            value.callee, MemberAccess
-        ):
-            return None
-
-        callee = value.callee
-        if callee.member != "get":
-            return None
-
-        receiver: ASTNode | None = None
-        object_spec = None
-        object_is_parameter = False
-        object_is_visible_binding = False
-        if isinstance(callee.object, Identifier):
-            object_is_visible_binding = (
-                self._symbols.resolve(callee.object.name) is not None
-            )
-            object_is_parameter = (
-                parameter_specs is not None
-                and callee.object.name in parameter_specs
-            )
-            if object_is_parameter:
-                object_spec = parameter_specs.get(callee.object.name)
-            else:
-                object_spec = self._type_spec_from_expr(callee.object)
-        object_is_array_value = (
-            object_spec is not None and object_spec.kind == "array"
-        )
-        if (
-            isinstance(callee.object, Identifier)
-            and callee.object.name == "array"
-            and not object_is_array_value
-            and not object_is_visible_binding
-        ):
-            # Functional forms supported by the checked-array emitter:
-            #   array.get(values, index)
-            #   array.get(values, index=index)
-            #   array.get(id=values, index=index)
-            if len(value.args) == 2 and not value.kwargs:
-                receiver = value.args[0]
-            elif len(value.args) == 1 and set(value.kwargs) == {"index"}:
-                receiver = value.args[0]
-            elif not value.args and set(value.kwargs) == {"id", "index"}:
-                receiver = value.kwargs["id"]
-        else:
-            # Method forms supported by the checked-array emitter:
-            #   values.get(index)
-            #   values.get(index=index)
-            if len(value.args) == 1 and not value.kwargs:
-                receiver = callee.object
-            elif not value.args and set(value.kwargs) == {"index"}:
-                receiver = callee.object
-
+        receiver = self._terminal_array_get_receiver(value)
         if receiver is None:
             return None
-        # Temporary/arbitrary receivers have their own stateful-call and
-        # reference-identity questions. Re-inferring them here would revisit
-        # nested calls and mint extra call-site state. The registered residual
-        # is limited to exact identifier receivers.
         if not isinstance(receiver, Identifier):
-            return None
+            # Both functional and method forms stay inside the same narrow
+            # contract.  A temporary UDF, slice/view, map result, or a local
+            # binding merely named ``array`` must not enter this refinement.
+            if not self._is_unshadowed_direct_array_value_producer(receiver):
+                return None
+            if resolved_return_spec is None:
+                producer_spec = self._direct_array_value_spec_without_visiting(
+                    receiver
+                )
+                if producer_spec is not None:
+                    resolved_return_spec = producer_spec.element
+            if (
+                resolved_return_spec is None
+                or resolved_return_spec.kind != "primitive"
+            ):
+                return None
+            return_type = self._element_pine_type(resolved_return_spec)
+            if return_type == PineType.VOID:
+                return None
+            return return_type, resolved_return_spec
 
         recv_spec = None
         if parameter_specs is not None and receiver.name in parameter_specs:

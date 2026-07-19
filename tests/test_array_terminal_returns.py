@@ -7,6 +7,7 @@ from itertools import product
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 
 
@@ -241,7 +242,7 @@ observed = blocked()
     assert "double blocked(" in cpp
 
 
-def test_temporary_receiver_does_not_duplicate_nested_stateful_call_sites():
+def test_temporary_array_from_receiver_reuses_captured_type_without_new_clones():
     source = r'''//@version=6
 strategy("Temporary receiver stays outside terminal get refinement")
 producer() =>
@@ -252,10 +253,266 @@ outer() =>
 observed = outer()
 '''
     cpp = transpile(source)
-    assert "std::string outer_cs0(" not in cpp
-    assert "double outer_cs0(" in cpp
+    assert "std::string outer_cs0(" in cpp
+    assert "double outer_cs0(" not in cpp
+    assert "std::vector<std::string>{producer_cs0()}" in cpp
     # Reuse the terminal TypeSpec captured while ``outer``'s lexical scope is
-    # active. Re-inferring it after scope exit revisits producer() as an
-    # analyzer side effect and mints one unused phantom clone.
-    assert "producer_cs2" in cpp
-    assert "producer_cs3" not in cpp
+    # active, and treat every analyzer revisit of this exact FuncCall node as
+    # the same Pine textual call site. Real caller variants are cloned later
+    # by call-path propagation; this one-call source needs exactly cs0.
+    assert "producer_cs1" not in cpp
+    compile_cpp(cpp)
+
+
+@pytest.mark.parametrize(
+    ("functional", "keyword", "producer_first"),
+    product((False, True), repeat=3),
+)
+def test_stateful_temporary_receiver_shape_and_source_order_matrix(
+    functional: bool,
+    keyword: bool,
+    producer_first: bool,
+):
+    """All 2^3 call-shape/order cells retain exact string typing."""
+    producer = '''produce() =>
+    unused = ta.sma(close, 2)
+    "x"
+'''
+    if functional:
+        terminal = (
+            "array.get(id=array.from(produce()), index=0)"
+            if keyword
+            else "array.get(array.from(produce()), 0)"
+        )
+    else:
+        terminal = (
+            "array.from(produce()).get(index=0)"
+            if keyword
+            else "array.from(produce()).get(0)"
+        )
+    reader = f"read_value() =>\n    {terminal}\n"
+    definitions = (
+        producer + reader if producer_first else reader + producer
+    )
+    source = (
+        "//@version=6\n"
+        'strategy("Temporary receiver source-order matrix")\n'
+        f"{definitions}"
+        "observed = read_value()\n"
+    )
+
+    cpp = transpile(source)
+    assert "std::string read_value_cs0(" in cpp
+    assert "double read_value_cs0(" not in cpp
+    assert "std::vector<std::string>{produce_cs" in cpp
+    expected_clones = 1
+    definitions = [
+        index
+        for index in range(8)
+        if f"std::string produce_cs{index}(" in cpp
+    ]
+    assert definitions == list(range(expected_clones))
+    assert f"std::vector<std::string>{{produce_cs{expected_clones - 1}()}}" in cpp
+    assert sum(
+        f"ta::SMA _ta_sma_1{'' if index == 0 else f'_cs{index}'};" in cpp
+        for index in range(8)
+    ) == expected_clones
+    compile_cpp(cpp)
+
+
+def test_nested_stateful_temporary_readers_isolate_two_call_paths():
+    source = r'''//@version=6
+strategy("Nested temporary reader isolation")
+produce() =>
+    unused = ta.sma(close, 2)
+    "x"
+middle() =>
+    array.get(array.from(produce()), 0)
+outer() =>
+    array.get(array.from(middle()), 0)
+first = outer()
+second = outer()
+'''
+    cpp = transpile(source)
+    for index in (0, 1):
+        assert f"std::string produce_cs{index}(" in cpp
+        assert f"std::string middle_cs{index}(" in cpp
+        assert f"std::string outer_cs{index}(" in cpp
+        assert f"std::vector<std::string>{{produce_cs{index}()}}" in cpp
+        assert f"std::vector<std::string>{{middle_cs{index}()}}" in cpp
+    assert "produce_cs2" not in cpp
+    assert "middle_cs2" not in cpp
+    assert "outer_cs2" not in cpp
+    assert cpp.count("ta::SMA _ta_sma_1") == 2
+    compile_cpp(cpp)
+
+
+@pytest.mark.parametrize(
+    "definitions",
+    (
+        '''reader() =>
+    array.get(array.from(reader()), 0)
+''',
+        '''first_reader() =>
+    array.get(array.from(second_reader()), 0)
+second_reader() =>
+    first_reader()
+''',
+        '''first_reader() =>
+    array.get(array.from(second_reader()), 0)
+second_reader() =>
+    third_reader()
+third_reader() =>
+    first_reader()
+''',
+    ),
+)
+def test_temporary_reader_recursion_is_rejected(definitions: str):
+    source = (
+        "//@version=6\n"
+        'strategy("Temporary reader recursion")\n'
+        f"{definitions}"
+        + (
+            "observed = reader()\n"
+            if definitions.startswith("reader")
+            else "observed = first_reader()\n"
+        )
+    )
+    with pytest.raises(
+        CompileError,
+        match="Recursive direct temporary-array reader cycle",
+    ):
+        transpile(source)
+
+
+def test_forward_defaulted_parameter_is_not_registered_as_zero_parameter():
+    source = r'''//@version=6
+strategy("Forward default parameter boundary")
+read_value() =>
+    array.get(array.from(produce()), 0)
+produce(string value = "x") =>
+    value
+observed = read_value()
+'''
+    with pytest.raises(CompileError, match="Unknown function 'produce"):
+        transpile(source)
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    (
+        "array.get(make_values(), 0)",
+        "array.copy(make_values()).get(0)",
+        "array.get(array.slice(values, 0, 1), 0)",
+    ),
+)
+def test_arbitrary_temporary_array_receivers_remain_fail_closed(terminal: str):
+    source = f'''//@version=6
+strategy("Temporary receiver scope boundary")
+values = array.from("x")
+make_values() =>
+    array.copy(values)
+blocked() =>
+    {terminal}
+observed = blocked()
+'''
+    cpp = transpile(source)
+    assert "std::string blocked(" not in cpp
+    assert "double blocked(" in cpp
+
+
+def test_local_map_named_array_is_not_a_builtin_array_producer():
+    source = r'''//@version=6
+strategy("Array producer namespace shadow")
+blocked() =>
+    map<string, string> array = map.new<string, string>()
+    map.put(array, "k", "x")
+    array.copy().get("k")
+observed = blocked()
+'''
+    cpp = transpile(source)
+    assert "std::string blocked(" not in cpp
+    assert "double blocked(" in cpp
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    (
+        "source.copy().get(0)",
+        "array.copy(source).get(0)",
+        "array.get(id=source.copy(), index=0)",
+        "array.get(id=array.copy(source), index=0)",
+    ),
+)
+def test_identifier_backed_copy_representations_return_exact_type(terminal: str):
+    source = f'''//@version=6
+strategy("Direct copy producer representations")
+read_value() =>
+    array<string> source = array.from("x")
+    {terminal}
+observed = read_value()
+'''
+    cpp = transpile(source)
+    assert "std::string read_value(" in cpp
+    assert "double read_value(" not in cpp
+    compile_cpp(cpp)
+
+
+@pytest.mark.parametrize(
+    ("functional", "string", "copy_factory", "udf_element"),
+    product((False, True), repeat=4),
+)
+def test_temporary_builtin_array_producer_matrix(
+    functional: bool,
+    string: bool,
+    copy_factory: bool,
+    udf_element: bool,
+):
+    """Complete 2^4 surface matrix around the two masked type gaps."""
+    type_name = "string" if string else "int"
+    literal = '"ok"' if string else "7"
+    expected_cpp = "std::string" if string else "int"
+    lines = [
+        "//@version=6",
+        'strategy("Temporary builtin array producer matrix")',
+    ]
+    if udf_element:
+        lines.extend(
+            [
+                "produce() =>",
+                "    unused = ta.sma(close, 2)",
+                f"    {literal}",
+            ]
+        )
+        element = "produce()"
+    else:
+        element = literal
+    lines.append("read_value() =>")
+    if copy_factory:
+        lines.append(
+            f"    array<{type_name}> source = array.from({element})"
+        )
+        receiver = "array.copy(source)"
+    else:
+        receiver = f"array.from({element})"
+    terminal = (
+        f"array.get({receiver}, 0)"
+        if functional
+        else f"{receiver}.get(0)"
+    )
+    lines.extend(
+        [
+            f"    {terminal}",
+            "observed = read_value()",
+        ]
+    )
+    source = "\n".join(lines) + "\n"
+
+    cpp = transpile(source)
+    suffix = "_cs0" if udf_element else ""
+    assert f"{expected_cpp} read_value{suffix}(" in cpp
+    if string:
+        assert f"double read_value{suffix}(" not in cpp
+    vector_type = "std::vector<std::string>" if string else "std::vector<int>"
+    assert vector_type in cpp
+    compile_cpp(cpp)
