@@ -5,7 +5,9 @@ import pytest
 from pineforge_codegen import transpile
 
 # Resolve the engine corpus from the sibling checkout (../pineforge-engine)
-# or PINEFORGE_ENGINE_CORPUS; the test skips cleanly when neither is present.
+# or PINEFORGE_ENGINE_CORPUS.  The golden itself uses a checked-in fixture so
+# codegen-only CI cannot silently skip it; the optional corpus assertion keeps
+# that fixture byte-identical to its authoritative engine-corpus source.
 CORPUS_ROOT = Path(
     os.environ.get(
         "PINEFORGE_ENGINE_CORPUS",
@@ -13,13 +15,33 @@ CORPUS_ROOT = Path(
     )
 )
 GOLDEN_ROOT = Path(__file__).parent / "golden"
+FIXTURE_ROOT = Path(__file__).parent / "fixtures"
+MATRIX_EIGEN_FIXTURE = FIXTURE_ROOT / "matrix_eigen_pca.pine"
+_MATRIX_EIGEN_CORPUS_CANDIDATES = (
+    CORPUS_ROOT / "matrix-covariance-eigen-pca-01" / "strategy.pine",
+    CORPUS_ROOT
+    / "validation"
+    / "matrix-covariance-eigen-pca-01"
+    / "strategy.pine",
+)
+MATRIX_EIGEN_CORPUS_SOURCE = next(
+    (path for path in _MATRIX_EIGEN_CORPUS_CANDIDATES if path.exists()),
+    _MATRIX_EIGEN_CORPUS_CANDIDATES[0],
+)
 
 
-@pytest.mark.skipif(not CORPUS_ROOT.exists(), reason="engine corpus not available")
 def test_matrix_eigen_pca_byte_identical():
-    src = (CORPUS_ROOT / "matrix-covariance-eigen-pca-01" / "strategy.pine").read_text()
+    src = MATRIX_EIGEN_FIXTURE.read_text()
     expected = (GOLDEN_ROOT / "matrix_eigen_pca.cpp").read_text()
     assert transpile(src) == expected
+
+
+@pytest.mark.skipif(
+    not MATRIX_EIGEN_CORPUS_SOURCE.exists(),
+    reason="authoritative engine-corpus source not available",
+)
+def test_matrix_eigen_pca_fixture_matches_engine_corpus():
+    assert MATRIX_EIGEN_FIXTURE.read_bytes() == MATRIX_EIGEN_CORPUS_SOURCE.read_bytes()
 
 
 # ---------------------------------------------------------------------------
