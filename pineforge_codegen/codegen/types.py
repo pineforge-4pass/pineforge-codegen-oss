@@ -310,6 +310,9 @@ class TypeInferer:
         doing so changes unrelated float-band comparator output.  Collection
         construction needs the narrower fact so its vector type agrees with
         the analyzer-captured declaration type, including lexical loop binders.
+        A primitive user-function result may have only the coarse ``PineType``
+        slot populated; recover that exact scalar here rather than silently
+        defaulting ``array.from(string_udf())`` to ``std::vector<double>``.
         """
         if isinstance(node, BinOp):
             left = self._array_from_element_spec(node.left)
@@ -325,7 +328,24 @@ class TypeInferer:
                 if left.name == "int" and right.name == "int":
                     return TypeSpec.primitive("int")
             return None
-        return self._type_spec_from_expr(node)
+        spec = self._type_spec_from_expr(node)
+        if spec is not None:
+            return spec
+        if isinstance(node, FuncCall):
+            func_name, namespace = self._resolve_callee(node.callee)
+            if namespace is None:
+                func_info = self._func_info_map.get(func_name)
+                pine_type = getattr(func_info, "return_type", None)
+                primitive_name = {
+                    PineType.INT: "int",
+                    PineType.FLOAT: "float",
+                    PineType.BOOL: "bool",
+                    PineType.STRING: "string",
+                    PineType.COLOR: "color",
+                }.get(pine_type)
+                if primitive_name is not None:
+                    return TypeSpec.primitive(primitive_name)
+        return None
 
     def _type_spec_from_expr(self, node) -> TypeSpec | None:
         """Best-effort TypeSpec inference for an expression node.
