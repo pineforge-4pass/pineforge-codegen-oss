@@ -406,6 +406,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         """Run semantic analysis and return the analyzer context."""
         self._ensure_pine_v6()
         self._visit(self._ast)
+        self._check_forward_tuple_helper_wrappers()
         self._check_top_level_block_shadow_boundaries()
         self._qualify_colliding_func_var_members()
         self._check_cross_callable_series_collection_collisions()
@@ -514,6 +515,41 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             udt_field_type_specs=dict(self._udt_field_type_specs),
             block_var_renames=dict(self._block_var_renames),
         )
+
+    def _check_forward_tuple_helper_wrappers(self) -> None:
+        """Fail before codegen on a tuple wrapper calling a later definition.
+
+        Direct terminal tuple metadata can be propagated after the callee is
+        analyzed, but the earlier wrapper body did not register that callee's
+        ordinary FuncInfo/call graph. Emitting it would therefore reach an
+        unknown-function error in codegen. Keep the boundary explicit until
+        forward callable registration itself is implemented.
+        """
+        positions = {
+            stmt.name: index
+            for index, stmt in enumerate(self._ast.body)
+            if isinstance(stmt, FuncDef)
+        }
+        for wrapper_name, wrapper_def in self._func_defs.items():
+            terminal = self._direct_terminal_return_expr(wrapper_def)
+            if not (
+                isinstance(terminal, FuncCall)
+                and isinstance(terminal.callee, Identifier)
+            ):
+                continue
+            callee_name = terminal.callee.name
+            if not self._func_returns_tuple.get(callee_name, False):
+                continue
+            if positions.get(callee_name, -1) <= positions.get(wrapper_name, -1):
+                continue
+            self._error(
+                "Tuple-return helper wrapper "
+                f"'{wrapper_name}' calls later-defined helper '{callee_name}'; "
+                "forward tuple-wrapper calls are not supported yet. "
+                f"Move '{callee_name}' above '{wrapper_name}' before passing "
+                "the wrapper to request.security().",
+                terminal.loc,
+            )
 
     def _qualify_colliding_func_var_members(self) -> None:
         """Give colliding ordinary-UDF primitive/collection vars distinct storage.
@@ -1177,6 +1213,28 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         keyed, so allowing those shapes to shadow a direct script binding could
         silently retarget the class member or emit invalid C++.
         """
+        def tuple_binding_type(
+            stmt: TupleAssign, name: str
+        ) -> tuple[PineType, TypeSpec]:
+            try:
+                index = stmt.names.index(name)
+            except ValueError:
+                index = -1
+            element_types = self._tuple_element_types_by_node.get(
+                id(stmt.value), ()
+            )
+            inferred = (
+                element_types[index]
+                if 0 <= index < len(element_types)
+                else PineType.FLOAT
+            )
+            # Mirrors _visit_TupleAssign: bool is the only newly exact family;
+            # all numeric elements retain the established float storage.
+            pine_type = (
+                PineType.BOOL if inferred == PineType.BOOL else PineType.FLOAT
+            )
+            return pine_type, TypeSpec.primitive(pine_type.value)
+
         direct: dict[str, tuple[PineType, TypeSpec | None]] = {}
         for stmt in self._ast.body:
             if isinstance(stmt, VarDecl):
@@ -1186,9 +1244,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             elif isinstance(stmt, TupleAssign):
                 for name in stmt.names:
                     if name != "_":
-                        direct[name] = (
-                            PineType.FLOAT, TypeSpec.primitive("float")
-                        )
+                        direct[name] = tuple_binding_type(stmt, name)
 
         def nested_bindings(
             stmts: list[ASTNode], primitive_mismatch_unsafe: bool
@@ -1317,13 +1373,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 nested_type, nested_spec = (
                     PineType.INT, TypeSpec.primitive("int")
                 )
+            elif isinstance(node, TupleAssign):
+                nested_type, nested_spec = tuple_binding_type(node, name)
             else:
-                nested_type, nested_spec = (
-                    self._var_decl_types_by_node.get(
-                        id(node), (PineType.FLOAT, None)
-                    )
-                    if isinstance(node, VarDecl)
-                    else (PineType.FLOAT, TypeSpec.primitive("float"))
+                nested_type, nested_spec = self._var_decl_types_by_node.get(
+                    id(node), (PineType.FLOAT, None)
                 )
             direct_type, direct_spec = direct[name]
             is_exact_series = (
@@ -2082,6 +2136,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     expression=sec.expression,
                     returns_tuple=sec.returns_tuple,
                     tuple_size=sec.tuple_size,
+                    tuple_element_types=sec.tuple_element_types,
                     gaps=sec.gaps,
                     lookahead=sec.lookahead,
                     ta_range=sec.ta_range,
@@ -2743,12 +2798,27 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _visit_TupleAssign(self, node: TupleAssign) -> PineType:
         val_type = self._visit(node.value)
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
+        element_types = self._tuple_element_types_by_node.get(id(node.value), ())
 
         is_val_static = self._is_static_expression(node.value)
 
-        for name in node.names:
+        for idx, name in enumerate(node.names):
             if name == "_":
                 continue
+
+            inferred_element_type = (
+                element_types[idx]
+                if idx < len(element_types)
+                else PineType.FLOAT
+            )
+            # Tuple bindings historically use double storage for every
+            # numeric element, including integer literals. Preserve that
+            # contract while retaining the newly-authoritative bool family.
+            element_type = (
+                PineType.BOOL
+                if inferred_element_type == PineType.BOOL
+                else PineType.FLOAT
+            )
 
             if self._global_scope and is_val_static:
                 self._static_vars.add(name)
@@ -2757,7 +2827,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
             sym = Symbol(
                 name=name,
-                pine_type=PineType.FLOAT,  # tuple elements are typically float
+                pine_type=element_type,
                 is_series=False,
                 is_var=False,
                 is_const=False,
@@ -2787,13 +2857,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     and self._symbols.current_scope.name == "global"
                     ):
                 self._ordinary_global_binding_info[name] = (
-                    id(node), PineType.FLOAT, node.value,
+                    id(node), element_type, node.value,
                 )
                 if name not in self._series_vars:
-                    self._global_var_decls.append((name, PineType.FLOAT))
+                    self._global_var_decls.append((name, element_type))
                     self._global_expr_map[name] = node.value
                 self._record_global_binding_stmt(
-                    name, PineType.FLOAT, False, decl_node=node,
+                    name, element_type, False, decl_node=node,
                 )
 
         return val_type
@@ -2922,6 +2992,68 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._func_tuple_element_types[node.name] = (
                     self._tuple_element_types_by_node.get(id(tuple_node), ())
                 )
+            elif (
+                isinstance(terminal_ret_expr, FuncCall)
+                and isinstance(terminal_ret_expr.callee, Identifier)
+            ):
+                # A direct terminal helper wrapper preserves the callee's
+                # tuple shape. Without this metadata request.security treats
+                # ``outer(x) => inner(x)`` as scalar and emits std::get against
+                # a double result. Keep propagation deliberately direct: more
+                # complex conditional/collection return shapes remain outside
+                # the supported helper-tuple contract.
+                terminal_callee = terminal_ret_expr.callee.name
+                if self._func_returns_tuple.get(terminal_callee, False):
+                    self._func_returns_tuple[node.name] = True
+                    self._func_tuple_element_count[node.name] = (
+                        self._func_tuple_element_count.get(terminal_callee, 0)
+                    )
+                    self._func_tuple_element_types[node.name] = (
+                        self._func_tuple_element_types.get(terminal_callee, ())
+                    )
+
+        # Re-run direct-wrapper propagation to a fixed point whenever a new
+        # definition is analyzed. This makes ``outer()=>inner()`` source-order
+        # safe when ``inner`` is defined later: once the callee's literal tuple
+        # shape is known, every already-seen wrapper chain is updated before a
+        # following request.security call is analyzed.
+        changed = True
+        while changed:
+            changed = False
+            for wrapper_name, wrapper_def in self._func_defs.items():
+                wrapper_terminal = self._direct_terminal_return_expr(
+                    wrapper_def
+                )
+                if not (
+                    isinstance(wrapper_terminal, FuncCall)
+                    and isinstance(wrapper_terminal.callee, Identifier)
+                ):
+                    continue
+                callee_name = wrapper_terminal.callee.name
+                if not self._func_returns_tuple.get(callee_name, False):
+                    continue
+                tuple_count = self._func_tuple_element_count.get(
+                    callee_name, 0
+                )
+                tuple_types = self._func_tuple_element_types.get(
+                    callee_name, ()
+                )
+                if (
+                    self._func_returns_tuple.get(wrapper_name, False)
+                    and self._func_tuple_element_count.get(wrapper_name, 0)
+                    == tuple_count
+                    and self._func_tuple_element_types.get(wrapper_name, ())
+                    == tuple_types
+                ):
+                    continue
+                self._func_returns_tuple[wrapper_name] = True
+                self._func_tuple_element_count[wrapper_name] = tuple_count
+                self._func_tuple_element_types[wrapper_name] = tuple_types
+                for info in self._func_infos:
+                    if info.name == wrapper_name:
+                        info.returns_tuple = True
+                        info.tuple_element_count = tuple_count
+                changed = True
 
         # Detect if the function returns a UDT instance via ``T.new(...)`` —
         # used by codegen to emit the C++ return type as the struct name and

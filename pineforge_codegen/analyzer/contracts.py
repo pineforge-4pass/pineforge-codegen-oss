@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..symbols import TypeSpec
+from ..symbols import PineType, TypeSpec
 
 
 @dataclass
@@ -138,6 +138,12 @@ class SecurityCallInfo:
     expression: Any
     returns_tuple: bool
     tuple_size: int
+    # Exact helper/direct tuple element types. Empty for scalar calls and for
+    # legacy/TA tuple records whose runtime result struct already defines its
+    # field types. User-defined request.security helpers use this to select
+    # numeric-double versus homogeneous-bool aggregate storage without
+    # guessing in codegen.
+    tuple_element_types: tuple[PineType, ...] = ()
     gaps: Any = None
     lookahead: Any = None
     ta_range: Any = None

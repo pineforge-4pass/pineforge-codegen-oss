@@ -94,11 +94,12 @@ from ..ast_nodes import (
     StrategyDecl,
     SwitchStmt,
     TupleAssign,
+    TupleLiteral,
     TypeDecl,
     VarDecl,
     WhileStmt,
 )
-from ..symbols import TypeSpec
+from ..symbols import PineType, TypeSpec
 from .tables import (
     ARRAY_NEW_CTORS,
     DRAWING_TYPE_TO_CPP,
@@ -998,6 +999,88 @@ class StmtVisitor:
             if is_top_level
             else set()
         )
+        security_result_fields: list[str] | None = None
+
+        # Exact supported request.security tuples are authoritative Program
+        # globals: a later UDF reads their class-member storage, so a local
+        # structured binding would shadow the members with fresh values while
+        # leaving the UDF-visible state stale. Keep this narrow to security
+        # tuples whose analyzer metadata proves a supported helper family, an
+        # exact direct literal, or a known TA tuple result. Ordinary
+        # non-security heterogeneous tuples retain their established local
+        # destructuring behavior.
+        if is_top_level and isinstance(node.value, FuncCall):
+            func_name, namespace = self._resolve_callee(node.value.callee)
+            if namespace == "request" and func_name == "security":
+                param_names = [
+                    "symbol", "timeframe", "expression", "gaps",
+                    "lookahead", "ignore_invalid_symbol", "currency",
+                ]
+                all_args = list(node.value.args)
+                for idx, param_name in enumerate(param_names):
+                    if param_name in node.value.kwargs:
+                        while len(all_args) <= idx:
+                            all_args.append(None)
+                        all_args[idx] = node.value.kwargs[param_name]
+                expr_node = all_args[2] if len(all_args) > 2 else None
+                info = next(
+                    (
+                        item
+                        for item in self._security_calls
+                        if not item.get("is_lower_tf_array")
+                        and item.get("expr_node") is expr_node
+                    ),
+                    None,
+                )
+                if info is not None:
+                    tuple_size = info.get("tuple_size", 0)
+                    tuple_types = tuple(
+                        info.get("tuple_element_types", ()) or ()
+                    )
+                    numeric_tuple = (
+                        tuple_size >= 2
+                        and len(tuple_types) == tuple_size
+                        and all(
+                            item in (PineType.INT, PineType.FLOAT)
+                            for item in tuple_types
+                        )
+                    )
+                    bool_tuple = (
+                        tuple_size >= 2
+                        and len(tuple_types) == tuple_size
+                        and all(item == PineType.BOOL for item in tuple_types)
+                    )
+                    exact_direct_tuple = (
+                        isinstance(expr_node, TupleLiteral)
+                        and tuple_size >= 2
+                        and len(tuple_types) == tuple_size
+                        and all(
+                            item in (
+                                PineType.INT,
+                                PineType.FLOAT,
+                                PineType.BOOL,
+                            )
+                            for item in tuple_types
+                        )
+                    )
+                    ta_site = self._get_ta_site(expr_node)
+                    known_ta_tuple = (
+                        ta_site is not None
+                        and self._ta_name_from_site(ta_site) in TA_TUPLE_FIELDS
+                    )
+                    if known_ta_tuple:
+                        security_result_fields = TA_TUPLE_FIELDS[
+                            self._ta_name_from_site(ta_site)
+                        ]
+                    if (
+                        numeric_tuple
+                        or bool_tuple
+                        or exact_direct_tuple
+                        or known_ta_tuple
+                    ):
+                        global_targets.update(
+                            name for name in node.names if name != "_"
+                        )
 
         def emit_call_tuple(call_expr: str) -> None:
             """Destructure once, routing exact history elements to Series.
@@ -1026,7 +1109,14 @@ class StmtVisitor:
             for idx, name in enumerate(node.names):
                 if name == "_":
                     continue
-                value = f"std::get<{idx}>({temp})"
+                value = (
+                    f"{temp}.{security_result_fields[idx]}"
+                    if (
+                        security_result_fields is not None
+                        and idx < len(security_result_fields)
+                    )
+                    else f"std::get<{idx}>({temp})"
+                )
                 safe = self._safe_name(name)
                 if name in series_names:
                     if safe in self._active_var_remap:

@@ -224,6 +224,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for stmt in ctx.ast.body
             if isinstance(stmt, TupleAssign)
         }
+        self._direct_program_tuple_binding_names: set[str] = {
+            name
+            for stmt in ctx.ast.body
+            if isinstance(stmt, TupleAssign)
+            for name in stmt.names
+            if name != "_"
+        }
         self._direct_program_binding_names: set[str] = {
             stmt.name
             for stmt in ctx.ast.body
@@ -2884,15 +2891,33 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     if ctype == "std::vector<double>":
                         lines.append(f"    {ctype} _req_sec_{sec_id}_{i}{{}};")
                     else:
-                        lines.append(f"    {ctype} _req_sec_{sec_id}_{i} = na<double>();")
+                        default = {
+                            "double": "na<double>()",
+                            "bool": "false",
+                            "int": "0",
+                            "std::string": 'std::string("")',
+                        }.get(ctype, self._default_for_type(ctype))
+                        lines.append(
+                            f"    {ctype} _req_sec_{sec_id}_{i} = {default};"
+                        )
             elif returns_tuple and tuple_size and tuple_size > 0:
                 self._security_ohlc_hist_fields_by_sec[sec_id] = (
                     self._collect_security_ohlc_hist_fields_for_call(item)
                 )
                 site = self._get_ta_site(expr_node)
                 ta_name = self._ta_name_from_site(site) if site is not None else ""
-                ctype = TA_TUPLE_RESULT_TYPES.get(ta_name, "std::tuple<double, double>")
-                default = self._security_tuple_result_default(ctype, tuple_size)
+                ctype = TA_TUPLE_RESULT_TYPES.get(
+                    ta_name,
+                    self._security_helper_tuple_cpp_type(
+                        tuple_size,
+                        item.get("tuple_element_types", ()),
+                    ),
+                )
+                default = self._security_tuple_result_default(
+                    ctype,
+                    tuple_size,
+                    item.get("tuple_element_types", ()),
+                )
                 lines.append(f"    {ctype} _req_sec_{sec_id} = {default};")
             else:
                 self._security_ohlc_hist_fields_by_sec[sec_id] = (
@@ -3185,7 +3210,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(f"    {udt_t} {safe} = {udt_t}{{}};")
             else:
                 expr = self.ctx.global_expr_map.get(name) if hasattr(self.ctx, "global_expr_map") else None
-                cpp_type = self._infer_type(expr) if expr is not None else PINE_TYPE_TO_CPP.get(ptype, "double")
+                if (
+                    name in self._direct_program_tuple_binding_names
+                    and ptype == PineType.BOOL
+                ):
+                    # request.security homogeneous-bool helper tuples carry
+                    # their exact element family in analyzer metadata. The
+                    # coarse request.security call expression itself still
+                    # reports FLOAT, so prefer that exact binding type here.
+                    cpp_type = "bool"
+                else:
+                    cpp_type = (
+                        self._infer_type(expr)
+                        if expr is not None
+                        else PINE_TYPE_TO_CPP.get(ptype, "double")
+                    )
                 default = self._default_for_type(cpp_type)
                 lines.append(f"    {cpp_type} {safe} = {default};")
 
@@ -3934,18 +3973,55 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                                 ctor_site = cand
                 if not ctor_site.ctor_args:
                     continue
-                runtime_args = []
-                any_runtime = False
-                for a in ctor_site.ctor_args:
-                    rt = self._runtime_ctor_arg_for_reset(a)
-                    if rt is not None:
-                        runtime_args.append(rt)
-                        any_runtime = True
-                    else:
+                for variant in variants:
+                    ctor_args, ctor_arg_stability = self._security_ta_ctor_args_for_variant(
+                        info["sec_id"],
+                        site,
+                        variant.get("binding_stack", ()),
+                        fallback_args=ctor_site.ctor_args,
+                    )
+                    runtime_args = []
+                    any_runtime = False
+                    for arg_pos, a in enumerate(ctor_args):
+                        rt = self._runtime_ctor_arg_for_reset(a)
                         resolved = self._resolve_known(a)
-                        runtime_args.append(resolved if self._is_compile_time_value(resolved) else "1")
-                if any_runtime:
-                    for variant in variants:
+                        lowered_variant = ctor_arg_stability is not None
+                        stable_variant_arg = (
+                            lowered_variant and ctor_arg_stability[arg_pos]
+                        )
+                        if (
+                            rt is None
+                            and stable_variant_arg
+                            and not self._is_compile_time_value(resolved)
+                        ):
+                            # This is trusted C++ from _build_security_expr and
+                            # its fully helper-bound AST passed _expr_is_stable.
+                            rt = a
+                        if (
+                            rt is None
+                            and lowered_variant
+                            and not self._is_compile_time_value(resolved)
+                        ):
+                            self._codegen_error(
+                                getattr(site, "node", None),
+                                f"Unsupported requested-context TA constructor "
+                                f"length '{a}' for {site.class_name}: the "
+                                "helper-bound expression is not a stable "
+                                "per-run scalar.",
+                                hint=("Use a literal, an input.*() value, "
+                                      "timeframe.* metadata, or arithmetic "
+                                      "over those for TA lengths."),
+                            )
+                        if rt is not None:
+                            runtime_args.append(rt)
+                            any_runtime = True
+                        else:
+                            runtime_args.append(
+                                resolved
+                                if self._is_compile_time_value(resolved)
+                                else "1"
+                            )
+                    if any_runtime:
                         resets.append(
                             f"{variant['member_name']} = {site.class_name}({', '.join(runtime_args)});"
                         )

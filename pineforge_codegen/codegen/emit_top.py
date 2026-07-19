@@ -544,11 +544,18 @@ class TopLevelEmitter:
                 site = self.ctx.ta_call_sites[idx]
                 if not site.ctor_args:
                     continue
-                resolved = [self._resolve_known(a) for a in site.ctor_args]
-                safe_resolved = []
-                for r in resolved:
-                    safe_resolved.append(r if self._is_compile_time_value(r) else "1")
                 for variant in variants:
+                    ctor_args, _ctor_arg_stability = self._security_ta_ctor_args_for_variant(
+                        info["sec_id"],
+                        site,
+                        variant.get("binding_stack", ()),
+                    )
+                    resolved = [self._resolve_known(a) for a in ctor_args]
+                    safe_resolved = []
+                    for r in resolved:
+                        safe_resolved.append(
+                            r if self._is_compile_time_value(r) else "1"
+                        )
                     init_parts.append(f"{variant['member_name']}({', '.join(safe_resolved)})")
 
         # Non-series var members with compile-time init (deduplicate by name)
