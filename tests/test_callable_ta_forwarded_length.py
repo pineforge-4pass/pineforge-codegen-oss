@@ -439,3 +439,32 @@ int main() {
 }
 '''
     assert _compile_and_run(transpile(source) + driver) == "10 1\n"
+
+
+def test_three_level_dynamic_length_reuses_outer_target_when_leaf_namespace_is_crowded() -> None:
+    source = '''//@version=6
+strategy("three level crowded dynamic length")
+leaf(float src, int len) => ta.sma(src, len)
+middle(float src, int len) => leaf(src, len)
+entry(float src, int len) => middle(src, len)
+noise1 = leaf(high, 2)
+noise2 = leaf(low, 3)
+noise3 = leaf(volume, 4)
+a = entry(close, 2)
+b = entry(open, 3)
+'''
+    driver = r'''
+#include <iostream>
+int main() {
+    Bar bars[] = {
+        Bar{1.0, 11.0, 0.0, 10.0, 1.0, 1000},
+        Bar{2.0, 21.0, 1.0, 20.0, 2.0, 61000},
+        Bar{3.0, 31.0, 2.0, 30.0, 3.0, 121000},
+    };
+    GeneratedStrategy strategy;
+    strategy.run(bars, 3);
+    if (!strategy.last_error().empty()) return 7;
+    std::cout << strategy.a << " " << strategy.b << "\n";
+}
+'''
+    assert _compile_and_run(transpile(source) + driver) == "25 2\n"

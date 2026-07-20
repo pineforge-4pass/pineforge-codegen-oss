@@ -2613,14 +2613,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         # Inherit each multi-call-site parent's index space down the full path.
         # Re-run to a fixed point for A -> B -> C chains.
-        def _ta_variant_target_indices(
+        def _ta_variant_target_map(
             func_name: str, cs_idx: int
-        ) -> set[int]:
+        ) -> dict[int, int]:
             source_indices = list(self._func_ta_indices.get(func_name, ()))
             if not source_indices and func_name in self._func_ta_ranges:
                 source_indices = list(range(*self._func_ta_ranges[func_name]))
             if cs_idx == 0:
-                return set(source_indices)
+                return {index: index for index in source_indices}
             overrides = self._func_cs_ta_clone_names.get(
                 (func_name, cs_idx), {}
             )
@@ -2628,7 +2628,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 site.member_name: index
                 for index, site in enumerate(self._ta_call_sites)
             }
-            targets: set[int] = set()
+            targets: dict[int, int] = {}
             for source_index in source_indices:
                 source_name = self._ta_call_sites[source_index].member_name
                 target_name = overrides.get(
@@ -2636,7 +2636,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 )
                 target_index = by_member.get(target_name)
                 if target_index is not None:
-                    targets.add(target_index)
+                    targets[source_index] = target_index
             return targets
 
         changed = True
@@ -2678,7 +2678,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                                     (sub, 0), None
                                 )
                         for cs_idx in range(current, count):
-                            parent_ta_targets = _ta_variant_target_indices(
+                            parent_ta_targets = _ta_variant_target_map(
                                 fname, cs_idx
                             )
                             self._materialize_user_func_call_site_state(

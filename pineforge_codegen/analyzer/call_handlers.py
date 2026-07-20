@@ -1215,7 +1215,7 @@ class CallHandlers:
     def _materialize_user_func_call_site_state(
             self, func_name: str, cs_idx: int, node: FuncCall,
             *, reuse_existing_owner: str | None = None,
-            reuse_existing_targets: set[int] | None = None,
+            reuse_existing_targets: dict[int, int] | None = None,
             ta_site_indices: list[int] | None = None,
             materialize_fixnan: bool = True) -> dict[int, int]:
         """Materialize TA/fixnan state for one UDF call-site variant.
@@ -1233,9 +1233,10 @@ class CallHandlers:
         ``{member}_cs{idx}`` clone for the borrowed callee site; when that clone
         belongs to the parent currently being propagated, it is the desired
         call-path state and must be reused rather than duplicated under a
-        disambiguated-but-unused name. ``reuse_existing_targets`` extends that
-        proof through another borrowed layer: the immediate parent's active
-        remap can legitimately target a clone owned by its own caller.
+        disambiguated-but-unused name. ``reuse_existing_targets`` maps each
+        source TA identity to the immediate parent's already-resolved target;
+        this extends the proof through another borrowed layer even when clone
+        name collisions forced a disambiguating suffix.
         """
         func_def = self._func_defs.get(func_name)
         method_info = None
@@ -1377,6 +1378,25 @@ class CallHandlers:
                     resolved_ctor = [
                         _subst_params(arg, param_arg_map) for arg in orig_args
                     ]
+                    reuse_target = (
+                        reuse_existing_targets.get(i)
+                        if reuse_existing_targets is not None
+                        else None
+                    )
+                    if reuse_target is not None:
+                        # The parent's active clone already resolved this
+                        # exact source identity through the next outer call
+                        # boundary. Reuse it directly; do not overwrite its
+                        # concrete constructor with this edge's still-local
+                        # parameter spelling.
+                        selected_ta_indices[i] = reuse_target
+                        target_name = self._ta_call_sites[
+                            reuse_target
+                        ].member_name
+                        default_name = f"{orig.member_name}_cs{cs_idx}"
+                        if target_name != default_name:
+                            clone_name_map[orig.member_name] = target_name
+                        continue
                     existing_target = self._func_ta_call_targets.get(
                         (id(node), cs_idx), {}
                     ).get(i)
@@ -1400,10 +1420,6 @@ class CallHandlers:
                                 reuse_existing_owner is not None
                                 and existing_pair[1].owner_func
                                 == reuse_existing_owner
-                            )
-                            or (
-                                reuse_existing_targets is not None
-                                and existing_pair[0] in reuse_existing_targets
                             )
                         )
                     ):
