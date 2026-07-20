@@ -1214,7 +1214,10 @@ class CallHandlers:
 
     def _materialize_user_func_call_site_state(
             self, func_name: str, cs_idx: int, node: FuncCall,
-            *, reuse_existing_owner: str | None = None) -> None:
+            *, reuse_existing_owner: str | None = None,
+            reuse_existing_targets: dict[int, int] | None = None,
+            ta_site_indices: list[int] | None = None,
+            materialize_fixnan: bool = True) -> dict[int, int]:
         """Materialize TA/fixnan state for one UDF call-site variant.
 
         Ordinary call sites are handled while walking the AST.  A second class
@@ -1230,7 +1233,10 @@ class CallHandlers:
         ``{member}_cs{idx}`` clone for the borrowed callee site; when that clone
         belongs to the parent currently being propagated, it is the desired
         call-path state and must be reused rather than duplicated under a
-        disambiguated-but-unused name.
+        disambiguated-but-unused name. ``reuse_existing_targets`` maps each
+        source TA identity to the immediate parent's already-resolved target;
+        this extends the proof through another borrowed layer even when clone
+        name collisions forced a disambiguating suffix.
         """
         func_def = self._func_defs.get(func_name)
         method_info = None
@@ -1251,7 +1257,9 @@ class CallHandlers:
                 f"Cannot materialize callable state for unknown function '{func_name}'.",
                 node.loc,
             )
-            return
+            return {}
+
+        selected_ta_indices: dict[int, int] = {}
 
         param_arg_map: dict[str, str] = {}
         positional_args = list(node.args)
@@ -1272,6 +1280,16 @@ class CallHandlers:
 
         if func_name in self._func_ta_ranges:
             start, end = self._func_ta_ranges[func_name]
+            site_indices = (
+                list(ta_site_indices)
+                if ta_site_indices is not None
+                else list(self._func_ta_indices.get(func_name, ()))
+            )
+            if ta_site_indices is None and not site_indices:
+                site_indices = list(range(start, end))
+            func_ctor_templates = self._func_ta_ctor_args.setdefault(
+                func_name, {}
+            )
 
             # Map local derived length variables back to expressions over the
             # function's parameters before substituting call-site arguments.
@@ -1309,46 +1327,105 @@ class CallHandlers:
             if cs_idx == 0:
                 # cs0 owns the source-level sites. Preserve their parameterized
                 # ctor args for every later direct or inherited clone.
-                for i in range(start, end):
+                for i in site_indices:
                     site = self._ta_call_sites[i]
                     if not hasattr(site, '_orig_ctor_args'):
                         site._orig_ctor_args = [
                             _expand_locals(arg) for arg in site.ctor_args
                         ]
+                    # Each callable owns its own view of a borrowed site's
+                    # constructor expression. Expand locals in that owner view
+                    # before substituting actual parameters; a template first
+                    # recorded at definition time can still contain a local
+                    # alias such as ``effectiveLen``.
+                    func_ctor_templates[i] = [
+                        _expand_locals(arg)
+                        for arg in func_ctor_templates.get(
+                            i, site._orig_ctor_args
+                        )
+                    ]
                     site.ctor_args = [
                         _subst_params(arg, param_arg_map)
-                        for arg in site._orig_ctor_args
+                        for arg in func_ctor_templates[i]
                     ]
-                    # If a ctor is now expressed in an enclosing UDF's params,
-                    # retain that expression so the enclosing call can resolve
-                    # it and widen the enclosing TA range as before.
+                    selected_ta_indices[i] = i
                     if enclosing_params and self._nested_ta_touched is not None:
                         for arg in site.ctor_args:
                             tokens = set(_re.findall(
                                 r"[A-Za-z_][A-Za-z_0-9]*", arg))
                             if tokens & enclosing_params:
-                                site._orig_ctor_args = list(site.ctor_args)
-                                self._nested_ta_touched.add(i)
+                                if self._enclosing_func_names:
+                                    caller = self._enclosing_func_names[-1]
+                                    self._func_ta_ctor_args.setdefault(
+                                        caller, {}
+                                    )[i] = list(site.ctor_args)
                                 break
             else:
                 clone_name_map: dict[str, str] = {}
-                for i in range(start, end):
+                for i in site_indices:
                     orig = self._ta_call_sites[i]
-                    orig_args = getattr(orig, '_orig_ctor_args', orig.ctor_args)
+                    if not hasattr(orig, '_orig_ctor_args'):
+                        orig._orig_ctor_args = [
+                            _expand_locals(arg) for arg in orig.ctor_args
+                        ]
+                    func_ctor_templates[i] = [
+                        _expand_locals(arg)
+                        for arg in func_ctor_templates.get(
+                            i, orig._orig_ctor_args
+                        )
+                    ]
+                    orig_args = func_ctor_templates[i]
                     resolved_ctor = [
                         _subst_params(arg, param_arg_map) for arg in orig_args
                     ]
+                    reuse_target = (
+                        reuse_existing_targets.get(i)
+                        if reuse_existing_targets is not None
+                        else None
+                    )
+                    if reuse_target is not None:
+                        # The parent's active clone already resolved this
+                        # exact source identity through the next outer call
+                        # boundary. Reuse it directly; do not overwrite its
+                        # concrete constructor with this edge's still-local
+                        # parameter spelling.
+                        selected_ta_indices[i] = reuse_target
+                        target_name = self._ta_call_sites[
+                            reuse_target
+                        ].member_name
+                        default_name = f"{orig.member_name}_cs{cs_idx}"
+                        if target_name != default_name:
+                            clone_name_map[orig.member_name] = target_name
+                        continue
+                    existing_target = self._func_ta_call_targets.get(
+                        (id(node), cs_idx), {}
+                    ).get(i)
+                    if existing_target is not None:
+                        self._ta_call_sites[existing_target].ctor_args = resolved_ctor
+                        selected_ta_indices[i] = existing_target
+                        continue
                     clone_name = f"{orig.member_name}_cs{cs_idx}"
-                    existing = next(
-                        (site for site in self._ta_call_sites
-                         if site.member_name == clone_name),
+                    existing_pair = next(
+                        (
+                            (index, site)
+                            for index, site in enumerate(self._ta_call_sites)
+                            if site.member_name == clone_name
+                        ),
                         None,
                     )
-                    if (reuse_existing_owner is not None
-                            and existing is not None
-                            and existing.owner_func == reuse_existing_owner):
+                    if (
+                        existing_pair is not None
+                        and (
+                            (
+                                reuse_existing_owner is not None
+                                and existing_pair[1].owner_func
+                                == reuse_existing_owner
+                            )
+                        )
+                    ):
                         # The active parent's widened range already made the
                         # exact member this inherited callee variant needs.
+                        selected_ta_indices[i] = existing_pair[0]
                         continue
                     if clone_name in self._ta_member_names:
                         base = clone_name
@@ -1367,15 +1444,36 @@ class CallHandlers:
                         is_static=orig.is_static,
                         owner_func=func_name,
                     )
+                    selected_ta_indices[i] = len(self._ta_call_sites)
                     self._ta_call_sites.append(cloned)
                     self._ta_member_names.add(clone_name)
                 if clone_name_map:
                     self._func_cs_ta_clone_names[(func_name, cs_idx)] = clone_name_map
 
+            # A nested stateful helper belongs to the enclosing callable's
+            # call path even when its constructor has no forwarded parameters
+            # (``ta.change`` is the canonical example). Constructor-template
+            # forwarding above is intentionally narrower: it only rewrites
+            # expressions that reference enclosing parameters. Keep state
+            # ownership independent from that substitution test so every
+            # written parent call site receives its exact borrowed TA targets.
+            if self._nested_ta_touched is not None:
+                self._nested_ta_touched.update(selected_ta_indices.values())
+
+            call_targets = self._func_ta_call_targets.setdefault(
+                (id(node), cs_idx), {}
+            )
+            call_targets.update(selected_ta_indices)
+            call_templates = self._func_ta_call_templates.setdefault(id(node), {})
+            for index in site_indices:
+                template = func_ctor_templates.get(index)
+                if template is not None:
+                    call_templates[index] = tuple(template)
+
         # fixnan is stateful for the same reason as a rolling TA reducer: each
         # emitted function variant needs its own previous-value member.
         fn_indices = self._func_fixnan_indices.get(func_name, [])
-        if cs_idx > 0 and fn_indices:
+        if materialize_fixnan and cs_idx > 0 and fn_indices:
             clone_map: dict[str, str] = {}
             for fi in fn_indices:
                 orig = self._fixnan_sites[fi]
@@ -1406,6 +1504,8 @@ class CallHandlers:
                 self._fixnan_member_names.add(clone_name)
             if clone_map:
                 self._func_cs_fixnan_clone_names[(func_name, cs_idx)] = clone_map
+
+        return selected_ta_indices
 
     def _handle_user_func_call(self, func_name: str, node: FuncCall) -> PineType:
         """Handle calls to user-defined functions."""

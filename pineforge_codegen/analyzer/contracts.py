@@ -237,7 +237,15 @@ class AnalyzerContext:
     var_member_owners_by_node: dict = field(default_factory=dict)
     # Per-call-site TA member cloning for user functions:
     func_ta_ranges: dict = field(default_factory=dict)    # func_name -> (start_idx, end_idx)
+    # Exact TA indices belonging to each callable path. ``func_ta_ranges`` is
+    # retained as the legacy stateful-callable marker, but a widened min/max
+    # range can contain unrelated sites allocated between two borrowed sites.
+    func_ta_indices: dict = field(default_factory=dict)   # func_name -> [site_idx, ...]
     func_call_cs_map: dict = field(default_factory=dict)  # call_node_id -> (func_name, call_site_index)
+    # Removed lexical nested-call mappings inherit their natural parent's
+    # active cs index. Fresh context-sensitive parents have no such index, so
+    # codegen uses this exact node -> callee identity to compose dispatch.
+    func_inherited_call_names: dict = field(default_factory=dict)
     func_call_site_counts: dict = field(default_factory=dict)  # func_name -> int
     # Exact primitive parameter/return types for each emitted written-callsite
     # variant.  Untyped Pine parameters are independently specialized at every

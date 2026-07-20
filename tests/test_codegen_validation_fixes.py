@@ -569,8 +569,19 @@ def test_series_parameter_shadowing_global_is_not_remapped_to_clone_member():
     )
     assert "double wrap_cs0(const Series<double>& x)" in cpp
     assert "double wrap_cs1(const Series<double>& x)" in cpp
-    assert cpp.count("return lag_cs1(x);") == 2
-    assert "return lag_cs1(x_cs1);" not in cpp
+    wrap_cs0 = cpp.split(
+        "double wrap_cs0(const Series<double>& x)", 1
+    )[1].split("\n    }", 1)[0]
+    wrap_cs1 = cpp.split(
+        "double wrap_cs1(const Series<double>& x)", 1
+    )[1].split("\n    }", 1)[0]
+    assert "return lag_cs1(x);" in wrap_cs0
+    # The second written path may own a fresh nested history instance.  Its
+    # argument must still be the lexical parameter, never the same-spelled
+    # global Series clone.
+    assert re.search(r"return lag__ni\d+\(x\);", wrap_cs1)
+    assert "x_cs1" not in wrap_cs0
+    assert "x_cs1" not in wrap_cs1
     compile_cpp(cpp, label="series-parameter-shadow-global-clone-remap")
 
 

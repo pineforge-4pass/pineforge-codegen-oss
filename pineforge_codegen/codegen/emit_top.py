@@ -518,6 +518,17 @@ class TopLevelEmitter:
                     r = self._resolve_ta_ctor_arg(a)
                     if (not self._is_compile_time_value(r)
                             and self._runtime_ctor_arg_for_reset(a) is None):
+                        # A TA source reached through request.security can have
+                        # several helper-bound constructor variants. Validate
+                        # only variants of this exact source node before the
+                        # ordinary guard fires, so an unstable requested-context
+                        # expression keeps its provenance-specific diagnostic
+                        # without allowing a later, unrelated security error to
+                        # reorder an earlier ordinary error.
+                        if self._security_eval_info and site.node is not None:
+                            self._collect_ta_runtime_resets(
+                                security_source_node=site.node
+                            )
                         self._codegen_error(
                             getattr(site, "node", None),
                             f"Unsupported TA constructor length '{a}' for "
