@@ -1125,10 +1125,12 @@ class CallVisitor:
                                 f"matrix.{meth_raw}: wrong number of arguments",
                                 hint="Check Pine v6 matrix method signature (positional vs keyword).",
                             )
-                    safe_o = self._safe_name(oname)
-                    udt_t = self._udt_var_types.get(oname) or self._udt_var_types.get(safe_o)
-                    if udt_t is None:
-                        udt_t = self._udt_param_udt.get(oname) or self._udt_param_udt.get(safe_o)
+                    recv_spec = self._type_spec_from_expr(obj)
+                    udt_t = (
+                        recv_spec.name
+                        if recv_spec is not None and recv_spec.kind == "udt"
+                        else None
+                    )
                     if udt_t is not None:
                         mk = f"{udt_t}.{meth_raw}"
                         fi_u = self._func_info_map.get(mk)
@@ -1898,7 +1900,9 @@ class CallVisitor:
                         value_node,
                         target_cpp_type=(
                             f_cpp_type
-                            if f_cpp_type.startswith("PineMap<")
+                            if (f_cpp_type.startswith("PineMap<")
+                                or f_cpp_type in self._udt_defs
+                                or f_cpp_type in DRAWING_TYPE_TO_CPP.values())
                             else None
                         ),
                     )

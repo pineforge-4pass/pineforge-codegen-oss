@@ -134,6 +134,29 @@ plot(close)
     assert "p.crossed = true;" in body
 
 
+def test_array_param_get_udt_local_mutation_emits_reference_alias():
+    src = PROLOGUE + """
+var array<pivot> pivots = array.new<pivot>()
+upd(array<pivot> items, int i) =>
+    pivot p = array.get(items, i)
+    p.currentLevel := close
+    p.crossed := true
+    0
+if array.size(pivots) == 0
+    array.push(pivots, pivot.new(na, false))
+if close > open
+    upd(pivots, 0)
+plot(close)
+"""
+    cpp = transpile(src)
+    body = _func_body(cpp, "upd")
+    assert "pivot& p =" in body
+    assert "}((i)); }((items));" in body
+    assert "pivot p =" not in body
+    assert "p.currentLevel = " in body
+    assert "p.crossed = true;" in body
+
+
 _GLOBAL_ARRAY_PROLOGUE = PROLOGUE + """
 var array<pivot> pivots = array.new<pivot>()
 if array.size(pivots) == 0

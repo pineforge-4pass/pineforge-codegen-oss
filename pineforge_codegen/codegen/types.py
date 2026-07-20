@@ -217,7 +217,7 @@ class TypeInferer:
             # historically mask a same-named top-level collection registry.
             # Declared scalar/UDT parameters do shadow it, while inferred or
             # declared collection parameters always carry their exact kind.
-            if (param_spec.kind in {"array", "map", "matrix"}
+            if (param_spec.kind in {"array", "map", "matrix", "udt"}
                     or name in getattr(
                         self, "_current_func_declared_param_names", set()
                     )):
@@ -369,41 +369,38 @@ class TypeInferer:
         if isinstance(node, StringLiteral):
             return TypeSpec.primitive("string")
         if isinstance(node, Identifier):
+            # An active lexical UDT/drawing binding must beat a same-spelled
+            # top-level primitive or collection.  This is intentionally the
+            # exact lexical prefix of _identifier_udt_binding(), not its raw-
+            # name fallback: method receivers such as ``line ln`` otherwise
+            # inherit an unrelated global ``ln`` before dispatch is resolved.
+            lexical_drawing = getattr(self, "_lexical_drawing_types", {})
+            drawing_cpp = lexical_drawing.get(node.name)
+            if drawing_cpp is not None:
+                for pine_name, cpp_name in DRAWING_TYPE_TO_CPP.items():
+                    if cpp_name == drawing_cpp:
+                        return TypeSpec.udt(pine_name)
+            lexical_udts = getattr(self, "_lexical_udt_types", {})
+            lexical_udt = lexical_udts.get(node.name)
+            if lexical_udt in self._udt_defs:
+                return TypeSpec.udt(lexical_udt)
             collection_spec = self._collection_spec_for_name(node.name)
-            if collection_spec is not None:
+            # This resolver also carries exact primitive loop/parameter/global
+            # metadata despite its historical name.  Preserve those scalar
+            # families here (notably bool for array.from); only arbitrary UDTs
+            # need the collision-safe lexical resolver below.
+            if (collection_spec is not None
+                    and collection_spec.kind != "udt"):
                 return collection_spec
-            if node.name in getattr(self, "_lexical_drawing_types", {}):
-                lexical_cpp = self._lexical_drawing_types[node.name]
-                if lexical_cpp is None:
-                    return None
-                for pine_name, cpp_name in DRAWING_TYPE_TO_CPP.items():
-                    if cpp_name == lexical_cpp:
-                        return TypeSpec.udt(pine_name)
-                return None
-            local_cpp = getattr(self, "_current_func_local_types", {}).get(
+            found_udt_binding, exact_udt = self._identifier_udt_binding(
                 node.name
             )
-            if local_cpp is not None:
-                local_cpp = local_cpp.removesuffix("&")
-                for pine_name, cpp_name in DRAWING_TYPE_TO_CPP.items():
-                    if cpp_name == local_cpp:
-                        return TypeSpec.udt(pine_name)
-                return None
-            global_cpp = getattr(self, "_global_drawing_cpp_types", {}).get(
-                node.name
-            )
-            if global_cpp is not None:
-                for pine_name, cpp_name in DRAWING_TYPE_TO_CPP.items():
-                    if cpp_name == global_cpp:
-                        return TypeSpec.udt(pine_name)
-            if node.name in self._udt_var_types:
-                return TypeSpec.udt(self._udt_var_types[node.name])
-            # Drawing-typed method/function parameter (L.6d / U.5): a ``line ln``
-            # method receiver registers in _udt_param_udt so its body getters
-            # resolve to the drawing udt and dispatch through the §4.3 path.
-            _pu = getattr(self, "_udt_param_udt", None)
-            if _pu and node.name in _pu and _pu[node.name] in DRAWING_TYPE_TO_CPP:
-                return TypeSpec.udt(_pu[node.name])
+            if found_udt_binding:
+                return (
+                    TypeSpec.udt(exact_udt)
+                    if exact_udt is not None
+                    else None
+                )
             if self._collection_name_is_lexically_shadowed(node.name):
                 return None
             sym = self.ctx.symbols.resolve(node.name)
@@ -492,7 +489,8 @@ class TypeInferer:
                 if return_spec is not None:
                     return return_spec
                 udt_return = getattr(func_info, "udt_return_type", None)
-                if udt_return in DRAWING_TYPE_TO_CPP:
+                if (udt_return in DRAWING_TYPE_TO_CPP
+                        or udt_return in self._udt_defs):
                     return TypeSpec.udt(udt_return)
             # ticker.* constructors (inherit/standard/heikinashi) return a symbol
             # string; without this the member-type inference defaults to double
@@ -627,6 +625,76 @@ class TypeInferer:
                     if recv_spec.name == "linefill" and func_name in ("get_line1", "get_line2"):
                         return TypeSpec.udt("line")
         return None
+
+    def _identifier_udt_binding(
+        self, name: str
+    ) -> tuple[bool, str | None]:
+        """Return ``(binding_known, exact_udt_or_none)`` for ``name``.
+
+        ``ctx.udt_var_types`` is a legacy raw-name registry: a declaration in
+        an unrelated callable can overwrite the type of a same-named global.
+        Every correctness-sensitive consumer must prefer the active lexical
+        binding (including scalar tombstones), then exact parameter/local and
+        direct-program metadata, before consulting that registry.
+        """
+        known_udts = set(self._udt_defs) | set(DRAWING_TYPE_TO_CPP)
+
+        lexical_drawing = getattr(self, "_lexical_drawing_types", {})
+        if name in lexical_drawing and lexical_drawing[name] is not None:
+            cpp_type = lexical_drawing[name]
+            for pine_name, candidate_cpp in DRAWING_TYPE_TO_CPP.items():
+                if candidate_cpp == cpp_type:
+                    return True, pine_name
+
+        lexical = getattr(self, "_lexical_udt_types", {})
+        if name in lexical:
+            candidate = lexical[name]
+            return True, candidate if candidate in known_udts else None
+
+        param_specs = getattr(self, "_current_func_param_specs", {})
+        param_spec = param_specs.get(name) or param_specs.get(
+            self._safe_name(name)
+        )
+        if (param_spec is not None
+                and param_spec.kind == "udt"
+                and param_spec.name in known_udts):
+            return True, param_spec.name
+        param_types = getattr(self, "_current_func_param_types", {})
+        if name in param_types or self._safe_name(name) in param_types:
+            return True, None
+
+        local_types = getattr(self, "_current_func_local_types", {})
+        if name in local_types:
+            local_cpp = local_types[name]
+            candidate = local_cpp.removesuffix("&").removesuffix("*")
+            return True, candidate if candidate in known_udts else None
+
+        param_udts = getattr(self, "_udt_param_udt", {})
+        candidate = param_udts.get(name) or param_udts.get(
+            self._safe_name(name)
+        )
+        if candidate in known_udts:
+            return True, candidate
+
+        global_types = getattr(self, "_global_udt_types", {})
+        if name in global_types:
+            candidate = global_types[name]
+            return True, candidate if candidate in known_udts else None
+
+        member_resolver = getattr(self, "_member_udt_type", None)
+        candidate = (
+            member_resolver(name)
+            if callable(member_resolver)
+            else self._udt_var_types.get(name)
+        )
+        if candidate is not None:
+            return True, candidate if candidate in known_udts else None
+        return False, None
+
+    def _identifier_udt_type(self, name: str) -> str | None:
+        """Exact UDT type for ``name``; scalar tombstones return ``None``."""
+        _found, udt_type = self._identifier_udt_binding(name)
+        return udt_type
 
     # ------------------------------------------------------------------
     # Method lowering for collection types (used by visit_call paths)
@@ -1294,7 +1362,7 @@ class TypeInferer:
             return self._type_spec_to_cpp(collection_spec)
         if ((collection_spec is not None
                 and collection_spec.kind in {"array", "matrix"})
-                or name in self._udt_var_types):
+                or self._identifier_udt_type(name) is not None):
             return None
         cpp_type: str | None = None
         # 1. ``var`` member (class-scope OR function-local: both are recorded in
@@ -1401,7 +1469,7 @@ class TypeInferer:
             return None
         if not isinstance(expr, Identifier):
             return None
-        udt_t = self._udt_var_types.get(expr.name)
+        udt_t = self._identifier_udt_type(expr.name)
         if udt_t is None or udt_t not in self._udt_defs:
             return None
         if udt_t in DRAWING_TYPE_TO_CPP:

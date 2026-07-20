@@ -256,6 +256,13 @@ class StmtVisitor:
                 if decl_spec is not None and decl_spec.kind == "udt"
                 else None
             )
+            self._lexical_udt_types[node.name] = (
+                decl_spec.name
+                if (decl_spec is not None
+                    and decl_spec.kind == "udt"
+                    and decl_spec.name in self._udt_defs)
+                else None
+            )
             if (
                 node.name == "map"
                 and getattr(self, "_block_map_visibility_depth", 0) > 0
@@ -269,6 +276,7 @@ class StmtVisitor:
             self._visit_assignment(node, lines, pad)
         elif isinstance(node, TupleAssign):
             self._visit_tuple_assign(node, lines, pad)
+            tuple_cpp_types = self._tuple_binding_cpp_types(node)
             if getattr(self, "_active_func_name", None) is not None:
                 for name in node.names:
                     if name and name != "_":
@@ -292,8 +300,23 @@ class StmtVisitor:
                 self._active_var_remap = dict(self._active_var_remap)
                 for name in scalar_names:
                     self._active_var_remap.pop(self._safe_name(name), None)
-            for name in node.names:
+            for index, name in enumerate(node.names):
                 if name and name != "_":
+                    # A supported tuple destructure creates fresh lexical
+                    # bindings.  Tuple elements are primitive on the current
+                    # supported surface, so install an explicit tombstone: an
+                    # unrelated same-named global/callable UDT must not target-
+                    # type a later ``name := na`` as ``State{}``.
+                    self._lexical_udt_types[name] = None
+                    if (getattr(self, "_active_func_name", None) is not None
+                            and not self._decl_binding_is_series(
+                                id(node), name
+                            )):
+                        self._current_func_local_types[name] = (
+                            tuple_cpp_types[index]
+                            if index < len(tuple_cpp_types)
+                            else "double"
+                        )
                     self._lexical_series_bindings[name] = (
                         self._decl_binding_is_series(id(node), name)
                     )
@@ -717,12 +740,18 @@ class StmtVisitor:
                 cpp_type
                 if (cpp_type is not None
                     and (cpp_type.startswith("PineMap<")
-                         or cpp_type in DRAWING_TYPE_TO_CPP.values()))
+                         or cpp_type in DRAWING_TYPE_TO_CPP.values()
+                         or cpp_type in self._udt_defs))
                 else self._map_target_cpp_type(
                     name=node.name,
                     type_hint=node.type_hint,
                 )
             )
+            if selection_cpp_type is None:
+                selection_cpp_type = self._udt_target_cpp_type(
+                    target_name=node.name,
+                    type_hint=node.type_hint,
+                )
             if selection_cpp_type is None:
                 selection_cpp_type = self._drawing_target_cpp_type(
                     node.name,
@@ -803,7 +832,12 @@ class StmtVisitor:
         # global scope, so a function-local sharing the name keeps its own path.
         if (node.name in self._udt_array_get_ref_locals
                 and getattr(self, "_current_func_body", None) is None):
-            udt_t = self._udt_var_types.get(node.name)
+            udt_t = self._is_udt_lvalue(node.value)
+            if udt_t is None:
+                self._codegen_error(
+                    node,
+                    "UDT array-element alias lost its exact element type.",
+                )
             cpp_val = self._visit_rhs_value(node.value, node.name, target_cpp_type=udt_t)
             lines.append(f"{pad}{udt_t}& {safe} = {cpp_val};")
             return
@@ -814,6 +848,11 @@ class StmtVisitor:
             name=node.name,
             type_hint=node.type_hint,
         )
+        if target_cpp_type is None:
+            target_cpp_type = self._udt_target_cpp_type(
+                target_name=node.name,
+                type_hint=node.type_hint,
+            )
         cpp_val = self._visit_rhs_value(
             node.value,
             node.name,
@@ -857,6 +896,11 @@ class StmtVisitor:
                 target_node=node.target if target_name is None else None,
             )
             if selection_cpp_type is None:
+                selection_cpp_type = self._udt_target_cpp_type(
+                    target_name=target_name,
+                    target_node=node.target if target_name is None else None,
+                )
+            if selection_cpp_type is None:
                 selection_cpp_type = self._drawing_target_cpp_type(
                     target_name,
                     None,
@@ -894,6 +938,10 @@ class StmtVisitor:
             target_cpp_type = self._map_target_cpp_type(
                 target_node=node.target,
             )
+            if target_cpp_type is None:
+                target_cpp_type = self._udt_target_cpp_type(
+                    target_node=node.target,
+                )
             val_cpp = self._visit_rhs_value(
                 node.value, target_cpp_type=target_cpp_type
             )
@@ -972,6 +1020,8 @@ class StmtVisitor:
             # is_na<T>()). Only computed for bare na — every other RHS is
             # unaffected.
             tct = self._map_target_cpp_type(name=target_name)
+            if tct is None:
+                tct = self._udt_target_cpp_type(target_name=target_name)
             if tct is None and self._is_na_expr(node.value):
                 tct = self._na_reassign_cpp_type(target_name)
             val_cpp = self._visit_rhs_value(node.value, target_name, target_cpp_type=tct)
@@ -985,6 +1035,8 @@ class StmtVisitor:
                     lines.append(f"{pad}{safe} {node.op} {val_cpp};")
         else:
             tct = self._map_target_cpp_type(name=target_name)
+            if tct is None:
+                tct = self._udt_target_cpp_type(target_name=target_name)
             if tct is None and self._is_na_expr(node.value):
                 tct = self._na_reassign_cpp_type(target_name)
             val_cpp = self._visit_rhs_value(node.value, target_name, target_cpp_type=tct)
@@ -1214,6 +1266,29 @@ class StmtVisitor:
 
         lines.append(f"{pad}/* unsupported tuple assignment */")
 
+    def _tuple_binding_cpp_types(self, node: TupleAssign) -> list[str]:
+        """Exact supported tuple element types for later lexical operations."""
+        count = len(node.names)
+        if not isinstance(node.value, FuncCall):
+            return ["double"] * count
+        func_name, namespace = self._resolve_callee(node.value.callee)
+        fi = None
+        if namespace is None:
+            fi = self._func_info_map.get(func_name)
+        elif isinstance(node.value.callee, MemberAccess):
+            recv_spec = self._type_spec_from_expr(node.value.callee.object)
+            if (recv_spec is not None
+                    and recv_spec.kind == "udt"
+                    and recv_spec.name):
+                fi = self._func_info_map.get(
+                    f"{recv_spec.name}.{node.value.callee.member}"
+                )
+        if (fi is not None
+                and fi.node is not None
+                and getattr(fi, "returns_tuple", False)):
+            return self._infer_tuple_types(fi.node, count)
+        return ["double"] * count
+
     def _push_block_var_remap(self, owner):
         """Activate exact lexical metadata for one branch/loop body.
 
@@ -1231,6 +1306,8 @@ class StmtVisitor:
         self._block_map_visibility_depth = previous_map_depth + 1
         saved_drawing_types = self._lexical_drawing_types
         self._lexical_drawing_types = dict(saved_drawing_types)
+        saved_udt_types = self._lexical_udt_types
+        self._lexical_udt_types = dict(saved_udt_types)
         saved_series_bindings = self._lexical_series_bindings
         self._lexical_series_bindings = dict(saved_series_bindings)
         saved_known_tombstones = self._lexical_known_var_tombstones
@@ -1247,6 +1324,7 @@ class StmtVisitor:
                 previous_map_visible,
                 previous_map_depth,
                 saved_drawing_types,
+                saved_udt_types,
                 saved_series_bindings,
                 saved_known_tombstones,
             )
@@ -1282,6 +1360,7 @@ class StmtVisitor:
             previous_map_visible,
             previous_map_depth,
             saved_drawing_types,
+            saved_udt_types,
             saved_series_bindings,
             saved_known_tombstones,
         )
@@ -1293,6 +1372,7 @@ class StmtVisitor:
             previous_map_visible,
             previous_map_depth,
             saved_drawing_types,
+            saved_udt_types,
             saved_series_bindings,
             saved_known_tombstones,
         ) = saved
@@ -1310,6 +1390,7 @@ class StmtVisitor:
                     ) = saved_collections
         finally:
             self._lexical_drawing_types = saved_drawing_types
+            self._lexical_udt_types = saved_udt_types
             self._lexical_series_bindings = saved_series_bindings
             self._lexical_known_var_tombstones = saved_known_tombstones
             self._block_map_binding_visible = previous_map_visible
@@ -1424,6 +1505,10 @@ class StmtVisitor:
             self._current_loop_var_specs[node.var] = TypeSpec.primitive("int")
         _blk_saved = self._push_block_var_remap(node)
         if node.var:
+            # The loop counter is a fresh primitive lexical binding.  Keep it
+            # from inheriting a same-spelled outer/raw UDT or drawing type.
+            self._lexical_drawing_types[node.var] = None
+            self._lexical_udt_types[node.var] = None
             self._lexical_series_bindings[node.var] = False
             self._lexical_known_var_tombstones.add(node.var)
         try:
@@ -1554,8 +1639,40 @@ class StmtVisitor:
         loop_binding_names = (
             [node.var] if node.var else list(node.vars or [])
         )
-        for name in loop_binding_names:
+        loop_binding_specs = (
+            [elem_spec]
+            if node.var
+            else [
+                tuple_specs[index] if index < len(tuple_specs) else None
+                for index in range(len(loop_binding_names))
+            ]
+        )
+        for index, name in enumerate(loop_binding_names):
             if name and name != "_":
+                spec = (
+                    loop_binding_specs[index]
+                    if index < len(loop_binding_specs)
+                    else None
+                )
+                drawing_name = (
+                    spec.name
+                    if (spec is not None
+                        and spec.kind == "udt"
+                        and spec.name in DRAWING_TYPE_TO_CPP)
+                    else None
+                )
+                self._lexical_drawing_types[name] = (
+                    DRAWING_TYPE_TO_CPP[drawing_name]
+                    if drawing_name is not None
+                    else None
+                )
+                self._lexical_udt_types[name] = (
+                    spec.name
+                    if (spec is not None
+                        and spec.kind == "udt"
+                        and spec.name in self._udt_defs)
+                    else None
+                )
                 self._lexical_series_bindings[name] = False
                 self._lexical_known_var_tombstones.add(name)
         try:

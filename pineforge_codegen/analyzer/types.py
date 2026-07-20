@@ -194,6 +194,20 @@ class TypeHelper:
         if isinstance(value, Ternary):
             true_spec = self._type_spec_from_expr(value.true_val)
             false_spec = self._type_spec_from_expr(value.false_val)
+
+            def direct_user_udt_ctor_name(node: ASTNode) -> str | None:
+                if not isinstance(node, FuncCall):
+                    return None
+                callee = node.callee
+                if not (
+                    isinstance(callee, MemberAccess)
+                    and isinstance(callee.object, Identifier)
+                    and callee.member == "new"
+                ):
+                    return None
+                name = callee.object.name
+                return name if name in self._udt_fields else None
+
             # Selecting between two values of the same user-defined type
             # preserves that receiver type.  Codegen already applies this
             # rule; the analyzer must agree so stateful method calls on a UDT
@@ -215,6 +229,22 @@ class TypeHelper:
                 return true_spec
             if (false_spec is not None
                     and false_spec.kind == "map"
+                    and isinstance(value.true_val, NaLiteral)):
+                return false_spec
+            # A direct user-UDT constructor selected against bare ``na`` has
+            # one unambiguous value type.  Require the constructor AST itself,
+            # not merely an inferred UDT expression, so temporary array-element
+            # identity returns continue to fail closed on their own surface.
+            true_ctor = direct_user_udt_ctor_name(value.true_val)
+            if (true_spec is not None
+                    and true_spec.kind == "udt"
+                    and true_spec.name == true_ctor
+                    and isinstance(value.false_val, NaLiteral)):
+                return true_spec
+            false_ctor = direct_user_udt_ctor_name(value.false_val)
+            if (false_spec is not None
+                    and false_spec.kind == "udt"
+                    and false_spec.name == false_ctor
                     and isinstance(value.true_val, NaLiteral)):
                 return false_spec
             # Drawing handles are nullable reference-like values in Pine.  A

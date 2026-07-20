@@ -802,6 +802,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # scalar/non-drawing tombstone that prevents an outer same-named handle
         # from leaking inward. Block push/pop provides sibling isolation.
         self._lexical_drawing_types: dict[str, str | None] = {}
+        # Source-ordered arbitrary UDT bindings.  Drawing handles have their
+        # specialized registry above, while this parallel map preserves the
+        # exact authored UDT name needed to target-type a later bare ``na``
+        # reassignment.  ``None`` is an ordinary scalar/collection tombstone;
+        # block push/pop keeps sibling declarations independent.
+        self._lexical_udt_types: dict[str, str | None] = {}
         # Source-ordered lexical Series status.  A False tombstone prevents a
         # scalar local from inheriting a same-spelled global entry from the
         # legacy raw-name ``ctx.series_vars`` union.
@@ -1019,7 +1025,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             )
         if is_series and name in self.ctx.series_vars:
             return False
-        udt_type = self._udt_var_types.get(name)
+        udt_type = self._member_udt_type(name)
         if udt_type in self._udt_defs:
             return False
         type_spec = self._collection_types.get(name)
@@ -1051,6 +1057,49 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._drawing_var_member_cpp_types: dict[str, str] = {}
         self._drawing_var_decl_info_by_node: dict[int, dict] = {}
         self._global_drawing_cpp_types: dict[str, str] = {}
+        # Exact direct-program UDT identity, including ``None`` tombstones for
+        # primitive globals.  The analyzer's legacy UDT registry is keyed only
+        # by raw spelling and can be overwritten by an unrelated callable
+        # local with the same name.
+        self._global_udt_types: dict[str, str | None] = {}
+        for stmt in self.ctx.ast.body:
+            if not isinstance(stmt, VarDecl):
+                continue
+            spec = (
+                self._type_spec_from_hint_name(stmt.type_hint)
+                if stmt.type_hint
+                else self._type_spec_from_expr(stmt.value)
+            )
+            self._global_udt_types[stmt.name] = (
+                spec.name
+                if spec is not None and spec.kind == "udt"
+                else None
+            )
+        # Analyzer metadata preserves the collision-safe storage identity for
+        # every persistent declaration, including chart-scope siblings that
+        # are not direct Program children. Keep primitive tombstones too: the
+        # raw-name UDT union must not swap ``state`` and ``state__blk1`` types.
+        self._member_udt_types: dict[str, str | None] = {}
+        metadata_by_node = getattr(
+            self.ctx, "var_member_metadata_by_node", {}
+        ) or {}
+        type_specs_by_node = getattr(
+            self.ctx, "var_member_type_specs_by_node", {}
+        ) or {}
+        for node_id, meta in metadata_by_node.items():
+            stmt, member_name, _ptype, _init_str, _callable = meta
+            spec = type_specs_by_node.get(node_id)
+            if spec is None and isinstance(stmt, VarDecl):
+                spec = (
+                    self._type_spec_from_hint_name(stmt.type_hint)
+                    if stmt.type_hint
+                    else self._type_spec_from_expr(stmt.value)
+                )
+            self._member_udt_types[member_name] = (
+                spec.name
+                if spec is not None and spec.kind == "udt"
+                else None
+            )
         self._runtime_var_init_flags: dict[tuple[int, str], str] = {}
 
         used_names = set(self._all_member_names)
@@ -1468,6 +1517,58 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     candidates.append(spec)
         return candidates[0] if len(candidates) == 1 else None
 
+    def _callable_var_udt_spec(
+            self, name: str, owner_func: str | None = None) -> TypeSpec | None:
+        """Exact UDT TypeSpec for one callable persistent member identity.
+
+        The analyzer's legacy ``_udt_var_types`` registry is keyed by raw Pine
+        spelling, so sibling declarations such as ``state`` / ``state__blk1``
+        can overwrite each other.  Declaration metadata retains both the exact
+        collision-safe member name and lexical owner; use it for base members
+        and every written-callsite clone.
+        """
+        safe = self._safe_name(name)
+        candidates_by_owner: dict[str, list[TypeSpec]] = {}
+        metadata = getattr(self.ctx, "var_member_metadata_by_node", {}) or {}
+        specs = getattr(self.ctx, "var_member_type_specs_by_node", {}) or {}
+        owners = getattr(self.ctx, "var_member_owners_by_node", {}) or {}
+        for node_id, meta in metadata.items():
+            _node, member_name, _ptype, _init_str, is_callable_scoped = meta
+            if (not is_callable_scoped
+                    or self._safe_name(member_name) != safe):
+                continue
+            spec = specs.get(node_id)
+            owner = owners.get(node_id)
+            if (owner is None or spec is None
+                    or spec.kind != "udt"
+                    or spec.name not in self._udt_defs):
+                continue
+            owner_candidates = candidates_by_owner.setdefault(owner, [])
+            if spec not in owner_candidates:
+                owner_candidates.append(spec)
+
+        if owner_func is not None:
+            owned = candidates_by_owner.get(owner_func, [])
+            if len(owned) == 1:
+                return owned[0]
+
+        candidates: list[TypeSpec] = []
+        for owned in candidates_by_owner.values():
+            for spec in owned:
+                if spec not in candidates:
+                    candidates.append(spec)
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _member_udt_type(self, name: str) -> str | None:
+        """Exact UDT type for class-member storage, with global tombstones."""
+        global_types = getattr(self, "_global_udt_types", {})
+        if name in global_types:
+            return global_types[name]
+        member_types = getattr(self, "_member_udt_types", {})
+        if name in member_types:
+            return member_types[name]
+        return self._udt_var_types.get(name)
+
     def _emit_cloned_var_decl(self, orig_safe: str, cloned_safe: str,
                               series_suffix: str, lines: list[str],
                               owner_func: str | None = None) -> None:
@@ -1483,6 +1584,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 collection_spec = self._callable_var_collection_spec(
                     vname, owner_func
                 )
+                udt_spec = self._callable_var_udt_spec(vname, owner_func)
+                member_udt_type = self._member_udt_type(vname)
                 drawing_cpp = self._drawing_var_member_cpp_types.get(vname)
                 if (drawing_cpp is not None
                         and orig_safe in self._series_var_member_names):
@@ -1506,12 +1609,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(
                         f"    {drawing_cpp} {cloned_safe} = {drawing_cpp}{{}};"
                     )
-                elif vname in self._udt_var_types:
+                elif udt_spec is not None or member_udt_type is not None:
                     # Drawing handle / UDT var clone must match the original's
                     # type (Line/Label/Box/<UDT>), not the coarse PineType
                     # default (double) — otherwise the clone can't hold the
                     # handle and drawing access on it reads a garbage / na id.
-                    udt_t = self._udt_var_types[vname]
+                    udt_t = (
+                        udt_spec.name
+                        if udt_spec is not None
+                        else member_udt_type
+                    )
                     handle_cpp = DRAWING_TYPE_TO_CPP.get(udt_t, udt_t)
                     lines.append(f"    {handle_cpp} {cloned_safe} = {handle_cpp}{{}};")
                 elif vname in self._runtime_scalar_var_init_members:
@@ -3234,7 +3341,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         f.default,
                         target_cpp_type=(
                             cpp_type
-                            if cpp_type.startswith("PineMap<")
+                            if (cpp_type.startswith("PineMap<")
+                                or cpp_type in self._udt_defs
+                                or cpp_type in DRAWING_TYPE_TO_CPP.values())
                             else None
                         ),
                     )
@@ -3454,6 +3563,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     f"    {self._type_spec_to_cpp(callable_collection_spec)} {safe};"
                 )
                 continue
+            callable_udt_spec = self._callable_var_udt_spec(name)
+            if callable_udt_spec is not None:
+                lines.append(
+                    f"    {self._type_spec_to_cpp(callable_udt_spec)} {safe};"
+                )
+                continue
             # Detect array vars from init expression. Guard the substring
             # heuristic against a UDT constructor that merely WRAPS array.new /
             # array.from in its arguments — e.g.
@@ -3522,9 +3637,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # C++ handle struct (Series<Line> when also history-referenced).
             # Drawing names are NOT in _udt_defs, so the udt branch below would
             # self-zero them to double; handle them first.
+            member_udt_type = self._member_udt_type(name)
             _draw_cpp = (
                 self._drawing_var_member_cpp_types.get(name)
-                or DRAWING_TYPE_TO_CPP.get(self._udt_var_types.get(name))
+                or DRAWING_TYPE_TO_CPP.get(member_udt_type)
             )
             if _draw_cpp is not None:
                 if safe in self._series_var_member_names:
@@ -3532,7 +3648,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 else:
                     lines.append(f"    {_draw_cpp} {safe};")
                 continue
-            udt_type = self._udt_var_types.get(name)
+            udt_type = member_udt_type
             if udt_type not in self._udt_defs:
                 udt_type = None
             if udt_type is None:
@@ -3638,12 +3754,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "localPivots", "securityPivotPointsArray", "pivotPointsArray",
             ):
                 lines.append(f"    std::vector<double> {safe} = std::vector<double>();")
-            elif name in self._udt_var_types:
+            elif self._member_udt_type(name) is not None:
                 # Non-var global of UDT type — declare as the struct so
                 # downstream method dispatch works. Probes:
                 # data/validation/udt-method-probe-19-array-of-udt-method,
                 # data/validation/udt-method-probe-20-udt-return-from-func.
-                udt_t = self._udt_var_types[name]
+                udt_t = self._member_udt_type(name)
                 # Drawing handle global (L-N6 / U): map line/box/label/linefill
                 # to the C++ handle struct (the default is na, id=-1).
                 _draw_cpp = DRAWING_TYPE_TO_CPP.get(udt_t)
@@ -3997,15 +4113,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """
         if not isinstance(node, MemberAccess):
             return False
-        # Cheap path: receiver is a bare identifier we already track in
-        # ``_udt_var_types`` (the common case — ``m.tag``, ``s.ln``).
-        if isinstance(node.object, Identifier):
-            udt_name = self._udt_var_types.get(node.object.name)
-            if udt_name is None:
-                return False
-            return node.member in self._udt_omitted_fields.get(udt_name, ())
-        # General path: try to infer the receiver's UDT type via the same
-        # spec-resolver visit_expr uses for fallback member access.
+        # Resolve even bare identifiers through the lexical/exact TypeSpec
+        # path.  The legacy raw-name UDT registry can describe an unrelated
+        # callable local and therefore cannot safely drive field omission.
         recv_spec = self._type_spec_from_expr(node.object)
         if recv_spec is not None and recv_spec.kind == "udt" and recv_spec.name:
             return node.member in self._udt_omitted_fields.get(recv_spec.name, ())
