@@ -56,6 +56,7 @@ class Parser:
         self.pos = 0
         self._source = source
         self._filename = filename
+        self._recovery_count = 0
 
     # ------------------------------------------------------------------
     # Helpers
@@ -143,6 +144,9 @@ class Parser:
                 self._recover()
             self._skip_newlines()
 
+        if self._recovery_count:
+            prog.annotations = dict(prog.annotations or {})
+            prog.annotations["parse_recovery_count"] = self._recovery_count
         return prog
 
     def _extract_version(self) -> int | None:
@@ -156,6 +160,7 @@ class Parser:
 
     def _recover(self) -> None:
         """Skip tokens until next NEWLINE or EOF for error recovery."""
+        self._recovery_count += 1
         while not self._at_end() and not self._check(TokenType.NEWLINE):
             self._advance()
         if self._check(TokenType.NEWLINE):

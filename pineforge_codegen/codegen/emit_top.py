@@ -516,7 +516,7 @@ class TopLevelEmitter:
                 # incl. function-derived lengths) are safe: the `!_ta_initialized_`
                 # reset overwrites the placeholder before the first compute.
                 for a in site.ctor_args:
-                    r = self._resolve_known(a)
+                    r = self._resolve_ta_ctor_arg(a)
                     if (not self._is_compile_time_value(r)
                             and self._runtime_ctor_arg_for_reset(a) is None):
                         self._codegen_error(
@@ -528,7 +528,7 @@ class TopLevelEmitter:
                             hint=("Use a literal, an input.*() value, or "
                                   "arithmetic over those for TA lengths."),
                         )
-                resolved = [self._resolve_known(a) for a in site.ctor_args]
+                resolved = [self._resolve_ta_ctor_arg(a) for a in site.ctor_args]
                 # Compile-time placeholder for the init list; the runtime reset
                 # (when the arg is input-derived) overwrites it on the first bar.
                 safe_resolved = []
@@ -550,7 +550,7 @@ class TopLevelEmitter:
                         site,
                         variant.get("binding_stack", ()),
                     )
-                    resolved = [self._resolve_known(a) for a in ctor_args]
+                    resolved = [self._resolve_ta_ctor_arg(a) for a in ctor_args]
                     safe_resolved = []
                     for r in resolved:
                         safe_resolved.append(
@@ -1693,7 +1693,7 @@ class TopLevelEmitter:
             if _ti in self._dead_ta_indices:
                 continue
             if self._ta_site_uses_precalc(site):
-                resolved = [self._resolve_known(a) for a in site.ctor_args]
+                resolved = [self._resolve_ta_ctor_arg(a) for a in site.ctor_args]
                 safe_resolved = []
                 for r in resolved:
                     safe_resolved.append(r if self._is_compile_time_value(r) else "1")
@@ -1805,7 +1805,7 @@ class TopLevelEmitter:
             if _ti in self._dead_ta_indices:
                 continue
             if self._ta_site_uses_precalc(site):
-                resolved = [self._resolve_known(a) for a in site.ctor_args]
+                resolved = [self._resolve_ta_ctor_arg(a) for a in site.ctor_args]
                 safe_resolved = []
                 for r in resolved:
                     safe_resolved.append(r if self._is_compile_time_value(r) else "1")
