@@ -395,6 +395,28 @@ bool ignored = poison()
         )
 
 
+def test_drawing_array_parameter_keeps_collection_identity() -> None:
+    expressions = {
+        "method": "items.copy().get(0).get_x1()",
+        "functional": "array.get(array.copy(items), 0).get_x1()",
+    }
+    for label, expression in expressions.items():
+        source = rf'''//@version=6
+strategy("exact drawing array parameter")
+probe(array<line> items) =>
+    {expression}
+var array<line> segments = array.new_line()
+if barstate.isfirst
+    segments.push(line.new(bar_index, close, bar_index + 1, close))
+float observed = probe(segments)
+'''
+        cpp = transpile(source)
+        assert "double probe(std::vector<Line>& items)" in cpp
+        assert "return None();" not in cpp
+        assert "pf_line_get_x1(_pf_lines_," in cpp
+        compile_cpp(cpp, label=f"udt-exact-drawing-array-{label}")
+
+
 def test_stateful_method_edge_uses_exact_global_udt_owner() -> None:
     source = r'''//@version=6
 strategy("stateful method exact edge")

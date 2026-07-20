@@ -1451,7 +1451,11 @@ class TopLevelEmitter:
                     else self._udt_param_udt.get(param)
                 ),
             )
-            if drawing_name in DRAWING_TYPE_TO_CPP
+            if (drawing_name in DRAWING_TYPE_TO_CPP
+                and self._current_func_param_types.get(
+                    param, ""
+                ).removesuffix("&").removesuffix("*")
+                == DRAWING_TYPE_TO_CPP[drawing_name])
         }
         self._lexical_udt_types = {
             param: (
@@ -1461,7 +1465,11 @@ class TopLevelEmitter:
                 and spec.name in self._udt_defs
                 else (
                     self._udt_param_udt.get(param)
-                    if self._udt_param_udt.get(param) in self._udt_defs
+                    if (self._udt_param_udt.get(param) in self._udt_defs
+                        and self._current_func_param_types.get(
+                            param, ""
+                        ).removesuffix("&").removesuffix("*")
+                        == self._udt_param_udt.get(param))
                     else None
                 )
             )
