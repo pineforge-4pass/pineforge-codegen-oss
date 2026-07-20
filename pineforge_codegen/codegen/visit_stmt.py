@@ -37,8 +37,6 @@ Mixin contract — host class must provide the following attributes
   ``_visit_var_decl`` populates it from inferred specs.
 - ``self._active_var_remap`` (``dict[str, str]``): per-call-site
   rename map for cloned function-local var/series names.
-- ``self._in_ta_func_variant`` (``bool``): set during per-call-site
-  function emission; gates the TA-hoist branch in ``_visit_if``.
 - ``self._current_loop_vars`` (``set[str]``): for-in iterator names;
   saved/restored around ``_visit_for_in`` bodies so member-access
   resolution can distinguish iterators from enum constants.
@@ -58,7 +56,7 @@ Sibling-mixin methods consumed via ``self``:
   ``_map_spec_for_name``.
 - ``TaSiteHelper`` (``codegen/ta.py``): ``_get_ta_site``,
   ``_ta_member_name``, ``_ta_compute_args_for_site``,
-  ``_ta_name_from_site``, ``_if_body_has_ta``, ``_hoist_if_body``.
+  ``_ta_name_from_site``.
 - ``InputHelper`` (``codegen/input.py``): ``_is_input_call``,
   ``_get_input_default``, ``_get_input_title``,
   ``_input_type_to_getter``,
@@ -474,11 +472,19 @@ class StmtVisitor:
                 previous_input_name = self._current_input_var_name
                 self._current_input_var_name = node.name
                 try:
-                    if info.get("drawing_cpp") is not None:
+                    type_spec = info.get("type_spec")
+                    target_cpp_type = info.get("drawing_cpp")
+                    if (
+                        target_cpp_type is None
+                        and type_spec is not None
+                        and type_spec.kind in {"map", "matrix"}
+                    ):
+                        target_cpp_type = self._type_spec_to_cpp(type_spec)
+                    if target_cpp_type is not None:
                         init_cpp = self._visit_rhs_value(
                             node.value,
                             member_name,
-                            target_cpp_type=info["drawing_cpp"],
+                            target_cpp_type=target_cpp_type,
                         )
                     else:
                         init_cpp = self._visit_expr(node.value)
@@ -1345,31 +1351,6 @@ class StmtVisitor:
 
     def _visit_if_body(self, node: IfStmt, lines: list[str], indent: int) -> None:
         pad = "    " * indent
-
-        # TA hoisting: inside per-call-site function variants, execute ALL
-        # statements unconditionally (PineScript execution model) but wrap
-        # the result assignment in the condition.
-        if self._in_ta_func_variant and self._if_body_has_ta(node.body):
-            cond = self._visit_expr(node.condition)
-            saved = self._push_block_var_remap(node.body)
-            try:
-                self._hoist_if_body(node.body, cond, lines, pad, indent)
-            finally:
-                self._pop_block_var_remap(saved)
-            # Handle else_body similarly
-            if node.else_body:
-                if len(node.else_body) == 1 and isinstance(node.else_body[0], IfStmt):
-                    self._visit_if(node.else_body[0], lines, indent)
-                else:
-                    neg_cond = f"!({cond})"
-                    saved = self._push_block_var_remap(node.else_body)
-                    try:
-                        self._hoist_if_body(
-                            node.else_body, neg_cond, lines, pad, indent
-                        )
-                    finally:
-                        self._pop_block_var_remap(saved)
-            return
 
         cond = self._visit_expr(node.condition)
         lines.append(f"{pad}if ({cond}) {{")

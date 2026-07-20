@@ -95,7 +95,7 @@ f() =>
 plot(f())
 """
     cpp = transpile(src)
-    assert "int et;" in cpp
+    assert "int et = na<int>();" in cpp
     # No double-NaN slip into the int member (init block OR reassignment).
     assert "et = na<double>();" not in cpp, cpp
     assert "et = na<int>();" in cpp

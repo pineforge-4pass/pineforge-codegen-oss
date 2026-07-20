@@ -282,6 +282,16 @@ class TypeInferer:
             if owner is not None
             else name
         )
+        # Once an exact callable-local collection declaration has become
+        # lexically active, its per-written-callsite variant must read the
+        # same cloned member that its declaration-site initializer wrote.
+        # Before the declaration, ``_current_func_collection_specs`` has no
+        # entry, so an inherited same-named global still resolves normally.
+        if (
+            name in getattr(self, "_current_func_collection_specs", {})
+            and safe in self._active_var_remap
+        ):
+            return self._active_var_remap[safe]
         # Preserve byte-identical output for every non-qualified callable.  A
         # qualified persistent array becomes visible through the raw lexical
         # spelling only after its VarDecl installs this active remap.

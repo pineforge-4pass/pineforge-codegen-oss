@@ -585,7 +585,7 @@ value = f()
     cpp = transpile(src)
 
     assert "    Line x = Line{};" in cpp
-    assert "    double _pfv_1_x__f;" in cpp
+    assert "    double _pfv_1_x__f = na<double>();" in cpp
     assert "_pfv_1_x__f = 1.0;" in cpp
     assert "x = pf_line_new(" in cpp
     skip_if_no_compile_env()

@@ -759,6 +759,50 @@ class CallVisitor:
             )
         return lowered
 
+    def _visit_udt_method_series_arg(
+        self,
+        func_info,
+        call_node: FuncCall,
+        arg_node,
+        rest_index: int,
+    ) -> str:
+        """Lower one UDT-method argument with history-Series awareness."""
+        param_index = rest_index + 1  # receiver is parameter 0
+        param_name = (
+            func_info.node.params[param_index]
+            if func_info.node is not None
+            and param_index < len(func_info.node.params)
+            else None
+        )
+        method_series = self.ctx.func_series_vars.get(func_info.name, set())
+        if param_name not in method_series:
+            return self._visit_expr(arg_node)
+        if isinstance(arg_node, Identifier):
+            arg_name = arg_node.name
+            if arg_name in BAR_FIELDS or arg_name in BAR_SERIES_PUSH:
+                return f"_s_{arg_name}"
+            safe = self._safe_name(arg_name)
+            if arg_name in self._current_func_series_params:
+                return safe
+            if self._active_var_remap and safe in self._active_var_remap:
+                safe = self._active_var_remap[safe]
+            if self._binding_is_series(arg_name, safe):
+                return safe
+        expr_cpp = self._visit_expr(arg_node)
+        cpp_type = self._infer_type(arg_node)
+        if cpp_type not in ("double", "int", "bool"):
+            cpp_type = "double"
+        member = self._inline_history_member(
+            "series_arg", call_node, arg_idx=param_index
+        )
+        return (
+            f"([&]() -> const Series<{cpp_type}>& {{ "
+            f"{cpp_type} _sv = ({expr_cpp}); "
+            f"if (history_advances_new_bar()) {member}.push(_sv); "
+            f"else {member}.update(_sv); "
+            f"return {member}; }}())"
+        )
+
     def _visit_func_call(self, node: FuncCall) -> str:
         callee = node.callee
         if isinstance(callee, MemberAccess):
@@ -804,7 +848,12 @@ class CallVisitor:
                         node.args, node.kwargs, param_names,
                         param_defaults, lambda x: x,
                     )
-                    rest = [self._visit_expr(a) for a in rest_nodes]
+                    rest = [
+                        self._visit_udt_method_series_arg(
+                            fi_u, node, arg, index
+                        )
+                        for index, arg in enumerate(rest_nodes)
+                    ]
                     return self._ordered_user_call_expr(
                         fn_cpp,
                         [callee.object, *rest_nodes],
@@ -1046,7 +1095,12 @@ class CallVisitor:
                                 node.args, node.kwargs, param_names,
                                 param_defaults, lambda x: x,
                             )
-                            rest = [self._visit_expr(a) for a in rest_nodes]
+                            rest = [
+                                self._visit_udt_method_series_arg(
+                                    fi_u, node, arg, index
+                                )
+                                for index, arg in enumerate(rest_nodes)
+                            ]
                             return self._ordered_user_call_expr(
                                 fn_cpp,
                                 [obj, *rest_nodes],
@@ -1886,7 +1940,7 @@ class CallVisitor:
                     # can contain the same raw name, but applying it here makes
                     # cs1+ ignore the actual parameter and read an unrelated
                     # class member instead.
-                    if aname in self._current_func_param_types:
+                    if aname in self._current_func_series_params:
                         return safe
                     if self._active_var_remap and safe in self._active_var_remap:
                         safe = self._active_var_remap[safe]

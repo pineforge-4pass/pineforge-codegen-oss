@@ -193,7 +193,7 @@ float result = switch
     assert "result = caseState__blk1;" in cpp
 
 
-def test_function_vars_keep_per_variant_initialization_route():
+def test_function_vars_use_exact_declaration_site_initialization_route():
     cpp = transpile("""//@version=6
 strategy("function var init isolation")
 helper() =>
@@ -203,8 +203,11 @@ helper() =>
 b = helper()
 """)
 
-    assert "_pf_var_init_functionSeed" not in cpp
-    assert "_fvinit_" in cpp
+    assert "if (!this->_pf_var_init_functionSeed)" in cpp
+    # Legacy per-variant members remain part of the checkpoint shape, but the
+    # callable body must no longer consult them for initialization timing.
+    assert "bool _fvinit_helper_cs0 = false;" in cpp
+    assert "if (!_fvinit_helper_cs0" not in cpp
     assert "functionSeed = current_bar_.high;" in cpp
 
 

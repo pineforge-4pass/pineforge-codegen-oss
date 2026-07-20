@@ -59,7 +59,6 @@ State written by ``_emit_func_def`` (the per-function emit context):
 - ``self._current_func_locals`` (``set[str]``).
 - ``self._active_ta_remap`` (``dict[str, str]``).
 - ``self._active_var_remap`` (``dict[str, str]``).
-- ``self._in_ta_func_variant`` (``bool``).
 - ``self._active_call_site_idx`` (``int | None``).
 
 Sibling-mixin methods consumed via ``self``:
@@ -567,11 +566,9 @@ class TopLevelEmitter:
             safe = self._safe_name(name)
             if name in self._array_vars or name in self._map_vars:
                 continue
-            # Function-scoped ``var`` members are initialized once-per-variant
-            # on first call (see _emit_func_var_init_block); exclude them from
-            # the constructor so they are not double-initialized and so their
-            # (possibly bar-dependent) initializer is lowered in the function's
-            # own scope (with its active var remap for clones).
+            # Callable-scoped ``var`` members initialize at their exact source
+            # declarations; exclude them from the constructor so source order,
+            # first reach, and the active clone remap remain authoritative.
             if name in getattr(self, "_func_local_var_names", ()):
                 continue
             # Runtime primitive initializers execute at their Pine declaration
@@ -856,8 +853,8 @@ class TopLevelEmitter:
         if self.ctx.var_members:
             lines.append("        if (!_var_initialized) {")
             for name, ptype, init_expr in self.ctx.var_members:
-                # Function-scoped ``var`` members are init'd once-per-variant
-                # on first call (see _emit_func_var_init_block), not here.
+                # Callable-scoped ``var`` members initialize at their exact
+                # declaration statements, not in the global on_bar preamble.
                 if name in getattr(self, "_func_local_var_names", ()):
                     continue
                 safe = self._safe_name(name)
@@ -1325,7 +1322,6 @@ class TopLevelEmitter:
 
         # For per-call-site variants, suffix the function name and activate TA + var remapping
         func_name = self._emit_udt_method_cpp_name(fi) if is_udt else self._func_safe_name(fi.name)
-        var_init_flag: str | None = None
         if instance is not None:
             # Fresh context-sensitive instance: name + composed remaps come from
             # the instance record. No textual cs index (dispatch is via the
@@ -1334,10 +1330,8 @@ class TopLevelEmitter:
             self._active_ta_remap = instance["ta_remap"]
             self._active_var_remap = instance["var_remap"]
             self._active_fixnan_remap = instance.get("fixnan_remap", {})
-            self._in_ta_func_variant = True
             self._active_call_site_idx = None
             self._current_instance_name = instance["name"]
-            var_init_flag = f"_fvinit_{instance['name']}"
         elif call_site_idx is not None:
             func_name = f"{func_name}_cs{call_site_idx}"
             remap = self._func_cs_ta_remap.get((fi.name, call_site_idx), {})
@@ -1345,7 +1339,6 @@ class TopLevelEmitter:
             var_remap = self._func_cs_var_remap.get((fi.name, call_site_idx), {})
             self._active_var_remap = var_remap
             self._active_fixnan_remap = self._func_cs_fixnan_remap.get((fi.name, call_site_idx), {})
-            self._in_ta_func_variant = True
             self._active_call_site_idx = call_site_idx
             # Use the actual emitted name. Plain UDFs are unchanged; UDT
             # methods carry their `_udt_Type_method` prefix. This identity is
@@ -1356,7 +1349,6 @@ class TopLevelEmitter:
             self._active_ta_remap = {}
             self._active_var_remap = {}
             self._active_fixnan_remap = {}
-            self._in_ta_func_variant = False
             self._active_call_site_idx = None
             self._current_instance_name = None
 
@@ -1391,47 +1383,6 @@ class TopLevelEmitter:
         self._current_func_locals |= self._collect_binding_names(node.body)
 
         lines.append(f"    {ret_type} {func_name}({', '.join(param_strs)}) {{")
-
-        # Function-scoped ``var`` one-shot initializer: Pine ``var`` inside a
-        # function is a function-local static — its initializer runs exactly
-        # once, on the first call to THIS variant, with the first bar's values
-        # the function actually sees. Each clone (cs0/cs1/…) is independent.
-        # Generate that initializer against its own source-ordered lexical
-        # state. Persistent declarations must be visible to later persistent
-        # initializers (``var copy = seed.copy()``), but preloading them into
-        # the ordinary body would make future declarations shadow earlier
-        # reads. Copy-on-write here provides both properties.
-        init_collection_state = (
-            self._current_func_collection_specs,
-            self._current_func_collection_shadows,
-            self._collection_types,
-            self._array_vars,
-            self._map_vars,
-            self._matrix_specs,
-        )
-        self._current_func_collection_specs = dict(
-            self._current_func_collection_specs
-        )
-        self._current_func_collection_shadows = set(
-            self._current_func_collection_shadows
-        )
-        self._collection_types = dict(self._collection_types)
-        self._array_vars = set(self._array_vars)
-        self._map_vars = set(self._map_vars)
-        self._matrix_specs = dict(self._matrix_specs)
-        try:
-            self._emit_func_var_init_block(
-                fi, call_site_idx, lines, flag_override=var_init_flag
-            )
-        finally:
-            (
-                self._current_func_collection_specs,
-                self._current_func_collection_shadows,
-                self._collection_types,
-                self._array_vars,
-                self._map_vars,
-                self._matrix_specs,
-            ) = init_collection_state
 
         emitted_return = False
         if node.is_single_expr and node.body:
@@ -1523,136 +1474,8 @@ class TopLevelEmitter:
         self._active_ta_remap = {}
         self._active_var_remap = {}
         self._active_fixnan_remap = {}
-        self._in_ta_func_variant = False
         self._active_call_site_idx = None
         self._current_instance_name = None
-
-    def _func_var_init_flag_name(self, fname: str, call_site_idx: int | None) -> str:
-        suffix = f"_cs{call_site_idx}" if call_site_idx is not None else ""
-        return f"_fvinit_{self._func_safe_name(fname)}{suffix}"
-
-    def _emit_func_var_init_block(self, fi: FuncInfo, call_site_idx: int | None,
-                                  lines: list[str], flag_override: str | None = None) -> None:
-        """Emit the one-shot initializer block for a function's ``var`` members.
-
-        Pine ``var`` declared inside a function is a function-local static:
-        the initializer runs exactly once on the FIRST call to this variant
-        (using the first bar's values the function actually sees) and the
-        result persists for the strategy's lifetime. Each per-call-site clone
-        is an independent instance with its own flag and its own set of
-        (remapped) members.
-
-        This closes the gap where a function-scoped ``var line x = line.new(...)``
-        (or any non-compile-time initializer — drawing handles, UDT ctors,
-        arrays, runtime expressions) was declared as a default-constructed
-        class member but its initializer was dropped, leaving the member ``na``
-        / uninitialised and causing "drawing access on na handle" at runtime.
-        """
-        members = self.ctx.func_var_members.get(fi.name)
-        if not members:
-            return
-        flag = flag_override or self._func_var_init_flag_name(fi.name, call_site_idx)
-        # ``_active_var_remap`` is already set for this variant by the caller,
-        # so lowering each init expression here correctly resolves references
-        # to sibling var members (which are themselves remapped for clones).
-        init_lines: list[str] = []
-        declaration_site_drawing_names = {
-            info["raw_name"]
-            for info in self._drawing_var_decl_info_by_node.values()
-            if info.get("owner") == fi.name
-            and info.get("node_id") in self._runtime_scalar_var_init_by_node
-        }
-        # Initializers are lowered in declaration order.  A qualified member's
-        # raw lexical spelling becomes visible to *later initializers* only
-        # after its own RHS has been rendered.  Restore the storage-only clone
-        # map before emitting the ordinary body so a future local cannot shadow
-        # an earlier same-named global read.
-        body_var_remap = self._active_var_remap
-        self._active_var_remap = dict(body_var_remap)
-        for name, ptype, _init_str in members:
-            if name in declaration_site_drawing_names:
-                continue
-            storage_name = self._func_var_storage_name(fi.name, name)
-            init_ast = self.ctx.var_member_init_exprs.get(storage_name)
-            safe = self._safe_name(storage_name)
-            target = self._active_var_remap.get(safe, safe)
-            collection_spec = self._callable_var_collection_spec(
-                storage_name, fi.name
-            )
-
-            def activate_member() -> None:
-                self._activate_callable_collection_binding(
-                    name, collection_spec
-                )
-                self._active_var_remap[self._safe_name(name)] = target
-
-            if self._safe_name(storage_name) in self._series_var_member_names:
-                if init_ast is None:
-                    activate_member()
-                    continue
-                drawing_cpp = self._drawing_var_member_cpp_types.get(
-                    storage_name
-                )
-                if drawing_cpp is not None:
-                    init_cpp = self._visit_rhs_value(
-                        init_ast,
-                        storage_name,
-                        target_cpp_type=drawing_cpp,
-                    )
-                    init_lines.append(f"        {target}.update({init_cpp});")
-                else:
-                    init_cpp = self._visit_expr(init_ast)
-                    init_cpp = self._typed_na_init(
-                        init_cpp, storage_name, ptype
-                    )
-                    init_lines.append(f"        {target}.push({init_cpp});")
-                activate_member()
-                continue
-            if init_ast is None:
-                # No initializer to lower (e.g. bare ``var box b``); leave the
-                # member at its default-constructed value.
-                activate_member()
-                continue
-            # Skip a plain ``na`` initializer for drawing handles / UDTs whose
-            # default-constructed member is already the na sentinel; assigning
-            # ``na<double>()`` would not type-match the handle / struct.
-            udt_t = self._udt_var_types.get(storage_name)
-            drawing_cpp = (
-                self._drawing_var_member_cpp_types.get(storage_name)
-                or DRAWING_TYPE_TO_CPP.get(udt_t)
-            )
-            is_drawing = drawing_cpp is not None
-            is_udt = udt_t in self._udt_defs if udt_t else False
-            from ..ast_nodes import NaLiteral
-            if (is_drawing or is_udt) and isinstance(init_ast, NaLiteral):
-                activate_member()
-                continue
-            init_cpp = self._visit_rhs_value(
-                init_ast,
-                storage_name,
-                target_cpp_type=(
-                    self._type_spec_to_cpp(collection_spec)
-                    if collection_spec is not None
-                    and collection_spec.kind == "map"
-                    else drawing_cpp
-                ),
-            )
-            # A bare-``na`` initializer for an int/int64_t/bool ``var`` member
-            # must be typed (``na<int>()``), mirroring the class-scope ctor
-            # init (``_typed_na_init`` at _emit_constructor); a raw ``na<double>()``
-            # NaN stored into an int member is UB and defeats is_na<T>().
-            init_cpp = self._typed_na_init(
-                init_cpp, storage_name, ptype
-            )
-            init_lines.append(f"        {target} = {init_cpp};")
-            activate_member()
-        self._active_var_remap = body_var_remap
-        if not init_lines:
-            return
-        lines.append(f"        if (!{flag}) {{")
-        lines.extend(init_lines)
-        lines.append(f"            {flag} = true;")
-        lines.append("        }")
 
     def _emit_precalculate_and_run(self, lines: list[str]) -> None:
         has_static_ta = any(
