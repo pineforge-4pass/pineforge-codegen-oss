@@ -1272,6 +1272,12 @@ class CallHandlers:
 
         if func_name in self._func_ta_ranges:
             start, end = self._func_ta_ranges[func_name]
+            site_indices = list(self._func_ta_indices.get(func_name, ()))
+            if not site_indices:
+                site_indices = list(range(start, end))
+            func_ctor_templates = self._func_ta_ctor_args.setdefault(
+                func_name, {}
+            )
 
             # Map local derived length variables back to expressions over the
             # function's parameters before substituting call-site arguments.
@@ -1309,15 +1315,26 @@ class CallHandlers:
             if cs_idx == 0:
                 # cs0 owns the source-level sites. Preserve their parameterized
                 # ctor args for every later direct or inherited clone.
-                for i in range(start, end):
+                for i in site_indices:
                     site = self._ta_call_sites[i]
                     if not hasattr(site, '_orig_ctor_args'):
                         site._orig_ctor_args = [
                             _expand_locals(arg) for arg in site.ctor_args
                         ]
+                    # Each callable owns its own view of a borrowed site's
+                    # constructor expression. Expand locals in that owner view
+                    # before substituting actual parameters; a template first
+                    # recorded at definition time can still contain a local
+                    # alias such as ``effectiveLen``.
+                    func_ctor_templates[i] = [
+                        _expand_locals(arg)
+                        for arg in func_ctor_templates.get(
+                            i, site._orig_ctor_args
+                        )
+                    ]
                     site.ctor_args = [
                         _subst_params(arg, param_arg_map)
-                        for arg in site._orig_ctor_args
+                        for arg in func_ctor_templates[i]
                     ]
                     # If a ctor is now expressed in an enclosing UDF's params,
                     # retain that expression so the enclosing call can resolve
@@ -1327,14 +1344,20 @@ class CallHandlers:
                             tokens = set(_re.findall(
                                 r"[A-Za-z_][A-Za-z_0-9]*", arg))
                             if tokens & enclosing_params:
-                                site._orig_ctor_args = list(site.ctor_args)
+                                if self._enclosing_func_names:
+                                    caller = self._enclosing_func_names[-1]
+                                    self._func_ta_ctor_args.setdefault(
+                                        caller, {}
+                                    )[i] = list(site.ctor_args)
                                 self._nested_ta_touched.add(i)
                                 break
             else:
                 clone_name_map: dict[str, str] = {}
-                for i in range(start, end):
+                for i in site_indices:
                     orig = self._ta_call_sites[i]
-                    orig_args = getattr(orig, '_orig_ctor_args', orig.ctor_args)
+                    orig_args = func_ctor_templates.get(
+                        i, getattr(orig, '_orig_ctor_args', orig.ctor_args)
+                    )
                     resolved_ctor = [
                         _subst_params(arg, param_arg_map) for arg in orig_args
                     ]

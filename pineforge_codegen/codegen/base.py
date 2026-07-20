@@ -438,7 +438,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Build TA site map and per-call-site remapping
         func_ta_originals: dict[str, list[str]] = {}  # func_name -> list of original member names
         for fname, (start, end) in ctx.func_ta_ranges.items():
-            orig_names = [ctx.ta_call_sites[i].member_name for i in range(start, end)]
+            indices = (ctx.func_ta_indices or {}).get(fname)
+            if indices is None:
+                indices = range(start, end)
+            orig_names = [ctx.ta_call_sites[i].member_name for i in indices]
             func_ta_originals[fname] = orig_names
             self._func_ta_members.update(orig_names)
             # cs0 uses originals (identity mapping)

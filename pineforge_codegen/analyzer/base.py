@@ -274,6 +274,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_nonpersistent_series_vars: dict[str, set[str]] = {}
         # Per-call-site TA tracking for user functions
         self._func_ta_ranges: dict[str, tuple[int, int]] = {}  # func_name -> (start, end) indices
+        # Exact counterpart to the legacy contiguous ranges. Borrowed nested
+        # sites can straddle unrelated TA allocations, so constructor argument
+        # substitution and codegen remaps must iterate these identities only.
+        self._func_ta_indices: dict[str, list[int]] = {}
+        # A shared TA site can be viewed through more than one callable's
+        # parameter names (innerLen -> outerLen). Preserve one constructor
+        # template per callable/site instead of mutating the site's single
+        # source template and relying on same-spelled forwarding parameters.
+        self._func_ta_ctor_args: dict[str, dict[int, list[str]]] = {}
         self._func_call_site_count: dict[str, int] = {}  # func_name -> count
         self._func_call_cs_map: dict[int, tuple[str, int]] = {}  # call_node_id -> (func_name, cs_idx)
         # Primitive type facts retained per written call AST and reconciled to
@@ -542,6 +551,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             var_member_type_specs_by_node=self._var_member_type_specs_by_node,
             var_member_owners_by_node=self._var_member_owners_by_node,
             func_ta_ranges=self._func_ta_ranges,
+            func_ta_indices=self._func_ta_indices,
             func_call_cs_map=self._func_call_cs_map,
             func_call_site_counts=self._func_call_site_count,
             func_callsite_param_types={
@@ -2237,6 +2247,63 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 calls_by_callee.setdefault(callee, []).append(call)
                 call_edges.append((owner, callee, call))
 
+        # A source-ordered method visit now threads TA constructor arguments
+        # through any already-known method callee.  Keep the same behavior for
+        # a forward-defined method: when ``outer`` was visited before ``inner``
+        # there was no FuncInfo/range to materialize yet, but the complete
+        # call graph above can resolve that edge now.  Process only still-
+        # unnumbered nested UDT-method edges and close to a fixed point so a
+        # reverse-ordered ``outer -> middle -> inner(TA)`` chain is covered.
+        # The selected TA slice becomes part of the caller's range; a later
+        # top-level call can then substitute its input through every boundary.
+        late_method_ta_changed = True
+        while late_method_ta_changed:
+            late_method_ta_changed = False
+            for owner, callee, call in call_edges:
+                if owner is None or id(call) in self._func_call_cs_map:
+                    continue
+                callee_info = func_info_by_name.get(callee)
+                if (
+                    callee_info is None
+                    or not getattr(callee_info, "is_udt_method", False)
+                    or callee not in self._func_ta_ranges
+                ):
+                    continue
+
+                source_indices = list(self._func_ta_indices.get(callee, ()))
+                if not source_indices:
+                    source_range = self._func_ta_ranges[callee]
+                    source_indices = list(range(*source_range))
+                cs_idx = self._func_call_site_count.get(callee, 0)
+                before = len(self._ta_call_sites)
+                self._func_call_site_count[callee] = cs_idx + 1
+                self._func_call_cs_map[id(call)] = (callee, cs_idx)
+                self._materialize_user_func_call_site_state(
+                    callee, cs_idx, call
+                )
+
+                selected_indices = (
+                    source_indices
+                    if cs_idx == 0
+                    else list(range(before, len(self._ta_call_sites)))
+                )
+                if selected_indices:
+                    current_indices = self._func_ta_indices.setdefault(owner, [])
+                    current_indices[:] = sorted(
+                        set(current_indices) | set(selected_indices)
+                    )
+                    self._func_ta_ranges[owner] = (
+                        min(current_indices), max(current_indices) + 1
+                    )
+                    owner_templates = self._func_ta_ctor_args.setdefault(
+                        owner, {}
+                    )
+                    for index in selected_indices:
+                        owner_templates[index] = list(
+                            self._ta_call_sites[index].ctor_args
+                        )
+                late_method_ta_changed = True
+
         # A history-reading callable receives ``Series<T>`` parameters. That
         # requirement must flow outward through every wrapper parameter that
         # is forwarded unchanged; otherwise a wrapper stays ``double`` and
@@ -3854,12 +3921,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # (e.g. f_basisMa's sites parameterized by f_bbwp's _bbwLen), so resolving
         # this function at its call site re-substitutes those nested sites too.
         ta_end = len(self._ta_call_sites)
-        lo, hi = ta_start, ta_end
-        if nested_touched:
-            lo = min(lo, min(nested_touched))
-            hi = max(hi, max(nested_touched) + 1)
-        if hi > lo:
-            self._func_ta_ranges[node.name] = (lo, hi)
+        exact_indices = sorted(
+            set(range(ta_start, ta_end)) | set(nested_touched or ())
+        )
+        if exact_indices:
+            self._func_ta_indices[node.name] = exact_indices
+            self._func_ta_ranges[node.name] = (
+                min(exact_indices), max(exact_indices) + 1
+            )
+            templates = self._func_ta_ctor_args.setdefault(node.name, {})
+            for index in exact_indices:
+                templates.setdefault(
+                    index, list(self._ta_call_sites[index].ctor_args)
+                )
 
         inferred_param_specs = self._param_type_specs_from_def(node)
         for i, param in enumerate(node.params):
@@ -4188,12 +4262,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # UDFs. Preserve their owned and nested-callee TA range under the
         # canonical ``Type.method`` identity so written call sites can clone it.
         ta_end = len(self._ta_call_sites)
-        lo, hi = ta_start, ta_end
-        if nested_touched:
-            lo = min(lo, min(nested_touched))
-            hi = max(hi, max(nested_touched) + 1)
-        if hi > lo:
-            self._func_ta_ranges[method_key] = (lo, hi)
+        exact_indices = sorted(
+            set(range(ta_start, ta_end)) | set(nested_touched or ())
+        )
+        if exact_indices:
+            self._func_ta_indices[method_key] = exact_indices
+            self._func_ta_ranges[method_key] = (
+                min(exact_indices), max(exact_indices) + 1
+            )
+            templates = self._func_ta_ctor_args.setdefault(method_key, {})
+            for index in exact_indices:
+                templates.setdefault(
+                    index, list(self._ta_call_sites[index].ctor_args)
+                )
         self._symbols.exit_scope()
         if method_udt_return is not None:
             self._func_udt_return_types[method_key] = method_udt_return
@@ -4740,6 +4821,34 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             arg_sym = self._symbols.resolve(arg.name)
                             if arg_sym is not None:
                                 arg_sym.is_series = True
+                    # Materialize TA state while the lexical caller is still
+                    # active, just as ``_handle_user_func_call`` does for a
+                    # bare UDF call.  Deferring every UDT-method call to the
+                    # whole-program call-graph pass loses the enclosing
+                    # callable's parameter stack: ``outer(self, len) =>
+                    # self.inner(len)`` then leaves ``inner``'s constructor
+                    # argument as the bare local name ``len`` instead of
+                    # threading the eventual top-level input through both
+                    # boundaries.  Besides substituting the arguments, the
+                    # cs0 path records the borrowed TA site in
+                    # ``_nested_ta_touched`` so the caller's range is widened
+                    # and can be resolved again at its own call site.
+                    if method_key in self._func_ta_ranges:
+                        existing_site = self._func_call_cs_map.get(id(node))
+                        if (
+                            existing_site is None
+                            or existing_site[0] != method_key
+                        ):
+                            cs_idx = self._func_call_site_count.get(
+                                method_key, 0
+                            )
+                            self._func_call_site_count[method_key] = cs_idx + 1
+                            self._func_call_cs_map[id(node)] = (
+                                method_key, cs_idx
+                            )
+                             self._materialize_user_func_call_site_state(
+                                 method_key, cs_idx, node
+                             )
                     return self._callsite_callable_return_type(
                         method_info.node,
                         full_param_types,
