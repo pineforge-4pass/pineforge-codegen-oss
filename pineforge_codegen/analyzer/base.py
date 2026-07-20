@@ -382,8 +382,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # pass can tell borrowed clones apart from a dead function's own
         # sites (see contracts.TACallSite.owner_func).
         self._enclosing_func_names: list[str] = []
-        # Set of TA-site indices a nested user-func call rewrote in terms of the
-        # current enclosing function's params (None when not inside a FuncDef body).
+        # Exact TA targets borrowed through nested callable edges while visiting
+        # the current callable body. Constructor templates are tracked
+        # separately in ``_func_ta_ctor_args`` because state ownership also
+        # matters for parameterless helpers such as ``ta.change``. ``None``
+        # means no callable body is active.
         self._nested_ta_touched: set | None = None
 
         # Pre-populate builtins
@@ -4021,10 +4024,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             nested_touched = self._nested_ta_touched
             self._nested_ta_touched = None
 
-        # Record TA range for this function. Widen to cover any nested-callee TA
-        # sites whose ctor args were rewritten in terms of THIS function's params
-        # (e.g. f_basisMa's sites parameterized by f_bbwp's _bbwLen), so resolving
-        # this function at its call site re-substitutes those nested sites too.
+        # Record exact TA ownership for this function: direct allocations plus
+        # targets borrowed from every nested stateful call. Per-owner ctor
+        # templates retain forwarded-parameter expressions independently.
         ta_end = len(self._ta_call_sites)
         exact_indices = sorted(
             set(range(ta_start, ta_end)) | set(nested_touched or ())
@@ -4364,7 +4366,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._nested_ta_touched = previous_nested_ta_touched
 
         # UDT methods participate in the same stateful call graph as ordinary
-        # UDFs. Preserve their owned and nested-callee TA range under the
+        # UDFs. Preserve exact direct and borrowed TA ownership under the
         # canonical ``Type.method`` identity so written call sites can clone it.
         ta_end = len(self._ta_call_sites)
         exact_indices = sorted(

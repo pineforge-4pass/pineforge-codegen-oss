@@ -411,3 +411,31 @@ int main() {
 }
 '''
     assert _compile_and_run(transpile(source) + driver) == "25 2\n"
+
+
+def test_nested_parameterless_ta_state_stays_isolated_when_callee_has_more_callsites() -> None:
+    source = '''//@version=6
+strategy("nested state crowded namespace")
+inner(float src) => ta.change(src)
+outer(float src) => inner(src)
+noise1 = inner(high)
+noise2 = inner(low)
+noise3 = inner(volume)
+a = outer(close)
+b = outer(open)
+'''
+    driver = r'''
+#include <iostream>
+int main() {
+    Bar bars[] = {
+        Bar{1.0, 11.0, 0.0, 10.0, 1.0, 1000},
+        Bar{2.0, 21.0, 1.0, 20.0, 2.0, 61000},
+        Bar{3.0, 31.0, 2.0, 30.0, 3.0, 121000},
+    };
+    GeneratedStrategy strategy;
+    strategy.run(bars, 3);
+    if (!strategy.last_error().empty()) return 7;
+    std::cout << strategy.a << " " << strategy.b << "\n";
+}
+'''
+    assert _compile_and_run(transpile(source) + driver) == "10 1\n"

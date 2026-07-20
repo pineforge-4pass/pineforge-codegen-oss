@@ -1348,9 +1348,6 @@ class CallHandlers:
                         for arg in func_ctor_templates[i]
                     ]
                     selected_ta_indices[i] = i
-                    # If a ctor is now expressed in an enclosing UDF's params,
-                    # retain that expression so the enclosing call can resolve
-                    # it and widen the enclosing TA range as before.
                     if enclosing_params and self._nested_ta_touched is not None:
                         for arg in site.ctor_args:
                             tokens = set(_re.findall(
@@ -1361,7 +1358,6 @@ class CallHandlers:
                                     self._func_ta_ctor_args.setdefault(
                                         caller, {}
                                     )[i] = list(site.ctor_args)
-                                self._nested_ta_touched.add(i)
                                 break
             else:
                 clone_name_map: dict[str, str] = {}
@@ -1437,6 +1433,16 @@ class CallHandlers:
                     self._ta_member_names.add(clone_name)
                 if clone_name_map:
                     self._func_cs_ta_clone_names[(func_name, cs_idx)] = clone_name_map
+
+            # A nested stateful helper belongs to the enclosing callable's
+            # call path even when its constructor has no forwarded parameters
+            # (``ta.change`` is the canonical example). Constructor-template
+            # forwarding above is intentionally narrower: it only rewrites
+            # expressions that reference enclosing parameters. Keep state
+            # ownership independent from that substitution test so every
+            # written parent call site receives its exact borrowed TA targets.
+            if self._nested_ta_touched is not None:
+                self._nested_ta_touched.update(selected_ta_indices.values())
 
             call_targets = self._func_ta_call_targets.setdefault(
                 (id(node), cs_idx), {}
