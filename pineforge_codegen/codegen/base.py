@@ -4472,7 +4472,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return rendered
 
 
-    def _collect_ta_runtime_resets(self) -> list[str]:
+    def _collect_ta_runtime_resets(
+        self,
+        *,
+        security_source_node: ASTNode | None = None,
+    ) -> list[str]:
         """Collect reassignment statements for every TA object whose ctor args
         depend on an input-backed variable. Returned strings are raw C++
         assignment statements (no enclosing block/indent). Empty list when no
@@ -4521,6 +4525,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             sec_cs_idx = (sec_item or {}).get("callsite_idx")
             for idx, variants in (info.get("ta_variants") or {}).items():
                 site = self.ctx.ta_call_sites[idx]
+                if (
+                    security_source_node is not None
+                    and site.node is not security_source_node
+                ):
+                    continue
                 ctor_site = site
                 if sec_containing and sec_cs_idx is not None:
                     remap = self._func_cs_ta_remap.get((sec_containing, sec_cs_idx))

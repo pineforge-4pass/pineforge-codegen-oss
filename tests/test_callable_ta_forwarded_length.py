@@ -221,6 +221,122 @@ plot(out)
     assert any('get_input_int("Len", 11)' in line for line in _reset_lines(cpp))
 
 
+def test_reverse_defined_three_method_chain_revisits_growing_ta_owner() -> None:
+    source = '''//@version=6
+strategy("reverse growing method chain length")
+type Holder
+    float seed
+method outer(Holder self, int outerLen) => self.middle(outerLen)
+method middle(Holder self, int middleLen) =>
+    ta.ema(close, middleLen) + self.inner(middleLen)
+method inner(Holder self, int innerLen) => ta.sma(close, innerLen)
+var Holder holder = Holder.new(0.0)
+n = input.int(11, "Len")
+out = holder.outer(n)
+plot(out)
+'''
+    cpp = transpile(source)
+    assert _ctor_periods(cpp, "ema") == ["11"]
+    assert _ctor_periods(cpp, "sma") == ["11"]
+    assert any(
+        'get_input_int("Len", 11)' in line for line in _reset_lines(cpp, "ema")
+    )
+    assert any(
+        'get_input_int("Len", 11)' in line for line in _reset_lines(cpp, "sma")
+    )
+
+
+def test_existing_method_and_top_level_edges_revisit_growing_ta_owner() -> None:
+    source = '''//@version=6
+strategy("existing growing method edges")
+type Holder
+    float seed
+method middle(Holder self, int middleLen) =>
+    ta.ema(close, middleLen) + self.inner(middleLen)
+method outer(Holder self, int outerLen) => self.middle(outerLen)
+method inner(Holder self, int innerLen) => ta.sma(close, innerLen)
+var Holder holder = Holder.new(0.0)
+n = input.int(11, "Len")
+out = holder.outer(n)
+plot(out)
+'''
+    cpp = transpile(source)
+    assert _ctor_periods(cpp, "ema") == ["11"]
+    assert _ctor_periods(cpp, "sma") == ["11"]
+
+
+def test_growing_chain_keeps_unrelated_ta_out_of_two_constant_callsites() -> None:
+    source = '''//@version=6
+strategy("growing method owner slice")
+type Holder
+    float seed
+method outer(Holder self, int outerLen) => self.middle(outerLen)
+method unrelated(Holder self) => ta.rma(close, 19)
+method middle(Holder self, int middleLen) =>
+    ta.ema(close, middleLen) + self.inner(middleLen)
+method inner(Holder self, int innerLen) => ta.sma(close, innerLen)
+var Holder holder = Holder.new(0.0)
+noise = holder.unrelated()
+first = holder.outer(4)
+second = holder.outer(9)
+plot(noise + first + second)
+'''
+    cpp = transpile(source)
+    assert _ctor_periods(cpp, "rma") == ["19"]
+    assert _ctor_periods(cpp, "ema") == ["4", "9"]
+    assert _ctor_periods(cpp, "sma") == ["4", "9"]
+
+
+def test_security_nested_dynamic_length_keeps_requested_context_diagnostic() -> None:
+    source = '''//@version=6
+strategy("requested nested mixed length")
+length = input.int(2, "L")
+inner(float src, int innerLen) => ta.ema(src, innerLen)
+outer(float src, int outerLen) =>
+    [inner(src, outerLen), inner(src, outerLen + int(close))]
+[a, b] = request.security(syminfo.tickerid, "1", outer(close, length))
+plot(a + b)
+'''
+    with pytest.raises(CompileError) as exc_info:
+        transpile(source)
+    message = str(exc_info.value)
+    assert "requested-context TA constructor length" in message
+    assert "not a stable per-run scalar" in message
+
+
+def test_earlier_unrelated_ordinary_ta_length_error_keeps_precedence() -> None:
+    source = '''//@version=6
+strategy("two length errors")
+bad(int n) => ta.sma(close, n)
+ordinary = bad(int(close))
+e(float src, int len) => ta.ema(src, len)
+four(float src, int p) => [e(src, p), e(src, p + int(close))]
+[a, b] = request.security(syminfo.tickerid, "1", four(close, input.int(2, "L")))
+plot(ordinary + a + b)
+'''
+    with pytest.raises(CompileError) as exc_info:
+        transpile(source)
+    message = str(exc_info.value)
+    assert "Unsupported TA constructor length 'int(close)'" in message
+    assert "requested-context" not in message
+
+
+def test_same_ta_source_with_safe_requested_variant_keeps_ordinary_error() -> None:
+    source = '''//@version=6
+strategy("same TA node mixed contexts")
+e(float src, int len) => ta.ema(src, len)
+ordinary = e(close, int(close))
+requested = request.security(
+    syminfo.tickerid, "1", e(close, input.int(2, "L")))
+plot(ordinary + requested)
+'''
+    with pytest.raises(CompileError) as exc_info:
+        transpile(source)
+    message = str(exc_info.value)
+    assert "Unsupported TA constructor length 'int(close)'" in message
+    assert "requested-context" not in message
+
+
 @pytest.mark.parametrize("forward_defined", [False, True])
 def test_branch_wrapper_and_two_callsites_keep_distinct_lengths(
     forward_defined: bool,

@@ -283,6 +283,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # template per callable/site instead of mutating the site's single
         # source template and relying on same-spelled forwarding parameters.
         self._func_ta_ctor_args: dict[str, dict[int, list[str]]] = {}
+        # Exact TA-site mapping and source-template snapshot for each textual
+        # callable edge.  Late whole-program propagation uses these to revisit
+        # an already-numbered edge when its callee gains another owned TA site
+        # (or refines an existing per-owner constructor template), without
+        # cloning the edge's previously-materialized state a second time.
+        self._func_ta_call_targets: dict[
+            tuple[int, int], dict[int, int]
+        ] = {}
+        self._func_ta_call_templates: dict[
+            int, dict[int, tuple[str, ...]]
+        ] = {}
         self._func_call_site_count: dict[str, int] = {}  # func_name -> count
         self._func_call_cs_map: dict[int, tuple[str, int]] = {}  # call_node_id -> (func_name, cs_idx)
         # Primitive type facts retained per written call AST and reconciled to
@@ -2247,20 +2258,24 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 calls_by_callee.setdefault(callee, []).append(call)
                 call_edges.append((owner, callee, call))
 
-        # A source-ordered method visit now threads TA constructor arguments
-        # through any already-known method callee.  Keep the same behavior for
-        # a forward-defined method: when ``outer`` was visited before ``inner``
-        # there was no FuncInfo/range to materialize yet, but the complete
-        # call graph above can resolve that edge now.  Process only still-
-        # unnumbered nested UDT-method edges and close to a fixed point so a
-        # reverse-ordered ``outer -> middle -> inner(TA)`` chain is covered.
-        # The selected TA slice becomes part of the caller's range; a later
-        # top-level call can then substitute its input through every boundary.
-        late_method_ta_changed = True
-        while late_method_ta_changed:
+        # A source-ordered method visit threads TA constructor arguments through
+        # any already-known method callee.  Forward definitions require the
+        # complete call graph above, and an edge may need revisiting even after
+        # it has a cs identity: its callee can acquire another exact TA owner (or
+        # a refined per-owner ctor template) later in this same closure.
+        #
+        # Track the exact source-index/template snapshot materialized for each
+        # textual edge.  Only the delta is materialized on a later round, which
+        # prevents cs>0 state from being cloned twice.  A finite callable graph
+        # converges in at most its path depth; retain a conservative explicit
+        # bound and fail closed rather than looping on a recursive TA cycle.
+        max_ta_rounds = max(2, len(func_defs) + len(call_edges) + 2)
+        last_changed_call: FuncCall | None = None
+        for _round in range(max_ta_rounds):
             late_method_ta_changed = False
             for owner, callee, call in call_edges:
-                if owner is None or id(call) in self._func_call_cs_map:
+                call_id = id(call)
+                if call_id in self._func_inherited_call_nodes:
                     continue
                 callee_info = func_info_by_name.get(callee)
                 if (
@@ -2274,23 +2289,74 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 if not source_indices:
                     source_range = self._func_ta_ranges[callee]
                     source_indices = list(range(*source_range))
-                cs_idx = self._func_call_site_count.get(callee, 0)
-                before = len(self._ta_call_sites)
-                self._func_call_site_count[callee] = cs_idx + 1
-                self._func_call_cs_map[id(call)] = (callee, cs_idx)
-                self._materialize_user_func_call_site_state(
-                    callee, cs_idx, call
+                callee_templates = self._func_ta_ctor_args.get(callee, {})
+                processed_templates = self._func_ta_call_templates.get(
+                    call_id, {}
                 )
+                existing_site = self._func_call_cs_map.get(call_id)
+                candidate_cs_idx = (
+                    existing_site[1]
+                    if existing_site is not None and existing_site[0] == callee
+                    else self._func_call_site_count.get(callee, 0)
+                )
+                selected_targets = self._func_ta_call_targets.get(
+                    (call_id, candidate_cs_idx), {}
+                )
+                owner_indices = (
+                    set(self._func_ta_indices.get(owner, ()))
+                    if owner is not None
+                    else set()
+                )
+                owner_templates = (
+                    self._func_ta_ctor_args.get(owner, {})
+                    if owner is not None
+                    else {}
+                )
+                stale_indices: list[int] = []
+                for index in source_indices:
+                    site = self._ta_call_sites[index]
+                    source_template = tuple(
+                        callee_templates.get(
+                            index,
+                            getattr(site, "_orig_ctor_args", site.ctor_args),
+                        )
+                    )
+                    target = selected_targets.get(index)
+                    if (
+                        processed_templates.get(index) != source_template
+                        or target is None
+                        or (
+                            owner is not None
+                            and (
+                                target not in owner_indices
+                                or target not in owner_templates
+                            )
+                        )
+                    ):
+                        stale_indices.append(index)
+                if not stale_indices:
+                    continue
 
-                selected_indices = (
-                    source_indices
-                    if cs_idx == 0
-                    else list(range(before, len(self._ta_call_sites)))
+                if existing_site is not None and existing_site[0] == callee:
+                    cs_idx = existing_site[1]
+                    materialize_fixnan = False
+                else:
+                    cs_idx = candidate_cs_idx
+                    self._func_call_site_count[callee] = cs_idx + 1
+                    self._func_call_cs_map[call_id] = (callee, cs_idx)
+                    materialize_fixnan = True
+
+                selected = self._materialize_user_func_call_site_state(
+                    callee,
+                    cs_idx,
+                    call,
+                    ta_site_indices=stale_indices,
+                    materialize_fixnan=materialize_fixnan,
                 )
-                if selected_indices:
+                if selected and owner is not None:
                     current_indices = self._func_ta_indices.setdefault(owner, [])
                     current_indices[:] = sorted(
-                        set(current_indices) | set(selected_indices)
+                        set(current_indices) | set(selected.values())
                     )
                     self._func_ta_ranges[owner] = (
                         min(current_indices), max(current_indices) + 1
@@ -2298,11 +2364,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     owner_templates = self._func_ta_ctor_args.setdefault(
                         owner, {}
                     )
-                    for index in selected_indices:
-                        owner_templates[index] = list(
-                            self._ta_call_sites[index].ctor_args
+                    for target in selected.values():
+                        owner_templates[target] = list(
+                            self._ta_call_sites[target].ctor_args
                         )
                 late_method_ta_changed = True
+                last_changed_call = call
+            if not late_method_ta_changed:
+                break
+        else:
+            self._error(
+                "Callable TA ownership propagation did not converge; "
+                "recursive stateful call paths are unsupported.",
+                last_changed_call.loc if last_changed_call is not None else None,
+            )
 
         # A history-reading callable receives ``Series<T>`` parameters. That
         # requirement must flow outward through every wrapper parameter that
@@ -2535,6 +2610,32 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         # Inherit each multi-call-site parent's index space down the full path.
         # Re-run to a fixed point for A -> B -> C chains.
+        def _ta_variant_target_indices(
+            func_name: str, cs_idx: int
+        ) -> set[int]:
+            source_indices = list(self._func_ta_indices.get(func_name, ()))
+            if not source_indices and func_name in self._func_ta_ranges:
+                source_indices = list(range(*self._func_ta_ranges[func_name]))
+            if cs_idx == 0:
+                return set(source_indices)
+            overrides = self._func_cs_ta_clone_names.get(
+                (func_name, cs_idx), {}
+            )
+            by_member = {
+                site.member_name: index
+                for index, site in enumerate(self._ta_call_sites)
+            }
+            targets: set[int] = set()
+            for source_index in source_indices:
+                source_name = self._ta_call_sites[source_index].member_name
+                target_name = overrides.get(
+                    source_name, f"{source_name}_cs{cs_idx}"
+                )
+                target_index = by_member.get(target_name)
+                if target_index is not None:
+                    targets.add(target_index)
+            return targets
+
         changed = True
         while changed:
             changed = False
@@ -2574,11 +2675,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                                     (sub, 0), None
                                 )
                         for cs_idx in range(current, count):
+                            parent_ta_targets = _ta_variant_target_indices(
+                                fname, cs_idx
+                            )
                             self._materialize_user_func_call_site_state(
                                 sub,
                                 cs_idx,
                                 call_node,
                                 reuse_existing_owner=fname,
+                                reuse_existing_targets=parent_ta_targets,
                             )
                         self._func_call_site_count[sub] = count
                         changed = True
@@ -4846,9 +4951,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             self._func_call_cs_map[id(node)] = (
                                 method_key, cs_idx
                             )
-                             self._materialize_user_func_call_site_state(
-                                 method_key, cs_idx, node
-                             )
+                            self._materialize_user_func_call_site_state(
+                                method_key, cs_idx, node
+                            )
                     return self._callsite_callable_return_type(
                         method_info.node,
                         full_param_types,
