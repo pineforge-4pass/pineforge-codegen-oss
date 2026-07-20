@@ -591,19 +591,33 @@ class SecurityEmitter:
                 return None
             return (left and right) if node.op == "and" else (left or right)
         if isinstance(node, Identifier):
-            binding = self._security_lookup_helper_binding_context(
-                node.name, helper_binding_stack
-            )
+            binding = None
+            if not self._security_identifier_is_global_binding(node):
+                binding = self._security_lookup_helper_binding_context(
+                    node.name, helper_binding_stack
+                )
             if binding is not None:
                 bound, bound_stack = binding
+                if isinstance(bound, str):
+                    return None
                 return self._fold_security_const_bool(
                     bound, bound_stack, resolving
                 )
+            param_key = f"param:{id(node)}"
+            param_binding = self._security_index_param_callsite_binding(node)
+            if param_binding is not None and param_key not in resolving:
+                return self._fold_security_const_bool(
+                    param_binding, (), resolving | {param_key}
+                )
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
-            if node.name in global_expr_map and node.name not in resolving:
+            if (
+                self._security_identifier_is_global_binding(node)
+                and node.name in global_expr_map
+                and node.name not in resolving
+            ):
                 resolving.add(node.name)
                 out = self._fold_security_const_bool(
-                    global_expr_map[node.name], helper_binding_stack, resolving
+                    global_expr_map[node.name], (), resolving
                 )
                 resolving.remove(node.name)
                 return out
@@ -630,19 +644,33 @@ class SecurityEmitter:
         if resolving is None:
             resolving = set()
         if isinstance(node, Identifier):
-            binding = self._security_lookup_helper_binding_context(
-                node.name, helper_binding_stack
-            )
+            binding = None
+            if not self._security_identifier_is_global_binding(node):
+                binding = self._security_lookup_helper_binding_context(
+                    node.name, helper_binding_stack
+                )
             if binding is not None:
                 bound, bound_stack = binding
+                if isinstance(bound, str):
+                    return None
                 return self._resolve_security_index_literal(
                     bound, bound_stack, resolving
                 )
+            param_key = f"param:{id(node)}"
+            param_binding = self._security_index_param_callsite_binding(node)
+            if param_binding is not None and param_key not in resolving:
+                return self._resolve_security_index_literal(
+                    param_binding, (), resolving | {param_key}
+                )
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
-            if node.name in global_expr_map and node.name not in resolving:
+            if (
+                self._security_identifier_is_global_binding(node)
+                and node.name in global_expr_map
+                and node.name not in resolving
+            ):
                 resolving.add(node.name)
                 out = self._resolve_security_index_literal(
-                    global_expr_map[node.name], helper_binding_stack, resolving
+                    global_expr_map[node.name], (), resolving
                 )
                 resolving.remove(node.name)
                 return out
@@ -656,6 +684,173 @@ class SecurityEmitter:
                 chosen, helper_binding_stack, resolving
             )
         return None
+
+    def _security_identifier_is_global_binding(self, node: Identifier) -> bool:
+        """Whether this exact identifier AST resolved to a global binding.
+
+        ``global_expr_map`` is keyed only by spelling.  Consulting it without
+        node provenance lets a UDF parameter, block local, or loop iterator
+        capture a same-named global input after analysis scopes have unwound.
+        """
+        scopes = getattr(self.ctx, "identifier_binding_scopes", {}) or {}
+        return scopes.get(id(node)) == "global"
+
+    def _security_index_param_callsite_binding(self, node: Identifier):
+        """Resolve one UDF parameter index from its call sites, conservatively.
+
+        A request.security evaluator is a class method, so a parameter of the
+        UDF that *contains* the request call is not otherwise in scope there.
+        Reuse the established timeframe-callsite model for the narrow offset
+        case: one call site is exact; several are accepted only for the same
+        literal or the same proven-global identifier.  Mixed bindings fail
+        closed instead of sharing one evaluator across different offsets.
+        """
+        scopes = getattr(self.ctx, "identifier_binding_scopes", {}) or {}
+        scope = scopes.get(id(node))
+        if not isinstance(scope, str) or not scope.startswith("func_"):
+            return None
+        func_name = scope[5:]
+        func_info = self._func_info_map.get(func_name)
+        if (
+            func_info is None
+            or func_info.node is None
+            or node.name not in func_info.node.params
+        ):
+            return None
+        # A parameter is only equal to its call-site argument until the UDF
+        # reassigns it.  Specializing a later ``ta.*[param]`` from the authored
+        # call argument would otherwise ignore legal ``param := ...`` writes
+        # and silently select the wrong requested-context history bar.
+        for child in self._walk_ast(func_info.node):
+            if (
+                isinstance(child, Assignment)
+                and isinstance(child.target, Identifier)
+                and child.target.name == node.name
+            ):
+                return None
+            if isinstance(child, VarDecl) and child.name == node.name:
+                return None
+            if isinstance(child, TupleAssign) and node.name in child.names:
+                return None
+            if isinstance(child, ForStmt) and child.var == node.name:
+                return None
+            if isinstance(child, ForInStmt) and (
+                child.var == node.name or node.name in (child.vars or [])
+            ):
+                return None
+        param_index = list(func_info.node.params).index(node.name)
+        bound_args = []
+        for call in self._walk_ast(self.ctx.ast):
+            if not (
+                isinstance(call, FuncCall)
+                and isinstance(call.callee, Identifier)
+                and call.callee.name == func_name
+            ):
+                continue
+            arg = call.args[param_index] if param_index < len(call.args) else None
+            if node.name in call.kwargs:
+                arg = call.kwargs[node.name]
+            if arg is None:
+                return None
+            bound_args.append(arg)
+        if not bound_args:
+            return None
+
+        first = bound_args[0]
+
+        def equivalent(left, right) -> bool:
+            if isinstance(left, NumberLiteral) and isinstance(right, NumberLiteral):
+                return left.value == right.value
+            if isinstance(left, Identifier) and isinstance(right, Identifier):
+                return (
+                    left.name == right.name
+                    and self._security_identifier_is_global_binding(left)
+                    and self._security_identifier_is_global_binding(right)
+                )
+            return left is right
+
+        if not all(equivalent(first, other) for other in bound_args[1:]):
+            return None
+        return first
+
+    def _resolve_security_immutable_input_int(
+        self,
+        node,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None = None,
+        resolving: set[int] | None = None,
+    ) -> tuple[FuncCall, tuple[dict[str, ASTNode], ...]] | None:
+        """Resolve an immutable security-history offset to its ``input.int``.
+
+        Pine v6 permits a bar-invariant input integer as a history offset.  A
+        request.security TA offset needs special admission because its backing
+        history advances in the requested context, not in chart context.  Keep
+        this proof deliberately narrower than arbitrary ``series int`` support:
+
+        * the leaf must be exactly ``input.int``;
+        * helper-parameter and top-level immutable alias chains are followed;
+        * ``var``/``varip`` or any globally reassigned alias is rejected; and
+        * arithmetic/ternary expressions remain unsupported for now.
+
+        Return the proven input call plus the lexical stack in which that call
+        was authored.  Rendering the original identifier under a helper's
+        stack would let a same-named helper parameter capture a global alias.
+        Crossing ``global_expr_map`` therefore resets the stack to global.
+
+        The generated ``Series`` safely returns ``na`` for insufficient depth;
+        negative runtime overrides are also lowered to ``na`` by the caller.
+        """
+        if resolving is None:
+            resolving = set()
+
+        if isinstance(node, FuncCall):
+            func_name, namespace = self._resolve_callee(node.callee)
+            if namespace == "input" and func_name == "int":
+                return node, tuple(helper_binding_stack or ())
+            return None
+
+        if not isinstance(node, Identifier) or id(node) in resolving:
+            return None
+
+        binding = None
+        if not self._security_identifier_is_global_binding(node):
+            binding = self._security_lookup_helper_binding_context(
+                node.name, helper_binding_stack
+            )
+        if binding is not None:
+            bound, bound_stack = binding
+            if isinstance(bound, str):
+                return None
+            return self._resolve_security_immutable_input_int(
+                bound,
+                bound_stack,
+                resolving | {id(node)},
+            )
+
+        param_binding = self._security_index_param_callsite_binding(node)
+        if param_binding is not None:
+            return self._resolve_security_immutable_input_int(
+                param_binding,
+                (),
+                resolving | {id(node)},
+            )
+
+        # Mutable globals have requested-context state of their own and cannot
+        # be replaced by their authored initializer without changing Pine
+        # semantics.  Reject them before following global_expr_map.
+        if node.name in getattr(self, "_global_mutable_infos", {}):
+            return None
+
+        if not self._security_identifier_is_global_binding(node):
+            return None
+
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        if node.name not in global_expr_map:
+            return None
+        return self._resolve_security_immutable_input_int(
+            global_expr_map[node.name],
+            (),
+            resolving | {id(node)},
+        )
 
     def _compose_security_helper_history_subscript(
         self,
@@ -721,9 +916,11 @@ class SecurityEmitter:
                 return
 
             if isinstance(n, Identifier):
-                binding = self._security_lookup_helper_binding_context(
-                    n.name, bindings
-                )
+                binding = None
+                if not self._security_identifier_is_global_binding(n):
+                    binding = self._security_lookup_helper_binding_context(
+                        n.name, bindings
+                    )
                 if binding is not None:
                     bound, bound_stack = binding
                     if not isinstance(bound, str):
@@ -741,16 +938,22 @@ class SecurityEmitter:
                     resolving.remove(n.name)
                     return
                 global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
-                if n.name in global_expr_map and n.name not in resolving:
+                if (
+                    self._security_identifier_is_global_binding(n)
+                    and n.name in global_expr_map
+                    and n.name not in resolving
+                ):
                     resolving.add(n.name)
-                    walk(global_expr_map[n.name], bindings)
+                    walk(global_expr_map[n.name], ())
                     resolving.remove(n.name)
                     return
 
             if isinstance(n, Subscript) and isinstance(n.object, Identifier):
-                binding = self._security_lookup_helper_binding_context(
-                    n.object.name, bindings
-                )
+                binding = None
+                if not self._security_identifier_is_global_binding(n.object):
+                    binding = self._security_lookup_helper_binding_context(
+                        n.object.name, bindings
+                    )
                 if binding is not None:
                     bound, bound_stack = binding
                     if not isinstance(bound, str):
@@ -779,7 +982,11 @@ class SecurityEmitter:
                         out.add(n.object.name)
                     return
                 global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
-                if n.object.name in global_expr_map and n.object.name not in resolving:
+                if (
+                    self._security_identifier_is_global_binding(n.object)
+                    and n.object.name in global_expr_map
+                    and n.object.name not in resolving
+                ):
                     resolving.add(n.object.name)
                     walk(
                         Subscript(
@@ -937,50 +1144,172 @@ class SecurityEmitter:
         per-site ``Series`` filled (gated on ``is_complete``) in
         ``_eval_security_N``. Mirrors ``_collect_security_ohlc_hist_fields`` for
         OHLC offsets. Offset 0 reuses the current committed value (``_secval_*``)
-        and needs no Series, so only index >= 1 registers here."""
+        and needs no Series, so only index >= 1 registers here.  A dynamic
+        index is registered conservatively; the expression emitter separately
+        admits only an immutable ``input.int`` chain and rejects everything
+        else.  This declaration prepass must expand helper/global bindings just
+        like ``_build_security_expr`` or a valid helper-wrapped offset could
+        emit a history read without storage, pushes, or reset."""
         out: set[int] = set()
         global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        resolving: set[str] = set()
 
-        def resolve_ta_site(obj, resolving: set[str] | None = None):
+        def resolve_ta_site(obj, bindings, seen: set[str] | None = None):
             """_get_ta_site only matches the literal ta.* FuncCall node by
-            identity; fall back through global_expr_map for an indirect
-            binding (``v = ta.ema(close, 55)`` then ``...v[1]...``), mirroring
-            the same fallback in _build_security_expr's Subscript branch."""
+            identity; fall back through helper/global bindings for an indirect
+            binding (``v = ta.ema(close, 55)`` then ``...v[1]...``)."""
             site = self._get_ta_site(obj)
             if site is not None:
                 return site
             if isinstance(obj, Identifier):
-                if resolving is None:
-                    resolving = set()
-                if obj.name in global_expr_map and obj.name not in resolving:
-                    resolving.add(obj.name)
-                    return resolve_ta_site(global_expr_map[obj.name], resolving)
+                if seen is None:
+                    seen = set()
+                if obj.name in seen:
+                    return None
+                binding = None
+                if not self._security_identifier_is_global_binding(obj):
+                    binding = self._security_lookup_helper_binding_context(
+                        obj.name, bindings
+                    )
+                if binding is not None:
+                    bound, bound_stack = binding
+                    if not isinstance(bound, str):
+                        return resolve_ta_site(
+                            bound, bound_stack, seen | {obj.name}
+                        )
+                if (
+                    self._security_identifier_is_global_binding(obj)
+                    and obj.name in global_expr_map
+                ):
+                    return resolve_ta_site(
+                        global_expr_map[obj.name],
+                        (),
+                        seen | {obj.name},
+                    )
             return None
 
-        def walk(n):
-            if n is None:
+        def walk(n, bindings) -> None:
+            if n is None or isinstance(n, str):
                 return
+
+            if isinstance(n, Identifier):
+                binding = None
+                if not self._security_identifier_is_global_binding(n):
+                    binding = self._security_lookup_helper_binding_context(
+                        n.name, bindings
+                    )
+                if binding is not None:
+                    bound, bound_stack = binding
+                    if not isinstance(bound, str):
+                        key = f"bind:{id(bound)}"
+                        if key not in resolving:
+                            resolving.add(key)
+                            walk(bound, bound_stack)
+                            resolving.remove(key)
+                    return
+                mutable_info = self._global_mutable_infos.get(n.name)
+                if mutable_info is not None and n.name not in resolving:
+                    resolving.add(n.name)
+                    for stmt in getattr(mutable_info, "source_stmts", []) or []:
+                        walk(stmt, bindings)
+                    resolving.remove(n.name)
+                    return
+                if (
+                    self._security_identifier_is_global_binding(n)
+                    and n.name in global_expr_map
+                    and n.name not in resolving
+                ):
+                    resolving.add(n.name)
+                    walk(global_expr_map[n.name], ())
+                    resolving.remove(n.name)
+                    return
+
             if isinstance(n, Subscript):
-                site = resolve_ta_site(n.object)
+                site = resolve_ta_site(n.object, bindings)
                 if site is not None:
-                    idx_lit = self._resolve_security_index_literal(n.index)
-                    if idx_lit is not None and idx_lit >= 1:
+                    idx_lit = self._resolve_security_index_literal(n.index, bindings)
+                    if idx_lit is None or idx_lit >= 1:
                         site_idx = self._ta_index_by_site_id.get(id(site))
                         if site_idx is not None:
                             out.add(site_idx)
+
+            if isinstance(n, FuncCall) and isinstance(n.callee, Identifier):
+                func_name = n.callee.name
+                if func_name in self._func_names:
+                    call_key = f"func:{func_name}"
+                    if call_key in resolving:
+                        return
+                    resolving.add(call_key)
+                    plan = self._security_helper_call_plan(n, bindings)
+                    if plan["mode"] == "expr":
+                        walk(plan["expr"], plan["binding_stack"])
+                    else:
+                        local_series_names = set(
+                            plan.get("local_series_names", ())
+                        )
+                        active: dict[str, object] = {}
+
+                        def walk_stmt(stmt, current: dict[str, object]) -> None:
+                            local_stack = plan["binding_stack"] + (current,)
+                            if isinstance(stmt, VarDecl):
+                                if stmt.value is not None:
+                                    walk(stmt.value, local_stack)
+                                if stmt.name in local_series_names or stmt.is_var:
+                                    current[stmt.name] = self._security_series_binding(
+                                        f"{plan['func_info'].name}:{stmt.name}"
+                                    )
+                                elif stmt.value is not None:
+                                    current[stmt.name] = stmt.value
+                                return
+                            if isinstance(stmt, Assignment):
+                                if stmt.value is not None:
+                                    walk(stmt.value, local_stack)
+                                target = self._get_target_name(stmt.target)
+                                existing = current.get(target) if target else None
+                                if (
+                                    target in local_series_names
+                                    or (
+                                        isinstance(existing, str)
+                                        and self._security_series_binding_target(
+                                            existing
+                                        )
+                                        is not None
+                                    )
+                                ):
+                                    current[target] = self._security_series_binding(
+                                        f"{plan['func_info'].name}:{target}"
+                                    )
+                                elif target is not None and stmt.value is not None:
+                                    current[target] = stmt.value
+                                return
+                            if isinstance(stmt, IfStmt):
+                                walk(stmt.condition, local_stack)
+                                body_bindings = dict(current)
+                                for child in stmt.body:
+                                    walk_stmt(child, body_bindings)
+                                else_bindings = dict(current)
+                                for child in stmt.else_body:
+                                    walk_stmt(child, else_bindings)
+
+                        for stmt in plan["body"]:
+                            walk_stmt(stmt, active)
+                        walk(plan["expr"], plan["binding_stack"] + (active,))
+                    resolving.remove(call_key)
+                    return
+
             if isinstance(n, (list, tuple)):
                 for x in n:
-                    walk(x)
+                    walk(x, bindings)
                 return
             for _k, v in getattr(n, "__dict__", {}).items():
                 if isinstance(v, ASTNode):
-                    walk(v)
+                    walk(v, bindings)
                 elif isinstance(v, (list, tuple)):
                     for x in v:
                         if isinstance(x, ASTNode):
-                            walk(x)
+                            walk(x, bindings)
 
-        walk(node)
+        walk(node, ())
         return out
 
     def _security_ta_hist_series_cpp(self, member_name: str) -> str:
@@ -1769,9 +2098,11 @@ class SecurityEmitter:
             resolving = set()
 
         if isinstance(expr_node, Identifier):
-            binding = self._security_lookup_helper_binding_context(
-                expr_node.name, helper_binding_stack
-            )
+            binding = None
+            if not self._security_identifier_is_global_binding(expr_node):
+                binding = self._security_lookup_helper_binding_context(
+                    expr_node.name, helper_binding_stack
+                )
             if binding is not None:
                 bound, bound_stack = binding
                 return self._expr_depends_on_security_mutables(
@@ -1981,10 +2312,12 @@ class SecurityEmitter:
             if current is None or depth > 32:
                 return None
             if isinstance(current, Identifier):
-                binding = self._security_lookup_helper_binding_context(
-                    current.name,
-                    stack,
-                )
+                binding = None
+                if not self._security_identifier_is_global_binding(current):
+                    binding = self._security_lookup_helper_binding_context(
+                        current.name,
+                        stack,
+                    )
                 if binding is None:
                     return current
                 bound, bound_stack = binding
@@ -2094,9 +2427,11 @@ class SecurityEmitter:
             resolving = set()
 
         if isinstance(expr_node, Identifier):
-            binding = self._security_lookup_helper_binding_context(
-                expr_node.name, helper_binding_stack
-            )
+            binding = None
+            if not self._security_identifier_is_global_binding(expr_node):
+                binding = self._security_lookup_helper_binding_context(
+                    expr_node.name, helper_binding_stack
+                )
             if binding is not None:
                 bound, bound_stack = binding
                 if isinstance(bound, str):
@@ -2138,12 +2473,16 @@ class SecurityEmitter:
                 return collected
 
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
-            if expr_node.name in global_expr_map and expr_node.name not in resolving:
+            if (
+                self._security_identifier_is_global_binding(expr_node)
+                and expr_node.name in global_expr_map
+                and expr_node.name not in resolving
+            ):
                 resolving.add(expr_node.name)
                 self._collect_security_ta_binding_stacks(
                     global_expr_map[expr_node.name],
                     resolving,
-                    helper_binding_stack,
+                    (),
                     collected,
                     inline_ta_indices,
                     inline_helper,
@@ -2827,9 +3166,11 @@ class SecurityEmitter:
             helper_binding_stack = ()
 
         if isinstance(expr_node, Identifier):
-            binding = self._security_lookup_helper_binding_context(
-                expr_node.name, helper_binding_stack
-            )
+            binding = None
+            if not self._security_identifier_is_global_binding(expr_node):
+                binding = self._security_lookup_helper_binding_context(
+                    expr_node.name, helper_binding_stack
+                )
             if binding is not None:
                 bound, bound_stack = binding
                 if isinstance(bound, str):
@@ -2864,7 +3205,11 @@ class SecurityEmitter:
                 return state_name
 
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
-            if expr_node.name in global_expr_map and expr_node.name not in resolving:
+            if (
+                self._security_identifier_is_global_binding(expr_node)
+                and expr_node.name in global_expr_map
+                and expr_node.name not in resolving
+            ):
                 resolving.add(expr_node.name)
                 resolved = self._build_security_expr(
                     sec_id,
@@ -2873,7 +3218,7 @@ class SecurityEmitter:
                     ta_results,
                     resolving,
                     security_mutable_names,
-                    helper_binding_stack,
+                    (),
                     emitted_lines,
                 )
                 resolving.remove(expr_node.name)
@@ -2889,25 +3234,27 @@ class SecurityEmitter:
                 return resolved
 
         if isinstance(expr_node, Subscript):
-            index_cpp = self._build_security_expr(
-                sec_id,
-                expr_node.index,
-                ta_range,
-                ta_results,
-                resolving,
-                security_mutable_names,
-                helper_binding_stack,
-                emitted_lines,
-            )
             if isinstance(expr_node.object, Identifier):
-                binding = self._security_lookup_helper_binding_context(
-                    expr_node.object.name, helper_binding_stack
-                )
+                binding = None
+                if not self._security_identifier_is_global_binding(expr_node.object):
+                    binding = self._security_lookup_helper_binding_context(
+                        expr_node.object.name, helper_binding_stack
+                    )
                 if binding is not None:
                     bound, bound_stack = binding
                     if isinstance(bound, str):
                         series_name = self._security_series_binding_target(bound)
                         if series_name is not None:
+                            index_cpp = self._build_security_expr(
+                                sec_id,
+                                expr_node.index,
+                                ta_range,
+                                ta_results,
+                                resolving,
+                                security_mutable_names,
+                                helper_binding_stack,
+                                emitted_lines,
+                            )
                             return f'_security_helper_series_["{series_name}"][{index_cpp}]'
                         return bound
                     # Function parameters retain Pine's series identity. Apply
@@ -2960,6 +3307,16 @@ class SecurityEmitter:
                     hist = self._security_ohlc_hist_series_cpp(sec_id, field)
                     cpp_t = self._security_bar_hist_type(field)
                     current = self._security_bar_field_expr(field)
+                    index_cpp = self._build_security_expr(
+                        sec_id,
+                        expr_node.index,
+                        ta_range,
+                        ta_results,
+                        resolving,
+                        security_mutable_names,
+                        helper_binding_stack,
+                        emitted_lines,
+                    )
                     return (
                         f"([&]() -> {cpp_t} {{ "
                         f"int _hidx = (int)({index_cpp}); "
@@ -2979,8 +3336,11 @@ class SecurityEmitter:
                 # helper binding, whichever the resolved expression turns out
                 # to be) instead of duplicating that dispatch here.
                 global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
-                if (expr_node.object.name in global_expr_map
-                        and expr_node.object.name not in resolving):
+                if (
+                    self._security_identifier_is_global_binding(expr_node.object)
+                    and expr_node.object.name in global_expr_map
+                    and expr_node.object.name not in resolving
+                ):
                     resolving.add(expr_node.object.name)
                     resolved = self._build_security_expr(
                         sec_id,
@@ -3001,6 +3361,16 @@ class SecurityEmitter:
                 meta = self._security_expr_hist_by_node.get((sec_id, id(expr_node)))
                 hist = meta["name"] if meta else f"_sec{sec_id}_expr_hist_missing"
                 cpp_t = meta["type"] if meta else "double"
+                index_cpp = self._build_security_expr(
+                    sec_id,
+                    expr_node.index,
+                    ta_range,
+                    ta_results,
+                    resolving,
+                    security_mutable_names,
+                    helper_binding_stack,
+                    emitted_lines,
+                )
                 inner = self._build_security_expr(
                     sec_id,
                     expr_node.object,
@@ -3032,14 +3402,72 @@ class SecurityEmitter:
                 # tick), so without a magnifier it advanced every chart bar and
                 # produced the chart-tf TA instead of the confirmed HTF value.
                 idx = self._ta_index_by_site_id.get(id(ta_site))
-                sig = self._security_binding_stack_signature(helper_binding_stack)
+                # A top-level TA site reached through a global alias owns the
+                # global variant even when the subscript index was authored
+                # in a helper.  Keep the helper stack for resolving that
+                # index, but do not use it to select the TA object's state.
+                ta_binding_stack = (
+                    ()
+                    if getattr(ta_site, "owner_func", None) is None
+                    else helper_binding_stack
+                )
+                sig = self._security_binding_stack_signature(ta_binding_stack)
                 idx_lit = self._resolve_security_index_literal(
                     expr_node.index, helper_binding_stack
                 )
                 if idx_lit is None:
+                    resolved_input = self._resolve_security_immutable_input_int(
+                        expr_node.index, helper_binding_stack
+                    )
+                    if resolved_input is None:
+                        self._codegen_error(
+                            expr_node,
+                            "request.security() TA history index must be a literal integer (e.g. ta.ema(close, 55)[1])",
+                        )
+                    input_node, input_stack = resolved_input
+                    index_cpp = self._build_security_expr(
+                        sec_id,
+                        input_node,
+                        ta_range,
+                        ta_results,
+                        resolving,
+                        security_mutable_names,
+                        input_stack,
+                        emitted_lines,
+                    )
+                    result_key = (idx, sig)
+                    if result_key not in ta_results:
+                        self._codegen_error(
+                            expr_node,
+                            "request.security multi-statement helper TA history is not supported",
+                            hint="Use a single-expression helper for TA history offsets.",
+                        )
+                    current = self._build_security_expr(
+                        sec_id,
+                        expr_node.object,
+                        ta_range,
+                        ta_results,
+                        resolving,
+                        security_mutable_names,
+                        ta_binding_stack,
+                        emitted_lines,
+                    )
+                    member_name = self._security_ta_variant_names.get(
+                        (sec_id, idx, sig),
+                        f"_sec{sec_id}_{ta_site.member_name}",
+                    )
+                    hist = self._security_ta_hist_series_cpp(member_name)
+                    return (
+                        "([&]() -> double { "
+                        f"int _hidx = (int)({index_cpp}); "
+                        "if (is_na(_hidx) || _hidx < 0) return na<double>(); "
+                        f"return (_hidx == 0) ? {current} : {hist}[_hidx - 1]; "
+                        "}())"
+                    )
+                if idx_lit < 0:
                     self._codegen_error(
                         expr_node,
-                        "request.security() TA history index must be a literal integer (e.g. ta.ema(close, 55)[1])",
+                        "request.security() TA history index must be non-negative",
                     )
                 if idx_lit == 0:
                     # Current completed-HTF-bar value: reuse the bare-TA emission.
@@ -3050,8 +3478,14 @@ class SecurityEmitter:
                         ta_results,
                         resolving,
                         security_mutable_names,
-                        helper_binding_stack,
+                        ta_binding_stack,
                         emitted_lines,
+                    )
+                if (idx, sig) not in ta_results:
+                    self._codegen_error(
+                        expr_node,
+                        "request.security multi-statement helper TA history is not supported",
+                        hint="Use a single-expression helper for TA history offsets.",
                     )
                 member_name = self._security_ta_variant_names.get(
                     (sec_id, idx, sig),

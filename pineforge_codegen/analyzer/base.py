@@ -192,6 +192,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._block_var_owner: dict[str, int] = {}
         self._block_var_renames: dict[int, dict[str, str]] = {}
         self._block_var_seq = 0
+        # Identifier node identity -> the lexical Symbol.scope resolved while
+        # that node's source scope is live.  Codegen uses this narrow
+        # provenance to distinguish true global aliases from same-named local
+        # shadows after the analyzer's scope stack has unwound.
+        self._identifier_binding_scopes: dict[int, str | None] = {}
         self._ta_counter = 0
         self._fixnan_counter = 0
         # All fixnan member names minted so far (base + clones), for O(1)
@@ -520,6 +525,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             filename=self._filename,
             global_var_decls=self._global_var_decls,
             global_expr_map=pure_global_expr_map,
+            identifier_binding_scopes=dict(self._identifier_binding_scopes),
             var_member_init_exprs=self._var_member_init_exprs,
             var_member_metadata_by_node=self._var_member_metadata_by_node,
             var_member_type_specs_by_node=self._var_member_type_specs_by_node,
@@ -4762,6 +4768,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return PineType.VOID
 
         sym = self._symbols.resolve(node.name)
+        self._identifier_binding_scopes[id(node)] = (
+            getattr(sym, "scope", None) if sym is not None else None
+        )
         if sym is not None:
             return sym.pine_type
 

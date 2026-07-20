@@ -221,6 +221,10 @@ class AnalyzerContext:
     filename: str = "<stdin>"
     global_var_decls: list = field(default_factory=list)  # [(name, PineType)] non-var global scope vars
     global_expr_map: dict = field(default_factory=dict)   # name -> defining AST expr (global, non-var)
+    # Exact lexical binding scope for each visited Identifier AST node.  Raw
+    # name lookup is not enough once a UDF parameter, block local, or loop
+    # iterator shadows a same-spelled global binding.
+    identifier_binding_scopes: dict = field(default_factory=dict)  # id(Identifier) -> scope name | None
     var_member_init_exprs: dict = field(default_factory=dict)  # var-member name -> init AST expr
     # id(VarDecl) -> (node, emitted member name, PineType, rendered initializer,
     #                 is function/method scoped)
