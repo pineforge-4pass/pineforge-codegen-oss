@@ -6,6 +6,8 @@ results from AnalyzerContext instead of walking the AST to collect info.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from ..ast_nodes import (
     ASTNode, Program, StrategyDecl, VarDecl, Assignment, IfStmt, ForStmt, ForInStmt,
     WhileStmt, SwitchStmt, BreakStmt, ContinueStmt, FuncDef, ExprStmt,
@@ -26,6 +28,15 @@ from ..analyzer import (
 from ..symbols import PineType, TypeSpec
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+
+
+@dataclass(frozen=True)
+class _StableVarCtorLiteral:
+    """Exact declaration identity admitted by the TA-length literal route."""
+
+    value: int
+    declaration_id: int
+    top_level_index: int
 
 # ---------------------------------------------------------------------------
 # Mapping tables — definitions live in ``tables.py``; re-imported here so
@@ -569,6 +580,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # state are NOT here, so a TA length fed by them is still rejected
         # by the constructor guard.
         self._stable_runtime_vars: set[str] = set()
+        # Narrow subset of persistent scalars that a TA constructor may fold
+        # directly: one unique top-level ``var [int] name = <int literal>``
+        # binding, never reassigned and never promoted to Series storage.
+        # Keep this separate from ``_known_vars`` so ordinary identifier use
+        # still reads the persistent member and only TA buffer sizing changes.
+        self._stable_var_ctor_literals: dict[str, _StableVarCtorLiteral] = {}
         # ``_var_names`` (var/varip persistent-state members) is needed by the
         # stability classifier during _collect_known_vars, so pre-seed it from
         # the analyzer's var_members before that pass runs; the canonical
@@ -1883,11 +1900,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         ``_known_vars`` (no use-site inlining): only the length-analysis path is
         affected, and the ``var`` member still emits and initializes normally.
         """
+        literal_candidates = self._admitted_stable_var_ctor_literals(reassigned)
+
         for stmt in (self.ctx.ast.body or []):
             if not isinstance(stmt, VarDecl):
                 continue
             if not (stmt.is_var or stmt.is_varip):
                 continue
+            literal_record = literal_candidates.get(stmt.name)
             if stmt.name in reassigned:
                 continue
             if self._decl_binding_is_series(id(stmt), stmt.name):
@@ -1899,12 +1919,223 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 continue
             self._derived_input_expr[stmt.name] = expr_str
             self._stable_runtime_vars.add(stmt.name)
+            if literal_record is not None:
+                self._stable_var_ctor_literals[stmt.name] = literal_record
             # Mark input-backed iff the init references an input, so the reset
             # emits override-aware get_input_*() reads for it.
             import re as _re
             toks = set(_re.findall(r"[A-Za-z_][A-Za-z_0-9]*", expr_str))
             if any(t in self._input_backed_vars for t in toks):
                 self._input_backed_vars.add(stmt.name)
+
+    @staticmethod
+    def _is_direct_int_var_literal(node) -> bool:
+        """Whether ``node`` is the one literal persistent shape we admit."""
+
+        return (
+            isinstance(node, VarDecl)
+            and node.is_var
+            and not node.is_varip
+            and node.type_hint in (None, "int")
+            and isinstance(node.value, NumberLiteral)
+            and isinstance(node.value.value, int)
+            and not isinstance(node.value.value, bool)
+        )
+
+    @staticmethod
+    def _walk_candidate_surface(root):
+        """Yield every AST node reachable through compiler-owned metadata.
+
+        The regular codegen walker intentionally follows only historically
+        emitted statement/expression slots.  Literal admission is a safety
+        proof and therefore needs the larger authored surface: loop bounds and
+        iterables, enum/type defaults, function/method parameter defaults kept
+        in ``annotations``, and any future AST-bearing metadata.  ``vars()``
+        plus identity de-duplication is both exhaustive and cycle-safe.
+        """
+
+        seen: set[int] = set()
+
+        def walk(value):
+            if value is None or isinstance(
+                value, (str, bytes, int, float, bool)
+            ):
+                return
+            value_id = id(value)
+            if value_id in seen:
+                return
+            seen.add(value_id)
+
+            if isinstance(value, ASTNode):
+                yield value
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    yield from walk(key)
+                    yield from walk(child)
+                return
+            if isinstance(value, (list, tuple, set, frozenset)):
+                for child in value:
+                    yield from walk(child)
+                return
+            if hasattr(value, "__dict__"):
+                for child in vars(value).values():
+                    yield from walk(child)
+
+        yield from walk(root)
+
+    def _stable_var_literal_has_earlier_use(
+        self,
+        name: str,
+        declaration_index: int,
+    ) -> bool:
+        """Whether authored code reads ``name`` before its global declaration."""
+
+        for root in (self.ctx.ast.body or [])[:declaration_index]:
+            if any(
+                isinstance(node, Identifier) and node.name == name
+                for node in self._walk_candidate_surface(root)
+            ):
+                return True
+        return False
+
+    def _candidate_surface_mentions_name(self, root, name: str) -> bool:
+        return any(
+            isinstance(node, Identifier) and node.name == name
+            for node in self._walk_candidate_surface(root)
+        )
+
+    def _stable_var_literal_has_unsupported_declaration(self) -> bool:
+        """Whether authored metadata would require cross-boundary dataflow.
+
+        Stable-var constructor folding is deliberately declaration-local.  A
+        user function, method, type, or enum introduces defaults, aliases, or
+        receiver effects that require a wider proof, so this narrow feature
+        fails closed for the whole script instead of approximating that proof.
+        """
+
+        return any(
+            isinstance(node, (FuncDef, MethodDef, TypeDecl, EnumDecl))
+            for node in self._walk_candidate_surface(self.ctx.ast)
+        )
+
+    def _stable_var_literal_has_parse_recovery(self) -> bool:
+        """Whether the parser discarded any authored source fragment.
+
+        Recovery intentionally keeps broad corpus transpilation moving, but a
+        discarded declaration can hide aliases or override a builtin method.
+        Literal admission therefore requires a lossless parse even though all
+        existing non-admission codegen paths retain their recovery behavior.
+        """
+
+        return bool(
+            (self.ctx.ast.annotations or {}).get("parse_recovery_count", 0)
+        )
+
+    def _stable_var_literal_has_unsupported_receiver_use(
+        self,
+        name: str,
+    ) -> bool:
+        """Catch primitive extension-method syntax dropped by the parser."""
+
+        roots: list[object] = [self.ctx.ast]
+        roots.extend(
+            pragma.expr_node
+            for pragma in (getattr(self.ctx, "pf_trace_pragmas", None) or [])
+            if getattr(pragma, "expr_node", None) is not None
+        )
+        for root in roots:
+            for node in self._walk_candidate_surface(root):
+                if (
+                    isinstance(node, FuncCall)
+                    and isinstance(node.callee, MemberAccess)
+                    and self._candidate_surface_mentions_name(
+                        node.callee.object, name
+                    )
+                ):
+                    return True
+        return False
+
+    def _stable_var_literal_has_history_use(self, name: str) -> bool:
+        """Whether any authored or post-analyzer expression histories ``name``."""
+
+        roots: list[object] = [self.ctx.ast]
+        roots.extend(
+            pragma.expr_node
+            for pragma in (getattr(self.ctx, "pf_trace_pragmas", None) or [])
+            if getattr(pragma, "expr_node", None) is not None
+        )
+        for root in roots:
+            for node in self._walk_candidate_surface(root):
+                if not isinstance(node, Subscript):
+                    continue
+                if any(
+                    isinstance(receiver_node, Identifier)
+                    and receiver_node.name == name
+                    for receiver_node in self._walk_candidate_surface(
+                        node.object
+                    )
+                ):
+                    return True
+        return False
+
+    def _admitted_stable_var_ctor_literals(
+        self,
+        reassigned: set[str],
+    ) -> dict[str, _StableVarCtorLiteral]:
+        """Return declaration-exact persistent literals safe for TA sizing."""
+
+        occurrences: dict[str, list[tuple[int, VarDecl]]] = {}
+        for index, stmt in enumerate(self.ctx.ast.body or []):
+            if self._is_direct_int_var_literal(stmt):
+                occurrences.setdefault(stmt.name, []).append((index, stmt))
+
+        unique = {
+            name: items[0]
+            for name, items in occurrences.items()
+            if len(items) == 1
+        }
+        if not unique:
+            return {}
+
+        candidate_names = set(unique)
+        binding_counts = {name: 0 for name in candidate_names}
+        for node in self._walk_candidate_surface(self.ctx.ast):
+            names: list[str] = []
+            if isinstance(node, VarDecl) and node.name:
+                names.append(node.name)
+            elif isinstance(node, TupleAssign):
+                names.extend(name for name in node.names if name != "_")
+            elif isinstance(node, ForStmt) and node.var:
+                names.append(node.var)
+            elif isinstance(node, ForInStmt):
+                if node.var:
+                    names.append(node.var)
+                names.extend(name for name in (node.vars or []) if name != "_")
+            if isinstance(node, (FuncDef, MethodDef)):
+                names.extend(name for name in node.params if name != "_")
+            for bound_name in names:
+                if bound_name in binding_counts:
+                    binding_counts[bound_name] += 1
+
+        admitted: dict[str, _StableVarCtorLiteral] = {}
+        for name, (index, declaration) in unique.items():
+            if (
+                name in reassigned
+                or binding_counts.get(name) != 1
+                or self._decl_binding_is_series(id(declaration), name)
+                or self._stable_var_literal_has_earlier_use(name, index)
+                or self._stable_var_literal_has_history_use(name)
+                or self._stable_var_literal_has_unsupported_declaration()
+                or self._stable_var_literal_has_parse_recovery()
+                or self._stable_var_literal_has_unsupported_receiver_use(name)
+            ):
+                continue
+            admitted[name] = _StableVarCtorLiteral(
+                value=declaration.value.value,
+                declaration_id=id(declaration),
+                top_level_index=index,
+            )
+        return admitted
 
     def _collect_reassigned_stable_scalars(self, reassigned: set[str]) -> None:
         """Track class-scope scalars that are reassigned but only along stable
@@ -3452,6 +3683,27 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     # _if_body_has_ta / _is_result_assignment / _expr_contains_ta /
     # _hoist_if_body live on TaSiteHelper (codegen/ta.py).
 
+    def _resolve_ta_ctor_arg(self, arg_str: str) -> str:
+        """Resolve one TA constructor argument without widening const folding.
+
+        ``var`` values deliberately stay out of ``_known_vars`` because normal
+        expression reads must still target persistent storage.  A uniquely
+        bound, never-reassigned top-level integer literal is nevertheless a
+        faithful static TA buffer length.  Admit only that exact bare alias;
+        arithmetic, input/timeframe expressions, shadows, and all mutable or
+        history-bearing bindings continue through the existing resolver/reset
+        guardrails unchanged.
+        """
+        resolved = self._resolve_known(arg_str)
+        if self._is_compile_time_value(resolved):
+            return resolved
+        if (
+            arg_str in self._stable_var_ctor_literals
+            and not self._known_var_is_lexically_shadowed(arg_str)
+        ):
+            return str(self._stable_var_ctor_literals[arg_str].value)
+        return resolved
+
     def _resolve_known(self, arg_str: str) -> str:
         """Resolve a string arg, replacing known var names with their values.
 
@@ -3937,7 +4189,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     runtime_args.append(rt)
                     any_runtime = True
                 else:
-                    resolved = self._resolve_known(a)
+                    resolved = self._resolve_ta_ctor_arg(a)
                     runtime_args.append(resolved if self._is_compile_time_value(resolved) else "1")
             if any_runtime:
                 resets.append(
@@ -3984,7 +4236,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     any_runtime = False
                     for arg_pos, a in enumerate(ctor_args):
                         rt = self._runtime_ctor_arg_for_reset(a)
-                        resolved = self._resolve_known(a)
+                        resolved = self._resolve_ta_ctor_arg(a)
                         lowered_variant = ctor_arg_stability is not None
                         stable_variant_arg = (
                             lowered_variant and ctor_arg_stability[arg_pos]

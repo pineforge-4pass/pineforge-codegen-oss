@@ -2056,10 +2056,22 @@ class SecurityEmitter:
         security_mutable_names: set[str],
         helper_binding_stack: tuple[dict[str, ASTNode], ...] | None = None,
     ) -> bool:
+        # A top-level ``var int L = 5`` is normally classified as mutable by
+        # request.security because persistent state is rebound per requested
+        # context.  The TA constructor does not read that mutable member when
+        # ``L`` passed the declaration-exact stable-literal admission proof:
+        # all main/requested-context buffers are sized directly from ``5``.
+        # Remove only those admitted names for this ctor-dependency query.
+        # Compute arguments and every other security mutability path retain
+        # the full set, and helper bindings still resolve transitively before
+        # checking the reduced set.
+        ctor_mutable_names = security_mutable_names.difference(
+            getattr(self, "_stable_var_ctor_literals", {})
+        )
         return any(
             self._expr_depends_on_security_mutables(
                 arg,
-                security_mutable_names,
+                ctor_mutable_names,
                 helper_binding_stack=helper_binding_stack,
             )
             for arg in self._security_ta_ctor_arg_nodes(site)
