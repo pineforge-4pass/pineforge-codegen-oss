@@ -396,6 +396,14 @@ class TypeInferer:
                 for pine_name, cpp_name in DRAWING_TYPE_TO_CPP.items():
                     if cpp_name == global_cpp:
                         return TypeSpec.udt(pine_name)
+            global_udt_types = getattr(self, "_global_udt_types", {})
+            if node.name in global_udt_types:
+                global_udt = global_udt_types[node.name]
+                return (
+                    TypeSpec.udt(global_udt)
+                    if global_udt is not None
+                    else None
+                )
             if node.name in self._udt_var_types:
                 return TypeSpec.udt(self._udt_var_types[node.name])
             # Drawing-typed method/function parameter (L.6d / U.5): a ``line ln``

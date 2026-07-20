@@ -579,15 +579,15 @@ class TopLevelEmitter:
             # UDT-typed var members (``var SDZone z = na``) default-construct to
             # na via the struct's in-class ``__pf_na = true``; a ctor init like
             # ``z(na<double>())`` would not type-match the struct member.
-            if name in self._udt_var_types and self._udt_var_types[name] in self._udt_defs:
+            member_udt_type = self._member_udt_type(name)
+            if member_udt_type in self._udt_defs:
                 continue
             # Drawing handle var member (L-N3): ``var line x`` / ``var box b``
             # default-construct to {-1} (na). A ``b(na<double>())`` ctor init
             # would not type-match the handle struct — skip it (the in-class
             # member default is the once-only persistent na init).
             if (name in self._drawing_var_member_cpp_types
-                    or (name in self._udt_var_types
-                        and self._udt_var_types[name] in DRAWING_TYPE_TO_CPP)):
+                    or member_udt_type in DRAWING_TYPE_TO_CPP):
                 continue
             if safe not in self._series_var_member_names:
                 cpp_val = self._resolve_known(init_expr)

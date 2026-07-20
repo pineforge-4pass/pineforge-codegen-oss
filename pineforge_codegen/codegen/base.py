@@ -1025,7 +1025,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             )
         if is_series and name in self.ctx.series_vars:
             return False
-        udt_type = self._udt_var_types.get(name)
+        udt_type = self._member_udt_type(name)
         if udt_type in self._udt_defs:
             return False
         type_spec = self._collection_types.get(name)
@@ -1057,6 +1057,24 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._drawing_var_member_cpp_types: dict[str, str] = {}
         self._drawing_var_decl_info_by_node: dict[int, dict] = {}
         self._global_drawing_cpp_types: dict[str, str] = {}
+        # Exact direct-program UDT identity, including ``None`` tombstones for
+        # primitive globals.  The analyzer's legacy UDT registry is keyed only
+        # by raw spelling and can be overwritten by an unrelated callable
+        # local with the same name.
+        self._global_udt_types: dict[str, str | None] = {}
+        for stmt in self.ctx.ast.body:
+            if not isinstance(stmt, VarDecl):
+                continue
+            spec = (
+                self._type_spec_from_hint_name(stmt.type_hint)
+                if stmt.type_hint
+                else self._type_spec_from_expr(stmt.value)
+            )
+            self._global_udt_types[stmt.name] = (
+                spec.name
+                if spec is not None and spec.kind == "udt"
+                else None
+            )
         self._runtime_var_init_flags: dict[tuple[int, str], str] = {}
 
         used_names = set(self._all_member_names)
@@ -1515,6 +1533,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if spec not in candidates:
                     candidates.append(spec)
         return candidates[0] if len(candidates) == 1 else None
+
+    def _member_udt_type(self, name: str) -> str | None:
+        """Exact UDT type for class-member storage, with global tombstones."""
+        global_types = getattr(self, "_global_udt_types", {})
+        if name in global_types:
+            return global_types[name]
+        return self._udt_var_types.get(name)
 
     def _emit_cloned_var_decl(self, orig_safe: str, cloned_safe: str,
                               series_suffix: str, lines: list[str],
@@ -3583,9 +3608,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # C++ handle struct (Series<Line> when also history-referenced).
             # Drawing names are NOT in _udt_defs, so the udt branch below would
             # self-zero them to double; handle them first.
+            member_udt_type = self._member_udt_type(name)
             _draw_cpp = (
                 self._drawing_var_member_cpp_types.get(name)
-                or DRAWING_TYPE_TO_CPP.get(self._udt_var_types.get(name))
+                or DRAWING_TYPE_TO_CPP.get(member_udt_type)
             )
             if _draw_cpp is not None:
                 if safe in self._series_var_member_names:
@@ -3593,7 +3619,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 else:
                     lines.append(f"    {_draw_cpp} {safe};")
                 continue
-            udt_type = self._udt_var_types.get(name)
+            udt_type = member_udt_type
             if udt_type not in self._udt_defs:
                 udt_type = None
             if udt_type is None:
@@ -3699,12 +3725,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "localPivots", "securityPivotPointsArray", "pivotPointsArray",
             ):
                 lines.append(f"    std::vector<double> {safe} = std::vector<double>();")
-            elif name in self._udt_var_types:
+            elif self._member_udt_type(name) is not None:
                 # Non-var global of UDT type — declare as the struct so
                 # downstream method dispatch works. Probes:
                 # data/validation/udt-method-probe-19-array-of-udt-method,
                 # data/validation/udt-method-probe-20-udt-return-from-func.
-                udt_t = self._udt_var_types[name]
+                udt_t = self._member_udt_type(name)
                 # Drawing handle global (L-N6 / U): map line/box/label/linefill
                 # to the C++ handle struct (the default is na, id=-1).
                 _draw_cpp = DRAWING_TYPE_TO_CPP.get(udt_t)

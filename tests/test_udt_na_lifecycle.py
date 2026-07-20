@@ -193,6 +193,32 @@ int observed = na(state) ? 1 : 0
     compile_cpp(cpp, label="udt-na-chart-scope")
 
 
+def test_callable_udt_locals_do_not_retype_same_named_global_scalars() -> None:
+    source = r'''//@version=6
+strategy("UDT raw-name global isolation")
+type State
+    float value
+float state = 2.0
+var float tracker = 3.0
+probe() =>
+    State state = State.new(9.0)
+    State tracker = State.new(10.0)
+    state := na
+    tracker := na
+    na(state) and na(tracker)
+bool localNulls = probe()
+float retained = state + tracker
+'''
+    cpp = transpile(source)
+    assert re.search(r"^\s+double state(?: = [^;]+)?;$", cpp, re.M)
+    assert re.search(r"^\s+double tracker(?: = [^;]+)?;$", cpp, re.M)
+    assert "State state = State{.value = 9.0" in cpp
+    assert "State tracker = State{.value = 10.0" in cpp
+    assert "state = State{};" in cpp
+    assert "tracker = State{};" in cpp
+    compile_cpp(cpp, label="udt-na-raw-name-global-isolation")
+
+
 def test_direct_udt_ctor_na_selection_return_is_target_typed() -> None:
     source = r'''//@version=6
 strategy("UDT nullable selection return")

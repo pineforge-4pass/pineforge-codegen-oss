@@ -335,6 +335,10 @@ class ExprVisitor:
         if local_cpp is not None:
             local_cpp = local_cpp.removesuffix("&")
             return local_cpp if local_cpp in self._udt_defs else None
+        global_types = getattr(self, "_global_udt_types", {})
+        if target_name in global_types:
+            udt_name = global_types[target_name]
+            return udt_name if udt_name in self._udt_defs else None
         udt_name = self._udt_var_types.get(target_name)
         return udt_name if udt_name in self._udt_defs else None
 
