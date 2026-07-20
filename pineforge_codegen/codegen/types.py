@@ -492,7 +492,8 @@ class TypeInferer:
                 if return_spec is not None:
                     return return_spec
                 udt_return = getattr(func_info, "udt_return_type", None)
-                if udt_return in DRAWING_TYPE_TO_CPP:
+                if (udt_return in DRAWING_TYPE_TO_CPP
+                        or udt_return in self._udt_defs):
                     return TypeSpec.udt(udt_return)
             # ticker.* constructors (inherit/standard/heikinashi) return a symbol
             # string; without this the member-type inference defaults to double

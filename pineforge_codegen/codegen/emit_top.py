@@ -1383,7 +1383,8 @@ class TopLevelEmitter:
         rhs_return_cpp_type = (
             ret_type
             if (ret_type.startswith("PineMap<")
-                or ret_type in DRAWING_TYPE_TO_CPP.values())
+                or ret_type in DRAWING_TYPE_TO_CPP.values()
+                or ret_type in self._udt_defs)
             else None
         )
 

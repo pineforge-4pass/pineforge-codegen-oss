@@ -3201,6 +3201,63 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             return None
         return owner
 
+    def _udt_name_from_nullable_ctor_selection(
+        self, value: ASTNode | None
+    ) -> str | None:
+        """Exact user-UDT type for ctor-only nullable selections.
+
+        Keep this deliberately narrower than generic UDT expression
+        inference.  In particular, a terminal ``array.get(...UDT...)`` is a
+        reference-identity surface with its own fail-closed rules; treating
+        every UDT-valued expression selected against ``na`` as a by-value
+        return would accidentally bypass those rules.
+        """
+        nullable = object()
+
+        def terminal(body: list[ASTNode]) -> ASTNode | None:
+            if not body:
+                return None
+            node = body[-1]
+            return node.expr if isinstance(node, ExprStmt) else node
+
+        def resolve(node: ASTNode | None) -> str | None | object:
+            if node is None:
+                return nullable
+            if isinstance(node, ExprStmt):
+                return resolve(node.expr)
+            if isinstance(node, NaLiteral):
+                return nullable
+            direct = self._udt_name_from_ctor(node)
+            if direct in self._udt_fields:
+                return direct
+            if isinstance(node, Ternary):
+                return merge((resolve(node.true_val), resolve(node.false_val)))
+            if isinstance(node, IfStmt):
+                return merge((
+                    resolve(terminal(node.body)),
+                    resolve(terminal(node.else_body)),
+                ))
+            if isinstance(node, SwitchStmt):
+                results = [
+                    resolve(terminal(branch))
+                    for _case, branch in node.cases
+                ]
+                results.append(resolve(terminal(node.default_body)))
+                return merge(results)
+            return None
+
+        def merge(results) -> str | None | object:
+            resolved = list(results)
+            if any(item is None for item in resolved):
+                return None
+            concrete = {item for item in resolved if item is not nullable}
+            if not concrete:
+                return nullable
+            return next(iter(concrete)) if len(concrete) == 1 else None
+
+        result = resolve(value)
+        return result if isinstance(result, str) else None
+
     def _func_terminal_drawing_type(self, func_node: FuncDef) -> str | None:
         """Resolve the drawing-handle / UDT type of a function's terminal
         (return) expression for cases the direct ``_udt_name_from_ctor`` on the
@@ -3933,6 +3990,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if node.body:
             ret_expr = terminal_ret_expr
             udt_ret = self._udt_name_from_ctor(ret_expr) if ret_expr is not None else None
+            if udt_ret is None:
+                udt_ret = self._udt_name_from_nullable_ctor_selection(ret_expr)
             if (udt_ret is None
                     and terminal_direct_return_spec is not None
                     and terminal_direct_return_spec.kind == "udt"):
@@ -4097,6 +4156,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._nested_ta_touched = set()
         terminal_ret_expr = self._direct_terminal_return_expr(node)
         return_type_spec = None
+        method_udt_return = None
         try:
             for stmt in node.body:
                 ret_type = self._visit(stmt)
@@ -4104,6 +4164,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 terminal_spec = self._type_spec_from_expr(terminal_ret_expr)
                 if terminal_spec is not None and terminal_spec.kind == "map":
                     return_type_spec = terminal_spec
+                method_udt_return = (
+                    self._udt_name_from_ctor(terminal_ret_expr)
+                    or self._udt_name_from_nullable_ctor_selection(
+                        terminal_ret_expr
+                    )
+                )
+                if method_udt_return is not None:
+                    return_type_spec = TypeSpec.udt(method_udt_return)
         finally:
             self._global_scope = old_global
             self._collection_scope_stack.pop()
@@ -4123,6 +4191,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         if hi > lo:
             self._func_ta_ranges[method_key] = (lo, hi)
         self._symbols.exit_scope()
+        if method_udt_return is not None:
+            self._func_udt_return_types[method_key] = method_udt_return
 
         # Detect tuple return on UDT methods (mirrors the regular FuncDef logic
         # earlier in this file). Without this, codegen emits the method with a
@@ -4168,6 +4238,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             param_defaults=param_defaults,
             param_type_specs=param_specs,
             return_type_spec=return_type_spec,
+            udt_return_type=method_udt_return,
         )
         self._func_infos.append(fi)
         return PineType.VOID

@@ -724,12 +724,18 @@ class StmtVisitor:
                 cpp_type
                 if (cpp_type is not None
                     and (cpp_type.startswith("PineMap<")
-                         or cpp_type in DRAWING_TYPE_TO_CPP.values()))
+                         or cpp_type in DRAWING_TYPE_TO_CPP.values()
+                         or cpp_type in self._udt_defs))
                 else self._map_target_cpp_type(
                     name=node.name,
                     type_hint=node.type_hint,
                 )
             )
+            if selection_cpp_type is None:
+                selection_cpp_type = self._udt_target_cpp_type(
+                    target_name=node.name,
+                    type_hint=node.type_hint,
+                )
             if selection_cpp_type is None:
                 selection_cpp_type = self._drawing_target_cpp_type(
                     node.name,
@@ -821,6 +827,11 @@ class StmtVisitor:
             name=node.name,
             type_hint=node.type_hint,
         )
+        if target_cpp_type is None:
+            target_cpp_type = self._udt_target_cpp_type(
+                target_name=node.name,
+                type_hint=node.type_hint,
+            )
         cpp_val = self._visit_rhs_value(
             node.value,
             node.name,

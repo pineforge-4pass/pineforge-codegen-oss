@@ -177,3 +177,93 @@ ok = na(holder.inner) and not na(holder.other)
     assert "holder.inner = Inner{};" in cpp
     assert "Outer{.inner = Inner{}" in cpp
     compile_cpp(cpp, label="udt-na-contexts")
+
+
+def test_chart_scope_typed_udt_na_is_target_typed_each_bar() -> None:
+    source = r'''//@version=6
+strategy("chart UDT na lifecycle")
+type State
+    float value
+State state = na
+int observed = na(state) ? 1 : 0
+'''
+    cpp = transpile(source)
+    assert "state = State{};" in cpp
+    assert "state = na<double>();" not in cpp
+    compile_cpp(cpp, label="udt-na-chart-scope")
+
+
+def test_direct_udt_ctor_na_selection_return_is_target_typed() -> None:
+    source = r'''//@version=6
+strategy("UDT nullable selection return")
+type State
+    float value
+choose(bool enabled, float seed) => enabled ? State.new(seed) : na
+State missing = choose(false, 1.0)
+State present = choose(true, 7.5)
+float observed = (na(missing) ? 100.0 : 0.0) +
+    (na(present) ? 0.0 : present.value)
+'''
+    cpp = transpile(source)
+    assert re.search(r"State choose\(bool enabled, double seed\)", cpp)
+    assert "State{.value = seed, .__pf_na = false}) : (State{})" in cpp
+    compile_cpp(cpp, label="udt-na-selection-return")
+    driver = r'''
+#include <iostream>
+int main() {
+    Bar bars[] = {Bar{1.0, 2.0, 0.0, 1.0, 1.0, 1700000000000LL}};
+    GeneratedStrategy strategy;
+    strategy.run(bars, 1);
+    if (!strategy.last_error().empty()) return 7;
+    std::cout << strategy.observed << "\n";
+}
+'''
+    assert _compile_and_run(cpp + driver) == "107.5\n"
+
+
+def test_if_and_switch_udt_ctor_na_returns_are_target_typed() -> None:
+    bodies = {
+        "if": r'''choose(bool enabled) =>
+    if enabled
+        State.new(2.5)
+    else
+        na''',
+        "switch": r'''choose(bool enabled) =>
+    switch enabled
+        true => State.new(2.5)
+        => na''',
+    }
+    for label, body in bodies.items():
+        source = f'''//@version=6
+strategy("UDT {label} nullable return")
+type State
+    float value
+{body}
+State observed = choose(false)
+'''
+        cpp = transpile(source)
+        assert re.search(r"State choose\(bool enabled\)", cpp)
+        assert "_func_ret = State{};" in cpp
+        compile_cpp(cpp, label=f"udt-na-{label}-return")
+
+
+def test_udt_method_nullable_udt_return_carries_exact_type() -> None:
+    source = r'''//@version=6
+strategy("UDT method nullable return")
+type State
+    float value
+type Factory
+    float seed
+method choose(Factory self, bool enabled) =>
+    enabled ? State.new(self.seed) : na
+var Factory factory = Factory.new(9.25)
+State missing = factory.choose(false)
+State present = factory.choose(true)
+float observed = (na(missing) ? 100.0 : 0.0) + present.value
+'''
+    cpp = transpile(source)
+    assert re.search(
+        r"State _udt_Factory_choose(?:_cs\d+)?\(Factory& self, bool enabled\)",
+        cpp,
+    )
+    compile_cpp(cpp, label="udt-method-na-return")
