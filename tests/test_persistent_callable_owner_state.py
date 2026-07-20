@@ -8,6 +8,7 @@ lexical spelling.
 
 from __future__ import annotations
 
+import math
 import re
 
 import pytest
@@ -101,7 +102,8 @@ def _qualified_member(cpp: str, cpp_type: str, raw: str, owner: str) -> str:
     """Resolve one opaque reserved member without pinning its sequence token."""
     match = re.search(
         rf"^    {re.escape(cpp_type)} "
-        rf"(_pfv_[0-9]+_{re.escape(raw)}__{re.escape(owner)});$",
+        rf"(_pfv_[0-9]+_{re.escape(raw)}__{re.escape(owner)})"
+        rf"(?: = [^;]+)?;$",
         cpp,
         re.M,
     )
@@ -139,7 +141,12 @@ def test_reverse_nested_multicallsite_storage_is_independent_at_runtime(
     left = _qualified_member(cpp, cpp_type, "state", "left")
     right = _qualified_member(cpp, cpp_type, "state", "right")
     for name in (left, right, f"{left}_cs1", f"{right}_cs1"):
-        assert f"    {cpp_type} {name};" in cpp
+        declaration = (
+            f"    {cpp_type} {name} = na<double>();"
+            if not array
+            else f"    {cpp_type} {name};"
+        )
+        assert declaration in cpp
 
     assert _compile_and_run(cpp + _driver(outputs)) == ("3.0 120.0 3.0 120.0\n")
 
@@ -274,8 +281,9 @@ b = existing(false, true)
     assert checkpoint_members.count(qualified) == 1
     assert checkpoint_members.count(block_clone) == 1
     compile_cpp(cpp, label="persistent-owner-generated-block-clone")
-    assert (
-        _compile_and_run(
+    observed = tuple(
+        float(value)
+        for value in _compile_and_run(
             cpp
             + _driver(
                 [
@@ -288,9 +296,12 @@ b = existing(false, true)
                 ],
                 bars=1,
             )
-        )
-        == "2.0 110.0 8.0 70.0 7.0 80.0\n"
+        ).split()
     )
+    assert observed[:3] == (2.0, 110.0, 8.0)
+    assert math.isnan(observed[3])
+    assert math.isnan(observed[4])
+    assert observed[5] == 80.0
 
 
 def test_direct_and_block_persistent_name_ambiguity_fails_closed() -> None:
@@ -542,8 +553,8 @@ b = only()
 """)
 
     assert "_pfv_" not in cpp
-    assert "    double state;" in cpp
-    assert "    double state_cs1;" in cpp
+    assert "    double state = na<double>();" in cpp
+    assert "    double state_cs1 = na<double>();" in cpp
     assert "state = 1.0;" in cpp
     assert "state_cs1 = 1.0;" in cpp
     compile_cpp(cpp, label="persistent-owner-noncolliding")
@@ -1369,7 +1380,7 @@ d = right(20.0)
     assert left == "_pfv_2_state__left"
     assert right == "_pfv_4_state__right"
     for name in (left, right, f"{left}_cs1", f"{right}_cs1"):
-        assert re.search(rf"^    double {name};$", cpp, re.M)
+        assert re.search(rf"^    double {name} = na<double>\(\);$", cpp, re.M)
     assert not re.search(r"^    double _pfv_1_state__left;$", cpp, re.M)
     assert not re.search(r"^    double _pfv_3_state__right;$", cpp, re.M)
     compile_cpp(cpp, label="persistent-owner-authored-helper-tokens")
@@ -1397,10 +1408,10 @@ var Holder holder = Holder.new(3)
 a = left()
 b = right()
 c = holder.read_float()
-""")
+    """)
 
     assert "    int globalState;" in cpp
-    assert "    int methodState;" in cpp
+    assert "    int methodState = na<int>();" in cpp
     assert not re.search(r"_pfv_[0-9]+_globalState__", cpp)
     assert not re.search(r"_pfv_[0-9]+_methodState__", cpp)
     _qualified_member(cpp, "int", "state", "left")

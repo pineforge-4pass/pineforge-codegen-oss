@@ -1,8 +1,7 @@
 """TA (technical analysis) call-site helpers for the codegen.
 
 Holds the eval-free TA helpers: call-site lookup, ``.compute()`` arg
-construction, the TA-hoisting machinery for if-bodies, and a small
-``_is_compile_time_value`` predicate. The runtime-reset chain that
+construction, and a small ``_is_compile_time_value`` predicate. The runtime-reset chain that
 depends on Python's compile-time expression evaluator
 (``_resolve_known`` / ``_runtime_ctor_arg_for_reset`` /
 ``_collect_ta_runtime_resets`` / ``_emit_ta_runtime_reset``) stays
@@ -13,8 +12,6 @@ Mixin contract — host class must provide:
 
 - ``self._ta_site_map`` (``dict[int, TACallSite]``).
 - ``self._active_ta_remap`` (``dict[str, str] | None``).
-- ``self._hoist_var_counter`` (``int``, optional — auto-managed).
-
 Sibling-mixin methods consumed via ``self``:
 
 - ``self._visit_expr`` / ``self._visit_stmt`` (visitor mixins, currently
@@ -40,7 +37,7 @@ if TYPE_CHECKING:
 
 
 class TaSiteHelper:
-    """TA call-site lookups, .compute() argument construction, and TA hoisting in if-bodies."""
+    """TA call-site lookups and ``.compute()`` argument construction."""
 
     # TA functions where an explicit source argument REPLACES the implicit
     # bar-data default (vs. ATR / supertrend / DMI where bar OHLC must
@@ -92,97 +89,6 @@ class TaSiteHelper:
             f"codegen: malformed TA member name {site.member_name!r} — expected "
             f"'_ta_<name>_<n>' convention. Internal codegen bug."
         )
-
-    # ------------------------------------------------------------------
-    # TA hoisting in if-bodies (computations unconditional, result conditional)
-    # ------------------------------------------------------------------
-
-    def _if_body_has_ta(self, stmts: list) -> bool:
-        """True if any statement in ``stmts`` references a TA call-site (recursively)."""
-        for s in stmts:
-            if isinstance(s, VarDecl) and s.value is not None:
-                if self._expr_contains_ta(s.value):
-                    return True
-            if isinstance(s, Assignment) and hasattr(s, "value"):
-                if self._expr_contains_ta(s.value):
-                    return True
-            if isinstance(s, ExprStmt):
-                if self._expr_contains_ta(s.expr):
-                    return True
-        return False
-
-    def _is_result_assignment(self, stmt) -> bool:
-        """True iff ``stmt`` is an assignment to the synthetic ``result`` variable.
-
-        ``result`` is the function-body return target injected when a Pine
-        function body becomes a C++ function-call site; assignments to it
-        carry semantic weight in TA hoisting (they are the conditional-emit
-        targets)."""
-        if isinstance(stmt, Assignment):
-            target_name = self._get_target_name(stmt.target)
-            if target_name == "result":
-                return True
-        return False
-
-    def _expr_contains_ta(self, expr) -> bool:
-        """Recursive check: does any subnode of ``expr`` resolve to a TA site?"""
-        if expr is None:
-            return False
-        if self._get_ta_site(expr) is not None:
-            return True
-        if isinstance(expr, BinOp):
-            return self._expr_contains_ta(expr.left) or self._expr_contains_ta(expr.right)
-        if isinstance(expr, UnaryOp):
-            return self._expr_contains_ta(expr.operand)
-        if isinstance(expr, Ternary):
-            return (self._expr_contains_ta(expr.true_val)
-                    or self._expr_contains_ta(expr.false_val))
-        if isinstance(expr, FuncCall):
-            return any(self._expr_contains_ta(a) for a in expr.args)
-        return False
-
-    def _hoist_if_body(self, stmts: list, cond: str, lines: list[str], pad: str, indent: int) -> None:
-        """Emit an if-body with TA hoisting.
-
-        Pine evaluates TA on every bar regardless of branch; C++ TA
-        instances must compute() unconditionally to keep their state
-        in sync. We split each result-assignment whose RHS contains a
-        TA call into:
-
-        - an unconditional ``double _hoist_<n> = <rhs>;`` line,
-        - a conditional ``if (<cond>) { result = _hoist_<n>; }``.
-
-        Non-result statements are emitted unconditionally inside an
-        opening scope block; result assignments without a TA reference
-        stay fully conditional."""
-        lines.append(f"{pad}{{")
-        conditional_stmts: list = []
-        _hoist_counter = getattr(self, "_hoist_var_counter", 0)
-
-        for s in stmts:
-            if self._is_result_assignment(s):
-                rhs = s.value if hasattr(s, "value") else None
-                if rhs is not None and self._expr_contains_ta(rhs):
-                    _hoist_counter += 1
-                    tmp_var = f"_hoist_{_hoist_counter}"
-                    compute_expr = self._visit_expr(rhs)
-                    lines.append(f"{pad}    double {tmp_var} = {compute_expr};")
-                    conditional_stmts.append(("result", tmp_var))
-                else:
-                    conditional_stmts.append(("stmt", s))
-            else:
-                self._visit_stmt(s, lines, indent + 1)
-
-        if conditional_stmts:
-            lines.append(f"{pad}    if ({cond}) {{")
-            for item in conditional_stmts:
-                if item[0] == "result":
-                    lines.append(f"{pad}        result = {item[1]};")
-                else:
-                    self._visit_stmt(item[1], lines, indent + 2)
-            lines.append(f"{pad}    }}")
-        lines.append(f"{pad}}}")
-        self._hoist_var_counter = _hoist_counter
 
     # ------------------------------------------------------------------
     # .compute() arg-string construction

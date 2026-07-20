@@ -2131,10 +2131,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             method = call.callee.member
             udt_name: str | None = None
             if isinstance(recv, Identifier):
-                udt_name = self._udt_var_types.get(recv.name)
                 owner_info = func_info_by_name.get(owner or "")
-                if udt_name is None and owner_info is not None \
-                        and owner_info.node is not None:
+                # Resolve the active callable's lexical parameters before the
+                # flat variable registry.  A parameter may legally shadow a
+                # top-level UDT variable with a different type; consulting the
+                # global binding first misidentifies the method call edge and
+                # silently shares state between written wrapper call sites.
+                if owner_info is not None and owner_info.node is not None:
                     if (getattr(owner_info, "is_udt_method", False)
                             and owner_info.node.params
                             and recv.name == owner_info.node.params[0]):
@@ -2145,6 +2148,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         spec = specs[param_idx] if param_idx < len(specs) else None
                         if spec is not None and spec.kind == "udt":
                             udt_name = spec.name
+                if udt_name is None:
+                    udt_name = self._udt_var_types.get(recv.name)
             if udt_name is None:
                 spec = self._type_spec_from_expr(recv)
                 if spec is not None and spec.kind == "udt":
@@ -2191,6 +2196,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         calls_by_callee: dict[str, list[FuncCall]] = {
             name: [] for name in known_func_names
         }
+        call_edges: list[tuple[str | None, str, FuncCall]] = []
         # Preserve source order across definitions and top-level statements.
         # Method bodies use their ``Type.method`` owner so ``self.sibling()``
         # resolves without relying on a now-exited symbol-table scope.
@@ -2203,6 +2209,74 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 owner = None
             for callee, call in _find_calls(stmt, known_func_names, owner):
                 calls_by_callee.setdefault(callee, []).append(call)
+                call_edges.append((owner, callee, call))
+
+        # A history-reading callable receives ``Series<T>`` parameters. That
+        # requirement must flow outward through every wrapper parameter that
+        # is forwarded unchanged; otherwise a wrapper stays ``double`` and
+        # generated C++ cannot bind it to the callee's ``const Series&``.
+        # Resolve this after every UDF/method definition is known and iterate
+        # to a fixed point so method <- inner <- outer chains are independent
+        # of declaration/source order.
+        def _bound_user_call_args(callee: str, call: FuncCall) -> list:
+            info = func_info_by_name.get(callee)
+            if info is None or info.node is None:
+                return []
+            params = list(info.node.params)
+            if (
+                getattr(info, "is_udt_method", False)
+                and isinstance(call.callee, MemberAccess)
+            ):
+                return [
+                    call.callee.object,
+                    *self._bind_callable_args(call, params[1:]),
+                ]
+            return self._bind_callable_args(call, params)
+
+        series_requirements: dict[str, set[str]] = {
+            name: set(params)
+            for name, params in self._func_series_vars.items()
+            if params
+        }
+        series_changed = True
+        while series_changed:
+            series_changed = False
+            for owner, callee, call in call_edges:
+                callee_info = func_info_by_name.get(callee)
+                if callee_info is None or callee_info.node is None:
+                    continue
+                callee_series = series_requirements.get(callee, set())
+                if not callee_series:
+                    continue
+                actuals = _bound_user_call_args(callee, call)
+                for index, param_name in enumerate(callee_info.node.params):
+                    if param_name not in callee_series or index >= len(actuals):
+                        continue
+                    actual = actuals[index]
+                    if not isinstance(actual, Identifier):
+                        continue
+                    if actual.name in BAR_FIELDS:
+                        self._series_bar_fields.add(actual.name)
+                    if owner is None:
+                        continue
+                    owner_info = func_info_by_name.get(owner)
+                    if (
+                        owner_info is None
+                        or owner_info.node is None
+                        or actual.name not in owner_info.node.params
+                    ):
+                        continue
+                    owner_series = self._func_series_vars.setdefault(
+                        owner, set()
+                    )
+                    if actual.name not in owner_series:
+                        owner_series.add(actual.name)
+                    owner_requirements = series_requirements.setdefault(
+                        owner, set()
+                    )
+                    if actual.name not in owner_requirements:
+                        owner_requirements.add(actual.name)
+                        series_changed = True
 
         # Codegen synthesizes a Series buffer for two expression shapes that
         # do not appear in ``_func_series_vars`` themselves:
@@ -2355,6 +2429,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     next_idx = max(next_idx, existing[1] + 1)
                     continue
                 self._func_call_cs_map[id(call)] = (fname, next_idx)
+                # Most ordinary UDFs were already materialized by the lexical
+                # call visitor. UDT method calls are resolved in this late
+                # graph pass, so their TA/fixnan state still needs matching
+                # cs0/cs1/... members before codegen emits the variants.
+                self._materialize_user_func_call_site_state(
+                    fname, next_idx, call
+                )
                 next_idx += 1
             if next_idx > current:
                 self._func_call_site_count[fname] = next_idx
@@ -3034,7 +3115,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Track var members
         if node.is_var or node.is_varip:
             init_str = self._expr_to_str(node.value)
-            scope_name = self._symbols.current_scope.name
             # Block-scoped var name-collision disambiguation. A ``var``/``varip``
             # declared inside any non-global block (an ``if`` / ``for`` /
             # ``while`` body, including one nested in a callable) is keyed by
@@ -3089,12 +3169,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # promote the symbol storage type to ``int64_t``).
             if node.value is not None:
                 self._var_member_init_exprs[member_name] = node.value
-            # Track function-scoped var members
-            if scope_name.startswith("func_"):
-                func_name = scope_name[5:]  # strip "func_" prefix
-                if func_name not in self._func_var_members:
-                    self._func_var_members[func_name] = []
-                self._func_var_members[func_name].append(
+            # Track callable-scoped var members under the analyzer's canonical
+            # owner identity.  Ordinary UDFs use ``name`` and UDT methods use
+            # ``Type.method``; both feed the same written-callsite clone graph.
+            if is_callable_scoped and callable_owner is not None:
+                if callable_owner not in self._func_var_members:
+                    self._func_var_members[callable_owner] = []
+                self._func_var_members[callable_owner].append(
                     (member_name, val_type, init_str)
                 )
 
@@ -3603,9 +3684,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             setattr(sym, "_pf_parameter_owner", method_key)
             self._symbols.define(sym)
         ret_type = PineType.VOID
+        ta_start = len(self._ta_call_sites)
         old_global = self._global_scope
         self._global_scope = False
+        self._enclosing_func_params.append(set(node.params))
+        self._enclosing_func_names.append(method_key)
         self._collection_scope_stack.append(method_key)
+        previous_nested_ta_touched = self._nested_ta_touched
+        self._nested_ta_touched = set()
         terminal_ret_expr = self._direct_terminal_return_expr(node)
         return_type_spec = None
         try:
@@ -3618,6 +3704,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         finally:
             self._global_scope = old_global
             self._collection_scope_stack.pop()
+            self._enclosing_func_params.pop()
+            self._enclosing_func_names.pop()
+            nested_touched = self._nested_ta_touched
+            self._nested_ta_touched = previous_nested_ta_touched
+
+        # UDT methods participate in the same stateful call graph as ordinary
+        # UDFs. Preserve their owned and nested-callee TA range under the
+        # canonical ``Type.method`` identity so written call sites can clone it.
+        ta_end = len(self._ta_call_sites)
+        lo, hi = ta_start, ta_end
+        if nested_touched:
+            lo = min(lo, min(nested_touched))
+            hi = max(hi, max(nested_touched) + 1)
+        if hi > lo:
+            self._func_ta_ranges[method_key] = (lo, hi)
         self._symbols.exit_scope()
 
         # Detect tuple return on UDT methods (mirrors the regular FuncDef logic
@@ -4108,6 +4209,22 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             )
                         },
                     )
+                    method_series = self._func_series_vars.get(
+                        method_key, set()
+                    )
+                    for index, param_name in enumerate(method_params):
+                        if (
+                            param_name not in method_series
+                            or index >= len(full_bound)
+                        ):
+                            continue
+                        arg = full_bound[index]
+                        if isinstance(arg, Identifier) and arg.name in BAR_FIELDS:
+                            self._series_bar_fields.add(arg.name)
+                        elif isinstance(arg, Identifier):
+                            arg_sym = self._symbols.resolve(arg.name)
+                            if arg_sym is not None:
+                                arg_sym.is_series = True
                     return method_info.return_type
             # Matrix method dispatch: ``m.get(0, 0)`` on ``matrix<int>`` must
             # type as INT, not VOID, so ``v = m.get(...)`` propagates the
@@ -4741,9 +4858,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         if not shadows_map_state:
                             self._series_vars.add(name)
                         sym.is_series = True
-                        # Track function-scoped series vars
+                        # Track callable-scoped series vars. Method symbol
+                        # scopes use ``method_Type_name`` while every later
+                        # clone/remap table is keyed by canonical
+                        # ``Type.method`` identity.
+                        func_name: str | None = None
                         if sym.scope and sym.scope.startswith("func_"):
                             func_name = sym.scope[5:]
+                        elif (
+                            sym.scope != "global"
+                            and self._collection_scope_stack
+                        ):
+                            func_name = self._collection_scope_stack[-1]
+                        if func_name is not None:
                             if func_name not in self._func_series_vars:
                                 self._func_series_vars[func_name] = set()
                             self._func_series_vars[func_name].add(name)

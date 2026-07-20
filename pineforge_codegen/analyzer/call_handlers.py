@@ -959,12 +959,43 @@ class CallHandlers:
         call-path state and must be reused rather than duplicated under a
         disambiguated-but-unused name.
         """
-        func_def = self._func_defs[func_name]
+        func_def = self._func_defs.get(func_name)
+        method_info = None
+        if func_def is None:
+            method_info = next(
+                (
+                    info
+                    for info in self._func_infos
+                    if info.name == func_name
+                    and getattr(info, "is_udt_method", False)
+                ),
+                None,
+            )
+            if method_info is not None:
+                func_def = method_info.node
+        if func_def is None:
+            self._error(
+                f"Cannot materialize callable state for unknown function '{func_name}'.",
+                node.loc,
+            )
+            return
 
         param_arg_map: dict[str, str] = {}
+        positional_args = list(node.args)
+        if (
+            method_info is not None
+            and isinstance(node.callee, MemberAccess)
+        ):
+            positional_args.insert(0, node.callee.object)
         for p_idx, param_name in enumerate(func_def.params):
-            if p_idx < len(node.args):
-                param_arg_map[param_name] = self._expr_to_str(node.args[p_idx])
+            if p_idx < len(positional_args):
+                param_arg_map[param_name] = self._expr_to_str(
+                    positional_args[p_idx]
+                )
+            elif param_name in node.kwargs:
+                param_arg_map[param_name] = self._expr_to_str(
+                    node.kwargs[param_name]
+                )
 
         if func_name in self._func_ta_ranges:
             start, end = self._func_ta_ranges[func_name]

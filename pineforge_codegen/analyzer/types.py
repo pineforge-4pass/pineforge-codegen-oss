@@ -194,6 +194,14 @@ class TypeHelper:
         if isinstance(value, Ternary):
             true_spec = self._type_spec_from_expr(value.true_val)
             false_spec = self._type_spec_from_expr(value.false_val)
+            # Selecting between two values of the same user-defined type
+            # preserves that receiver type.  Codegen already applies this
+            # rule; the analyzer must agree so stateful method calls on a UDT
+            # ternary enter the written-callsite clone graph.
+            if (true_spec is not None
+                    and true_spec.kind == "udt"
+                    and true_spec == false_spec):
+                return true_spec
             if (true_spec is not None
                     and true_spec.kind == "map"
                     and true_spec == false_spec):

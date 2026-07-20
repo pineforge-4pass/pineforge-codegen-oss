@@ -107,7 +107,7 @@ from .helpers import CPP_RESERVED, NamingHelper
 from .types import TypeInferer
 
 # TaSiteHelper owns site lookup, .compute() arg construction, and the TA
-# hoisting machinery. The runtime-reset chain (_resolve_known and friends)
+# call-site machinery. The runtime-reset chain (_resolve_known and friends)
 # stays on CodeGen for now because it relies on Python's compile-time
 # expression evaluator.
 from .ta import TaSiteHelper
@@ -166,7 +166,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
           per-function emitters used by Pine functions and UDT methods
         * ``SecurityEmitter`` -- ``request.security()`` lowering pipeline
           (evaluators, dispatch, rebind, TA variants)
-        * ``TaSiteHelper`` -- TA call-site lookup + .compute() arg construction + TA hoisting
+        * ``TaSiteHelper`` -- TA call-site lookup + .compute() arg construction
         * ``TypeInferer``  -- _type_spec_*, _infer_type, _array/_map_method_expr
         * ``InputHelper``  -- Pine ``input.*`` defaults / titles / getter dispatch
         * ``NamingHelper`` -- _safe_name / _resolve_callee / _walk_ast / ...
@@ -289,8 +289,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._func_cs_ta_remap: dict[tuple[str, int], dict[str, str]] = {}
         # Active TA name remap (set during per-call-site function emission)
         self._active_ta_remap: dict[str, str] = {}
-        # Flag: inside a per-call-site function variant (enables TA hoisting)
-        self._in_ta_func_variant: bool = False
         # Active call-site index (set during per-call-site function emission)
         self._active_call_site_idx: int | None = None
         # Set of TA member names that belong to user functions
@@ -328,10 +326,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # semantics. Populated by _register_udt_array_get_ref_locals.
         self._udt_array_get_ref_locals: set[str] = set()
         self._precalc_loop_active: bool = False
-        # Names of ``var`` members that live in a FUNCTION scope (not global).
-        # These are initialized once-per-function-variant on first call (a
-        # function-local static equivalent), NOT in the constructor / on_bar
-        # preamble. See ``_emit_func_var_init_block``.
+        # Names of ``var`` members that live in a callable scope (not global).
+        # Their exact declaration statements own initialization; they must not
+        # be initialized by the constructor or the global on_bar preamble.
         self._func_local_var_names: set[str] = set()
         for _owner, _vlist in ctx.func_var_members.items():
             for _n, _, _ in _vlist:
@@ -963,11 +960,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # history reads off security-helper series.
         self._max_bars_back_cap: int | None = self._compute_max_bars_back_cap()
 
-        # Non-series persistent scalars whose initializer cannot run in the
-        # C++ constructor are initialized at their Pine declaration site.  The
-        # source-order metadata and collision-safe once flags must be prepared
-        # before function-instance naming and class-member emission begin.
-        self._prepare_runtime_scalar_var_initializers()
+        # Declaration-site ``var`` metadata is prepared in ``generate()``
+        # after context-sensitive function instances have been built.  Once
+        # flags share the class-member namespace with those fresh members, so
+        # allocating the flags here would not yet have the complete collision
+        # inventory.
 
     def _scalar_var_init_depends_on_runtime_input(self, init_ast) -> bool:
         """Whether a nominally constant initializer depends on input state.
@@ -995,10 +992,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             is_series: bool = False) -> bool:
         """Return True for a persistent primitive that must init in execution.
 
-        Series and aggregate state keep their existing specialized preamble
-        routes. Function-local vars keep their per-function-variant route. This
-        predicate only selects primitive global/on-bar-scope members for the
-        declaration-site once guards prepared below.
+        Global Series and aggregate state keep their specialized preamble
+        routes. Callable vars are selected separately by the exact-declaration
+        rule below. This predicate identifies the remaining primitive global /
+        on-bar-scope members that need declaration-site once guards.
         """
         if init_ast is None:
             return False
@@ -1061,6 +1058,47 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         used_names.update(
             self._safe_name(name) for name, _ptype in self.ctx.global_var_decls
         )
+        # Natural call-site clones and context-sensitive fresh instances are
+        # emitted later, but they occupy the same C++ class-member namespace as
+        # these flags. Reserve the complete callable-state inventory up front;
+        # in particular, an authored local named ``_pf_var_init_state`` also
+        # produces a legal ``_pf_var_init_state_cs1`` storage clone.
+        for remap in self._func_cs_var_remap.values():
+            used_names.update(remap.values())
+        used_names.update(
+            fresh_safe
+            for _owner, _orig_safe, fresh_safe in self._fresh_var_members
+        )
+        used_names.update(
+            remapped
+            for remap in self._func_cs_fixnan_remap.values()
+            for remapped in remap.values()
+        )
+        used_names.update(
+            fresh_safe for _site, fresh_safe in self._fresh_fixnan_members
+        )
+        # Keep function naming stable across this late preparation pass.  A
+        # flag must avoid an emitted base/clone/fresh method name rather than
+        # making ``_func_safe_name`` change after the instance graph was built.
+        for func_info in self.ctx.func_infos:
+            emitted = self._func_cpp_base_name(func_info.name)
+            used_names.add(emitted)
+            for callsite in range(
+                self.ctx.func_call_site_counts.get(func_info.name, 0)
+            ):
+                used_names.add(f"{emitted}_cs{callsite}")
+        used_names.update(inst["name"] for inst in self._fresh_instances)
+
+        def allocate_flag(base: str) -> str:
+            flag = base
+            suffix = 2
+            while flag in used_names:
+                flag = f"{base}_{suffix}"
+                suffix += 1
+            used_names.add(flag)
+            self._all_member_names.add(flag)
+            return flag
+
         metadata_by_node = getattr(
             self.ctx, "var_member_metadata_by_node", {}
         ) or {}
@@ -1103,21 +1141,34 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             is_series = self._safe_name(member_name) in self._series_var_member_names
             if node_id in self._drawing_var_decl_info_by_node:
                 self._drawing_var_decl_info_by_node[node_id]["is_series"] = is_series
-            if is_callable_scoped and drawing_cpp is None:
-                continue
-            if not self._is_runtime_scalar_var_initializer(
+            # Every initialized callable ``var`` declaration must run at its
+            # exact statement.  Nested declarations may be unreached, while a
+            # direct declaration can depend on ordinary statements immediately
+            # before it; a function-entry preamble violates both Pine rules.
+            # Exact-node once flags also preserve independent call-site clones.
+            # A bare UDT/drawing ``na`` already has the correct default member
+            # state and needs no assignment guard.
+            callable_decl_site = (
+                is_callable_scoped
+                and stmt.value is not None
+                and not (
+                    stmt_spec is not None
+                    and stmt_spec.kind == "udt"
+                    and self._is_na_expr(stmt.value)
+                )
+            )
+            established_decl_site = (
+                (not is_callable_scoped or drawing_cpp is not None)
+                and self._is_runtime_scalar_var_initializer(
                     member_name, ptype, init_str, stmt.value, drawing_cpp,
-                    is_series):
+                    is_series
+                )
+            )
+            if not callable_decl_site and not established_decl_site:
                 continue
 
             base_flag = f"_pf_var_init_{self._safe_name(member_name)}"
-            flag = base_flag
-            suffix = 2
-            while flag in used_names:
-                flag = f"{base_flag}_{suffix}"
-                suffix += 1
-            used_names.add(flag)
-            self._all_member_names.add(flag)
+            flag = allocate_flag(base_flag)
             self._runtime_scalar_var_init_members.add(member_name)
             info = {
                 "member_name": member_name,
@@ -1127,6 +1178,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "ptype": ptype,
                 "flag": flag,
                 "drawing_cpp": drawing_cpp,
+                "type_spec": stmt_spec,
                 "is_series": is_series,
             }
             self._runtime_scalar_var_init_by_node[node_id] = info
@@ -1141,14 +1193,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     if storage == base_storage:
                         continue
                     clone_base = f"_pf_var_init_{storage}"
-                    clone_flag = clone_base
-                    clone_suffix = 2
-                    while clone_flag in used_names:
-                        clone_flag = f"{clone_base}_{clone_suffix}"
-                        clone_suffix += 1
-                    used_names.add(clone_flag)
-                    self._all_member_names.add(clone_flag)
+                    clone_flag = allocate_flag(clone_base)
                     self._runtime_var_init_flags[(node_id, storage)] = clone_flag
+                for inst in self._fresh_instances:
+                    if inst.get("fname") != owner:
+                        continue
+                    storage = inst.get("var_remap", {}).get(
+                        base_storage, base_storage
+                    )
+                    key = (node_id, storage)
+                    if key in self._runtime_var_init_flags:
+                        continue
+                    fresh_base = f"_pf_var_init_{storage}"
+                    self._runtime_var_init_flags[key] = allocate_flag(
+                        fresh_base
+                    )
             if not is_callable_scoped:
                 self._runtime_scalar_var_init_by_member[member_name] = info
 
@@ -1415,6 +1474,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for vname, ptype, _init_str in self.ctx.var_members:
             if self._safe_name(vname) == orig_safe:
                 cpp_type = PINE_TYPE_TO_CPP.get(ptype, "double")
+                if cpp_type == "int" and self._is_int64_builtin_init(vname):
+                    cpp_type = "int64_t"
                 collection_spec = self._callable_var_collection_spec(
                     vname, owner_func
                 )
@@ -1449,6 +1510,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     udt_t = self._udt_var_types[vname]
                     handle_cpp = DRAWING_TYPE_TO_CPP.get(udt_t, udt_t)
                     lines.append(f"    {handle_cpp} {cloned_safe} = {handle_cpp}{{}};")
+                elif vname in self._runtime_scalar_var_init_members:
+                    # Declaration-site state may remain unreached while COOF
+                    # snapshots value-copy every clone. Match the base member's
+                    # typed Pine-na default instead of leaving primitive clone
+                    # storage indeterminate (or giving it a legacy zero).
+                    pending = self._typed_na_init(
+                        "na<double>()", vname, ptype
+                    )
+                    lines.append(
+                        f"    {cpp_type} {cloned_safe} = {pending};"
+                    )
                 else:
                     lines.append(f"    {cpp_type} {cloned_safe};")
                 return
@@ -2924,6 +2996,27 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return _merge_kwargs(call.args, call.kwargs, params, lambda arg: arg)
             return list(call.args)
 
+        def owner_lexical_specs(owner: str | None) -> dict[str, TypeSpec | None]:
+            """Recover callable parameter types after analyzer scopes exit."""
+            if owner is None:
+                return {}
+            info = self._func_info_map.get(owner)
+            if info is None or info.node is None:
+                return {}
+            specs = list(getattr(info, "param_type_specs", ()) or ())
+            lexical = {
+                name: specs[index] if index < len(specs) else None
+                for index, name in enumerate(info.node.params)
+            }
+            if (
+                getattr(info, "is_udt_method", False)
+                and info.node.params
+                and info.udt_type_name
+            ):
+                lexical[info.node.params[0]] = TypeSpec.udt(info.udt_type_name)
+            lexical.update(self._func_collection_types.get(owner, {}))
+            return lexical
+
         for node in walk_nodes(self.ctx.ast):
             owner = owner_by_node.get(id(node))
             if isinstance(node, Subscript) and isinstance(node.object, FuncCall):
@@ -2933,8 +3026,33 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
             if not isinstance(node, FuncCall):
                 continue
-            func_name, _ = self._resolve_callee(node.callee)
-            fi = self._func_info_map.get(func_name)
+            fi = None
+            method_call = False
+            if isinstance(node.callee, MemberAccess):
+                # Method syntax is type-directed. Resolve it before considering
+                # any same-named bare UDF, and use the AST owner's lexical
+                # parameter types: analyzer symbol scopes no longer exist in
+                # this source-order prepass.
+                receiver_spec = self._map_effect_type_spec(
+                    node.callee.object, owner_lexical_specs(owner)
+                )
+                if (
+                    receiver_spec is not None
+                    and receiver_spec.kind == "udt"
+                    and receiver_spec.name
+                ):
+                    method_key = (
+                        f"{receiver_spec.name}.{node.callee.member}"
+                    )
+                    candidate = self._func_info_map.get(method_key)
+                    if (
+                        candidate is not None
+                        and getattr(candidate, "is_udt_method", False)
+                    ):
+                        fi = candidate
+                        method_call = True
+            elif isinstance(node.callee, Identifier):
+                fi = self._func_info_map.get(node.callee.name)
             if fi is None or fi.node is None:
                 continue
             func_sv = self.ctx.func_series_vars.get(fi.name, set())
@@ -2943,7 +3061,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             }
             if not series_param_indices:
                 continue
-            args = actual_args_for(node, list(fi.node.params))
+            if method_call:
+                args = [
+                    node.callee.object,
+                    *actual_args_for(node, list(fi.node.params[1:])),
+                ]
+            else:
+                args = actual_args_for(node, list(fi.node.params))
             for idx, arg in enumerate(args):
                 if idx not in series_param_indices:
                     continue
@@ -2975,6 +3099,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Context-sensitive instance pre-pass (needs the naming helpers populated
         # in __init__). Computes nested stateful-helper dispatch + fresh instances.
         self._build_func_instances()
+        # Allocate declaration-site once flags only after every natural and
+        # context-sensitive callable-state member name is known.
+        self._prepare_runtime_scalar_var_initializers()
         self._prepare_inline_history_members()
         # Pre-scan for strategy series vars
         self._prescan_strategy_series()
@@ -3513,30 +3640,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # initializers. Unlike the global aggregate/Series latch above, these
         # live at the declaration site so prior statements are available and a
         # conditional declaration initializes on its first actual execution.
-        used_runtime_flags = set(self._runtime_var_init_flag_used_names)
-        for info in self._runtime_scalar_var_init_by_node.values():
-            if not info.get("is_callable_scoped"):
-                continue
-            node_id = info["node_id"]
-            base_storage = self._safe_name(info["member_name"])
-            for inst in self._fresh_instances:
-                if inst.get("fname") != info.get("owner"):
-                    continue
-                storage = inst.get("var_remap", {}).get(
-                    base_storage, base_storage
-                )
-                key = (node_id, storage)
-                if key in self._runtime_var_init_flags:
-                    continue
-                flag_base = f"_pf_var_init_{storage}"
-                flag = flag_base
-                suffix = 2
-                while flag in used_runtime_flags:
-                    flag = f"{flag_base}_{suffix}"
-                    suffix += 1
-                used_runtime_flags.add(flag)
-                self._runtime_var_init_flags[key] = flag
-
         emitted_runtime_flags: set[str] = set()
         for flag in self._runtime_var_init_flags.values():
             if flag in emitted_runtime_flags:
@@ -3544,28 +3647,37 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             emitted_runtime_flags.add(flag)
             lines.append(f"    bool {flag} = false;")
 
-        # 9b. Per-function-variant ``var`` init flags. A function-scoped
-        #     ``var`` (Pine "init once" semantics) is a function-local static:
-        #     its initializer runs on the FIRST call to that function variant
-        #     (with the first bar's values the function actually sees) and the
-        #     result persists for the strategy's lifetime. Each clone (cs0,
-        #     cs1, ...) is an independent instance with its own flag.
-        #     ``func_var_members`` is keyed by the plain Pine function name
-        #     (``fi.name``), so this matches both plain UDFs and UDT methods.
+        # 9b. Legacy per-variant latch members are retained for generated-C++
+        # and checkpoint-shape compatibility. Callable initializers no longer
+        # consult them: every initialized declaration owns an exact-site flag.
+        # Keep their historical spelling when free, but avoid legal authored
+        # ``_fvinit_*`` members and every natural/fresh clone name.
+        used_legacy_flags = set(self._runtime_var_init_flag_used_names)
+
+        def allocate_legacy_flag(base: str) -> str:
+            flag = base
+            suffix = 2
+            while flag in used_legacy_flags:
+                flag = f"{base}_{suffix}"
+                suffix += 1
+            used_legacy_flags.add(flag)
+            return flag
+
         for fi in self.ctx.func_infos:
             if fi.name not in self.ctx.func_var_members:
                 continue
+            emitted = self._func_cpp_base_name(fi.name)
             total_cs = self.ctx.func_call_site_counts.get(fi.name, 0)
-            if total_cs > 0:
-                for cs_idx in range(total_cs):
-                    lines.append(f"    bool _fvinit_{self._func_safe_name(fi.name)}_cs{cs_idx} = false;")
-            else:
-                lines.append(f"    bool _fvinit_{self._func_safe_name(fi.name)} = false;")
+            variants = range(total_cs) if total_cs > 0 else (None,)
+            for cs_idx in variants:
+                suffix = f"_cs{cs_idx}" if cs_idx is not None else ""
+                flag = allocate_legacy_flag(f"_fvinit_{emitted}{suffix}")
+                lines.append(f"    bool {flag} = false;")
 
-        # 9b2. ``var`` init flags for fresh context-sensitive helper instances.
         for inst in self._fresh_instances:
             if inst["fname"] in self.ctx.func_var_members and inst["var_remap"]:
-                lines.append(f"    bool _fvinit_{inst['name']} = false;")
+                flag = allocate_legacy_flag(f"_fvinit_{inst['name']}")
+                lines.append(f"    bool {flag} = false;")
 
         # 9c. _ta_initialized_ flag for runtime TA re-sizing (first on_bar only).
         if self.ctx.ta_call_sites:
@@ -3680,9 +3792,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
     # _get_ta_site / _ta_member_name / _ta_name_from_site / _TA_IMPLICIT_REPLACE
     # / _ta_compute_args_for_site / _security_ta_compute_args_for_site /
-    # _if_body_has_ta / _is_result_assignment / _expr_contains_ta /
-    # _hoist_if_body live on TaSiteHelper (codegen/ta.py).
-
     def _resolve_ta_ctor_arg(self, arg_str: str) -> str:
         """Resolve one TA constructor argument without widening const folding.
 

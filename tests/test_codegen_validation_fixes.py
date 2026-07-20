@@ -545,10 +545,10 @@ def test_callable_persistent_siblings_keep_exact_clone_storage():
         "b = wrap(open)\n"
         "plot(a + b)"
     )
-    assert "double x;" in cpp
-    assert "double x__blk1;" in cpp
-    assert "double x_cs1;" in cpp
-    assert "double x__blk1_cs1;" in cpp
+    assert "double x = na<double>();" in cpp
+    assert "double x__blk1 = na<double>();" in cpp
+    assert "double x_cs1 = na<double>();" in cpp
+    assert "double x__blk1_cs1 = na<double>();" in cpp
     assert "scaled = (x * 2.0)" in cpp
     assert "scaled = (x_cs1 * 2.0)" in cpp
     assert "double _sv = (x__blk1)" in cpp
@@ -1205,7 +1205,7 @@ def test_per_call_site_clone_of_drawing_var_is_handle_not_double():
 
 
 # ---------------------------------------------------------------------------
-# Round 3: function-scoped ``var`` one-shot initializer semantics
+# Round 3: function-scoped ``var`` exact declaration-site semantics
 # (jevondijefferson "drawing access on na handle" + counter root cause)
 # ---------------------------------------------------------------------------
 def test_function_scoped_var_numeric_init_runs_once():
@@ -1220,12 +1220,13 @@ def test_function_scoped_var_numeric_init_runs_once():
         "_z = counter()\n"
         "plot(_z)"
     )
-    # The initializer must be emitted, guarded by a per-function init flag.
-    assert "_fvinit_counter" in cpp
+    # The initializer must be emitted at the declaration and guarded by its
+    # own exact-site latch.  The retained legacy member is checkpoint-shape
+    # compatibility only and must not control initialization timing.
+    assert "if (!this->_pf_var_init_c)" in cpp
     assert "c = 5" in cpp
-    assert "bool _fvinit_counter" in cpp  # the flag member exists
-    # The init is gated (runs once), not unconditionally each call.
-    assert "if (!_fvinit_counter" in cpp
+    assert "bool _fvinit_counter_cs0 = false;" in cpp
+    assert "if (!_fvinit_counter_cs0" not in cpp
 
 
 def test_function_scoped_var_drawing_handle_init_runs_once():
@@ -1281,7 +1282,8 @@ def test_function_scoped_var_udt_init_runs_once():
         "_z = f()\n"
         "plot(_z)"
     )
-    assert "_fvinit_f" in cpp
+    assert "if (!this->_pf_var_init_p)" in cpp
+    assert "if (!_fvinit_f_cs0" not in cpp
     # The UDT constructor expression is lowered inside the guarded init block.
     assert "p = pivot{" in cpp or "p = pivot(" in cpp
 
@@ -1300,13 +1302,15 @@ def test_function_scoped_var_na_drawing_handle_skips_assignment():
         "plot(_a)"
     )
     assert "x = na<double>()" not in cpp
-    assert "bool _fvinit_f" in cpp
+    # Bare ``na`` drawing handles need neither an assignment nor an exact-site
+    # latch.  The legacy per-variant member remains for checkpoint compatibility.
+    assert "bool _fvinit_f_cs0 = false;" in cpp
 
 
 def test_function_scoped_var_not_in_constructor_init_list():
-    # Function-scoped var members are initialized once-per-call in the function
-    # body, NOT in the constructor initializer list (avoid double-init + allows
-    # bar-dependent initializers).
+    # Function-scoped var members initialize at their exact declaration site in
+    # the function body, NOT in the constructor initializer list (avoids
+    # double-init and allows bar-dependent/prior-local initializers).
     cpp = _cpp(
         "counter() =>\n"
         "    var int c = 5\n"
