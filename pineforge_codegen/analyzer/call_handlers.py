@@ -66,8 +66,9 @@ from __future__ import annotations
 from typing import Any
 
 from ..ast_nodes import (
-    ASTNode, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier, MemberAccess,
-    NumberLiteral, StringLiteral, Ternary, TupleLiteral, UnaryOp, VarDecl,
+    ASTNode, Assignment, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier,
+    IfStmt, MemberAccess, NumberLiteral, StringLiteral, Subscript, SwitchStmt,
+    Ternary, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..symbols import PineType
 from .. import signatures as sigs
@@ -88,6 +89,278 @@ class CallHandlers:
     # ------------------------------------------------------------------
     # TA call handling
     # ------------------------------------------------------------------
+
+    def _callsite_primitive_expr_type(
+        self,
+        expr: ASTNode | None,
+        parameter_types: dict[str, PineType],
+    ) -> PineType:
+        """Infer a primitive return using one written call's parameter types.
+
+        The analyzer's legacy ``FuncInfo`` is definition-wide, but Pine's
+        untyped parameters are polymorphic per written call.  Keep this helper
+        intentionally primitive and expression-local: it provides the exact
+        family needed by history-preserving identity/wrapper functions without
+        attempting to monomorphize collections or reference types here.
+        """
+        if expr is None:
+            return PineType.UNKNOWN
+        if isinstance(expr, ExprStmt):
+            return self._callsite_primitive_expr_type(
+                expr.expr, parameter_types
+            )
+        if isinstance(expr, Identifier):
+            if expr.name in parameter_types:
+                return parameter_types[expr.name]
+            if expr.name in {"true", "false"}:
+                return PineType.BOOL
+            return PineType.UNKNOWN
+        if isinstance(expr, Subscript):
+            # Pine's history operator preserves the receiver's scalar family.
+            return self._callsite_primitive_expr_type(
+                expr.object, parameter_types
+            )
+        if isinstance(expr, NumberLiteral):
+            return (
+                PineType.FLOAT
+                if isinstance(expr.value, float)
+                else PineType.INT
+            )
+        if isinstance(expr, BoolLiteral):
+            return PineType.BOOL
+        if isinstance(expr, StringLiteral):
+            return PineType.STRING
+        if isinstance(expr, UnaryOp):
+            if expr.op == "not":
+                return PineType.BOOL
+            return self._callsite_primitive_expr_type(
+                expr.operand, parameter_types
+            )
+        if isinstance(expr, BinOp):
+            left = self._callsite_primitive_expr_type(
+                expr.left, parameter_types
+            )
+            right = self._callsite_primitive_expr_type(
+                expr.right, parameter_types
+            )
+            if expr.op in {"==", "!=", ">", "<", ">=", "<=", "and", "or"}:
+                return PineType.BOOL
+            if left == PineType.STRING or right == PineType.STRING:
+                return PineType.STRING
+            if expr.op == "/" or PineType.FLOAT in {left, right}:
+                return PineType.FLOAT
+            if left == PineType.INT and right == PineType.INT:
+                return PineType.INT
+            return PineType.UNKNOWN
+        if isinstance(expr, Ternary):
+            true_type = self._callsite_primitive_expr_type(
+                expr.true_val, parameter_types
+            )
+            false_type = self._callsite_primitive_expr_type(
+                expr.false_val, parameter_types
+            )
+            if true_type == false_type:
+                return true_type
+            if PineType.STRING in {true_type, false_type}:
+                return PineType.STRING
+            if PineType.FLOAT in {true_type, false_type}:
+                return PineType.FLOAT
+            return PineType.UNKNOWN
+        if isinstance(expr, FuncCall):
+            callee = expr.callee
+            if isinstance(callee, Identifier):
+                if callee.name == "int":
+                    return PineType.INT
+                if callee.name == "float":
+                    return PineType.FLOAT
+                if callee.name == "bool":
+                    return PineType.BOOL
+                # A user callable's definition-wide return cache is not a
+                # call-site fact.  In particular, a pure untyped transform
+                # nested inside a polymorphic history wrapper may have been
+                # analyzed first as FLOAT even when this path carries an
+                # int64 timestamp or bool.  Exact direct-wrapper call edges are
+                # reconciled later; arbitrary nested transforms stay UNKNOWN
+                # and therefore fail closed instead of source-order coercing.
+                return PineType.UNKNOWN
+        return PineType.UNKNOWN
+
+    @staticmethod
+    def _join_callsite_primitive_types(
+        types: list[PineType],
+    ) -> PineType:
+        if not types or PineType.UNKNOWN in types:
+            return PineType.UNKNOWN
+        first = types[0]
+        if all(value == first for value in types):
+            return first
+        if set(types).issubset({PineType.INT, PineType.FLOAT}):
+            return PineType.FLOAT
+        return PineType.UNKNOWN
+
+    def _apply_callsite_local_type_effects(
+        self,
+        stmt: ASTNode,
+        local_types: dict[str, PineType],
+    ) -> None:
+        """Flow one statement's primitive local writes into ``local_types``.
+
+        This is deliberately a small callable-return analysis, not a second
+        semantic analyzer. It exists so a terminal alias such as
+        ``prior = src[1]; prior`` keeps the exact written-call family. Unknown
+        loops/collections remain unknown and cannot silently pick FLOAT.
+        """
+        if isinstance(stmt, VarDecl):
+            hinted = {
+                "int": PineType.INT,
+                "float": PineType.FLOAT,
+                "bool": PineType.BOOL,
+                "string": PineType.STRING,
+                "color": PineType.COLOR,
+            }.get(stmt.type_hint or "", PineType.UNKNOWN)
+            local_types[stmt.name] = (
+                hinted
+                if hinted != PineType.UNKNOWN
+                else self._callsite_primitive_expr_type(
+                    stmt.value, local_types
+                )
+            )
+            return
+        if (
+            isinstance(stmt, Assignment)
+            and isinstance(stmt.target, Identifier)
+        ):
+            rhs = self._callsite_primitive_expr_type(
+                stmt.value, local_types
+            )
+            if stmt.op == ":=":
+                # Pine variables retain their declaration/inferred primitive
+                # family for their lifetime. An ``na``/otherwise unknown
+                # declaration may acquire the first concrete family here.
+                current = local_types.get(
+                    stmt.target.name, PineType.UNKNOWN
+                )
+                local_types[stmt.target.name] = (
+                    current if current != PineType.UNKNOWN else rhs
+                )
+            else:
+                local_types[stmt.target.name] = (
+                    self._join_callsite_primitive_types(
+                        [
+                            local_types.get(
+                                stmt.target.name, PineType.UNKNOWN
+                            ),
+                            rhs,
+                        ]
+                    )
+                )
+            return
+        if isinstance(stmt, IfStmt):
+            before = dict(local_types)
+            branch_envs: list[dict[str, PineType]] = []
+            for body in (stmt.body, stmt.else_body):
+                branch = dict(before)
+                for child in body:
+                    self._apply_callsite_local_type_effects(child, branch)
+                branch_envs.append(branch)
+            all_names = set().union(*(env.keys() for env in branch_envs))
+            for name in all_names:
+                local_types[name] = self._join_callsite_primitive_types(
+                    [
+                        env.get(name, before.get(name, PineType.UNKNOWN))
+                        for env in branch_envs
+                    ]
+                )
+            return
+        if isinstance(stmt, SwitchStmt):
+            before = dict(local_types)
+            bodies = [body for _, body in stmt.cases]
+            if stmt.default_body:
+                bodies.append(stmt.default_body)
+            else:
+                bodies.append([])
+            branch_envs = []
+            for body in bodies:
+                branch = dict(before)
+                for child in body:
+                    self._apply_callsite_local_type_effects(child, branch)
+                branch_envs.append(branch)
+            all_names = set().union(*(env.keys() for env in branch_envs))
+            for name in all_names:
+                local_types[name] = self._join_callsite_primitive_types(
+                    [
+                        env.get(name, before.get(name, PineType.UNKNOWN))
+                        for env in branch_envs
+                    ]
+                )
+
+    def _callsite_body_return_type(
+        self,
+        body: list[ASTNode],
+        parameter_types: dict[str, PineType],
+    ) -> PineType:
+        if not body:
+            return PineType.UNKNOWN
+        local_types = dict(parameter_types)
+        for stmt in body[:-1]:
+            self._apply_callsite_local_type_effects(stmt, local_types)
+        terminal = body[-1]
+        if isinstance(terminal, ExprStmt):
+            terminal = terminal.expr
+        if isinstance(terminal, VarDecl):
+            return self._callsite_primitive_expr_type(
+                terminal.value, local_types
+            )
+        if isinstance(terminal, IfStmt):
+            if not terminal.body:
+                return PineType.UNKNOWN
+            branches = [terminal.body]
+            # A missing else produces contextual ``na`` in Pine and therefore
+            # does not erase the concrete family's type.
+            if terminal.else_body:
+                branches.append(terminal.else_body)
+            return self._join_callsite_primitive_types(
+                [
+                    self._callsite_body_return_type(
+                        branch, dict(local_types)
+                    )
+                    for branch in branches
+                ]
+            )
+        if isinstance(terminal, SwitchStmt):
+            bodies = [case_body for _, case_body in terminal.cases]
+            if terminal.default_body:
+                bodies.append(terminal.default_body)
+            if not bodies:
+                return PineType.UNKNOWN
+            return self._join_callsite_primitive_types(
+                [
+                    self._callsite_body_return_type(
+                        branch, dict(local_types)
+                    )
+                    for branch in bodies
+                ]
+            )
+        return self._callsite_primitive_expr_type(terminal, local_types)
+
+    def _callsite_callable_return_type(
+        self,
+        func_def,
+        param_types: list[PineType],
+        fallback: PineType,
+    ) -> PineType:
+        inferred = self._callsite_body_return_type(
+            func_def.body,
+            {
+                name: (
+                    param_types[index]
+                    if index < len(param_types)
+                    else PineType.UNKNOWN
+                )
+                for index, name in enumerate(func_def.params)
+            },
+        )
+        return inferred if inferred != PineType.UNKNOWN else fallback
 
     def _merge_ta_args(self, func_name: str, node: FuncCall) -> list:
         """Merge positional args and kwargs into a unified positional list."""
@@ -1155,6 +1428,23 @@ class CallHandlers:
             else PineType.UNKNOWN
             for arg in bound_args
         ]
+        declared_specs = list(
+            self._func_param_type_specs.get(func_name, ())
+        )
+        effective_param_types = [
+            (
+                self._primitive_pine_type_from_spec(declared_specs[index])
+                if index < len(declared_specs)
+                and self._primitive_pine_type_from_spec(
+                    declared_specs[index]
+                ) != PineType.UNKNOWN
+                else param_type
+            )
+            for index, param_type in enumerate(param_types)
+        ]
+        self._callable_bound_param_types_by_node[id(node)] = list(
+            effective_param_types
+        )
 
         # Per-param TypeSpec: declared hints are authoritative; for untyped
         # params, infer from this call site's argument.  Validate deferred
@@ -1211,6 +1501,14 @@ class CallHandlers:
                         elif pt == PineType.FLOAT:
                             return_type = PineType.FLOAT
                         break
+
+        # History and other primitive operations preserve an untyped
+        # parameter's family independently at each written call.  Do this
+        # before the legacy FuncInfo merge so the first call cannot dictate
+        # every later call's return type.
+        return_type = self._callsite_callable_return_type(
+            func_def, effective_param_types, return_type
+        )
 
         # If this function has series params, ensure bar-field arguments
         # passed at the call site are registered as series_bar_fields so that
@@ -1278,6 +1576,13 @@ class CallHandlers:
                 self._materialize_user_func_call_site_state(
                     func_name, cs_idx, node
                 )
+            callsite = self._func_call_cs_map.get(id(node))
+            if callsite is not None and callsite[0] == func_name:
+                key = (func_name, callsite[1])
+                self._func_callsite_param_types[key] = list(
+                    effective_param_types
+                )
+                self._func_callsite_return_types[key] = return_type
 
         # Create or update FuncInfo
         is_tuple = self._func_returns_tuple.get(func_name, False)
@@ -1393,4 +1698,4 @@ class CallHandlers:
             },
         )
 
-        return self._func_return_types.get(func_name, return_type)
+        return return_type

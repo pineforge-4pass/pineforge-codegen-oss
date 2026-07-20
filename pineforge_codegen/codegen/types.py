@@ -34,7 +34,7 @@ tables it needs come from ``codegen/tables.py``.
 from __future__ import annotations
 
 from ..ast_nodes import (
-    BinOp, BoolLiteral, ExprStmt, FuncCall, FuncDef, Identifier, IfStmt,
+    Assignment, BinOp, BoolLiteral, ExprStmt, FuncCall, FuncDef, Identifier, IfStmt,
     MemberAccess, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
     Subscript, Ternary, TupleLiteral, UnaryOp, VarDecl,
 )
@@ -160,7 +160,7 @@ class TypeInferer:
             return 'std::string("")'
         if cpp_type == "bool":
             return "false"
-        if cpp_type == "int":
+        if cpp_type in ("int", "int64_t"):
             return "0"
         if cpp_type in DRAWING_TYPE_TO_CPP.values():
             return f"{cpp_type}{{}}"
@@ -790,13 +790,30 @@ class TypeInferer:
 
     def _type_for_decl(self, node: VarDecl) -> str:
         """Determine the C++ type for a ``VarDecl``: explicit hint, then symbol, then RHS inference."""
+        def promote_wide_int(cpp_type: str) -> str:
+            if cpp_type != "int":
+                return cpp_type
+            owner = self._func_info_map.get(
+                getattr(self, "_active_func_name", "") or ""
+            )
+            if self._expr_returns_wide_int(
+                node.value,
+                owner,
+                set(),
+                getattr(self, "_active_call_site_idx", None),
+            ) or self._is_int64_builtin_init(node.name):
+                return "int64_t"
+            return cpp_type
+
         if node.type_hint:
             spec = self._type_spec_from_hint_name(node.type_hint)
             if spec is not None:
-                return self._type_spec_to_cpp(spec)
+                return promote_wide_int(self._type_spec_to_cpp(spec))
             if node.type_hint in self._udt_defs:
                 return node.type_hint
-            return PINE_TYPE_TO_CPP.get(node.type_hint, "double")
+            return promote_wide_int(
+                PINE_TYPE_TO_CPP.get(node.type_hint, "double")
+            )
         # The analyzer records exact callable-local collection bindings before
         # its lexical scopes are popped.  In particular, an inferred local
         # such as ``selected = cond ? na : global_map`` has a map TypeSpec even
@@ -827,7 +844,7 @@ class TypeInferer:
         # local.  The local binding is known from the emitted body inventory;
         # infer it from its own RHS rather than borrowing the global's PineType.
         if node.name in getattr(self, "_current_func_locals", set()):
-            return self._infer_type(node.value)
+            return promote_wide_int(self._infer_type(node.value))
         sym = self.ctx.symbols.resolve(node.name)
         if sym is not None:
             inferred = self._infer_type(node.value)
@@ -835,8 +852,8 @@ class TypeInferer:
                 return inferred
             cpp_type = PINE_TYPE_TO_CPP.get(sym.pine_type, "double")
             if cpp_type != "double" or sym.pine_type != PineType.UNKNOWN:
-                return cpp_type
-        return self._infer_type(node.value)
+                return promote_wide_int(cpp_type)
+        return promote_wide_int(self._infer_type(node.value))
 
     def _series_type_for(self, name: str) -> str:
         """C++ element type for a series variable's history buffer."""
@@ -851,6 +868,318 @@ class TypeInferer:
         if sym is not None:
             return PINE_TYPE_TO_CPP.get(sym.pine_type, "double")
         return "double"
+
+    def _series_param_element_cpp_type(
+        self,
+        func_info,
+        index: int,
+        call_site_idx: int | None = None,
+    ) -> str:
+        """Canonical element type for one history-referenced UDF parameter.
+
+        A Pine parameter used as ``src[n]`` is a typed time series, not an
+        implicitly-float series.  The old emitter hard-coded every such
+        parameter as ``Series<double>``.  That happened to work for price
+        sources, but rejected real ``series int``/``series bool`` bindings and
+        let synthetic-expression bridges conceal the same mismatch by
+        converting their values to double.
+
+        Pine ``int`` also carries epoch-millisecond builtins such as ``time``.
+        Use the codegen's existing wide integer representation at this
+        callable boundary so one declared ``int`` parameter can safely accept
+        both ``bar_index`` and timestamp values without narrowing.  Scalar
+        integer values are widened when a synthetic bridge is required.
+        """
+        declared_specs = list(
+            getattr(self.ctx, "func_declared_param_type_specs", {}).get(
+                func_info.name, ()
+            )
+        )
+        declared_spec = (
+            declared_specs[index] if index < len(declared_specs) else None
+        )
+        # A declared type is authoritative across every written call. Only a
+        # truly untyped slot may consult the per-callsite specialization map.
+        spec = declared_spec
+        if spec is not None and spec.kind == "primitive":
+            if spec.name == "int":
+                return "int64_t"
+            if spec.name == "bool":
+                return "bool"
+            if spec.name == "color":
+                return "int"
+            if spec.name == "float":
+                return "double"
+
+        if call_site_idx is not None:
+            variant = getattr(
+                self.ctx, "func_callsite_param_types", {}
+            ).get((func_info.name, call_site_idx))
+            pine_type = (
+                variant[index]
+                if variant is not None and index < len(variant)
+                else PineType.UNKNOWN
+            )
+            if pine_type == PineType.INT:
+                return "int64_t"
+            if pine_type == PineType.BOOL:
+                return "bool"
+            if pine_type == PineType.COLOR:
+                return "int"
+            if pine_type == PineType.FLOAT:
+                return "double"
+
+        specs = list(getattr(func_info, "param_type_specs", ()) or ())
+        spec = specs[index] if index < len(specs) else None
+        if spec is not None and spec.kind == "primitive":
+            if spec.name == "int":
+                return "int64_t"
+            if spec.name == "bool":
+                return "bool"
+            if spec.name == "color":
+                return "int"
+            if spec.name == "float":
+                return "double"
+        param_types = list(getattr(func_info, "param_types", ()) or ())
+        pine_type = param_types[index] if index < len(param_types) else None
+        if pine_type == PineType.INT:
+            return "int64_t"
+        if pine_type == PineType.BOOL:
+            return "bool"
+        if pine_type == PineType.COLOR:
+            return "int"
+        return "double"
+
+    def _callsite_callable_return_pine_type(
+        self, func_info, call_site_idx: int | None
+    ):
+        if call_site_idx is not None:
+            variant = getattr(
+                self.ctx, "func_callsite_return_types", {}
+            ).get((func_info.name, call_site_idx))
+            if variant is not None and variant != PineType.UNKNOWN:
+                return variant
+        return getattr(func_info, "return_type", PineType.UNKNOWN)
+
+    def _func_int_return_uses_wide_history(
+        self,
+        func_info,
+        seen: set[str] | None = None,
+        call_site_idx: int | None = None,
+    ) -> bool:
+        """Whether an integer callable must preserve the ``int64_t`` family.
+
+        History-referenced ``int`` parameters are one source of wide values,
+        but not the only one.  A parameterless helper can capture ``time[1]``
+        directly, and an otherwise-pure wrapper can return that helper.  The
+        analyzer's Pine-level return type is intentionally just ``INT`` in all
+        of those cases, so follow the terminal expression/call chain here to
+        prevent the C++ callable boundary from narrowing epoch milliseconds.
+        """
+        if self._callsite_callable_return_pine_type(
+            func_info, call_site_idx
+        ) != PineType.INT:
+            return False
+        node = getattr(func_info, "node", None)
+        if node is None:
+            return False
+
+        if seen is None:
+            seen = set()
+        func_name = getattr(func_info, "name", "")
+        if func_name in seen:
+            return False
+        seen = {*seen, func_name}
+
+        series_names = self.ctx.func_series_vars.get(func_info.name, set())
+        if any(
+            param in series_names
+            and self._series_param_element_cpp_type(
+                func_info, index, call_site_idx
+            )
+                == "int64_t"
+            for index, param in enumerate(node.params)
+        ):
+            return True
+
+        if not node.body:
+            return False
+        terminal = node.body[-1]
+        if isinstance(terminal, ExprStmt):
+            terminal = terminal.expr
+        return self._expr_returns_wide_int(
+            terminal, func_info, seen, call_site_idx
+        )
+
+    def _expr_returns_wide_int(
+        self,
+        expr,
+        owner_info,
+        seen: set[str],
+        call_site_idx: int | None = None,
+    ) -> bool:
+        """Trace wide integer provenance through a callable return expression."""
+        if expr is None:
+            return False
+        if isinstance(expr, Subscript):
+            return self._expr_returns_wide_int(
+                expr.object, owner_info, seen, call_site_idx
+            )
+        if isinstance(expr, Identifier):
+            # A terminal local can be a narrow-looking alias for ``time[1]``.
+            # Resolve its declaration inside this callable without consulting
+            # the already-popped analyzer scope.
+            node = getattr(owner_info, "node", None)
+            if node is not None:
+                if expr.name in node.params:
+                    return False
+                local_key = (
+                    f"{getattr(owner_info, 'name', '')}:local:{expr.name}"
+                )
+                if local_key in seen:
+                    return False
+                local_seen = {*seen, local_key}
+                for child in self._walk_ast_list(node.body):
+                    if (
+                        isinstance(child, VarDecl)
+                        and child.name == expr.name
+                        and child.value is not None
+                    ):
+                        if self._expr_returns_wide_int(
+                            child.value,
+                            owner_info,
+                            local_seen,
+                            call_site_idx,
+                        ):
+                            return True
+                    if (
+                        isinstance(child, Assignment)
+                        and isinstance(child.target, Identifier)
+                        and child.target.name == expr.name
+                    ):
+                        if self._expr_returns_wide_int(
+                            child.value,
+                            owner_info,
+                            local_seen,
+                            call_site_idx,
+                        ):
+                            return True
+            return self._expr_is_int64_builtin(expr)
+        if self._expr_is_int64_builtin(expr):
+            return True
+        if isinstance(expr, FuncCall):
+            func_name, namespace = self._resolve_callee(expr.callee)
+            if namespace is None and func_name in {
+                "int",
+                "float",
+                "nz",
+                "fixnan",
+            }:
+                # Casts and Pine's missing-value wrappers preserve the wide
+                # integer provenance needed by an int destination. ``nz`` may
+                # obtain it from either the source or replacement argument.
+                return any(
+                    self._expr_returns_wide_int(
+                        arg, owner_info, seen, call_site_idx
+                    )
+                    for arg in expr.args
+                )
+            if namespace == "math" and func_name in {"abs", "max", "min"}:
+                return any(
+                    self._expr_returns_wide_int(
+                        arg, owner_info, seen, call_site_idx
+                    )
+                    for arg in expr.args
+                )
+
+            callee_info = None
+            if namespace is None and func_name:
+                callee_info = self._func_info_map.get(func_name)
+            elif isinstance(expr.callee, MemberAccess):
+                receiver = expr.callee.object
+                owner_node = getattr(owner_info, "node", None)
+                if (
+                    getattr(owner_info, "is_udt_method", False)
+                    and owner_node is not None
+                    and owner_node.params
+                    and isinstance(receiver, Identifier)
+                    and receiver.name == owner_node.params[0]
+                    and getattr(owner_info, "udt_type_name", None)
+                ):
+                    callee_info = self._func_info_map.get(
+                        f"{owner_info.udt_type_name}.{expr.callee.member}"
+                    )
+                if callee_info is None:
+                    receiver_spec = self._type_spec_from_expr(receiver)
+                    if (
+                        receiver_spec is not None
+                        and receiver_spec.kind == "udt"
+                        and receiver_spec.name
+                    ):
+                        callee_info = self._func_info_map.get(
+                            f"{receiver_spec.name}.{expr.callee.member}"
+                        )
+            return (
+                callee_info is not None
+                and self._func_int_return_uses_wide_history(
+                    callee_info,
+                    seen,
+                    call_site_idx=call_site_idx,
+                )
+            )
+        if isinstance(expr, BinOp):
+            return (
+                self._expr_returns_wide_int(
+                    expr.left, owner_info, seen, call_site_idx
+                )
+                or self._expr_returns_wide_int(
+                    expr.right, owner_info, seen, call_site_idx
+                )
+            )
+        if isinstance(expr, UnaryOp):
+            return self._expr_returns_wide_int(
+                expr.operand, owner_info, seen, call_site_idx
+            )
+        if isinstance(expr, Ternary):
+            return (
+                self._expr_returns_wide_int(
+                    expr.true_val, owner_info, seen, call_site_idx
+                )
+                or self._expr_returns_wide_int(
+                    expr.false_val, owner_info, seen, call_site_idx
+                )
+            )
+        if isinstance(expr, IfStmt):
+            branches = [expr.body, expr.else_body]
+            return any(
+                branch
+                and self._expr_returns_wide_int(
+                    branch[-1].expr
+                    if isinstance(branch[-1], ExprStmt)
+                    else branch[-1],
+                    owner_info,
+                    seen,
+                    call_site_idx,
+                )
+                for branch in branches
+            )
+        if isinstance(expr, SwitchStmt):
+            branches = [body for _, body in expr.cases]
+            if expr.default_body:
+                branches.append(expr.default_body)
+            return any(
+                branch
+                and self._expr_returns_wide_int(
+                    branch[-1].expr
+                    if isinstance(branch[-1], ExprStmt)
+                    else branch[-1],
+                    owner_info,
+                    seen,
+                    call_site_idx,
+                )
+                for branch in branches
+            )
+        return False
 
     def _expr_is_int64_builtin(self, expr) -> bool:
         """True if ``expr`` is a top-level int64-returning Pine builtin: either a
@@ -867,6 +1196,28 @@ class TypeInferer:
             return expr.name in INT64_BUILTIN_IDENTIFIERS
         return False
 
+    def _fixnan_site_cpp_type(self, site) -> str:
+        """Storage type for one fixnan previous-value slot.
+
+        ``PineType.INT`` does not distinguish ordinary counters from epoch
+        milliseconds, but fixnan stores the exact prior value. Inspect the
+        authored argument's wide provenance so the state member cannot narrow
+        ``time[1]`` before an otherwise-int64 local receives it.
+        """
+        cpp_type = PINE_TYPE_TO_CPP.get(site.pine_type, "double")
+        if site.pine_type != PineType.INT:
+            return cpp_type
+        node = getattr(site, "node", None)
+        args = getattr(node, "args", ()) if node is not None else ()
+        owner_info = self._func_info_map.get(
+            getattr(site, "owner_func", None) or ""
+        )
+        if args and self._expr_returns_wide_int(
+            args[0], owner_info, set(), None
+        ):
+            return "int64_t"
+        return cpp_type
+
     def _int64_reassign_targets(self) -> set[str]:
         """Names of vars that are reassigned (``:=``/``=``) anywhere in the AST
         with an RHS that is a top-level int64-returning builtin. Cached on the
@@ -875,14 +1226,31 @@ class TypeInferer:
         cached = getattr(self, "_int64_reassign_cache", None)
         if cached is not None:
             return cached
-        from ..ast_nodes import Assignment
         targets: set[str] = set()
+        # Callable locals need their lexical owner so a reassignment through a
+        # wrapper/method returning wide history is recognized as well as a
+        # direct ``time[1]`` RHS.
+        for info in getattr(self.ctx, "func_infos", ()):
+            node = getattr(info, "node", None)
+            if node is None:
+                continue
+            for child in self._walk_ast_list(node.body):
+                if (
+                    isinstance(child, Assignment)
+                    and isinstance(child.target, Identifier)
+                    and self._expr_returns_wide_int(
+                        child.value, info, set(), None
+                    )
+                ):
+                    targets.add(child.target.name)
         ast = getattr(self.ctx, "ast", None)
         if ast is not None:
             for node in self._walk_ast(ast):
                 if (isinstance(node, Assignment)
                         and isinstance(node.target, Identifier)
-                        and self._expr_is_int64_builtin(node.value)):
+                        and self._expr_returns_wide_int(
+                            node.value, None, set(), None
+                        )):
                     targets.add(node.target.name)
         self._int64_reassign_cache = targets
         return targets
@@ -1273,6 +1641,10 @@ class TypeInferer:
         and ternaries / if / switch expressions. Returns the string
         ``"double"`` as the safe fallback when no narrower type can be
         determined."""
+        if isinstance(node, Subscript) and isinstance(node.object, FuncCall):
+            # A callable-result history read keeps the callable's scalar
+            # family. Collection subscripts follow separate element-type paths.
+            return self._infer_type(node.object)
         if isinstance(node, NumberLiteral):
             return "double" if isinstance(node.value, float) else "int"
         if isinstance(node, BoolLiteral):
@@ -1297,6 +1669,10 @@ class TypeInferer:
                     return "int"
                 if isinstance(val, float):
                     return "double"
+            if node.name in getattr(
+                self, "_current_func_series_param_types", {}
+            ):
+                return self._current_func_series_param_types[node.name]
             if node.name in self._current_func_param_types:
                 return self._current_func_param_types[node.name]
             if node.name in getattr(self, "_current_func_local_types", {}):
@@ -1374,16 +1750,42 @@ class TypeInferer:
                 if recv_spec is not None and recv_spec.kind == "udt" and recv_spec.name:
                     fi_u = self._func_info_map.get(f"{recv_spec.name}.{member_name}")
                     if fi_u is not None:
+                        call_site_idx = self._callable_target_callsite_idx(
+                            fi_u, node
+                        )
+                        if self._func_int_return_uses_wide_history(
+                            fi_u, call_site_idx=call_site_idx
+                        ):
+                            return "int64_t"
                         if getattr(fi_u, "return_type_spec", None) is not None:
                             return self._type_spec_to_cpp(fi_u.return_type_spec)
-                        return PINE_TYPE_TO_CPP.get(fi_u.return_type, "double")
+                        return PINE_TYPE_TO_CPP.get(
+                            self._callsite_callable_return_pine_type(
+                                fi_u, call_site_idx
+                            ),
+                            "double",
+                        )
+            if namespace is None and func_name in self._func_info_map:
+                fi_u = self._func_info_map[func_name]
+                call_site_idx = self._callable_target_callsite_idx(fi_u, node)
+                if self._func_int_return_uses_wide_history(
+                    fi_u, call_site_idx=call_site_idx
+                ):
+                    return "int64_t"
             spec = self._type_spec_from_expr(node)
             if spec is not None:
                 return self._type_spec_to_cpp(spec)
             if namespace in self._udt_defs and func_name == "new":
                 return namespace
             if namespace is None and func_name in self._func_info_map:
-                return PINE_TYPE_TO_CPP.get(self._func_info_map[func_name].return_type, "double")
+                fi_u = self._func_info_map[func_name]
+                return PINE_TYPE_TO_CPP.get(
+                    self._callsite_callable_return_pine_type(
+                        fi_u,
+                        self._callable_target_callsite_idx(fi_u, node),
+                    ),
+                    "double",
+                )
             site = self._get_ta_site(node)
             if site is not None:
                 ta_name = self._ta_name_from_site(site)

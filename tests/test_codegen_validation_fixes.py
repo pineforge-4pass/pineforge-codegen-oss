@@ -551,8 +551,9 @@ def test_callable_persistent_siblings_keep_exact_clone_storage():
     assert "double x__blk1_cs1 = na<double>();" in cpp
     assert "scaled = (x * 2.0)" in cpp
     assert "scaled = (x_cs1 * 2.0)" in cpp
-    assert "double _sv = (x__blk1)" in cpp
-    assert "double _sv = (x__blk1_cs1)" in cpp
+    assert "auto _pf_series_raw = (x__blk1)" in cpp
+    assert "auto _pf_series_raw = (x__blk1_cs1)" in cpp
+    assert "is_na(_pf_series_raw) ? na<double>()" in cpp
     compile_cpp(cpp, label="callable-persistent-sibling-clone-storage")
 
 
@@ -584,7 +585,8 @@ def test_counted_loop_binder_shadows_global_series_and_uses_history_bridge():
         "plot(globalPrior + total)"
     )
     assert "total += (i + lag_cs1(" in cpp
-    assert "double _sv = (i)" in cpp
+    assert "auto _pf_series_raw = (i)" in cpp
+    assert "is_na(_pf_series_raw) ? na<double>()" in cpp
     assert "total += (i[0]" not in cpp
     compile_cpp(cpp, label="counted-loop-binder-shadows-global-series")
 

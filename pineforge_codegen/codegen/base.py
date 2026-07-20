@@ -790,6 +790,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._collection_shadow_tmp_names: set[str] = set()
         # Current function params that are series (const Series<double>&)
         self._current_func_series_params: set[str] = set()
+        # Element types parallel to ``_current_func_series_params``.  Keeping
+        # these separate from the full C++ reference spelling lets expression
+        # inference see ``src`` as its Pine scalar family inside the body.
+        self._current_func_series_param_types: dict[str, str] = {}
         # Locals declared in the function currently being emitted (symbol table loses them after analysis)
         self._current_func_locals: set[str] = set()
         self._current_func_local_types: dict[str, str] = {}
@@ -2973,23 +2977,59 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if len(states) > 1
         }
 
+        def register_one(
+            kind: str,
+            source_key: tuple,
+            cpp_type: str,
+            context: str | None,
+        ) -> None:
+            if cpp_type not in ("double", "int", "int64_t", "bool"):
+                cpp_type = "double"
+            key = (kind, *source_key, context)
+            if key in self._inline_history_member_by_key:
+                return
+            counters[kind] += 1
+            member_name = f"_{kind}_{counters[kind]}"
+            self._inline_history_member_by_key[key] = member_name
+            self._inline_history_members.append({
+                "kind": kind,
+                "member_name": member_name,
+                "cpp_type": cpp_type,
+                "context": context,
+            })
+
         def register(kind: str, source_key: tuple, cpp_type: str,
                      owner: str | None) -> None:
-            if cpp_type not in ("double", "int", "bool"):
-                cpp_type = "double"
             for context in self._inline_history_contexts_for_owner(owner):
-                key = (kind, *source_key, context)
-                if key in self._inline_history_member_by_key:
-                    continue
-                counters[kind] += 1
-                member_name = f"_{kind}_{counters[kind]}"
-                self._inline_history_member_by_key[key] = member_name
-                self._inline_history_members.append({
-                    "kind": kind,
-                    "member_name": member_name,
-                    "cpp_type": cpp_type,
-                    "context": context,
-                })
+                register_one(kind, source_key, cpp_type, context)
+
+        def owner_cs_for_context(
+            owner: str | None, context: str | None
+        ) -> int | None:
+            if owner is None or context is None:
+                return None
+            prefix = f"{self._func_cpp_base_name(owner)}_cs"
+            if not context.startswith(prefix):
+                return None
+            suffix = context[len(prefix):]
+            return int(suffix) if suffix.isdigit() else None
+
+        def target_cs_for_context(
+            fi,
+            call: FuncCall,
+            owner: str | None,
+            context: str | None,
+        ) -> int | None:
+            owner_cs = owner_cs_for_context(owner, context)
+            cs_info = self.ctx.func_call_cs_map.get(id(call))
+            count = self.ctx.func_call_site_counts.get(fi.name, 0)
+            if owner_cs is not None and (
+                cs_info is not None or count > 1
+            ):
+                return owner_cs
+            if cs_info is not None and cs_info[0] == fi.name:
+                return cs_info[1]
+            return None
 
         def actual_args_for(call: FuncCall, params: list[str]) -> list:
             if call.kwargs:
@@ -3071,15 +3111,60 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for idx, arg in enumerate(args):
                 if idx not in series_param_indices:
                     continue
-                if isinstance(arg, Identifier):
-                    if arg.name in BAR_FIELDS or arg.name in BAR_SERIES_PUSH:
-                        continue
-                    if (arg.name in self.ctx.series_vars
-                            and arg.name not in ambiguous_series_names):
-                        continue
-                register(
-                    "series_arg", (id(node), idx), self._infer_type(arg), owner
-                )
+                for context in self._inline_history_contexts_for_owner(owner):
+                    target_cs = target_cs_for_context(
+                        fi, node, owner, context
+                    )
+                    expected_cpp_type = self._series_param_element_cpp_type(
+                        fi, idx, target_cs
+                    )
+                    needs_bridge = True
+                    if isinstance(arg, Identifier):
+                        if (
+                            (
+                                arg.name in BAR_FIELDS
+                                or arg.name in BAR_SERIES_PUSH
+                            )
+                            and expected_cpp_type == "double"
+                        ):
+                            needs_bridge = False
+                        owner_info = self._func_info_map.get(owner or "")
+                        owner_series_cpp_type = None
+                        if (
+                            owner_info is not None
+                            and owner_info.node is not None
+                            and arg.name in owner_info.node.params
+                            and arg.name in self.ctx.func_series_vars.get(
+                                owner_info.name, set()
+                            )
+                        ):
+                            owner_index = owner_info.node.params.index(
+                                arg.name
+                            )
+                            owner_series_cpp_type = (
+                                self._series_param_element_cpp_type(
+                                    owner_info,
+                                    owner_index,
+                                    owner_cs_for_context(owner, context),
+                                )
+                            )
+                            if owner_series_cpp_type == expected_cpp_type:
+                                needs_bridge = False
+                        if (
+                            owner_series_cpp_type is None
+                            and arg.name in self.ctx.series_vars
+                            and arg.name not in ambiguous_series_names
+                            and self._series_type_for(arg.name)
+                                == expected_cpp_type
+                        ):
+                            needs_bridge = False
+                    if needs_bridge:
+                        register_one(
+                            "series_arg",
+                            (id(node), idx),
+                            expected_cpp_type,
+                            context,
+                        )
 
     def _inline_history_member(self, kind: str, node: ASTNode,
                                arg_idx: int | None = None) -> str:
@@ -3500,7 +3585,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for _fi_idx, site in enumerate(self.ctx.fixnan_sites):
             if _fi_idx in self._dead_fixnan_indices:
                 continue
-            cpp_type = PINE_TYPE_TO_CPP.get(site.pine_type, "double")
+            cpp_type = self._fixnan_site_cpp_type(site)
             lines.append(f"    {cpp_type} {site.member_name} = na<{cpp_type}>();")
 
         # 8. Strategy series (e.g., strategy.closedtrades[1])
@@ -3618,7 +3703,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if fresh_safe in emitted_clones:
                 continue
             emitted_clones.add(fresh_safe)
-            cpp_type = PINE_TYPE_TO_CPP.get(orig_site.pine_type, "double")
+            cpp_type = self._fixnan_site_cpp_type(orig_site)
             lines.append(f"    {cpp_type} {fresh_safe} = na<{cpp_type}>();")
 
         # 8d. Drawing-objects-as-data arenas (gated on _uses_drawing so
