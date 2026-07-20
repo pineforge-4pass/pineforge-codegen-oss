@@ -468,3 +468,172 @@ int main() {
 }
 '''
     assert _compile_and_run(transpile(source) + driver) == "25 2\n"
+
+
+def test_three_level_dynamic_length_composes_shifted_parent_source_identity() -> None:
+    source = '''//@version=6
+strategy("three level shifted parent source identity")
+leaf(float src, int len) => ta.sma(src, len)
+sub(float src, int len) => leaf(src, len)
+pre(float src, int len) => sub(src, len)
+outer(float src, int len) => sub(src, len)
+p = pre(volume, 4)
+a = outer(close, 1)
+b = outer(open, 2)
+c = outer(high, 3)
+'''
+    driver = r'''
+#include <iostream>
+int main() {
+    Bar bars[] = {
+        Bar{1.0, 11.0, 0.0, 10.0, 1.0, 1000},
+        Bar{2.0, 21.0, 1.0, 20.0, 2.0, 61000},
+        Bar{3.0, 31.0, 2.0, 30.0, 3.0, 121000},
+    };
+    GeneratedStrategy strategy;
+    strategy.run(bars, 3);
+    if (!strategy.last_error().empty()) return 7;
+    std::cout << strategy.a << " " << strategy.b << " " << strategy.c << "\n";
+}
+'''
+    assert _compile_and_run(transpile(source) + driver) == "30 2.5 21\n"
+
+
+def test_crowded_nested_var_paths_get_fresh_persistent_state() -> None:
+    source = '''//@version=6
+strategy("crowded callable var only")
+inner(float src) =>
+    var float total = 0.0
+    total += src
+    total
+outer(float src) => inner(src)
+noise = inner(high)
+a = outer(close)
+b = outer(open)
+'''
+    driver = r'''
+#include <iostream>
+int main() {
+    Bar bars[] = {
+        Bar{1.0, 11.0, 0.0, 10.0, 1.0, 1000},
+        Bar{2.0, 21.0, 1.0, 20.0, 2.0, 61000},
+        Bar{3.0, 31.0, 2.0, 30.0, 3.0, 121000},
+    };
+    GeneratedStrategy strategy;
+    strategy.run(bars, 3);
+    if (!strategy.last_error().empty()) return 7;
+    std::cout << strategy.a << " " << strategy.b << "\n";
+}
+'''
+    assert _compile_and_run(transpile(source) + driver) == "60 6\n"
+
+
+def test_crowded_nested_fixnan_paths_get_fresh_previous_value_state() -> None:
+    source = '''//@version=6
+strategy("crowded callable fixnan only")
+inner(float src) => fixnan(src)
+outer(float src) => inner(src)
+noise = inner(high)
+a = outer(close)
+b = outer(open)
+'''
+    driver = r'''
+#include <iostream>
+#include <limits>
+int main() {
+    double nan = std::numeric_limits<double>::quiet_NaN();
+    Bar bars[] = {
+        Bar{1.0, 11.0, 0.0, 10.0, 1.0, 1000},
+        Bar{2.0, 21.0, 1.0, nan, 2.0, 61000},
+        Bar{3.0, 31.0, 2.0, nan, 3.0, 121000},
+    };
+    GeneratedStrategy strategy;
+    strategy.run(bars, 3);
+    if (!strategy.last_error().empty()) return 7;
+    std::cout << strategy.a << " " << strategy.b << "\n";
+}
+'''
+    assert _compile_and_run(transpile(source) + driver) == "10 3\n"
+
+
+def test_transitive_crowded_var_and_fixnan_paths_cross_pure_wrappers() -> None:
+    source = '''//@version=6
+strategy("transitive crowded var and fixnan")
+inner(float src) =>
+    var float total = 0.0
+    held = fixnan(src)
+    total += held
+    total
+middle(float src) => inner(src)
+outer(float src) => middle(src)
+noise = inner(high)
+a = outer(close)
+b = outer(open)
+'''
+    driver = r'''
+#include <iostream>
+#include <limits>
+int main() {
+    double nan = std::numeric_limits<double>::quiet_NaN();
+    Bar bars[] = {
+        Bar{1.0, 11.0, 0.0, 10.0, 1.0, 1000},
+        Bar{2.0, 21.0, 1.0, nan, 2.0, 61000},
+        Bar{3.0, 31.0, 2.0, nan, 3.0, 121000},
+    };
+    GeneratedStrategy strategy;
+    strategy.run(bars, 3);
+    if (!strategy.last_error().empty()) return 7;
+    std::cout << strategy.a << " " << strategy.b << "\n";
+}
+'''
+    assert _compile_and_run(transpile(source) + driver) == "30 6\n"
+
+
+def test_shifted_dynamic_ta_paths_keep_nested_var_state_independent() -> None:
+    source = '''//@version=6
+strategy("shifted TA lineage with nested var state")
+state(float src) =>
+    var float total = 0.0
+    total += src
+    total
+sub(float src, int len) =>
+    ignored = ta.sma(src, len)
+    state(src)
+pre(float src, int len) => sub(src, len)
+outer(float src, int len) => sub(src, len)
+p = pre(volume, 4)
+a = outer(close, 1)
+b = outer(open, 2)
+c = outer(high, 3)
+'''
+    driver = r'''
+#include <iostream>
+int main() {
+    Bar bars[] = {
+        Bar{1.0, 11.0, 0.0, 10.0, 1.0, 1000},
+        Bar{2.0, 21.0, 1.0, 20.0, 2.0, 61000},
+        Bar{3.0, 31.0, 2.0, 30.0, 3.0, 121000},
+    };
+    GeneratedStrategy strategy;
+    strategy.run(bars, 3);
+    if (!strategy.last_error().empty()) return 7;
+    std::cout << strategy.p << " " << strategy.a << " "
+              << strategy.b << " " << strategy.c << "\n";
+}
+'''
+    assert _compile_and_run(transpile(source) + driver) == "6 60 6 63\n"
+
+
+def test_recursive_stateful_callable_is_rejected_before_instance_expansion() -> None:
+    source = '''//@version=6
+strategy("recursive stateful callable")
+rec(float src, int n) =>
+    var float total = 0.0
+    total += src
+    n <= 0 ? total : rec(src, n - 1)
+out = rec(close, 1)
+'''
+    with pytest.raises(
+        CompileError, match="Recursive stateful callable cycle"
+    ):
+        transpile(source)

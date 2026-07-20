@@ -312,6 +312,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Kept separately so a second propagation pass (security TF cloning)
         # does not accidentally backfill them as a new cs{N} call site.
         self._func_inherited_call_nodes: set[int] = set()
+        # Exact callee identity for those removed mappings. Natural parent
+        # clones still use active-index fallback, while a context-sensitive
+        # fresh parent has no active index and needs this edge identity to
+        # compose and dispatch its nested instance explicitly.
+        self._func_inherited_call_names: dict[int, str] = {}
         # Per-function fixnan site ownership: func_name -> list of fixnan site
         # indices in self._fixnan_sites owned by that function. Mirrors the
         # TA-range slicing but for fixnan state, so per-call-site cloning can
@@ -567,6 +572,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             func_ta_ranges=self._func_ta_ranges,
             func_ta_indices=self._func_ta_indices,
             func_call_cs_map=self._func_call_cs_map,
+            func_inherited_call_names=dict(
+                self._func_inherited_call_names
+            ),
             func_call_site_counts=self._func_call_site_count,
             func_callsite_param_types={
                 key: tuple(types)
@@ -2639,6 +2647,50 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     targets[source_index] = target_index
             return targets
 
+        def _edge_ta_variant_target_map(
+            parent_name: str,
+            parent_cs_idx: int,
+            callee_name: str,
+            call_node: FuncCall,
+        ) -> dict[int, int]:
+            """Compose callee source identity through one parent call edge.
+
+            ``_ta_variant_target_map`` is keyed by the parent's base TA
+            identities.  Those identities need not equal the callee's source
+            indices: an earlier textual call can make this edge select a
+            shifted parent site.  The edge's original materialization records
+            the exact ``callee source -> parent base`` relation; compose that
+            with the active parent variant instead of assuming equal keys.
+            """
+            parent_targets = _ta_variant_target_map(
+                parent_name, parent_cs_idx
+            )
+            cs_info = self._func_call_cs_map.get(id(call_node))
+            edge_cs_idx = (
+                cs_info[1]
+                if cs_info is not None and cs_info[0] == callee_name
+                else 0
+            )
+            edge_targets = self._func_ta_call_targets.get(
+                (id(call_node), edge_cs_idx), {}
+            )
+            source_indices = list(
+                self._func_ta_indices.get(callee_name, ())
+            )
+            if not source_indices and callee_name in self._func_ta_ranges:
+                source_indices = list(
+                    range(*self._func_ta_ranges[callee_name])
+                )
+            composed: dict[int, int] = {}
+            for source_index in source_indices:
+                parent_source_index = edge_targets.get(
+                    source_index, source_index
+                )
+                active_target = parent_targets.get(parent_source_index)
+                if active_target is not None:
+                    composed[source_index] = active_target
+            return composed
+
         changed = True
         while changed:
             changed = False
@@ -2666,6 +2718,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             if cs_info == (sub, 0):
                                 self._func_call_cs_map.pop(id(call_node), None)
                                 self._func_inherited_call_nodes.add(id(call_node))
+                                self._func_inherited_call_names[
+                                    id(call_node)
+                                ] = sub
                                 # Its definition-time type profile was likewise
                                 # provisional: forwarded untyped owner params
                                 # are still UNKNOWN during that visit. Each
@@ -2678,8 +2733,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                                     (sub, 0), None
                                 )
                         for cs_idx in range(current, count):
-                            parent_ta_targets = _ta_variant_target_map(
-                                fname, cs_idx
+                            parent_ta_targets = _edge_ta_variant_target_map(
+                                fname,
+                                cs_idx,
+                                sub,
+                                call_node,
                             )
                             self._materialize_user_func_call_site_state(
                                 sub,

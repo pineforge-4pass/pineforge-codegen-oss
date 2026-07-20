@@ -1360,6 +1360,61 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if node is not None and getattr(node, "body", None):
                 func_bodies.setdefault(fi.name, node.body)
 
+        # Pine forbids recursive callable execution. Most scalar-only cycles
+        # never enter this state-instance pass (and some legacy dead-branch
+        # typing probes intentionally retain them), but a cycle carrying TA,
+        # var, series, fixnan, or transitive state would otherwise mint a new
+        # fresh path instance forever. Reject exactly that stateful subgraph
+        # before expanding any members or dispatch records.
+        stateful_edges: dict[str, list[tuple[str, FuncCall]]] = {
+            name: [] for name in stateful
+        }
+        inherited_names = getattr(
+            ctx, "func_inherited_call_names", {}
+        ) or {}
+        for owner, body in func_bodies.items():
+            if owner not in stateful:
+                continue
+            for callnode in self._iter_func_calls(body):
+                cs_info = ctx.func_call_cs_map.get(id(callnode))
+                callee = (
+                    cs_info[0]
+                    if cs_info is not None
+                    else inherited_names.get(id(callnode))
+                )
+                if callee in stateful:
+                    stateful_edges[owner].append((callee, callnode))
+
+        colors: dict[str, int] = {}
+        stack: list[str] = []
+
+        def reject_stateful_cycle(name: str) -> None:
+            colors[name] = 1
+            stack.append(name)
+            for callee, callnode in stateful_edges.get(name, ()):
+                color = colors.get(callee, 0)
+                if color == 1:
+                    start = stack.index(callee)
+                    cycle = [*stack[start:], callee]
+                    self._codegen_error(
+                        callnode,
+                        "Recursive stateful callable cycle is not supported: "
+                        + " -> ".join(cycle)
+                        + ".",
+                        hint=(
+                            "Remove the recursive call; Pine user-defined "
+                            "functions cannot execute recursively."
+                        ),
+                    )
+                if color == 0:
+                    reject_stateful_cycle(callee)
+            stack.pop()
+            colors[name] = 2
+
+        for name in sorted(stateful):
+            if colors.get(name, 0) == 0:
+                reject_stateful_cycle(name)
+
         def ta_originals(fname: str) -> list[str]:
             return list(self._func_cs_ta_remap.get((fname, 0), {}).keys())
 
@@ -1390,6 +1445,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     worklist.append({
                         "fname": fname,
                         "name": natural_name(fname, k),
+                        "call_site_idx": k,
                         "ta_remap": self._func_cs_ta_remap.get((fname, k), {}),
                         "var_remap": self._func_cs_var_remap.get((fname, k), {}),
                         "fixnan_remap": self._func_cs_fixnan_remap.get((fname, k), {}),
@@ -1398,6 +1454,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 worklist.append({
                     "fname": fname,
                     "name": self._func_cpp_base_name(fname),
+                    "call_site_idx": None,
                     "ta_remap": {},
                     "var_remap": {},
                     "fixnan_remap": {},
@@ -1412,12 +1469,24 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if not body:
                 continue
             active_ta = inst["ta_remap"]
+            active_var = inst.get("var_remap", {})
             active_fixnan = inst.get("fixnan_remap", {})
             for callnode in self._iter_func_calls(body):
                 cs_info = ctx.func_call_cs_map.get(id(callnode))
                 if cs_info is None:
-                    continue
-                g_name, j = cs_info
+                    # Natural csN parents deliberately leave inherited nested
+                    # calls unmapped so visit_call can thread N through its
+                    # active-index fallback. A fresh context-sensitive parent
+                    # has no active index; recover only that removed edge's
+                    # exact callee identity and compose it from natural cs0.
+                    if not inst.get("fresh", False):
+                        continue
+                    g_name = ctx.func_inherited_call_names.get(id(callnode))
+                    if g_name is None:
+                        continue
+                    j = 0
+                else:
+                    g_name, j = cs_info
                 if g_name not in stateful:
                     continue
                 natural_ta = self._func_cs_ta_remap.get((g_name, j), {})
@@ -1425,18 +1494,56 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 for m in ta_originals(g_name):
                     mid = natural_ta.get(m, m)
                     composed_ta[m] = active_ta.get(mid, mid)
+                g_var_originals = var_originals(g_name)
+                full_natural_var = self._func_cs_var_remap.get(
+                    (g_name, j), {}
+                )
+                natural_var = {
+                    name: full_natural_var.get(name, name)
+                    for name in g_var_originals
+                }
+                composed_var = {}
+                for m in g_var_originals:
+                    mid = natural_var.get(m, m)
+                    composed_var[m] = active_var.get(mid, mid)
                 natural_fixnan = self._func_cs_fixnan_remap.get((g_name, j), {})
                 composed_fixnan = {}
                 for m in fixnan_originals(g_name):
                     mid = natural_fixnan.get(m, m)
                     composed_fixnan[m] = active_fixnan.get(mid, mid)
-                if composed_ta == natural_ta and composed_fixnan == natural_fixnan:
+                owns_non_ta_state = bool(
+                    g_var_originals or fixnan_originals(g_name)
+                )
+                # Every non-cs0 enclosing variant is a distinct Pine written
+                # call path. Even a pure wrapper can reach var/fixnan state
+                # farther down the graph, so preserve the path identity here
+                # and let the fresh wrapper compose its next edge in turn.
+                path_requires_fresh_state = (
+                    inst.get("fresh", False)
+                    or inst.get("call_site_idx") not in (None, 0)
+                )
+                if (
+                    not path_requires_fresh_state
+                    and composed_ta == natural_ta
+                    and composed_var == natural_var
+                    and composed_fixnan == natural_fixnan
+                ):
                     # Path resolves to the callee's own cs{j} clone — reuse it.
                     self._instance_dispatch[(inst["name"], id(callnode))] = \
                         natural_name(g_name, j)
                     continue
-                key = (g_name, frozenset(composed_ta.items()),
-                       frozenset(composed_fixnan.items()))
+                path_identity = (
+                    (inst["name"], id(callnode))
+                    if owns_non_ta_state or path_requires_fresh_state
+                    else None
+                )
+                key = (
+                    g_name,
+                    frozenset(composed_ta.items()),
+                    frozenset(composed_var.items()),
+                    frozenset(composed_fixnan.items()),
+                    path_identity,
+                )
                 ginst = interned.get(key)
                 if ginst is None:
                     fresh_counter += 1
@@ -1465,6 +1572,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     ginst = {
                         "fname": g_name,
                         "name": inst_name,
+                        "fresh": True,
+                        "call_site_idx": None,
                         "ta_remap": composed_ta,
                         "var_remap": fvar_remap,
                         "fixnan_remap": ffixnan_remap,
