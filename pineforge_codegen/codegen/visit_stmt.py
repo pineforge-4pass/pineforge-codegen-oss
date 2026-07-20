@@ -1505,6 +1505,10 @@ class StmtVisitor:
             self._current_loop_var_specs[node.var] = TypeSpec.primitive("int")
         _blk_saved = self._push_block_var_remap(node)
         if node.var:
+            # The loop counter is a fresh primitive lexical binding.  Keep it
+            # from inheriting a same-spelled outer/raw UDT or drawing type.
+            self._lexical_drawing_types[node.var] = None
+            self._lexical_udt_types[node.var] = None
             self._lexical_series_bindings[node.var] = False
             self._lexical_known_var_tombstones.add(node.var)
         try:
@@ -1635,8 +1639,40 @@ class StmtVisitor:
         loop_binding_names = (
             [node.var] if node.var else list(node.vars or [])
         )
-        for name in loop_binding_names:
+        loop_binding_specs = (
+            [elem_spec]
+            if node.var
+            else [
+                tuple_specs[index] if index < len(tuple_specs) else None
+                for index in range(len(loop_binding_names))
+            ]
+        )
+        for index, name in enumerate(loop_binding_names):
             if name and name != "_":
+                spec = (
+                    loop_binding_specs[index]
+                    if index < len(loop_binding_specs)
+                    else None
+                )
+                drawing_name = (
+                    spec.name
+                    if (spec is not None
+                        and spec.kind == "udt"
+                        and spec.name in DRAWING_TYPE_TO_CPP)
+                    else None
+                )
+                self._lexical_drawing_types[name] = (
+                    DRAWING_TYPE_TO_CPP[drawing_name]
+                    if drawing_name is not None
+                    else None
+                )
+                self._lexical_udt_types[name] = (
+                    spec.name
+                    if (spec is not None
+                        and spec.kind == "udt"
+                        and spec.name in self._udt_defs)
+                    else None
+                )
                 self._lexical_series_bindings[name] = False
                 self._lexical_known_var_tombstones.add(name)
         try:

@@ -1440,7 +1440,19 @@ class TopLevelEmitter:
         self._udt_ptr_alias_locals = set()
         self._current_func_locals = {n for n, _, _ in self.ctx.func_var_members.get(fi.name, [])}
         self._current_func_local_types = {}
-        self._lexical_drawing_types = {}
+        self._lexical_drawing_types = {
+            param: DRAWING_TYPE_TO_CPP[drawing_name]
+            for param in node.params
+            for drawing_name in (
+                (
+                    self._current_func_param_specs[param].name
+                    if (param in self._current_func_param_specs
+                        and self._current_func_param_specs[param].kind == "udt")
+                    else self._udt_param_udt.get(param)
+                ),
+            )
+            if drawing_name in DRAWING_TYPE_TO_CPP
+        }
         self._lexical_udt_types = {
             param: (
                 spec.name

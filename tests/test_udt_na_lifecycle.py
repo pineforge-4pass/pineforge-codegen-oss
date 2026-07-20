@@ -352,6 +352,40 @@ bool ignored = shadow()
     compile_cpp(cpp, label="udt-na-callable-primitive-clone-isolation")
 
 
+def test_primitive_metadata_survives_global_udt_tombstone_registry() -> None:
+    source = r'''//@version=6
+strategy("exact primitive metadata")
+bool enabled = true
+array<bool> flags = array.from(enabled, false)
+'''
+    cpp = transpile(source)
+    assert "std::vector<bool> flags;" in cpp
+    assert "flags = std::vector<bool>{" in cpp
+    compile_cpp(cpp, label="udt-exact-primitive-metadata")
+
+
+def test_drawing_method_parameter_keeps_exact_lexical_type() -> None:
+    source = r'''//@version=6
+strategy("exact drawing method parameter")
+type Shadow
+    float value
+method span(line ln) =>
+    ln.get_x2() - ln.get_x1()
+poison() =>
+    Shadow ln = Shadow.new(1.0)
+    na(ln)
+var line segment = line.new(bar_index, close, bar_index + 1, close)
+float measured = segment.span()
+bool ignored = poison()
+'''
+    cpp = transpile(source)
+    assert "pf_line_get_x2(_pf_lines_, ln)" in cpp
+    assert "pf_line_get_x1(_pf_lines_, ln)" in cpp
+    assert "ln.get_x2()" not in cpp
+    assert "ln.get_x1()" not in cpp
+    compile_cpp(cpp, label="udt-exact-drawing-method-parameter")
+
+
 def test_stateful_method_edge_uses_exact_global_udt_owner() -> None:
     source = r'''//@version=6
 strategy("stateful method exact edge")

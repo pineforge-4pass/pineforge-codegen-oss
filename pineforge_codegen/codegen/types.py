@@ -370,8 +370,12 @@ class TypeInferer:
             return TypeSpec.primitive("string")
         if isinstance(node, Identifier):
             collection_spec = self._collection_spec_for_name(node.name)
+            # This resolver also carries exact primitive loop/parameter/global
+            # metadata despite its historical name.  Preserve those scalar
+            # families here (notably bool for array.from); only arbitrary UDTs
+            # need the collision-safe lexical resolver below.
             if (collection_spec is not None
-                    and collection_spec.kind in {"array", "map", "matrix"}):
+                    and collection_spec.kind != "udt"):
                 return collection_spec
             found_udt_binding, exact_udt = self._identifier_udt_binding(
                 node.name
