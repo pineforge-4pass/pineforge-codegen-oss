@@ -86,7 +86,7 @@ from ..ast_nodes import (
     ExprStmt, FuncCall, Identifier, IfStmt, SwitchStmt, VarDecl,
 )
 from ..analyzer import FuncInfo
-from ..symbols import TypeSpec
+from ..symbols import PineType, TypeSpec
 from .tables import (
     BAR_SERIES_PUSH,
     DRAWING_TYPE_TO_CPP,
@@ -1231,8 +1231,21 @@ class TopLevelEmitter:
             for alias in (param, self._safe_name(param))
         }
         self._current_func_series_params = set()
+        self._current_func_series_param_types = {}
         self._udt_param_udt = {}
         func_sv = self.ctx.func_series_vars.get(fi.name, set())
+        declared_param_specs = list(
+            getattr(self.ctx, "func_declared_param_type_specs", {}).get(
+                fi.name, ()
+            )
+        )
+        variant_param_types = (
+            getattr(self.ctx, "func_callsite_param_types", {}).get(
+                (fi.name, call_site_idx), ()
+            )
+            if call_site_idx is not None
+            else ()
+        )
         for i, p in enumerate(node.params):
             spec = None
             if is_udt and i == 0 and fi.udt_type_name:
@@ -1261,9 +1274,44 @@ class TopLevelEmitter:
             elif fi.name == "isInSession" and i < 2:
                 cpp_t = "std::string"
             elif p in func_sv:
-                # This param uses history access (e.g. src[1]) — pass as Series
-                cpp_t = "const Series<double>&"
+                # This param uses history access (e.g. src[1]) — preserve its
+                # Pine scalar family instead of hard-coding Series<double>.
+                elem_cpp_t = self._series_param_element_cpp_type(
+                    fi, i, call_site_idx
+                )
+                cpp_t = f"const Series<{elem_cpp_t}>&"
                 self._current_func_series_params.add(p)
+                self._current_func_series_param_types[p] = elem_cpp_t
+                self._current_func_series_param_types[
+                    self._safe_name(p)
+                ] = elem_cpp_t
+                if (
+                    i < len(getattr(fi, "param_type_specs", []))
+                    and fi.param_type_specs[i] is not None
+                ):
+                    spec = fi.param_type_specs[i]
+            elif (
+                i >= len(declared_param_specs)
+                or declared_param_specs[i] is None
+            ) and i < len(variant_param_types) and variant_param_types[i] in {
+                PineType.INT,
+                PineType.FLOAT,
+                PineType.BOOL,
+                PineType.STRING,
+                PineType.COLOR,
+            }:
+                # Non-history untyped parameters are polymorphic too. A pure
+                # wrapper around a stateful helper is cloned per written call,
+                # so its scalar boundary must use that clone's actual family
+                # instead of the first call's shared FuncInfo inference.
+                variant_pt = variant_param_types[i]
+                cpp_t = {
+                    PineType.INT: "int64_t",
+                    PineType.FLOAT: "double",
+                    PineType.BOOL: "bool",
+                    PineType.STRING: "std::string",
+                    PineType.COLOR: "int",
+                }[variant_pt]
             elif i < len(getattr(fi, "param_type_specs", [])) and fi.param_type_specs[i] is not None:
                 # Precise per-param TypeSpec (declared hint or call-site inference):
                 # ``pivot hi`` -> ``pivot&``, ``line ln`` -> ``Line&``, an untyped
@@ -1307,6 +1355,24 @@ class TopLevelEmitter:
             # A function returning a drawing handle must emit the C++ handle
             # struct (Line/Box/Label/Linefill), not the unknown lowercase name.
             ret_type = DRAWING_TYPE_TO_CPP.get(fi.udt_return_type, fi.udt_return_type)
+        elif self._func_int_return_uses_wide_history(
+            fi, call_site_idx=call_site_idx
+        ):
+            # The history parameter is represented as int64_t so timestamp
+            # values and their na sentinel cannot narrow at the return edge.
+            ret_type = "int64_t"
+        elif (
+            call_site_idx is not None
+            and self._callsite_callable_return_pine_type(
+                fi, call_site_idx
+            ) != PineType.UNKNOWN
+        ):
+            ret_type = PINE_TYPE_TO_CPP.get(
+                self._callsite_callable_return_pine_type(
+                    fi, call_site_idx
+                ),
+                "double",
+            )
         elif getattr(fi, "return_type_spec", None) is not None:
             # Exact return TypeSpec (collections plus narrowly cached primitive
             # terminal reads) takes precedence over the coarse PineType slot.
@@ -1456,6 +1522,7 @@ class TopLevelEmitter:
         self._current_func_param_specs = {}
         self._current_func_declared_param_names = set()
         self._current_func_series_params = set()
+        self._current_func_series_param_types = {}
         self._udt_param_udt = {}
         self._current_func_locals = prev_func_locals
         self._current_func_local_types = prev_func_local_types

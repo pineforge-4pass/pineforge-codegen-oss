@@ -247,6 +247,37 @@ class CallVisitor:
             return f"{base}_cs{self._active_call_site_idx}"
         return base
 
+    def _callable_target_callsite_idx(self, fi, node: FuncCall) -> int | None:
+        """Return the primitive profile selected by this emitted call path."""
+        cs_info = self.ctx.func_call_cs_map.get(id(node))
+        count = self.ctx.func_call_site_counts.get(fi.name, 0)
+        if self._active_call_site_idx is not None and (
+            cs_info is not None or count > 1
+        ):
+            return self._active_call_site_idx
+        if cs_info is not None and cs_info[0] == fi.name:
+            return cs_info[1]
+        return None
+
+    @staticmethod
+    def _series_bridge_value_expr(expr_cpp: str, cpp_type: str) -> str:
+        """Convert one scalar to a Series element without erasing Pine na.
+
+        Numeric C++ casts do not translate sentinels: INT64_MIN converted to
+        double is finite, while NaN converted to an integer is undefined.  A
+        history bridge must re-materialize ``na<T>`` in the destination family
+        before pushing the value.
+        """
+        return (
+            "([&]() { auto _pf_series_raw = ("
+            + expr_cpp
+            + "); return is_na(_pf_series_raw) ? na<"
+            + cpp_type
+            + ">() : static_cast<"
+            + cpp_type
+            + ">(_pf_series_raw); }())"
+        )
+
     def _array_init_value_expr(self, elem_spec: TypeSpec | None, value_node) -> str:
         if isinstance(value_node, NaLiteral):
             if elem_spec is not None and elem_spec.kind == "udt":
@@ -777,27 +808,45 @@ class CallVisitor:
         method_series = self.ctx.func_series_vars.get(func_info.name, set())
         if param_name not in method_series:
             return self._visit_expr(arg_node)
+        expected_cpp_type = self._series_param_element_cpp_type(
+            func_info,
+            param_index,
+            self._callable_target_callsite_idx(func_info, call_node),
+        )
         if isinstance(arg_node, Identifier):
             arg_name = arg_node.name
-            if arg_name in BAR_FIELDS or arg_name in BAR_SERIES_PUSH:
+            if (
+                (arg_name in BAR_FIELDS or arg_name in BAR_SERIES_PUSH)
+                and expected_cpp_type == "double"
+            ):
                 return f"_s_{arg_name}"
             safe = self._safe_name(arg_name)
-            if arg_name in self._current_func_series_params:
+            is_current_series_param = (
+                arg_name in self._current_func_series_params
+            )
+            if (
+                is_current_series_param
+                and self._current_func_series_param_types.get(arg_name)
+                    == expected_cpp_type
+            ):
                 return safe
             if self._active_var_remap and safe in self._active_var_remap:
                 safe = self._active_var_remap[safe]
-            if self._binding_is_series(arg_name, safe):
+            if (
+                not is_current_series_param
+                and self._binding_is_series(arg_name, safe)
+                and self._series_type_for(arg_name) == expected_cpp_type
+            ):
                 return safe
         expr_cpp = self._visit_expr(arg_node)
-        cpp_type = self._infer_type(arg_node)
-        if cpp_type not in ("double", "int", "bool"):
-            cpp_type = "double"
+        cpp_type = expected_cpp_type
+        bridge_cpp = self._series_bridge_value_expr(expr_cpp, cpp_type)
         member = self._inline_history_member(
             "series_arg", call_node, arg_idx=param_index
         )
         return (
             f"([&]() -> const Series<{cpp_type}>& {{ "
-            f"{cpp_type} _sv = ({expr_cpp}); "
+            f"{cpp_type} _sv = {bridge_cpp}; "
             f"if (history_advances_new_bar()) {member}.push(_sv); "
             f"else {member}.update(_sv); "
             f"return {member}; }}())"
@@ -1924,10 +1973,18 @@ class CallVisitor:
         def _visit_arg_for_series(arg_node, arg_idx):
             """Visit a function argument, returning Series ref for series params."""
             if arg_idx in _func_series_param_indices:
+                expected_cpp_type = self._series_param_element_cpp_type(
+                    fi_lookup,
+                    arg_idx,
+                    self._callable_target_callsite_idx(fi_lookup, node),
+                )
                 if isinstance(arg_node, Identifier):
                     aname = arg_node.name
                     # Bar field: pass _s_close instead of current_bar_.close
-                    if aname in BAR_FIELDS or aname in BAR_SERIES_PUSH:
+                    if (
+                        (aname in BAR_FIELDS or aname in BAR_SERIES_PUSH)
+                        and expected_cpp_type == "double"
+                    ):
                         return f"_s_{aname}"
                     # Exact Series binding: pass the Series object directly.
                     # A raw name can also denote a scalar sibling/callable
@@ -1940,22 +1997,35 @@ class CallVisitor:
                     # can contain the same raw name, but applying it here makes
                     # cs1+ ignore the actual parameter and read an unrelated
                     # class member instead.
-                    if aname in self._current_func_series_params:
+                    is_current_series_param = (
+                        aname in self._current_func_series_params
+                    )
+                    if (
+                        is_current_series_param
+                        and self._current_func_series_param_types.get(aname)
+                            == expected_cpp_type
+                    ):
                         return safe
                     if self._active_var_remap and safe in self._active_var_remap:
                         safe = self._active_var_remap[safe]
-                    if self._binding_is_series(aname, safe):
+                    if (
+                        not is_current_series_param
+                        and self._binding_is_series(aname, safe)
+                        and self._series_type_for(aname)
+                            == expected_cpp_type
+                    ):
                         return safe
                 expr_cpp = self._visit_expr(arg_node)
-                cpp_t = self._infer_type(arg_node)
-                if cpp_t not in ("double", "int", "bool"):
-                    cpp_t = "double"
+                cpp_t = expected_cpp_type
+                bridge_cpp = self._series_bridge_value_expr(
+                    expr_cpp, cpp_t
+                )
                 member = self._inline_history_member(
                     "series_arg", node, arg_idx=arg_idx
                 )
                 return (
                     f"([&]() -> const Series<{cpp_t}>& {{ "
-                    f"{cpp_t} _sv = ({expr_cpp}); "
+                    f"{cpp_t} _sv = {bridge_cpp}; "
                     f"if (history_advances_new_bar()) {member}.push(_sv); "
                     f"else {member}.update(_sv); "
                     f"return {member}; }}())"

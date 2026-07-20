@@ -276,6 +276,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_ta_ranges: dict[str, tuple[int, int]] = {}  # func_name -> (start, end) indices
         self._func_call_site_count: dict[str, int] = {}  # func_name -> count
         self._func_call_cs_map: dict[int, tuple[str, int]] = {}  # call_node_id -> (func_name, cs_idx)
+        # Primitive type facts retained per written call AST and reconciled to
+        # the emitted cs0/cs1/... identities after the stateful call graph is
+        # closed. Pine explicitly permits an untyped parameter to inherit a
+        # different type at each written call site.
+        self._callable_bound_param_types_by_node: dict[int, list[PineType]] = {}
+        self._func_callsite_param_types: dict[
+            tuple[str, int], list[PineType]
+        ] = {}
+        self._func_callsite_return_types: dict[
+            tuple[str, int], PineType
+        ] = {}
         # Textual nested calls whose identity is inherited from the active
         # parent clone rather than assigned a fixed source-level cs index.
         # Kept separately so a second propagation pass (security TF cloning)
@@ -533,6 +544,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             func_ta_ranges=self._func_ta_ranges,
             func_call_cs_map=self._func_call_cs_map,
             func_call_site_counts=self._func_call_site_count,
+            func_callsite_param_types={
+                key: tuple(types)
+                for key, types in self._func_callsite_param_types.items()
+            },
+            func_callsite_return_types=dict(
+                self._func_callsite_return_types
+            ),
+            func_declared_param_type_specs={
+                name: tuple(specs)
+                for name, specs in self._func_param_type_specs.items()
+            },
             func_security_clone_only=self._func_security_clone_only,
             func_cs_ta_clone_names=self._func_cs_ta_clone_names,
             udt_defs=self._udt_fields,
@@ -2469,6 +2491,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             if cs_info == (sub, 0):
                                 self._func_call_cs_map.pop(id(call_node), None)
                                 self._func_inherited_call_nodes.add(id(call_node))
+                                # Its definition-time type profile was likewise
+                                # provisional: forwarded untyped owner params
+                                # are still UNKNOWN during that visit. Each
+                                # inherited parent clone supplies the real
+                                # primitive profile below.
+                                self._func_callsite_param_types.pop(
+                                    (sub, 0), None
+                                )
+                                self._func_callsite_return_types.pop(
+                                    (sub, 0), None
+                                )
                         for cs_idx in range(current, count):
                             self._materialize_user_func_call_site_state(
                                 sub,
@@ -2478,6 +2511,372 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             )
                         self._func_call_site_count[sub] = count
                         changed = True
+
+        self._resolve_callable_callsite_primitive_types(
+            call_edges,
+            func_info_by_name,
+            _bound_user_call_args,
+        )
+
+    @staticmethod
+    def _primitive_pine_type_from_spec(spec) -> PineType:
+        if spec is None or getattr(spec, "kind", None) != "primitive":
+            return PineType.UNKNOWN
+        return {
+            "int": PineType.INT,
+            "float": PineType.FLOAT,
+            "bool": PineType.BOOL,
+            "string": PineType.STRING,
+            "color": PineType.COLOR,
+        }.get(getattr(spec, "name", None), PineType.UNKNOWN)
+
+    def _resolve_callable_callsite_primitive_types(
+        self,
+        call_edges,
+        func_info_by_name,
+        bound_user_call_args,
+    ) -> None:
+        """Reconcile per-written-call primitive types after clone closure.
+
+        Direct UDF calls are typed during the lexical visit, but UDT methods
+        and pure wrappers receive their cs identities only in the late stateful
+        call-graph pass.  Propagate an enclosing variant's parameter profile
+        through exact forwarded argument ASTs until every emitted history
+        callable variant has its own stable primitive profile.
+        """
+        edge_by_call_id = {
+            id(call): (owner, callee, call)
+            for owner, callee, call in call_edges
+        }
+
+        def declared_types(name: str, size: int) -> list[PineType]:
+            specs = list(self._func_param_type_specs.get(name, ()))
+            return [
+                self._primitive_pine_type_from_spec(
+                    specs[index] if index < len(specs) else None
+                )
+                for index in range(size)
+            ]
+
+        def merge_profile(
+            callee: str,
+            cs_idx: int,
+            incoming: list[PineType],
+            call,
+        ) -> bool:
+            info = func_info_by_name.get(callee)
+            if info is None or info.node is None:
+                return False
+            size = len(info.node.params)
+            declared = declared_types(callee, size)
+            key = (callee, cs_idx)
+            current = list(
+                self._func_callsite_param_types.get(
+                    key, [PineType.UNKNOWN] * size
+                )
+            )
+            while len(current) < size:
+                current.append(PineType.UNKNOWN)
+            changed = False
+            for index in range(size):
+                candidate = declared[index]
+                if candidate == PineType.UNKNOWN and index < len(incoming):
+                    candidate = incoming[index]
+                if candidate == PineType.UNKNOWN:
+                    continue
+                if current[index] == PineType.UNKNOWN:
+                    current[index] = candidate
+                    changed = True
+                elif current[index] != candidate:
+                    self._error(
+                        "Cannot safely specialize untyped parameter '"
+                        + info.node.params[index]
+                        + "' of callable '"
+                        + callee
+                        + "': distinct primitive types collapse onto the same "
+                        + f"written-call variant cs{cs_idx}. Inline the calls "
+                        + "or declare an explicit parameter type.",
+                        call.loc,
+                    )
+            if changed or key not in self._func_callsite_param_types:
+                self._func_callsite_param_types[key] = current
+            return changed
+
+        # Backfill every direct UDF/method identity assigned by the late graph
+        # pass. Definition-time wrapper calls can still contain UNKNOWN params;
+        # the fixed point below resolves those from their owner variant.
+        for _owner, callee, call in call_edges:
+            if _owner is not None:
+                # Definition-time analyzer fallbacks for an expression over an
+                # untyped owner parameter are not concrete facts (``y + 0``
+                # historically reports FLOAT while ``y`` is still UNKNOWN).
+                # The owner-variant fixed point below resolves nested calls.
+                continue
+            cs_info = self._func_call_cs_map.get(id(call))
+            if cs_info is None or cs_info[0] != callee:
+                continue
+            incoming = self._callable_bound_param_types_by_node.get(
+                id(call), []
+            )
+            merge_profile(callee, cs_info[1], incoming, call)
+
+        def owner_profile(owner: str, owner_cs: int | None) -> list[PineType]:
+            info = func_info_by_name.get(owner)
+            if info is None or info.node is None:
+                return []
+            size = len(info.node.params)
+            if owner_cs is not None:
+                profile = self._func_callsite_param_types.get(
+                    (owner, owner_cs)
+                )
+                if profile is not None:
+                    return list(profile)
+            declared = declared_types(owner, size)
+            legacy = list(getattr(info, "param_types", ()) or ())
+            return [
+                declared[index]
+                if declared[index] != PineType.UNKNOWN
+                else (
+                    legacy[index]
+                    if index < len(legacy)
+                    else PineType.UNKNOWN
+                )
+                for index in range(size)
+            ]
+
+        def target_variant(
+            owner: str | None,
+            owner_cs: int | None,
+            callee: str,
+            call,
+        ) -> int | None:
+            cs_info = self._func_call_cs_map.get(id(call))
+            callee_count = self._func_call_site_count.get(callee, 0)
+            if owner is None:
+                if cs_info is not None and cs_info[0] == callee:
+                    return cs_info[1]
+                return None
+            if cs_info is not None and cs_info[0] == callee:
+                # A surviving lexical mapping is authoritative. Codegen's
+                # context-sensitive instance dispatcher pins every clone of
+                # this owner to that same written callee variant. If two owner
+                # profiles disagree, merge_profile must reject the collapse;
+                # pretending the owner index selects another callee clone
+                # would type a function different from the one actually
+                # emitted at the call edge.
+                return cs_info[1]
+            if owner_cs is not None and callee_count > 1:
+                # A removed lexical map marks an inherited single-call path;
+                # those variants deliberately follow the enclosing clone.
+                return owner_cs if owner_cs < callee_count else None
+            return None
+
+        def mentions_owner_parameter(value, names: set[str]) -> bool:
+            if value is None:
+                return False
+            if isinstance(value, Identifier):
+                return value.name in names
+            if isinstance(value, (list, tuple)):
+                return any(
+                    mentions_owner_parameter(item, names) for item in value
+                )
+            if isinstance(value, dict):
+                return any(
+                    mentions_owner_parameter(item, names)
+                    for item in value.values()
+                )
+            if not hasattr(value, "__dict__"):
+                return False
+            return any(
+                mentions_owner_parameter(child, names)
+                for child in vars(value).values()
+            )
+
+        # Calls visited inside an untyped callable are initially analyzed
+        # before any concrete outer call-site profile exists.  The ordinary
+        # expression analyzer therefore records defaults for transformed
+        # expressions (many numeric built-ins default to FLOAT).  That value
+        # is not evidence about the eventual written call: discard it for
+        # every nested argument that depends on an untyped owner parameter so
+        # the fixed point below either derives the type from the owner variant
+        # or rejects the unresolved transformation deterministically.
+        for owner, callee, call in call_edges:
+            if owner is None:
+                continue
+            owner_info = func_info_by_name.get(owner)
+            callee_info = func_info_by_name.get(callee)
+            if (
+                owner_info is None
+                or owner_info.node is None
+                or callee_info is None
+                or callee_info.node is None
+            ):
+                continue
+            owner_declared = declared_types(
+                owner, len(owner_info.node.params)
+            )
+            untyped_owner_params = {
+                param
+                for index, param in enumerate(owner_info.node.params)
+                if owner_declared[index] == PineType.UNKNOWN
+            }
+            if not untyped_owner_params:
+                continue
+            actuals = bound_user_call_args(callee, call)
+            dependent_slots = {
+                index
+                for index, actual in enumerate(actuals)
+                if mentions_owner_parameter(actual, untyped_owner_params)
+            }
+            if not dependent_slots:
+                continue
+            callee_declared = declared_types(
+                callee, len(callee_info.node.params)
+            )
+            owner_count = self._func_call_site_count.get(owner, 0)
+            owner_variants = range(owner_count) if owner_count > 0 else (None,)
+            for owner_cs in owner_variants:
+                callee_cs = target_variant(owner, owner_cs, callee, call)
+                if callee_cs is None:
+                    continue
+                key = (callee, callee_cs)
+                current = list(
+                    self._func_callsite_param_types.get(
+                        key,
+                        [PineType.UNKNOWN] * len(callee_info.node.params),
+                    )
+                )
+                while len(current) < len(callee_info.node.params):
+                    current.append(PineType.UNKNOWN)
+                invalidated = False
+                for index in dependent_slots:
+                    if (
+                        index < len(current)
+                        and index < len(callee_declared)
+                        and callee_declared[index] == PineType.UNKNOWN
+                        and current[index] != PineType.UNKNOWN
+                    ):
+                        current[index] = PineType.UNKNOWN
+                        invalidated = True
+                if invalidated:
+                    self._func_callsite_param_types[key] = current
+                    self._func_callsite_return_types.pop(key, None)
+
+        # Resolve parameter forwarding and direct-wrapper returns together.
+        # The graph is finite and primitive types only move UNKNOWN -> known.
+        for _ in range(64):
+            changed = False
+            for owner, callee, call in call_edges:
+                if owner is None:
+                    continue
+                owner_count = self._func_call_site_count.get(owner, 0)
+                owner_variants = (
+                    range(owner_count) if owner_count > 0 else (None,)
+                )
+                owner_info = func_info_by_name.get(owner)
+                if owner_info is None or owner_info.node is None:
+                    continue
+                actuals = bound_user_call_args(callee, call)
+                recorded = self._callable_bound_param_types_by_node.get(
+                    id(call), []
+                )
+                for owner_cs in owner_variants:
+                    callee_cs = target_variant(
+                        owner, owner_cs, callee, call
+                    )
+                    if callee_cs is None:
+                        continue
+                    profile = owner_profile(owner, owner_cs)
+                    param_map = {
+                        name: (
+                            profile[index]
+                            if index < len(profile)
+                            else PineType.UNKNOWN
+                        )
+                        for index, name in enumerate(owner_info.node.params)
+                    }
+                    incoming: list[PineType] = []
+                    owner_param_names = set(owner_info.node.params)
+                    for index, actual in enumerate(actuals):
+                        inferred = self._callsite_primitive_expr_type(
+                            actual, param_map
+                        )
+                        if (
+                            inferred == PineType.UNKNOWN
+                            and not mentions_owner_parameter(
+                                actual, owner_param_names
+                            )
+                            and index < len(recorded)
+                        ):
+                            inferred = recorded[index]
+                        incoming.append(inferred)
+                    if merge_profile(callee, callee_cs, incoming, call):
+                        changed = True
+
+            # Recompute each variant's primitive return. A direct terminal
+            # wrapper call uses the exact callee variant return rather than the
+            # shared definition-level cache.
+            for key, profile in list(
+                self._func_callsite_param_types.items()
+            ):
+                name, cs_idx = key
+                info = func_info_by_name.get(name)
+                if info is None or info.node is None:
+                    continue
+                ret = self._callsite_callable_return_type(
+                    info.node, list(profile), info.return_type
+                )
+                terminal = self._direct_terminal_return_expr(info.node)
+                if isinstance(terminal, FuncCall):
+                    edge = edge_by_call_id.get(id(terminal))
+                    if edge is not None:
+                        _, terminal_callee, terminal_call = edge
+                        terminal_cs = target_variant(
+                            name, cs_idx, terminal_callee, terminal_call
+                        )
+                        if terminal_cs is not None:
+                            nested_ret = self._func_callsite_return_types.get(
+                                (terminal_callee, terminal_cs),
+                                PineType.UNKNOWN,
+                            )
+                            if nested_ret != PineType.UNKNOWN:
+                                ret = nested_ret
+                if self._func_callsite_return_types.get(key) != ret:
+                    self._func_callsite_return_types[key] = ret
+                    changed = True
+            if not changed:
+                break
+
+        # A live untyped history parameter without a variant type cannot be
+        # emitted faithfully. Reject it rather than falling back to the first
+        # call's global FuncInfo type and reintroducing source-order coercion.
+        for name, series_names in self._func_series_vars.items():
+            info = func_info_by_name.get(name)
+            if info is None or info.node is None:
+                continue
+            count = self._func_call_site_count.get(name, 0)
+            declared = declared_types(name, len(info.node.params))
+            for cs_idx in range(count):
+                profile = self._func_callsite_param_types.get(
+                    (name, cs_idx), []
+                )
+                for index, param in enumerate(info.node.params):
+                    if param not in series_names:
+                        continue
+                    if declared[index] != PineType.UNKNOWN:
+                        continue
+                    resolved = (
+                        profile[index]
+                        if index < len(profile)
+                        else PineType.UNKNOWN
+                    )
+                    if resolved == PineType.UNKNOWN:
+                        self._error(
+                            "Cannot infer the per-callsite primitive type of "
+                            f"history parameter '{param}' in callable '{name}' "
+                            f"variant cs{cs_idx}; declare its type explicitly.",
+                            info.node.loc,
+                        )
 
     # ------------------------------------------------------------------
     # Mixed-callsite UDF timeframe-param security rejection.
@@ -3670,7 +4069,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         for i, p in enumerate(node.params):
             udt_self = node.type_name if i == 0 else None
             hint = param_hints[i] if i < len(param_hints) else None
-            ptype = self._type_hint_to_pine(hint) if hint else PineType.FLOAT
+            # Only the receiver is required to be typed in Pine methods. Every
+            # other omitted type is polymorphic per written call, exactly like
+            # a regular UDF parameter; seeding it as FLOAT makes even a single
+            # bool/int history call silently coerce through Series<double>.
+            ptype = self._type_hint_to_pine(hint) if hint else PineType.UNKNOWN
             pspec = self._type_spec_from_hint(hint) if hint else None
             param_types.append(ptype)
             param_specs.append(pspec)
@@ -3746,12 +4149,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # them (e.g., synthetic MethodDef nodes from tests).
         while len(param_defaults) < len(node.params):
             param_defaults.append(None)
+        self._func_param_type_specs[method_key] = list(param_specs)
         fi = FuncInfo(
             name=method_key,
             param_types=param_types,
             return_type=ret_type,
-            node=FuncDef(name=node.name, params=node.params,
-                         body=node.body, is_single_expr=node.is_single_expr),
+            node=FuncDef(
+                name=node.name,
+                params=node.params,
+                body=node.body,
+                is_single_expr=node.is_single_expr,
+                annotations=dict(node.annotations or {}),
+            ),
             is_udt_method=True,
             udt_type_name=node.type_name,
             returns_tuple=returns_tuple,
@@ -4156,11 +4565,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return self._visit(callee)
 
             # General member call (e.g., array.push, etc.)
-            self._visit(obj)
+            receiver_pine_type = self._visit(obj)
+            visited_member_arg_types: dict[int, PineType] = {}
             for arg in node.args:
-                self._visit(arg)
+                visited_member_arg_types[id(arg)] = self._visit(arg)
             for val in node.kwargs.values():
-                self._visit(val)
+                visited_member_arg_types[id(val)] = self._visit(val)
             # UDT method call-site typing.  Method definitions may contain an
             # untyped parameter history read; resolve receiver + args here and
             # apply the same deferred map-history gate as regular UDFs before
@@ -4186,6 +4596,36 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     rest_params = method_params[1:]
                     rest_bound = self._bind_callable_args(node, rest_params)
                     full_bound: list[ASTNode | None] = [obj, *rest_bound]
+                    full_param_types = [
+                        receiver_pine_type,
+                        *[
+                            visited_member_arg_types.get(
+                                id(arg), PineType.UNKNOWN
+                            )
+                            if arg is not None
+                            else PineType.UNKNOWN
+                            for arg in rest_bound
+                        ],
+                    ]
+                    declared_specs = list(
+                        self._func_param_type_specs.get(method_key, ())
+                    )
+                    full_param_types = [
+                        (
+                            self._primitive_pine_type_from_spec(
+                                declared_specs[index]
+                            )
+                            if index < len(declared_specs)
+                            and self._primitive_pine_type_from_spec(
+                                declared_specs[index]
+                            ) != PineType.UNKNOWN
+                            else param_type
+                        )
+                        for index, param_type in enumerate(full_param_types)
+                    ]
+                    self._callable_bound_param_types_by_node[id(node)] = list(
+                        full_param_types
+                    )
                     effective_specs = list(
                         getattr(method_info, "param_type_specs", None) or []
                     )
@@ -4225,7 +4665,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             arg_sym = self._symbols.resolve(arg.name)
                             if arg_sym is not None:
                                 arg_sym.is_series = True
-                    return method_info.return_type
+                    return self._callsite_callable_return_type(
+                        method_info.node,
+                        full_param_types,
+                        method_info.return_type,
+                    )
             # Matrix method dispatch: ``m.get(0, 0)`` on ``matrix<int>`` must
             # type as INT, not VOID, so ``v = m.get(...)`` propagates the
             # element PineType. ``_type_spec_from_expr`` already carries the

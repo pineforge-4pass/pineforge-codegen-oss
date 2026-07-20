@@ -1051,7 +1051,7 @@ class ExprVisitor:
         if isinstance(node.object, FuncCall):
             inner = self._visit_expr(node.object)
             cpp_t = self._infer_type(node.object)
-            if cpp_t not in ("double", "int", "bool"):
+            if cpp_t not in ("double", "int", "int64_t", "bool"):
                 cpp_t = "double"
             member = self._inline_history_member("hist_call", node)
             ta_site = self._get_ta_site(node.object)

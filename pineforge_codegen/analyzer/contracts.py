@@ -239,6 +239,17 @@ class AnalyzerContext:
     func_ta_ranges: dict = field(default_factory=dict)    # func_name -> (start_idx, end_idx)
     func_call_cs_map: dict = field(default_factory=dict)  # call_node_id -> (func_name, call_site_index)
     func_call_site_counts: dict = field(default_factory=dict)  # func_name -> int
+    # Exact primitive parameter/return types for each emitted written-callsite
+    # variant.  Untyped Pine parameters are independently specialized at every
+    # written call; collapsing these onto FuncInfo's first observed type makes
+    # generated semantics depend on source order (for example one ``src[1]``
+    # helper called with both ``bar_index`` and ``close``).
+    func_callsite_param_types: dict = field(default_factory=dict)
+    func_callsite_return_types: dict = field(default_factory=dict)
+    # Declaration-time parameter specs, before any call-site inference fills
+    # untyped slots on the legacy FuncInfo record.  Codegen uses this to apply
+    # variant overrides only to genuinely untyped parameters.
+    func_declared_param_type_specs: dict = field(default_factory=dict)
     # Functions that need per-call-site body cloning PURELY because they
     # contain a request.security(...) whose timeframe is a UDF parameter
     # called with >= 2 distinct literal timeframes (the security-tf-
