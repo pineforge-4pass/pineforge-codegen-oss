@@ -318,28 +318,7 @@ class ExprVisitor:
             return spec.name
         if not target_name:
             return None
-        lexical = getattr(self, "_lexical_udt_types", {})
-        if target_name in lexical:
-            udt_name = lexical[target_name]
-            return udt_name if udt_name in self._udt_defs else None
-        param_spec = getattr(self, "_current_func_param_specs", {}).get(
-            target_name
-        )
-        if (param_spec is not None
-                and param_spec.kind == "udt"
-                and param_spec.name in self._udt_defs):
-            return param_spec.name
-        local_cpp = getattr(self, "_current_func_local_types", {}).get(
-            target_name
-        )
-        if local_cpp is not None:
-            local_cpp = local_cpp.removesuffix("&")
-            return local_cpp if local_cpp in self._udt_defs else None
-        global_types = getattr(self, "_global_udt_types", {})
-        if target_name in global_types:
-            udt_name = global_types[target_name]
-            return udt_name if udt_name in self._udt_defs else None
-        udt_name = self._udt_var_types.get(target_name)
+        udt_name = self._identifier_udt_type(target_name)
         return udt_name if udt_name in self._udt_defs else None
 
     def _visit_rhs_value(self, value_node, target_name: str | None = None,

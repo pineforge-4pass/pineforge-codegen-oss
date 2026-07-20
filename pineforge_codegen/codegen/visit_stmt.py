@@ -276,6 +276,7 @@ class StmtVisitor:
             self._visit_assignment(node, lines, pad)
         elif isinstance(node, TupleAssign):
             self._visit_tuple_assign(node, lines, pad)
+            tuple_cpp_types = self._tuple_binding_cpp_types(node)
             if getattr(self, "_active_func_name", None) is not None:
                 for name in node.names:
                     if name and name != "_":
@@ -299,8 +300,23 @@ class StmtVisitor:
                 self._active_var_remap = dict(self._active_var_remap)
                 for name in scalar_names:
                     self._active_var_remap.pop(self._safe_name(name), None)
-            for name in node.names:
+            for index, name in enumerate(node.names):
                 if name and name != "_":
+                    # A supported tuple destructure creates fresh lexical
+                    # bindings.  Tuple elements are primitive on the current
+                    # supported surface, so install an explicit tombstone: an
+                    # unrelated same-named global/callable UDT must not target-
+                    # type a later ``name := na`` as ``State{}``.
+                    self._lexical_udt_types[name] = None
+                    if (getattr(self, "_active_func_name", None) is not None
+                            and not self._decl_binding_is_series(
+                                id(node), name
+                            )):
+                        self._current_func_local_types[name] = (
+                            tuple_cpp_types[index]
+                            if index < len(tuple_cpp_types)
+                            else "double"
+                        )
                     self._lexical_series_bindings[name] = (
                         self._decl_binding_is_series(id(node), name)
                     )
@@ -816,7 +832,12 @@ class StmtVisitor:
         # global scope, so a function-local sharing the name keeps its own path.
         if (node.name in self._udt_array_get_ref_locals
                 and getattr(self, "_current_func_body", None) is None):
-            udt_t = self._udt_var_types.get(node.name)
+            udt_t = self._is_udt_lvalue(node.value)
+            if udt_t is None:
+                self._codegen_error(
+                    node,
+                    "UDT array-element alias lost its exact element type.",
+                )
             cpp_val = self._visit_rhs_value(node.value, node.name, target_cpp_type=udt_t)
             lines.append(f"{pad}{udt_t}& {safe} = {cpp_val};")
             return
@@ -1244,6 +1265,29 @@ class StmtVisitor:
                         return
 
         lines.append(f"{pad}/* unsupported tuple assignment */")
+
+    def _tuple_binding_cpp_types(self, node: TupleAssign) -> list[str]:
+        """Exact supported tuple element types for later lexical operations."""
+        count = len(node.names)
+        if not isinstance(node.value, FuncCall):
+            return ["double"] * count
+        func_name, namespace = self._resolve_callee(node.value.callee)
+        fi = None
+        if namespace is None:
+            fi = self._func_info_map.get(func_name)
+        elif isinstance(node.value.callee, MemberAccess):
+            recv_spec = self._type_spec_from_expr(node.value.callee.object)
+            if (recv_spec is not None
+                    and recv_spec.kind == "udt"
+                    and recv_spec.name):
+                fi = self._func_info_map.get(
+                    f"{recv_spec.name}.{node.value.callee.member}"
+                )
+        if (fi is not None
+                and fi.node is not None
+                and getattr(fi, "returns_tuple", False)):
+            return self._infer_tuple_types(fi.node, count)
+        return ["double"] * count
 
     def _push_block_var_remap(self, owner):
         """Activate exact lexical metadata for one branch/loop body.

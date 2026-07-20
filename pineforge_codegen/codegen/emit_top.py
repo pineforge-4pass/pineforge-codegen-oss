@@ -1447,7 +1447,11 @@ class TopLevelEmitter:
                 if spec is not None
                 and spec.kind == "udt"
                 and spec.name in self._udt_defs
-                else None
+                else (
+                    self._udt_param_udt.get(param)
+                    if self._udt_param_udt.get(param) in self._udt_defs
+                    else None
+                )
             )
             for param in node.params
             for spec in (self._current_func_param_specs.get(param),)

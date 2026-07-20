@@ -4084,15 +4084,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """
         if not isinstance(node, MemberAccess):
             return False
-        # Cheap path: receiver is a bare identifier we already track in
-        # ``_udt_var_types`` (the common case — ``m.tag``, ``s.ln``).
-        if isinstance(node.object, Identifier):
-            udt_name = self._udt_var_types.get(node.object.name)
-            if udt_name is None:
-                return False
-            return node.member in self._udt_omitted_fields.get(udt_name, ())
-        # General path: try to infer the receiver's UDT type via the same
-        # spec-resolver visit_expr uses for fallback member access.
+        # Resolve even bare identifiers through the lexical/exact TypeSpec
+        # path.  The legacy raw-name UDT registry can describe an unrelated
+        # callable local and therefore cannot safely drive field omission.
         recv_spec = self._type_spec_from_expr(node.object)
         if recv_spec is not None and recv_spec.kind == "udt" and recv_spec.name:
             return node.member in self._udt_omitted_fields.get(recv_spec.name, ())

@@ -219,6 +219,89 @@ float retained = state + tracker
     compile_cpp(cpp, label="udt-na-raw-name-global-isolation")
 
 
+def test_exact_global_udt_drives_methods_fields_and_lvalue_aliases() -> None:
+    source = r'''//@version=6
+strategy("exact global UDT identity")
+type Left
+    float value
+    float tag
+type Right
+    float value
+    table tag
+method read(Left self) => self.value
+method read(Right self) => self.value + 100.0
+Left state = Left.new(1.0, 7.0)
+shadow() =>
+    Right state = Right.new(2.0)
+    na(state)
+mutate() =>
+    Left alias = state
+    alias.value := 3.0
+    alias.value
+bool ignored = shadow()
+float methodValue = state.read()
+float aliasValue = mutate()
+float tagValue = state.tag
+'''
+    cpp = transpile(source)
+    assert "_udt_Left_read(state)" in cpp
+    assert "Left& alias = state;" in cpp
+    assert "tagValue = state.tag;" in cpp
+    assert "tagValue = /* drawing field omitted */ 0;" not in cpp
+    compile_cpp(cpp, label="udt-exact-global-identity")
+
+
+def test_global_udt_array_alias_uses_rhs_element_type_not_raw_name() -> None:
+    source = r'''//@version=6
+strategy("exact global UDT array alias")
+type Left
+    float value
+type Right
+    float value
+var array<Left> items = array.new<Left>()
+if barstate.isfirst
+    items.push(Left.new(1.0))
+for i = 0 to items.size() - 1
+    Left state = items.get(i)
+    state.value := 3.0
+shadow() =>
+    Right state = Right.new(2.0)
+    na(state)
+bool ignored = shadow()
+'''
+    cpp = transpile(source)
+    assert "Left& state =" in cpp
+    assert "Right& state =" not in cpp
+    compile_cpp(cpp, label="udt-exact-global-array-alias")
+
+
+def test_scalar_and_tuple_tombstones_keep_typed_na_reassignment() -> None:
+    source = r'''//@version=6
+strategy("exact scalar tombstones")
+type State
+    float value
+State state = State.new(5.0)
+int tracker = 2
+pair() => [1, 2]
+shadow() =>
+    State tracker = State.new(9.0)
+    tracker := na
+    na(tracker)
+tupleProbe() =>
+    [state, other] = pair()
+    state := na
+    state
+bool ignored = shadow()
+int tupleValue = tupleProbe()
+tracker := na
+bool trackerNull = na(tracker)
+'''
+    cpp = transpile(source)
+    assert "state = na<int>();" in cpp
+    assert "tracker = na<int>();" in cpp
+    compile_cpp(cpp, label="udt-exact-scalar-tuple-tombstones")
+
+
 def test_direct_udt_ctor_na_selection_return_is_target_typed() -> None:
     source = r'''//@version=6
 strategy("UDT nullable selection return")
