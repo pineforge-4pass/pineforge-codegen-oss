@@ -295,16 +295,60 @@ class ExprVisitor:
         # raw-name registry can be overwritten by a same-named local.
         return self._global_drawing_cpp_types.get(target_name)
 
+    def _udt_target_cpp_type(
+        self,
+        *,
+        target_name: str | None = None,
+        target_node=None,
+        type_hint: str | None = None,
+    ) -> str | None:
+        """Return the exact authored UDT type for a contextual RHS target.
+
+        Pine's bare ``na`` is target typed.  Arbitrary UDTs represent their na
+        ID with a default-constructed ``T{}``, just as generated drawing
+        handles do, but the drawing-only registry cannot safely answer for
+        same-spelled ordinary UDT declarations in sibling blocks/functions.
+        Prefer explicit/node context, then the source-ordered lexical map, and
+        consult legacy raw-name metadata only when no lexical binding exists.
+        """
+        spec = self._type_spec_from_hint_name(type_hint) if type_hint else None
+        if spec is None and target_node is not None:
+            spec = self._type_spec_from_expr(target_node)
+        if spec is not None and spec.kind == "udt" and spec.name in self._udt_defs:
+            return spec.name
+        if not target_name:
+            return None
+        lexical = getattr(self, "_lexical_udt_types", {})
+        if target_name in lexical:
+            udt_name = lexical[target_name]
+            return udt_name if udt_name in self._udt_defs else None
+        param_spec = getattr(self, "_current_func_param_specs", {}).get(
+            target_name
+        )
+        if (param_spec is not None
+                and param_spec.kind == "udt"
+                and param_spec.name in self._udt_defs):
+            return param_spec.name
+        local_cpp = getattr(self, "_current_func_local_types", {}).get(
+            target_name
+        )
+        if local_cpp is not None:
+            local_cpp = local_cpp.removesuffix("&")
+            return local_cpp if local_cpp in self._udt_defs else None
+        udt_name = self._udt_var_types.get(target_name)
+        return udt_name if udt_name in self._udt_defs else None
+
     def _visit_rhs_value(self, value_node, target_name: str | None = None,
                          target_cpp_type: str | None = None) -> str:
         """Visit an assignment / declaration RHS.
 
         A bare ``na`` lowers to a type-appropriate initializer for the target
-        instead of ``na<double>()``: drawing handles brace-init to their na
-        handle (``Box{}`` / ``Line{}`` / …); ``std::string``/``int``/``int64_t``/
-        ``bool`` use ``na<T>()``. Without this, ``Box b = na;`` and
-        ``string s = na;`` would both emit ``na<double>()`` and fail to compile
-        (no viable ``operator=`` / conversion). Every other RHS lowers unchanged.
+        instead of ``na<double>()``: drawing and authored UDT handles
+        brace-init to their na object (``Box{}`` / ``State{}``), while
+        ``std::string``/``int``/``int64_t``/``bool`` use ``na<T>()``. Without
+        this, ``State s = na;`` and ``string x = na;`` would both emit
+        ``na<double>()`` and fail to compile (no viable assignment/conversion).
+        Every other RHS lowers unchanged.
         """
         drawing_target = self._drawing_target_cpp_type(
             target_name,
@@ -313,6 +357,8 @@ class ExprVisitor:
         if self._is_na_expr(value_node):
             if drawing_target is not None:
                 return f"{drawing_target}{{}}"
+            if target_cpp_type in self._udt_defs:
+                return f"{target_cpp_type}{{}}"
             if target_cpp_type and target_cpp_type.startswith("PineMap<"):
                 # PineMap's default constructor is the typed ``na`` ID.  A
                 # map.new call is the only operation that allocates storage.
@@ -322,12 +368,14 @@ class ExprVisitor:
         if (isinstance(value_node, Ternary)
                 and ((target_cpp_type
                       and target_cpp_type.startswith("PineMap<"))
-                     or drawing_target is not None)):
+                     or drawing_target is not None
+                     or target_cpp_type in self._udt_defs)):
             # C++ cannot deduce a common type for ``na<double>()`` and a
             # PineMap/drawing handle.  Pine's ternary is target typed, so
             # propagate the exact declared/reassignment target into both arms.
-            # Arbitrary UDTs, arrays, matrices, and scalar ternaries retain the
-            # established generic expression path.
+            # Arrays, matrices, and scalar ternaries retain the established
+            # generic expression path; collection IDs require a nullable
+            # runtime representation before target typing alone can be safe.
             branch_target = drawing_target or target_cpp_type
             condition = self._visit_expr(value_node.condition)
             true_value = self._visit_rhs_value(

@@ -775,6 +775,7 @@ class TopLevelEmitter:
 
     def _emit_on_bar(self, lines: list[str]) -> None:
         self._lexical_drawing_types = {}
+        self._lexical_udt_types = {}
         self._lexical_series_bindings = {}
         self._lexical_known_var_tombstones = set()
         lines.append("    void on_bar(const Bar& bar) override {")
@@ -1421,6 +1422,7 @@ class TopLevelEmitter:
         prev_func_locals = self._current_func_locals
         prev_func_local_types = self._current_func_local_types
         prev_lexical_drawing_types = self._lexical_drawing_types
+        prev_lexical_udt_types = self._lexical_udt_types
         prev_lexical_series_bindings = self._lexical_series_bindings
         prev_known_var_tombstones = self._lexical_known_var_tombstones
         prev_func_body = getattr(self, "_current_func_body", None)
@@ -1438,6 +1440,17 @@ class TopLevelEmitter:
         self._current_func_locals = {n for n, _, _ in self.ctx.func_var_members.get(fi.name, [])}
         self._current_func_local_types = {}
         self._lexical_drawing_types = {}
+        self._lexical_udt_types = {
+            param: (
+                spec.name
+                if spec is not None
+                and spec.kind == "udt"
+                and spec.name in self._udt_defs
+                else None
+            )
+            for param in node.params
+            for spec in (self._current_func_param_specs.get(param),)
+        }
         self._lexical_series_bindings = {
             param: param in self._current_func_series_params
             for param in node.params
@@ -1527,6 +1540,7 @@ class TopLevelEmitter:
         self._current_func_locals = prev_func_locals
         self._current_func_local_types = prev_func_local_types
         self._lexical_drawing_types = prev_lexical_drawing_types
+        self._lexical_udt_types = prev_lexical_udt_types
         self._lexical_series_bindings = prev_lexical_series_bindings
         self._lexical_known_var_tombstones = prev_known_var_tombstones
         self._current_func_body = prev_func_body

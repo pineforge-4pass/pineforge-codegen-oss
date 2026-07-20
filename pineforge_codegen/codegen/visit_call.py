@@ -1898,7 +1898,9 @@ class CallVisitor:
                         value_node,
                         target_cpp_type=(
                             f_cpp_type
-                            if f_cpp_type.startswith("PineMap<")
+                            if (f_cpp_type.startswith("PineMap<")
+                                or f_cpp_type in self._udt_defs
+                                or f_cpp_type in DRAWING_TYPE_TO_CPP.values())
                             else None
                         ),
                     )

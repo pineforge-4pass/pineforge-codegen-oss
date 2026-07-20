@@ -256,6 +256,13 @@ class StmtVisitor:
                 if decl_spec is not None and decl_spec.kind == "udt"
                 else None
             )
+            self._lexical_udt_types[node.name] = (
+                decl_spec.name
+                if (decl_spec is not None
+                    and decl_spec.kind == "udt"
+                    and decl_spec.name in self._udt_defs)
+                else None
+            )
             if (
                 node.name == "map"
                 and getattr(self, "_block_map_visibility_depth", 0) > 0
@@ -857,6 +864,11 @@ class StmtVisitor:
                 target_node=node.target if target_name is None else None,
             )
             if selection_cpp_type is None:
+                selection_cpp_type = self._udt_target_cpp_type(
+                    target_name=target_name,
+                    target_node=node.target if target_name is None else None,
+                )
+            if selection_cpp_type is None:
                 selection_cpp_type = self._drawing_target_cpp_type(
                     target_name,
                     None,
@@ -894,6 +906,10 @@ class StmtVisitor:
             target_cpp_type = self._map_target_cpp_type(
                 target_node=node.target,
             )
+            if target_cpp_type is None:
+                target_cpp_type = self._udt_target_cpp_type(
+                    target_node=node.target,
+                )
             val_cpp = self._visit_rhs_value(
                 node.value, target_cpp_type=target_cpp_type
             )
@@ -972,6 +988,8 @@ class StmtVisitor:
             # is_na<T>()). Only computed for bare na — every other RHS is
             # unaffected.
             tct = self._map_target_cpp_type(name=target_name)
+            if tct is None:
+                tct = self._udt_target_cpp_type(target_name=target_name)
             if tct is None and self._is_na_expr(node.value):
                 tct = self._na_reassign_cpp_type(target_name)
             val_cpp = self._visit_rhs_value(node.value, target_name, target_cpp_type=tct)
@@ -985,6 +1003,8 @@ class StmtVisitor:
                     lines.append(f"{pad}{safe} {node.op} {val_cpp};")
         else:
             tct = self._map_target_cpp_type(name=target_name)
+            if tct is None:
+                tct = self._udt_target_cpp_type(target_name=target_name)
             if tct is None and self._is_na_expr(node.value):
                 tct = self._na_reassign_cpp_type(target_name)
             val_cpp = self._visit_rhs_value(node.value, target_name, target_cpp_type=tct)
@@ -1231,6 +1251,8 @@ class StmtVisitor:
         self._block_map_visibility_depth = previous_map_depth + 1
         saved_drawing_types = self._lexical_drawing_types
         self._lexical_drawing_types = dict(saved_drawing_types)
+        saved_udt_types = self._lexical_udt_types
+        self._lexical_udt_types = dict(saved_udt_types)
         saved_series_bindings = self._lexical_series_bindings
         self._lexical_series_bindings = dict(saved_series_bindings)
         saved_known_tombstones = self._lexical_known_var_tombstones
@@ -1247,6 +1269,7 @@ class StmtVisitor:
                 previous_map_visible,
                 previous_map_depth,
                 saved_drawing_types,
+                saved_udt_types,
                 saved_series_bindings,
                 saved_known_tombstones,
             )
@@ -1282,6 +1305,7 @@ class StmtVisitor:
             previous_map_visible,
             previous_map_depth,
             saved_drawing_types,
+            saved_udt_types,
             saved_series_bindings,
             saved_known_tombstones,
         )
@@ -1293,6 +1317,7 @@ class StmtVisitor:
             previous_map_visible,
             previous_map_depth,
             saved_drawing_types,
+            saved_udt_types,
             saved_series_bindings,
             saved_known_tombstones,
         ) = saved
@@ -1310,6 +1335,7 @@ class StmtVisitor:
                     ) = saved_collections
         finally:
             self._lexical_drawing_types = saved_drawing_types
+            self._lexical_udt_types = saved_udt_types
             self._lexical_series_bindings = saved_series_bindings
             self._lexical_known_var_tombstones = saved_known_tombstones
             self._block_map_binding_visible = previous_map_visible
