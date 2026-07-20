@@ -217,7 +217,7 @@ class TypeInferer:
             # historically mask a same-named top-level collection registry.
             # Declared scalar/UDT parameters do shadow it, while inferred or
             # declared collection parameters always carry their exact kind.
-            if (param_spec.kind in {"array", "map", "matrix"}
+            if (param_spec.kind in {"array", "map", "matrix", "udt"}
                     or name in getattr(
                         self, "_current_func_declared_param_names", set()
                     )):
@@ -369,6 +369,21 @@ class TypeInferer:
         if isinstance(node, StringLiteral):
             return TypeSpec.primitive("string")
         if isinstance(node, Identifier):
+            # An active lexical UDT/drawing binding must beat a same-spelled
+            # top-level primitive or collection.  This is intentionally the
+            # exact lexical prefix of _identifier_udt_binding(), not its raw-
+            # name fallback: method receivers such as ``line ln`` otherwise
+            # inherit an unrelated global ``ln`` before dispatch is resolved.
+            lexical_drawing = getattr(self, "_lexical_drawing_types", {})
+            drawing_cpp = lexical_drawing.get(node.name)
+            if drawing_cpp is not None:
+                for pine_name, cpp_name in DRAWING_TYPE_TO_CPP.items():
+                    if cpp_name == drawing_cpp:
+                        return TypeSpec.udt(pine_name)
+            lexical_udts = getattr(self, "_lexical_udt_types", {})
+            lexical_udt = lexical_udts.get(node.name)
+            if lexical_udt in self._udt_defs:
+                return TypeSpec.udt(lexical_udt)
             collection_spec = self._collection_spec_for_name(node.name)
             # This resolver also carries exact primitive loop/parameter/global
             # metadata despite its historical name.  Preserve those scalar

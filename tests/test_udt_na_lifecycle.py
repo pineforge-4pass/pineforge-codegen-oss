@@ -365,10 +365,16 @@ array<bool> flags = array.from(enabled, false)
 
 
 def test_drawing_method_parameter_keeps_exact_lexical_type() -> None:
-    source = r'''//@version=6
+    top_level_collisions = {
+        "primitive": "bool ln = true",
+        "collection": "array<int> ln = array.from(1)",
+    }
+    for label, top_level in top_level_collisions.items():
+        source = rf'''//@version=6
 strategy("exact drawing method parameter")
 type Shadow
     float value
+{top_level}
 method span(line ln) =>
     ln.get_x2() - ln.get_x1()
 poison() =>
@@ -378,12 +384,15 @@ var line segment = line.new(bar_index, close, bar_index + 1, close)
 float measured = segment.span()
 bool ignored = poison()
 '''
-    cpp = transpile(source)
-    assert "pf_line_get_x2(_pf_lines_, ln)" in cpp
-    assert "pf_line_get_x1(_pf_lines_, ln)" in cpp
-    assert "ln.get_x2()" not in cpp
-    assert "ln.get_x1()" not in cpp
-    compile_cpp(cpp, label="udt-exact-drawing-method-parameter")
+        cpp = transpile(source)
+        assert "pf_line_get_x2(_pf_lines_, ln)" in cpp
+        assert "pf_line_get_x1(_pf_lines_, ln)" in cpp
+        assert "ln.get_x2()" not in cpp
+        assert "ln.get_x1()" not in cpp
+        compile_cpp(
+            cpp,
+            label=f"udt-exact-drawing-method-parameter-{label}",
+        )
 
 
 def test_stateful_method_edge_uses_exact_global_udt_owner() -> None:
