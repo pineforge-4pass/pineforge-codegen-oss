@@ -2170,12 +2170,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         spec = specs[param_idx] if param_idx < len(specs) else None
                         if spec is not None and spec.kind == "udt":
                             udt_name = spec.name
-                if udt_name is None:
-                    udt_name = self._udt_var_types.get(recv.name)
+            # Resolve the surviving exact global/lexical symbol before the
+            # flat raw-name registry. A later callable-local declaration can
+            # overwrite that registry and otherwise attach the wrong stateful
+            # method edge to wrappers and their written call sites.
             if udt_name is None:
                 spec = self._type_spec_from_expr(recv)
                 if spec is not None and spec.kind == "udt":
                     udt_name = spec.name
+            if udt_name is None and isinstance(recv, Identifier):
+                udt_name = self._udt_var_types.get(recv.name)
             key = f"{udt_name}.{method}" if udt_name else ""
             return key if key in func_defs else None
 

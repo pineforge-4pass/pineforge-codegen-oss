@@ -1075,6 +1075,31 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if spec is not None and spec.kind == "udt"
                 else None
             )
+        # Analyzer metadata preserves the collision-safe storage identity for
+        # every persistent declaration, including chart-scope siblings that
+        # are not direct Program children. Keep primitive tombstones too: the
+        # raw-name UDT union must not swap ``state`` and ``state__blk1`` types.
+        self._member_udt_types: dict[str, str | None] = {}
+        metadata_by_node = getattr(
+            self.ctx, "var_member_metadata_by_node", {}
+        ) or {}
+        type_specs_by_node = getattr(
+            self.ctx, "var_member_type_specs_by_node", {}
+        ) or {}
+        for node_id, meta in metadata_by_node.items():
+            stmt, member_name, _ptype, _init_str, _callable = meta
+            spec = type_specs_by_node.get(node_id)
+            if spec is None and isinstance(stmt, VarDecl):
+                spec = (
+                    self._type_spec_from_hint_name(stmt.type_hint)
+                    if stmt.type_hint
+                    else self._type_spec_from_expr(stmt.value)
+                )
+            self._member_udt_types[member_name] = (
+                spec.name
+                if spec is not None and spec.kind == "udt"
+                else None
+            )
         self._runtime_var_init_flags: dict[tuple[int, str], str] = {}
 
         used_names = set(self._all_member_names)
@@ -1539,6 +1564,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         global_types = getattr(self, "_global_udt_types", {})
         if name in global_types:
             return global_types[name]
+        member_types = getattr(self, "_member_udt_types", {})
+        if name in member_types:
+            return member_types[name]
         return self._udt_var_types.get(name)
 
     def _emit_cloned_var_decl(self, orig_safe: str, cloned_safe: str,
@@ -1557,6 +1585,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     vname, owner_func
                 )
                 udt_spec = self._callable_var_udt_spec(vname, owner_func)
+                member_udt_type = self._member_udt_type(vname)
                 drawing_cpp = self._drawing_var_member_cpp_types.get(vname)
                 if (drawing_cpp is not None
                         and orig_safe in self._series_var_member_names):
@@ -1580,7 +1609,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(
                         f"    {drawing_cpp} {cloned_safe} = {drawing_cpp}{{}};"
                     )
-                elif udt_spec is not None or vname in self._udt_var_types:
+                elif udt_spec is not None or member_udt_type is not None:
                     # Drawing handle / UDT var clone must match the original's
                     # type (Line/Label/Box/<UDT>), not the coarse PineType
                     # default (double) — otherwise the clone can't hold the
@@ -1588,7 +1617,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     udt_t = (
                         udt_spec.name
                         if udt_spec is not None
-                        else self._udt_var_types[vname]
+                        else member_udt_type
                     )
                     handle_cpp = DRAWING_TYPE_TO_CPP.get(udt_t, udt_t)
                     lines.append(f"    {handle_cpp} {cloned_safe} = {handle_cpp}{{}};")

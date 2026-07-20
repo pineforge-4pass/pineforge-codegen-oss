@@ -147,6 +147,32 @@ rightNull = probe(false)
     compile_cpp(cpp, label="udt-na-sibling-branches")
 
 
+def test_chart_scope_sibling_udt_vars_keep_exact_member_types() -> None:
+    source = r'''//@version=6
+strategy("chart UDT sibling declarations")
+type Left
+    float value
+type Right
+    int value
+if close > 0
+    var Left state = na
+    if na(state)
+        state := Left.new(1.0)
+    state := na
+else
+    var Right state = na
+    if na(state)
+        state := Right.new(2)
+    state := na
+'''
+    cpp = transpile(source)
+    assert re.search(r"^\s+Left state;$", cpp, re.M)
+    assert re.search(r"^\s+Right state__blk1;$", cpp, re.M)
+    assert "state = Left{};" in cpp
+    assert "state__blk1 = Right{};" in cpp
+    compile_cpp(cpp, label="udt-na-chart-sibling-members")
+
+
 def test_plain_and_nested_udt_na_contexts_are_target_typed() -> None:
     source = r'''//@version=6
 strategy("UDT contextual na")
@@ -300,6 +326,72 @@ bool trackerNull = na(tracker)
     assert "state = na<int>();" in cpp
     assert "tracker = na<int>();" in cpp
     compile_cpp(cpp, label="udt-exact-scalar-tuple-tombstones")
+
+
+def test_callable_primitive_clones_ignore_unrelated_udt_raw_name() -> None:
+    source = r'''//@version=6
+strategy("UDT callable primitive clone isolation")
+type State
+    float value
+counter(bool reset) =>
+    var int state = 1
+    if reset
+        state := na
+    state
+shadow() =>
+    State state = State.new(4.0)
+    na(state)
+int first = counter(true)
+int second = counter(false)
+bool ignored = shadow()
+'''
+    cpp = transpile(source)
+    assert re.search(r"^\s+int state(?: = [^;]+)?;$", cpp, re.M)
+    assert re.search(r"^\s+int state_cs1(?: = [^;]+)?;$", cpp, re.M)
+    assert "State state_cs1" not in cpp
+    compile_cpp(cpp, label="udt-na-callable-primitive-clone-isolation")
+
+
+def test_stateful_method_edge_uses_exact_global_udt_owner() -> None:
+    source = r'''//@version=6
+strategy("stateful method exact edge")
+type Left
+    float value
+type Right
+    float value
+method accumulate(Left self) =>
+    var float leftTotal = 0.0
+    leftTotal += self.value
+    leftTotal
+method accumulate(Right self) =>
+    var float rightTotal = 0.0
+    rightTotal += self.value
+    rightTotal
+Left state = Left.new(2.0)
+wrapped() => state.accumulate()
+shadow() =>
+    Right state = Right.new(3.0)
+    na(state)
+bool ignored = shadow()
+float first = wrapped()
+float second = wrapped()
+'''
+    cpp = transpile(source)
+    assert "_udt_Left_accumulate_cs0(state)" in cpp
+    assert "_udt_Left_accumulate_cs1(state)" in cpp
+    assert "_udt_Right_accumulate_cs0(state)" not in cpp
+    compile_cpp(cpp, label="udt-na-stateful-method-exact-edge")
+    driver = r'''
+#include <iostream>
+int main() {
+    Bar bars[] = {Bar{1.0, 2.0, 0.0, 1.0, 1.0, 1700000000000LL}};
+    GeneratedStrategy strategy;
+    strategy.run(bars, 1);
+    if (!strategy.last_error().empty()) return 8;
+    std::cout << strategy.first << " " << strategy.second << "\n";
+}
+'''
+    assert _compile_and_run(cpp + driver) == "2 2\n"
 
 
 def test_direct_udt_ctor_na_selection_return_is_target_typed() -> None:
