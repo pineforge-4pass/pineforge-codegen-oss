@@ -98,7 +98,7 @@ from ..ast_nodes import (
     VarDecl,
     WhileStmt,
 )
-from ..symbols import PineType, TypeSpec
+from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .tables import (
     ARRAY_NEW_CTORS,
     DRAWING_TYPE_TO_CPP,
@@ -1329,8 +1329,9 @@ class StmtVisitor:
             callee = node.value.callee
             if isinstance(callee, MemberAccess):
                 recv_spec = self._type_spec_from_expr(callee.object)
-                if recv_spec is not None and recv_spec.kind == "udt" and recv_spec.name:
-                    method_key = f"{recv_spec.name}.{callee.member}"
+                receiver_name = method_receiver_type_name(recv_spec)
+                if receiver_name is not None:
+                    method_key = f"{receiver_name}.{callee.member}"
                     fi_u = self._func_info_map.get(method_key)
                     if (fi_u is not None
                             and getattr(fi_u, "is_udt_method", False)
@@ -1352,11 +1353,10 @@ class StmtVisitor:
             fi = self._func_info_map.get(func_name)
         elif isinstance(node.value.callee, MemberAccess):
             recv_spec = self._type_spec_from_expr(node.value.callee.object)
-            if (recv_spec is not None
-                    and recv_spec.kind == "udt"
-                    and recv_spec.name):
+            receiver_name = method_receiver_type_name(recv_spec)
+            if receiver_name is not None:
                 fi = self._func_info_map.get(
-                    f"{recv_spec.name}.{node.value.callee.member}"
+                    f"{receiver_name}.{node.value.callee.member}"
                 )
         if (fi is not None
                 and fi.node is not None

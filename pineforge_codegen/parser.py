@@ -791,8 +791,16 @@ class Parser:
         start_tok = self._advance()  # consume 'method'
         name = self._consume(TokenType.IDENT).value
         self._consume(TokenType.LPAREN)
-        # First param is the type + self: TypeName self
-        type_name = self._consume(TokenType.IDENT).value
+        # First param is the required receiver type + self name.  Receiver
+        # types use the same complete Pine hint grammar as ordinary typed
+        # parameters: primitives lex as TYPE_* tokens, while collections may
+        # carry nested ``<...>`` arguments or postfix ``[]``.  Consuming only
+        # IDENT here silently dropped valid declarations such as
+        # ``method id(int self)`` and ``method push(array<int> self, ...)``
+        # through the parser's top-level recovery path.
+        if self._current().type not in TYPE_KEYWORDS | {TokenType.IDENT}:
+            self._consume(TokenType.IDENT)  # raises a located ParseError
+        type_name = self._parse_type_hint_string()
         params = [self._consume(TokenType.IDENT).value]  # 'self' or user's name
         param_type_hints = [type_name]
         # Preserve per-param default expressions so codegen can substitute

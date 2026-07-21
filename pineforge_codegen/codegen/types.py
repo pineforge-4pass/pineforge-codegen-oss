@@ -38,7 +38,7 @@ from ..ast_nodes import (
     MemberAccess, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
     Subscript, Ternary, TupleLiteral, UnaryOp, VarDecl,
 )
-from ..symbols import PineType, TypeSpec
+from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .. import signatures as sigs
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
@@ -459,8 +459,18 @@ class TypeInferer:
             if self._collection_name_is_lexically_shadowed(node.name):
                 return None
             sym = self.ctx.symbols.resolve(node.name)
-            if sym is not None and getattr(sym, "type_spec", None) is not None:
-                return sym.type_spec
+            if sym is not None:
+                if getattr(sym, "type_spec", None) is not None:
+                    return sym.type_spec
+                primitive_name = {
+                    PineType.INT: "int",
+                    PineType.FLOAT: "float",
+                    PineType.BOOL: "bool",
+                    PineType.STRING: "string",
+                    PineType.COLOR: "color",
+                }.get(sym.pine_type)
+                if primitive_name is not None:
+                    return TypeSpec.primitive(primitive_name)
             return None
         if isinstance(node, Subscript):
             # History access preserves the scalar drawing-handle type.  This
@@ -563,6 +573,57 @@ class TypeInferer:
                 if (udt_return in DRAWING_TYPE_TO_CPP
                         or udt_return in self._udt_defs):
                     return TypeSpec.udt(udt_return)
+            if isinstance(node.callee, MemberAccess):
+                receiver_spec = self._type_spec_from_expr(
+                    node.callee.object
+                )
+                receiver_name = method_receiver_type_name(receiver_spec)
+                method_info = (
+                    getattr(self, "_func_info_map", {}).get(
+                        f"{receiver_name}.{node.callee.member}"
+                    )
+                    if receiver_name is not None
+                    else None
+                )
+                if (
+                    method_info is not None
+                    and getattr(method_info, "is_udt_method", False)
+                ):
+                    return_spec = getattr(
+                        method_info, "return_type_spec", None
+                    )
+                    if return_spec is not None:
+                        return return_spec
+                    udt_return = getattr(
+                        method_info, "udt_return_type", None
+                    )
+                    if (
+                        udt_return in DRAWING_TYPE_TO_CPP
+                        or udt_return in self._udt_defs
+                    ):
+                        return TypeSpec.udt(udt_return)
+                    call_site_idx = self._callable_target_callsite_idx(
+                        method_info,
+                        node,
+                    )
+                    return_pine_type = (
+                        self._callsite_callable_return_pine_type(
+                            method_info,
+                            call_site_idx,
+                        )
+                    )
+                    primitive_name = {
+                        PineType.INT: "int",
+                        PineType.FLOAT: "float",
+                        PineType.BOOL: "bool",
+                        PineType.STRING: "string",
+                        PineType.COLOR: "color",
+                    }.get(return_pine_type)
+                    return (
+                        TypeSpec.primitive(primitive_name)
+                        if primitive_name is not None
+                        else None
+                    )
             # ticker.* constructors (inherit/standard/heikinashi) return a symbol
             # string; without this the member-type inference defaults to double
             # and a ``haTicker = ticker.heikinashi(...)`` global mis-declares as
@@ -679,11 +740,12 @@ class TypeInferer:
                         return TypeSpec.primitive("bool")
                     if member_name == "size":
                         return TypeSpec.primitive("int")
-                if (recv_spec is not None
-                        and recv_spec.kind == "udt"
-                        and recv_spec.name):
-                    method_info = self._func_info_map.get(
-                        f"{recv_spec.name}.{member_name}"
+                receiver_name = method_receiver_type_name(recv_spec)
+                if receiver_name is not None:
+                    method_info = getattr(
+                        self, "_func_info_map", {}
+                    ).get(
+                        f"{receiver_name}.{member_name}"
                     )
                     return_spec = getattr(
                         method_info, "return_type_spec", None
@@ -1255,20 +1317,25 @@ class TypeInferer:
                     and owner_node.params
                     and isinstance(receiver, Identifier)
                     and receiver.name == owner_node.params[0]
-                    and getattr(owner_info, "udt_type_name", None)
                 ):
-                    callee_info = self._func_info_map.get(
-                        f"{owner_info.udt_type_name}.{expr.callee.member}"
+                    receiver_specs = list(
+                        getattr(owner_info, "param_type_specs", ()) or ()
                     )
+                    receiver_name = method_receiver_type_name(
+                        receiver_specs[0] if receiver_specs else None
+                    ) or getattr(owner_info, "udt_type_name", None)
+                    if receiver_name is not None:
+                        callee_info = self._func_info_map.get(
+                            f"{receiver_name}.{expr.callee.member}"
+                        )
                 if callee_info is None:
                     receiver_spec = self._type_spec_from_expr(receiver)
-                    if (
-                        receiver_spec is not None
-                        and receiver_spec.kind == "udt"
-                        and receiver_spec.name
-                    ):
+                    receiver_name = method_receiver_type_name(
+                        receiver_spec
+                    )
+                    if receiver_name is not None:
                         callee_info = self._func_info_map.get(
-                            f"{receiver_spec.name}.{expr.callee.member}"
+                            f"{receiver_name}.{expr.callee.member}"
                         )
             return (
                 callee_info is not None
@@ -1899,8 +1966,11 @@ class TypeInferer:
                 recv_spec = self._type_spec_from_expr(node.callee.object)
                 if recv_spec is not None and recv_spec.kind == "array" and member_name == "join":
                     return "std::string"
-                if recv_spec is not None and recv_spec.kind == "udt" and recv_spec.name:
-                    fi_u = self._func_info_map.get(f"{recv_spec.name}.{member_name}")
+                receiver_name = method_receiver_type_name(recv_spec)
+                if receiver_name is not None:
+                    fi_u = self._func_info_map.get(
+                        f"{receiver_name}.{member_name}"
+                    )
                     if fi_u is not None:
                         call_site_idx = self._callable_target_callsite_idx(
                             fi_u, node

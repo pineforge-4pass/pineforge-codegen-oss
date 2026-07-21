@@ -56,7 +56,72 @@ class TypeSpec:
             return f"array<{self.element}>"
         if self.kind == "map" and self.key is not None and self.value is not None:
             return f"map<{self.key},{self.value}>"
+        if self.kind == "matrix" and self.element is not None:
+            return f"matrix<{self.element}>"
         return self.name or self.kind
+
+
+def method_receiver_type_name(spec: TypeSpec | None) -> str | None:
+    """Canonical Pine type name used to key a user method receiver.
+
+    ``MethodDef.type_name`` is the parser-normalized spelling (for example
+    ``array<int>``).  Calls are resolved from structured ``TypeSpec`` values,
+    so both sides need one lossless spelling across primitive, UDT, and
+    collection receivers.  Incomplete collection specs stay unresolved rather
+    than accidentally colliding under a coarse ``array``/``map``/``matrix``
+    key.
+    """
+
+    if spec is None:
+        return None
+    if spec.kind in {"primitive", "udt"}:
+        return spec.name
+    if spec.kind == "array" and spec.element is not None:
+        element = method_receiver_type_name(spec.element)
+        return f"array<{element}>" if element is not None else None
+    if spec.kind == "map" and spec.key is not None and spec.value is not None:
+        key = method_receiver_type_name(spec.key)
+        value = method_receiver_type_name(spec.value)
+        if key is not None and value is not None:
+            return f"map<{key},{value}>"
+        return None
+    if spec.kind == "matrix" and spec.element is not None:
+        element = method_receiver_type_name(spec.element)
+        return f"matrix<{element}>" if element is not None else None
+    return None
+
+
+def method_receiver_cpp_token(
+    spec: TypeSpec | None,
+    fallback_name: str | None = None,
+) -> str:
+    """Return a stable C++ identifier fragment for a method receiver type.
+
+    Existing primitive, UDT, and drawing receiver spellings remain unchanged.
+    Generic Pine types cannot be embedded directly in an identifier, so their
+    structure is encoded recursively (``array<int>`` -> ``array_int``).  The
+    fallback only supports older/synthetic ``FuncInfo`` records that lack the
+    structured receiver spec.
+    """
+
+    if spec is not None:
+        if spec.kind in {"primitive", "udt"} and spec.name:
+            return spec.name
+        if spec.kind == "array" and spec.element is not None:
+            return f"array_{method_receiver_cpp_token(spec.element)}"
+        if spec.kind == "map" and spec.key is not None and spec.value is not None:
+            return (
+                f"map_{method_receiver_cpp_token(spec.key)}_"
+                f"{method_receiver_cpp_token(spec.value)}"
+            )
+        if spec.kind == "matrix" and spec.element is not None:
+            return f"matrix_{method_receiver_cpp_token(spec.element)}"
+
+    raw = fallback_name or "receiver"
+    token = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in raw)
+    if token and token[0].isdigit():
+        token = f"type_{token}"
+    return token or "receiver"
 
 
 @dataclass

@@ -86,7 +86,7 @@ from ..ast_nodes import (
     ExprStmt, FuncCall, Identifier, IfStmt, SwitchStmt, VarDecl,
 )
 from ..analyzer import FuncInfo
-from ..symbols import PineType
+from ..symbols import PineType, method_receiver_cpp_token
 from .tables import (
     BAR_SERIES_PUSH,
     DRAWING_TYPE_TO_CPP,
@@ -1184,10 +1184,18 @@ class TopLevelEmitter:
         lines.append("")
 
     def _emit_udt_method_cpp_name(self, fi: FuncInfo) -> str:
-        """Stable C++ identifier for a UDT instance method (``_udt_Type_method``)."""
-        udt = fi.udt_type_name or ""
+        """Stable C++ identifier for a typed instance method."""
+        receiver_spec = (
+            fi.param_type_specs[0]
+            if getattr(fi, "param_type_specs", None)
+            else None
+        )
+        receiver = method_receiver_cpp_token(
+            receiver_spec,
+            fi.udt_type_name,
+        )
         base = fi.node.name if fi.node else ""
-        return self._func_safe_name(f"_udt_{udt}_{base}")
+        return self._func_safe_name(f"_udt_{receiver}_{base}")
 
     def _emit_func_def(self, fi: FuncInfo, lines: list[str], call_site_idx: int | None = None,
                        instance: dict | None = None) -> None:
@@ -1228,7 +1236,10 @@ class TopLevelEmitter:
         self._map_vars = set(prev_map_vars)
         self._matrix_specs = dict(prev_matrix_specs)
 
-        is_udt = bool(getattr(fi, "is_udt_method", False)) and fi.udt_type_name
+        is_method = (
+            bool(getattr(fi, "is_udt_method", False))
+            and fi.udt_type_name
+        )
 
         # Determine param types and set context for type inference inside body
         param_strs = []
@@ -1261,22 +1272,54 @@ class TopLevelEmitter:
         )
         for i, p in enumerate(node.params):
             spec = None
-            if is_udt and i == 0 and fi.udt_type_name:
-                # A method receiver whose type is a drawing primitive
-                # (egoigor's ``method slope(line ln)``) must emit ``Line&`` not
-                # the unknown ``line&``. Register _udt_param_udt so the body's
-                # getters dispatch through the §4.3 drawing path (L.6d / U.5).
+            receiver_spec = None
+            if is_method and i == 0:
                 recv_spec = (
                     fi.param_type_specs[i]
                     if i < len(fi.param_type_specs)
                     else None
                 )
-                if recv_spec is not None and recv_spec.kind == "map":
-                    # A map method receiver is a copied ID handle. Mutations
-                    # reach the caller's map while rebinds stay method-local.
-                    spec = recv_spec
+                receiver_spec = recv_spec
+
+            if (
+                receiver_spec is not None
+                and receiver_spec.kind == "primitive"
+                and p in func_sv
+            ):
+                # A primitive receiver used with history is a Series boundary,
+                # just like an ordinary history-bearing UDF parameter.
+                elem_cpp_t = self._series_param_element_cpp_type(
+                    fi, i, call_site_idx
+                )
+                cpp_t = f"const Series<{elem_cpp_t}>&"
+                spec = receiver_spec
+                self._current_func_series_params.add(p)
+                self._current_func_series_param_types[p] = elem_cpp_t
+                self._current_func_series_param_types[
+                    self._safe_name(p)
+                ] = elem_cpp_t
+            elif is_method and i == 0 and fi.udt_type_name:
+                # Receiver pass modes follow Pine's value/ID families:
+                # primitives by value; arrays, matrices, UDTs, and drawings by
+                # reference; maps by copied shared-ID handle so mutations
+                # reach the caller while receiver rebinds remain local.
+                recv_spec = receiver_spec
+                if recv_spec is None:
+                    recv_spec = self._type_spec_from_hint_name(
+                        fi.udt_type_name
+                    )
+                spec = recv_spec
+                if recv_spec is not None:
                     cpp_t = self._type_spec_to_cpp(recv_spec)
+                    if recv_spec.kind in {"array", "matrix", "udt"}:
+                        cpp_t = f"{cpp_t}&"
+                    if recv_spec.kind == "udt" and recv_spec.name:
+                        safe_p = self._safe_name(p)
+                        self._udt_param_udt[safe_p] = recv_spec.name
+                        self._udt_param_udt[p] = recv_spec.name
                 else:
+                    # Compatibility for synthetic/legacy method records that
+                    # carry only the old receiver-name field.
                     recv_cpp = DRAWING_TYPE_TO_CPP.get(
                         fi.udt_type_name, fi.udt_type_name
                     )
@@ -1401,7 +1444,11 @@ class TopLevelEmitter:
         )
 
         # For per-call-site variants, suffix the function name and activate TA + var remapping
-        func_name = self._emit_udt_method_cpp_name(fi) if is_udt else self._func_safe_name(fi.name)
+        func_name = (
+            self._emit_udt_method_cpp_name(fi)
+            if is_method
+            else self._func_safe_name(fi.name)
+        )
         if instance is not None:
             # Fresh context-sensitive instance: name + composed remaps come from
             # the instance record. No textual cs index (dispatch is via the

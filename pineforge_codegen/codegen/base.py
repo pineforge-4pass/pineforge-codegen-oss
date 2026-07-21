@@ -25,7 +25,7 @@ from ..analyzer import (
     TA_NO_CTOR,
     TA_PERIOD_ARG,
 )
-from ..symbols import PineType, TypeSpec
+from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 
@@ -3391,7 +3391,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 and info.node.params
                 and info.udt_type_name
             ):
-                lexical[info.node.params[0]] = TypeSpec.udt(info.udt_type_name)
+                receiver_spec = specs[0] if specs else None
+                if receiver_spec is None:
+                    receiver_spec = self._type_spec_from_hint_name(
+                        info.udt_type_name
+                    )
+                lexical[info.node.params[0]] = receiver_spec
             lexical.update(self._func_collection_types.get(owner, {}))
             return lexical
 
@@ -3414,14 +3419,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 receiver_spec = self._map_effect_type_spec(
                     node.callee.object, owner_lexical_specs(owner)
                 )
-                if (
-                    receiver_spec is not None
-                    and receiver_spec.kind == "udt"
-                    and receiver_spec.name
-                ):
-                    method_key = (
-                        f"{receiver_spec.name}.{node.callee.member}"
-                    )
+                receiver_name = method_receiver_type_name(receiver_spec)
+                if receiver_name is not None:
+                    method_key = f"{receiver_name}.{node.callee.member}"
                     candidate = self._func_info_map.get(method_key)
                     if (
                         candidate is not None

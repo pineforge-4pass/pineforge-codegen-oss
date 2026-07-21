@@ -21,7 +21,13 @@ from ..ast_nodes import (
     TupleLiteral,
     TypeDecl, EnumDecl, MethodDef, TypeField,
 )
-from ..symbols import PineType, Symbol, SymbolTable, TypeSpec
+from ..symbols import (
+    PineType,
+    Symbol,
+    SymbolTable,
+    TypeSpec,
+    method_receiver_type_name,
+)
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from .. import signatures as sigs
 from .. import tv_input_choices as tv_in
@@ -2183,7 +2189,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
             recv = call.callee.object
             method = call.callee.member
-            udt_name: str | None = None
+            receiver_type_name: str | None = None
             if isinstance(recv, Identifier):
                 owner_info = func_info_by_name.get(owner or "")
                 # Resolve the active callable's lexical parameters before the
@@ -2195,24 +2201,31 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     if (getattr(owner_info, "is_udt_method", False)
                             and owner_info.node.params
                             and recv.name == owner_info.node.params[0]):
-                        udt_name = owner_info.udt_type_name
+                        owner_specs = list(
+                            getattr(owner_info, "param_type_specs", ()) or ()
+                        )
+                        receiver_type_name = method_receiver_type_name(
+                            owner_specs[0] if owner_specs else None
+                        ) or owner_info.udt_type_name
                     elif recv.name in owner_info.node.params:
                         param_idx = owner_info.node.params.index(recv.name)
                         specs = getattr(owner_info, "param_type_specs", []) or []
                         spec = specs[param_idx] if param_idx < len(specs) else None
-                        if spec is not None and spec.kind == "udt":
-                            udt_name = spec.name
+                        receiver_type_name = method_receiver_type_name(spec)
             # Resolve the surviving exact global/lexical symbol before the
             # flat raw-name registry. A later callable-local declaration can
             # overwrite that registry and otherwise attach the wrong stateful
             # method edge to wrappers and their written call sites.
-            if udt_name is None:
+            if receiver_type_name is None:
                 spec = self._type_spec_from_expr(recv)
-                if spec is not None and spec.kind == "udt":
-                    udt_name = spec.name
-            if udt_name is None and isinstance(recv, Identifier):
-                udt_name = self._udt_var_types.get(recv.name)
-            key = f"{udt_name}.{method}" if udt_name else ""
+                receiver_type_name = method_receiver_type_name(spec)
+            if receiver_type_name is None and isinstance(recv, Identifier):
+                receiver_type_name = self._udt_var_types.get(recv.name)
+            key = (
+                f"{receiver_type_name}.{method}"
+                if receiver_type_name
+                else ""
+            )
             return key if key in func_defs else None
 
         def _find_calls(node, known_funcs: set[str],
@@ -4361,7 +4374,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.VOID
 
     def _visit_MethodDef(self, node) -> PineType:
-        """Register UDT instance method under a unique key ``TypeName.methodName``."""
+        """Register a typed instance method under ``TypeName.methodName``."""
         method_key = f"{node.type_name}.{node.name}"
         self._symbols.enter_scope(f"method_{node.type_name}_{node.name}")
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
@@ -4369,7 +4382,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         param_types: list[PineType] = []
         param_specs: list = []
         for i, p in enumerate(node.params):
-            udt_self = node.type_name if i == 0 else None
             hint = param_hints[i] if i < len(param_hints) else None
             # Only the receiver is required to be typed in Pine methods. Every
             # other omitted type is polymorphic per written call, exactly like
@@ -4377,6 +4389,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # bool/int history call silently coerce through Series<double>.
             ptype = self._type_hint_to_pine(hint) if hint else PineType.UNKNOWN
             pspec = self._type_spec_from_hint(hint) if hint else None
+            udt_self = (
+                node.type_name
+                if i == 0 and pspec is not None and pspec.kind == "udt"
+                else None
+            )
             param_types.append(ptype)
             param_specs.append(pspec)
             sym = Symbol(
@@ -4897,12 +4914,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # apply the same deferred map-history gate as regular UDFs before
             # codegen can emit the parameter as a scalar double.
             receiver_spec = self._type_spec_from_expr(obj)
-            if (
-                receiver_spec is not None
-                and receiver_spec.kind == "udt"
-                and receiver_spec.name
-            ):
-                method_key = f"{receiver_spec.name}.{member}"
+            receiver_type_name = method_receiver_type_name(receiver_spec)
+            if receiver_type_name is not None:
+                method_key = f"{receiver_type_name}.{member}"
                 method_info = next(
                     (
                         info

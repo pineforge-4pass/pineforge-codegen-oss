@@ -44,7 +44,7 @@ from ..ast_nodes import (
     MemberAccess, NaLiteral, NumberLiteral, StringLiteral, Subscript, Ternary,
     SwitchStmt, TupleLiteral, UnaryOp,
 )
-from ..symbols import PineType, TypeSpec
+from ..symbols import PineType, TypeSpec, method_receiver_type_name
 
 # Drawing-objects-as-data type names (spec §4.1). Defined locally — the
 # analyzer must not import from ``codegen`` (codegen imports analyzer, so the
@@ -241,6 +241,14 @@ class TypeHelper:
     def _type_spec_from_expr(self, value: ASTNode | None) -> TypeSpec | None:
         if value is None:
             return None
+        if isinstance(value, NumberLiteral):
+            return TypeSpec.primitive(
+                "float" if isinstance(value.value, float) else "int"
+            )
+        if isinstance(value, BoolLiteral):
+            return TypeSpec.primitive("bool")
+        if isinstance(value, StringLiteral):
+            return TypeSpec.primitive("string")
         if isinstance(value, Ternary):
             true_spec = self._type_spec_from_expr(value.true_val)
             false_spec = self._type_spec_from_expr(value.false_val)
@@ -375,6 +383,42 @@ class TypeHelper:
             func = cal.member if isinstance(cal, MemberAccess) else None
             ns = cal.object.name if isinstance(cal, MemberAccess) and isinstance(cal.object, Identifier) else None
             targs = self._template_args_from_call(value)
+            if isinstance(cal, MemberAccess):
+                typed_receiver_spec = self._type_spec_from_expr(cal.object)
+                typed_receiver_name = method_receiver_type_name(
+                    typed_receiver_spec
+                )
+                method_info = next(
+                    (
+                        info
+                        for info in getattr(self, "_func_infos", ())
+                        if info.name == f"{typed_receiver_name}.{func}"
+                        and getattr(info, "is_udt_method", False)
+                    ),
+                    None,
+                ) if typed_receiver_name is not None else None
+                if method_info is not None:
+                    return_spec = getattr(
+                        method_info, "return_type_spec", None
+                    )
+                    if return_spec is not None:
+                        return return_spec
+                    udt_return = getattr(
+                        method_info, "udt_return_type", None
+                    )
+                    if udt_return is not None:
+                        return TypeSpec.udt(udt_return)
+                    if method_info.return_type in {
+                        PineType.INT,
+                        PineType.FLOAT,
+                        PineType.BOOL,
+                        PineType.STRING,
+                        PineType.COLOR,
+                    }:
+                        return self._pine_type_to_spec(
+                            method_info.return_type
+                        )
+                    return None
             # Drawing-objects-as-data return typing: *.new / *.copy -> handle of
             # the self-type; linefill.get_line* -> line; chart.point.* -> point.
             if ns in _DRAWING_NS:
@@ -508,10 +552,9 @@ class TypeHelper:
                         return recv_spec.element
                     if func == "eigenvalues":
                         return TypeSpec.array(TypeSpec.primitive("float"))
-                if (recv_spec is not None
-                        and recv_spec.kind == "udt"
-                        and recv_spec.name):
-                    method_key = f"{recv_spec.name}.{func}"
+                receiver_name = method_receiver_type_name(recv_spec)
+                if receiver_name is not None:
+                    method_key = f"{receiver_name}.{func}"
                     method_info = next(
                         (
                             info
@@ -535,15 +578,33 @@ class TypeHelper:
                         return TypeSpec.udt("line")
         if isinstance(value, Identifier):
             sym = self._symbols.resolve(value.name)
-            if sym is not None and sym.type_spec is not None:
-                return sym.type_spec
+            if sym is not None:
+                if sym.type_spec is not None:
+                    return sym.type_spec
+                if sym.pine_type in {
+                    PineType.INT,
+                    PineType.FLOAT,
+                    PineType.BOOL,
+                    PineType.STRING,
+                    PineType.COLOR,
+                }:
+                    return self._pine_type_to_spec(sym.pine_type)
         if isinstance(value, FuncCall):
             # User-function return spec (e.g. an array-returning
             # ``buildPDLevels() => array.from(...)``), so a caller's
             # ``allLevels = buildPDLevels()`` infers an array TypeSpec.
             cal = value.callee
-            fname = cal.member if isinstance(cal, MemberAccess) else (
-                cal.name if isinstance(cal, Identifier) else None)
+            if isinstance(cal, MemberAccess):
+                receiver_name = method_receiver_type_name(
+                    self._type_spec_from_expr(cal.object)
+                )
+                fname = (
+                    f"{receiver_name}.{cal.member}"
+                    if receiver_name is not None
+                    else cal.member
+                )
+            else:
+                fname = cal.name if isinstance(cal, Identifier) else None
             if fname and fname in getattr(self, "_func_return_type_specs", {}):
                 return self._func_return_type_specs[fname]
             if fname and fname in getattr(self, "_func_udt_return_types", {}):

@@ -142,7 +142,7 @@ from ..ast_nodes import (
     StringLiteral,
     VarDecl,
 )
-from ..symbols import TypeSpec
+from ..symbols import TypeSpec, method_receiver_type_name
 from .. import signatures as sigs
 from .drawing import ALL_DRAWING_METHODS
 from .tables import (
@@ -246,6 +246,86 @@ class CallVisitor:
                 and self.ctx.func_call_site_counts.get(fi.name, 0) > 1):
             return f"{base}_cs{self._active_call_site_idx}"
         return base
+
+    def _typed_user_method_info(self, receiver, member: str):
+        """Resolve an exact typed user method before any builtin method."""
+        receiver_spec = self._type_spec_from_expr(receiver)
+        receiver_name = method_receiver_type_name(receiver_spec)
+        if receiver_name is None:
+            return receiver_spec, None
+        method_info = self._func_info_map.get(f"{receiver_name}.{member}")
+        if (
+            method_info is None
+            or not getattr(method_info, "is_udt_method", False)
+        ):
+            return receiver_spec, None
+        return receiver_spec, method_info
+
+    def _emit_typed_user_method_call(
+        self,
+        node: FuncCall,
+        receiver_spec: TypeSpec,
+        method_info,
+    ) -> str:
+        """Lower a typed extension method with ordinary callable semantics."""
+        callee = node.callee
+        assert isinstance(callee, MemberAccess)
+        receiver_node = callee.object
+        fn_cpp = self._udt_method_call_emit_name(method_info, node)
+
+        param_names = (
+            list(method_info.node.params[1:])
+            if method_info.node is not None
+            else []
+        )
+        param_defaults = list(
+            getattr(method_info, "param_defaults", []) or []
+        )[1:]
+        rest_nodes = _merge_kwargs_with_defaults(
+            node.args,
+            node.kwargs,
+            param_names,
+            param_defaults,
+            lambda value: value,
+        )
+        receiver_cpp = self._visit_typed_method_param(
+            method_info,
+            node,
+            receiver_node,
+            0,
+        )
+        rest_cpp = [
+            self._visit_typed_method_param(
+                method_info,
+                node,
+                arg,
+                index + 1,
+            )
+            for index, arg in enumerate(rest_nodes)
+        ]
+
+        receiver_root = receiver_node
+        while isinstance(receiver_root, MemberAccess):
+            receiver_root = receiver_root.object
+        receiver_passes_by_reference = receiver_spec.kind in {
+            "array",
+            "matrix",
+            "udt",
+        }
+        return self._ordered_user_call_expr(
+            fn_cpp,
+            [receiver_node, *rest_nodes],
+            [receiver_cpp, *rest_cpp],
+            source_order_nodes=[
+                receiver_node,
+                *node.args,
+                *node.kwargs.values(),
+            ],
+            force_stage=(
+                receiver_passes_by_reference
+                and not isinstance(receiver_root, Identifier)
+            ),
+        )
 
     def _callable_target_callsite_idx(self, fi, node: FuncCall) -> int | None:
         """Return the primitive profile selected by this emitted call path."""
@@ -680,10 +760,9 @@ class CallVisitor:
             receiver_spec = self._map_effect_type_spec(
                 callee.object, lexical_specs
             )
-            if (receiver_spec is not None
-                    and receiver_spec.kind == "udt"
-                    and receiver_spec.name):
-                key = f"{receiver_spec.name}.{callee.member}"
+            receiver_name = method_receiver_type_name(receiver_spec)
+            if receiver_name is not None:
+                key = f"{receiver_name}.{callee.member}"
                 return key, self._func_info_map.get(key)
         return "", None
 
@@ -790,15 +869,14 @@ class CallVisitor:
             )
         return lowered
 
-    def _visit_udt_method_series_arg(
+    def _visit_typed_method_param(
         self,
         func_info,
         call_node: FuncCall,
         arg_node,
-        rest_index: int,
+        param_index: int,
     ) -> str:
-        """Lower one UDT-method argument with history-Series awareness."""
-        param_index = rest_index + 1  # receiver is parameter 0
+        """Lower one typed-method parameter with history-Series awareness."""
         param_name = (
             func_info.node.params[param_index]
             if func_info.node is not None
@@ -869,9 +947,37 @@ class CallVisitor:
             f"return {member}; }}())"
         )
 
+    def _visit_udt_method_series_arg(
+        self,
+        func_info,
+        call_node: FuncCall,
+        arg_node,
+        rest_index: int,
+    ) -> str:
+        """Backward-compatible wrapper for non-receiver method arguments."""
+        return self._visit_typed_method_param(
+            func_info,
+            call_node,
+            arg_node,
+            rest_index + 1,
+        )
+
     def _visit_func_call(self, node: FuncCall) -> str:
         callee = node.callee
         if isinstance(callee, MemberAccess):
+            recv_spec, method_info = self._typed_user_method_info(
+                callee.object,
+                callee.member,
+            )
+            if method_info is not None and recv_spec is not None:
+                # Pine extension methods are exact type-directed overloads.
+                # They must win before collection/drawing builtins; otherwise
+                # a user ``array<int>.push`` silently executes push_back.
+                return self._emit_typed_user_method_call(
+                    node,
+                    recv_spec,
+                    method_info,
+                )
             recv_spec = self._type_spec_from_expr(callee.object)
             if (
                 recv_spec is not None
