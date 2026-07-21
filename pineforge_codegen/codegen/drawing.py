@@ -20,7 +20,13 @@ reads only attributes established by ``CodeGen.__init__`` (``_uses_drawing``,
 from __future__ import annotations
 
 from ..ast_nodes import FuncCall, Identifier, MemberAccess
-from .tables import DRAWING_TYPE_TO_CPP, DRAWING_ARENA, ARRAY_VOID_METHODS as _ARRAY_VOID_METHODS
+from ..symbols import method_receiver_type_name
+from .tables import (
+    ARRAY_VOID_METHODS as _ARRAY_VOID_METHODS,
+    DRAWING_ARENA,
+    DRAWING_TYPE_TO_CPP,
+    MATRIX_VOID_METHODS as _MATRIX_VOID_METHODS,
+)
 
 _MAP_VOID_METHODS = frozenset({"clear", "put_all"})
 
@@ -482,9 +488,10 @@ class DrawingVisitor:
         Covers drawing setters/delete/visual-noop (delegated to
         ``_drawing_call_is_void``), the Pine array MUTATOR methods whose C++
         lowering is void / an iterator (``array.push/insert/clear/set/fill/
-        sort/reverse/concat/unshift``), and terminal map ``clear``/``put_all``
-        calls. A function ending in one of these calls must emit it as a
-        statement with a default return, never ``return <void-expression>;``.
+        sort/reverse/concat/unshift``), matrix mutators whose runtime lowering
+        returns void, and terminal map ``clear``/``put_all`` calls. A function
+        ending in one of these calls must emit it as a statement with a default
+        return, never ``return <void-expression>;``.
         """
         if self._drawing_call_is_void(node):
             return True
@@ -492,6 +499,39 @@ class DrawingVisitor:
             return False
         method = node.callee.member
         _fn, ns = self._resolve_callee(node.callee)
+
+        if method in _MATRIX_VOID_METHODS:
+            # Resolve the exact matrix receiver for both established spellings:
+            # ``matrix.set(id, ...)`` and ``id.set(...)``.  A same-named typed
+            # user method has dispatch precedence over the builtin (KI-73), so
+            # never classify that call from the builtin method name alone.
+            direct_spec = self._type_spec_from_expr(node.callee.object)
+            direct_receiver_name = method_receiver_type_name(direct_spec)
+            direct_method_info = (
+                getattr(self, "_func_info_map", {}).get(
+                    f"{direct_receiver_name}.{method}"
+                )
+                if direct_receiver_name is not None
+                else None
+            )
+            if direct_method_info is not None and getattr(
+                direct_method_info, "is_udt_method", False
+            ):
+                return False
+
+            functional_namespace = ns == "matrix" and (
+                direct_spec is None or direct_spec.kind != "matrix"
+            )
+            recv_spec = direct_spec
+            if functional_namespace:
+                recv_spec = (
+                    self._type_spec_from_expr(node.args[0])
+                    if node.args
+                    else None
+                )
+            if recv_spec is not None and recv_spec.kind == "matrix":
+                return True
+
         if method in _ARRAY_VOID_METHODS:
             # array.<method>(arr, ...) namespace form OR arr.<method>(...)
             # method form on a std::vector receiver.
