@@ -731,6 +731,20 @@ MATRIX_METHOD_KWARGS: dict[str, list[str]] = {
     "add_col": ["col_index", "array_id"],
 }
 
+# Matrix mutators whose established C++ lowering returns ``void``.  A Pine
+# callable may use one as its terminal expression, but its generated numeric
+# fallback wrapper must emit the mutation as a statement and then return the
+# default value; ``return matrix.set(...)`` is invalid C++.
+#
+# ``remove_row`` / ``remove_col`` are intentionally absent: their lowering in
+# ``MATRIX_METHODS`` already wraps the runtime mutation in a lambda that returns
+# a numeric sentinel.  Matrix-returning transforms belong exclusively in
+# ``MATRIX_RETURNING_METHODS`` below.
+MATRIX_VOID_METHODS: frozenset[str] = frozenset({
+    "set", "fill", "add_row", "add_col", "swap_rows", "swap_columns",
+    "reshape", "reverse", "sort",
+})
+
 # matrix.* method names whose RUNTIME return type is ``PineMatrix``. Used by
 # the codegen aggregate-type registration to declare the LHS variable as
 # ``PineMatrix`` instead of the analyzer's default ``double``. Without this
