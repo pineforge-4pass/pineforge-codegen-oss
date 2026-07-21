@@ -1,5 +1,7 @@
 """Tests for the new CodeGen that reads from AnalyzerContext."""
 
+import re
+
 import pytest
 
 from pineforge_codegen import transpile
@@ -371,21 +373,32 @@ def test_strategy_close():
 def test_strategy_close_forwards_comment():
     src = '//@version=6\nstrategy("T")\nstrategy.close("Long", comment="manual exit")\n'
     cpp = _generate(src)
-    assert 'strategy_close(std::string("Long"), std::string("manual exit"), na<double>(), na<double>(), false)' in cpp
+    assert re.search(
+        r'strategy_close\(std::string\("Long"\), std::string\("manual exit"\), '
+        r'na<double>\(\), na<double>\(\), false, [1-9][0-9]*ULL\)',
+        cpp,
+    )
 
 
 def test_strategy_close_forwards_qty_percent_and_immediately():
     src = '//@version=6\nstrategy("T")\nstrategy.close("Long", qty_percent=50, immediately=true)\n'
     cpp = _generate(src)
-    assert 'strategy_close(std::string("Long"), "", na<double>(), 50, true)' in cpp
+    assert re.search(
+        r'strategy_close\(std::string\("Long"\), "", na<double>\(\), 50, true, '
+        r'[1-9][0-9]*ULL\)',
+        cpp,
+    )
 
 
 def test_strategy_close_positional_immediately_uses_official_order():
     src = ('//@version=6\nstrategy("T")\n'
            'strategy.close("Long", "manual", 2, 50, "", true)\n')
     cpp = transpile(src)
-    assert ('strategy_close(std::string("Long"), std::string("manual"), '
-            '2, 50, true)') in cpp
+    assert re.search(
+        r'strategy_close\(std::string\("Long"\), std::string\("manual"\), '
+        r'2, 50, true, [1-9][0-9]*ULL\)',
+        cpp,
+    )
 
 
 def test_strategy_close_all_forwards_named_comment_and_immediately():

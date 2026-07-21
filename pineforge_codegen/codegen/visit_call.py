@@ -2198,6 +2198,24 @@ class CallVisitor:
         x = self._visit_expr(node.args[0])
         return f"(is_na({x}) ? {member} : ({member} = {x}))"
 
+    @staticmethod
+    def _strategy_close_callsite_token(node: FuncCall) -> str:
+        """Return the stable runtime token for an authored close statement.
+
+        A generated strategy is compiled from one Pine source unit, so the
+        parser's 1-based line and column identify the syntactic callsite.  The
+        same inner UDF/loop node retains that location across every emitted or
+        runtime execution.  Zero is reserved for source-less synthetic calls
+        so existing compatibility behavior remains available.
+        """
+        loc = node.loc
+        if loc is None or loc.line <= 0 or loc.col <= 0:
+            return "0ULL"
+        token = ((int(loc.line) & 0xFFFFFFFF) << 32) | (
+            int(loc.col) & 0xFFFFFFFF
+        )
+        return f"{token}ULL"
+
     def _visit_strategy_call(self, func_name: str, node: FuncCall) -> str:
         if func_name in ("convert_to_account", "convert_to_symbol"):
             p = self._resolve_func_args(node, f"strategy.{func_name}")
@@ -2243,7 +2261,8 @@ class CallVisitor:
             qty = self._visit_expr(p.get("qty")) if p.get("qty") is not None else "na<double>()"
             qty_pct = self._visit_expr(p.get("qty_percent")) if p.get("qty_percent") is not None else "na<double>()"
             immediately = self._visit_expr(p.get("immediately")) if p.get("immediately") is not None else "false"
-            return f"strategy_close({close_id}, {comment}, {qty}, {qty_pct}, {immediately})"
+            callsite = self._strategy_close_callsite_token(node)
+            return f"strategy_close({close_id}, {comment}, {qty}, {qty_pct}, {immediately}, {callsite})"
 
         if func_name == "close_all":
             p = self._resolve_func_args(node, "strategy.close_all")
