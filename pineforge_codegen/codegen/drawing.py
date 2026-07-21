@@ -493,32 +493,34 @@ class DrawingVisitor:
         ending in one of these calls must emit it as a statement with a default
         return, never ``return <void-expression>;``.
         """
-        if self._drawing_call_is_void(node):
-            return True
         if not isinstance(node, FuncCall) or not isinstance(node.callee, MemberAccess):
             return False
         method = node.callee.member
+        direct_spec = self._type_spec_from_expr(node.callee.object)
+        direct_receiver_name = method_receiver_type_name(direct_spec)
+        direct_method_info = (
+            getattr(self, "_func_info_map", {}).get(
+                f"{direct_receiver_name}.{method}"
+            )
+            if direct_receiver_name is not None
+            else None
+        )
+        # Exact typed user methods have dispatch precedence over every builtin
+        # family. Resolve that once before drawing/array/matrix/map terminal
+        # classification, including when a parameter named after a namespace
+        # (for example ``array`` or ``label``) is the authored receiver.
+        if direct_method_info is not None and getattr(
+            direct_method_info, "is_udt_method", False
+        ):
+            return False
+
+        if self._drawing_call_is_void(node):
+            return True
         _fn, ns = self._resolve_callee(node.callee)
 
         if method in _MATRIX_VOID_METHODS:
             # Resolve the exact matrix receiver for both established spellings:
-            # ``matrix.set(id, ...)`` and ``id.set(...)``.  A same-named typed
-            # user method has dispatch precedence over the builtin (KI-73), so
-            # never classify that call from the builtin method name alone.
-            direct_spec = self._type_spec_from_expr(node.callee.object)
-            direct_receiver_name = method_receiver_type_name(direct_spec)
-            direct_method_info = (
-                getattr(self, "_func_info_map", {}).get(
-                    f"{direct_receiver_name}.{method}"
-                )
-                if direct_receiver_name is not None
-                else None
-            )
-            if direct_method_info is not None and getattr(
-                direct_method_info, "is_udt_method", False
-            ):
-                return False
-
+            # ``matrix.set(id, ...)`` and ``id.set(...)``.
             functional_namespace = ns == "matrix" and (
                 direct_spec is None or direct_spec.kind != "matrix"
             )
@@ -537,8 +539,7 @@ class DrawingVisitor:
             # method form on a std::vector receiver.
             if ns == "array":
                 return True
-            recv_spec = self._type_spec_from_expr(node.callee.object)
-            if recv_spec is not None and recv_spec.kind == "array":
+            if direct_spec is not None and direct_spec.kind == "array":
                 return True
 
         if method not in _MAP_VOID_METHODS:
