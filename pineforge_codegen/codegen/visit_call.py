@@ -805,6 +805,23 @@ class CallVisitor:
             and param_index < len(func_info.node.params)
             else None
         )
+        param_specs = list(
+            getattr(func_info, "param_type_specs", ()) or ()
+        )
+        param_spec = (
+            param_specs[param_index]
+            if param_index < len(param_specs)
+            else None
+        )
+        if param_spec is not None and param_spec.kind in {"map", "matrix"}:
+            # Both UDT-method dispatch paths funnel through this helper after
+            # positional/keyword/default merging.  Lower a bare ``na`` (and
+            # nullable selections containing it) against the declared exact
+            # parameter type instead of the legacy numeric ``na<double>()``.
+            return self._visit_rhs_value(
+                arg_node,
+                target_cpp_type=self._type_spec_to_cpp(param_spec),
+            )
         method_series = self.ctx.func_series_vars.get(func_info.name, set())
         if param_name not in method_series:
             return self._visit_expr(arg_node)
@@ -1900,7 +1917,7 @@ class CallVisitor:
                         value_node,
                         target_cpp_type=(
                             f_cpp_type
-                            if (f_cpp_type.startswith("PineMap<")
+                            if (self._is_nullable_collection_cpp_type(f_cpp_type)
                                 or f_cpp_type in self._udt_defs
                                 or f_cpp_type in DRAWING_TYPE_TO_CPP.values())
                             else None
@@ -1911,7 +1928,7 @@ class CallVisitor:
                             val = val.replace("na<double>()", "na<int64_t>()")
                         else:
                             val = f"(int64_t)({val})"
-                    elif (f_cpp_type.startswith("PineMap<")
+                    elif (self._is_nullable_collection_cpp_type(f_cpp_type)
                           and val == "na<double>()"):
                         val = f"{f_cpp_type}{{}}"
                     field_inits.append(f".{f.name} = {val}")
@@ -2034,17 +2051,14 @@ class CallVisitor:
                     f"else {member}.update(_sv); "
                     f"return {member}; }}())"
                 )
-            # A concrete map specialization learned through an untyped
-            # wrapper chain also target-types its call arguments.  In
-            # particular, ``choose(cond, value, na)`` must pass a typed null
-            # PineMap handle rather than the generic ``na<double>()``.  Every
-            # non-map destination remains on the byte-identical expression
-            # path below.
+            # A concrete nullable collection specialization learned through an
+            # untyped wrapper chain also target-types its call arguments.
             if fi_lookup is not None:
                 param_specs = getattr(fi_lookup, "param_type_specs", []) or []
                 if arg_idx < len(param_specs):
                     param_spec = param_specs[arg_idx]
-                    if param_spec is not None and param_spec.kind == "map":
+                    if (param_spec is not None
+                            and param_spec.kind in {"map", "matrix"}):
                         return self._visit_rhs_value(
                             arg_node,
                             target_cpp_type=self._type_spec_to_cpp(param_spec),

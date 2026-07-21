@@ -1213,11 +1213,19 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     and self._is_na_expr(stmt.value)
                 )
             )
+            nullable_collection_selection_decl_site = (
+                stmt_spec is not None
+                and stmt_spec.kind in {"map", "matrix"}
+                and isinstance(stmt.value, (IfStmt, SwitchStmt))
+            )
             established_decl_site = (
                 (not is_callable_scoped or drawing_cpp is not None)
-                and self._is_runtime_scalar_var_initializer(
-                    member_name, ptype, init_str, stmt.value, drawing_cpp,
-                    is_series
+                and (
+                    nullable_collection_selection_decl_site
+                    or self._is_runtime_scalar_var_initializer(
+                        member_name, ptype, init_str, stmt.value, drawing_cpp,
+                        is_series
+                    )
                 )
             )
             if not callable_decl_site and not established_decl_site:
@@ -1857,6 +1865,29 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         ``global_expr_map``; without registering it here, ``m`` was emitted as a scalar
         while ``on_bar`` still assigned ``PineMatrix``.
         """
+        # A typed ``matrix<T> m = na`` or an inferred nullable selection has no
+        # constructor call for the legacy RHS scan below to recognize. Resolve
+        # declarations in source order from the authored hint/RHS, not from
+        # ``ctx.collection_types``: that raw-name table describes the analyzer's
+        # final state and can already contain an invalid later reassignment's
+        # element type. The original declaration must remain the compatibility
+        # baseline used to reject matrix<int> := matrix<float>.
+        for stmt, _in_loop in self._walk_global_scope_with_loopflag(
+            getattr(self.ctx.ast, "body", []), False
+        ):
+            if not isinstance(stmt, VarDecl):
+                continue
+            if stmt.type_hint:
+                declared_spec = self._type_spec_from_hint_name(stmt.type_hint)
+            elif isinstance(stmt.value, (Ternary, IfStmt, SwitchStmt)):
+                declared_spec = self._type_spec_from_expr(stmt.value)
+            else:
+                continue
+            if declared_spec is None or declared_spec.kind != "matrix":
+                continue
+            self._matrix_specs.setdefault(stmt.name, declared_spec)
+            self._collection_types[stmt.name] = self._matrix_specs[stmt.name]
+
         gem = getattr(self.ctx, "global_expr_map", {}) or {}
         for name, _ptype in self.ctx.global_var_decls:
             expr = gem.get(name)
@@ -2055,8 +2086,70 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             else:
                 self._codegen_error(node, "matrix.sort requires int, bool, string, or float element type; UDT matrices cannot be sorted")
 
+    def _iter_declared_matrix_specs(self):
+        """Yield matrix TypeSpecs reachable from declared source types.
+
+        A typed ``matrix<T> x = na`` has no matrix call for a syntactic scan
+        to find. Matrix types can also be nested in UDT fields or appear only
+        at a callable boundary, so include selection must start from analyzer
+        metadata and recurse through aggregate types.
+        """
+        roots = list(self._collection_types.values())
+        roots.extend(
+            spec
+            for specs in self._func_collection_types.values()
+            for spec in specs.values()
+        )
+        roots.extend(
+            spec
+            for specs in self._block_collection_types.values()
+            for spec in specs.values()
+            if spec is not None
+        )
+        roots.extend(
+            spec
+            for fields in self._udt_field_type_specs.values()
+            for spec in fields.values()
+        )
+        for fi in self.ctx.func_infos:
+            roots.extend(
+                spec
+                for spec in (getattr(fi, "param_type_specs", []) or [])
+                if spec is not None
+            )
+            return_spec = getattr(fi, "return_type_spec", None)
+            if return_spec is not None:
+                roots.append(return_spec)
+
+        def walk(spec: TypeSpec | None, visiting_udts: frozenset[str]):
+            if spec is None:
+                return
+            if spec.kind == "matrix":
+                yield spec
+                return
+            if spec.kind == "array":
+                yield from walk(spec.element, visiting_udts)
+                return
+            if spec.kind == "map":
+                yield from walk(spec.key, visiting_udts)
+                yield from walk(spec.value, visiting_udts)
+                return
+            if spec.kind == "udt" and spec.name:
+                if spec.name in visiting_udts:
+                    return
+                nested_visiting = visiting_udts | {spec.name}
+                for field_spec in self._udt_field_type_specs.get(
+                    spec.name, {}
+                ).values():
+                    yield from walk(field_spec, nested_visiting)
+
+        for root in roots:
+            yield from walk(root, frozenset())
+
     def _detect_matrix_usage(self) -> bool:
-        """True if emitted C++ will need runtime/matrix.hpp (PineMatrix)."""
+        """True if emitted C++ will need a matrix runtime header."""
+        if next(self._iter_declared_matrix_specs(), None) is not None:
+            return True
         for _, _, init_str in self.ctx.var_members:
             if init_str and "matrix.new" in str(init_str):
                 return True
@@ -2065,6 +2158,32 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 _fn, ns = self._resolve_callee(node.callee)
                 if ns == "matrix":
                     return True
+        return False
+
+    def _detect_generic_matrix_usage(self) -> bool:
+        """True if emitted C++ mentions a non-float matrix specialization."""
+        float_spec = TypeSpec.primitive("float")
+        if any(
+            spec.element != float_spec
+            for spec in self._iter_declared_matrix_specs()
+        ):
+            return True
+
+        # A standalone matrix.new<T>() expression may have no declaration
+        # TypeSpec. Read its explicit template argument directly so the
+        # generated call still receives the generic runtime declaration.
+        for node in self._walk_ast(self.ctx.ast):
+            if not isinstance(node, FuncCall):
+                continue
+            fn, ns = self._resolve_callee(node.callee)
+            if ns != "matrix" or fn != "new":
+                continue
+            targs = self._template_args_from_call(node)
+            if not targs:
+                continue
+            elem_spec = self._type_spec_from_hint_name(targs[0])
+            if elem_spec is not None and elem_spec != float_spec:
+                return True
         return False
 
     def _detect_map_usage(self) -> bool:
@@ -3453,7 +3572,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         f.default,
                         target_cpp_type=(
                             cpp_type
-                            if (cpp_type.startswith("PineMap<")
+                            if (self._is_nullable_collection_cpp_type(cpp_type)
                                 or cpp_type in self._udt_defs
                                 or cpp_type in DRAWING_TYPE_TO_CPP.values())
                             else None
