@@ -15,6 +15,7 @@ import re
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.ast_nodes import MethodDef
 from pineforge_codegen.errors import CompileError, Level, Phase
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
@@ -63,6 +64,29 @@ def _assert_parse_recovery_fences_sma(source: str, *, expected_line: int) -> Non
 
     with pytest.raises(CompileError) as caught:
         transpile(source, filename="stable-var-parse-recovery.pine")
+
+    assert len(caught.value.diagnostics) == 1
+    diagnostic = caught.value.diagnostics[0]
+    assert diagnostic.phase is Phase.CODEGEN
+    assert diagnostic.location.line == expected_line
+    assert diagnostic.message == (
+        "Unsupported TA constructor length 'p' for ta::SMA: it is neither a "
+        "compile-time constant nor derived from an input, so PineForge cannot "
+        "size the indicator buffer."
+    )
+
+
+def _assert_method_declaration_fences_sma(
+    source: str,
+    *,
+    expected_line: int,
+) -> None:
+    program = Parser(Lexer(source).tokenize(), source=source).parse()
+    assert (program.annotations or {}).get("parse_recovery_count", 0) == 0
+    assert any(isinstance(node, MethodDef) for node in program.body)
+
+    with pytest.raises(CompileError) as caught:
+        transpile(source, filename="stable-var-method-declaration.pine")
 
     assert len(caught.value.diagnostics) == 1
     diagnostic = caught.value.diagnostics[0]
@@ -229,7 +253,7 @@ def test_any_user_declaration_fences_narrow_literal_admission(
     )
 
 
-def test_dropped_primitive_method_declaration_fences_unrelated_receiver_mask() -> None:
+def test_primitive_method_declaration_fences_narrow_literal_admission() -> None:
     source = '''//@version=6
 strategy("parse recovery receiver mask")
 method id(int self) => self
@@ -239,10 +263,10 @@ var int p = 5
 z = ta.sma(close, p)
 '''
 
-    _assert_parse_recovery_fences_sma(source, expected_line=7)
+    _assert_method_declaration_fences_sma(source, expected_line=7)
 
 
-def test_dropped_collection_method_cannot_collide_with_builtin_semantics() -> None:
+def test_collection_method_declaration_fences_narrow_literal_admission() -> None:
     source = '''//@version=6
 strategy("parse recovery builtin collision")
 method push(array<int> self, int x) => array.unshift(self, x)
@@ -252,7 +276,7 @@ var int p = 5
 z = ta.sma(close, p)
 '''
 
-    _assert_parse_recovery_fences_sma(source, expected_line=7)
+    _assert_method_declaration_fences_sma(source, expected_line=7)
 
 
 @pytest.mark.parametrize(
