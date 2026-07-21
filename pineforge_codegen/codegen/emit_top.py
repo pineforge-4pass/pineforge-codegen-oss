@@ -86,7 +86,7 @@ from ..ast_nodes import (
     ExprStmt, FuncCall, Identifier, IfStmt, SwitchStmt, VarDecl,
 )
 from ..analyzer import FuncInfo
-from ..symbols import PineType, TypeSpec
+from ..symbols import PineType
 from .tables import (
     BAR_SERIES_PUSH,
     DRAWING_TYPE_TO_CPP,
@@ -137,27 +137,7 @@ class TopLevelEmitter:
             # is present in the TU. Float matrices route through PineMatrix in
             # matrix.hpp; pulling in the generic header otherwise is a wasted
             # include.
-            float_spec = TypeSpec.primitive("float")
-            scoped_matrix_specs = (
-                spec
-                for specs in self._func_collection_types.values()
-                for spec in specs.values()
-                if spec.kind == "matrix"
-            )
-            block_matrix_specs = (
-                spec
-                for specs in self._block_collection_types.values()
-                for spec in specs.values()
-                if spec is not None and spec.kind == "matrix"
-            )
-            if any(
-                spec.element != float_spec
-                for spec in (
-                    *self._matrix_specs.values(),
-                    *scoped_matrix_specs,
-                    *block_matrix_specs,
-                )
-            ):
+            if self._detect_generic_matrix_usage():
                 lines.append('#include <pineforge/generic_matrix.hpp>')
         # Drawing-objects-as-data runtime (line/box/label/linefill arenas +
         # ChartPoint). Gated on _uses_drawing so non-drawing strategies stay
@@ -575,7 +555,14 @@ class TopLevelEmitter:
                 continue
             seen_ctor_vars.add(name)
             safe = self._safe_name(name)
-            if name in self._array_vars or name in self._map_vars:
+            if (name in self._array_vars
+                    or name in self._map_vars
+                    or name in self._matrix_specs):
+                # Collection members are initialized in the first-bar block.
+                # A matrix declared as ``var matrix<T> x = na`` has no
+                # constructor call to replay there and its default constructor
+                # is already the correctly typed null ID.  Letting the generic
+                # scalar path add ``x(na<double>())`` is ill-typed.
                 continue
             # Callable-scoped ``var`` members initialize at their exact source
             # declarations; exclude them from the constructor so source order,
@@ -880,6 +867,20 @@ class TopLevelEmitter:
                             safe,
                             f"{runtime_info['drawing_cpp']}{{}}",
                         )
+                    continue
+                # Declaration-site initialization owns nullable collection
+                # members carrying runtime metadata. A persistent map/matrix
+                # if/switch initializer must not also enter the legacy
+                # first-bar aggregate preamble (which cannot lower a block
+                # expression and formerly emitted ``/* unknown */`` for maps).
+                # Keep primitive and ternary paths on their established order.
+                runtime_spec = (
+                    runtime_info.get("type_spec")
+                    if runtime_info is not None
+                    else None
+                )
+                if (runtime_spec is not None
+                        and runtime_spec.kind in {"map", "matrix"}):
                     continue
                 if name in self._array_vars:
                     for stmt in self.ctx.ast.body:
@@ -1393,7 +1394,7 @@ class TopLevelEmitter:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")
         rhs_return_cpp_type = (
             ret_type
-            if (ret_type.startswith("PineMap<")
+            if (self._is_nullable_collection_cpp_type(ret_type)
                 or ret_type in DRAWING_TYPE_TO_CPP.values()
                 or ret_type in self._udt_defs)
             else None

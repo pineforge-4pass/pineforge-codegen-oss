@@ -342,23 +342,23 @@ class ExprVisitor:
                 return f"{drawing_target}{{}}"
             if target_cpp_type in self._udt_defs:
                 return f"{target_cpp_type}{{}}"
-            if target_cpp_type and target_cpp_type.startswith("PineMap<"):
-                # PineMap's default constructor is the typed ``na`` ID.  A
-                # map.new call is the only operation that allocates storage.
+            if self._is_nullable_collection_cpp_type(target_cpp_type):
+                # Maps and matrices use default construction for a typed
+                # ``na`` ID. Their ``*.new`` factories create a valid ID,
+                # including a valid empty collection.
                 return f"{target_cpp_type}{{}}"
             if target_cpp_type in ("std::string", "int", "int64_t", "bool"):
                 return f"na<{target_cpp_type}>()"
         if (isinstance(value_node, Ternary)
-                and ((target_cpp_type
-                      and target_cpp_type.startswith("PineMap<"))
+                and (self._is_nullable_collection_cpp_type(target_cpp_type)
                      or drawing_target is not None
                      or target_cpp_type in self._udt_defs)):
             # C++ cannot deduce a common type for ``na<double>()`` and a
-            # PineMap/drawing handle.  Pine's ternary is target typed, so
+            # collection/drawing handle. Pine's ternary is target typed, so
             # propagate the exact declared/reassignment target into both arms.
-            # Arrays, matrices, and scalar ternaries retain the established
-            # generic expression path; collection IDs require a nullable
-            # runtime representation before target typing alone can be safe.
+            # Arrays and scalar ternaries retain the established generic path;
+            # target typing is safe only for collections with nullable runtime
+            # representations.
             branch_target = drawing_target or target_cpp_type
             condition = self._visit_expr(value_node.condition)
             true_value = self._visit_rhs_value(

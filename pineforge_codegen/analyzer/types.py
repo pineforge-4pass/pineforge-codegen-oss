@@ -42,7 +42,7 @@ from typing import Any
 from ..ast_nodes import (
     ASTNode, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier, IfStmt,
     MemberAccess, NaLiteral, NumberLiteral, StringLiteral, Subscript, Ternary,
-    TupleLiteral, UnaryOp,
+    SwitchStmt, TupleLiteral, UnaryOp,
 )
 from ..symbols import PineType, TypeSpec
 
@@ -59,6 +59,15 @@ _DIRECT_ARRAY_VALUE_PRODUCERS = frozenset({
     "new_bool",
     "new_string",
     "copy",
+})
+
+# Keep this analyzer-owned mirror in sync with
+# codegen.tables.MATRIX_RETURNING_METHODS.  The analyzer cannot import from
+# codegen (codegen already imports analyzer), but nullable selections need the
+# exact matrix result type before codegen registers global aggregate members.
+_MATRIX_RETURNING_METHODS = frozenset({
+    "copy", "submatrix", "transpose", "concat", "diff", "mult", "pow",
+    "inv", "pinv", "eigenvectors", "kron",
 })
 
 
@@ -188,12 +197,59 @@ class TypeHelper:
                 return self._pine_type_to_spec(sym.pine_type)
         return None
 
+    @staticmethod
+    def _selection_terminal_expr(
+        body: list[ASTNode] | None,
+    ) -> ASTNode | None:
+        """Return one if/switch branch's value expression, if present."""
+        if not body:
+            return None
+        terminal = body[-1]
+        return terminal.expr if isinstance(terminal, ExprStmt) else terminal
+
+    @staticmethod
+    def _selection_node_is_na(node: ASTNode | None) -> bool:
+        """Whether a selection arm is explicit or implicit Pine ``na``."""
+        return (
+            node is None
+            or isinstance(node, NaLiteral)
+            or (isinstance(node, Identifier) and node.name == "na")
+        )
+
+    def _nullable_collection_selection_spec(
+        self,
+        branches: list[tuple[ASTNode | None, TypeSpec | None]],
+    ) -> TypeSpec | None:
+        """Unify compatible map/matrix selection arms around typed ``na``.
+
+        A missing ``if``/``switch`` fallback is Pine's implicit ``na`` arm.
+        Every concrete arm must carry the same nullable collection TypeSpec;
+        an unknown or incompatible concrete arm fails closed.
+        """
+        concrete: list[TypeSpec] = []
+        for node, spec in branches:
+            if self._selection_node_is_na(node):
+                continue
+            if spec is None or spec.kind not in {"map", "matrix"}:
+                return None
+            concrete.append(spec)
+        if not concrete:
+            return None
+        first = concrete[0]
+        return first if all(spec == first for spec in concrete[1:]) else None
+
     def _type_spec_from_expr(self, value: ASTNode | None) -> TypeSpec | None:
         if value is None:
             return None
         if isinstance(value, Ternary):
             true_spec = self._type_spec_from_expr(value.true_val)
             false_spec = self._type_spec_from_expr(value.false_val)
+            collection_spec = self._nullable_collection_selection_spec([
+                (value.true_val, true_spec),
+                (value.false_val, false_spec),
+            ])
+            if collection_spec is not None:
+                return collection_spec
 
             def direct_user_udt_ctor_name(node: ASTNode) -> str | None:
                 if not isinstance(node, FuncCall):
@@ -216,21 +272,6 @@ class TypeHelper:
                     and true_spec.kind == "udt"
                     and true_spec == false_spec):
                 return true_spec
-            if (true_spec is not None
-                    and true_spec.kind == "map"
-                    and true_spec == false_spec):
-                return true_spec
-            # A Pine ``na`` arm acquires the other arm's map type.  Keep this
-            # narrow to maps so unrelated scalar/array inference and generated
-            # output retain their established behavior.
-            if (true_spec is not None
-                    and true_spec.kind == "map"
-                    and isinstance(value.false_val, NaLiteral)):
-                return true_spec
-            if (false_spec is not None
-                    and false_spec.kind == "map"
-                    and isinstance(value.true_val, NaLiteral)):
-                return false_spec
             # A direct user-UDT constructor selected against bare ``na`` has
             # one unambiguous value type.  Require the constructor AST itself,
             # not merely an inferred UDT expression, so temporary array-element
@@ -277,18 +318,16 @@ class TypeHelper:
                 return receiver_spec
             return None
         if isinstance(value, IfStmt):
-            def terminal_expr(body):
-                if not body:
-                    return None
-                terminal = body[-1]
-                return terminal.expr if isinstance(terminal, ExprStmt) else terminal
-
-            true_node = terminal_expr(value.body)
-            false_node = terminal_expr(value.else_body)
-            if true_node is None or false_node is None:
-                return None
+            true_node = self._selection_terminal_expr(value.body)
+            false_node = self._selection_terminal_expr(value.else_body)
             true_spec = self._type_spec_from_expr(true_node)
             false_spec = self._type_spec_from_expr(false_node)
+            collection_spec = self._nullable_collection_selection_spec([
+                (true_node, true_spec),
+                (false_node, false_spec),
+            ])
+            if collection_spec is not None:
+                return collection_spec
             true_is_na = (
                 isinstance(true_node, NaLiteral)
                 or (isinstance(true_node, Identifier)
@@ -299,18 +338,6 @@ class TypeHelper:
                 or (isinstance(false_node, Identifier)
                     and false_node.name == "na")
             )
-            if (true_spec is not None
-                    and true_spec.kind == "map"
-                    and true_spec == false_spec):
-                return true_spec
-            if (true_spec is not None
-                    and true_spec.kind == "map"
-                    and isinstance(false_node, NaLiteral)):
-                return true_spec
-            if (false_spec is not None
-                    and false_spec.kind == "map"
-                    and isinstance(true_node, NaLiteral)):
-                return false_spec
             if (true_spec is not None
                     and true_spec.kind == "udt"
                     and true_spec.name in _DRAWING_TYPE_NAMES
@@ -327,6 +354,22 @@ class TypeHelper:
                     and true_is_na):
                 return false_spec
             return None
+        if isinstance(value, SwitchStmt):
+            branches: list[tuple[ASTNode | None, TypeSpec | None]] = []
+            for _case_expr, case_body in value.cases:
+                terminal = self._selection_terminal_expr(case_body)
+                branches.append((
+                    terminal,
+                    self._type_spec_from_expr(terminal),
+                ))
+            default_terminal = self._selection_terminal_expr(
+                value.default_body
+            )
+            branches.append((
+                default_terminal,
+                self._type_spec_from_expr(default_terminal),
+            ))
+            return self._nullable_collection_selection_spec(branches)
         if isinstance(value, FuncCall):
             cal = value.callee
             func = cal.member if isinstance(cal, MemberAccess) else None
@@ -387,6 +430,11 @@ class TypeHelper:
                 else:
                     elem = TypeSpec.primitive("float")
                 return TypeSpec.matrix(elem)
+            if ns == "matrix" and func in _MATRIX_RETURNING_METHODS:
+                receiver = value.args[0] if value.args else value.kwargs.get("id")
+                receiver_spec = self._type_spec_from_expr(receiver)
+                if receiver_spec is not None and receiver_spec.kind == "matrix":
+                    return receiver_spec
             if ns == "map" and func == "new":
                 key = self._type_spec_from_hint(targs[0]) if len(targs) > 0 else TypeSpec.primitive("string")
                 val = self._type_spec_from_hint(targs[1]) if len(targs) > 1 else TypeSpec.primitive("float")
@@ -452,7 +500,7 @@ class TypeHelper:
                     if func == "size":
                         return TypeSpec.primitive("int")
                 if recv_spec is not None and recv_spec.kind == "matrix":
-                    if func in ("copy", "submatrix", "transpose", "concat"):
+                    if func in _MATRIX_RETURNING_METHODS:
                         return recv_spec
                     if func in ("row", "col"):
                         return TypeSpec.array(recv_spec.element)

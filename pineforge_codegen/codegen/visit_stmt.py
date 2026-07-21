@@ -91,6 +91,7 @@ from ..ast_nodes import (
     MethodDef,
     StrategyDecl,
     SwitchStmt,
+    Ternary,
     TupleAssign,
     TupleLiteral,
     TypeDecl,
@@ -428,27 +429,27 @@ class StmtVisitor:
                 return recv
         return None
 
-    def _map_target_cpp_type(
+    def _nullable_collection_target_cpp_type(
         self,
         *,
         name: str | None = None,
         target_node=None,
         type_hint: str | None = None,
     ) -> str | None:
-        """Return the exact C++ map type for a contextual RHS target.
+        """Return the exact nullable collection type for an RHS target.
 
         Declarations need the explicit hint before their lexical collection
         binding is activated; reassignments can use the active name registry,
         while UDT fields are resolved from the target expression itself.
-        Returning ``None`` for every non-map shape deliberately preserves the
-        established generic expression lowering byte-for-byte.
+        Arrays are deliberately excluded until their runtime representation
+        can distinguish ``na`` from a valid empty ID.
         """
         spec = self._type_spec_from_hint_name(type_hint) if type_hint else None
         if spec is None and target_node is not None:
             spec = self._type_spec_from_expr(target_node)
         if spec is None and name is not None:
             spec = self._collection_spec_for_name(name)
-        if spec is None or spec.kind != "map":
+        if spec is None or spec.kind not in {"map", "matrix"}:
             return None
         return self._type_spec_to_cpp(spec)
 
@@ -503,6 +504,27 @@ class StmtVisitor:
                         and type_spec.kind in {"map", "matrix"}
                     ):
                         target_cpp_type = self._type_spec_to_cpp(type_spec)
+                    if (
+                        target_cpp_type is not None
+                        and type_spec is not None
+                        and type_spec.kind in {"map", "matrix"}
+                        and isinstance(node.value, (IfStmt, SwitchStmt))
+                    ):
+                        lines.append(f"{pad}if (!{flag_expr}) {{")
+                        self._visit_if_switch_expr(
+                            node.value,
+                            target_expr,
+                            lines,
+                            len(pad) // 4 + 1,
+                            target_cpp_type=target_cpp_type,
+                        )
+                        # The flag belongs after the complete selection.  If it
+                        # were emitted in an individual branch, unmatched paths
+                        # or later arms could retry a Pine ``var`` initializer,
+                        # violating first-reach / one-time semantics.
+                        lines.append(f"{pad}    {flag_expr} = true;")
+                        lines.append(f"{pad}}}")
+                        return
                     if target_cpp_type is not None:
                         init_cpp = self._visit_rhs_value(
                             node.value,
@@ -739,10 +761,10 @@ class StmtVisitor:
             selection_cpp_type = (
                 cpp_type
                 if (cpp_type is not None
-                    and (cpp_type.startswith("PineMap<")
+                    and (self._is_nullable_collection_cpp_type(cpp_type)
                          or cpp_type in DRAWING_TYPE_TO_CPP.values()
                          or cpp_type in self._udt_defs))
-                else self._map_target_cpp_type(
+                else self._nullable_collection_target_cpp_type(
                     name=node.name,
                     type_hint=node.type_hint,
                 )
@@ -844,7 +866,7 @@ class StmtVisitor:
 
         # General declaration
         cpp_type = self._type_for_decl(node) if not is_global_member else None
-        target_cpp_type = cpp_type or self._map_target_cpp_type(
+        target_cpp_type = cpp_type or self._nullable_collection_target_cpp_type(
             name=node.name,
             type_hint=node.type_hint,
         )
@@ -883,15 +905,96 @@ class StmtVisitor:
             return f"std::fmod((double)({target_read}), (double)({val_cpp}))"
         return None
 
+    def _matrix_rhs_specs(self, value: ASTNode | None) -> list[TypeSpec]:
+        """Return every known concrete matrix type in an RHS selection.
+
+        ``_type_spec_from_expr`` intentionally returns ``None`` for a
+        selection whose concrete arms disagree.  Reassignment validation must
+        still inspect those arms individually: otherwise
+        ``matrix<int> := cond ? matrix<int> : matrix<float>`` evades the type
+        check precisely because the complete selection has no unified type.
+        Explicit and implicit ``na`` arms contribute no concrete type.
+        """
+        if self._selection_node_is_na(value):
+            return []
+        if isinstance(value, Ternary):
+            return (
+                self._matrix_rhs_specs(value.true_val)
+                + self._matrix_rhs_specs(value.false_val)
+            )
+        if isinstance(value, IfStmt):
+            return (
+                self._matrix_rhs_specs(
+                    self._selection_terminal_expr(value.body)
+                )
+                + self._matrix_rhs_specs(
+                    self._selection_terminal_expr(value.else_body)
+                )
+            )
+        if isinstance(value, SwitchStmt):
+            specs: list[TypeSpec] = []
+            for _case_expr, case_body in value.cases:
+                specs.extend(
+                    self._matrix_rhs_specs(
+                        self._selection_terminal_expr(case_body)
+                    )
+                )
+            specs.extend(
+                self._matrix_rhs_specs(
+                    self._selection_terminal_expr(value.default_body)
+                )
+            )
+            return specs
+        spec = self._type_spec_from_expr(value)
+        return [spec] if spec is not None and spec.kind == "matrix" else []
+
+    def _validate_matrix_reassignment(
+        self,
+        node: Assignment,
+        target_name: str | None,
+    ) -> None:
+        """Reject any known matrix RHS whose element type changes the LHS.
+
+        This check belongs to the lexical target rather than any particular
+        storage representation. A matrix may be a persistent ``var``, a plain
+        global member, a callable local, or a UDT field, but Pine forbids
+        changing its declared element type in every case.
+        """
+        if node.op != ":=":
+            return
+        target_spec = self._type_spec_from_expr(node.target)
+        if target_spec is None and target_name is not None:
+            target_spec = self._collection_spec_for_name(target_name)
+        if target_spec is None or target_spec.kind != "matrix":
+            return
+        target_label = target_name
+        if target_label is None and isinstance(node.target, MemberAccess):
+            target_label = node.target.member
+        target_label = target_label or "<expression>"
+        for rhs_spec in self._matrix_rhs_specs(node.value):
+            if rhs_spec.element == target_spec.element:
+                continue
+            self._codegen_error(
+                node,
+                f"matrix '{target_label}' element type mismatch on reassignment: "
+                f"expected {self._type_spec_to_cpp(target_spec)}, "
+                f"got {self._type_spec_to_cpp(rhs_spec)}",
+            )
+
     def _visit_assignment(self, node: Assignment, lines: list[str], pad: str) -> None:
         if isinstance(node.value, FuncCall) and self._is_skip_expr(node.value):
             return
 
+        # Validate against the active lexical target before any syntax-specific
+        # early return. In particular, if/switch expressions and UDT-field
+        # targets otherwise bypass the ordinary identifier assignment path.
+        target_name = self._get_target_name(node.target)
+        self._validate_matrix_reassignment(node, target_name)
+
         # If/switch expression in assignment: x := if cond ...
         if isinstance(node.value, (IfStmt, SwitchStmt)):
-            target_name = self._get_target_name(node.target)
             safe = self._safe_name(target_name) if target_name else self._visit_expr(node.target)
-            selection_cpp_type = self._map_target_cpp_type(
+            selection_cpp_type = self._nullable_collection_target_cpp_type(
                 name=target_name,
                 target_node=node.target if target_name is None else None,
             )
@@ -916,7 +1019,6 @@ class StmtVisitor:
             return
 
         # Get target name
-        target_name = self._get_target_name(node.target)
         if target_name is None:
             # Assignment to a UDT field that was dropped from the emitted
             # struct because it had a drawing-only type (label/line/box/
@@ -935,7 +1037,7 @@ class StmtVisitor:
                 return
             # General expression target (e.g., member access)
             target_cpp = self._visit_expr(node.target)
-            target_cpp_type = self._map_target_cpp_type(
+            target_cpp_type = self._nullable_collection_target_cpp_type(
                 target_node=node.target,
             )
             if target_cpp_type is None:
@@ -987,39 +1089,12 @@ class StmtVisitor:
                     op_char = node.op[0]  # e.g., "+" from "+="
                     lines.append(f"{pad}{safe}.update({safe}[0] {op_char} {val_cpp});")
         elif target_name in self._var_names:
-            target_spec = self._collection_spec_for_name(target_name)
-            if (node.op == ":="
-                    and target_spec is not None
-                    and target_spec.kind == "matrix"
-                    and isinstance(node.value, FuncCall)):
-                rhs_fn, rhs_ns = self._resolve_callee(node.value.callee)
-                rhs_spec = None
-                if rhs_ns == "matrix" and rhs_fn == "new":
-                    targs = self._template_args_from_call(node.value) if hasattr(node.value, "annotations") else []
-                    elem = self._type_spec_from_hint_name(targs[0]) if targs else TypeSpec.primitive("float")
-                    rhs_spec = TypeSpec.matrix(elem)
-                elif rhs_ns == "matrix" and rhs_fn in MATRIX_RETURNING_METHODS:
-                    rcv = self._extract_receiver_name(node.value)
-                    rhs_spec = (
-                        self._collection_spec_for_name(rcv)
-                        if rcv is not None
-                        else None
-                    )
-                if rhs_spec is not None:
-                    lhs_spec = target_spec
-                    if rhs_spec.element != lhs_spec.element:
-                        self._codegen_error(
-                            node,
-                            f"matrix '{target_name}' element type mismatch on reassignment: "
-                            f"expected {self._type_spec_to_cpp(lhs_spec)}, "
-                            f"got {self._type_spec_to_cpp(rhs_spec)}",
-                        )
             # A bare-``na`` reassignment must adopt the target's declared scalar
             # type (``x := na`` -> ``na<int>()`` not ``na<double>()``); otherwise
             # a double NaN is stored into an int/int64_t/bool member (UB, defeats
             # is_na<T>()). Only computed for bare na — every other RHS is
             # unaffected.
-            tct = self._map_target_cpp_type(name=target_name)
+            tct = self._nullable_collection_target_cpp_type(name=target_name)
             if tct is None:
                 tct = self._udt_target_cpp_type(target_name=target_name)
             if tct is None and self._is_na_expr(node.value):
@@ -1034,7 +1109,7 @@ class StmtVisitor:
                 else:
                     lines.append(f"{pad}{safe} {node.op} {val_cpp};")
         else:
-            tct = self._map_target_cpp_type(name=target_name)
+            tct = self._nullable_collection_target_cpp_type(name=target_name)
             if tct is None:
                 tct = self._udt_target_cpp_type(target_name=target_name)
             if tct is None and self._is_na_expr(node.value):
@@ -1791,6 +1866,18 @@ class StmtVisitor:
     ) -> None:
         """Emit an if/switch used as an expression, assigning to target."""
         pad = "    " * indent
+        nullable_collection_target = self._is_nullable_collection_cpp_type(
+            target_cpp_type
+        )
+
+        def emit_implicit_na_fallback() -> None:
+            """Reset a nullable ID when an expression has no matching arm."""
+            lines.append(f"{pad}else {{")
+            lines.append(
+                f"{pad}    {target} = {target_cpp_type}{{}};"
+            )
+            lines.append(f"{pad}}}")
+
         if isinstance(node, IfStmt):
             cond = self._visit_expr(node.condition)
             lines.append(f"{pad}if ({cond}) {{")
@@ -1822,6 +1909,12 @@ class StmtVisitor:
                         target_cpp_type=target_cpp_type,
                     )
                     lines.append(f"{pad}}}")
+            elif nullable_collection_target:
+                # A Pine if-expression without an else evaluates to ``na`` on
+                # the unmatched path.  This assignment is essential for
+                # non-var globals and reassignments: retaining the prior bar's
+                # map/matrix ID would turn the expression into implicit state.
+                emit_implicit_na_fallback()
         elif isinstance(node, SwitchStmt):
             if node.expr:
                 expr_var = f"__switch_val_{self._switch_counter}"
@@ -1853,12 +1946,28 @@ class StmtVisitor:
                     )
                     lines.append(f"{pad}}}")
             if node.default_body:
-                lines.append(f"{pad}else {{")
-                self._emit_block_with_assign(
-                    node.default_body,
-                    target,
-                    lines,
-                    indent + 1,
-                    target_cpp_type=target_cpp_type,
-                )
-                lines.append(f"{pad}}}")
+                if node.cases:
+                    lines.append(f"{pad}else {{")
+                    self._emit_block_with_assign(
+                        node.default_body,
+                        target,
+                        lines,
+                        indent + 1,
+                        target_cpp_type=target_cpp_type,
+                    )
+                    lines.append(f"{pad}}}")
+                else:
+                    self._emit_block_with_assign(
+                        node.default_body,
+                        target,
+                        lines,
+                        indent,
+                        target_cpp_type=target_cpp_type,
+                    )
+            elif nullable_collection_target:
+                if node.cases:
+                    emit_implicit_na_fallback()
+                else:
+                    lines.append(
+                        f"{pad}{target} = {target_cpp_type}{{}};"
+                    )

@@ -34,7 +34,7 @@ tables it needs come from ``codegen/tables.py``.
 from __future__ import annotations
 
 from ..ast_nodes import (
-    Assignment, BinOp, BoolLiteral, ExprStmt, FuncCall, FuncDef, Identifier, IfStmt,
+    ASTNode, Assignment, BinOp, BoolLiteral, ExprStmt, FuncCall, FuncDef, Identifier, IfStmt,
     MemberAccess, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
     Subscript, Ternary, TupleLiteral, UnaryOp, VarDecl,
 )
@@ -47,6 +47,7 @@ from .tables import (
     BAR_FIELDS,
     DRAWING_NS,
     DRAWING_TYPE_TO_CPP,
+    MATRIX_RETURNING_METHODS,
     PINE_TYPE_TO_CPP,
     TA_RETURNS_BOOL,
 )
@@ -154,7 +155,23 @@ class TypeInferer:
         return "double"
 
     @staticmethod
-    def _default_for_type(cpp_type: str) -> str:
+    def _is_nullable_collection_cpp_type(cpp_type: str | None) -> bool:
+        """Whether ``cpp_type`` has a default-constructed Pine ``na`` ID.
+
+        Arrays still lower to ``std::vector`` and cannot distinguish a null ID
+        from a valid empty array. Keep them outside this predicate until their
+        runtime representation carries that distinction.
+        """
+        return bool(
+            cpp_type
+            and (
+                cpp_type.startswith("PineMap<")
+                or cpp_type == "PineMatrix"
+                or cpp_type.startswith("PineGenericMatrix<")
+            )
+        )
+
+    def _default_for_type(self, cpp_type: str) -> str:
         """Default initialiser for a primitive C++ type (matches Pine ``na``)."""
         if cpp_type == "std::string":
             return 'std::string("")'
@@ -166,6 +183,8 @@ class TypeInferer:
             return f"{cpp_type}{{}}"
         if cpp_type.startswith("std::vector") or cpp_type.startswith("PineMap"):
             return f"{cpp_type}()"
+        if self._is_nullable_collection_cpp_type(cpp_type):
+            return f"{cpp_type}{{}}"
         return "0.0"
 
     def _default_for_spec(self, spec: TypeSpec | None) -> str:
@@ -184,6 +203,8 @@ class TypeInferer:
         cpp_type = self._type_spec_to_cpp(spec)
         if cpp_type.startswith("std::vector") or cpp_type.startswith("PineMap"):
             return f"{cpp_type}()"
+        if self._is_nullable_collection_cpp_type(cpp_type):
+            return f"{cpp_type}{{}}"
         return self._default_for_type(cpp_type)
 
     def _collection_spec_for_name(self, name: str) -> TypeSpec | None:
@@ -357,6 +378,40 @@ class TypeInferer:
                     return TypeSpec.primitive(primitive_name)
         return None
 
+    @staticmethod
+    def _selection_terminal_expr(body: list[ASTNode] | None) -> ASTNode | None:
+        """Return one if/switch branch's value expression, if present."""
+        if not body:
+            return None
+        terminal = body[-1]
+        return terminal.expr if isinstance(terminal, ExprStmt) else terminal
+
+    @staticmethod
+    def _selection_node_is_na(node: ASTNode | None) -> bool:
+        """Whether a selection arm is explicit or implicit Pine ``na``."""
+        return (
+            node is None
+            or isinstance(node, NaLiteral)
+            or (isinstance(node, Identifier) and node.name == "na")
+        )
+
+    def _nullable_collection_selection_spec(
+        self,
+        branches: list[tuple[ASTNode | None, TypeSpec | None]],
+    ) -> TypeSpec | None:
+        """Unify compatible map/matrix selection arms around typed ``na``."""
+        concrete: list[TypeSpec] = []
+        for node, spec in branches:
+            if self._selection_node_is_na(node):
+                continue
+            if spec is None or spec.kind not in {"map", "matrix"}:
+                return None
+            concrete.append(spec)
+        if not concrete:
+            return None
+        first = concrete[0]
+        return first if all(spec == first for spec in concrete[1:]) else None
+
     def _type_spec_from_expr(self, node) -> TypeSpec | None:
         """Best-effort TypeSpec inference for an expression node.
 
@@ -420,6 +475,12 @@ class TypeInferer:
         if isinstance(node, Ternary):
             true_spec = self._type_spec_from_expr(node.true_val)
             false_spec = self._type_spec_from_expr(node.false_val)
+            collection_spec = self._nullable_collection_selection_spec([
+                (node.true_val, true_spec),
+                (node.false_val, false_spec),
+            ])
+            if collection_spec is not None:
+                return collection_spec
             if true_spec is not None and true_spec == false_spec:
                 return true_spec
             if (true_spec is not None
@@ -434,22 +495,16 @@ class TypeInferer:
                 return false_spec
             return None
         if isinstance(node, IfStmt):
-            def terminal_expr(body):
-                if not body:
-                    return None
-                terminal = body[-1]
-                return (
-                    terminal.expr
-                    if isinstance(terminal, ExprStmt)
-                    else terminal
-                )
-
-            true_node = terminal_expr(node.body)
-            false_node = terminal_expr(node.else_body)
-            if true_node is None or false_node is None:
-                return None
+            true_node = self._selection_terminal_expr(node.body)
+            false_node = self._selection_terminal_expr(node.else_body)
             true_spec = self._type_spec_from_expr(true_node)
             false_spec = self._type_spec_from_expr(false_node)
+            collection_spec = self._nullable_collection_selection_spec([
+                (true_node, true_spec),
+                (false_node, false_spec),
+            ])
+            if collection_spec is not None:
+                return collection_spec
             true_is_na = (
                 isinstance(true_node, NaLiteral)
                 or (isinstance(true_node, Identifier)
@@ -476,6 +531,22 @@ class TypeInferer:
                     and true_is_na):
                 return false_spec
             return None
+        if isinstance(node, SwitchStmt):
+            branches: list[tuple[ASTNode | None, TypeSpec | None]] = []
+            for _case_expr, case_body in node.cases:
+                terminal = self._selection_terminal_expr(case_body)
+                branches.append((
+                    terminal,
+                    self._type_spec_from_expr(terminal),
+                ))
+            default_terminal = self._selection_terminal_expr(
+                node.default_body
+            )
+            branches.append((
+                default_terminal,
+                self._type_spec_from_expr(default_terminal),
+            ))
+            return self._nullable_collection_selection_spec(branches)
         if isinstance(node, MemberAccess):
             owner = self._type_spec_from_expr(node.object)
             if owner is not None and owner.kind == "udt" and owner.name:
@@ -510,6 +581,13 @@ class TypeInferer:
                 return TypeSpec.udt("chart.point")
             if namespace == "str" and func_name == "split":
                 return TypeSpec.array(TypeSpec.primitive("string"))
+            if namespace == "matrix" and func_name == "new":
+                elem = (
+                    self._type_spec_from_hint_name(targs[0])
+                    if targs
+                    else TypeSpec.primitive("float")
+                )
+                return TypeSpec.matrix(elem or TypeSpec.primitive("float"))
             if namespace == "array" and func_name in (
                 "new", "new_float", "new_int", "new_bool", "new_string", "from",
             ) or (namespace == "array" and func_name in ARRAY_DRAWING_NEW_CTORS):
@@ -545,6 +623,11 @@ class TypeInferer:
                     if func_name in ("copy", "slice"):
                         return arg_spec
                     return arg_spec.element
+            if namespace == "matrix" and func_name in MATRIX_RETURNING_METHODS:
+                receiver_node = node.args[0] if node.args else node.kwargs.get("id")
+                receiver_spec = self._type_spec_from_expr(receiver_node)
+                if receiver_spec is not None and receiver_spec.kind == "matrix":
+                    return receiver_spec
             if namespace == "map" and func_name == "new":
                 key = self._type_spec_from_hint_name(targs[0]) if len(targs) > 0 else TypeSpec.primitive("string")
                 val = self._type_spec_from_hint_name(targs[1]) if len(targs) > 1 else TypeSpec.primitive("float")
@@ -608,7 +691,7 @@ class TypeInferer:
                     if return_spec is not None:
                         return return_spec
                 if recv_spec is not None and recv_spec.kind == "matrix":
-                    if func_name in ("copy", "submatrix", "transpose", "concat"):
+                    if func_name in MATRIX_RETURNING_METHODS:
                         return recv_spec
                     if func_name in ("row", "col"):
                         return TypeSpec.array(recv_spec.element)
@@ -886,10 +969,10 @@ class TypeInferer:
         # its lexical scopes are popped.  In particular, an inferred local
         # such as ``selected = cond ? na : global_map`` has a map TypeSpec even
         # though generic C++ expression inference sees ``na`` as ``double``.
-        # Consume only the map form here; arrays/matrices and every non-map
-        # declaration retain their established inference/output paths.
+        # Consume nullable map/matrix forms here. Arrays still lack a runtime
+        # null-ID representation and retain their established inference path.
         captured = self._callable_collection_bindings.get(id(node))
-        if captured is not None and captured.kind == "map":
+        if captured is not None and captured.kind in {"map", "matrix"}:
             return self._type_spec_to_cpp(captured)
         # Drawing handle local (L-N6): a hintless local whose RHS resolves to a
         # drawing udt must declare as the handle struct, not the analyzer's
@@ -1355,13 +1438,14 @@ class TypeInferer:
         for ``double`` (already the default lowering), so those paths are
         unchanged.
         """
-        # Maps use their default-constructed null ID for Pine ``na``. Arrays,
-        # matrices, UDTs and drawing handles retain their established paths.
+        # Maps and matrices use their default-constructed null ID for Pine
+        # ``na``. Arrays still lack a nullable runtime representation.
         collection_spec = self._collection_spec_for_name(name)
-        if collection_spec is not None and collection_spec.kind == "map":
+        if (collection_spec is not None
+                and collection_spec.kind in {"map", "matrix"}):
             return self._type_spec_to_cpp(collection_spec)
         if ((collection_spec is not None
-                and collection_spec.kind in {"array", "matrix"})
+                and collection_spec.kind == "array")
                 or self._identifier_udt_type(name) is not None):
             return None
         cpp_type: str | None = None
