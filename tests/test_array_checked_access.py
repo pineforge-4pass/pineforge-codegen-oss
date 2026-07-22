@@ -206,8 +206,9 @@ def test_checked_udt_lvalue_access_preserves_alias(access: str):
         "    array.push(pivots, Pivot.new(na))\n"
         "update(0)"
     )
-    assert re.search(r"Pivot& p = .*pine_runtime_error", cpp)
-    assert "Pivot p =" not in cpp
+    assert re.search(r"Pivot p = .*pine_runtime_error", cpp)
+    assert "Pivot& p =" not in cpp
+    assert "_pf_udt_Pivot.get(p).level = current_bar_.close;" in cpp
 
 
 _VALID_NEGATIVE_SOURCE = """//@version=6
@@ -713,7 +714,8 @@ mutate()
 observed = array.get(array.get(outer, 0), 0).level
 '''
     cpp = transpile(source)
-    assert re.search(r"Pivot& p = .*pine_runtime_error", cpp)
+    assert re.search(r"Pivot p = .*pine_runtime_error", cpp)
+    assert "Pivot& p =" not in cpp
     driver = r"""
 #include <iostream>
 int main() {
@@ -924,7 +926,8 @@ def test_array_typed_udf_parameter_methods_route_by_typespec():
         assert raw_call not in cpp
     assert "source.push_back(10);" in cpp
     assert "source.push_back(true);" in cpp
-    assert re.search(r"Pivot& p = .*pine_runtime_error", cpp)
+    assert re.search(r"Pivot p = .*pine_runtime_error", cpp)
+    assert "Pivot& p =" not in cpp
 
     # The checked set wrapper evaluates index then value exactly once.  Its
     # nested-call spelling closes in reverse textual order, locking execution

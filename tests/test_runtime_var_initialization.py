@@ -251,7 +251,8 @@ var line marker = na
         "lookup = PineMap<std::string, double>::new_();"
     ) == 1
     assert init_block.count(
-        "point = Point{.x = current_bar_.low, .__pf_na = false};"
+        "point = _pf_udt_Point.create("
+        "_PFUdtRecord_Point{.x = current_bar_.low});"
     ) == 1
     assert "marker =" not in init_block
 

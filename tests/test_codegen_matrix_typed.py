@@ -98,6 +98,7 @@ def test_member_access_matrix_copy_returns_same_spec():
 # ---------------------------------------------------------------------------
 
 from pineforge_codegen import transpile
+from tests import _compile as compile_env
 
 
 def _emit(src: str) -> str:
@@ -143,6 +144,25 @@ var m = matrix.new<Pt>(1, 1)
 '''
     cpp = _emit(src)
     assert "PineGenericMatrix<Pt>::new_(1, 1, Pt{})" in cpp
+
+
+def test_udt_constructor_wrapping_matrix_new_keeps_udt_member_type():
+    src = '''//@version=6
+strategy("t")
+type Holder
+    matrix<int> nested
+var Holder holder = Holder.new(matrix.new<int>(1, 1, 7))
+observed = holder.nested.get(0, 0)
+'''
+    cpp = _emit(src)
+
+    assert "    Holder holder;" in cpp
+    assert "    PineMatrix holder;" not in cpp
+    assert (
+        "_pf_udt_Holder.create(_PFUdtRecord_Holder{"
+        ".nested = PineGenericMatrix<int>::new_(1, 1, 7)})"
+    ) in cpp
+    compile_env.compile_cpp(cpp, label="udt-constructor-wrapping-matrix-new")
 
 
 # ---------------------------------------------------------------------------

@@ -118,9 +118,16 @@ class TopLevelEmitter:
         lines.append("#include <numeric>")
         lines.append("#include <string>")
         lines.append("#include <vector>")
+        if getattr(self, "_udt_defs", {}):
+            lines.append("#include <deque>")
+            lines.append("#include <functional>")
+            lines.append("#include <limits>")
         lines.append("#include <tuple>")
         lines.append("#include <optional>")
         lines.append("#include <type_traits>")
+        if getattr(self, "_udt_defs", {}):
+            lines.append("#include <stdexcept>")
+            lines.append("#include <utility>")
         lines.append("#include <memory>")
         lines.append("#include <mutex>")
         lines.append("#include <unordered_map>")
@@ -277,17 +284,19 @@ class TopLevelEmitter:
             members.append(name)
         return members
 
-    def _emit_map_checkpoint_traits(self, lines: list[str]) -> None:
-        """Emit recursive rollback adapters for shared-ID PineMap state.
+    def _emit_handle_checkpoint_traits(self, lines: list[str]) -> None:
+        """Emit recursive rollback adapters for shared-ID collection state.
 
-        This support block is emitted only for map-using scripts. The primary
-        trait retains the historical value-copy checkpoint for ordinary
-        runtime state; PineMap, vectors and generated UDTs recursively replace
-        shared handles with immutable runtime snapshots.
+        This support block is emitted for scripts using a shared-ID map/matrix
+        or an authored UDT arena. The primary trait retains the historical
+        value-copy checkpoint for ordinary runtime state; specialized map,
+        matrix, vector, UDT-record, and arena traits snapshot their owned state
+        without recursively following nested UDT handle graphs.
         """
+        checkpoint_traits = self._checkpoint_traits_cpp_type()
         lines.extend([
             "template <typename _PFValue>",
-            "struct _PFCheckpointTraits {",
+            f"struct {checkpoint_traits} {{",
             "    using snapshot_type = _PFValue;",
             "    static snapshot_type take(const _PFValue& value) { return value; }",
             "    static void restore(_PFValue& value, const snapshot_type& snapshot) {",
@@ -295,8 +304,30 @@ class TopLevelEmitter:
             "    }",
             "};",
             "",
+        ])
+
+        if getattr(self, "_udt_defs", {}):
+            coordinator_type = self._udt_undo_coordinator_cpp_name
+            lines.extend([
+                "template <>",
+                f"struct {checkpoint_traits}<{coordinator_type}> {{",
+                f"    using coordinator_type = {coordinator_type};",
+                "    using snapshot_type = typename coordinator_type::Snapshot;",
+                "    static snapshot_type take(coordinator_type& value) {",
+                "        return value.snapshot();",
+                "    }",
+                "    static void restore(coordinator_type& value,",
+                "                        const snapshot_type& snapshot) {",
+                "        value.restore(snapshot);",
+                "    }",
+                "};",
+                "",
+            ])
+
+        if getattr(self, "_uses_map", False):
+            lines.extend([
             "template <typename _PFKey, typename _PFValue>",
-            "struct _PFCheckpointTraits<PineMap<_PFKey, _PFValue>> {",
+            f"struct {checkpoint_traits}<PineMap<_PFKey, _PFValue>> {{",
             "    using map_type = PineMap<_PFKey, _PFValue>;",
             "    static_assert(map_type::snapshot_supported,",
             '                  "generated map checkpoints require primitive map values");',
@@ -314,9 +345,81 @@ class TopLevelEmitter:
             "    }",
             "};",
             "",
+            ])
+
+        if getattr(self, "_uses_matrix", False):
+            lines.extend([
+                "template <>",
+                f"struct {checkpoint_traits}<PineMatrix> {{",
+                "    using matrix_type = PineMatrix;",
+                "    using snapshot_type = std::optional<typename matrix_type::Snapshot>;",
+                "    static snapshot_type take(const matrix_type& value) {",
+                "        if (value.is_na()) return std::nullopt;",
+                "        return value.snapshot();",
+                "    }",
+                "    static void restore(matrix_type& value, const snapshot_type& snapshot) {",
+                "        if (!snapshot) {",
+                "            value = matrix_type{};",
+                "            return;",
+                "        }",
+                "        value.restore(*snapshot);",
+                "    }",
+                "};",
+                "",
+            ])
+
+            if self._detect_generic_matrix_usage():
+                lines.extend([
+                    "template <typename _PFElement>",
+                    f"struct {checkpoint_traits}<PineGenericMatrix<_PFElement>> {{",
+                    "    using matrix_type = PineGenericMatrix<_PFElement>;",
+                    f"    using element_traits = {checkpoint_traits}<_PFElement>;",
+                    "    using element_snapshot = typename element_traits::snapshot_type;",
+                    "    struct active_snapshot {",
+                    "        typename matrix_type::Snapshot outer;",
+                    "        int rows;",
+                    "        int columns;",
+                    "        std::vector<element_snapshot> elements;",
+                    "    };",
+                    "    using snapshot_type = std::optional<active_snapshot>;",
+                    "    static snapshot_type take(const matrix_type& value) {",
+                    "        if (value.is_na()) return std::nullopt;",
+                    "        active_snapshot snapshot{value.snapshot(), value.rows(),",
+                    "                                 value.columns(), {}};",
+                    "        snapshot.elements.reserve(",
+                    "            static_cast<std::size_t>(snapshot.rows) *",
+                    "            static_cast<std::size_t>(snapshot.columns));",
+                    "        for (int row = 0; row < snapshot.rows; ++row) {",
+                    "            for (int column = 0; column < snapshot.columns; ++column) {",
+                    "                snapshot.elements.push_back(",
+                    "                    element_traits::take(value.get(row, column)));",
+                    "            }",
+                    "        }",
+                    "        return snapshot;",
+                    "    }",
+                    "    static void restore(matrix_type& value, const snapshot_type& snapshot) {",
+                    "        if (!snapshot) {",
+                    "            value = matrix_type{};",
+                    "            return;",
+                    "        }",
+                    "        value.restore(snapshot->outer);",
+                    "        std::size_t index = 0;",
+                    "        for (int row = 0; row < snapshot->rows; ++row) {",
+                    "            for (int column = 0; column < snapshot->columns; ++column) {",
+                    "                _PFElement element = value.get(row, column);",
+                    "                element_traits::restore(element, snapshot->elements[index++]);",
+                    "                value.set(row, column, element);",
+                    "            }",
+                    "        }",
+                    "    }",
+                    "};",
+                    "",
+                ])
+
+        lines.extend([
             "template <typename _PFElement, typename _PFAllocator>",
-            "struct _PFCheckpointTraits<std::vector<_PFElement, _PFAllocator>> {",
-            "    using element_traits = _PFCheckpointTraits<_PFElement>;",
+            f"struct {checkpoint_traits}<std::vector<_PFElement, _PFAllocator>> {{",
+            f"    using element_traits = {checkpoint_traits}<_PFElement>;",
             "    using element_snapshot = typename element_traits::snapshot_type;",
             "    using snapshot_type = std::vector<element_snapshot>;",
             "    static snapshot_type take(",
@@ -344,48 +447,70 @@ class TopLevelEmitter:
             "",
         ])
 
-        # Pine requires referenced UDT types to be declared before their use,
-        # so source/declaration order is also a valid dependency order for the
-        # corresponding checkpoint specializations.
+        # Snapshot backing records field-by-field.  A nested UDT field is only
+        # a numeric handle, so the primary trait copies its ID without recursing
+        # into another record.  This makes self/cyclic object graphs finite;
+        # each arena snapshots every owned record exactly once. Shared-ID map
+        # and matrix fields still enter their specialized recursive traits.
         for type_name, fields in self._udt_defs.items():
+            record_type = self._udt_record_cpp_type(type_name)
             emitted_fields = [
                 field
                 for field in fields
                 if field.name not in self._udt_omitted_fields.get(type_name, set())
             ]
             checkpoint_fields = [field.name for field in emitted_fields]
-            checkpoint_fields.append("__pf_na")
             lines.append("template <>")
-            lines.append(f"struct _PFCheckpointTraits<{type_name}> {{")
+            lines.append(f"struct {checkpoint_traits}<{record_type}> {{")
             lines.append("    struct snapshot_type {")
             for index, field_name in enumerate(checkpoint_fields):
                 lines.append(
-                    "        _PFCheckpointTraits<"
-                    f"decltype({type_name}::{field_name})>::snapshot_type "
+                    f"        {checkpoint_traits}<"
+                    f"decltype({record_type}::{field_name})>::snapshot_type "
                     f"_pf_field_{index};"
                 )
             lines.append("    };")
             lines.append(
-                f"    static snapshot_type take(const {type_name}& value) {{"
+                f"    static snapshot_type take(const {record_type}& value) {{"
             )
             lines.append("        return snapshot_type{")
             for field_name in checkpoint_fields:
                 lines.append(
-                    "            _PFCheckpointTraits<"
-                    f"decltype({type_name}::{field_name})>::take(value.{field_name}),"
+                    f"            {checkpoint_traits}<"
+                    f"decltype({record_type}::{field_name})>::take(value.{field_name}),"
                 )
             lines.append("        };")
             lines.append("    }")
             lines.append(
-                f"    static void restore({type_name}& value, "
+                f"    static void restore({record_type}& value, "
                 "const snapshot_type& snapshot) {"
             )
             for index, field_name in enumerate(checkpoint_fields):
                 lines.append(
-                    "        _PFCheckpointTraits<"
-                    f"decltype({type_name}::{field_name})>::restore("
+                    f"        {checkpoint_traits}<"
+                    f"decltype({record_type}::{field_name})>::restore("
                     f"value.{field_name}, snapshot._pf_field_{index});"
                 )
+            lines.append("    }")
+            lines.append("};")
+            lines.append("")
+
+            arena_type = self._udt_arena_cpp_type(type_name)
+            lines.append("template <>")
+            lines.append(f"struct {checkpoint_traits}<{arena_type}> {{")
+            lines.append(
+                f"    using arena_type = {arena_type};"
+            )
+            lines.append(
+                "    using snapshot_type = typename arena_type::Snapshot;"
+            )
+            lines.append("    static snapshot_type take(arena_type& value) {")
+            lines.append("        return value.snapshot();")
+            lines.append("    }")
+            lines.append(
+                "    static void restore(arena_type& value, const snapshot_type& snapshot) {"
+            )
+            lines.append("        value.restore(snapshot);")
             lines.append("    }")
             lines.append("};")
             lines.append("")
@@ -393,24 +518,31 @@ class TopLevelEmitter:
     def _emit_script_state_hooks(self, lines: list[str], members: list[str]) -> None:
         """Emit the engine's Pine rollback checkpoint hook implementation.
 
-        The checkpoint owns value copies of all generated mutable state.  Every
-        runtime container used by generated code (Series, std::vector/map,
-        PineMatrix/generic matrices, UDTs and drawing arenas) has value
-        semantics, so copying recursively preserves data without retaining
-        pointers into live state.  Drawing handles themselves are stable ids;
-        their arenas are captured in the same checkpoint.
+        The checkpoint owns detached snapshots of all generated mutable state.
+        Shared-ID maps and matrices retain their original backing identity so
+        rollback updates every alias. Generated UDT arenas snapshot each owned
+        record once; nested UDT/map/matrix fields therefore restore through
+        their numeric/shared IDs without recursively walking object graphs.
+        Vectors snapshot their elements, including UDT handle values. Drawing
+        handles themselves are stable ids and their arenas are captured in the
+        same checkpoint.
 
         The static assertions deliberately turn any future non-copyable member
         into a compile failure instead of a nominal, shallow rollback.  Engine
         broker/order state lives in the base class and is intentionally absent:
         fills must survive while Pine script variables roll back.
         """
-        map_aware = getattr(self, "_uses_map", False)
+        checkpoint_traits = self._checkpoint_traits_cpp_type()
+        handle_aware = bool(
+            getattr(self, "_uses_map", False)
+            or getattr(self, "_uses_matrix", False)
+            or getattr(self, "_udt_defs", {})
+        )
         lines.append("    struct _PFScriptState {")
         for idx, name in enumerate(members):
-            if map_aware:
+            if handle_aware:
                 lines.append(
-                    "        _PFCheckpointTraits<"
+                    f"        {checkpoint_traits}<"
                     f"decltype(GeneratedStrategy::{name})>::snapshot_type "
                     f"_pf_value_{idx};"
                 )
@@ -432,9 +564,9 @@ class TopLevelEmitter:
         lines.append("    void snapshot_script_state() override {")
         lines.append("        _pf_script_state_checkpoint_.emplace(_PFScriptState{")
         for name in members:
-            if map_aware:
+            if handle_aware:
                 lines.append(
-                    "            _PFCheckpointTraits<"
+                    f"            {checkpoint_traits}<"
                     f"decltype(GeneratedStrategy::{name})>::take({name}),"
                 )
             else:
@@ -445,9 +577,9 @@ class TopLevelEmitter:
         lines.append("    void restore_script_state() override {")
         lines.append("        if (!_pf_script_state_checkpoint_) return;")
         for idx, name in enumerate(members):
-            if map_aware:
+            if handle_aware:
                 lines.append(
-                    "        _PFCheckpointTraits<"
+                    f"        {checkpoint_traits}<"
                     f"decltype(GeneratedStrategy::{name})>::restore("
                     f"this->{name}, _pf_script_state_checkpoint_->_pf_value_{idx});"
                 )
@@ -890,10 +1022,20 @@ class TopLevelEmitter:
                             break
                     continue
                 if name in self._matrix_specs:
-                    # Matrix vars: initialize with matrix.new expression
+                    # Matrix vars are nullable ID handles. Initialize from the
+                    # authored RHS in declaration order, not only from a
+                    # matrix.new(...) call: ``var matrix<int> alias = source``
+                    # must copy source's ID once, while a later local rebind
+                    # remains independent.
                     for stmt in self.ctx.ast.body:
-                        if isinstance(stmt, VarDecl) and stmt.name == name and isinstance(stmt.value, FuncCall):
-                            cpp_val = self._visit_expr(stmt.value)
+                        if isinstance(stmt, VarDecl) and stmt.name == name:
+                            cpp_val = self._visit_rhs_value(
+                                stmt.value,
+                                name,
+                                target_cpp_type=self._type_spec_to_cpp(
+                                    self._matrix_specs[name]
+                                ),
+                            )
                             lines.append(f"            {safe} = {cpp_val};")
                             break
                     continue
@@ -912,23 +1054,21 @@ class TopLevelEmitter:
                     continue
                 if name in self._runtime_scalar_var_init_members:
                     continue
-                # UDT vars: init with constructor expression
-                init_s = str(init_expr)
-                is_udt_init = False
-                for udt_name in self._udt_defs:
-                    if init_s.startswith(f"{udt_name}.new"):
-                        # Find the actual AST node to generate the init expression
-                        for stmt in self.ctx.ast.body:
-                            if isinstance(stmt, VarDecl) and stmt.name == name and isinstance(stmt.value, FuncCall):
-                                cpp_val = self._visit_expr(stmt.value)
-                                lines.append(f"            {safe} = {cpp_val};")
-                                is_udt_init = True
-                                break
-                        if not is_udt_init:
-                            lines.append(f"            {safe} = {udt_name}{{}};")
-                            is_udt_init = True
-                        break
-                if is_udt_init:
+                # Persistent authored UDT variables initialize from their full
+                # source RHS, not only from ``Type.new``.  In particular,
+                # ``var Item alias = original`` must copy the numeric handle
+                # once and therefore alias the same arena record.
+                udt_name = self._member_udt_type(name)
+                if udt_name in self._udt_defs:
+                    for stmt in self.ctx.ast.body:
+                        if isinstance(stmt, VarDecl) and stmt.name == name:
+                            cpp_val = self._visit_rhs_value(
+                                stmt.value,
+                                name,
+                                target_cpp_type=udt_name,
+                            )
+                            lines.append(f"            {safe} = {cpp_val};")
+                            break
                     continue
                 if self._binding_is_series(name, safe):
                     cpp_val = self._resolve_known(init_expr)
@@ -1299,10 +1439,10 @@ class TopLevelEmitter:
                     self._safe_name(p)
                 ] = elem_cpp_t
             elif is_method and i == 0 and fi.udt_type_name:
-                # Receiver pass modes follow Pine's value/ID families:
-                # primitives by value; arrays, matrices, UDTs, and drawings by
-                # reference; maps by copied shared-ID handle so mutations
-                # reach the caller while receiver rebinds remain local.
+                # Receiver pass modes follow Pine's value/ID families. A user
+                # UDT is itself a numeric object-ID handle, so pass it by value:
+                # field mutation dereferences the same arena record while
+                # ``self := other`` remains a local handle rebind.
                 recv_spec = receiver_spec
                 if recv_spec is None:
                     recv_spec = self._type_spec_from_hint_name(
@@ -1311,7 +1451,13 @@ class TopLevelEmitter:
                 spec = recv_spec
                 if recv_spec is not None:
                     cpp_t = self._type_spec_to_cpp(recv_spec)
-                    if recv_spec.kind in {"array", "matrix", "udt"}:
+                    if (
+                        recv_spec.kind in {"array", "matrix"}
+                        or (
+                            recv_spec.kind == "udt"
+                            and recv_spec.name not in self._udt_defs
+                        )
+                    ):
                         cpp_t = f"{cpp_t}&"
                     if recv_spec.kind == "udt" and recv_spec.name:
                         safe_p = self._safe_name(p)
@@ -1323,7 +1469,11 @@ class TopLevelEmitter:
                     recv_cpp = DRAWING_TYPE_TO_CPP.get(
                         fi.udt_type_name, fi.udt_type_name
                     )
-                    cpp_t = f"{recv_cpp}&"
+                    cpp_t = (
+                        recv_cpp
+                        if fi.udt_type_name in self._udt_defs
+                        else f"{recv_cpp}&"
+                    )
                     safe_p = self._safe_name(p)
                     self._udt_param_udt[safe_p] = fi.udt_type_name
                     self._udt_param_udt[p] = fi.udt_type_name
@@ -1370,16 +1520,17 @@ class TopLevelEmitter:
                 }[variant_pt]
             elif i < len(getattr(fi, "param_type_specs", [])) and fi.param_type_specs[i] is not None:
                 # Precise per-param TypeSpec (declared hint or call-site inference):
-                # ``pivot hi`` -> ``pivot&``, ``line ln`` -> ``Line&``, an untyped
-                # ``s`` used as a string -> ``std::string``. UDT / collection
-                # params pass by reference (Pine UDTs/arrays are reference types,
-                # so mutations propagate and member access compiles).
+                # ``pivot hi`` -> ``pivot`` numeric handle, ``line ln`` keeps its
+                # established drawing-handle route, and an untyped ``s`` used as
+                # a string -> ``std::string``. User UDT field mutation propagates
+                # through the arena even though the handle parameter is by value.
                 spec = fi.param_type_specs[i]
                 cpp_t = self._type_spec_to_cpp(spec)
                 if spec.kind == "udt":
                     self._udt_param_udt[p] = spec.name
                     self._udt_param_udt[self._safe_name(p)] = spec.name
-                    cpp_t = f"{cpp_t}&"
+                    if spec.name not in self._udt_defs:
+                        cpp_t = f"{cpp_t}&"
                 elif spec.kind in ("array", "map"):
                     elem = spec.element if spec.kind == "array" else spec.value
                     if elem is not None and elem.kind == "udt":
@@ -1487,16 +1638,8 @@ class TopLevelEmitter:
         prev_known_var_tombstones = self._lexical_known_var_tombstones
         prev_func_body = getattr(self, "_current_func_body", None)
         prev_func_name = getattr(self, "_active_func_name", None)
-        # The function body is the lexical scope used by the UDT-alias analysis
-        # (BUG C): a local initialised from a var/global UDT lvalue and later
-        # mutated through must alias, not value-copy.
         self._current_func_body = node.body
         self._active_func_name = fi.name
-        # Pointer-aliased UDT locals are function-scoped: a name like ``p_ivot``
-        # may be a rebinding pointer alias in one function and a ``pivot&``
-        # parameter in another, so reset per function to avoid cross-contamination.
-        prev_ptr_alias = self._udt_ptr_alias_locals
-        self._udt_ptr_alias_locals = set()
         self._current_func_locals = {n for n, _, _ in self.ctx.func_var_members.get(fi.name, [])}
         self._current_func_local_types = {}
         self._lexical_drawing_types = {
@@ -1629,7 +1772,6 @@ class TopLevelEmitter:
         self._lexical_known_var_tombstones = prev_known_var_tombstones
         self._current_func_body = prev_func_body
         self._active_func_name = prev_func_name
-        self._udt_ptr_alias_locals = prev_ptr_alias
         self._current_func_collection_specs = prev_func_collection_specs
         self._current_func_collection_shadows = prev_func_collection_shadows
         self._collection_types = prev_collection_types

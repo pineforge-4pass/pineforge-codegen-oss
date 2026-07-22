@@ -27,9 +27,9 @@ plot(m.price)
     # The struct now declares a real Label handle member.
     assert "Label tag" in cpp
     # The field write lowers onto the arena, NOT a dropped placeholder.
-    assert "m.tag = pf_label_new(_pf_labels_," in cpp
+    assert "_pf_udt_Marker.get(m).tag = pf_label_new(_pf_labels_," in cpp
     # The field read is a plain handle copy (real member access survives).
-    assert "m.tag" in cpp
+    assert "_pf_udt_Marker.get(m).tag" in cpp
 
 
 def test_udt_line_field_assignment_is_real():
@@ -46,7 +46,7 @@ plot(s.p1)
 '''
     cpp = transpile(src)
     assert "Line ln" in cpp
-    assert "s.ln = pf_line_new(_pf_lines_," in cpp
+    assert "_pf_udt_Segment.get(s).ln = pf_line_new(_pf_lines_," in cpp
 
 
 def test_udt_box_field_read_is_real():
@@ -64,7 +64,7 @@ plot(r.top)
     cpp = transpile(src)
     assert "Box bx" in cpp
     # The field read survives as a real handle member access.
-    assert "r.bx" in cpp
+    assert "_pf_udt_Region.read(r).bx" in cpp
 
 
 def test_udt_without_drawing_fields_unchanged():
@@ -85,7 +85,7 @@ plot(v)
     assert "double y" in cpp or "float y" in cpp
     # Direct field access must still work — at least one reference to p.x
     # survives in the executable body (the plot of v depends on it).
-    assert "p.x" in cpp
-    assert "p.y" in cpp
+    assert "_pf_udt_Pt.read(p).x" in cpp
+    assert "_pf_udt_Pt.read(p).y" in cpp
     # No drawing machinery for a non-drawing strategy.
     assert "pineforge/drawing.hpp" not in cpp

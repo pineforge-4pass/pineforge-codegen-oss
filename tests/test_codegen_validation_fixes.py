@@ -1098,9 +1098,9 @@ def test_tuple_return_infers_local_string_from_nested_decl():
     assert "std::string" in cpp
 
 
-def test_udt_param_emits_struct_reference():
-    # jevon's f_get(... pivot hi, pivot lo): the param must emit as ``pivot&``
-    # (not ``double``) so member access + reference semantics work.
+def test_udt_param_emits_object_handle_value():
+    # A user UDT parameter is a numeric object-ID handle. Passing it by value
+    # preserves field mutation through the arena while local rebind stays local.
     cpp = _cpp(
         "type pivot\n"
         "    float level\n"
@@ -1111,7 +1111,8 @@ def test_udt_param_emits_struct_reference():
         "_z = f(p)\n"
         "plot(close)"
     )
-    assert "f(pivot& lo)" in cpp
+    assert "f(pivot lo)" in cpp
+    assert "f(pivot& lo)" not in cpp
     assert "f(double lo)" not in cpp
 
 
@@ -1298,7 +1299,7 @@ def test_function_scoped_var_udt_init_runs_once():
     assert "if (!this->_pf_var_init_p)" in cpp
     assert "if (!_fvinit_f_cs0" not in cpp
     # The UDT constructor expression is lowered inside the guarded init block.
-    assert "p = pivot{" in cpp or "p = pivot(" in cpp
+    assert "p = _pf_udt_pivot.create(_PFUdtRecord_pivot{" in cpp
 
 
 def test_function_scoped_var_na_drawing_handle_skips_assignment():
@@ -1381,8 +1382,11 @@ def test_string_concat_preserves_udt_for_in_field_string_type():
         "    label.new(bar_index, lvl.price, \"hit \" + lvl.name)\n"
         "plot(close)"
     )
-    assert "std::to_string(lvl.name)" not in cpp
-    assert 'std::string("hit ") + lvl.name' in cpp
+    assert "std::to_string(_pf_udt_Level.read(lvl).name)" not in cpp
+    assert (
+        'std::string("hit ") + _pf_udt_Level.read(lvl).name'
+        in cpp
+    )
 
 
 def test_for_loop_with_explicit_by_infers_descending_direction():

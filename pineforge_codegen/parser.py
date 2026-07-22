@@ -405,10 +405,13 @@ class Parser:
         start_tok = self._advance()  # consume 'strategy' or 'indicator'
         # Parse arguments as a function call, then convert to StrategyDecl
         self._consume(TokenType.LPAREN)
-        args, kwargs = self._parse_call_args()
+        args, kwargs, call_arg_order = self._parse_call_args()
         self._consume(TokenType.RPAREN)
         node = StrategyDecl(args=args, kwargs=kwargs)
-        node.annotations = {"decl_kind": start_tok.value}
+        node.annotations = {
+            "decl_kind": start_tok.value,
+            "call_arg_order": call_arg_order,
+        }
         return self._set_loc(node, start_tok)
 
     def _parse_import_stmt(self) -> ImportStmt:
@@ -1225,15 +1228,17 @@ class Parser:
         """Parse (args, kwargs) after callee expression."""
         start_tok = self._current()
         self._consume(TokenType.LPAREN)
-        args, kwargs = self._parse_call_args()
+        args, kwargs, call_arg_order = self._parse_call_args()
         self._consume(TokenType.RPAREN)
         node = FuncCall(callee=callee, args=args, kwargs=kwargs)
+        node.annotations = {"call_arg_order": call_arg_order}
         return self._set_loc(node, start_tok)
 
-    def _parse_call_args(self) -> tuple[list, dict]:
+    def _parse_call_args(self) -> tuple[list, dict, list]:
         """Parse function call arguments and keyword arguments."""
         args: list = []
         kwargs: dict = {}
+        call_arg_order: list = []
 
         while not self._check(TokenType.RPAREN) and not self._at_end():
             # Detect kwargs: IDENT = value (but not IDENT == value)
@@ -1262,12 +1267,15 @@ class Parser:
                 self._advance()  # consume =
                 val = self._parse_expression()
                 kwargs[key_tok.value] = val
+                call_arg_order.append(val)
             else:
-                args.append(self._parse_expression())
+                val = self._parse_expression()
+                args.append(val)
+                call_arg_order.append(val)
 
             self._match(TokenType.COMMA)
 
-        return args, kwargs
+        return args, kwargs, call_arg_order
 
     # -- Primary expressions --
 

@@ -1,9 +1,10 @@
-"""Regression (BUG C): UDT lvalue init must ALIAS, not value-copy.
+"""Regression (BUG C): ordinary UDT assignment copies an object-ID handle.
 
 Pine UDTs are reference types. A local initialised from a var/global UDT lvalue
 (or a ternary/switch selecting such lvalues) and then mutated through must write
-back to the global. Codegen previously emitted a value copy, so the mutation was
-lost. The fix emits a C++ reference (non-rebinding) or pointer (rebinding) alias.
+back to the global. Generated UDT values are now numeric handles into per-type
+arenas, so ordinary C++ value assignment aliases the record while local rebind
+remains independent. No selective C++ reference/pointer heuristic is needed.
 
 Also covers the related crash unmasked by the alias fix: a drawing-style visual
 constant (``label.style_*``) passed positionally into a user function's
@@ -19,7 +20,11 @@ from pineforge_codegen import transpile
 
 
 def _func_body(cpp: str, name: str) -> str:
-    m = re.search(rf"{re.escape(name)}\w*\(.*?\n    \}}", cpp, re.S)
+    m = re.search(
+        rf"^    [^\n]*\b{re.escape(name)}\w*\([^;\n]*\) \{{.*?^    \}}",
+        cpp,
+        re.S | re.M,
+    )
     assert m is not None, f"function {name} not found"
     return m.group(0)
 
@@ -34,7 +39,7 @@ var pivot gHigh = pivot.new(na, false)
 """
 
 
-def test_ternary_of_var_udts_mutated_emits_reference_alias():
+def test_ternary_of_var_udts_mutated_emits_handle_alias():
     src = PROLOGUE + """
 upd(bool internal) =>
     pivot p = internal ? gLow : gHigh
@@ -47,15 +52,14 @@ plot(close)
 """
     cpp = transpile(src)
     body = _func_body(cpp, "upd")
-    # Reference alias (non-rebinding), not a value copy.
-    assert re.search(r"pivot& p = \(\(internal\) \? \(gLow\) : \(gHigh\)\);", body)
-    assert "pivot p = ((internal)" not in body
-    # Mutations write through the reference with ``.`` member access.
-    assert "p.currentLevel = " in body
-    assert "p.crossed = " in body
+    assert re.search(r"pivot p = \(\(internal\) \? \(gLow\) : \(gHigh\)\);", body)
+    assert "pivot& p" not in body
+    assert "pivot* p" not in body
+    assert "_pf_udt_pivot.get(p).currentLevel = " in body
+    assert "_pf_udt_pivot.get(p).crossed = " in body
 
 
-def test_rebound_udt_local_emits_pointer_alias():
+def test_rebound_udt_local_rebinds_handle_only():
     src = PROLOGUE + """
 disp(bool internal) =>
     pivot p = internal ? gHigh : gLow
@@ -69,16 +73,15 @@ plot(close)
 """
     cpp = transpile(src)
     body = _func_body(cpp, "disp")
-    # Pointer alias because the local is rebound to a different lvalue.
-    assert re.search(r"pivot\* p = \(internal \? &\(gHigh\) : &\(gLow\)\);", body)
-    # Field access goes through ``->`` and the rebind takes the address.
-    assert "p->crossed = true;" in body
-    assert re.search(r"p = \(internal \? &\(gLow\) : &\(gHigh\)\);", body)
+    assert re.search(r"pivot p = \(\(internal\) \? \(gHigh\) : \(gLow\)\);", body)
+    assert "pivot& p" not in body
+    assert "pivot* p" not in body
+    assert "_pf_udt_pivot.get(p).crossed = true;" in body
+    assert re.search(r"p = \(\(internal\) \? \(gLow\) : \(gHigh\)\);", body)
 
 
 def test_value_snapshot_not_aliased():
-    # CAUTION control: a local copied from a .new() ctor (not a var/global
-    # lvalue) and mutated must stay a VALUE copy, never an alias.
+    # CAUTION control: .new() must allocate a fresh record ID.
     src = PROLOGUE + """
 mk() =>
     pivot p = pivot.new(1.0, false)
@@ -91,12 +94,12 @@ plot(v)
     body = _func_body(cpp, "mk")
     assert "pivot& p" not in body
     assert "pivot* p" not in body
-    assert "pivot p = " in body
+    assert "pivot p = _pf_udt_pivot.create(_PFUdtRecord_pivot{" in body
+    assert "_pf_udt_pivot.get(p).currentLevel = 2.0;" in body
 
 
 def test_readonly_var_udt_local_not_aliased():
-    # A local read but never mutated needn't alias (value-copy is fine and
-    # avoids surprising reference semantics for pure reads).
+    # A read-only local uses the same ordinary handle-copy representation.
     src = PROLOGUE + """
 rd(bool internal) =>
     pivot p = internal ? gLow : gHigh
@@ -108,9 +111,11 @@ plot(x)
     body = _func_body(cpp, "rd")
     assert "pivot& p" not in body
     assert "pivot* p" not in body
+    assert "pivot p = " in body
+    assert "_pf_udt_pivot.read(p).currentLevel" in body
 
 
-def test_array_get_udt_local_mutation_emits_reference_alias():
+def test_array_get_udt_local_mutation_emits_handle_alias():
     src = PROLOGUE + """
 var array<pivot> pivots = array.new<pivot>()
 upd(int i) =>
@@ -126,15 +131,16 @@ plot(close)
 """
     cpp = transpile(src)
     body = _func_body(cpp, "upd")
-    assert "pivot& p =" in body
+    assert "pivot p =" in body
     assert "pine_runtime_error" in body
     assert "}((i)); }((pivots));" in body
-    assert "pivot p =" not in body
-    assert "p.currentLevel = " in body
-    assert "p.crossed = true;" in body
+    assert "pivot& p" not in body
+    assert "pivot* p" not in body
+    assert "_pf_udt_pivot.get(p).currentLevel = " in body
+    assert "_pf_udt_pivot.get(p).crossed = true;" in body
 
 
-def test_array_param_get_udt_local_mutation_emits_reference_alias():
+def test_array_param_get_udt_local_mutation_emits_handle_alias():
     src = PROLOGUE + """
 var array<pivot> pivots = array.new<pivot>()
 upd(array<pivot> items, int i) =>
@@ -150,11 +156,12 @@ plot(close)
 """
     cpp = transpile(src)
     body = _func_body(cpp, "upd")
-    assert "pivot& p =" in body
+    assert "pivot p =" in body
     assert "}((i)); }((items));" in body
-    assert "pivot p =" not in body
-    assert "p.currentLevel = " in body
-    assert "p.crossed = true;" in body
+    assert "pivot& p" not in body
+    assert "pivot* p" not in body
+    assert "_pf_udt_pivot.get(p).currentLevel = " in body
+    assert "_pf_udt_pivot.get(p).crossed = true;" in body
 
 
 _GLOBAL_ARRAY_PROLOGUE = PROLOGUE + """
@@ -164,7 +171,7 @@ if array.size(pivots) == 0
 """
 
 
-def test_global_while_array_get_udt_mutation_emits_reference_alias():
+def test_global_while_array_get_udt_mutation_emits_handle_alias():
     # Regression: a GLOBAL-scope ``while`` loop-local bound from an array
     # element and field-mutated is hoisted to a class member and its in-loop
     # init lowered to a value-copy assignment, so the mutation was lost. It must
@@ -180,19 +187,17 @@ while wi < array.size(pivots)
 plot(close)
 """
     cpp = transpile(src)
-    # Fresh per-iteration reference to the array element (write-back), not copy.
-    assert "pivot& p =" in cpp
+    # Fresh per-iteration handle aliases the array element's backing record.
+    assert "pivot p =" in cpp
     assert "pine_runtime_error" in cpp
     assert "}((wi)); }((pivots));" in cpp
-    assert "pivot p =" not in cpp
-    # The hoisted value member is suppressed (the alias replaces it).
-    assert "pivot p = pivot{};" not in cpp
-    # Mutations write through the reference with ``.`` member access.
-    assert "p.currentLevel = " in cpp
-    assert "p.crossed = true;" in cpp
+    assert "pivot& p" not in cpp
+    assert "pivot* p" not in cpp
+    assert "_pf_udt_pivot.get(p).currentLevel = " in cpp
+    assert "_pf_udt_pivot.get(p).crossed = true;" in cpp
 
 
-def test_global_for_array_get_udt_mutation_emits_reference_alias():
+def test_global_for_array_get_udt_mutation_emits_handle_alias():
     # Same defect via a GLOBAL ``for i = ...`` loop. Here the get-local stays a
     # true local (not hoisted), but the function-local alias path no-ops at
     # global scope, so it also value-copied. Must alias for write-back.
@@ -204,19 +209,17 @@ for fi = 0 to array.size(pivots) - 1
 plot(close)
 """
     cpp = transpile(src)
-    assert "pivot& p =" in cpp
+    assert "pivot p =" in cpp
     assert "pine_runtime_error" in cpp
     assert "}((fi)); }((pivots));" in cpp
-    assert "pivot p =" not in cpp
-    assert "p.currentLevel = " in cpp
-    assert "p.crossed = true;" in cpp
+    assert "pivot& p" not in cpp
+    assert "pivot* p" not in cpp
+    assert "_pf_udt_pivot.get(p).currentLevel = " in cpp
+    assert "_pf_udt_pivot.get(p).crossed = true;" in cpp
 
 
 def test_global_readonly_array_get_udt_stays_value_copy():
-    # CAUTION control locking the scope of the fix: a GLOBAL get-local that is
-    # only READ (never field-mutated) must keep value-copy semantics — no
-    # needless reference/pointer aliasing (this is what keeps the read-only
-    # tripwire strategies byte-identical).
+    # A read-only array get uses the same value handle as a mutating get.
     src = _GLOBAL_ARRAY_PROLOGUE + """
 float acc = 0.0
 for ri = 0 to array.size(pivots) - 1

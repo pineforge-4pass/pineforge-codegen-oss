@@ -308,23 +308,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._reset_input_getter_mode: bool = False
         # Set of var/series member names that belong to user functions (need cloning)
         self._func_var_members_set: set[str] = set()
-        # BUG C: function-local names emitted as ``UDT*`` pointer aliases (a UDT
-        # local initialised from a var/global UDT lvalue, mutated through, AND
-        # later rebound to a different lvalue). Member access lowers to ``->``
-        # and rebinds to ``&(...)``. Reset per function in _emit_func_def is not
-        # needed: names are function-unique and the value-copy fallback ignores
-        # entries for inactive functions.
-        self._udt_ptr_alias_locals: set[str] = set()
-        # Names of hoisted GLOBAL-scope UDT loop-locals bound from a UDT array
-        # element (``z = arr.get(i)``) and later field-mutated. Pine array
-        # elements of a user-defined type are references, so such a local must
-        # ALIAS the element, not value-copy — the mutation has to write back
-        # into the array. These are de-hoisted from the class-member value-copy
-        # to a fresh per-iteration ``UDT& z = arr[i];`` local reference (the same
-        # form the non-hoisted function-local alias path already emits). Read-only
-        # get-locals are NOT recorded (no field mutation) and keep value-copy
-        # semantics. Populated by _register_udt_array_get_ref_locals.
-        self._udt_array_get_ref_locals: set[str] = set()
         self._precalc_loop_active: bool = False
         # Names of ``var`` members that live in a callable scope (not global).
         # Their exact declaration statements own initialization; they must not
@@ -940,7 +923,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for name, _, _ in ctx.var_members:
             self._all_member_names.add(self._safe_name(name))
         self._register_global_aggregate_member_types()
-        self._register_udt_array_get_ref_locals()
         self._uses_map = self._detect_map_usage()
         self._uses_matrix = self._detect_matrix_usage()
         # Drawing-objects-as-data: gate all new emission (drawing.hpp include +
@@ -1982,47 +1964,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 for _case_expr, case_stmts in cases:
                     if isinstance(case_stmts, list):
                         yield from self._walk_global_scope_with_loopflag(case_stmts, child_in_loop)
-
-    def _register_udt_array_get_ref_locals(self) -> None:
-        """Detect global-scope UDT loop-locals that alias a UDT array element and
-        are later field-mutated (Pine array elements of a user-defined type are
-        references — ``z = arr.get(i)`` then ``z.f := v`` MUST write back into
-        ``arr``).
-
-        A non-``var`` global-scope ``UDT z = arr.get(i)`` (or ``.first`` /
-        ``.last``) nested inside a for/while loop mis-lowers to a value copy: a
-        global ``while`` loop hoists ``z`` to a class member whose in-loop init
-        becomes a value-copy assignment, and a global ``for`` loop keeps ``z`` a
-        true local but the function-local alias path (``_udt_local_alias_kind``)
-        no-ops at global scope (``_current_func_body`` is None) — both silently
-        drop the field mutation. We record exactly this shape so the (possible)
-        class member is suppressed and the in-loop VarDecl is emitted as a fresh
-        per-iteration ``UDT& z = arr[i];`` reference instead (the same alias form
-        the non-hoisted function-local path already produces). Strictly gated:
-        the RHS must be a UDT-array-element lvalue AND the name must be field-
-        mutated at global scope AND the declaration must be loop-nested. A
-        read-only get-local is never recorded, so its value-copy output is
-        unchanged. Function-local get-locals are excluded (the walker skips
-        function bodies) — those keep using the existing alias path."""
-        pairs = list(self._walk_global_scope_with_loopflag(self.ctx.ast.body, False))
-        field_mutated: set[str] = set()
-        for s, _in_loop in pairs:
-            if (isinstance(s, Assignment)
-                    and isinstance(s.target, MemberAccess)
-                    and isinstance(s.target.object, Identifier)):
-                field_mutated.add(s.target.object.name)
-        for s, in_loop in pairs:
-            if not isinstance(s, VarDecl) or s.is_var or s.is_varip:
-                continue
-            if not in_loop:
-                continue
-            if not isinstance(s.value, FuncCall):
-                continue
-            if self._is_udt_lvalue(s.value) is None:
-                continue
-            if s.name not in field_mutated:
-                continue
-            self._udt_array_get_ref_locals.add(s.name)
 
     def _extract_receiver_name(self, call_node) -> str | None:
         """Extract receiver Identifier name from m.method(...) or matrix.method(m, ...).
@@ -3369,7 +3310,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return cs_info[1]
             return None
 
-        def actual_args_for(call: FuncCall, params: list[str]) -> list:
+        def actual_args_for(call: FuncCall, params: list[str], method_info=None) -> list:
+            if method_info is not None:
+                return list(
+                    self._bind_typed_method_args(method_info, call).args_by_param
+                )
             if call.kwargs:
                 return _merge_kwargs(call.args, call.kwargs, params, lambda arg: arg)
             return list(call.args)
@@ -3442,7 +3387,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if method_call:
                 args = [
                     node.callee.object,
-                    *actual_args_for(node, list(fi.node.params[1:])),
+                    *actual_args_for(
+                        node, list(fi.node.params[1:]), method_info=fi
+                    ),
                 ]
             else:
                 args = actual_args_for(node, list(fi.node.params))
@@ -3517,6 +3464,140 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             )
         return member
 
+    @staticmethod
+    def _allocate_generated_cpp_name(preferred: str, used: set[str]) -> str:
+        """Reserve one deterministic generated C++ identifier.
+
+        Pine permits identifiers beginning with underscores, so generated
+        support names cannot rely on a magic prefix being unavailable to the
+        author.  Preserve the historical spelling when it is free and append
+        a stable suffix only for an actual collision.
+        """
+        candidate = preferred
+        suffix = 2
+        while candidate in used:
+            candidate = f"{preferred}__pf{suffix}"
+            suffix += 1
+        used.add(candidate)
+        return candidate
+
+    def _prepare_udt_generated_names(self) -> None:
+        """Allocate UDT support symbols outside every authored namespace.
+
+        Record/trait/template names live at generated-file scope, while arena
+        instances live in ``GeneratedStrategy``.  This pass runs only after
+        callable clones, declaration-site flags and inline-history members have
+        their final names.  Keep one complete class-scope inventory so adding a
+        UDT member cannot make ``_func_safe_name`` change after those prepasses,
+        then extend the file-scope inventory with the same names because an
+        unqualified class member, parameter or local can hide a generated
+        support type.  In the ordinary non-colliding case the preferred names
+        remain byte-for-byte unchanged.
+        """
+        class_used: set[str] = set(
+            getattr(self, "_runtime_var_init_flag_used_names", ())
+        )
+        class_used.update(self._all_member_names)
+        class_used.update(
+            self._safe_name(name) for name in self._all_bound_names
+        )
+        class_used.update(
+            self._safe_name(name)
+            for name, _ptype in self.ctx.global_var_decls
+        )
+        for func_info in self.ctx.func_infos:
+            node = getattr(func_info, "node", None)
+            if node is not None:
+                class_used.update(
+                    self._safe_name(name)
+                    for name in (getattr(node, "params", ()) or ())
+                )
+
+        # These generated members are not all recorded in
+        # ``_runtime_var_init_flag_used_names``.  Reserve them explicitly so
+        # the inventory remains authoritative even for scripts without a
+        # runtime scalar ``var`` initializer.
+        class_used.update(
+            remapped
+            for remap in self._func_cs_ta_remap.values()
+            for remapped in remap.values()
+        )
+        class_used.update(
+            site.member_name
+            for index, site in enumerate(self.ctx.ta_call_sites)
+            if index not in self._dead_ta_indices
+        )
+        class_used.update(
+            f"_precalc_{site.member_name}"
+            for index, site in enumerate(self.ctx.ta_call_sites)
+            if index not in self._dead_ta_indices
+            and self._ta_site_uses_precalc(site)
+        )
+        class_used.update(
+            site.member_name
+            for index, site in enumerate(self.ctx.fixnan_sites)
+            if index not in self._dead_fixnan_indices
+        )
+        class_used.update(
+            info["member_name"] for info in self._inline_history_members
+        )
+        class_used.update(
+            variant["member_name"]
+            for info in self._security_eval_info
+            for variants in (info.get("ta_variants") or {}).values()
+            for variant in variants
+        )
+        for instance in self._fresh_instances:
+            class_used.add(instance["name"])
+            for remap_name in ("ta_remap", "var_remap", "fixnan_remap"):
+                class_used.update(instance.get(remap_name, {}).values())
+
+        global_used: set[str] = set(self._udt_defs)
+        global_used.update(self._enum_defs)
+        global_used.update(
+            f"{enum_name}_{member}"
+            for enum_name, members in self._enum_defs.items()
+            for member in members
+        )
+        global_used.update(
+            f"{enum_name}_str_values"
+            for enum_name, members in self._enum_defs.items()
+            if self._enum_member_strings.get(enum_name)
+            and len(self._enum_member_strings[enum_name]) == len(members)
+        )
+        global_used.update(class_used)
+
+        self._udt_arena_template_cpp_name = self._allocate_generated_cpp_name(
+            "_PFUdtArena", global_used
+        )
+        self._udt_undo_coordinator_cpp_name = self._allocate_generated_cpp_name(
+            "_PFUdtUndoCoordinator", global_used
+        )
+        self._checkpoint_traits_cpp_name = self._allocate_generated_cpp_name(
+            "_PFCheckpointTraits", global_used
+        )
+        self._udt_record_cpp_names: dict[str, str] = {}
+        for type_name in self._udt_defs:
+            self._udt_record_cpp_names[type_name] = (
+                self._allocate_generated_cpp_name(
+                    f"_PFUdtRecord_{type_name}", global_used
+                )
+            )
+
+        member_used = set(class_used)
+        self._udt_undo_coordinator_member_name = self._allocate_generated_cpp_name(
+            "_pf_udt_undo", member_used
+        )
+        self._all_member_names.add(self._udt_undo_coordinator_member_name)
+        self._udt_arena_member_names: dict[str, str] = {}
+        for type_name in self._udt_defs:
+            preferred = f"_pf_udt_{self._safe_name(type_name)}"
+            allocated = self._allocate_generated_cpp_name(
+                preferred, member_used
+            )
+            self._udt_arena_member_names[type_name] = allocated
+            self._all_member_names.add(allocated)
+
     def generate(self) -> str:
         """Generate C++ source from the AnalyzerContext."""
         # Context-sensitive instance pre-pass (needs the naming helpers populated
@@ -3526,6 +3607,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # context-sensitive callable-state member name is known.
         self._prepare_runtime_scalar_var_initializers()
         self._prepare_inline_history_members()
+        # UDT support names are the final generated-name category.  They must
+        # suffix around every authored/callable identifier already frozen by
+        # the passes above, never force an earlier callable to rename itself.
+        self._prepare_udt_generated_names()
         # Pre-scan for strategy series vars
         self._prescan_strategy_series()
         self._security_ohlc_hist_fields_by_sec: dict[int, set[str]] = {}
@@ -3546,14 +3631,197 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 1. Includes
         self._emit_includes(lines)
 
-        # 1b. UDT structs
-        # Drawing field names per struct are pre-computed in __init__ as
-        # ``self._udt_omitted_fields`` so visit_expr / visit_stmt can
-        # consult the same map. Drawing types: label, line, box, table,
-        # linefill, polyline, chart.point. These have no backtest runtime
-        # representation in PineForge — see pineforge-codegen issue #10.
-        for type_name, fields in self._udt_defs.items():
+        # 1b. User-defined object handles and backing records.
+        #
+        # Pine UDT values are object IDs: ordinary assignment aliases the same
+        # object, while ``copy()`` allocates one detached outer object and keeps
+        # nested UDT/map/matrix IDs shallow-shared. Direct array-valued fields
+        # still use std::vector value storage, so their built-in UDT copy path
+        # is rejected explicitly until arrays gain handle identity. Emit every
+        # authored type as a small nullable handle first, then its value record.
+        # The two-phase order also permits self/nested UDT fields without
+        # embedding a C++ type recursively by value.
+        for type_name in self._udt_defs:
             lines.append(f"struct {type_name} {{")
+            lines.append("    int32_t __pf_id = -1;")
+            lines.append("};")
+            lines.append(
+                f"inline bool is_na(const {type_name}& _z) "
+                "{ return _z.__pf_id < 0; }"
+            )
+            lines.append("")
+
+        if self._udt_defs:
+            lines.extend([
+                "template <typename _PFValue>",
+                f"struct {self._checkpoint_traits_cpp_name};",
+                "",
+                f"class {self._udt_undo_coordinator_cpp_name} {{",
+                "    std::vector<std::function<void()>> _pf_undo_;",
+                "    uint64_t _pf_generation_ = 0;",
+                "    bool _pf_active_ = false;",
+                "public:",
+                "    struct Snapshot { uint64_t generation; };",
+                f"    {self._udt_undo_coordinator_cpp_name}() = default;",
+                f"    {self._udt_undo_coordinator_cpp_name}(",
+                f"        const {self._udt_undo_coordinator_cpp_name}&) = delete;",
+                f"    {self._udt_undo_coordinator_cpp_name}& operator=(",
+                f"        const {self._udt_undo_coordinator_cpp_name}&) = delete;",
+                f"    {self._udt_undo_coordinator_cpp_name}(",
+                f"        {self._udt_undo_coordinator_cpp_name}&&) = delete;",
+                f"    {self._udt_undo_coordinator_cpp_name}& operator=(",
+                f"        {self._udt_undo_coordinator_cpp_name}&&) = delete;",
+                "",
+                "    Snapshot snapshot() {",
+                "        if (_pf_generation_ == std::numeric_limits<uint64_t>::max()) {",
+                '            throw std::overflow_error("UDT checkpoint generation exhausted");',
+                "        }",
+                "        ++_pf_generation_;",
+                "        _pf_undo_.clear();",
+                "        _pf_active_ = true;",
+                "        return Snapshot{_pf_generation_};",
+                "    }",
+                "    uint64_t generation() const { return _pf_generation_; }",
+                "    bool active() const { return _pf_active_; }",
+                "    bool empty() const { return _pf_undo_.empty(); }",
+                "    void record(uint64_t generation, std::function<void()> undo) {",
+                "        if (!_pf_active_ || generation != _pf_generation_) {",
+                '            throw std::runtime_error("invalid UDT undo generation");',
+                "        }",
+                "        _pf_undo_.push_back(std::move(undo));",
+                "    }",
+                "    void restore(const Snapshot& snapshot) {",
+                "        if (!_pf_active_ || snapshot.generation != _pf_generation_) {",
+                '            throw std::runtime_error("invalid UDT coordinator checkpoint token");',
+                "        }",
+                "        for (auto entry = _pf_undo_.rbegin();",
+                "                entry != _pf_undo_.rend(); ++entry) (*entry)();",
+                "        _pf_undo_.clear();",
+                "    }",
+                "};",
+                "",
+                "template <typename _PFHandle, typename _PFRecord>",
+                f"class {self._udt_arena_template_cpp_name} {{",
+                f"    using _PFRecordTraits = {self._checkpoint_traits_cpp_name}<_PFRecord>;",
+                "    using _PFRecordSnapshot = typename _PFRecordTraits::snapshot_type;",
+                "    struct _PFSlot {",
+                "        _PFRecord value;",
+                "        uint64_t logged_generation = 0;",
+                "    };",
+                "    std::deque<_PFSlot> _pf_records_;",
+                f"    {self._udt_undo_coordinator_cpp_name}* _pf_coordinator_;",
+                "    std::size_t _pf_checkpoint_size_ = 0;",
+                "    uint64_t _pf_checkpoint_generation_ = 0;",
+                "    bool _pf_checkpoint_active_ = false;",
+                "",
+                "    void capture(std::size_t index) {",
+                "        if (!_pf_checkpoint_active_) return;",
+                "        auto& slot = _pf_records_.at(index);",
+                "        if (slot.logged_generation",
+                "                == _pf_checkpoint_generation_) return;",
+                "        auto snapshot = _PFRecordTraits::take(slot.value);",
+                "        _pf_coordinator_->record(_pf_checkpoint_generation_,",
+                "            [this, index, snapshot = std::move(snapshot)]() mutable {",
+                "                auto& restore_slot = _pf_records_.at(index);",
+                "                _PFRecordTraits::restore(restore_slot.value, snapshot);",
+                "                restore_slot.logged_generation = 0;",
+                "            });",
+                "        slot.logged_generation = _pf_checkpoint_generation_;",
+                "    }",
+                "public:",
+                "    struct Snapshot {",
+                "        uint64_t generation;",
+                "        std::size_t size;",
+                "    };",
+                "",
+                f"    explicit {self._udt_arena_template_cpp_name}(",
+                f"            {self._udt_undo_coordinator_cpp_name}* coordinator)",
+                "            : _pf_coordinator_(coordinator) {",
+                "        if (!_pf_coordinator_)",
+                '            throw std::invalid_argument("UDT arena requires undo coordinator");',
+                "    }",
+                f"    {self._udt_arena_template_cpp_name}(",
+                f"        const {self._udt_arena_template_cpp_name}&) = delete;",
+                f"    {self._udt_arena_template_cpp_name}& operator=(",
+                f"        const {self._udt_arena_template_cpp_name}&) = delete;",
+                f"    {self._udt_arena_template_cpp_name}(",
+                f"        {self._udt_arena_template_cpp_name}&&) = delete;",
+                f"    {self._udt_arena_template_cpp_name}& operator=(",
+                f"        {self._udt_arena_template_cpp_name}&&) = delete;",
+                "",
+                "    _PFHandle create(_PFRecord value) {",
+                "        if (_pf_records_.size() > static_cast<std::size_t>(",
+                "                std::numeric_limits<int32_t>::max())) {",
+                '            throw std::length_error("UDT object-ID capacity exceeded");',
+                "        }",
+                "        const auto id = static_cast<int32_t>(_pf_records_.size());",
+                "        _pf_records_.push_back(_PFSlot{std::move(value), 0});",
+                "        return _PFHandle{id};",
+                "    }",
+                "    _PFHandle copy(_PFHandle value) {",
+                "        return create(static_cast<const "
+                f"{self._udt_arena_template_cpp_name}&>(*this).get(value));",
+                "    }",
+                "    _PFRecord& get(_PFHandle value) {",
+                "        if (value.__pf_id < 0",
+                "                || static_cast<std::size_t>(value.__pf_id) >= _pf_records_.size()) {",
+                '            throw std::runtime_error("UDT access on na or invalid object ID");',
+                "        }",
+                "        const auto index = static_cast<std::size_t>(value.__pf_id);",
+                "        capture(index);",
+                "        return _pf_records_[index].value;",
+                "    }",
+                "    const _PFRecord& get(_PFHandle value) const {",
+                "        if (value.__pf_id < 0",
+                "                || static_cast<std::size_t>(value.__pf_id) >= _pf_records_.size()) {",
+                '            throw std::runtime_error("UDT access on na or invalid object ID");',
+                "        }",
+                "        return _pf_records_[static_cast<std::size_t>(value.__pf_id)].value;",
+                "    }",
+                "    const _PFRecord& read(_PFHandle value) const {",
+                "        return get(value);",
+                "    }",
+                "    std::size_t size() const { return _pf_records_.size(); }",
+                "    _PFRecord& record_at(std::size_t index) {",
+                "        capture(index);",
+                "        return _pf_records_.at(index).value;",
+                "    }",
+                "    const _PFRecord& record_at(std::size_t index) const {",
+                "        return _pf_records_.at(index).value;",
+                "    }",
+                "    Snapshot snapshot() {",
+                "        if (!_pf_coordinator_->active()) {",
+                '            throw std::runtime_error("UDT coordinator checkpoint is not active");',
+                "        }",
+                "        _pf_checkpoint_generation_ = _pf_coordinator_->generation();",
+                "        _pf_checkpoint_size_ = _pf_records_.size();",
+                "        _pf_checkpoint_active_ = true;",
+                "        return Snapshot{_pf_checkpoint_generation_,",
+                "                        _pf_checkpoint_size_};",
+                "    }",
+                "    void restore(const Snapshot& snapshot) {",
+                "        if (!_pf_checkpoint_active_",
+                "                || snapshot.generation != _pf_checkpoint_generation_",
+                "                || snapshot.generation != _pf_coordinator_->generation()",
+                "                || snapshot.size != _pf_checkpoint_size_",
+                "                || _pf_records_.size() < snapshot.size",
+                "                || !_pf_coordinator_->empty()) {",
+                '            throw std::runtime_error("invalid UDT checkpoint token");',
+                "        }",
+                "        _pf_records_.resize(snapshot.size);",
+                "    }",
+                "};",
+                "",
+            ])
+
+        # Drawing field names per record are pre-computed in __init__ as
+        # ``self._udt_omitted_fields`` so visit_expr / visit_stmt can consult
+        # the same map.  Authored field defaults are evaluated by ``Type.new``
+        # at the call site; record declarations use only inert typed defaults so
+        # bar/TA expressions never leak into namespace-scope C++ initializers.
+        for type_name, fields in self._udt_defs.items():
+            record_type = self._udt_record_cpp_type(type_name)
+            lines.append(f"struct {record_type} {{")
             field_specs = self._udt_field_type_specs.get(type_name, {})
             omitted = self._udt_omitted_fields.get(type_name, set())
             for f in fields:
@@ -3561,39 +3829,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     continue
                 spec = field_specs.get(f.name) or self._type_spec_from_hint_name(f.type_name)
                 cpp_type = self._type_spec_to_cpp(spec)
-                # Pine ``int`` is 64-bit (it routinely holds UNIX-ms timestamps
-                # and large bar indices); emit UDT int fields as ``int64_t`` so a
-                # field initialised from ``time``/``current_bar_.timestamp`` does
-                # not truncate / narrow-init.
                 if cpp_type == "int":
                     cpp_type = "int64_t"
-                if f.default:
-                    default = self._visit_rhs_value(
-                        f.default,
-                        target_cpp_type=(
-                            cpp_type
-                            if (self._is_nullable_collection_cpp_type(cpp_type)
-                                or cpp_type in self._udt_defs
-                                or cpp_type in DRAWING_TYPE_TO_CPP.values())
-                            else None
-                        ),
-                    )
-                else:
-                    default = self._default_for_spec(spec)
+                default = self._default_for_spec(spec)
                 lines.append(f"    {cpp_type} {f.name} = {default};")
-            # NA sentinel (always the last data member). A default-constructed
-            # UDT - ``var T x = na``, an array fill slot, ``T.copy()`` no-arg -
-            # is na; the ``T.new(...)`` lowering sets this false. This lets
-            # ``na(udtVar)`` lower to the ``is_na(const T&)`` overload below
-            # instead of failing because no ``is_na`` accepts a struct.
-            lines.append(f"    bool __pf_na = true;")
-            lines.append(f"    static {type_name} create() {{ return {type_name}{{}}; }}")
             lines.append("};")
-            lines.append(f"inline bool is_na(const {type_name}& _z) {{ return _z.__pf_na; }}")
             lines.append("")
 
-        if self._uses_map:
-            self._emit_map_checkpoint_traits(lines)
+        if self._uses_map or self._uses_matrix or self._udt_defs:
+            self._emit_handle_checkpoint_traits(lines)
 
         # 1c. Enum constants + string tables for str.tostring(enumVar)
         for enum_name, members in self._enum_defs.items():
@@ -3619,6 +3863,25 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         lines.append("class GeneratedStrategy : public BacktestEngine {")
         lines.append("public:")
         _script_state_decl_start = len(lines)
+
+        # One strategy-local undo coordinator gives every UDT arena a single
+        # reverse first-touch order. This is required when records from distinct
+        # authored UDT types shallow-share the same map or matrix identity.
+        if self._udt_defs:
+            lines.append(
+                f"    {self._udt_undo_coordinator_cpp_name} "
+                f"{self._udt_undo_coordinator_member_name};"
+            )
+
+        # Per-type object stores precede every handle-bearing script member.
+        # COOF rollback therefore replays the coordinator, truncates arenas,
+        # then rebinds ordinary variables, arrays and matrices in that order.
+        for type_name in self._udt_defs:
+            lines.append(
+                f"    {self._udt_arena_cpp_type(type_name)} "
+                f"{self._udt_arena_member_name(type_name)}"
+                f"{{&{self._udt_undo_coordinator_member_name}}};"
+            )
         
         # request.security state
         for item in self._security_calls:
@@ -3835,7 +4098,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # not just ``matrix.new``).
             if name in self._matrix_specs:
                 pass  # already registered upstream
-            elif "matrix.new" in str(init_str):
+            elif not _is_udt_ctor_init and "matrix.new" in str(init_str):
                 self._matrix_specs[name] = TypeSpec.matrix(TypeSpec.primitive("float"))
                 self._collection_types[name] = self._matrix_specs[name]
             if name in self._matrix_specs:
@@ -3965,12 +4228,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if (name in seen_global
                     or (name in self.ctx.series_vars and not exact_scalar_override)
                     or name in self._var_names):
-                continue
-            # De-hoisted UDT array-element alias (Pine reference semantics): the
-            # in-loop VarDecl is emitted as a fresh ``UDT& z = arr[i];`` local
-            # reference each iteration, so there is no persistent class member.
-            if name in self._udt_array_get_ref_locals:
-                seen_global.add(name)
                 continue
             seen_global.add(name)
             safe = self._safe_name(name)

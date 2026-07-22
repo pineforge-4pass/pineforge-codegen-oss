@@ -253,7 +253,10 @@ def _checkpoint_fields(cpp: str) -> dict[str, int]:
     return {
         name: int(index)
         for name, index in re.findall(
-            r"decltype\(GeneratedStrategy::(\w+)\) _pf_value_(\d+);", cpp
+            r"(?:_PFCheckpointTraits<)?"
+            r"decltype\(GeneratedStrategy::(\w+)\)"
+            r"(?:>::snapshot_type)? _pf_value_(\d+);",
+            cpp,
         )
     }
 

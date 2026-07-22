@@ -154,6 +154,66 @@ class TypeInferer:
             return f"PineGenericMatrix<{elem}>"
         return "double"
 
+    def _udt_record_cpp_type(self, type_name: str) -> str:
+        """Generated backing-record type for one user-defined object type."""
+        return getattr(self, "_udt_record_cpp_names", {}).get(
+            type_name, f"_PFUdtRecord_{type_name}"
+        )
+
+    def _udt_arena_member_name(self, type_name: str) -> str:
+        """Per-strategy arena member owning one user-defined object's records."""
+        return getattr(self, "_udt_arena_member_names", {}).get(
+            type_name, f"_pf_udt_{self._safe_name(type_name)}"
+        )
+
+    def _udt_arena_cpp_type(self, type_name: str) -> str:
+        """Generated arena specialization for one user-defined object type."""
+        return (
+            f"{getattr(self, '_udt_arena_template_cpp_name', '_PFUdtArena')}<"
+            f"{type_name}, "
+            f"{self._udt_record_cpp_type(type_name)}>"
+        )
+
+    def _checkpoint_traits_cpp_type(self) -> str:
+        """Collision-safe generated checkpoint trait template name."""
+        return getattr(
+            self, "_checkpoint_traits_cpp_name", "_PFCheckpointTraits"
+        )
+
+    def _udt_direct_array_fields(self, type_name: str) -> tuple[str, ...]:
+        """Direct array-valued fields whose UDT copy semantics are unsupported.
+
+        Maps, matrices, and nested UDTs are numeric/shared-ID handles, so an
+        outer record copy is correctly shallow. Arrays still lower directly to
+        ``std::vector<T>``; copying such a record would silently deep-copy the
+        vector and diverge from Pine object identity. Keep this boundary narrow
+        and explicit until arrays themselves have a handle representation.
+        """
+        return tuple(
+            field_name
+            for field_name, spec in self._udt_field_type_specs.get(
+                type_name, {}
+            ).items()
+            if spec is not None and spec.kind == "array"
+        )
+
+    def _reject_unsupported_udt_copy(self, type_name: str, node) -> None:
+        """Fail closed before copying a record with direct vector storage."""
+        fields = self._udt_direct_array_fields(type_name)
+        if not fields:
+            return
+        rendered = ", ".join(fields)
+        self._codegen_error(
+            node,
+            f"{type_name}.copy() is unsupported because direct array field(s) "
+            f"{rendered} still use value storage",
+            hint=(
+                "Move the array outside the UDT and store a supported shared-ID "
+                "map/matrix or nested UDT handle until array fields gain handle "
+                "identity."
+            ),
+        )
+
     @staticmethod
     def _is_nullable_collection_cpp_type(cpp_type: str | None) -> bool:
         """Whether ``cpp_type`` has a default-constructed Pine ``na`` ID.
@@ -624,6 +684,13 @@ class TypeInferer:
                         if primitive_name is not None
                         else None
                     )
+                if (
+                    receiver_spec is not None
+                    and receiver_spec.kind == "udt"
+                    and receiver_spec.name in self._udt_defs
+                    and node.callee.member == "copy"
+                ):
+                    return receiver_spec
             # ticker.* constructors (inherit/standard/heikinashi) return a symbol
             # string; without this the member-type inference defaults to double
             # and a ``haTicker = ticker.heikinashi(...)`` global mis-declares as
@@ -715,7 +782,7 @@ class TypeInferer:
                         return TypeSpec.primitive("bool")
                     if func_name == "size":
                         return TypeSpec.primitive("int")
-            if namespace in self._udt_defs and func_name == "new":
+            if namespace in self._udt_defs and func_name in {"new", "copy"}:
                 return TypeSpec.udt(namespace)
             if isinstance(node.callee, MemberAccess):
                 recv_spec = self._type_spec_from_expr(node.callee.object)
@@ -1548,176 +1615,6 @@ class TypeInferer:
         return None
 
     # ------------------------------------------------------------------
-    # BUG C: user-defined-UDT lvalue aliasing
-    # ------------------------------------------------------------------
-
-    def _is_stable_lvalue_expr(self, expr) -> bool:
-        """Whether ``expr`` denotes storage that can safely back a C++ ref.
-
-        Checked array access deliberately returns by reference for lvalue
-        receivers and by value for temporary receivers.  The UDT alias pass
-        must make the same distinction or it can emit ``T&`` bound to the
-        checked helper's safe rvalue copy.
-        """
-        if isinstance(expr, Identifier):
-            return True
-        if isinstance(expr, MemberAccess):
-            return self._is_stable_lvalue_expr(expr.object)
-        if isinstance(expr, FuncCall):
-            # An element selected from a stable array is itself stable.  This
-            # must recurse independently of the element type so nested
-            # ``array<array<UDT>>`` access keeps the inner array lvalue and the
-            # eventual UDT element can still alias it.  Constructors, user
-            # function returns, matrix.row(), and other temporary producers do
-            # not enter this checked array-access shape.
-            func_name, namespace = self._resolve_callee(expr.callee)
-            receiver = None
-            if namespace == "array" and func_name in ("get", "first", "last"):
-                receiver = expr.args[0] if expr.args else expr.kwargs.get("id")
-            elif (isinstance(expr.callee, MemberAccess)
-                  and func_name in ("get", "first", "last")):
-                candidate = expr.callee.object
-                candidate_spec = self._type_spec_from_expr(candidate)
-                if candidate_spec is not None and candidate_spec.kind == "array":
-                    receiver = candidate
-            return (
-                receiver is not None
-                and self._is_stable_lvalue_expr(receiver)
-            )
-        if isinstance(expr, Ternary):
-            return (
-                self._is_stable_lvalue_expr(expr.true_val)
-                and self._is_stable_lvalue_expr(expr.false_val)
-            )
-        return False
-
-    def _is_udt_lvalue(self, expr) -> str | None:
-        """If ``expr`` is a *user-defined* UDT lvalue (a bare ``Identifier`` that
-        names a class-scope ``var``/global UDT member, e.g. ``wyckoffSwingLow``,
-        or an element selected from ``array<UDT>``), return its UDT type name;
-        else ``None``.
-
-        Pine UDTs are reference types, so a local initialised from such an lvalue
-        and then mutated through must write back to the global. Drawing UDTs are
-        handled by the separate ``_uses_drawing`` path and are excluded here."""
-        if isinstance(expr, FuncCall):
-            callee = expr.callee
-            func_name, namespace = self._resolve_callee(callee)
-            receiver = None
-            if namespace == "array" and func_name in ("get", "first", "last"):
-                receiver = expr.args[0] if expr.args else expr.kwargs.get("id")
-            elif (isinstance(callee, MemberAccess)
-                  and func_name in ("get", "first", "last")):
-                receiver = callee.object
-            if receiver is not None:
-                if not self._is_stable_lvalue_expr(receiver):
-                    return None
-                spec = self._type_spec_from_expr(receiver)
-                elem = spec.element if spec is not None and spec.kind == "array" else None
-                if (elem is not None and elem.kind == "udt" and elem.name in self._udt_defs
-                        and elem.name not in DRAWING_TYPE_TO_CPP):
-                    return elem.name
-            return None
-        if not isinstance(expr, Identifier):
-            return None
-        udt_t = self._identifier_udt_type(expr.name)
-        if udt_t is None or udt_t not in self._udt_defs:
-            return None
-        if udt_t in DRAWING_TYPE_TO_CPP:
-            return None
-        # Must be a known global/class-scope member (not a function param or a
-        # plain local snapshot) for write-through to be observable.
-        if expr.name in getattr(self, "_current_func_locals", set()):
-            # A function-local of UDT type that is itself a persistent ``var``
-            # member still write-through aliases; but a plain inline local does
-            # not represent shared state. Only treat ``var`` func-locals (in
-            # func_var_members) as aliasable shared state.
-            fname = getattr(self, "_active_func_name", None)
-            var_locals = {n for n, _, _ in self.ctx.func_var_members.get(fname, [])} if fname else set()
-            if expr.name not in var_locals:
-                return None
-        return udt_t
-
-    def _udt_lvalue_selection_type(self, expr) -> str | None:
-        """UDT type if ``expr`` is a UDT lvalue OR a ternary/switch whose every
-        selectable branch is a UDT lvalue of the SAME user-defined UDT type.
-        Returns ``None`` otherwise (so plain ``UDT a = b`` value-snapshots, calls,
-        ``.new(...)`` ctors, and mixed/non-lvalue selections never alias)."""
-        direct = self._is_udt_lvalue(expr)
-        if direct is not None:
-            return direct
-        branches: list = []
-        if isinstance(expr, Ternary):
-            branches = [expr.true_val, expr.false_val]
-        elif isinstance(expr, SwitchStmt):
-            for _case_expr, stmts in (expr.cases or []):
-                if not stmts:
-                    return None
-                last = stmts[-1]
-                branches.append(last.expr if isinstance(last, ExprStmt) else last)
-            if expr.default_body:
-                last = expr.default_body[-1]
-                branches.append(last.expr if isinstance(last, ExprStmt) else last)
-        else:
-            return None
-        if not branches:
-            return None
-        types = {self._is_udt_lvalue(b) for b in branches}
-        if len(types) == 1 and None not in types:
-            return next(iter(types))
-        return None
-
-    def _udt_local_alias_kind(self, node: VarDecl) -> tuple[str, str] | None:
-        """Decide whether a hintless/typed local UDT declaration must ALIAS the
-        global(s) it selects rather than value-copy (BUG C).
-
-        Returns ``("ref", udt_type)`` for a non-rebinding reference alias,
-        ``("ptr", udt_type)`` for a pointer alias (the local is later reassigned
-        to a *different* UDT lvalue, which a C++ reference cannot do), or
-        ``None`` to keep the existing value-copy semantics.
-
-        Conditions (all required):
-          * RHS is a UDT lvalue or a ternary/switch selecting same-typed UDT
-            lvalues (``_udt_lvalue_selection_type``).
-          * The local is MUTATED later in the enclosing function body
-            (``local.field := ...``) — a pure read-only snapshot needn't alias.
-
-        The mutation requirement is the safety guard: a local that is only read
-        keeps value semantics, and a local initialised from a non-lvalue (a
-        ``.new()`` ctor, a function return, or a plain local copy) returns
-        ``None`` here, preserving intentional independent-copy semantics."""
-        from ..ast_nodes import Assignment
-        body = getattr(self, "_current_func_body", None)
-        if body is None:
-            return None
-        udt_t = self._udt_lvalue_selection_type(node.value)
-        if udt_t is None:
-            return None
-        name = node.name
-        mutated = False
-        rebinds_to_other_lvalue = False
-        for stmt in self._walk_ast_list(body):
-            if not isinstance(stmt, Assignment):
-                continue
-            tgt = stmt.target
-            # Mutation through the local: ``p.field := ...``
-            if (isinstance(tgt, MemberAccess)
-                    and isinstance(tgt.object, Identifier)
-                    and tgt.object.name == name):
-                mutated = True
-            # Rebind of the local itself to another UDT lvalue: ``p := other``
-            elif isinstance(tgt, Identifier) and tgt.name == name:
-                if self._udt_lvalue_selection_type(stmt.value) is not None:
-                    rebinds_to_other_lvalue = True
-                else:
-                    # Reassigned to a non-lvalue (e.g. ``.new()`` / a copy):
-                    # aliasing would be wrong; bail to value-copy.
-                    return None
-        if not mutated:
-            return None
-        return ("ptr" if rebinds_to_other_lvalue else "ref"), udt_t
-
-    # ------------------------------------------------------------------
     # BUG 2: collection (array / map / matrix) lvalue aliasing
     # ------------------------------------------------------------------
 
@@ -1739,7 +1636,7 @@ class TypeInferer:
         whose every selectable branch is a collection lvalue of the SAME C++
         type; ``None`` otherwise (so ``array.new(...)`` ctors, copies, function
         returns, and mixed selections keep value-copy semantics). Mirrors
-        ``_udt_lvalue_selection_type`` for the BUG-2 collection-alias path."""
+        the former UDT alias-selection path."""
         direct = self._collection_lvalue_spec(expr)
         if direct is not None:
             return direct
@@ -1798,22 +1695,6 @@ class TypeInferer:
         """Yield every node within a list of statements (depth-first)."""
         for s in stmts:
             yield from self._walk_ast(s)
-
-    def _addr_of_udt_selection(self, expr, local_name: str):
-        """Render the address-of form of a UDT lvalue selection for a pointer
-        alias (BUG C rebind case): ``other`` -> ``&(other)``;
-        ``cond ? a : b`` -> ``(cond ? &(a) : &(b))``. The selectable branches are
-        guaranteed (by ``_udt_lvalue_selection_type``) to be UDT lvalues."""
-        if isinstance(expr, Identifier):
-            return f"&({self._safe_name(expr.name)})"
-        if isinstance(expr, Ternary):
-            cond = self._visit_expr(expr.condition)
-            t = self._addr_of_udt_selection(expr.true_val, local_name)
-            f = self._addr_of_udt_selection(expr.false_val, local_name)
-            return f"({cond} ? {t} : {f})"
-        # Switch selection: lower to nested ternaries over case equality. Rare in
-        # practice; fall back to address-of the whole lowered expression.
-        return f"&({self._visit_expr(expr)})"
 
     def _infer_cpp_type_for_security_elem(self, node) -> str:
         """C++ type for one element of the ``request.security(..., expr, ...)`` payload.

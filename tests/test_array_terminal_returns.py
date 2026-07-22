@@ -216,7 +216,7 @@ def test_terminal_get_representation_and_order_matrix(
     compile_cpp(cpp)
 
 
-def test_reference_like_array_elements_are_not_value_return_refined():
+def test_udt_array_element_return_preserves_handle_type():
     source = r'''//@version=6
 strategy("Terminal UDT array get remains identity-gated")
 type Item
@@ -227,8 +227,9 @@ pick() =>
 observed = pick()
 '''
     cpp = transpile(source)
-    assert "Item pick(" not in cpp
-    assert "double pick(" in cpp
+    assert "Item pick(" in cpp
+    assert "double pick(" not in cpp
+    compile_cpp(cpp)
 
 
 def test_scalar_array_binding_is_not_misclassified_as_builtin_namespace():
@@ -426,7 +427,7 @@ observed = blocked()
     assert "double blocked(" in cpp
 
 
-def test_nested_method_copy_reference_element_remains_fail_closed():
+def test_nested_method_copy_udt_element_preserves_handle_type():
     source = r'''//@version=6
 strategy("Nested method copy reference boundary")
 type Item
@@ -436,8 +437,9 @@ blocked() =>
 observed = blocked()
 '''
     cpp = transpile(source)
-    assert "Item blocked(" not in cpp
-    assert "double blocked(" in cpp
+    assert "Item blocked(" in cpp
+    assert "double blocked(" not in cpp
+    compile_cpp(cpp)
 
 
 def test_nested_method_copy_temporary_reader_recursion_is_rejected():
