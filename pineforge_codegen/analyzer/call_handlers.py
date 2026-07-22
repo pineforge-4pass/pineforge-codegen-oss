@@ -1262,12 +1262,20 @@ class CallHandlers:
         selected_ta_indices: dict[int, int] = {}
 
         param_arg_map: dict[str, str] = {}
-        positional_args = list(node.args)
         if (
             method_info is not None
             and isinstance(node.callee, MemberAccess)
+            and func_name in self._method_signatures
         ):
-            positional_args.insert(0, node.callee.object)
+            binding = self._bind_typed_method_call(func_name, node)
+            positional_args = [node.callee.object, *binding.args_by_param]
+        else:
+            positional_args = list(node.args)
+            if (
+                method_info is not None
+                and isinstance(node.callee, MemberAccess)
+            ):
+                positional_args.insert(0, node.callee.object)
         for p_idx, param_name in enumerate(func_def.params):
             if p_idx < len(positional_args):
                 param_arg_map[param_name] = self._expr_to_str(

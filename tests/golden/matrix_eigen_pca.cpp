@@ -95,6 +95,60 @@ static inline std::string _pf_derive_country(const std::string& tickerid) {
 }
 // --- end syminfo derivation helpers ---
 
+template <typename _PFValue>
+struct _PFCheckpointTraits {
+    using snapshot_type = _PFValue;
+    static snapshot_type take(const _PFValue& value) { return value; }
+    static void restore(_PFValue& value, const snapshot_type& snapshot) {
+        value = snapshot;
+    }
+};
+
+template <>
+struct _PFCheckpointTraits<PineMatrix> {
+    using matrix_type = PineMatrix;
+    using snapshot_type = std::optional<typename matrix_type::Snapshot>;
+    static snapshot_type take(const matrix_type& value) {
+        if (value.is_na()) return std::nullopt;
+        return value.snapshot();
+    }
+    static void restore(matrix_type& value, const snapshot_type& snapshot) {
+        if (!snapshot) {
+            value = matrix_type{};
+            return;
+        }
+        value.restore(*snapshot);
+    }
+};
+
+template <typename _PFElement, typename _PFAllocator>
+struct _PFCheckpointTraits<std::vector<_PFElement, _PFAllocator>> {
+    using element_traits = _PFCheckpointTraits<_PFElement>;
+    using element_snapshot = typename element_traits::snapshot_type;
+    using snapshot_type = std::vector<element_snapshot>;
+    static snapshot_type take(
+            const std::vector<_PFElement, _PFAllocator>& value) {
+        snapshot_type snapshot;
+        snapshot.reserve(value.size());
+        for (std::size_t index = 0; index < value.size(); ++index) {
+            const _PFElement element = value[index];
+            snapshot.push_back(element_traits::take(element));
+        }
+        return snapshot;
+    }
+    static void restore(
+            std::vector<_PFElement, _PFAllocator>& value,
+            const snapshot_type& snapshot) {
+        value.clear();
+        value.reserve(snapshot.size());
+        for (const auto& element_snapshot_value : snapshot) {
+            _PFElement element{};
+            element_traits::restore(element, element_snapshot_value);
+            value.push_back(element);
+        }
+    }
+};
+
 class GeneratedStrategy : public BacktestEngine {
 public:
     ta::SMA _ta_sma_1;
@@ -124,30 +178,30 @@ public:
     bool _inputs_initialized_ = false;
 
     struct _PFScriptState {
-        decltype(GeneratedStrategy::_ta_sma_1) _pf_value_0;
-        decltype(GeneratedStrategy::_ta_sma_2) _pf_value_1;
-        decltype(GeneratedStrategy::_ta_sma_3) _pf_value_2;
-        decltype(GeneratedStrategy::_ta_sma_4) _pf_value_3;
-        decltype(GeneratedStrategy::_ta_sma_5) _pf_value_4;
-        decltype(GeneratedStrategy::_ta_sma_6) _pf_value_5;
-        decltype(GeneratedStrategy::_ta_crossover_7) _pf_value_6;
-        decltype(GeneratedStrategy::_ta_crossunder_8) _pf_value_7;
-        decltype(GeneratedStrategy::m) _pf_value_8;
-        decltype(GeneratedStrategy::length) _pf_value_9;
-        decltype(GeneratedStrategy::v1) _pf_value_10;
-        decltype(GeneratedStrategy::v2) _pf_value_11;
-        decltype(GeneratedStrategy::v1_mean) _pf_value_12;
-        decltype(GeneratedStrategy::v2_mean) _pf_value_13;
-        decltype(GeneratedStrategy::cov11) _pf_value_14;
-        decltype(GeneratedStrategy::cov12) _pf_value_15;
-        decltype(GeneratedStrategy::cov21) _pf_value_16;
-        decltype(GeneratedStrategy::cov22) _pf_value_17;
-        decltype(GeneratedStrategy::covReady) _pf_value_18;
-        decltype(GeneratedStrategy::lam) _pf_value_19;
-        decltype(GeneratedStrategy::lamSma) _pf_value_20;
-        decltype(GeneratedStrategy::_var_initialized) _pf_value_21;
-        decltype(GeneratedStrategy::_ta_initialized_) _pf_value_22;
-        decltype(GeneratedStrategy::_inputs_initialized_) _pf_value_23;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_1)>::snapshot_type _pf_value_0;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_2)>::snapshot_type _pf_value_1;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_3)>::snapshot_type _pf_value_2;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_4)>::snapshot_type _pf_value_3;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_5)>::snapshot_type _pf_value_4;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_6)>::snapshot_type _pf_value_5;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_crossover_7)>::snapshot_type _pf_value_6;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_crossunder_8)>::snapshot_type _pf_value_7;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::m)>::snapshot_type _pf_value_8;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::length)>::snapshot_type _pf_value_9;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::v1)>::snapshot_type _pf_value_10;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::v2)>::snapshot_type _pf_value_11;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::v1_mean)>::snapshot_type _pf_value_12;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::v2_mean)>::snapshot_type _pf_value_13;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::cov11)>::snapshot_type _pf_value_14;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::cov12)>::snapshot_type _pf_value_15;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::cov21)>::snapshot_type _pf_value_16;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::cov22)>::snapshot_type _pf_value_17;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::covReady)>::snapshot_type _pf_value_18;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::lam)>::snapshot_type _pf_value_19;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::lamSma)>::snapshot_type _pf_value_20;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_var_initialized)>::snapshot_type _pf_value_21;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_initialized_)>::snapshot_type _pf_value_22;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_inputs_initialized_)>::snapshot_type _pf_value_23;
     };
     static_assert(std::is_copy_constructible_v<_PFScriptState>, "generated Pine state must be deep-copy constructible");
     static_assert(std::is_copy_assignable_v<_PFScriptState>, "generated Pine state must be deep-copy assignable");
@@ -155,59 +209,59 @@ public:
 
     void snapshot_script_state() override {
         _pf_script_state_checkpoint_.emplace(_PFScriptState{
-            _ta_sma_1,
-            _ta_sma_2,
-            _ta_sma_3,
-            _ta_sma_4,
-            _ta_sma_5,
-            _ta_sma_6,
-            _ta_crossover_7,
-            _ta_crossunder_8,
-            m,
-            length,
-            v1,
-            v2,
-            v1_mean,
-            v2_mean,
-            cov11,
-            cov12,
-            cov21,
-            cov22,
-            covReady,
-            lam,
-            lamSma,
-            _var_initialized,
-            _ta_initialized_,
-            _inputs_initialized_,
+            _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_1)>::take(_ta_sma_1),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_2)>::take(_ta_sma_2),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_3)>::take(_ta_sma_3),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_4)>::take(_ta_sma_4),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_5)>::take(_ta_sma_5),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_6)>::take(_ta_sma_6),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_crossover_7)>::take(_ta_crossover_7),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_crossunder_8)>::take(_ta_crossunder_8),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::m)>::take(m),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::length)>::take(length),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::v1)>::take(v1),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::v2)>::take(v2),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::v1_mean)>::take(v1_mean),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::v2_mean)>::take(v2_mean),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::cov11)>::take(cov11),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::cov12)>::take(cov12),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::cov21)>::take(cov21),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::cov22)>::take(cov22),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::covReady)>::take(covReady),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::lam)>::take(lam),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::lamSma)>::take(lamSma),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::_var_initialized)>::take(_var_initialized),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_initialized_)>::take(_ta_initialized_),
+            _PFCheckpointTraits<decltype(GeneratedStrategy::_inputs_initialized_)>::take(_inputs_initialized_),
         });
     }
 
     void restore_script_state() override {
         if (!_pf_script_state_checkpoint_) return;
-        this->_ta_sma_1 = _pf_script_state_checkpoint_->_pf_value_0;
-        this->_ta_sma_2 = _pf_script_state_checkpoint_->_pf_value_1;
-        this->_ta_sma_3 = _pf_script_state_checkpoint_->_pf_value_2;
-        this->_ta_sma_4 = _pf_script_state_checkpoint_->_pf_value_3;
-        this->_ta_sma_5 = _pf_script_state_checkpoint_->_pf_value_4;
-        this->_ta_sma_6 = _pf_script_state_checkpoint_->_pf_value_5;
-        this->_ta_crossover_7 = _pf_script_state_checkpoint_->_pf_value_6;
-        this->_ta_crossunder_8 = _pf_script_state_checkpoint_->_pf_value_7;
-        this->m = _pf_script_state_checkpoint_->_pf_value_8;
-        this->length = _pf_script_state_checkpoint_->_pf_value_9;
-        this->v1 = _pf_script_state_checkpoint_->_pf_value_10;
-        this->v2 = _pf_script_state_checkpoint_->_pf_value_11;
-        this->v1_mean = _pf_script_state_checkpoint_->_pf_value_12;
-        this->v2_mean = _pf_script_state_checkpoint_->_pf_value_13;
-        this->cov11 = _pf_script_state_checkpoint_->_pf_value_14;
-        this->cov12 = _pf_script_state_checkpoint_->_pf_value_15;
-        this->cov21 = _pf_script_state_checkpoint_->_pf_value_16;
-        this->cov22 = _pf_script_state_checkpoint_->_pf_value_17;
-        this->covReady = _pf_script_state_checkpoint_->_pf_value_18;
-        this->lam = _pf_script_state_checkpoint_->_pf_value_19;
-        this->lamSma = _pf_script_state_checkpoint_->_pf_value_20;
-        this->_var_initialized = _pf_script_state_checkpoint_->_pf_value_21;
-        this->_ta_initialized_ = _pf_script_state_checkpoint_->_pf_value_22;
-        this->_inputs_initialized_ = _pf_script_state_checkpoint_->_pf_value_23;
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_1)>::restore(this->_ta_sma_1, _pf_script_state_checkpoint_->_pf_value_0);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_2)>::restore(this->_ta_sma_2, _pf_script_state_checkpoint_->_pf_value_1);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_3)>::restore(this->_ta_sma_3, _pf_script_state_checkpoint_->_pf_value_2);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_4)>::restore(this->_ta_sma_4, _pf_script_state_checkpoint_->_pf_value_3);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_5)>::restore(this->_ta_sma_5, _pf_script_state_checkpoint_->_pf_value_4);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_sma_6)>::restore(this->_ta_sma_6, _pf_script_state_checkpoint_->_pf_value_5);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_crossover_7)>::restore(this->_ta_crossover_7, _pf_script_state_checkpoint_->_pf_value_6);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_crossunder_8)>::restore(this->_ta_crossunder_8, _pf_script_state_checkpoint_->_pf_value_7);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::m)>::restore(this->m, _pf_script_state_checkpoint_->_pf_value_8);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::length)>::restore(this->length, _pf_script_state_checkpoint_->_pf_value_9);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::v1)>::restore(this->v1, _pf_script_state_checkpoint_->_pf_value_10);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::v2)>::restore(this->v2, _pf_script_state_checkpoint_->_pf_value_11);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::v1_mean)>::restore(this->v1_mean, _pf_script_state_checkpoint_->_pf_value_12);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::v2_mean)>::restore(this->v2_mean, _pf_script_state_checkpoint_->_pf_value_13);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::cov11)>::restore(this->cov11, _pf_script_state_checkpoint_->_pf_value_14);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::cov12)>::restore(this->cov12, _pf_script_state_checkpoint_->_pf_value_15);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::cov21)>::restore(this->cov21, _pf_script_state_checkpoint_->_pf_value_16);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::cov22)>::restore(this->cov22, _pf_script_state_checkpoint_->_pf_value_17);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::covReady)>::restore(this->covReady, _pf_script_state_checkpoint_->_pf_value_18);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::lam)>::restore(this->lam, _pf_script_state_checkpoint_->_pf_value_19);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::lamSma)>::restore(this->lamSma, _pf_script_state_checkpoint_->_pf_value_20);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_var_initialized)>::restore(this->_var_initialized, _pf_script_state_checkpoint_->_pf_value_21);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_ta_initialized_)>::restore(this->_ta_initialized_, _pf_script_state_checkpoint_->_pf_value_22);
+        _PFCheckpointTraits<decltype(GeneratedStrategy::_inputs_initialized_)>::restore(this->_inputs_initialized_, _pf_script_state_checkpoint_->_pf_value_23);
     }
 
     void commit_script_state() override {

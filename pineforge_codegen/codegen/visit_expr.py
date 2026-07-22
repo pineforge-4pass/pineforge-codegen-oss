@@ -495,6 +495,16 @@ class ExprVisitor:
             return True
         return False
 
+    def _visit_mutable_expr(self, node: ASTNode) -> str:
+        """Lower an assignment target with UDT journal capture enabled."""
+
+        previous = getattr(self, "_udt_mutable_expr_depth", 0)
+        self._udt_mutable_expr_depth = previous + 1
+        try:
+            return self._visit_expr(node)
+        finally:
+            self._udt_mutable_expr_depth = previous
+
     def _visit_member_access(self, node: MemberAccess) -> str:
         # UDT field whose type was a drawing primitive (label/line/box/
         # linefill/polyline/table/chart.point) — the field is dropped from
@@ -503,6 +513,34 @@ class ExprVisitor:
         # See: pineforge-codegen issue #10.
         if self._is_omitted_udt_field(node):
             return "/* drawing field omitted */ 0"
+
+        # User-defined objects are numeric handles into a per-type arena.  The
+        # arena lookup returns a real record lvalue, so this one lowering serves
+        # reads, assignment targets, nested field chains and method receivers.
+        owner_spec = self._type_spec_from_expr(node.object)
+        if (
+            owner_spec is not None
+            and owner_spec.kind == "udt"
+            and owner_spec.name in self._udt_defs
+        ):
+            owner = self._visit_expr(node.object)
+            arena = self._udt_arena_member_name(owner_spec.name)
+            field_spec = (
+                self._udt_field_type_specs.get(owner_spec.name, {}).get(
+                    node.member
+                )
+            )
+            mutable_collection = (
+                field_spec is not None
+                and field_spec.kind in {"array", "map", "matrix"}
+            )
+            access = (
+                "get"
+                if getattr(self, "_udt_mutable_expr_depth", 0)
+                or mutable_collection
+                else "read"
+            )
+            return f"{arena}.{access}({owner}).{node.member}"
         if isinstance(node.object, Identifier):
             ns = node.object.name
             if ns == "strategy":
@@ -882,10 +920,6 @@ class ExprVisitor:
                 safe = self._safe_name(name)
                 if self._active_var_remap and safe in self._active_var_remap:
                     safe = self._active_var_remap[safe]
-                # Pointer-aliased UDT local (BUG C, rebinding case): field access
-                # goes through ``->`` since the local holds ``UDT*``.
-                if name in self._udt_ptr_alias_locals:
-                    return f"{safe}->{node.member}"
                 return f"{safe}.{node.member}"
             if name not in self.ctx.series_vars:
                 # Unknown identifier — likely an enum value

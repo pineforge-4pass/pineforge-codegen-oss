@@ -82,11 +82,11 @@ def test_callable_history_parameters_keep_their_pine_scalar_family() -> None:
     assert "int64_t intHistory_cs0(const Series<int64_t>& src)" in cpp
     assert "int64_t intOuter_cs0(const Series<int64_t>& src)" in cpp
     assert (
-        "int64_t _udt_Holder_intHistory_cs0(Holder& self, "
+        "int64_t _udt_Holder_intHistory_cs0(Holder self, "
         "const Series<int64_t>& src)"
     ) in cpp
     assert (
-        "int64_t _udt_Holder_intOuter_cs0(Holder& self, "
+        "int64_t _udt_Holder_intOuter_cs0(Holder self, "
         "const Series<int64_t>& src)"
     ) in cpp
     assert "bool boolHistory_cs0(const Series<bool>& src)" in cpp
@@ -140,11 +140,11 @@ int main() {
     assert "double floatHistory_cs0(const Series<double>& src)" in cpp
     assert "double intOuter_cs0(const Series<int64_t>& src)" in cpp
     assert (
-        "double _udt_Holder_floatHistory_cs0(Holder& self, "
+        "double _udt_Holder_floatHistory_cs0(Holder self, "
         "const Series<double>& src)"
     ) in cpp
     assert (
-        "double _udt_Holder_intOuter_cs0(Holder& self, "
+        "double _udt_Holder_intOuter_cs0(Holder self, "
         "const Series<int64_t>& src)"
     ) in cpp
     assert "([&]() -> const Series<double>&" in cpp
@@ -356,8 +356,8 @@ int main() {
     assert cpp.count("int64_t value = 0;") == 2
     assert "int64_t captureReassigned()" in cpp
     assert "int64_t wrapper()" in cpp
-    assert "int64_t _udt_Holder_captureReassigned(Holder& self)" in cpp
-    assert "int64_t _udt_Holder_wrapper(Holder& self)" in cpp
+    assert "int64_t _udt_Holder_captureReassigned(Holder self)" in cpp
+    assert "int64_t _udt_Holder_wrapper(Holder self)" in cpp
     assert _compile_and_run(cpp + driver) == (
         "1700000060000 1700000060000 1 1\n"
     )

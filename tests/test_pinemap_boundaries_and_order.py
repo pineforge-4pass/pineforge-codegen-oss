@@ -123,6 +123,7 @@ var helper_target = map.new<string, int>()
 var inferred_target = map.new<string, int>()
 var transitive_target = map.new<string, int>()
 var method_target = map.new<string, int>()
+var method_named_target = map.new<string, int>()
 var Holder holder = Holder.new(0)
 direct_seen = observe(direct_target.put("first", 1), direct_target.put("second", 2))
 named_seen = observe(second=named_target.put("second", 2), first=named_target.put("first", 1))
@@ -130,6 +131,7 @@ helper_seen = observe(mutate(helper_target, "first", 1), mutate(helper_target, "
 inferred_seen = observe(inferred_mutate(inferred_target, "first", 1), inferred_mutate(inferred_target, "second", 2))
 transitive_seen = observe(relay(transitive_target, "first", 1), relay(transitive_target, "second", 2))
 method_seen = holder.observe_method(method_target.put("first", 1), method_target.put("second", 2))
+method_named_seen = holder.observe_method(second=method_named_target.put("second", 2), first=method_named_target.put("first", 1))
 '''
 
 
@@ -163,6 +165,7 @@ def test_user_and_udt_calls_stage_map_effects_in_pine_source_order() -> None:
         "inferred_seen",
         "transitive_seen",
         "method_seen",
+        "method_named_seen",
     ):
         assignment = next(
             line
@@ -187,6 +190,7 @@ int main() {
     if (strategy.inferred_target.keys() != forward) return 6;
     if (strategy.transitive_target.keys() != forward) return 7;
     if (strategy.method_target.keys() != forward) return 8;
+    if (strategy.method_named_target.keys() != named) return 9;
     std::cout << "ok\n";
 }
 '''
@@ -208,7 +212,7 @@ observed = combine(left, right)
     )
 
 
-def test_temporary_udt_method_receiver_is_staged_once_and_compiles() -> None:
+def test_temporary_udt_handle_receiver_is_evaluated_once_and_compiles() -> None:
     cpp = transpile(_TEMPORARY_UDT_RECEIVER_SOURCE)
     direct = next(
         line
@@ -220,9 +224,10 @@ def test_temporary_udt_method_receiver_is_staged_once_and_compiles() -> None:
         for line in cpp.splitlines()
         if line.strip().startswith("ordered_previous =")
     )
-    assert "_udt_H_get(__pf_call_arg_" in direct
-    assert "_udt_H_get(H{" not in direct
-    assert "_udt_H_apply(__pf_call_arg_" in ordered
+    assert "_udt_H_get(_pf_udt_H.create(_PFUdtRecord_H{" in direct
+    assert direct.count("_pf_udt_H.create(") == 1
+    assert "_udt_H_apply(_pf_udt_H.create(_PFUdtRecord_H{" in ordered
+    assert ordered.count("_pf_udt_H.create(") == 1
     assert ordered.count("receiver_map(order, root)") == 1
     assert ordered.count("next_value(order)") == 1
     compile_env.compile_cpp(cpp, label="pinemap-temporary-udt-receiver")

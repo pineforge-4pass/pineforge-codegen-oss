@@ -135,8 +135,8 @@ second = time >= 120000 ? wrapped(b) : na
 """
     cpp = transpile(source)
 
-    assert "double wrapped_cs0(B& obj)" in cpp
-    assert "double wrapped_cs1(B& obj)" in cpp
+    assert "double wrapped_cs0(B obj)" in cpp
+    assert "double wrapped_cs1(B obj)" in cpp
     assert "return _udt_B_sample_cs0(obj);" in cpp
     assert "return _udt_B_sample_cs1(obj);" in cpp
     assert _compile_and_run(cpp + _driver(["first", "second"])) == (
@@ -188,11 +188,11 @@ second = holder.sample(open)
     assert "double _prev_fixnan_1 = na<double>();" in cpp
     assert "double _prev_fixnan_1_cs1 = na<double>();" in cpp
     assert (
-        "double _udt_Holder_sample_cs0(Holder& self, "
+        "double _udt_Holder_sample_cs0(Holder self, "
         "const Series<double>& src)" in cpp
     )
     assert (
-        "double _udt_Holder_sample_cs1(Holder& self, "
+        "double _udt_Holder_sample_cs1(Holder self, "
         "const Series<double>& src)" in cpp
     )
     assert "first = _udt_Holder_sample_cs0(holder, _s_close);" in cpp
@@ -227,11 +227,11 @@ second = outer(open, true)
     for name in ("inner_cs0", "inner_cs1", "outer_cs0", "outer_cs1"):
         assert f"double {name}(const Series<double>& src, bool active)" in cpp
     assert (
-        "double _udt_Holder_sample_cs0(Holder& self, "
+        "double _udt_Holder_sample_cs0(Holder self, "
         "const Series<double>& src, bool active)" in cpp
     )
     assert (
-        "double _udt_Holder_sample_cs1(Holder& self, "
+        "double _udt_Holder_sample_cs1(Holder self, "
         "const Series<double>& src, bool active)" in cpp
     )
     assert _compile_and_run(
@@ -333,7 +333,7 @@ second = holder.sample(open)
 '''
     cpp = transpile(source)
     assert (
-        "double _udt_Holder_sample_cs0(Holder& self, "
+        "double _udt_Holder_sample_cs0(Holder self, "
         "const Series<double>& src)" in cpp
     )
     assert "return history_cs0(src);" in cpp
@@ -357,7 +357,7 @@ second = holder.outer(open)
     cpp = transpile(source)
     for index in (0, 1):
         assert (
-            f"double _udt_Holder_outer_cs{index}(Holder& self, "
+            f"double _udt_Holder_outer_cs{index}(Holder self, "
             "const Series<double>& src)" in cpp
         )
         assert f"_udt_Holder_inner_cs{index}(self, src)" in cpp
@@ -435,7 +435,7 @@ first = holder.sample(close)
 second = holder.sample(open)
 '''
     cpp = transpile(source)
-    assert "_udt_Holder_sample_cs0(Holder& self, double src)" in cpp
+    assert "_udt_Holder_sample_cs0(Holder self, double src)" in cpp
     assert _compile_and_run(
         cpp + _driver(["first", "second"], split_ohlc=True)
     ) == "30.0 2.5\n"

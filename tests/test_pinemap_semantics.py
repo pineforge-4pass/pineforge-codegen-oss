@@ -367,9 +367,13 @@ def test_pinemap_emission_uses_handle_identity_and_recursive_checkpoints() -> No
     assert "PineMap<std::string, int> data" in checkpoint
     assert "_PFCheckpointTraits<PineMap<_PFKey, _PFValue>>" in checkpoint
     assert "std::optional<typename map_type::Snapshot>" in checkpoint
-    assert "struct _PFCheckpointTraits<Holder>" in checkpoint
-    assert "decltype(Holder::__pf_na)" in checkpoint
-    assert "struct _PFCheckpointTraits<Nested>" in checkpoint
+    assert "struct _PFCheckpointTraits<_PFUdtRecord_Holder>" in checkpoint
+    assert "decltype(_PFUdtRecord_Holder::data)" in checkpoint
+    assert "struct _PFCheckpointTraits<_PFUdtRecord_Nested>" in checkpoint
+    assert (
+        "struct _PFCheckpointTraits<"
+        "_PFUdtArena<Holder, _PFUdtRecord_Holder>>" in checkpoint
+    )
     assert "_PFCheckpointTraits<std::vector<_PFElement, _PFAllocator>>" in checkpoint
 
 
@@ -744,16 +748,23 @@ int main() {
     strategy.root.put("after", 2);
     strategy.alias = PineMap<std::string, int>::new_();
     strategy.alias.put("wrong", 9);
-    strategy.holder.data = PineMap<std::string, int>::new_();
-    strategy.nested.inner.data = PineMap<std::string, int>::new_();
-    strategy.holders[0].data = PineMap<std::string, int>::new_();
-    strategy.holders.push_back(Holder{PineMap<std::string, int>::new_(), false, false});
+    strategy._pf_udt_Holder.get(strategy.holder).data =
+        PineMap<std::string, int>::new_();
+    Nested nested_record = strategy.nested;
+    Holder nested_inner = strategy._pf_udt_Nested.get(nested_record).inner;
+    strategy._pf_udt_Holder.get(nested_inner).data =
+        PineMap<std::string, int>::new_();
+    strategy._pf_udt_Holder.get(strategy.holders[0]).data =
+        PineMap<std::string, int>::new_();
+    _PFUdtRecord_Holder extra_holder{};
+    extra_holder.data = PineMap<std::string, int>::new_();
+    extra_holder.active = false;
+    strategy.holders.push_back(strategy._pf_udt_Holder.create(extra_holder));
     strategy.flags[0] = false;
     strategy.flags.push_back(true);
-    strategy.holder.active = false;
-    strategy.holder.__pf_na = true;
-    strategy.nested.__pf_na = true;
-    strategy.nested.inner.__pf_na = true;
+    strategy._pf_udt_Holder.get(strategy.holder).active = false;
+    strategy.holder = Holder{};
+    strategy.nested = Nested{};
     strategy.independent.put("copy_after", 3);
     strategy.nullable = PineMap<std::string, int>::new_();
     strategy.nullable.put("not_null", 4);
@@ -762,21 +773,22 @@ int main() {
     if (strategy.root.contains("after")) return 5;
     if (strategy.root.get("seed") != 1) return 6;
     if (strategy.alias.get("seed") != 1) return 7;
-    if (strategy.holder.data.get("seed") != 1) return 8;
-    if (strategy.nested.inner.data.get("seed") != 1) return 9;
+    if (strategy._pf_udt_Holder.get(strategy.holder).data.get("seed") != 1) return 8;
+    Holder restored_inner = strategy._pf_udt_Nested.get(strategy.nested).inner;
+    if (strategy._pf_udt_Holder.get(restored_inner).data.get("seed") != 1) return 9;
     if (strategy.holders.size() != 1) return 10;
-    if (strategy.holders[0].data.get("seed") != 1) return 11;
-    if (!strategy.holder.active || strategy.holder.__pf_na) return 12;
-    if (strategy.nested.__pf_na || strategy.nested.inner.__pf_na) return 13;
+    if (strategy._pf_udt_Holder.get(strategy.holders[0]).data.get("seed") != 1) return 11;
+    if (!strategy._pf_udt_Holder.get(strategy.holder).active || is_na(strategy.holder)) return 12;
+    if (is_na(strategy.nested) || is_na(restored_inner)) return 13;
     if (strategy.independent.contains("copy_after")) return 14;
     if (!strategy.nullable.is_na()) return 15;
     if (strategy.flags.size() != 2 || !strategy.flags[0] || strategy.flags[1]) return 23;
 
-    strategy.holder.data.put("shared", 5);
+    strategy._pf_udt_Holder.get(strategy.holder).data.put("shared", 5);
     if (strategy.root.get("shared") != 5) return 16;
     if (strategy.alias.get("shared") != 5) return 17;
-    if (strategy.nested.inner.data.get("shared") != 5) return 18;
-    if (strategy.holders[0].data.get("shared") != 5) return 19;
+    if (strategy._pf_udt_Holder.get(restored_inner).data.get("shared") != 5) return 18;
+    if (strategy._pf_udt_Holder.get(strategy.holders[0]).data.get("shared") != 5) return 19;
 
     strategy.restore_script_state();
     if (strategy.root.contains("shared")) return 20;
@@ -792,9 +804,9 @@ int main() {
 
 def test_contextual_map_na_forms_emit_typed_handles_and_compile() -> None:
     cpp = transpile(_CONTEXTUAL_NA_SOURCE)
-    assert "PineMap<std::string, int> defaulted = PineMap<std::string, int>{};" in cpp
+    assert "PineMap<std::string, int> defaulted = PineMap<std::string, int>();" in cpp
     assert "global_bare = PineMap<std::string, int>{};" in cpp
-    assert "holder.defaulted = PineMap<std::string, int>{};" in cpp
+    assert "_pf_udt_H.get(holder).defaulted = PineMap<std::string, int>{};" in cpp
     assert not [
         line
         for line in cpp.splitlines()
@@ -815,12 +827,14 @@ int main() {
     if (strategy.global_right.is_na() || !strategy.global_if_left.is_na()) return 4;
     if (strategy.global_if_right.is_na() || !strategy.persistent_na.is_na()) return 5;
     if (!strategy.local_ok) return 6;
-    if (!strategy.holder.defaulted.is_na()
-            || !strategy.holder.ternary_field.is_na()) return 7;
-    if (strategy.holder.if_field.is_na()) return 8;
-    if (!strategy.explicit_na.defaulted.is_na()) return 9;
-    if (strategy.explicit_na.ternary_field.is_na()
-            || strategy.explicit_na.if_field.is_na()) return 10;
+    const auto& holder = strategy._pf_udt_H.get(strategy.holder);
+    const auto& explicit_na = strategy._pf_udt_H.get(strategy.explicit_na);
+    if (!holder.defaulted.is_na()
+            || !holder.ternary_field.is_na()) return 7;
+    if (holder.if_field.is_na()) return 8;
+    if (!explicit_na.defaulted.is_na()) return 9;
+    if (explicit_na.ternary_field.is_na()
+            || explicit_na.if_field.is_na()) return 10;
     std::cout << "ok\n";
 }
 '''
@@ -833,7 +847,7 @@ int main() {
 def test_map_return_specs_reach_lhs_and_arbitrary_receivers_compile() -> None:
     cpp = transpile(_MAP_RETURN_PROPAGATION_SOURCE)
     map_type = "PineMap<std::string, int>"
-    assert f"{map_type} _udt_H_get(H& h)" in cpp
+    assert f"{map_type} _udt_H_get(H h)" in cpp
     assert f"{map_type} choose(bool cond" in cpp
     assert f"{map_type} choose_if(bool cond" in cpp
     for name in (

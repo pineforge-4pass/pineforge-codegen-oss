@@ -388,11 +388,16 @@ class TypeHelper:
                 typed_receiver_name = method_receiver_type_name(
                     typed_receiver_spec
                 )
+                method_key = (
+                    f"{typed_receiver_name}.{func}"
+                    if typed_receiver_name is not None
+                    else None
+                )
                 method_info = next(
                     (
                         info
                         for info in getattr(self, "_func_infos", ())
-                        if info.name == f"{typed_receiver_name}.{func}"
+                        if info.name == method_key
                         and getattr(info, "is_udt_method", False)
                     ),
                     None,
@@ -419,6 +424,21 @@ class TypeHelper:
                             method_info.return_type
                         )
                     return None
+                if (
+                    method_key is not None
+                    and method_key in getattr(self, "_method_signatures", {})
+                ):
+                    # A later authored method declaration owns this surface.
+                    # Its body-derived return type is not available yet, but a
+                    # same-named builtin must not lend it a false type.
+                    return None
+                if (
+                    typed_receiver_spec is not None
+                    and typed_receiver_spec.kind == "udt"
+                    and typed_receiver_spec.name in self._udt_fields
+                    and func == "copy"
+                ):
+                    return typed_receiver_spec
             # Drawing-objects-as-data return typing: *.new / *.copy -> handle of
             # the self-type; linefill.get_line* -> line; chart.point.* -> point.
             if ns in _DRAWING_NS:
@@ -521,7 +541,7 @@ class TypeHelper:
                 if inner is None:
                     return TypeSpec.array(TypeSpec.primitive("float"))
                 return TypeSpec.array(self._pine_type_to_spec(inner))
-            if ns in self._udt_fields and func == "new":
+            if ns in self._udt_fields and func in {"new", "copy"}:
                 return TypeSpec.udt(ns)
             if isinstance(cal, MemberAccess):
                 recv_spec = self._type_spec_from_expr(cal.object)
@@ -569,6 +589,8 @@ class TypeHelper:
                     )
                     if return_spec is not None:
                         return return_spec
+                    if method_key in getattr(self, "_method_signatures", {}):
+                        return None
                 # Drawing method-form: a.copy() -> same handle; lf.get_line*() -> line.
                 if (recv_spec is not None and recv_spec.kind == "udt"
                         and recv_spec.name in _DRAWING_TYPE_NAMES):

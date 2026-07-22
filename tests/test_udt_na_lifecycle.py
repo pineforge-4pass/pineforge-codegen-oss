@@ -200,8 +200,8 @@ ok = na(holder.inner) and not na(holder.other)
     assert "Inner inner = Inner{};" in cpp
     assert "Inner local = Inner{};" in cpp
     assert cpp.count("local = Inner{};") >= 3
-    assert "holder.inner = Inner{};" in cpp
-    assert "Outer{.inner = Inner{}" in cpp
+    assert "_pf_udt_Outer.get(holder).inner = Inner{};" in cpp
+    assert "_PFUdtRecord_Outer{.inner = Inner{}" in cpp
     compile_cpp(cpp, label="udt-na-contexts")
 
 
@@ -238,8 +238,8 @@ float retained = state + tracker
     cpp = transpile(source)
     assert re.search(r"^\s+double state(?: = [^;]+)?;$", cpp, re.M)
     assert re.search(r"^\s+double tracker(?: = [^;]+)?;$", cpp, re.M)
-    assert "State state = State{.value = 9.0" in cpp
-    assert "State tracker = State{.value = 10.0" in cpp
+    assert "State state = _pf_udt_State.create(_PFUdtRecord_State{.value = 9.0" in cpp
+    assert "State tracker = _pf_udt_State.create(_PFUdtRecord_State{.value = 10.0" in cpp
     assert "state = State{};" in cpp
     assert "tracker = State{};" in cpp
     compile_cpp(cpp, label="udt-na-raw-name-global-isolation")
@@ -271,8 +271,8 @@ float tagValue = state.tag
 '''
     cpp = transpile(source)
     assert "_udt_Left_read(state)" in cpp
-    assert "Left& alias = state;" in cpp
-    assert "tagValue = state.tag;" in cpp
+    assert "Left alias = state;" in cpp
+    assert "tagValue = _pf_udt_Left.read(state).tag;" in cpp
     assert "tagValue = /* drawing field omitted */ 0;" not in cpp
     compile_cpp(cpp, label="udt-exact-global-identity")
 
@@ -296,8 +296,10 @@ shadow() =>
 bool ignored = shadow()
 '''
     cpp = transpile(source)
-    assert "Left& state =" in cpp
-    assert "Right& state =" not in cpp
+    assert "Left state =" in cpp
+    assert "Left& state" not in cpp
+    assert "Right& state" not in cpp
+    assert "_pf_udt_Left.get(state).value = 3.0;" in cpp
     compile_cpp(cpp, label="udt-exact-global-array-alias")
 
 
@@ -472,7 +474,10 @@ float observed = (na(missing) ? 100.0 : 0.0) +
 '''
     cpp = transpile(source)
     assert re.search(r"State choose\(bool enabled, double seed\)", cpp)
-    assert "State{.value = seed, .__pf_na = false}) : (State{})" in cpp
+    assert (
+        "_pf_udt_State.create(_PFUdtRecord_State{.value = seed})) : (State{})"
+        in cpp
+    )
     compile_cpp(cpp, label="udt-na-selection-return")
     driver = r'''
 #include <iostream>
@@ -529,7 +534,7 @@ float observed = (na(missing) ? 100.0 : 0.0) + present.value
 '''
     cpp = transpile(source)
     assert re.search(
-        r"State _udt_Factory_choose(?:_cs\d+)?\(Factory& self, bool enabled\)",
+        r"State _udt_Factory_choose(?:_cs\d+)?\(Factory self, bool enabled\)",
         cpp,
     )
     compile_cpp(cpp, label="udt-method-na-return")

@@ -29,6 +29,12 @@ from ..symbols import (
     method_receiver_type_name,
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
+from ..method_binding import (
+    BoundMethodArgs,
+    MethodBindError,
+    bind_method_call,
+    inventory_method_signatures,
+)
 from .. import signatures as sigs
 from .. import tv_input_choices as tv_in
 # Output dataclasses (contract with the codegen) live in contracts.py so
@@ -121,6 +127,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def __init__(self, ast: Program, filename: str = "<stdin>") -> None:
         self._ast = ast
         self._filename = filename
+        self._method_signatures = inventory_method_signatures(ast)
+        self._method_call_bindings: dict[
+            tuple[int, str], BoundMethodArgs
+        ] = {}
         self._symbols = SymbolTable()
         self._ta_call_sites: list[TACallSite] = []
         self._series_vars: set[str] = set()
@@ -677,6 +687,87 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 "the wrapper to request.security().",
                 terminal.loc,
             )
+
+    def _refresh_direct_typed_method_wrapper_returns(self) -> None:
+        """Reconcile direct sibling-method return types without revisiting AST.
+
+        Method signatures are inventoried before source-order analysis so a
+        call to a later declaration binds to the authored method, but the
+        callee's body-derived return type does not exist yet.  A direct wrapper
+        such as ``outer(H self) => self.inner()`` therefore initially receives
+        the generic scalar fallback.  Once declarations are registered, copy
+        the exact terminal callee contract through direct first-parameter
+        receiver edges to a fixed point.  This pass is deliberately structural: it does
+        not call ``_visit`` and cannot duplicate TA, fixnan or written-callsite
+        state.
+        """
+        infos = {info.name: info for info in self._func_infos}
+        if not infos:
+            return
+
+        def direct_callee_key(info: FuncInfo) -> str | None:
+            node = info.node
+            if (
+                node is None
+                or not info.is_udt_method
+                or not node.params
+            ):
+                return None
+            terminal = self._direct_terminal_return_expr(node)
+            if not (
+                isinstance(terminal, FuncCall)
+                and isinstance(terminal.callee, MemberAccess)
+                and isinstance(terminal.callee.object, Identifier)
+                and terminal.callee.object.name == node.params[0]
+            ):
+                return None
+            if not info.param_type_specs:
+                return None
+            receiver_name = method_receiver_type_name(
+                info.param_type_specs[0]
+            )
+            if receiver_name is None:
+                return None
+            return f"{receiver_name}.{terminal.callee.member}"
+
+        # One newly resolved leaf can unlock one wrapper edge per pass.  Cycles
+        # without an exact leaf retain their existing fail-closed fallback.
+        for _ in range(len(infos) + 1):
+            changed = False
+            for wrapper in infos.values():
+                callee_key = direct_callee_key(wrapper)
+                callee = infos.get(callee_key) if callee_key else None
+                if callee is None:
+                    continue
+
+                if (
+                    callee.return_type not in {PineType.UNKNOWN, PineType.VOID}
+                    and wrapper.return_type != callee.return_type
+                ):
+                    wrapper.return_type = callee.return_type
+                    self._func_return_types[wrapper.name] = callee.return_type
+                    changed = True
+
+                callee_spec = callee.return_type_spec
+                if (
+                    callee_spec is not None
+                    and wrapper.return_type_spec != callee_spec
+                ):
+                    wrapper.return_type_spec = callee_spec
+                    self._func_return_type_specs[wrapper.name] = callee_spec
+                    changed = True
+
+                if (
+                    callee.udt_return_type is not None
+                    and wrapper.udt_return_type != callee.udt_return_type
+                ):
+                    wrapper.udt_return_type = callee.udt_return_type
+                    self._func_udt_return_types[wrapper.name] = (
+                        callee.udt_return_type
+                    )
+                    changed = True
+            if not changed:
+                break
 
     def _refresh_direct_terminal_array_temporary_returns(self) -> None:
         """Reconcile exact primitive returns without revisiting call sites.
@@ -2419,6 +2510,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 getattr(info, "is_udt_method", False)
                 and isinstance(call.callee, MemberAccess)
             ):
+                if callee in self._method_signatures:
+                    binding = self._bind_typed_method_call(callee, call)
+                    return [call.callee.object, *binding.args_by_param]
                 return [
                     call.callee.object,
                     *self._bind_callable_args(call, params[1:]),
@@ -4251,9 +4345,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if (udt_ret is None
                     and terminal_direct_return_spec is not None
                     and terminal_direct_return_spec.kind == "udt"):
-                from .types import _DRAWING_TYPE_NAMES
-                if terminal_direct_return_spec.name in _DRAWING_TYPE_NAMES:
-                    udt_ret = terminal_direct_return_spec.name
+                # A user UDT is a numeric object-ID handle just like a drawing
+                # handle.  Returning a parameter/local identity must retain
+                # that exact handle type; limiting this route to drawings made
+                # ``identity(Item value) => value`` emit ``double``.
+                udt_ret = terminal_direct_return_spec.name
             if udt_ret is None:
                 # Drawing-handle returns wrapped in an if-statement terminal
                 # branch (``makeEventLabel``) or returned as a bare drawing-handle
@@ -4424,12 +4520,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 terminal_spec = self._type_spec_from_expr(terminal_ret_expr)
                 if terminal_spec is not None and terminal_spec.kind == "map":
                     return_type_spec = terminal_spec
-                method_udt_return = (
-                    self._udt_name_from_ctor(terminal_ret_expr)
-                    or self._udt_name_from_nullable_ctor_selection(
-                        terminal_ret_expr
+                if terminal_spec is not None and terminal_spec.kind == "udt":
+                    # Methods may return ``self`` or another UDT-typed
+                    # parameter/local, not only a syntactic ``Type.new``.
+                    method_udt_return = terminal_spec.name
+                    return_type_spec = terminal_spec
+                else:
+                    method_udt_return = (
+                        self._udt_name_from_ctor(terminal_ret_expr)
+                        or self._udt_name_from_nullable_ctor_selection(
+                            terminal_ret_expr
+                        )
                     )
-                )
                 if method_udt_return is not None:
                     return_type_spec = TypeSpec.udt(method_udt_return)
         finally:
@@ -4508,6 +4610,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             udt_return_type=method_udt_return,
         )
         self._func_infos.append(fi)
+        # A just-registered later sibling can resolve an earlier direct method
+        # wrapper before the next source statement is analyzed.
+        self._refresh_direct_typed_method_wrapper_returns()
         return PineType.VOID
 
     # ------------------------------------------------------------------
@@ -4902,6 +5007,26 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     self._visit(val)
                 return self._visit(callee)
 
+            # Compatibility functional form: ``Type.copy(object)``.  The
+            # canonical Pine spelling is ``object.copy()`` below, but retaining
+            # this existing surface keeps older corpus sources well-defined.
+            if (
+                isinstance(obj, Identifier)
+                and obj.name in self._udt_fields
+                and member == "copy"
+            ):
+                for arg in node.args:
+                    self._visit(arg)
+                for val in node.kwargs.values():
+                    self._visit(val)
+                if len(node.args) != 1 or node.kwargs:
+                    self._error(
+                        f"{obj.name}.copy(...) expects exactly one object argument",
+                        node.loc,
+                    )
+                    return PineType.UNKNOWN
+                return self._visit(node.args[0])
+
             # General member call (e.g., array.push, etc.)
             receiver_pine_type = self._visit(obj)
             visited_member_arg_types: dict[int, PineType] = {}
@@ -4917,6 +5042,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             receiver_type_name = method_receiver_type_name(receiver_spec)
             if receiver_type_name is not None:
                 method_key = f"{receiver_type_name}.{member}"
+                signature = self._method_signatures.get(method_key)
+                strict_binding = (
+                    self._bind_typed_method_call(method_key, node)
+                    if signature is not None
+                    else None
+                )
+                if strict_binding is not None:
+                    # Defaults are real call-site expressions. Visit only the
+                    # inserted nodes here; written actuals were visited above.
+                    supplied_ids = {
+                        id(arg) for arg in [*node.args, *node.kwargs.values()]
+                    }
+                    for arg in strict_binding.evaluation_order:
+                        if id(arg) not in supplied_ids:
+                            visited_member_arg_types[id(arg)] = self._visit(arg)
                 method_info = next(
                     (
                         info
@@ -4929,7 +5069,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 if method_info is not None and method_info.node is not None:
                     method_params = list(method_info.node.params)
                     rest_params = method_params[1:]
-                    rest_bound = self._bind_callable_args(node, rest_params)
+                    rest_bound = (
+                        list(strict_binding.args_by_param)
+                        if strict_binding is not None
+                        else self._bind_callable_args(node, rest_params)
+                    )
                     full_bound: list[ASTNode | None] = [obj, *rest_bound]
                     full_param_types = [
                         receiver_pine_type,
@@ -5033,6 +5177,24 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         full_param_types,
                         method_info.return_type,
                     )
+                if signature is not None:
+                    # The exact authored method exists later in source. Its
+                    # body-derived return/effect metadata is intentionally not
+                    # guessed here, and the call must not fall through to a
+                    # same-named builtin such as UDT ``copy()``.
+                    return PineType.UNKNOWN
+                if (
+                    receiver_spec.kind == "udt"
+                    and receiver_spec.name in self._udt_fields
+                    and member == "copy"
+                ):
+                    if node.args or node.kwargs:
+                        self._error(
+                            f"{receiver_spec.name}.copy() expects no arguments",
+                            node.loc,
+                        )
+                        return PineType.UNKNOWN
+                    return receiver_pine_type
             # Matrix method dispatch: ``m.get(0, 0)`` on ``matrix<int>`` must
             # type as INT, not VOID, so ``v = m.get(...)`` propagates the
             # element PineType. ``_type_spec_from_expr`` already carries the
@@ -5274,6 +5436,26 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         for name, value in node.kwargs.items():
             if name in param_names:
                 bound[param_names.index(name)] = value
+        return bound
+
+    def _bind_typed_method_call(
+        self,
+        method_key: str,
+        node: FuncCall,
+    ) -> BoundMethodArgs:
+        """Strict shared binding for one exact typed method call."""
+
+        cache_key = (id(node), method_key)
+        cached = self._method_call_bindings.get(cache_key)
+        if cached is not None:
+            return cached
+        signature = self._method_signatures[method_key]
+        try:
+            bound = bind_method_call(signature, node)
+        except MethodBindError as exc:
+            self._error(str(exc), node.loc)
+            raise AssertionError("unreachable") from exc
+        self._method_call_bindings[cache_key] = bound
         return bound
 
     def _record_deferred_param_call_edge(

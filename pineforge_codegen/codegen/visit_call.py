@@ -143,6 +143,11 @@ from ..ast_nodes import (
     VarDecl,
 )
 from ..symbols import TypeSpec, method_receiver_type_name
+from ..method_binding import (
+    MethodBindError,
+    bind_method_call,
+    signature_from_callable,
+)
 from .. import signatures as sigs
 from .drawing import ALL_DRAWING_METHODS
 from .tables import (
@@ -167,7 +172,6 @@ from .tables import (
     TIME_FIELD_EXPRS,
     _math_minmax_na_expr,
     _merge_kwargs,
-    _merge_kwargs_with_defaults,
     tz_time_field_lambda,
 )
 
@@ -261,6 +265,50 @@ class CallVisitor:
             return receiver_spec, None
         return receiver_spec, method_info
 
+    def _bind_typed_method_args(self, method_info, node: FuncCall):
+        """Bind typed method arguments through the analyzer-shared rules."""
+
+        param_names = (
+            list(method_info.node.params[1:])
+            if method_info.node is not None
+            else []
+        )
+        param_defaults = list(
+            getattr(method_info, "param_defaults", ()) or ()
+        )[1:]
+        hints = list(
+            (getattr(method_info.node, "annotations", None) or {}).get(
+                "param_type_hints", ()
+            )
+            if method_info.node is not None
+            else ()
+        )[1:]
+        signature = signature_from_callable(
+            method_info.name,
+            param_names,
+            param_defaults,
+            hints,
+        )
+        try:
+            return bind_method_call(signature, node)
+        except MethodBindError as exc:
+            self._codegen_error(node, str(exc))
+            raise AssertionError("unreachable") from exc
+
+    def _emit_udt_new_expr(
+        self,
+        type_name: str,
+        field_initializers: list[str],
+    ) -> str:
+        """Allocate one authored UDT record and return its numeric object ID."""
+        record_type = self._udt_record_cpp_type(type_name)
+        arena = self._udt_arena_member_name(type_name)
+        return f"{arena}.create({record_type}{{{', '.join(field_initializers)}}})"
+
+    def _emit_udt_copy_expr(self, type_name: str, source_cpp: str) -> str:
+        """Allocate a detached outer record while shallow-copying nested IDs."""
+        return f"{self._udt_arena_member_name(type_name)}.copy({source_cpp})"
+
     def _emit_typed_user_method_call(
         self,
         node: FuncCall,
@@ -273,21 +321,8 @@ class CallVisitor:
         receiver_node = callee.object
         fn_cpp = self._udt_method_call_emit_name(method_info, node)
 
-        param_names = (
-            list(method_info.node.params[1:])
-            if method_info.node is not None
-            else []
-        )
-        param_defaults = list(
-            getattr(method_info, "param_defaults", []) or []
-        )[1:]
-        rest_nodes = _merge_kwargs_with_defaults(
-            node.args,
-            node.kwargs,
-            param_names,
-            param_defaults,
-            lambda value: value,
-        )
+        binding = self._bind_typed_method_args(method_info, node)
+        rest_nodes = list(binding.args_by_param)
         receiver_cpp = self._visit_typed_method_param(
             method_info,
             node,
@@ -307,19 +342,20 @@ class CallVisitor:
         receiver_root = receiver_node
         while isinstance(receiver_root, MemberAccess):
             receiver_root = receiver_root.object
-        receiver_passes_by_reference = receiver_spec.kind in {
-            "array",
-            "matrix",
-            "udt",
-        }
+        receiver_passes_by_reference = (
+            receiver_spec.kind in {"array", "matrix"}
+            or (
+                receiver_spec.kind == "udt"
+                and receiver_spec.name not in self._udt_defs
+            )
+        )
         return self._ordered_user_call_expr(
             fn_cpp,
             [receiver_node, *rest_nodes],
             [receiver_cpp, *rest_cpp],
             source_order_nodes=[
                 receiver_node,
-                *node.args,
-                *node.kwargs.values(),
+                *binding.evaluation_order,
             ],
             force_stage=(
                 receiver_passes_by_reference
@@ -789,11 +825,11 @@ class CallVisitor:
         }
 
         is_method = bool(getattr(func_info, "is_udt_method", False))
-        positional = (
-            [call.callee.object, *call.args]
-            if is_method and isinstance(call.callee, MemberAccess)
-            else list(call.args)
-        )
+        if is_method and isinstance(call.callee, MemberAccess):
+            binding = self._bind_typed_method_args(func_info, call)
+            positional = [call.callee.object, *binding.args_by_param]
+        else:
+            positional = list(call.args)
         for index, actual in enumerate(positional):
             if index >= len(params) or result[params[index]] is not None:
                 continue
@@ -801,14 +837,14 @@ class CallVisitor:
                 actual, caller_specs
             )
 
-        keyword_offset = 1 if is_method else 0
-        for name, actual in call.kwargs.items():
-            if name not in params[keyword_offset:]:
-                continue
-            if result[name] is None:
-                result[name] = self._map_effect_type_spec(
-                    actual, caller_specs
-                )
+        if not is_method:
+            for name, actual in call.kwargs.items():
+                if name not in params:
+                    continue
+                if result[name] is None:
+                    result[name] = self._map_effect_type_spec(
+                        actual, caller_specs
+                    )
 
         # Direct callable locals already carry analyzer-owned lexical
         # provenance.  They override same-named parameters/globals exactly as
@@ -981,6 +1017,23 @@ class CallVisitor:
             recv_spec = self._type_spec_from_expr(callee.object)
             if (
                 recv_spec is not None
+                and recv_spec.kind == "udt"
+                and recv_spec.name in self._udt_defs
+                and callee.member == "copy"
+            ):
+                if node.args or node.kwargs:
+                    self._codegen_error(
+                        node,
+                        f"{recv_spec.name}.copy() expects no arguments",
+                        hint="Call copy() on the UDT object without arguments.",
+                    )
+                self._reject_unsupported_udt_copy(recv_spec.name, node)
+                return self._emit_udt_copy_expr(
+                    recv_spec.name,
+                    self._visit_expr(callee.object),
+                )
+            if (
+                recv_spec is not None
                 and recv_spec.kind == "map"
                 and not isinstance(callee.object, (Identifier, MemberAccess))
                 and callee.member in MAP_METHODS
@@ -1011,15 +1064,8 @@ class CallVisitor:
                     while isinstance(receiver_root, MemberAccess):
                         receiver_root = receiver_root.object
                     stage_receiver = not isinstance(receiver_root, Identifier)
-                    param_names = list(fi_u.node.params[1:]) if fi_u.node else []
-                    # Drop the leading ``self`` slot from param_defaults so the
-                    # parallel array lines up with ``param_names`` (rest of
-                    # the signature). Probe: udt-method-probe-04-default-param.
-                    param_defaults = list(getattr(fi_u, "param_defaults", []) or [])[1:]
-                    rest_nodes = _merge_kwargs_with_defaults(
-                        node.args, node.kwargs, param_names,
-                        param_defaults, lambda x: x,
-                    )
+                    binding = self._bind_typed_method_args(fi_u, node)
+                    rest_nodes = list(binding.args_by_param)
                     rest = [
                         self._visit_udt_method_series_arg(
                             fi_u, node, arg, index
@@ -1032,8 +1078,7 @@ class CallVisitor:
                         [recv_e, *rest],
                         source_order_nodes=[
                             callee.object,
-                            *node.args,
-                            *node.kwargs.values(),
+                            *binding.evaluation_order,
                         ],
                         # Generated UDT methods accept ``T&``. A constructor or
                         # function-return receiver is a C++ rvalue; bind it to a
@@ -1260,15 +1305,8 @@ class CallVisitor:
                         if fi_u is not None and getattr(fi_u, "is_udt_method", False):
                             fn_cpp = self._udt_method_call_emit_name(fi_u, node)
                             recv_e = self._visit_expr(obj)
-                            param_names = list(fi_u.node.params[1:]) if fi_u.node else []
-                            # Drop the leading ``self`` slot so param_defaults
-                            # lines up with ``param_names``. Probe:
-                            # udt-method-probe-04-default-param.
-                            param_defaults = list(getattr(fi_u, "param_defaults", []) or [])[1:]
-                            rest_nodes = _merge_kwargs_with_defaults(
-                                node.args, node.kwargs, param_names,
-                                param_defaults, lambda x: x,
-                            )
+                            binding = self._bind_typed_method_args(fi_u, node)
+                            rest_nodes = list(binding.args_by_param)
                             rest = [
                                 self._visit_udt_method_series_arg(
                                     fi_u, node, arg, index
@@ -1281,8 +1319,7 @@ class CallVisitor:
                                 [recv_e, *rest],
                                 source_order_nodes=[
                                     obj,
-                                    *node.args,
-                                    *node.kwargs.values(),
+                                    *binding.evaluation_order,
                                 ],
                             )
                     args = ", ".join(self._visit_expr(a) for a in node.args)
@@ -2038,18 +2075,21 @@ class CallVisitor:
                           and val == "na<double>()"):
                         val = f"{f_cpp_type}{{}}"
                     field_inits.append(f".{f.name} = {val}")
-            # Mark the constructed object non-na (the struct's ``__pf_na`` is the
-            # last declared field, so this designator stays in declaration order).
-            # A bare default-constructed UDT keeps ``__pf_na = true`` (na); only a
-            # real ``.new(...)`` flips it false so ``na(obj)`` reports correctly.
-            field_inits.append(".__pf_na = false")
-            return f"{namespace}{{{', '.join(field_inits)}}}"
+            return self._emit_udt_new_expr(namespace, field_inits)
 
         # UDT copy: TypeName.copy(obj)
         if namespace in self._udt_defs and func_name == "copy":
-            if node.args:
-                return self._visit_expr(node.args[0])
-            return f"{namespace}{{}}"
+            if len(node.args) != 1 or node.kwargs:
+                self._codegen_error(
+                    node,
+                    f"{namespace}.copy(...) expects exactly one object argument",
+                    hint="Prefer the canonical object.copy() form.",
+                )
+            self._reject_unsupported_udt_copy(namespace, node)
+            return self._emit_udt_copy_expr(
+                namespace,
+                self._visit_expr(node.args[0]),
+            )
 
         # Safety net before the generic emitter. Every builtin namespace and
         # bare builtin that codegen knows how to emit has been dispatched (and

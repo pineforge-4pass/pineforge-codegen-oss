@@ -793,26 +793,6 @@ class StmtVisitor:
             )
             return
 
-        # UDT lvalue alias (BUG C): a local initialised from a user-defined-UDT
-        # var/global lvalue (or a ternary/switch of such lvalues) and then
-        # mutated through must ALIAS the global, not value-copy — Pine UDTs are
-        # reference types. Emit a C++ reference (non-rebinding) or pointer
-        # (rebinding) alias instead of the default copy.
-        if not is_global_member:
-            alias = self._udt_local_alias_kind(node)
-            if alias is not None:
-                kind, udt_t = alias
-                if kind == "ref":
-                    cpp_val = self._visit_rhs_value(node.value, node.name, target_cpp_type=udt_t)
-                    lines.append(f"{pad}{udt_t}& {safe} = {cpp_val};")
-                    return
-                # Pointer alias: take address of each selected lvalue; subsequent
-                # field access lowers to ``->`` and rebinds to ``&(other)``.
-                self._udt_ptr_alias_locals.add(node.name)
-                cpp_val = self._addr_of_udt_selection(node.value, node.name)
-                lines.append(f"{pad}{udt_t}* {safe} = {cpp_val};")
-                return
-
         # Collection lvalue alias (BUG 2): a local bound to an existing array /
         # map / matrix lvalue (or a ternary/switch selecting same-typed ones)
         # and later MUTATED through must ALIAS the member, not value-copy — Pine
@@ -842,27 +822,6 @@ class StmtVisitor:
                 ref = "" if coll_spec.kind == "map" else "&"
                 lines.append(f"{pad}{cpp_type}{ref} {safe} = {cpp_val};")
                 return
-
-        # Global-scope UDT array-element alias (BUG: Pine array elements of a
-        # user-defined type are references). A global loop-local bound from
-        # ``arr.get(i)`` and later field-mutated must ALIAS the element so the
-        # mutation writes back into the array. Emit a fresh per-iteration
-        # ``UDT& z = arr[i];`` reference (any hoisted class member was
-        # suppressed) — identical to the non-hoisted function-local alias path.
-        # Gated by _register_udt_array_get_ref_locals (which only records global-
-        # scope names); the ``_current_func_body is None`` guard confines this to
-        # global scope, so a function-local sharing the name keeps its own path.
-        if (node.name in self._udt_array_get_ref_locals
-                and getattr(self, "_current_func_body", None) is None):
-            udt_t = self._is_udt_lvalue(node.value)
-            if udt_t is None:
-                self._codegen_error(
-                    node,
-                    "UDT array-element alias lost its exact element type.",
-                )
-            cpp_val = self._visit_rhs_value(node.value, node.name, target_cpp_type=udt_t)
-            lines.append(f"{pad}{udt_t}& {safe} = {cpp_val};")
-            return
 
         # General declaration
         cpp_type = self._type_for_decl(node) if not is_global_member else None
@@ -993,7 +952,11 @@ class StmtVisitor:
 
         # If/switch expression in assignment: x := if cond ...
         if isinstance(node.value, (IfStmt, SwitchStmt)):
-            safe = self._safe_name(target_name) if target_name else self._visit_expr(node.target)
+            safe = (
+                self._safe_name(target_name)
+                if target_name
+                else self._visit_mutable_expr(node.target)
+            )
             selection_cpp_type = self._nullable_collection_target_cpp_type(
                 name=target_name,
                 target_node=node.target if target_name is None else None,
@@ -1036,7 +999,7 @@ class StmtVisitor:
                 )
                 return
             # General expression target (e.g., member access)
-            target_cpp = self._visit_expr(node.target)
+            target_cpp = self._visit_mutable_expr(node.target)
             target_cpp_type = self._nullable_collection_target_cpp_type(
                 target_node=node.target,
             )
@@ -1061,12 +1024,6 @@ class StmtVisitor:
         # Apply per-call-site var remap (for function-local vars)
         if self._active_var_remap and safe in self._active_var_remap:
             safe = self._active_var_remap[safe]
-
-        # Pointer-aliased UDT local (BUG C, rebinding case): ``p := other``
-        # rebinds the pointer to the address of the newly selected UDT lvalue.
-        if target_name in self._udt_ptr_alias_locals and node.op == ":=":
-            lines.append(f"{pad}{safe} = {self._addr_of_udt_selection(node.value, target_name)};")
-            return
 
         if self._binding_is_series(target_name, safe):
             val_cpp = self._visit_rhs_value(
@@ -1595,30 +1552,6 @@ class StmtVisitor:
         self._current_loop_var_specs = saved_loop_specs
         lines.append(f"{pad}}}")
 
-    def _loop_elem_is_writeback_udt(self, iterable) -> bool:
-        """Whether a ``for x in coll`` loop variable must bind by reference.
-
-        In Pine a ``for x in arr`` loop variable over an array of *user-defined
-        objects* is a reference to the element — field writes (``x.f := v``)
-        mutate the array in place — whereas over a primitive array it is a
-        copy. So emit C++ ``auto&`` only for arrays whose element is a
-        user-defined UDT struct. Primitive elements keep ``auto`` (Pine copy
-        semantics: writing the loop var must NOT write back). Drawing handles
-        (line/box/label/linefill/...) also keep ``auto``: their element type
-        name is a builtin, not in ``_udt_defs``, and a handle copy already
-        mutates the shared engine object. (Reassigning the loop var itself —
-        ``x := ...`` — is not modelled by either form, but Pine forbids it for
-        objects in practice and it does not occur in the corpus.)
-        """
-        spec = self._type_spec_from_expr(iterable)
-        return (
-            spec is not None
-            and spec.kind == "array"
-            and spec.element is not None
-            and spec.element.kind == "udt"
-            and spec.element.name in self._udt_defs
-        )
-
     def _visit_for_in(self, node, lines: list[str], indent: int) -> None:
         pad = "    " * indent
         iterable = self._visit_expr(node.iterable)
@@ -1654,8 +1587,12 @@ class StmtVisitor:
         )
         if node.var:
             v_cpp = self._safe_name(node.var)
-            ref = "&" if self._loop_elem_is_writeback_udt(node.iterable) else ""
-            lines.append(f"{pad}for (auto{ref} {v_cpp} : {iterable}) {{")
+            # User UDT elements are numeric object-ID handles.  Copying the
+            # loop binding preserves Pine semantics: field writes still reach
+            # the shared arena record, while rebinding the loop variable does
+            # not overwrite the array slot.  Primitive elements use the same
+            # value-binding rule.
+            lines.append(f"{pad}for (auto {v_cpp} : {iterable}) {{")
         elif map_pair_loop:
             # Pine map iteration exposes insertion-ordered ``[key, value]``
             # pairs. PineMap intentionally keeps its storage private, so take
