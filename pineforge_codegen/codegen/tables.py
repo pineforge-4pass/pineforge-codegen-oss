@@ -459,45 +459,143 @@ ORDER_DIRECTION_MAP = {
 # ---------------------------------------------------------------------------
 
 
-def _checked_array_index_prelude(*, normalize_negative: bool = True) -> str:
+def _checked_array_index_prelude(
+    *,
+    normalize_negative: bool = True,
+    allow_size: bool = False,
+    name: str = "index",
+) -> str:
     """C++ body shared by checked single-index operations.
 
-    Pine v6 explicitly gives end-relative negative indices to the checked
-    ``get``, ``set``, and ``remove`` cluster. Other indexed functions such as
-    ``percentrank`` still need the same NA/non-finite/range checks, but must
-    reject negative indices instead of normalizing them. ``insert`` remains a
-    separately bounded residual.
+    Pine v6 explicitly gives end-relative negative indices to ``array.get``,
+    ``array.set``, ``array.insert``, and ``array.remove``. Other indexed
+    functions such as ``percentrank`` and the ``fill``/``slice`` range
+    endpoints still need the same NA/non-finite/range checks, but must reject
+    negative indices instead of normalizing them (``normalize_negative``).
+
+    ``allow_size`` widens the upper bound from ``index < size`` to
+    ``index <= size``. An *element access* is invalid at ``size``, but an
+    *insertion point* is not: ``array.insert(id, size, v)`` appends, and the
+    half-open ``[index_from, index_to)`` ranges of ``array.fill`` /
+    ``array.slice`` legally end at ``size``.
+
+    ``name`` renames every emitted local so two endpoints can be checked in
+    one C++ scope without colliding. ``name="index"`` reproduces the original
+    identifiers byte-for-byte.
     """
+    raw_value = f"__pf_raw_{name}_value"
+    raw_type = f"__pf_raw_{name}_type"
+    raw_text = f"__pf_raw_{name}_text"
+    raw_wide = f"__pf_raw_{name}_wide"
+    raw = f"__pf_raw_{name}"
+    checked = f"__pf_array_{name}"
+    size = "__pf_array_size" if name == "index" else f"__pf_array_size_{name}"
     checked_index = (
-        "__pf_raw_index<0?__pf_raw_index+__pf_array_size:__pf_raw_index"
-        if normalize_negative
-        else "__pf_raw_index"
+        f"{raw}<0?{raw}+{size}:{raw}" if normalize_negative else raw
     )
+    upper = ">" if allow_size else ">="
     return (
-        "using __pf_raw_index_type=std::decay_t<decltype(__pf_raw_index_value)>; "
-        "if constexpr(!std::is_same_v<__pf_raw_index_type,bool>) { "
-        "if(is_na(__pf_raw_index_value)) "
+        f"using {raw_type}=std::decay_t<decltype({raw_value})>; "
+        f"if constexpr(!std::is_same_v<{raw_type},bool>) {{ "
+        f"if(is_na({raw_value})) "
         "pine_runtime_error(std::string(\"Index na is out of bounds. Array size is \")+"
         "std::to_string((int64_t)__pf_array.size())); } "
-        "if constexpr(std::is_floating_point_v<__pf_raw_index_type>) { "
-        "if(!std::isfinite(__pf_raw_index_value)) { "
-        "std::string __pf_raw_index_text=__pf_raw_index_value>0?\"inf\":\"-inf\"; "
-        "pine_runtime_error(std::string(\"Index \")+__pf_raw_index_text+"
+        f"if constexpr(std::is_floating_point_v<{raw_type}>) {{ "
+        f"if(!std::isfinite({raw_value})) {{ "
+        f"std::string {raw_text}={raw_value}>0?\"inf\":\"-inf\"; "
+        f"pine_runtime_error(std::string(\"Index \")+{raw_text}+"
         "\" is out of bounds. Array size is \"+"
         "std::to_string((int64_t)__pf_array.size())); } "
-        "long double __pf_raw_index_wide=(long double)__pf_raw_index_value; "
-        "if(__pf_raw_index_wide<(long double)std::numeric_limits<int64_t>::min()||"
-        "__pf_raw_index_wide>(long double)std::numeric_limits<int64_t>::max()) "
+        f"long double {raw_wide}=(long double){raw_value}; "
+        f"if({raw_wide}<(long double)std::numeric_limits<int64_t>::min()||"
+        f"{raw_wide}>(long double)std::numeric_limits<int64_t>::max()) "
         "pine_runtime_error(std::string(\"Index \")+"
-        "std::to_string((double)__pf_raw_index_value)+"
+        f"std::to_string((double){raw_value})+"
         "\" is out of bounds. Array size is \"+"
         "std::to_string((int64_t)__pf_array.size())); } "
-        "int64_t __pf_raw_index=(int64_t)__pf_raw_index_value; "
-        "int64_t __pf_array_size=(int64_t)__pf_array.size(); "
-        f"int64_t __pf_array_index={checked_index}; "
-        "if(__pf_array_index<0||__pf_array_index>=__pf_array_size) "
-        "pine_runtime_error(std::string(\"Index \")+std::to_string(__pf_raw_index)+"
-        "\" is out of bounds. Array size is \"+std::to_string(__pf_array_size)); "
+        f"int64_t {raw}=(int64_t){raw_value}; "
+        f"int64_t {size}=(int64_t)__pf_array.size(); "
+        f"int64_t {checked}={checked_index}; "
+        f"if({checked}<0||{checked}{upper}{size}) "
+        f"pine_runtime_error(std::string(\"Index \")+std::to_string({raw})+"
+        f"\" is out of bounds. Array size is \"+std::to_string({size})); "
+    )
+
+
+def _checked_array_range_prelude() -> str:
+    """Validate the half-open ``[index_from, index_to)`` range of fill/slice.
+
+    Both endpoints are checked with ``allow_size`` (``index_to`` is exclusive,
+    so ``size`` is a legal endpoint) and without negative normalization
+    (neither function appears in the Pine v6 reference's negative-indexing
+    set). An inverted range is rejected rather than silently treated as empty:
+    ``begin()+from > begin()+to`` is undefined behaviour in the STL forms this
+    replaces, and no evidence pins TradingView's behaviour there.
+    """
+    return (
+        _checked_array_index_prelude(
+            normalize_negative=False, allow_size=True, name="index_from"
+        )
+        + _checked_array_index_prelude(
+            normalize_negative=False, allow_size=True, name="index_to"
+        )
+        + "if(__pf_array_index_from>__pf_array_index_to) "
+        "pine_runtime_error(std::string(\"Index range \")+"
+        "std::to_string(__pf_array_index_from)+\"..\"+"
+        "std::to_string(__pf_array_index_to)+"
+        "\" is invalid. Array size is \"+"
+        "std::to_string(__pf_array_size_index_from)); "
+    )
+
+
+def _checked_array_insert(a: str, args: list[str]) -> str:
+    """``array.insert(id, index, value)`` — index is an INSERTION point.
+
+    ``index == size`` appends, so the bound is ``index <= size``; a negative
+    index is end-relative, exactly as for ``get``/``set``/``remove``.
+    """
+    check = _checked_array_index_prelude(allow_size=True)
+    return (
+        "[&](auto&& __pf_array){ "
+        "return [&](auto&& __pf_raw_index_value){ "
+        "return [&](auto&& __pf_array_value){ "
+        f"{check}"
+        "__pf_array.insert(__pf_array.begin()+(size_t)__pf_array_index, "
+        "__pf_array_value); "
+        f"}}(({args[1]})); }}(({args[0]})); }}(({a}))"
+    )
+
+
+def _checked_array_fill_range(a: str, args: list[str]) -> str:
+    """``array.fill(id, value, index_from, index_to)`` — bounded range fill."""
+    check = _checked_array_range_prelude()
+    return (
+        "[&](auto&& __pf_array){ "
+        "return [&](auto&& __pf_array_value){ "
+        "return [&](auto&& __pf_raw_index_from_value){ "
+        "return [&](auto&& __pf_raw_index_to_value){ "
+        f"{check}"
+        "std::fill(__pf_array.begin()+(size_t)__pf_array_index_from, "
+        "__pf_array.begin()+(size_t)__pf_array_index_to, __pf_array_value); "
+        f"}}(({args[2]})); }}(({args[1]})); }}(({args[0]})); }}(({a}))"
+    )
+
+
+def checked_array_slice(a: str, args: list[str], *, result_type: str) -> str:
+    """``array.slice(id, index_from, index_to)`` — bounded range extraction.
+
+    ``result_type`` stays caller-supplied so the typed method lane keeps
+    emitting the receiver's own element type; only the bounds checks are new.
+    """
+    check = _checked_array_range_prelude()
+    return (
+        "[&](auto&& __pf_array){ "
+        "return [&](auto&& __pf_raw_index_from_value){ "
+        "return [&](auto&& __pf_raw_index_to_value){ "
+        f"{check}"
+        f"return {result_type}(__pf_array.begin()+(size_t)__pf_array_index_from, "
+        "__pf_array.begin()+(size_t)__pf_array_index_to); "
+        f"}}(({args[1]})); }}(({args[0]})); }}(({a}))"
     )
 
 
@@ -600,7 +698,7 @@ ARRAY_METHODS = {
     "set":       _checked_array_set,
     "push":      lambda a, args: f"{a}.push_back({args[0]})",
     "unshift":   lambda a, args: f"{a}.insert({a}.begin(), {args[0]})",
-    "insert":    lambda a, args: f"{a}.insert({a}.begin() + (int)({args[0]}), {args[1]})",
+    "insert":    _checked_array_insert,
     "pop":       lambda a, args: _checked_array_end_remove(a, "pop"),
     "shift":     lambda a, args: _checked_array_end_remove(a, "shift"),
     "remove":    _checked_array_remove,
@@ -609,7 +707,7 @@ ARRAY_METHODS = {
     "size":      lambda a, args: f"(double){a}.size()",
     "clear":     lambda a, args: f"{a}.clear()",
     "fill":      lambda a, args: f"std::fill({a}.begin(), {a}.end(), {args[0]})" if len(args) == 1
-                                 else f"std::fill({a}.begin()+(int)({args[1]}), {a}.begin()+(int)({args[2]}), {args[0]})",
+                                 else _checked_array_fill_range(a, args),
     "includes":  lambda a, args: f"(std::find({a}.begin(), {a}.end(), {args[0]}) != {a}.end())",
     "indexof":   lambda a, args: f"[&](){{ auto it=std::find({a}.begin(),{a}.end(),{args[0]}); return it!={a}.end()?(double)(it-{a}.begin()):-1.0; }}()",
     "lastindexof": lambda a, args: f"[&](){{ for(int i=(int){a}.size()-1;i>=0;i--)if({a}[i]=={args[0]})return(double)i; return -1.0; }}()",
@@ -619,7 +717,7 @@ ARRAY_METHODS = {
     ),
     "reverse":   lambda a, args: f"std::reverse({a}.begin(),{a}.end())",
     "copy":      lambda a, args: f"std::vector<double>({a})",
-    "slice":     lambda a, args: f"std::vector<double>({a}.begin()+(int)({args[0]}),{a}.begin()+(int)({args[1]}))",
+    "slice":     lambda a, args: checked_array_slice(a, args, result_type="std::vector<double>"),
     "concat":    lambda a, args: f"{a}.insert({a}.end(),{args[0]}.begin(),{args[0]}.end())",
     "sum":       lambda a, args: f"({a}.empty()?na<double>():std::accumulate({a}.begin(),{a}.end(),0.0))",
     "avg":       lambda a, args: f"({a}.empty()?na<double>():std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size())",
@@ -667,6 +765,9 @@ CHECKED_ARRAY_METHOD_KWARGS: dict[str, list[str]] = {
     "set": ["index", "value"],
     "remove": ["index"],
     "percentrank": ["index"],
+    "insert": ["index", "value"],
+    "fill": ["value", "index_from", "index_to"],
+    "slice": ["index_from", "index_to"],
     "first": [],
     "last": [],
     "pop": [],
