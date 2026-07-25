@@ -266,7 +266,10 @@ def test_array_slice_string_elements():
         'sa = array.new<string>(0)\narray.push(sa, "a")\narray.push(sa, "b")\n'
         "sb = array.slice(sa, 0, 1)\nplot(close)\n"
     )
-    assert "std::vector<std::string>(sa.begin()" in cpp
+    # The slice keeps the receiver's ELEMENT type (std::string, not double).
+    # Iterators come from the bounds-checked lambda's ``__pf_array`` binding.
+    assert "std::vector<std::string>(__pf_array.begin()" in cpp
+    assert "}((sa))" in cpp
 
 
 # ---------------------------------------------------------------------------

@@ -50,6 +50,7 @@ from .tables import (
     MATRIX_RETURNING_METHODS,
     PINE_TYPE_TO_CPP,
     TA_RETURNS_BOOL,
+    checked_array_slice,
 )
 
 # Collection (array / map / matrix) methods that MUTATE the receiver in place.
@@ -960,7 +961,11 @@ class TypeInferer:
         if method == "copy":
             lower_receiver = lambda recv: f"{arr_cpp_type}({recv})"
         elif method == "slice":
-            lower_receiver = lambda recv: f"{arr_cpp_type}({recv}.begin()+(int)({args[0]}),{recv}.begin()+(int)({args[1]}))"
+            # Bounds-checked in the shared helper; the element type stays
+            # caller-supplied so the typed lane keeps its own vector type.
+            lower_receiver = lambda recv: checked_array_slice(
+                recv, args, result_type=arr_cpp_type
+            )
         elif method == "join" and elem_cpp == "std::string":
             sep = args[0] if args else 'std::string(",")'
             lower_receiver = lambda recv: f"[&](){{ std::string r; for(size_t i=0;i<{recv}.size();i++){{ if(i>0)r+={sep}; r+={recv}[i]; }} return r; }}()"

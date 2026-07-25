@@ -516,11 +516,20 @@ class SupportChecker:
         # then ``request.security(haTicker, ...)``, or ``reqSym = cond ? other :
         # syminfo.tickerid``. First binding wins (closest to declaration).
         self._scalar_defs: dict[str, ASTNode] = {}
+        # EVERY reassignment value bound to a scalar name (``name := <expr>``
+        # and the compound forms). A declaration alone does not pin the value a
+        # ``request.security`` symbol argument actually carries: the engine is
+        # registered with no symbol at all, so an accepted-but-divergent rebind
+        # silently backtests the CHART feed. Collected in a whole-AST pre-pass
+        # (below) as well as during the visit, so a rebind that lexically
+        # FOLLOWS the request.security call cannot slip past.
+        self._scalar_rebinds: dict[str, list[ASTNode]] = {}
 
     # -- Public API --
 
     def check(self) -> list[Diagnostic]:
         self._collect_user_definitions(self._ast)
+        self._collect_scalar_rebinds(self._ast)
         for stmt in self._ast.body:
             self._visit(stmt)
         return self._diagnostics
@@ -532,6 +541,42 @@ class SupportChecker:
             raise CompileError(diags)
 
     # -- Setup --
+
+    def _record_scalar_rebind(self, node: Assignment) -> None:
+        """Remember ``name := <expr>`` (and the compound forms) by name.
+
+        A compound op (``+=``, ``*=``, …) records its right-hand operand, which
+        is never a current-symbol expression — so a string-built symbol is
+        rejected by the same rule that rejects a plain divergent ``:=``.
+        """
+        target = node.target
+        if not isinstance(target, Identifier) or node.value is None:
+            return
+        recorded = self._scalar_rebinds.setdefault(target.name, [])
+        if not any(value is node.value for value in recorded):
+            recorded.append(node.value)
+
+    def _collect_scalar_rebinds(self, node: ASTNode) -> None:
+        """Pre-pass: collect every scalar rebind anywhere in the AST.
+
+        The visit walks top-level statements in source order, so a rebind that
+        FOLLOWS a ``request.security`` call would otherwise never be seen by
+        that call's symbol check. Collecting up front is strictly fail-closed:
+        it can only add rejections, never remove one.
+        """
+        if isinstance(node, Assignment):
+            self._record_scalar_rebind(node)
+        for value in vars(node).values():
+            if isinstance(value, ASTNode):
+                self._collect_scalar_rebinds(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, ASTNode):
+                        self._collect_scalar_rebinds(item)
+            elif isinstance(value, dict):
+                for item in value.values():
+                    if isinstance(item, ASTNode):
+                        self._collect_scalar_rebinds(item)
 
     def _collect_user_definitions(self, ast: Program) -> None:
         for stmt in ast.body:
@@ -999,6 +1044,14 @@ class SupportChecker:
                     "in hosted TradingView Studio."
                 ),
             )
+        self._visit_children(node)
+
+    def _visit_Assignment(self, node: Assignment) -> None:
+        # ``_scalar_defs`` records only the DECLARATION, so a later ``:=``
+        # rebind used to be invisible to the request.security symbol check.
+        # (``check`` also pre-collects these; recording here keeps the visit
+        # self-consistent for any caller that drives visitors directly.)
+        self._record_scalar_rebind(node)
         self._visit_children(node)
 
     def _visit_TupleAssign(self, node: TupleAssign) -> None:
@@ -1723,10 +1776,21 @@ class SupportChecker:
                     or self._is_current_symbol_expr(node.false_val, _seen))
         # Def-use: resolve a bare identifier through its declaration value so an
         # aliased symbol is accepted (``haTicker = ticker.heikinashi(...)`` then
-        # ``request.security(haTicker, ...)``). Name-cycle-guarded.
-        if isinstance(node, Identifier) and node.name in self._scalar_defs and node.name not in _seen:
-            _seen.add(node.name)
-            return self._is_current_symbol_expr(self._scalar_defs[node.name], _seen)
+        # ``request.security(haTicker, ...)``). Every ``:=`` rebind of the name
+        # must resolve to the chart symbol too: the declaration alone does not
+        # pin the value the call actually receives. Name-cycle-guarded.
+        if isinstance(node, Identifier) and node.name not in _seen:
+            definition = self._scalar_defs.get(node.name)
+            rebinds = self._scalar_rebinds.get(node.name)
+            if definition is not None or rebinds:
+                _seen.add(node.name)
+                if rebinds and not all(
+                    self._is_current_symbol_expr(value, _seen) for value in rebinds
+                ):
+                    return False
+                if definition is None:
+                    return False
+                return self._is_current_symbol_expr(definition, _seen)
         return False
 
     # -- Pine timeframe-literal validation --

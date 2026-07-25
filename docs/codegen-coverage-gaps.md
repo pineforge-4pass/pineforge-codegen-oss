@@ -76,3 +76,55 @@ were added to convert the most fragile defensive paths from
 silent-on-bug to loud-on-bug.
 
 No new follow-up work identified by this audit.
+
+## Residuals left open by the array-bounds guard (2026-07-25)
+
+`array.insert`, the 3-argument `array.fill`, and `array.slice` now reject an
+out-of-range index instead of emitting raw STL iterator arithmetic (undefined
+behaviour). Three questions the bounds work deliberately does NOT settle:
+
+1. **`array.slice` shares storage with its source; codegen deep-copies.**
+   The Pine v6 reference says "Changing the elements in a slice directly
+   changes the elements in the original array, and vice versa", while both
+   lowerings construct a fresh `std::vector` from the iterator range. Any
+   write through a slice (or through the source while a slice is live) is
+   therefore lost. Closing this needs a view/alias type over the receiver's
+   storage, not an index check, so it is a separate and much larger change.
+   The extent of the aliasing is itself unsettled: the reference sentence
+   says "an object from the slice", which is unambiguous for arrays of
+   reference-like elements (UDT instances) but does NOT establish that a
+   primitive `array<float>` slice aliases element-for-element. Pin that
+   against TradingView before designing the view type — the answer decides
+   whether the fix is "arrays of UDTs only" or "all arrays".
+
+2. **Inverted ranges (`index_from > index_to`) are rejected, not clamped.**
+   No evidence pins TradingView's behaviour for `array.fill(id, v, 2, 1)` /
+   `array.slice(id, 2, 1)`. Rejecting is the fail-closed choice and the
+   3-argument `fill` range form has no current corpus exposure, but a
+   TradingView probe could show TV treats it as an empty range instead.
+
+3. **Negative endpoints for `fill`/`slice` are rejected.** The reference
+   lists only `array.get`/`array.set`/`array.insert`/`array.remove` as
+   negative-indexing functions, so `fill`/`slice` follow `array.percentrank`
+   and reject. If TradingView in fact normalises them, this is an
+   over-rejection (a valid script fails to transpile), not a wrong result.
+
+## Residual left open by the request.security rebind guard (2026-07-25)
+
+`_scalar_rebinds` is keyed by BARE NAME with no scope resolution, mirroring
+the existing `_scalar_defs`. A divergent `:=` rebind of a *local* named `sym`
+inside a user function therefore also disqualifies an unrelated *global*
+`sym` used as a `request.security` symbol. That direction is fail-closed
+(over-rejection, never a silent wrong-symbol run), but a scoped symbol table
+would be the exact fix. A 788-source differential shows the over-rejection
+costs nothing on the current corpus.
+
+**Still open — the ternary branch hole (KI-47(a)).** `_is_current_symbol_expr`
+still accepts `cond ? "EXCH:OTHER" : syminfo.tickerid` because EITHER branch
+resolving to the chart symbol is enough. Tightening it to require BOTH
+branches is correct in principle but rejects
+`data/standard/doriannnq-tjr-v4-strategy`, whose alternate branch is
+unreachable at its declared input configuration (`smtSym` defaults to `""`)
+and which grades Excellent at 44/44 / 100% match. Closing this needs the
+checker to see the effective input configuration, which it currently cannot
+(see the analysis in the R6 handoff). Held deliberately, not overlooked.

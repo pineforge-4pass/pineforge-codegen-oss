@@ -60,7 +60,10 @@ def test_checked_get_binds_temporary_receiver_and_index_once():
     assignment = next(
         line for line in cpp.splitlines() if line.startswith("        x =")
     )
-    assert assignment.count("std::vector<int>(values.begin()") == 1
+    # The temporary slice receiver is built exactly once (its own receiver
+    # ``values`` is substituted once), and the index is evaluated once.
+    assert assignment.count("std::vector<int>(__pf_array.begin()") == 1
+    assert assignment.count("values") == 1
     assert assignment.count("idx()") == 1
     assert "pine_runtime_error" in assignment
 
