@@ -108,3 +108,23 @@ behaviour). Three questions the bounds work deliberately does NOT settle:
    negative-indexing functions, so `fill`/`slice` follow `array.percentrank`
    and reject. If TradingView in fact normalises them, this is an
    over-rejection (a valid script fails to transpile), not a wrong result.
+
+## Residual left open by the request.security rebind guard (2026-07-25)
+
+`_scalar_rebinds` is keyed by BARE NAME with no scope resolution, mirroring
+the existing `_scalar_defs`. A divergent `:=` rebind of a *local* named `sym`
+inside a user function therefore also disqualifies an unrelated *global*
+`sym` used as a `request.security` symbol. That direction is fail-closed
+(over-rejection, never a silent wrong-symbol run), but a scoped symbol table
+would be the exact fix. A 788-source differential shows the over-rejection
+costs nothing on the current corpus.
+
+**Still open — the ternary branch hole (KI-47(a)).** `_is_current_symbol_expr`
+still accepts `cond ? "EXCH:OTHER" : syminfo.tickerid` because EITHER branch
+resolving to the chart symbol is enough. Tightening it to require BOTH
+branches is correct in principle but rejects
+`data/standard/doriannnq-tjr-v4-strategy`, whose alternate branch is
+unreachable at its declared input configuration (`smtSym` defaults to `""`)
+and which grades Excellent at 44/44 / 100% match. Closing this needs the
+checker to see the effective input configuration, which it currently cannot
+(see the analysis in the R6 handoff). Held deliberately, not overlooked.

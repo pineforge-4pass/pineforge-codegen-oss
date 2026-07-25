@@ -381,6 +381,77 @@ def test_request_security_syminfo_ticker_passes():
 
 
 # ---------------------------------------------------------------------------
+# request.security symbol holes: register_security_eval carries no symbol, so
+# an accepted non-chart symbol silently backtests the CHART feed. A divergent
+# ``:=`` rebind must be rejected at the exact symbol argument.
+# ---------------------------------------------------------------------------
+
+def _expect_error_at(src: str, needle: str, line: int, col: int) -> None:
+    """Assert a matching error AND pin its precise file:line:col.
+
+    ``file`` comes from the SourceLocation the PARSER stamped on the offending
+    node (``<input>`` for :func:`_check`'s sources), not from the checker's own
+    ``filename`` argument.
+    """
+    _expect_error(src, needle)
+    matching = [
+        d for d in _errors(src)
+        if needle in d.message or (d.hint and needle in d.hint)
+    ]
+    located = [
+        f"{d.location.file}:{d.location.line}:{d.location.col}" for d in matching
+    ]
+    assert f"<input>:{line}:{col}" in located, located
+
+
+def test_request_security_reassigned_symbol_identifier_rejected():
+    """``var sym = syminfo.tickerid`` … ``sym := "EXCH:OTHER"`` must reject.
+
+    ``_scalar_defs`` only ever saw the DECLARATION, so the divergent ``:=``
+    rebind used to transpile clean and run on the chart feed.
+    """
+    src = (
+        PRELUDE
+        + 'var sym = syminfo.tickerid\n'
+        + 'sym := "EXCH:OTHER"\n'
+        + 'a = request.security(sym, "60", close)\n'
+    )
+    _expect_error_at(src, "current chart symbol", line=5, col=22)
+
+
+def test_request_security_reassigned_symbol_after_call_rejected():
+    """A divergent rebind LATER in the source must reject too."""
+    src = (
+        PRELUDE
+        + 'var sym = syminfo.tickerid\n'
+        + 'a = request.security(sym, "60", close)\n'
+        + 'sym := "EXCH:OTHER"\n'
+    )
+    _expect_error(src, "current chart symbol")
+
+
+def test_request_security_symbol_rebound_to_current_symbol_passes():
+    src = (
+        PRELUDE
+        + 'var sym = syminfo.tickerid\n'
+        + 'sym := syminfo.ticker\n'
+        + 'a = request.security(sym, "60", close)\n'
+    )
+    assert _errors(src) == []
+
+
+def test_request_security_symbol_compound_rebind_rejected():
+    """A string-built symbol reaches the same rule through its RHS operand."""
+    src = (
+        PRELUDE
+        + 'var sym = syminfo.tickerid\n'
+        + 'sym += "X"\n'
+        + 'a = request.security(sym, "60", close)\n'
+    )
+    _expect_error(src, "current chart symbol")
+
+
+# ---------------------------------------------------------------------------
 # Unknown built-ins (silent stub avoidance)
 # ---------------------------------------------------------------------------
 
