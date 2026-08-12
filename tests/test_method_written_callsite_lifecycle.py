@@ -258,7 +258,9 @@ first = wrapped(close, true)
 
     assert "double wrapped_cs0(const Series<double>& src, bool active)" in cpp
     assert "return _udt_Holder_sample_cs0(holder, src, active);" in cpp
-    assert "first = wrapped_cs0(_s_close, true);" in cpp
+    assert "Series<double> _udf_series_arg_" in cpp
+    assert "first = wrapped_cs0(([&]() -> const Series<double>&" in cpp
+    assert "auto _pf_series_raw = (current_bar_.close)" in cpp
     assert _compile_and_run(
         cpp + _driver(["first"], split_ohlc=True)
     ) == "105.0\n"
@@ -336,8 +338,9 @@ second = holder.sample(open)
         "double _udt_Holder_sample_cs0(Holder self, "
         "const Series<double>& src)" in cpp
     )
-    assert "return history_cs0(src);" in cpp
-    assert "return history_cs1(src);" in cpp
+    assert "return history_cs0(([&]() -> const Series<double>&" in cpp
+    assert "return history_cs1(([&]() -> const Series<double>&" in cpp
+    assert cpp.count("auto _pf_series_raw = (src[0])") >= 2
     assert _compile_and_run(
         cpp + _driver(["first", "second"], split_ohlc=True)
     ) == "25.0 2.0\n"

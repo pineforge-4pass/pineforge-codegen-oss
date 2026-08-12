@@ -949,6 +949,21 @@ class TopLevelEmitter:
                 f"{info['member_name']}.clear();"
             )
 
+        # A history-reading plain-UDF parameter advances on the chart clock,
+        # even when lazy control flow skips its written call on this bar.  Seed
+        # the new slot with the prior current value (``na`` before first reach);
+        # an executed call later in the bar updates this same slot with its
+        # scalar actual.  Typed-method ``series_arg`` bridges intentionally keep
+        # their existing execution-clock behavior.
+        for info in self._inline_history_members:
+            if info["kind"] != "udf_series_arg":
+                continue
+            member = info["member_name"]
+            lines.append(
+                f"        if (history_advances_new_bar()) "
+                f"{member}.push({member}.current());"
+            )
+
         # a. Push bar field series (with bar magnifier support)
         for field_name in sorted(self.ctx.series_bar_fields):
             push_expr = BAR_SERIES_PUSH.get(field_name, f"current_bar_.{field_name}")

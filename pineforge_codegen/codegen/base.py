@@ -514,6 +514,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # the declaration-derived checkpoint inventory.
         self._inline_history_members: list[dict] = []
         self._inline_history_member_by_key: dict[tuple, str] = {}
+        # request.security/request.security_lower_tf inline their Pine helper
+        # expressions on the requested clock instead of calling the ordinary
+        # emitted UDF methods.  The chart-clocked plain-UDF history factor must
+        # therefore exclude those source nodes and any emitted helper context
+        # reached only through them.
+        self._requested_context_inline_node_ids: set[int] = set()
+        self._requested_context_only_inline_contexts: set[
+            tuple[str, str | None]
+        ] = set()
         # Unique lambda-local names used when an array lowering references its
         # receiver more than once.  The binding keeps temporary-producing or
         # side-effectful receivers single-evaluation (see TypeInferer).
@@ -3173,7 +3182,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """
         self._inline_history_members = []
         self._inline_history_member_by_key = {}
-        counters = {"hist_call": 0, "series_arg": 0}
+        counters = {
+            "hist_call": 0,
+            "series_arg": 0,
+            "udf_series_arg": 0,
+        }
 
         def walk_nodes(value):
             """Yield AST nodes in stable field order, including tuple elements.
@@ -3345,6 +3358,113 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lexical.update(self._func_collection_types.get(owner, {}))
             return lexical
 
+        def plain_udf_info(call: FuncCall):
+            if not isinstance(call.callee, Identifier):
+                return None
+            candidate = self._func_info_map.get(call.callee.name)
+            if (
+                candidate is None
+                or candidate.node is None
+                or getattr(candidate, "is_udt_method", False)
+            ):
+                return None
+            return candidate
+
+        # Requested-context UDF expressions are lowered independently by
+        # security.py.  Classify their otherwise-emitted helper variants so
+        # this chart-clocked factor neither allocates unused buffers for them
+        # nor changes the legacy bodies that remain in generated C++.
+        requested_node_ids: set[int] = set()
+        for security_call in self._security_calls:
+            expression = security_call.get("expr_node")
+            if expression is None:
+                continue
+            requested_node_ids.update(
+                id(child) for child in walk_nodes(expression)
+            )
+        self._requested_context_inline_node_ids = requested_node_ids
+
+        def emitted_context_for_call(
+            fi,
+            call: FuncCall,
+            owner: str | None,
+            owner_context: str | None,
+        ) -> str | None:
+            dispatch = self._instance_dispatch.get(
+                (owner_context, id(call))
+            )
+            if dispatch is not None:
+                return dispatch
+            target_cs = target_cs_for_context(
+                fi, call, owner, owner_context
+            )
+            if target_cs is not None:
+                return f"{self._func_cpp_base_name(fi.name)}_cs{target_cs}"
+            return None
+
+        requested_roots: set[tuple[str, str | None]] = set()
+        chart_roots: set[tuple[str, str | None]] = set()
+        context_edges: dict[
+            tuple[str, str | None], set[tuple[str, str | None]]
+        ] = {}
+        for call in (
+            candidate
+            for candidate in walk_nodes(self.ctx.ast)
+            if isinstance(candidate, FuncCall)
+        ):
+            fi = plain_udf_info(call)
+            if fi is None:
+                continue
+            owner = owner_by_node.get(id(call))
+            if id(call) in requested_node_ids:
+                owner_contexts = (
+                    [None]
+                    if owner is None
+                    else self._inline_history_contexts_for_owner(owner)
+                )
+                for owner_context in owner_contexts:
+                    requested_roots.add((
+                        fi.name,
+                        emitted_context_for_call(
+                            fi, call, owner, owner_context
+                        ),
+                    ))
+                continue
+            if owner is None:
+                target = (
+                    fi.name,
+                    emitted_context_for_call(fi, call, None, None),
+                )
+                chart_roots.add(target)
+                continue
+            for owner_context in self._inline_history_contexts_for_owner(owner):
+                source = (owner, owner_context)
+                target = (
+                    fi.name,
+                    emitted_context_for_call(
+                        fi, call, owner, owner_context
+                    ),
+                )
+                context_edges.setdefault(source, set()).add(target)
+
+        def reachable(
+            roots: set[tuple[str, str | None]],
+        ) -> set[tuple[str, str | None]]:
+            found = set(roots)
+            pending = list(roots)
+            while pending:
+                source = pending.pop()
+                for target in context_edges.get(source, ()):
+                    if target in found:
+                        continue
+                    found.add(target)
+                    pending.append(target)
+            return found
+
+        self._requested_context_only_inline_contexts = (
+            reachable(requested_roots) - reachable(chart_roots)
+        )
+
         for node in walk_nodes(self.ctx.ast):
             owner = owner_by_node.get(id(node))
             if isinstance(node, Subscript) and isinstance(node.object, FuncCall):
@@ -3403,6 +3523,26 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     expected_cpp_type = self._series_param_element_cpp_type(
                         fi, idx, target_cs
                     )
+                    # Pine gives each plain-UDF written call its own
+                    # chart-aligned parameter history.  Even an exact Series
+                    # actual therefore needs a call-site-owned buffer: skipped
+                    # evaluations hold the last value in that bar's slot
+                    # instead of exposing the caller's independently changing
+                    # history.  Typed methods retain their established direct
+                    # binding/bridge behavior below.
+                    chart_execution_context = (
+                        id(node) not in requested_node_ids
+                        and (owner, context)
+                        not in self._requested_context_only_inline_contexts
+                    )
+                    if not method_call and chart_execution_context:
+                        register_one(
+                            "udf_series_arg",
+                            (id(node), idx),
+                            expected_cpp_type,
+                            context,
+                        )
+                        continue
                     needs_bridge = True
                     if isinstance(arg, Identifier):
                         if (

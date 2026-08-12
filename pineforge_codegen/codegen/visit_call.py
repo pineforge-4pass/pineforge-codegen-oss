@@ -2145,25 +2145,25 @@ class CallVisitor:
                     arg_idx,
                     self._callable_target_callsite_idx(fi_lookup, node),
                 )
-                if isinstance(arg_node, Identifier):
+                chart_execution_context = (
+                    id(node) not in self._requested_context_inline_node_ids
+                    and (
+                        getattr(self, "_active_func_name", None),
+                        self._current_instance_name,
+                    ) not in self._requested_context_only_inline_contexts
+                )
+                if not chart_execution_context and isinstance(arg_node, Identifier):
+                    # request.security/request.security_lower_tf own a separate
+                    # evaluator clock and inline their UDF expressions in
+                    # security.py.  Preserve the pre-factor direct-Series
+                    # lowering in the otherwise-emitted helper bodies.
                     aname = arg_node.name
-                    # Bar field: pass _s_close instead of current_bar_.close
                     if (
                         (aname in BAR_FIELDS or aname in BAR_SERIES_PUSH)
                         and expected_cpp_type == "double"
                     ):
                         return f"_s_{aname}"
-                    # Exact Series binding: pass the Series object directly.
-                    # A raw name can also denote a scalar sibling/callable
-                    # shadow, in which case lexical state must override the
-                    # legacy ``ctx.series_vars`` union and fall through to the
-                    # synthetic history bridge below.
                     safe = self._safe_name(aname)
-                    # Function parameters are lexical C++ arguments in every
-                    # emitted variant.  The legacy function-series clone table
-                    # can contain the same raw name, but applying it here makes
-                    # cs1+ ignore the actual parameter and read an unrelated
-                    # class member instead.
                     is_current_series_param = (
                         aname in self._current_func_series_params
                     )
@@ -2188,13 +2188,31 @@ class CallVisitor:
                     expr_cpp, cpp_t
                 )
                 member = self._inline_history_member(
-                    "series_arg", node, arg_idx=arg_idx
+                    (
+                        "udf_series_arg"
+                        if chart_execution_context
+                        else "series_arg"
+                    ),
+                    node,
+                    arg_idx=arg_idx,
                 )
+                if not chart_execution_context:
+                    return (
+                        f"([&]() -> const Series<{cpp_t}>& {{ "
+                        f"{cpp_t} _sv = {bridge_cpp}; "
+                        f"if (history_advances_new_bar()) {member}.push(_sv); "
+                        f"else {member}.update(_sv); "
+                        f"return {member}; }}())"
+                    )
+                # A chart-executed plain UDF's history-reading parameter
+                # belongs to this lexical call site, not to the caller Series
+                # object.  The on_bar preamble has already advanced its
+                # synthetic buffer by one chart slot, so execution replaces
+                # that slot rather than pushing a second one.
                 return (
                     f"([&]() -> const Series<{cpp_t}>& {{ "
                     f"{cpp_t} _sv = {bridge_cpp}; "
-                    f"if (history_advances_new_bar()) {member}.push(_sv); "
-                    f"else {member}.update(_sv); "
+                    f"{member}.update(_sv); "
                     f"return {member}; }}())"
                 )
             # A concrete nullable collection specialization learned through an

@@ -92,12 +92,16 @@ def test_callable_history_parameters_keep_their_pine_scalar_family() -> None:
     assert "bool boolHistory_cs0(const Series<bool>& src)" in cpp
     assert "double floatHistory_cs0(const Series<double>& src)" in cpp
 
-    # bar_index uses Series<int> at chart scope, so the int callable boundary
-    # widens its call-site history. Epoch time already uses Series<int64_t> and
-    # can bind directly; neither path is allowed to detour through double.
+    # bar_index widens to int64_t at the call-site boundary. Epoch time already
+    # has that family, but plain UDF calls still own a distinct chart-aligned
+    # parameter buffer; neither path is allowed to detour through double.
     assert "auto _pf_series_raw = (pine_bar_index())" in cpp
     assert "is_na(_pf_series_raw) ? na<int64_t>()" in cpp
-    assert "udf_time = intHistory_cs4(time);" in cpp
+    assert "Series<int64_t> _udf_series_arg_" in cpp
+    assert (
+        "udf_time = intHistory_cs4(([&]() -> const Series<int64_t>&" in cpp
+    )
+    assert "auto _pf_series_raw = (current_bar_.timestamp)" in cpp
     assert "intHistory_cs0(const Series<double>& src)" not in cpp
     assert "boolHistory_cs0(const Series<double>& src)" not in cpp
 
@@ -306,8 +310,8 @@ int main() {
 }
 '''
     cpp = transpile(source)
-    assert "Series<int64_t> _series_arg_" in cpp
-    assert "Series<double> _series_arg_" in cpp
+    assert "Series<int64_t> _udf_series_arg_" in cpp
+    assert "Series<double> _udf_series_arg_" in cpp
     assert "int64_t outer_cs0(int64_t outerSrc)" in cpp
     assert "double outer_cs1(double outerSrc)" in cpp
     assert _compile_and_run(cpp + driver) == "1 19.75 1\n"

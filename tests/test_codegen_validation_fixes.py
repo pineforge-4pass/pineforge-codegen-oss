@@ -448,9 +448,10 @@ def test_input_source_passed_to_history_udf_is_series_arg():
     assert "src.push(get_input_source" in cpp
     assert "src.update(get_input_source" in cpp
     assert "src = get_input_source" not in cpp
-    assert "lagged_cs0(src, 10)" in cpp or "lagged(src, 10)" in cpp
-    assert "lagged_cs0(src[0], 10)" not in cpp
-    assert "lagged(src[0], 10)" not in cpp
+    assert "Series<double> _udf_series_arg_" in cpp
+    assert "lagged_cs0(([&]() -> const Series<double>&" in cpp
+    assert "auto _pf_series_raw = (src[0])" in cpp
+    assert "_udf_series_arg_1.update(_sv)" in cpp
     compile_cpp(cpp, label="input-source-indirect-history-series")
 
 
@@ -575,11 +576,16 @@ def test_series_parameter_shadowing_global_is_not_remapped_to_clone_member():
     wrap_cs1 = cpp.split(
         "double wrap_cs1(const Series<double>& x)", 1
     )[1].split("\n    }", 1)[0]
-    assert "return lag_cs1(x);" in wrap_cs0
+    assert "return lag_cs1(([&]() -> const Series<double>&" in wrap_cs0
+    assert "auto _pf_series_raw = (x[0])" in wrap_cs0
     # The second written path may own a fresh nested history instance.  Its
     # argument must still be the lexical parameter, never the same-spelled
     # global Series clone.
-    assert re.search(r"return lag__ni\d+\(x\);", wrap_cs1)
+    assert re.search(
+        r"return lag__ni\d+\(\(\[&\]\(\) -> const Series<double>&",
+        wrap_cs1,
+    )
+    assert "auto _pf_series_raw = (x[0])" in wrap_cs1
     assert "x_cs1" not in wrap_cs0
     assert "x_cs1" not in wrap_cs1
     compile_cpp(cpp, label="series-parameter-shadow-global-clone-remap")
