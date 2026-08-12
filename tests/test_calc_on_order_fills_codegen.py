@@ -220,9 +220,11 @@ def test_post_fill_recalc_updates_current_history_slot_but_barstate_stays_new():
         on_bar,
     )
     assert re.search(
-        r"if \(history_advances_new_bar\(\)\) _series_arg_\d+\.push\(_sv\);",
+        r"if \(history_advances_new_bar\(\)\) "
+        r"(_udf_series_arg_\d+)\.push\(\1\.current\(\)\);",
         on_bar,
     )
+    assert re.search(r"_udf_series_arg_\d+\.update\(_sv\);", on_bar)
 
     # Mutation guard: coupling barstate.isnew to history advancement would make
     # it false during historical fill recalcs, contrary to Pine semantics.
@@ -275,7 +277,9 @@ def test_inline_history_buffers_are_owned_independent_and_clear_at_bar_zero():
     cpp = transpile(_INLINE_BUFFER_PROBE)
     fields = _checkpoint_fields(cpp)
     hist_members = re.findall(r"^\s+Series<double> (_hist_call_\d+);$", cpp, re.MULTILINE)
-    arg_members = re.findall(r"^\s+Series<double> (_series_arg_\d+);$", cpp, re.MULTILINE)
+    arg_members = re.findall(
+        r"^\s+Series<double> (_udf_series_arg_\d+);$", cpp, re.MULTILINE
+    )
 
     # Two top-level sites plus one site in each wrapped() call-site clone.
     assert len(hist_members) == 4
@@ -290,21 +294,28 @@ def test_inline_history_buffers_are_owned_independent_and_clear_at_bar_zero():
     for member in hist_members + arg_members:
         index = fields[member]
         assert f"if (history_advances_new_bar() && bar_index_ == 0) {member}.clear();" in on_bar
-        assert f"if (history_advances_new_bar()) {member}.push(" in cpp
-        assert f"else {member}.update(" in cpp
         assert re.search(rf"^\s+{re.escape(member)},$", cpp, re.MULTILINE)
         assert (
             f"this->{member} = _pf_script_state_checkpoint_->_pf_value_{index};"
             in cpp
         )
+    for member in hist_members:
+        assert f"if (history_advances_new_bar()) {member}.push(" in cpp
+        assert f"else {member}.update(" in cpp
+    for member in arg_members:
+        assert (
+            f"if (history_advances_new_bar()) "
+            f"{member}.push({member}.current());" in on_bar
+        )
+        assert f"{member}.update(_sv);" in cpp
 
     wrapped_cs0 = cpp.split("double wrapped_cs0(", 1)[1].split("\n    }", 1)[0]
     wrapped_cs1 = cpp.split("double wrapped_cs1(", 1)[1].split("\n    }", 1)[0]
     assert set(re.findall(r"_hist_call_\d+", wrapped_cs0)).isdisjoint(
         re.findall(r"_hist_call_\d+", wrapped_cs1)
     )
-    assert set(re.findall(r"_series_arg_\d+", wrapped_cs0)).isdisjoint(
-        re.findall(r"_series_arg_\d+", wrapped_cs1)
+    assert set(re.findall(r"_udf_series_arg_\d+", wrapped_cs0)).isdisjoint(
+        re.findall(r"_udf_series_arg_\d+", wrapped_cs1)
     )
 
 
@@ -335,8 +346,8 @@ def test_nested_synthetic_only_helpers_dispatch_to_distinct_leaf_instances():
 
     leaf0 = cpp.split("double leaf_cs0(", 1)[1].split("\n    }", 1)[0]
     leaf1 = cpp.split("double leaf_cs1(", 1)[1].split("\n    }", 1)[0]
-    assert set(re.findall(r"_series_arg_\d+", leaf0)).isdisjoint(
-        re.findall(r"_series_arg_\d+", leaf1)
+    assert set(re.findall(r"_udf_series_arg_\d+", leaf0)).isdisjoint(
+        re.findall(r"_udf_series_arg_\d+", leaf1)
     )
 
 
@@ -395,7 +406,9 @@ def test_udt_method_synthetic_history_isolated_per_source_call_site():
     assert "second = _udt_Box_measure_cs1(" in cpp
 
     hist_members = re.findall(r"^\s+Series<double> (_hist_call_\d+);$", cpp, re.MULTILINE)
-    arg_members = re.findall(r"^\s+Series<double> (_series_arg_\d+);$", cpp, re.MULTILINE)
+    arg_members = re.findall(
+        r"^\s+Series<double> (_udf_series_arg_\d+);$", cpp, re.MULTILINE
+    )
     assert len(hist_members) == 2
     assert len(arg_members) == 2
     fields = _checkpoint_fields(cpp)
@@ -403,8 +416,10 @@ def test_udt_method_synthetic_history_isolated_per_source_call_site():
 
     body0 = cpp.split("double _udt_Box_measure_cs0(", 1)[1].split("\n    }", 1)[0]
     body1 = cpp.split("double _udt_Box_measure_cs1(", 1)[1].split("\n    }", 1)[0]
-    assert set(re.findall(r"_(?:hist_call|series_arg)_\d+", body0)).isdisjoint(
-        re.findall(r"_(?:hist_call|series_arg)_\d+", body1)
+    assert set(
+        re.findall(r"_(?:hist_call|udf_series_arg)_\d+", body0)
+    ).isdisjoint(
+        re.findall(r"_(?:hist_call|udf_series_arg)_\d+", body1)
     )
 
 
