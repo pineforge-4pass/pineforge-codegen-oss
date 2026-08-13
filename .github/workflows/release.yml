@@ -124,7 +124,7 @@ jobs:
       # failure would leave npm shipping a version PyPI never got.
       - name: Publish to PyPI
         if: ${{ !inputs.dry_run }}
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
 
       # Commit + tag + push AFTER PyPI succeeds. The `git push --tags` triggers
       # publish-pyodide.yml for npm (which re-runs the gate — defense in depth),
