@@ -5,6 +5,7 @@ results from AnalyzerContext instead of walking the AST to collect info.
 """
 
 from __future__ import annotations
+import re
 
 from dataclasses import dataclass
 
@@ -934,6 +935,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._register_global_aggregate_member_types()
         self._uses_map = self._detect_map_usage()
         self._uses_matrix = self._detect_matrix_usage()
+        self._uses_pine_time = self._detect_pine_time_usage()
+        self._uses_vwap_anchor = self._detect_vwap_usage()
         # Drawing-objects-as-data: gate all new emission (drawing.hpp include +
         # the per-type arenas) on this flag so non-drawing strategies stay
         # byte-identical. Caps come from the strategy() header max_*_count.
@@ -2107,6 +2110,45 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if isinstance(node, FuncCall):
                 _fn, ns = self._resolve_callee(node.callee)
                 if ns == "matrix":
+                    return True
+        return False
+
+    def _detect_pine_time_usage(self) -> bool:
+        """True if emitted C++ calls the engine's pine_time()/pine_time_close().
+
+        Gates the PF_PINE_TIME_SESSION_DAY_ARGS prelude shim (emit_top.py) so
+        scripts that never call ``time(tf[, session[, tz]])`` /
+        ``time_close(...)`` stay byte-identical. A ``var`` initializer is
+        also text-scanned, mirroring ``_detect_matrix_usage``.
+        """
+        pat = re.compile(r"(?<![\w.])time(?:_close)?\s*\(")
+        for _, _, init_str in self.ctx.var_members:
+            if init_str and pat.search(str(init_str)):
+                return True
+        for node in self._walk_ast(self.ctx.ast):
+            if isinstance(node, FuncCall) and (node.args or node.kwargs):
+                fn, ns = self._resolve_callee(node.callee)
+                if ns is None and fn in ("time", "time_close"):
+                    return True
+        return False
+
+    def _detect_vwap_usage(self) -> bool:
+        """True if emitted C++ calls ta::VWAP / ta::VWAPBands compute().
+
+        Gates the PF_VWAP_SESSION_ANCHOR_ARGS prelude shim (emit_top.py):
+        ``ta.vwap(...)`` calls, the bare ``ta.vwap`` property read, and
+        ``var`` initializers are covered.
+        """
+        for _, _, init_str in self.ctx.var_members:
+            if init_str and "ta.vwap" in str(init_str):
+                return True
+        for node in self._walk_ast(self.ctx.ast):
+            if isinstance(node, FuncCall):
+                fn, ns = self._resolve_callee(node.callee)
+                if ns == "ta" and fn == "vwap":
+                    return True
+            elif isinstance(node, MemberAccess) and node.member == "vwap":
+                if getattr(node.object, "name", None) == "ta":
                     return True
         return False
 

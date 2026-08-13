@@ -679,11 +679,15 @@ class ExprVisitor:
                         ta_short = site.class_name.split("::")[-1].lower()
                         if site.member_name.startswith(f"_ta_{node.member}_"):
                             if node.member == "vwap":
+                                # Same implicit tail as TA_IMPLICIT_APPEND["vwap"]:
+                                # the symbol clock keys the Daily anchor reset.
                                 return (
                                     f"(history_advances_new_bar() ? {site.member_name}.compute("
-                                    "current_bar_.close, current_bar_.volume, current_bar_.timestamp) "
+                                    "current_bar_.close, current_bar_.volume, current_bar_.timestamp"
+                                    " PF_VWAP_SESSION_ANCHOR_ARGS(syminfo_.timezone, syminfo_.session)) "
                                     f": {site.member_name}.recompute(current_bar_.close, "
-                                    "current_bar_.volume, current_bar_.timestamp))"
+                                    "current_bar_.volume, current_bar_.timestamp"
+                                    " PF_VWAP_SESSION_ANCHOR_ARGS(syminfo_.timezone, syminfo_.session)))"
                                 )
                             return (
                                 f"(history_advances_new_bar() ? {site.member_name}.compute("

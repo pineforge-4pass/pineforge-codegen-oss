@@ -221,6 +221,111 @@ def test_time_close_with_session_uses_pine_time_close():
     assert "pine_time_close(" in cpp
 
 
+_SYMINFO_TZ_ARG = r" PF_PINE_TIME_SESSION_DAY_ARGS\(syminfo_\.timezone, syminfo_\.session\)\)"
+
+
+def test_time_tzless_session_defaults_to_syminfo_timezone():
+    # Pine v6: the `timezone` argument of time()/time_close() "is the
+    # timezone of the session argument ... The default is syminfo.timezone".
+    # A 2-arg call must therefore hand the engine syminfo_.timezone as the
+    # session default while leaving the explicit-tz slot empty (the tf
+    # open/close path is not tz-shifted by the default).
+    src = (
+        '//@version=6\nstrategy("T")\n'
+        'x = time(timeframe.period, "0930-1600")\n'
+    )
+    cpp = _generate(src)
+    assert re.search(
+        r'pine_time\(current_bar_\.timestamp, [^;]*?"0930-1600"[^;]*?, '
+        r'std::string\(""\), script_tf_' + _SYMINFO_TZ_ARG,
+        cpp,
+    ), cpp
+
+
+def test_time_close_tzless_session_defaults_to_syminfo_timezone():
+    src = (
+        '//@version=6\nstrategy("T")\n'
+        'x = time_close("60", "0800-1700:23456")\n'
+    )
+    cpp = _generate(src)
+    assert re.search(
+        r'pine_time_close\(current_bar_\.timestamp, [^;]*?"0800-1700:23456"[^;]*?, '
+        r'std::string\(""\), script_tf_' + _SYMINFO_TZ_ARG,
+        cpp,
+    ), cpp
+
+
+def test_time_explicit_tz_still_forwarded_alongside_syminfo_default():
+    # An explicit tz argument must stay in the tz slot (it wins in the
+    # engine); the syminfo default is only a fallback.
+    src = (
+        '//@version=6\nstrategy("T")\n'
+        'x = time("60", "0800-1600", "Asia/Tokyo")\n'
+    )
+    cpp = _generate(src)
+    assert re.search(
+        r'pine_time\([^;]*?"Asia/Tokyo"[^;]*?, script_tf_' + _SYMINFO_TZ_ARG,
+        cpp,
+    ), cpp
+    assert 'std::string(""), script_tf_ PF_PINE_TIME_SESSION_DAY_ARGS' not in cpp
+
+
+def test_time_single_arg_forwards_syminfo_default_with_empty_session():
+    # time("D") has no session, so the syminfo default is inert for the
+    # filter; it is still forwarded so the engine signature is uniform.
+    src = '//@version=6\nstrategy("T")\nx = time("D")\n'
+    cpp = _generate(src)
+    assert re.search(
+        r'pine_time\(current_bar_\.timestamp, [^;]*?"D"[^;]*?, std::string\(""\), '
+        r'std::string\(""\), script_tf_' + _SYMINFO_TZ_ARG,
+        cpp,
+    ), cpp
+
+
+def test_time_session_day_args_shim_emitted_after_session_time_include():
+    # The trailing (syminfo tz, session) pair is compiled out on engines whose
+    # session_time.hpp lacks PF_PINE_TIME_HAS_SESSION_DAY, so the same TU
+    # builds against the base and the candidate headers (lab experiment
+    # cells). The shim must follow the include (the macro it tests is
+    # defined there) and must not add parentheses (preprocessed call is
+    # byte-identical to the plain 7-arg form).
+    cpp = _generate('//@version=6\nstrategy("T")\nx = time("60", "0800-1600")\n')
+    inc = cpp.index("#include <pineforge/session_time.hpp>")
+    shim = (
+        "#ifdef PF_PINE_TIME_HAS_SESSION_DAY\n"
+        "#define PF_PINE_TIME_SESSION_DAY_ARGS(tz, sess) , tz, sess\n"
+        "#else\n"
+        "#define PF_PINE_TIME_SESSION_DAY_ARGS(tz, sess)\n"
+        "#endif"
+    )
+    assert shim in cpp, cpp[:2000]
+    assert cpp.index(shim) > inc
+
+
+def test_time_session_day_args_shim_absent_without_time_calls():
+    # Byte-identity guard: a script that never calls time(tf, ...) /
+    # time_close(...) must not grow the shim (the bare `time` variable and
+    # hour()/minute() do not count).
+    cpp = _generate(
+        '//@version=6\nstrategy("T")\n'
+        'x = time\ny = hour(time)\nz = time_close\n'
+        'w = strategy.closedtrades.entry_time(0)\n'
+    )
+    assert "PF_PINE_TIME" not in cpp
+
+
+def test_time_session_day_args_shim_emitted_for_var_init_and_security_contexts():
+    for body in (
+        'var t0 = time("60", "0800-1600")\n',
+        'x = request.security(syminfo.tickerid, "60", time("60", "0930-1600"), '
+        'lookahead=barmerge.lookahead_off)\n',
+        'f() =>\n    time_close(timeframe.period, "0900-1700")\ny = f()\n',
+    ):
+        cpp = _generate('//@version=6\nstrategy("T")\n' + body)
+        assert "#ifdef PF_PINE_TIME_HAS_SESSION_DAY" in cpp, body
+        assert "PF_PINE_TIME_SESSION_DAY_ARGS(syminfo_.timezone, syminfo_.session)" in cpp, body
+
+
 def test_timeframe_isdwm_uses_runtime_timeframe_helpers():
     src = '//@version=6\nstrategy("T")\nx = timeframe.isdwm\n'
     cpp = _generate(src)
