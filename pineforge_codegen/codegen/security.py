@@ -2844,6 +2844,156 @@ class SecurityEmitter:
         )
         return out
 
+    def _security_lazy_ta_keys(
+        self,
+        sec_id: int,
+        expr_node,
+        info: dict,
+    ) -> set[tuple[int, tuple]]:
+        """``(ta_index, binding_signature)`` pairs Pine reaches only lazily.
+
+        Pine evaluates ``and``/``or`` with left-to-right short-circuit and a
+        ternary evaluates its condition plus exactly one branch. A ``ta.*``
+        call sitting in a skipped operand is **not evaluated on that bar**, so
+        its series state does not advance. The evaluator used to hoist every
+        collected site into an unconditional ``auto _secval_N = ...compute(...)``
+        prologue, which advanced every site on every HTF bar and desynchronised
+        the series against TradingView.
+
+        A site returned here is dropped from that prologue. ``_build_security_expr``
+        then falls through to its inline
+        ``(security_series_slot_is_new(N) ? m.compute(a) : m.recompute(a))``
+        form, emitted in expression position — C++'s own ``&&`` / ``||`` /
+        ``?:`` short-circuit then advances the state exactly when Pine would,
+        and the relational lowering's ``_pna_l`` / ``_pna_r`` temporaries keep
+        the evaluation order left-to-right.
+
+        Deliberately conservative — anything not provably single-reach and
+        conditional keeps the existing eager hoist, so scripts without
+        conditional security TA regenerate byte-identically:
+
+        - A site reached more than once must stay hoisted: sharing one
+          ``_secval_*`` is what keeps it to a single advance per bar, whereas
+          two inline copies would advance it twice (or zero times).
+        - Laziness does **not** propagate through a global binding. In the
+          requested context that global is its own unconditional top-level
+          statement, so it evaluates on every HTF bar wherever it is read
+          (this is what keeps chart-side ``t0``-shaped code exact).
+        - Sites with a history offset (``ta.ema(close, 55)[1]``) keep the
+          committed ``_secval_*`` their per-bar Series push reads.
+        - Securities that rebind mutable globals, and multi-statement helper
+          calls, bail entirely: both lower through statement emitters that
+          consume ``ta_results`` outside this expression.
+        """
+        if info.get("mutable_globals"):
+            return set()
+
+        occurrences: dict[tuple[int, tuple], list[bool]] = {}
+        unsafe = False
+
+        def walk(node, lazy: bool, binding_stack, resolving: set[str]) -> None:
+            nonlocal unsafe
+            if node is None or unsafe:
+                return
+
+            if isinstance(node, Identifier):
+                binding = None
+                if not self._security_identifier_is_global_binding(node):
+                    binding = self._security_lookup_helper_binding_context(
+                        node.name, binding_stack
+                    )
+                if binding is not None:
+                    bound, bound_stack = binding
+                    if isinstance(bound, str):
+                        return
+                    bind_key = f"bind:{id(bound)}"
+                    if bind_key in resolving:
+                        return
+                    resolving.add(bind_key)
+                    walk(bound, lazy, bound_stack, resolving)
+                    resolving.discard(bind_key)
+                    return
+
+                if self._global_mutable_infos.get(node.name) is not None:
+                    unsafe = True
+                    return
+
+                global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+                if (
+                    self._security_identifier_is_global_binding(node)
+                    and node.name in global_expr_map
+                    and node.name not in resolving
+                ):
+                    resolving.add(node.name)
+                    walk(global_expr_map[node.name], False, (), resolving)
+                    resolving.remove(node.name)
+                    return
+
+            if isinstance(node, FuncCall) and isinstance(node.callee, Identifier):
+                func_name = node.callee.name
+                if func_name in self._func_names:
+                    call_key = f"func:{func_name}"
+                    if call_key in resolving:
+                        return
+                    resolving.add(call_key)
+                    plan = self._security_helper_call_plan(node, binding_stack)
+                    if plan["mode"] == "expr":
+                        walk(plan["expr"], lazy, plan["binding_stack"], resolving)
+                    else:
+                        unsafe = True
+                    resolving.discard(call_key)
+                    return
+
+            if isinstance(node, BinOp) and node.op in ("and", "or"):
+                walk(node.left, lazy, binding_stack, resolving)
+                walk(node.right, True, binding_stack, resolving)
+                return
+
+            if isinstance(node, Ternary):
+                walk(node.condition, lazy, binding_stack, resolving)
+                walk(node.true_val, True, binding_stack, resolving)
+                walk(node.false_val, True, binding_stack, resolving)
+                return
+
+            site = self._get_ta_site(node)
+            if site is not None:
+                idx = self._ta_index_by_site_id.get(id(site))
+                if idx is not None:
+                    key = (idx, self._security_binding_stack_signature(binding_stack))
+                    occurrences.setdefault(key, []).append(lazy)
+
+            for child in vars(node).values():
+                walk_value(child, lazy, binding_stack, resolving)
+
+        def walk_value(value, lazy: bool, binding_stack, resolving: set[str]) -> None:
+            if value is None or unsafe:
+                return
+            if hasattr(value, "__dict__"):
+                walk(value, lazy, binding_stack, resolving)
+                return
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    walk_value(item, lazy, binding_stack, resolving)
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    walk_value(item, lazy, binding_stack, resolving)
+
+        walk(expr_node, False, (), set())
+        if unsafe:
+            return set()
+
+        hist_indices = set(self._security_ta_hist_idx_by_sec.get(sec_id, ()))
+        inline_helper_ta_indices = set(info.get("inline_helper_ta_indices", []))
+        return {
+            key
+            for key, reaches in occurrences.items()
+            if key[0] not in hist_indices
+            and key[0] not in inline_helper_ta_indices
+            and len(reaches) == 1
+            and reaches[0]
+        }
+
     def _emit_security_ohlc_hist_pushes(self, sec_id: int, lines: list[str]) -> None:
         """Emit the OHLC history-offset Series pushes for ``sec_id``, gated on
         ``is_complete``.
@@ -2909,6 +3059,7 @@ class SecurityEmitter:
             ta_indices = info.get("ta_indices") or []
             security_mutable_names = set(info.get("mutable_globals", []))
             inline_helper_ta_indices = set(info.get("inline_helper_ta_indices", []))
+            lazy_ta_keys = self._security_lazy_ta_keys(sec_id, expr_node, info)
 
             lines.append(f"    void _eval_security_{sec_id}(const Bar& bar, bool is_complete) {{")
 
@@ -2949,6 +3100,15 @@ class SecurityEmitter:
                     site = self.ctx.ta_call_sites[idx]
                     variants = (info.get("ta_variants") or {}).get(idx, [])
                     for variant in variants:
+                        if (idx, variant["signature"]) in lazy_ta_keys:
+                            # Pine only reaches this site through a
+                            # short-circuited operand or an untaken ternary
+                            # branch. Leave it out of the eager prologue:
+                            # _build_security_expr emits its
+                            # compute()/recompute() inline in expression
+                            # position, where C++'s &&/||/?: short-circuit
+                            # advances the series exactly on the bars Pine does.
+                            continue
                         helper_binding_stack = variant.get("binding_stack", ())
                         compute_args = self._security_ta_compute_args_for_site(
                             sec_id,
