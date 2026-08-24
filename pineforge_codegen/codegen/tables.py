@@ -248,12 +248,17 @@ TA_IMPLICIT_APPEND = {
     "kc": "current_bar_.high, current_bar_.low, current_bar_.close",
     "mfi": "current_bar_.volume",
     "kcw": "current_bar_.high, current_bar_.low, current_bar_.close",
-    # ta.vwap needs the bar timestamp so the runtime can detect Daily
-    # anchor boundaries (Pine v6 default for `ta.vwap(source)` resets
-    # the cumulator at every UTC-day change).
-    "vwap": "current_bar_.volume, current_bar_.timestamp",
+    # ta.vwap needs the bar timestamp plus the symbol clock (syminfo.timezone
+    # + syminfo.session) so the runtime can detect Daily anchor boundaries:
+    # Pine v6's default `anchor = timeframe.change("1D")` is the SYMBOL's
+    # daily bar (17:00 ET on OANDA forex, 09:30 ET RTH on NASDAQ equities,
+    # 00:00 UTC on a 24x7 UTC symbol). The engine's tz/session overload
+    # reduces to the UTC-day integer math for the default UTC/24x7 syminfo.
+    # The tail is wrapped in PF_VWAP_SESSION_ANCHOR_ARGS (prelude, emit_top.py)
+    # so it compiles out against engines without the overload.
+    "vwap": "current_bar_.volume, current_bar_.timestamp PF_VWAP_SESSION_ANCHOR_ARGS(syminfo_.timezone, syminfo_.session)",
     # 3-arg bands form uses the same implicit append as the scalar form.
-    "vwap_bands": "current_bar_.volume, current_bar_.timestamp",
+    "vwap_bands": "current_bar_.volume, current_bar_.timestamp PF_VWAP_SESSION_ANCHOR_ARGS(syminfo_.timezone, syminfo_.session)",
 }
 
 # Tuple field names for TA functions returning tuples.

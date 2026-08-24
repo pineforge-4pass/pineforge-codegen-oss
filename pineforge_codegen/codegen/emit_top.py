@@ -136,6 +136,28 @@ class TopLevelEmitter:
         lines.append('#include <pineforge/log.hpp>')
         lines.append('#include <pineforge/str_utils.hpp>')
         lines.append('#include <pineforge/session_time.hpp>')
+        # Feature-guarded argument tails (lab experiment cells build the
+        # candidate codegen against the BASE engine too): the symbol clock
+        # (syminfo tz + session) reaches time()/time_close() and ta.vwap only
+        # when the engine header advertises the overloads; otherwise the
+        # macros expand to nothing and the calls collapse to the legacy
+        # 5-arg pine_time / 3-arg VWAP::compute shapes (session filter in
+        # UTC, UTC-day VWAP anchor — the honest "factor absent" behaviour).
+        # Gated on the pre-scans so scripts without such calls stay
+        # byte-identical. The expansion carries no extra parentheses so the
+        # preprocessed call is byte-identical to the plain 7-arg form.
+        if getattr(self, "_uses_pine_time", False):
+            lines.append("#ifdef PF_PINE_TIME_HAS_SESSION_DAY")
+            lines.append("#define PF_PINE_TIME_SESSION_DAY_ARGS(tz, sess) , tz, sess")
+            lines.append("#else")
+            lines.append("#define PF_PINE_TIME_SESSION_DAY_ARGS(tz, sess)")
+            lines.append("#endif")
+        if getattr(self, "_uses_vwap_anchor", False):
+            lines.append("#ifdef PF_VWAP_HAS_SESSION_ANCHOR")
+            lines.append("#define PF_VWAP_SESSION_ANCHOR_ARGS(tz, sess) , tz, sess")
+            lines.append("#else")
+            lines.append("#define PF_VWAP_SESSION_ANCHOR_ARGS(tz, sess)")
+            lines.append("#endif")
         if self._uses_matrix:
             # Unconditional include when matrix API is used — do not gate on
             # __has_include(<Eigen/Dense>) (can differ between runtime build and this TU).

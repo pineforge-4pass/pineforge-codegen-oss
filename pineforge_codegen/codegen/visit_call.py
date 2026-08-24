@@ -222,6 +222,55 @@ def _parse_pine_datestring_ms(text: str) -> int | None:
     return int(dt.timestamp() * 1000)
 
 
+def _timestamp_calendar_lambda(tz: str, yr: str, mo: str, dy: str,
+                               hr: str, mn: str, sc: str) -> str:
+    """Inline C++ lambda turning calendar fields in timezone ``tz`` into Unix ms.
+
+    Shared by both ``timestamp(...)`` overloads: the tz-first form passes the
+    explicit tz expression, the numeric form passes ``syminfo_.timezone``
+    (Pine v6: "If the timezone argument is not specified, the function uses
+    the exchange time zone (syminfo.timezone)"). UTC / "" / "Etc/UTC" stays on
+    the ``timegm`` fast path — byte-identical to the historical numeric
+    emission for UTC symbols; anything else takes the mutex-guarded
+    setenv+``mktime`` block with ``tm_isdst = -1`` so DST is resolved by the
+    tz database. A per-call-site thread_local memo keeps the setenv churn to
+    one flip per distinct (tz, fields) tuple.
+    """
+    return (
+        f"[&]() -> int64_t {{ "
+        f"std::string _tz = pineforge::normalize_timezone_for_posix(({tz})); "
+        f"int _yr = ({yr}); int _mo = ({mo}); int _dy = ({dy}); "
+        f"int _hr = ({hr}); int _min = ({mn}); int _sc = ({sc}); "
+        f"static thread_local std::string _last_tz; "
+        f"static thread_local int _last_yr = -1, _last_mo = -1, _last_dy = -1, _last_hr = -1, _last_min = -1, _last_sc = -1; "
+        f"static thread_local int64_t _last_res = -1; "
+        f"if (_last_res != -1 && _last_tz == _tz && _last_yr == _yr && _last_mo == _mo && _last_dy == _dy && _last_hr == _hr && _last_min == _min && _last_sc == _sc) {{ "
+        f"return _last_res; "
+        f"}} "
+        f"struct tm t = {{}}; "
+        f"t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
+        f"t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
+        f"t.tm_isdst = -1; "
+        f"int64_t _res; "
+        f"if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") {{ "
+        f"_res = (int64_t)timegm(&t) * 1000; "
+        f"}} else {{ "
+        f"static std::mutex _pf_ts_mu; "
+        f"std::lock_guard<std::mutex> _pf_ts_mu_lock(_pf_ts_mu); "
+        f"const char* _old = std::getenv(\"TZ\"); "
+        f"std::string _old_tz = _old ? _old : \"\"; bool _had_old = (_old != nullptr); "
+        f"::setenv(\"TZ\", _tz.c_str(), 1); ::tzset(); "
+        f"_res = (int64_t)mktime(&t) * 1000; "
+        f"if (_had_old) {{ ::setenv(\"TZ\", _old_tz.c_str(), 1); }} "
+        f"else {{ ::unsetenv(\"TZ\"); }} ::tzset(); "
+        f"}} "
+        f"_last_tz = _tz; _last_yr = _yr; _last_mo = _mo; _last_dy = _dy; _last_hr = _hr; _last_min = _min; _last_sc = _sc; "
+        f"_last_res = _res; "
+        f"return _res; "
+        f"}}()"
+    )
+
+
 class CallVisitor:
     """Function-call dispatch visitor methods shared across the codegen.
 
@@ -1722,22 +1771,51 @@ class CallVisitor:
             return f"pine_{func_name}((int64_t)({ts_arg}), {tz_arg})"
 
         # time(timeframe) or time(timeframe, session[, tz])
+        #
+        # Timezone of the SESSION argument (Pine v6 reference): "Timezone of
+        # the session argument. Can only be used when a session is
+        # specified. Optional. The default is syminfo.timezone." So a tz-less
+        # ``time(tf, "0930-1600")`` reads the window in the EXCHANGE timezone
+        # (America/New_York for NASDAQ/OANDA symbols), not UTC. We keep the
+        # tz slot empty (the engine's tf-open/close path is unchanged and an
+        # explicit tz still wins) and hand the engine ``syminfo_.timezone`` as
+        # the trailing session-default — the same field the tz-less
+        # hour()/minute()/dayofweek() forms above resolve against, which the
+        # harness populates from runtime_overrides.timezone. For the corpus'
+        # crypto data it is "UTC", which keeps that lane byte-identical.
+        #
+        # Composition (cand/symbol-r5): the engine's 7-arg pine_time /
+        # pine_time_close take (..., script_tf_, syminfo_.timezone,
+        # syminfo_.session). syminfo_.timezone is the tz-less session default
+        # above; the pair also lets a D/W/M `tf` WITHOUT a valid session
+        # resolve to the SYMBOL's session-day bar open (17:00 ET on OANDA
+        # forex, 09:30 ET RTH on equities, 00:00 UTC on 24x7) instead of a
+        # UTC calendar floor. A valid session keeps the explicit-tz-else-UTC
+        # floor. The pair is wrapped in PF_PINE_TIME_SESSION_DAY_ARGS (prelude,
+        # emit_top.py): it expands to ``, syminfo_.timezone, syminfo_.session``
+        # only when the engine header defines PF_PINE_TIME_HAS_SESSION_DAY and
+        # to nothing against the base engine (legacy 5-arg call), so the same
+        # generated.cpp builds in every lab-experiment cell.
+        #
         if func_name == "time" and namespace is None and (node.args or node.kwargs):
             args = _merge_kwargs(node.args, node.kwargs, sigs.get_param_names(None, "time"), self._visit_expr)
             tf_e = args[0] if len(args) > 0 else 'script_tf_'
             sess = args[1] if len(args) > 1 else 'std::string("")'
             tz_e = args[2] if len(args) > 2 else 'std::string("")'
             return (
-                f"pine_time(current_bar_.timestamp, {tf_e}, {sess}, {tz_e}, script_tf_)"
+                f"pine_time(current_bar_.timestamp, {tf_e}, {sess}, {tz_e}, script_tf_"
+                " PF_PINE_TIME_SESSION_DAY_ARGS(syminfo_.timezone, syminfo_.session))"
             )
-        # time_close(timeframe) or time_close(tf, session, tz)
+        # time_close(timeframe) or time_close(tf, session, tz) — same
+        # session-tz default as time() above.
         if func_name == "time_close" and namespace is None and (node.args or node.kwargs):
             args = _merge_kwargs(node.args, node.kwargs, sigs.get_param_names(None, "time_close"), self._visit_expr)
             tf_e = args[0] if len(args) > 0 else 'script_tf_'
             sess = args[1] if len(args) > 1 else 'std::string("")'
             tz_e = args[2] if len(args) > 2 else 'std::string("")'
             return (
-                f"pine_time_close(current_bar_.timestamp, {tf_e}, {sess}, {tz_e}, script_tf_)"
+                f"pine_time_close(current_bar_.timestamp, {tf_e}, {sess}, {tz_e}, script_tf_"
+                " PF_PINE_TIME_SESSION_DAY_ARGS(syminfo_.timezone, syminfo_.session))"
             )
 
         # timestamp(year, month, day, hour, minute) → Unix ms
@@ -1798,39 +1876,7 @@ class CallVisitor:
                 hr = args[4] if len(args) > 4 else "0"
                 mn = args[5] if len(args) > 5 else "0"
                 sc = args[6] if len(args) > 6 else "0"
-                return (
-                    f"[&]() -> int64_t {{ "
-                    f"std::string _tz = pineforge::normalize_timezone_for_posix(({tz})); "
-                    f"int _yr = ({yr}); int _mo = ({mo}); int _dy = ({dy}); "
-                    f"int _hr = ({hr}); int _min = ({mn}); int _sc = ({sc}); "
-                    f"static thread_local std::string _last_tz; "
-                    f"static thread_local int _last_yr = -1, _last_mo = -1, _last_dy = -1, _last_hr = -1, _last_min = -1, _last_sc = -1; "
-                    f"static thread_local int64_t _last_res = -1; "
-                    f"if (_last_res != -1 && _last_tz == _tz && _last_yr == _yr && _last_mo == _mo && _last_dy == _dy && _last_hr == _hr && _last_min == _min && _last_sc == _sc) {{ "
-                    f"return _last_res; "
-                    f"}} "
-                    f"struct tm t = {{}}; "
-                    f"t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
-                    f"t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
-                    f"t.tm_isdst = -1; "
-                    f"int64_t _res; "
-                    f"if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") {{ "
-                    f"_res = (int64_t)timegm(&t) * 1000; "
-                    f"}} else {{ "
-                    f"static std::mutex _pf_ts_mu; "
-                    f"std::lock_guard<std::mutex> _pf_ts_mu_lock(_pf_ts_mu); "
-                    f"const char* _old = std::getenv(\"TZ\"); "
-                    f"std::string _old_tz = _old ? _old : \"\"; bool _had_old = (_old != nullptr); "
-                    f"::setenv(\"TZ\", _tz.c_str(), 1); ::tzset(); "
-                    f"_res = (int64_t)mktime(&t) * 1000; "
-                    f"if (_had_old) {{ ::setenv(\"TZ\", _old_tz.c_str(), 1); }} "
-                    f"else {{ ::unsetenv(\"TZ\"); }} ::tzset(); "
-                    f"}} "
-                    f"_last_tz = _tz; _last_yr = _yr; _last_mo = _mo; _last_dy = _dy; _last_hr = _hr; _last_min = _min; _last_sc = _sc; "
-                    f"_last_res = _res; "
-                    f"return _res; "
-                    f"}}()"
-                )
+                return _timestamp_calendar_lambda(tz, yr, mo, dy, hr, mn, sc)
             else:
                 # Numeric form requires year, month, and day (hour/minute/
                 # second default to 0). Anything shorter used to emit "0".
@@ -1855,24 +1901,16 @@ class CallVisitor:
                 hr = args[3] if len(args) > 3 else "0"
                 mn = args[4] if len(args) > 4 else "0"
                 sc = args[5] if len(args) > 5 else "0"
-                return (
-                    f"[&]() -> int64_t {{ "
-                    f"int _yr = ({yr}); int _mo = ({mo}); int _dy = ({dy}); "
-                    f"int _hr = ({hr}); int _min = ({mn}); int _sc = ({sc}); "
-                    f"static thread_local int _last_yr = -1, _last_mo = -1, _last_dy = -1, _last_hr = -1, _last_min = -1, _last_sc = -1; "
-                    f"static thread_local int64_t _last_res = -1; "
-                    f"if (_last_res != -1 && _last_yr == _yr && _last_mo == _mo && _last_dy == _dy && _last_hr == _hr && _last_min == _min && _last_sc == _sc) {{ "
-                    f"return _last_res; "
-                    f"}} "
-                    f"struct tm t = {{}}; "
-                    f"t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
-                    f"t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
-                    f"int64_t _res = (int64_t)timegm(&t) * 1000; "
-                    f"_last_yr = _yr; _last_mo = _mo; _last_dy = _dy; _last_hr = _hr; _last_min = _min; _last_sc = _sc; "
-                    f"_last_res = _res; "
-                    f"return _res; "
-                    f"}}()"
-                )
+                # No timezone argument: Pine resolves the calendar fields in
+                # syminfo.timezone (the EXCHANGE tz), not UTC. This used to be
+                # a bare timegm(), which put e.g. timestamp(y, m, d, 8, 0, 0)
+                # on a NASDAQ/OANDA symbol 4-5 h early. Same field the tz-less
+                # hour()/minute() forms and the tz-first overload above use;
+                # "UTC" keeps the timegm fast path so crypto stays identical.
+                # (timestamp(dateString) is different: Pine reads a tz-less
+                # dateString as GMT+0, which _parse_pine_datestring_ms does.)
+                return _timestamp_calendar_lambda(
+                    "syminfo_.timezone", yr, mo, dy, hr, mn, sc)
 
         # barssince() — unsupported. Defensive: support_checker rejects bare
         # barssince(...) with a hint to use ta.barssince(...). Reaching here
@@ -2017,7 +2055,15 @@ class CallVisitor:
         if namespace == "timeframe":
             if func_name == "change":
                 tf_arg = self._visit_expr(node.args[0]) if node.args else 'script_tf_'
-                return f'tf_change(prev_bar_timestamp_, current_bar_.timestamp, {tf_arg})'
+                # Symbol-clock overload: D/W/M boundaries fall on the SYMBOL's
+                # session day (17:00 ET on OANDA forex, 09:30 ET RTH on
+                # equities), intraday buckets on the session-open grid — the
+                # same clock request.security aggregation uses. UTC/24x7
+                # syminfo reduces to the tz-less epoch math bit-for-bit.
+                return (
+                    f'tf_change(prev_bar_timestamp_, current_bar_.timestamp, {tf_arg}, '
+                    'syminfo_.timezone, syminfo_.session)'
+                )
             if func_name == "in_seconds":
                 tf_arg = self._visit_expr(node.args[0]) if node.args else 'script_tf_'
                 return f'tf_to_seconds({tf_arg})'

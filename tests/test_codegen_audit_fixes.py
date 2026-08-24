@@ -80,10 +80,58 @@ def test_timestamp_numeric_form_works():
     assert "timegm" in cpp
 
 
+def test_timestamp_numeric_form_defaults_to_syminfo_timezone():
+    # Pine v6: "If the timezone argument is not specified, the function uses
+    # the exchange time zone (syminfo.timezone)". The numeric overload must
+    # resolve its calendar fields through syminfo_.timezone (UTC fast path
+    # kept via timegm, DST-aware mktime otherwise) — not a bare timegm().
+    cpp = _gen("t = timestamp(2020, 1, 2, 8, 30, 0)\nplot(close)\n")
+    lam = cpp[cpp.index("normalize_timezone_for_posix((syminfo_.timezone))"):]
+    lam = lam[: lam.index("}()")]
+    assert "_hr = (8)" in lam and "_min = (30)" in lam
+    assert "timegm" in lam and "mktime" in lam
+    assert "t.tm_isdst = -1" in lam
+    assert 'if (_tz.empty() || _tz == "UTC" || _tz == "Etc/UTC")' in lam
+
+
+def test_timestamp_numeric_kwargs_default_to_syminfo_timezone():
+    cpp = _gen(
+        "t = timestamp(year=2021, month=3, day=14, hour=9, minute=30)\n"
+        "plot(close)\n"
+    )
+    assert "normalize_timezone_for_posix((syminfo_.timezone))" in cpp
+    assert "_hr = (9)" in cpp and "_min = (30)" in cpp and "_sc = (0)" in cpp
+
+
+def test_timestamp_numeric_series_args_default_to_syminfo_timezone():
+    # The opening-range idiom: fields taken from the current bar.
+    cpp = _gen(
+        "t = timestamp(year, month, dayofmonth, 8, 0, 0)\nplot(close)\n"
+    )
+    assert "normalize_timezone_for_posix((syminfo_.timezone))" in cpp
+
+
 def test_timestamp_tz_form_works():
     cpp = _gen('t = timestamp("GMT+2", 2020, 1, 2)\nplot(close)\n')
     assert "normalize_timezone_for_posix" in cpp
     assert "mktime" in cpp
+
+
+def test_timestamp_tz_form_does_not_fall_back_to_syminfo():
+    # An explicit timezone argument wins; syminfo must not appear in the
+    # tz-first overload's lambda.
+    cpp = _gen('t = timestamp("Asia/Tokyo", 2020, 1, 2, 9, 0)\nplot(close)\n')
+    assert 'normalize_timezone_for_posix(("Asia/Tokyo"))' in cpp or \
+        'normalize_timezone_for_posix((std::string("Asia/Tokyo")))' in cpp
+    assert "syminfo_.timezone" not in cpp[cpp.index("normalize_timezone_for_posix"):cpp.index("}()", cpp.index("normalize_timezone_for_posix"))]
+
+
+def test_timestamp_datestring_without_tz_stays_gmt0():
+    # Pine: a dateString with no time zone is GMT+0 (NOT syminfo.timezone);
+    # it is folded at transpile time and must not pick up the syminfo default.
+    cpp = _gen('t = timestamp("2020-01-02 08:30")\nplot(close)\n')
+    assert "1577953800000LL" in cpp
+    assert "syminfo_.timezone" not in cpp
 
 
 @pytest.mark.parametrize("call", [

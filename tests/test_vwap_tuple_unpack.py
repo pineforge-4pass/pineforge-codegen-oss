@@ -143,4 +143,4 @@ if close > v
     assert _has_no_errors(src)
     cpp = _transpile(src)
     assert "ta::VWAP" in cpp
-    assert "compute(current_bar_.close, current_bar_.volume, current_bar_.timestamp)" in cpp
+    assert "compute(current_bar_.close, current_bar_.volume, current_bar_.timestamp PF_VWAP_SESSION_ANCHOR_ARGS(syminfo_.timezone, syminfo_.session))" in cpp
