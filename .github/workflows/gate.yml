@@ -4,6 +4,11 @@ name: Pyodide Gate
 # native CPython on every corpus input (success + failure). Heavier than the
 # unit matrix (loads Pyodide), so: on demand, nightly, and on PRs that touch the
 # gate itself. It does NOT block releases yet — that wiring is Phase 3.
+# NOTE: `gate` is a required status check on main, but the pull_request
+# trigger below is path-filtered -- a PR touching none of these paths (for
+# example a workflow-only change) never runs it and sits BLOCKED. For such a
+# PR, include this file in the change (as that PR did) or dispatch this
+# workflow on the branch.
 on:
   workflow_dispatch:
   schedule:
