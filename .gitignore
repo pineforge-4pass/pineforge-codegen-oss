@@ -110,7 +110,8 @@ temp/
 .scratch/
 
 # ─── Tooling caches (Claude Code, AI agents) ───────────────────────────────
-.claude/
+.claude/*
+!.claude/settings.json
 .cursor/
 .aider*
 
