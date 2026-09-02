@@ -174,7 +174,7 @@ jobs:
 
       - name: Set up gcloud
         if: steps.ci.outputs.green == 'true'
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@v3
 
       # The plane is Postgres on Cloud SQL; the promotion reads the active
       # baseline and the gate ledger there, so this runner needs the same
