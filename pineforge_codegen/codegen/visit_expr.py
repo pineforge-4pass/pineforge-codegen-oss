@@ -1118,6 +1118,12 @@ class ExprVisitor:
         # sites never share history, and on_bar clears every synthetic member at
         # run-start even when this particular expression is conditional.
         if isinstance(node.object, FuncCall):
+            # ``[k]`` on a hoisted top-level lazy-edge TA call: its Series was
+            # pushed unconditionally before the statement, so ``[1]`` is the
+            # previous chart bar in every run mode (``_lazy_edge_ta_hoist_plan``).
+            hoisted_member = self._hoisted_hist_reads.get(id(node))
+            if hoisted_member is not None:
+                return f"{hoisted_member}[(int)({idx})]"
             inner = self._visit_expr(node.object)
             cpp_t = self._infer_type(node.object)
             if cpp_t not in ("double", "int", "int64_t", "bool"):

@@ -779,11 +779,35 @@ def test_ta_precalc_skips_user_series_alias_source():
     assert "_ta_stdev_1.compute(ha_close)" in cpp
 
 
-def test_ta_precalc_skips_short_circuit_and_rhs_call_sites():
-    """Dual ta.sma under ``and`` must not use full-history precalc (lazy-stale).
 
-    Campaign pin: pf-probe-oliver-dual-vol-sma — TV dual-callsite volume SMAs
-    disagree with a hoisted SMA; eager precalc erased that independence.
+_EVERY_BAR_RULE_NOTE = """Re-pinned 2026-09-03 with ``lab tv`` (NYSE:F 1D): a stateful chart
+``ta.*`` call below a Pine-v6 lazy edge of a TOP-LEVEL statement advances on
+every bar -- ``c = bar_index % 7 == 3 and close > ta.sma(close, 5)[1]`` gives
+the every-bar model 25/25 TV trades (per-call clock: 28), ``ta.ema`` 23/23
+(27), ``ta.highest(high, 5)[1]`` 9/9 (8), and the ternary
+``v = bar_index % 7 == 3 ? ta.highest(high, 5)[1] : na`` 38/39 (2). Codegen
+hoists such sites into a ``const auto _pf_every_bar_ta_N`` local emitted before
+the statement (``_lazy_edge_ta_hoist_plan``); precalc, which is that same
+every-bar evaluation, is therefore valid for them again."""
+
+
+def _stmt_line(cpp: str, prefix: str) -> str:
+    return next(
+        ln for ln in cpp.splitlines() if ln.strip().startswith(prefix)
+    )
+
+
+def _hoist_line(cpp: str, name: str) -> str:
+    return _stmt_line(cpp, f"const auto {name} = ")
+
+
+def test_and_rhs_sma_sites_are_hoisted_every_bar_and_precalc_eligible():
+    """Dual ta.sma under ``and`` advance every bar and agree with hoisted ``v``.
+
+    Former pin (pf-probe-oliver-dual-vol-sma, "TV dual-callsite volume SMAs
+    disagree with a hoisted SMA; eager precalc erased that independence")
+    encoded the per-call clock that the out-pin-lazyand-sma tape refutes for
+    this top-level ``and``-RHS shape. See ``_EVERY_BAR_RULE_NOTE``.
     """
     cpp = _cpp(
         "stPred = close > open\n"
@@ -793,29 +817,46 @@ def test_ta_precalc_skips_short_circuit_and_rhs_call_sites():
         "c = stPred and (volume < v)\n"
         "plot(close)"
     )
-    # Hoisted always-evaluated SMA may still precalc; dual sites under `and` must not.
-    assert "_use_precalc ? _precalc__ta_sma_1" not in cpp
-    assert "_use_precalc ? _precalc__ta_sma_2" not in cpp
-    assert "stPred &&" in cpp
-    assert "_ta_sma_1.compute(current_bar_.volume)" in cpp
-    assert "_ta_sma_2.compute(current_bar_.volume)" in cpp
-    # Hoisted third SMA still eligible for precalc
+    for idx in (1, 2):
+        hoist = _hoist_line(cpp, f"_pf_every_bar_ta_{idx}")
+        assert f"_use_precalc ? _precalc__ta_sma_{idx}[bar_index_]" in hoist
+        assert f"_ta_sma_{idx}.compute(current_bar_.volume)" in hoist
+    a_line = _stmt_line(cpp, "a = (")
+    b_line = _stmt_line(cpp, "b = (")
+    assert "stPred &&" in a_line and "_pf_every_bar_ta_1" in a_line
+    assert "stPred &&" in b_line and "_pf_every_bar_ta_2" in b_line
+    assert ".compute(" not in a_line and ".compute(" not in b_line
+    # The always-evaluated third SMA is unchanged: eligible, never hoisted.
     assert "_precalc__ta_sma_3" in cpp
+    assert "_pf_every_bar_ta_3" not in cpp
 
 
-def test_ta_precalc_skips_nested_sma_below_and_rhs():
-    """The SMA keeps the enclosing lazy context through an outer ta.change."""
+
+def test_nested_ta_below_and_rhs_hoists_inner_then_outer():
+    """``ta.change(ta.sma(...))`` under an ``and`` RHS hoists both, inner first."""
     cpp = _cpp(
         "base = ta.mom(close, 20) > 0 and ta.change(ta.sma(close, 50)) > 0\n"
         "plot(base ? 1 : 0)"
     )
-    assert "std::vector<double> _precalc__ta_sma" not in cpp
-    assert "_use_precalc ? _precalc__ta_sma" not in cpp
-    assert "_ta_sma_" in cpp and ".compute(current_bar_.close)" in cpp
+    inner = _hoist_line(cpp, "_pf_every_bar_ta_1")
+    outer = _hoist_line(cpp, "_pf_every_bar_ta_2")
+    assert "_ta_sma_" in inner and ".compute(current_bar_.close)" in inner
+    assert "_ta_change_" in outer and ".compute(_pf_every_bar_ta_1)" in outer
+    assert cpp.index(inner) < cpp.index(outer) < cpp.index(_stmt_line(cpp, "base = ("))
+    base_line = _stmt_line(cpp, "base = (")
+    assert "_pf_every_bar_ta_2" in base_line and "_ta_change_" not in base_line
+    # The eager LHS ``ta.mom`` is not a lazy-edge site.
+    assert "_ta_mom_" in base_line
 
 
-def test_ta_precalc_lazy_scope_routes_recursive_ema_only():
-    """EMA follows Pine-v6 lazy edges while unrelated TA stays precalculated."""
+
+def test_lazy_edge_sites_hoist_every_bar_except_pinned_roc3_clock():
+    """Every lazy-edge TA family hoists; the pinned lazy ROC(close, 3) clock stays.
+
+    ``_EVERY_BAR_RULE_NOTE`` covers sma/ema/highest. ``ta.roc(close, 3)`` below
+    a plain ``and`` RHS keeps its oracle-backed saturated call clock
+    (tests/test_lazy_saturated_roc*.py) -- that rule is not re-pinned here.
+    """
     cpp = _cpp(
         "pred = close > open\n"
         "a = pred and ta.ema(close, 20) > close\n"
@@ -834,44 +875,72 @@ def test_ta_precalc_lazy_scope_routes_recursive_ema_only():
         assert f"_use_precalc ? _precalc__ta_{name}_" in cpp
     assert "std::vector<double> _precalc__ta_roc_" not in cpp
     assert "_PFLazySaturatedROC3Clock" in cpp
+    b_line = _stmt_line(cpp, "b = (")
     assert (
         ".evaluate(current_bar_.close, "
         "_pf_lazy_saturated_roc3_close_history[3], bar_index_)"
-    ) in cpp
-    assert len(re.findall(r"std::vector<double> _precalc__ta_ema_", cpp)) == 1
+    ) in b_line
+    # a, c, d, e, f, g, h are hoisted (7 sites); b keeps its clock, i is eager.
+    assert len(re.findall(r"const auto _pf_every_bar_ta_\d+ = ", cpp)) == 7
+    for var in ("a", "c", "d", "e", "f", "g", "h"):
+        assert "_pf_every_bar_ta_" in _stmt_line(cpp, f"{var} = (")
+    assert "_pf_every_bar_ta_" not in _stmt_line(cpp, "i = (")
+    # Every ema/sma site is every-bar, so every one is precalc-eligible.
+    assert len(re.findall(r"std::vector<double> _precalc__ta_ema_", cpp)) == 4
     assert len(re.findall(r"std::vector<double> _precalc__ta_sma_", cpp)) == 2
-    assert len(re.findall(r"_use_precalc \? _precalc__ta_sma_", cpp)) >= 2
+
 
 
 def test_precalculated_extrema_direct_history_uses_chart_bar_clock():
-    """``ta.highest/lowest(...)[k]`` must index their precalculated series.
+    """``ta.highest/lowest(...)[k]`` reads the chart-bar clock in every run mode.
 
-    The surrounding Pine-v6 boolean remains lazy. Only the already-computed
-    direct-call history changes from a sparse evaluation clock to the chart-bar
-    clock used by the same TA site's ``_precalc_*`` values.
+    Below a lazy edge the site is hoisted: its ``_hist_call_*`` Series is pushed
+    unconditionally before the statement, so ``[k]`` is ``k`` chart bars ago in
+    precalc and dynamic runs alike (the surrounding boolean still gates the
+    value). An eager direct-history site keeps the precalc-indexed lambda with
+    the synthetic-history fallback for dynamic runs.
     """
     cpp = _cpp(
         "pred = close > open\n"
         "lo = pred and close < ta.lowest(low, 20)[1]\n"
         "hi = pred and close > ta.highest(high, 10)[2]\n"
-        "plot((lo or hi) ? 1 : 0)"
+        "flat = close > ta.highest(high, 30)[3]\n"
+        "plot((lo or hi or flat) ? 1 : 0)"
     )
 
-    assert "pred &&" in cpp
     assert "std::vector<double> _precalc__ta_lowest_1" in cpp
     assert "std::vector<double> _precalc__ta_highest_2" in cpp
-    assert "static_cast<std::size_t>(bar_index_) - _pf_hist_offset" in cpp
-    assert "_pf_hist_offset_numeric < 0.0L" in cpp
-    assert "static_cast<long double>(bar_index_)" in cpp
-    assert "return _precalc__ta_lowest_1[(std::size_t)_pf_hist_bar]" in cpp
-    assert "return _precalc__ta_highest_2[(std::size_t)_pf_hist_bar]" in cpp
-    # Dynamic/non-precalculated execution retains the rollback-safe synthetic
-    # history fallback rather than silently becoming eager.
-    assert cpp.count("if (history_advances_new_bar()) _hist_call_") >= 2
+    assert "std::vector<double> _precalc__ta_highest_3" in cpp
+    lines = cpp.splitlines()
+    for idx, member in ((1, "_hist_call_1"), (2, "_hist_call_2")):
+        hoist = _hoist_line(cpp, f"_pf_every_bar_ta_{idx}")
+        assert hoist.startswith("        const auto")
+        push = (
+            f"        if (history_advances_new_bar()) {member}.push("
+            f"_pf_every_bar_ta_{idx});"
+        )
+        assert push in lines
+        assert f"        else {member}.update(_pf_every_bar_ta_{idx});" in lines
+    lo_line = _stmt_line(cpp, "lo = (")
+    hi_line = _stmt_line(cpp, "hi = (")
+    assert "pred &&" in lo_line and "_hist_call_1[(int)(1)]" in lo_line
+    assert "pred &&" in hi_line and "_hist_call_2[(int)(2)]" in hi_line
+    assert "_pf_hist_bar" not in lo_line and "_pf_hist_bar" not in hi_line
+    # Eager direct history: precalc-indexed read, synthetic-history fallback.
+    flat_line = _stmt_line(cpp, "flat = (")
+    assert "static_cast<std::size_t>(bar_index_) - _pf_hist_offset" in flat_line
+    assert "return _precalc__ta_highest_3[(std::size_t)_pf_hist_bar]" in flat_line
+    assert "if (history_advances_new_bar()) _hist_call_3.push(_hv)" in flat_line
 
 
-def test_nonprecalculated_extrema_direct_history_keeps_evaluation_clock():
-    """Unsafe extrema inputs must retain their call-local history clock."""
+
+def test_nonprecalculated_extrema_direct_history_uses_every_bar_clock():
+    """Precalc-unsafe extrema below a lazy edge still advance every bar.
+
+    ``src = close`` is not replayed by ``precalculate()``, so the site cannot
+    read ``_precalc_*`` -- it is hoisted to an inline every-bar compute and its
+    direct history is pushed every bar (``_EVERY_BAR_RULE_NOTE``).
+    """
     cpp = _cpp(
         "src = close\n"
         "pred = close > open\n"
@@ -881,12 +950,21 @@ def test_nonprecalculated_extrema_direct_history_keeps_evaluation_clock():
 
     assert "std::vector<double> _precalc__ta_highest" not in cpp
     assert "_pf_hist_bar" not in cpp
-    assert "_ta_highest_1.compute(src)" in cpp
-    assert "if (history_advances_new_bar()) _hist_call_" in cpp
+    hoist = _hoist_line(cpp, "_pf_every_bar_ta_1")
+    assert "_ta_highest_1.compute(src)" in hoist
+    assert "_use_precalc" not in hoist
+    assert (
+        "        if (history_advances_new_bar()) _hist_call_1.push(_pf_every_bar_ta_1);"
+        in cpp.splitlines()
+    )
+    signal_line = _stmt_line(cpp, "signal = (")
+    assert "pred &&" in signal_line and "_hist_call_1[(int)(1)]" in signal_line
+    assert ".compute(" not in signal_line
 
 
-def test_recursive_ema_lazy_edges_preserve_eager_operand_positions():
-    """Only OR RHS / ternary arms opt out; eager positions still precalc."""
+
+def test_recursive_ema_lazy_edges_hoist_only_lazy_operand_positions():
+    """OR RHS / ternary arms hoist; eager positions stay inline; all precalc."""
     cpp = _cpp(
         "pred = close > open\n"
         "orLeft = ta.ema(close, 10) > close or pred\n"
@@ -897,18 +975,30 @@ def test_recursive_ema_lazy_edges_preserve_eager_operand_positions():
         "plot(orLeft ? ternaryCond + ternaryTrue + ternaryFalse "
         ": orRight ? close : open)"
     )
-    for idx in (1, 3):
+    for idx in (1, 2, 3, 4, 5):
+        assert f"ta::EMA _ta_ema_{idx};" in cpp
         assert f"std::vector<double> _precalc__ta_ema_{idx}" in cpp
         assert f"_use_precalc ? _precalc__ta_ema_{idx}" in cpp
-    for idx in (2, 4, 5):
-        assert f"ta::EMA _ta_ema_{idx};" in cpp
-        assert f"std::vector<double> _precalc__ta_ema_{idx}" not in cpp
-        assert f"_use_precalc ? _precalc__ta_ema_{idx}" not in cpp
-        assert f"_ta_ema_{idx}.compute(current_bar_.close)" in cpp
+    for var in ("orLeft", "ternaryCond"):
+        line = _stmt_line(cpp, f"{var} = (")
+        assert ".compute(current_bar_.close)" in line
+        assert "_pf_every_bar_ta_" not in line
+    hoisted = {
+        "orRight": "_ta_ema_2",
+        "ternaryTrue": "_ta_ema_4",
+        "ternaryFalse": "_ta_ema_5",
+    }
+    for var, member in hoisted.items():
+        line = _stmt_line(cpp, f"{var} = (")
+        assert "_pf_every_bar_ta_" in line and ".compute(" not in line
+        assert any(
+            member in _hoist_line(cpp, f"_pf_every_bar_ta_{n}") for n in (1, 2, 3)
+        )
+
 
 
 def test_lazy_chart_ema_does_not_reclassify_security_evaluator_ema():
-    """Security payload EMA keeps evaluator-local state, not chart scope."""
+    """Chart EMA hoists every bar; the security payload EMA stays evaluator-local."""
     cpp = _cpp(
         "pred = close > open\n"
         "chart = pred or ta.ema(close, 3) > close\n"
@@ -916,12 +1006,16 @@ def test_lazy_chart_ema_does_not_reclassify_security_evaluator_ema():
         "close > open or ta.ema(close, 4) > close)\n"
         "plot(chart ? sec : close)"
     )
-    assert "std::vector<double> _precalc__ta_ema_1" not in cpp
-    assert "_ta_ema_1.compute(current_bar_.close)" in cpp
+    assert "std::vector<double> _precalc__ta_ema_1" in cpp
+    assert "_ta_ema_1.compute(current_bar_.close)" in _hoist_line(
+        cpp, "_pf_every_bar_ta_1"
+    )
+    assert "_pf_every_bar_ta_1" in _stmt_line(cpp, "chart = (")
     security_body = cpp.split("void _eval_security_0", 1)[1].split("\n    }", 1)[0]
     assert "ta::EMA _sec0__ta_ema_2;" in cpp
     assert "_sec0__ta_ema_2.compute(bar.close)" in security_body
     assert " || " in security_body
+    assert "_pf_every_bar_ta_" not in security_body
 
 
 def test_lazy_udf_ema_uses_callsite_state_without_precalc():
@@ -945,6 +1039,7 @@ def test_lazy_udf_ema_uses_callsite_state_without_precalc():
     assert "eager = f_cs1();" in cpp
 
 
+
 def test_ta_precalc_keeps_security_context_and_rhs_sma():
     """Security-local TA is distinct; a referenced chart expression is not."""
     cpp = _cpp(
@@ -955,23 +1050,34 @@ def test_ta_precalc_keeps_security_context_and_rhs_sma():
         "secChart = request.security(syminfo.tickerid, \"60\", chart)\n"
         "plot(chart ? sec + secChart : close)"
     )
-    assert "std::vector<double> _precalc__ta_sma_1" not in cpp
+    # Chart-context lazy-edge SMA: hoisted every bar, precalc-eligible.
+    assert "std::vector<double> _precalc__ta_sma_1" in cpp
+    assert "_pf_every_bar_ta_1" in _stmt_line(cpp, "chart = (")
+    # Security payload SMA: evaluator-local, never hoisted.
     assert "std::vector<double> _precalc__ta_sma_2" in cpp
+    assert "_pf_every_bar_ta_2" not in cpp
 
 
-def test_ta_precalc_skips_and_rhs_sma_in_tuple_assignment():
-    """Top-level TupleAssign/TupleLiteral payloads participate in classification."""
+
+def test_and_rhs_sma_in_tuple_assignment_is_hoisted():
+    """Top-level TupleAssign/TupleLiteral payloads participate in hoisting."""
     cpp = _cpp(
         "pred = close > open\n"
-        "[a, b] = [pred and ta.sma(close, 3) > close, close]\n"
-        "plot(a ? b : close)"
+        "[a, b] = [pred and ta.sma(close, 3) > close, close > open]\n"
+        "plot(a ? 1 : b ? 2 : 0)"
     )
-    assert "std::vector<double> _precalc__ta_sma" not in cpp
-    assert "_use_precalc ? _precalc__ta_sma" not in cpp
     assert "ta::SMA _ta_sma_1;" in cpp
+    assert "std::vector<double> _precalc__ta_sma_1" in cpp
+    hoist = _hoist_line(cpp, "_pf_every_bar_ta_1")
+    assert "_ta_sma_1.compute(current_bar_.close)" in hoist
+    # (The literal tuple assignment itself is still a codegen stub; the walk
+    # and the every-bar step are what this pins.)
+    on_bar = cpp.split("void on_bar(", 1)[1].split("void precalculate(", 1)[0]
+    assert on_bar.count("_ta_sma_1.compute(") == 1
 
 
-def test_ta_precalc_skips_and_rhs_sma_in_assignment_subscript_target():
+
+def test_and_rhs_sma_in_assignment_subscript_target_is_hoisted():
     """An assignment target can contain evaluated expressions in its index."""
     cpp = _cpp(
         "pred = close > open\n"
@@ -979,12 +1085,15 @@ def test_ta_precalc_skips_and_rhs_sma_in_assignment_subscript_target():
         "xs[pred and ta.sma(close, 3) > close ? 0 : 1] := close\n"
         "plot(array.get(xs, 0))"
     )
-    assert "std::vector<double> _precalc__ta_sma" not in cpp
-    assert "_use_precalc ? _precalc__ta_sma" not in cpp
-    assert "_ta_sma_1.compute(current_bar_.close)" in cpp
+    assert "std::vector<double> _precalc__ta_sma_1" in cpp
+    assert "_ta_sma_1.compute(current_bar_.close)" in _hoist_line(
+        cpp, "_pf_every_bar_ta_1"
+    )
+    assert cpp.count("_pf_every_bar_ta_1") >= 2
 
 
-def test_ta_precalc_walks_nested_func_call_keyword_values_under_and_rhs():
+
+def test_hoist_walks_nested_func_call_keyword_values_under_and_rhs():
     """Lazy context propagates through keyword values and nested calls."""
     cpp = _cpp(
         "pred = close > open\n"
@@ -992,12 +1101,18 @@ def test_ta_precalc_walks_nested_func_call_keyword_values_under_and_rhs():
         "label.new(bar_index, ta.sma(close, 3))) > 0\n"
         "plot(x ? 1 : 0)"
     )
-    assert "std::vector<double> _precalc__ta_sma" not in cpp
-    assert "_use_precalc ? _precalc__ta_sma" not in cpp
     assert "ta::SMA _ta_sma_1;" in cpp
+    assert "std::vector<double> _precalc__ta_sma_1" in cpp
+    assert "_ta_sma_1.compute(current_bar_.close)" in _hoist_line(
+        cpp, "_pf_every_bar_ta_1"
+    )
+    # ``label.get_x`` lowers to a stub here, so the statement itself carries
+    # no TA read; the every-bar step still happens in the hoist.
+    assert ".compute(" not in _stmt_line(cpp, "x = (")
 
 
-def test_ta_precalc_walks_chained_call_receiver_under_and_rhs():
+
+def test_hoist_walks_chained_call_receiver_under_and_rhs():
     """An evaluated call receiver inherits its enclosing lazy context."""
     cpp = _cpp(
         "pred = close > open\n"
@@ -1005,12 +1120,15 @@ def test_ta_precalc_walks_chained_call_receiver_under_and_rhs():
         "y = ta.sma(close, 3)).get_y() > close\n"
         "plot(x ? 1 : 0)"
     )
-    assert "std::vector<double> _precalc__ta_sma" not in cpp
-    assert "_use_precalc ? _precalc__ta_sma" not in cpp
-    assert "_ta_sma_1.compute(current_bar_.close)" in cpp
+    assert "std::vector<double> _precalc__ta_sma_1" in cpp
+    assert "_ta_sma_1.compute(current_bar_.close)" in _hoist_line(
+        cpp, "_pf_every_bar_ta_1"
+    )
+    assert "_pf_every_bar_ta_1" in _stmt_line(cpp, "x = (")
 
 
-def test_ta_precalc_security_positional_skips_only_expression_payload():
+
+def test_hoist_security_positional_skips_only_expression_payload():
     """Security symbol/timeframe are chart context; its payload is not."""
     cpp = _cpp(
         "pred = close > open\n"
@@ -1020,12 +1138,18 @@ def test_ta_precalc_security_positional_skips_only_expression_payload():
         "pred and ta.sma(close, 5) > close)\n"
         "plot(sec ? 1 : 0)"
     )
-    assert "std::vector<double> _precalc__ta_sma_1" not in cpp
-    assert "std::vector<double> _precalc__ta_sma_2" not in cpp
+    assert "_ta_sma_1.compute(current_bar_.close)" in _hoist_line(
+        cpp, "_pf_every_bar_ta_1"
+    )
+    assert "_ta_sma_2.compute(current_bar_.close)" in _hoist_line(
+        cpp, "_pf_every_bar_ta_2"
+    )
+    assert "_pf_every_bar_ta_3" not in cpp
     assert "std::vector<double> _precalc__ta_sma_3" in cpp
 
 
-def test_ta_precalc_security_lower_tf_keywords_skip_only_expression_payload():
+
+def test_hoist_security_lower_tf_keywords_skip_only_expression_payload():
     """Keyword-bound lower-TF payload has the same evaluator boundary."""
     cpp = _cpp(
         "pred = close > open\n"
@@ -1036,8 +1160,13 @@ def test_ta_precalc_security_lower_tf_keywords_skip_only_expression_payload():
         "expression = pred and ta.sma(close, 5) > close)\n"
         "plot(array.size(sec))"
     )
-    assert "std::vector<double> _precalc__ta_sma_1" not in cpp
-    assert "std::vector<double> _precalc__ta_sma_2" not in cpp
+    assert "_ta_sma_1.compute(current_bar_.close)" in _hoist_line(
+        cpp, "_pf_every_bar_ta_1"
+    )
+    assert "_ta_sma_2.compute(current_bar_.close)" in _hoist_line(
+        cpp, "_pf_every_bar_ta_2"
+    )
+    assert "_pf_every_bar_ta_3" not in cpp
     assert "std::vector<double> _precalc__ta_sma_3" in cpp
 
 

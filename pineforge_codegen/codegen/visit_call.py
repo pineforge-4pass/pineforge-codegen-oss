@@ -1420,6 +1420,12 @@ class CallVisitor:
         # ta.* calls -> member.compute(...)
         site = self._get_ta_site(node)
         if site is not None:
+            # A top-level lazy-edge site already evaluated for this bar in a
+            # ``_pf_every_bar_ta_N`` local (see ``_lazy_edge_ta_hoist_plan``):
+            # read it instead of stepping the indicator again.
+            hoisted = self._hoisted_ta_values.get(id(node))
+            if hoisted is not None:
+                return hoisted
             compute_args = self._ta_compute_args_for_site(site)
             ta_mem = self._ta_member_name(site)
             uses_precalc = self._ta_site_uses_precalc(site)

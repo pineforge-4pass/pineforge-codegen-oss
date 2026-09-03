@@ -301,6 +301,20 @@ you delete or weaken the special case, the test will tell you.
    in Pine v6; both lack `direction`. `TRADE_ACCESSOR_METHODS` is kept
    as the union for back-compat but new code should prefer the side-
    specific constant.
+9. **Top-level lazy-edge `ta.*` sites are hoisted to every-bar evaluation.**
+   TradingView (pinned 2026-09-03 with `lab tv`, NYSE:F 1D) advances a
+   stateful `ta.*` call on EVERY bar when it sits below a Pine-v6 lazy
+   `and`/`or` RHS or a ternary arm of a top-level statement; short-circuiting
+   gates only the value, and `[1]` on it is the previous BAR. Codegen emits
+   `const auto _pf_every_bar_ta_N = <site>;` (plus the site's `_hist_call_*`
+   push for a direct `[k]`) BEFORE the statement, in dynamic mode too
+   (`codegen/ta.py::_lazy_edge_ta_hoist_plan`, `_emit_lazy_edge_ta_hoists`;
+   `tests/test_lazy_edge_ta_every_bar.py`). Sites inside `if`/loop/function
+   bodies, `else if` conditions, `var` initializers, `request.security`
+   payloads, tuple-returning sites and the pinned lazy `ta.roc(close, 3)`
+   clock keep their existing lowering. The old "lazy SMA/EMA must not
+   precalc" pins (pf-probe-oliver-dual-vol-sma) encoded the refuted per-call
+   clock and were re-pinned in `test_codegen_validation_fixes.py`.
 
 ## How to add a new Pine v6 function
 

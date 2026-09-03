@@ -26,8 +26,8 @@ from typing import TYPE_CHECKING
 
 from ..ast_nodes import (
     Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall,
-    ForInStmt, ForStmt, FuncDef, Identifier, MemberAccess, NaLiteral,
-    NumberLiteral, StringLiteral, Subscript, Ternary, TupleAssign,
+    ForInStmt, ForStmt, FuncDef, Identifier, IfStmt, MemberAccess, NaLiteral,
+    NumberLiteral, StringLiteral, Subscript, SwitchStmt, Ternary, TupleAssign,
     TupleLiteral, TypeDecl, UnaryOp, VarDecl,
 )
 from .tables import TA_IMPLICIT_APPEND, TA_IMPLICIT_COMPUTE_FULL
@@ -618,16 +618,31 @@ class TaSiteHelper:
         all-``na``. Opting that site out preserves correctness; it simply uses
         the ordinary stateful TA object during ``on_bar``.
 
-        A chart-context ``ta.sma`` nested under an ``and`` RHS is also opted
-        out: precalc advances it every bar, which is eager and TV-incorrect for
-        the pinned dual-volume-SMA case. Recursive chart ``ta.ema`` sites below
-        any Pine-v6 lazy edge follow the same call-clock rule. Other TA families
+        A site hoisted to unconditional per-bar evaluation (top-level lazy
+        ``and``/``or`` RHS or ternary arm -- see
+        ``_lazy_edge_ta_hoist_plan``) advances on every chart bar by the pinned
+        TV rule, which is exactly what precalc computes; the lazy-edge opt-outs
+        below therefore never apply to it.
+
+        Re-pinned 2026-09-03: the old opt-out for a chart ``ta.sma`` under an
+        ``and`` RHS (pf-probe-oliver-dual-vol-sma, "eager precalc is
+        TV-incorrect") and the matching recursive ``ta.ema`` rule encoded a
+        per-call clock that ``lab tv`` refuted for top-level shapes (NYSE:F 1D,
+        ``... and close > ta.sma(close,5)[1]``: every-bar 25/25 vs per-call 28;
+        ``ta.ema``: 23/23 vs 27). The analyzer never marks a site inside an
+        ``if``/loop/function scope static, so after hoisting the opt-outs
+        only reach a static lazy-edge ``ta.sma``/``ta.ema`` that is not a
+        top-level statement operand -- in practice a UDT field default
+        (``test_ta_precalc_walks_type_field_defaults``), whose clock is the
+        ``Type.new()`` call site's and may sit in a block. Other TA families
         and request.security sites retain their existing behavior."""
         if not getattr(site, "is_static", False):
             return False
         if self._is_lazy_saturated_roc3_site(site):
             return False
         node = getattr(site, "node", None)
+        if node is not None and id(node) in self._lazy_edge_hoisted_ta_call_nodes():
+            return all(self._expr_safe_for_ta_precalc(arg) for arg in site.compute_args)
         ta_name = self._ta_name_from_site(site)
         if (
             ta_name == "sma"
@@ -642,6 +657,224 @@ class TaSiteHelper:
         ):
             return False
         return all(self._expr_safe_for_ta_precalc(arg) for arg in site.compute_args)
+
+    # ------------------------------------------------------------------
+    # Every-bar hoisting of stateful ``ta.*`` sites below top-level lazy edges
+    # ------------------------------------------------------------------
+    #
+    # TradingView rule, pinned 2026-09-03 with ``lab tv`` on NYSE:F 1D (tapes
+    # out-pin-ring-lazyand / lazyand-sma / lazyand-ema / ring-ternary): a
+    # stateful ``ta.*`` call inside ANY expression operand of a top-level
+    # statement -- the RHS of a Pine-v6 lazy ``and``/``or``, either branch of a
+    # ternary, nested comparisons -- is evaluated on EVERY bar. Short-circuiting
+    # and branch selection gate only the *value*, never the built-in's state,
+    # and ``[1]`` on such a call is the previous BAR's value:
+    #
+    #   c = bar_index % 7 == 3 and close > ta.highest(high,5)[1]   9/9 entries
+    #   c = bar_index % 7 == 3 and close > ta.sma(close,5)[1]      25/25
+    #   c = bar_index % 7 == 3 and close > ta.ema(close,5)[1]      23/23
+    #   v = bar_index % 7 == 3 ? ta.highest(high,5)[1] : na        38/39
+    #
+    # (the per-call / "previous evaluation" model predicts 8/9, 28, 27 and
+    # 2/39). Production instance: robmagnaye14 ``bullMSS = setupAlive and
+    # dir == 1 and close > ta.highest(high, 10)[1]``.
+    #
+    # A stateful call INSIDE an ``if``/local-block/function body that does not
+    # execute every bar IS execution-gated on TV (pinned separately) and keeps
+    # the in-block compute + ``_hist_call_*`` push lowering untouched.
+    #
+    # Lowering: every eligible site below a lazy edge of a top-level statement
+    # is evaluated once, unconditionally, in a ``const auto _pf_every_bar_ta_N``
+    # local emitted BEFORE the statement (in dynamic mode too -- this is
+    # independent of ``_use_precalc``). A direct ``[k]`` on the hoisted call
+    # pushes its ``_hist_call_*`` Series there as well, so ``[1]`` reads the
+    # previous chart bar. The statement's expression then reads the local /
+    # the Series instead of stepping the indicator when the operand is reached.
+
+    _LAZY_EDGE_HOIST_NAME_PREFIX = "_pf_every_bar_ta_"
+
+    def _lazy_edge_hoist_block_reason(self, site: "TACallSite") -> str | None:
+        """Why an otherwise-eligible lazy-edge site is left on its lowering."""
+        if getattr(site, "owner_func", None) is not None:
+            return "site belongs to a user function body"
+        if getattr(site, "returns_tuple", False):
+            return "tuple-returning site"
+        if self._is_lazy_saturated_roc3_site(site):
+            return (
+                "pinned lazy saturated ta.roc(close, 3) clock "
+                "(tests/test_lazy_saturated_roc*.py)"
+            )
+        return None
+
+    def _lazy_edge_ta_hoist_plan(self) -> dict:
+        """Plan (once) which top-level lazy-edge TA sites are hoisted.
+
+        Returns ``{"by_stmt": {id(stmt): [unit, ...]}, "call_nodes": set,
+        "skipped": [(node, site, reason), ...]}``. A unit is either
+        ``{"kind": "call", "node": FuncCall, "site": TACallSite, "name": str}``
+        or ``{"kind": "hist", "node": Subscript}`` (a direct ``[k]`` on a hoisted
+        call). Units are in evaluation order: a nested hoisted call precedes the
+        call whose argument it is, and a ``hist`` unit follows its call.
+
+        Only top-level statement expressions are scanned (``VarDecl`` values
+        except ``var``/``varip`` initializers, ``Assignment`` target/value,
+        ``TupleAssign`` value, ``ExprStmt`` expression, and the head condition
+        of an ``IfStmt``). ``if``/``for``/``while``/``switch`` bodies, ``else
+        if`` conditions (Pine's ``else if`` is an ``if`` inside the ``else``
+        local block) and user-function bodies are never hoisted. Inside an
+        expression, the walk descends into every operand and call argument
+        except a ``request.security*`` payload, which its own evaluator runs.
+        Block-local arguments cannot occur at top level, so the skip list only
+        carries the shapes named in ``_lazy_edge_hoist_block_reason``.
+        """
+        cached = getattr(self, "_lazy_edge_hoist_plan_cache", None)
+        if cached is not None:
+            return cached
+
+        by_stmt: dict[int, list[dict]] = {}
+        call_nodes: set[int] = set()
+        skipped: list[tuple] = []
+        counter = [0]
+
+        def scan(expr, under_lazy: bool, units: list[dict]) -> None:
+            if expr is None:
+                return
+            if isinstance(expr, FuncCall):
+                callee = expr.callee
+                is_security = (
+                    isinstance(callee, MemberAccess)
+                    and isinstance(callee.object, Identifier)
+                    and callee.object.name == "request"
+                    and callee.member in ("security", "security_lower_tf")
+                )
+                # Chained receivers (``label.new(...).get_y()``) are evaluated
+                # expressions too; namespace/identifier callees are leaves.
+                scan(callee, under_lazy, units)
+                for idx, arg in enumerate(getattr(expr, "args", ()) or ()):
+                    if is_security and idx == 2:
+                        continue
+                    scan(arg, under_lazy, units)
+                for key, value in (getattr(expr, "kwargs", None) or {}).items():
+                    if is_security and key == "expression":
+                        continue
+                    scan(value, under_lazy, units)
+                if not under_lazy:
+                    return
+                site = self._get_ta_site(expr)
+                if site is None:
+                    return
+                reason = self._lazy_edge_hoist_block_reason(site)
+                if reason is not None:
+                    skipped.append((expr, site, reason))
+                    return
+                counter[0] += 1
+                units.append({
+                    "kind": "call",
+                    "node": expr,
+                    "site": site,
+                    "name": f"{self._LAZY_EDGE_HOIST_NAME_PREFIX}{counter[0]}",
+                })
+                call_nodes.add(id(expr))
+                return
+            if isinstance(expr, BinOp):
+                if expr.op in ("and", "or"):
+                    scan(expr.left, under_lazy, units)
+                    scan(expr.right, True, units)
+                else:
+                    scan(expr.left, under_lazy, units)
+                    scan(expr.right, under_lazy, units)
+                return
+            if isinstance(expr, Ternary):
+                scan(expr.condition, under_lazy, units)
+                scan(expr.true_val, True, units)
+                scan(expr.false_val, True, units)
+                return
+            if isinstance(expr, UnaryOp):
+                scan(expr.operand, under_lazy, units)
+                return
+            if isinstance(expr, Subscript):
+                scan(expr.object, under_lazy, units)
+                scan(expr.index, under_lazy, units)
+                if isinstance(expr.object, FuncCall) and id(expr.object) in call_nodes:
+                    units.append({"kind": "hist", "node": expr})
+                return
+            if isinstance(expr, MemberAccess):
+                scan(expr.object, under_lazy, units)
+                return
+            if isinstance(expr, TupleLiteral):
+                for element in expr.elements:
+                    scan(element, under_lazy, units)
+                return
+            # ``x = if cond ... else ...`` / ``x = switch ...`` value forms: the
+            # head expression is top-level, the bodies are local blocks.
+            if isinstance(expr, IfStmt):
+                scan(expr.condition, under_lazy, units)
+                return
+            if isinstance(expr, SwitchStmt):
+                scan(expr.expr, under_lazy, units)
+                return
+            # Literals, identifiers and anything else are leaves.
+
+        def roots(stmt) -> list:
+            if isinstance(stmt, VarDecl):
+                if stmt.is_var or stmt.is_varip:
+                    return []
+                return [stmt.value]
+            if isinstance(stmt, Assignment):
+                return [stmt.target, stmt.value]
+            if isinstance(stmt, TupleAssign):
+                return [stmt.value]
+            if isinstance(stmt, ExprStmt):
+                return [stmt.expr]
+            if isinstance(stmt, IfStmt):
+                return [stmt.condition]
+            return []
+
+        ast = getattr(self.ctx, "ast", None)
+        for stmt in getattr(ast, "body", ()) or ():
+            units: list[dict] = []
+            for root in roots(stmt):
+                scan(root, False, units)
+            if units:
+                by_stmt[id(stmt)] = units
+
+        plan = {"by_stmt": by_stmt, "call_nodes": call_nodes, "skipped": skipped}
+        self._lazy_edge_hoist_plan_cache = plan
+        return plan
+
+    def _lazy_edge_hoisted_ta_call_nodes(self) -> set[int]:
+        return self._lazy_edge_ta_hoist_plan()["call_nodes"]
+
+    def _emit_lazy_edge_ta_hoists(self, stmt, lines: list[str], indent: int) -> None:
+        """Emit the every-bar evaluations a top-level statement depends on.
+
+        Must be paired with ``_clear_lazy_edge_ta_hoists`` after the statement
+        is visited: the maps make ``_visit_func_call`` / ``_visit_subscript``
+        read the hoisted local / Series while the statement is lowered.
+        """
+        units = self._lazy_edge_ta_hoist_plan()["by_stmt"].get(id(stmt))
+        if not units:
+            return
+        pad = "    " * indent
+        lines.append(
+            f"{pad}// Pine v6 lazy operand: TA state advances every bar, only the "
+            "value is gated."
+        )
+        for unit in units:
+            node = unit["node"]
+            if unit["kind"] == "call":
+                rendered = self._visit_expr(node)
+                lines.append(f"{pad}const auto {unit['name']} = {rendered};")
+                self._hoisted_ta_values[id(node)] = unit["name"]
+            else:
+                member = self._inline_history_member("hist_call", node)
+                value = self._hoisted_ta_values[id(node.object)]
+                self._emit_history_series_write(lines, pad, member, value)
+                self._hoisted_hist_reads[id(node)] = member
+
+    def _clear_lazy_edge_ta_hoists(self) -> None:
+        self._hoisted_ta_values.clear()
+        self._hoisted_hist_reads.clear()
 
     def _security_ta_compute_args_for_site(
         self,

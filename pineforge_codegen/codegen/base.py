@@ -310,6 +310,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Set of var/series member names that belong to user functions (need cloning)
         self._func_var_members_set: set[str] = set()
         self._precalc_loop_active: bool = False
+        # Top-level lazy-edge TA sites hoisted to every-bar evaluation for the
+        # statement currently being lowered: FuncCall id -> local name, and
+        # Subscript id -> ``_hist_call_*`` member (see ``ta.py``).
+        self._hoisted_ta_values: dict[int, str] = {}
+        self._hoisted_hist_reads: dict[int, str] = {}
         # Names of ``var`` members that live in a callable scope (not global).
         # Their exact declaration statements own initialization; they must not
         # be initialized by the constructor or the global on_bar preamble.

@@ -1218,9 +1218,15 @@ class TopLevelEmitter:
         # an input (the default-sized construction already matches Pine).
         self._emit_ta_runtime_reset(lines, indent=2)
 
-        # d. Visit each statement
+        # d. Visit each statement. A stateful ``ta.*`` site below a lazy
+        #    ``and``/``or`` RHS or ternary arm of a top-level statement is
+        #    evaluated every bar BEFORE the statement (TV rule, see ``ta.py``).
         for stmt in self.ctx.ast.body:
-            self._visit_stmt(stmt, lines, indent=2)
+            self._emit_lazy_edge_ta_hoists(stmt, lines, indent=2)
+            try:
+                self._visit_stmt(stmt, lines, indent=2)
+            finally:
+                self._clear_lazy_edge_ta_hoists()
 
         # e. ``// @pf-trace`` pragma block — emitted last so trace values
         #    reflect every assignment / strategy call made earlier in the

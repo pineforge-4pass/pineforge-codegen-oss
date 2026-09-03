@@ -224,18 +224,38 @@ def test_mutable_global_security_stays_eager():
 # ----------------------------------------------------------------------
 
 
-def test_chart_context_conditional_ta_is_inline():
-    """The chart path never hoisted; its ``?:`` / ``&&`` are the short-circuit."""
+def test_chart_context_conditional_ta_is_hoisted_every_bar():
+    """Chart-context lazy-edge TA is NOT the security evaluator's lazy path.
+
+    Re-pinned 2026-09-03 (``lab tv``, NYSE:F 1D): a top-level chart ``ta.*``
+    below a ``?:`` arm or ``and``/``or`` RHS advances every bar on TradingView
+    (``... and close > ta.ema(close, 5)[1]`` -> every-bar 23/23 vs per-call 27;
+    ``... ? ta.highest(high, 5)[1] : na`` -> 38/39 vs 2/39). Codegen hoists it
+    into a ``_pf_every_bar_ta_N`` local before the statement; only the value
+    is gated. The security-evaluator lazy rule pinned by the rest of this file
+    is untouched and never uses ``_secval_`` on the chart path.
+    """
     cpp = transpile(_strategy(
         "c = close > open\n"
         "v = c ? ta.ema(close, 20) : 0.0\n"
         "w = c and ta.rsi(close, 14) > 50.0"
     ))
-    assign = next(ln for ln in cpp.splitlines() if ln.strip().startswith("v = ("))
-    assert "? ((history_advances_new_bar() ? _ta_ema_1.compute" in assign
-    assert "_secval_" not in assign
-    w_assign = next(ln for ln in cpp.splitlines() if ln.strip().startswith("w = ("))
-    assert "_ta_rsi_2.compute" in w_assign
+    lines = cpp.splitlines()
+    ema_hoist = next(
+        ln for ln in lines if ln.strip().startswith("const auto _pf_every_bar_ta_1 = ")
+    )
+    assert "history_advances_new_bar() ? _ta_ema_1.compute" in ema_hoist
+    assign = next(ln for ln in lines if ln.strip().startswith("v = ("))
+    assert assign.strip() == "v = ((c) ? (_pf_every_bar_ta_1) : (0.0));"
+    assert "_secval_" not in assign and "_secval_" not in ema_hoist
+    rsi_hoist = next(
+        ln for ln in lines if ln.strip().startswith("const auto _pf_every_bar_ta_2 = ")
+    )
+    assert "_ta_rsi_2.compute" in rsi_hoist
+    w_assign = next(ln for ln in lines if ln.strip().startswith("w = ("))
+    assert "_pf_every_bar_ta_2" in w_assign and ".compute(" not in w_assign
+    assert lines.index(ema_hoist) < lines.index(assign)
+    assert lines.index(rsi_hoist) < lines.index(w_assign)
 
 
 def test_chart_context_unconditional_ta_unchanged():
