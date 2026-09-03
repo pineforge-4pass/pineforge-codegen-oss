@@ -301,25 +301,31 @@ you delete or weaken the special case, the test will tell you.
    in Pine v6; both lack `direction`. `TRADE_ACCESSOR_METHODS` is kept
    as the union for back-compat but new code should prefer the side-
    specific constant.
-9. **Top-level lazy-edge `ta.*` sites are hoisted to every-bar evaluation.**
-   TradingView (pinned 2026-09-03 with `lab tv`, NYSE:F 1D) advances a
-   stateful `ta.*` call on EVERY bar when it sits below a Pine-v6 lazy
-   `and`/`or` RHS or a ternary arm of a top-level statement; short-circuiting
-   gates only the value, and `[1]` on it is the previous BAR. Codegen emits
+9. **Top-level lazy-edge `ta.*` sites whose history is read are hoisted to
+   every-bar evaluation.** TradingView (pinned 2026-09-03 with `lab tv`,
+   NYSE:F 1D) advances a stateful `ta.*` call on EVERY bar when it sits below
+   a Pine-v6 lazy `and`/`or` RHS or a ternary arm of a top-level statement
+   AND the call's own history is referenced (`ta.sma(close, 5)[1]`);
+   short-circuiting gates only the value, and `[1]` on it is the previous
+   BAR. Without a `[k]` read the reached-only inline compute is TV's clock
+   (oliver1002 / louislapis9 / ycelestine77 / quantbyboji / miemomo3 exact at
+   100% on it, 2026-09-04). For a `[k]`-read site codegen emits
    `const auto _pf_every_bar_ta_N = <site>;` (plus the site's `_hist_call_*`
    push for a direct `[k]`) BEFORE the statement, in dynamic mode too
    (`codegen/ta.py::_lazy_edge_ta_hoist_plan`, `_emit_lazy_edge_ta_hoists`;
    `tests/test_lazy_edge_ta_every_bar.py`). The rule is per family
    (cadence-7 ternary/lazy-and probes, same tapes) and the hoist is an
-   ALLOW-LIST (`LAZY_EVERY_BAR_TA` = highest/lowest/sma/ema): a broad hoist
-   of every family cost 170 tiers / 30 hard lanes on Cloud Run
-   (2026-09-04), so an unpinned family keeps its existing lowering until a
-   tape pins it. `change`/`mom`/`roc` (`LAZY_SOURCE_CLOCK_TA`) read the
+   ALLOW-LIST (`LAZY_EVERY_BAR_TA` = highest/lowest/sma/ema) gated on the
+   `[k]` read: a broad hoist of every family cost 170 tiers / 30 hard lanes
+   on Cloud Run (2026-09-04), so an unpinned family keeps its existing
+   lowering until a tape pins it. `change`/`mom`/`roc` (`LAZY_SOURCE_CLOCK_TA`) read the
    call's OWN held `source[length]` -- written only when the call executes,
    held on skipped bars, na before the first execution -- through the
    generated `_PFLazySourceClock` + `_pf_lazy_src_hist_N` members
    (`tests/test_lazy_source_clock*.py`; this replaced the #64 roc3-only
-   clock, whose eager first-execution fallback the tapes refute);
+   clock, whose eager first-execution fallback the tapes refute; its eager
+   chart `source[length]` read between executions closer than `length` bars
+   is kept for chart-builtin sources via `_pf_lazy_src_chart_N`);
    `cum`/`barssince`/`valuewhen`/`cross*`/`rising`/`falling`/`math.sum`
    (`LAZY_PER_EXECUTION_TA`) keep the reached-only inline compute, which is
    TradingView's per-execution clock, and never precalc.

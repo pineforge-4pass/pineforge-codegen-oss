@@ -182,3 +182,38 @@ int main() {
 }
 """
     assert _compile_and_run(transpile(pine) + driver) == "1011101"
+
+
+def test_executions_closer_than_length_read_the_eager_chart_source():
+    """#64's regime the tapes do not distinguish: the previous execution is
+    2 bars back for length 3, so the previous source is the chart close[3]
+    (bar 3 = 106) rather than the held history (na: no execution at or before
+    bar 3)."""
+    pine = """//@version=6
+strategy("lazy source clock close executions")
+var float lastRoc = na
+gate = bar_index == 4 or bar_index == 6
+v = gate ? ta.roc(close, 3) : na
+if not na(v)
+    lastRoc := v
+"""
+    driver = r"""
+#include <iomanip>
+#include <iostream>
+
+static Bar make_bar(double close, int64_t timestamp) {
+    return Bar{close, close, close, close, 1.0, timestamp};
+}
+
+int main() {
+    Bar bars[8];
+    for (int i = 0; i < 8; ++i) {
+        bars[i] = make_bar(100.0 + 2.0 * i, 1000 + static_cast<int64_t>(i) * 60000);
+    }
+    GeneratedStrategy s;
+    s.run(bars, 8);
+    std::cout << std::setprecision(10) << s.lastRoc << '\n';   // (112 - 106) / 106 * 100
+    return 0;
+}
+"""
+    assert _compile_and_run(transpile(pine) + driver) == "5.660377358"

@@ -224,36 +224,38 @@ def test_mutable_global_security_stays_eager():
 # ----------------------------------------------------------------------
 
 
-def test_chart_context_conditional_ta_is_hoisted_every_bar():
-    """Chart-context lazy-edge TA is NOT the security evaluator's lazy path.
-
-    Re-pinned 2026-09-03 (``lab tv``, NYSE:F 1D): a top-level chart ``ta.*``
-    below a ``?:`` arm or ``and``/``or`` RHS advances every bar on TradingView
-    (``... and close > ta.ema(close, 5)[1]`` -> every-bar 23/23 vs per-call 27;
-    ``... ? ta.highest(high, 5)[1] : na`` -> 38/39 vs 2/39). Codegen hoists it
-    into a ``_pf_every_bar_ta_N`` local before the statement; only the value
-    is gated. The security-evaluator lazy rule pinned by the rest of this file
-    is untouched and never uses ``_secval_`` on the chart path.
-    """
+def test_chart_context_conditional_ta_is_inline_without_history_read():
+    """The chart path keeps its reached-only ``?:`` / ``&&`` compute unless the
+    call's own history is read (2026-09-04: hoisting ``c ? ta.ema(...) : 0``
+    shapes broke quantbyboji/ycelestine77/oliver1002/louislapis9 on ETH, all
+    exact at 100% on this lowering). Never ``_secval_`` on the chart path."""
     cpp = transpile(_strategy(
         "c = close > open\n"
         "v = c ? ta.ema(close, 20) : 0.0\n"
         "w = c and ta.rsi(close, 14) > 50.0"
     ))
+    assign = next(ln for ln in cpp.splitlines() if ln.strip().startswith("v = ("))
+    assert "? ((history_advances_new_bar() ? _ta_ema_1.compute" in assign
+    assert "_secval_" not in assign
+    w_assign = next(ln for ln in cpp.splitlines() if ln.strip().startswith("w = ("))
+    assert "_ta_rsi_2.compute" in w_assign
+    assert "_pf_every_bar_ta_" not in cpp
+
+
+def test_chart_context_conditional_ta_with_history_read_is_hoisted_every_bar():
+    """With ``[1]`` on the call TradingView advances the built-in every bar
+    (lab tv 2026-09-03, ``... and close > ta.ema(close, 5)[1]`` 23/23 vs
+    per-call 27): codegen hoists it before the statement."""
+    cpp = transpile(_strategy(
+        "c = close > open\n"
+        "v = c ? ta.ema(close, 20)[1] : 0.0"
+    ))
     lines = cpp.splitlines()
-    ema_hoist = next(
-        ln for ln in lines if ln.strip().startswith("const auto _pf_every_bar_ta_1 = ")
-    )
-    assert "history_advances_new_bar() ? _ta_ema_1.compute" in ema_hoist
+    hoist = next(ln for ln in lines if ln.strip().startswith("const auto _pf_every_bar_ta_1 = "))
+    assert "_ta_ema_1.compute" in hoist
     assign = next(ln for ln in lines if ln.strip().startswith("v = ("))
-    assert assign.strip() == "v = ((c) ? (_pf_every_bar_ta_1) : (0.0));"
-    assert "_secval_" not in assign and "_secval_" not in ema_hoist
-    # ``ta.rsi`` has no every-bar tape yet: the allow-list leaves its inline
-    # reached-only compute in place (see LAZY_EVERY_BAR_TA in codegen/ta.py).
-    w_assign = next(ln for ln in lines if ln.strip().startswith("w = ("))
-    assert "_ta_rsi_2.compute" in w_assign and "_pf_every_bar_ta_" not in w_assign
-    assert "_pf_every_bar_ta_2" not in cpp
-    assert lines.index(ema_hoist) < lines.index(assign)
+    assert assign.strip() == "v = ((c) ? (_hist_call_1[(int)(1)]) : (0.0));"
+    assert lines.index(hoist) < lines.index(assign)
 
 
 def test_chart_context_unconditional_ta_unchanged():

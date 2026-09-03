@@ -948,6 +948,8 @@ class TopLevelEmitter:
             for info in self._lazy_source_clock_by_node.values():
                 lines.append(f"            {info['clock']}.reset();")
                 lines.append(f"            {info['hist']}.clear();")
+                if info["chart"] is not None:
+                    lines.append(f"            {info['chart']}.clear();")
             lines.append("        }")
             for info in self._lazy_source_clock_by_node.values():
                 lines.append(f"        {info['clock']}.begin_bar(bar_index_);")
@@ -957,6 +959,13 @@ class TopLevelEmitter:
                     info["hist"],
                     f"{info['clock']}.bar_base_source",
                 )
+                if info["chart"] is not None:
+                    self._emit_history_series_write(
+                        lines,
+                        "        ",
+                        info["chart"],
+                        self._visit_expr(info["chart_source"]),
+                    )
 
         # reset_run_state() owns engine/broker state, while these generated
         # Series members belong to the strategy object. Clear all of them on

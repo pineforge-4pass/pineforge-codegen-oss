@@ -14,9 +14,17 @@ Pinned 2026-09-03 with ``lab tv`` on NYSE:F 1D (campaign scratch tapes
 
 Rule: a stateful ``ta.*`` call inside ANY expression operand of a top-level
 statement -- the RHS of a Pine-v6 lazy ``and``/``or``, either ternary arm,
-nested comparisons -- is evaluated on EVERY bar. Short-circuiting and branch
-selection gate only the value, never the built-in's state, and ``[1]`` on such
-a call is the previous BAR's value. A stateful call inside an ``if`` / local
+nested comparisons -- WHOSE OWN HISTORY IS READ (``[k]`` on the call) is
+evaluated on EVERY bar. Short-circuiting and branch selection gate only the
+value, never the built-in's state, and ``[1]`` on such a call is the previous
+BAR's value. Every one of the every-bar tapes reads ``[1]`` on the call.
+Without a history read the call stays on the reached-only clock: hoisting
+``volume < ta.sma(volume, 20)`` (oliver1002), ``adxVal > ta.sma(adxVal, 7)``
+(louislapis9), ``ta.change(ta.sma(close, 50)) > 0`` (ycelestine77), five
+``ta.ema(close, 200)`` under ``or`` (quantbyboji) and ``ta.highest(high, n) /
+entry_price > 1.05`` (miemomo3) turned 100%-exact ETH/BTC probes weak on
+Cloud Run (2026-09-04). The hoist is also an allow-list of the families pinned
+every-bar (highest, lowest, sma, ema). A stateful call inside an ``if`` / local
 block / function body that does not execute every bar stays execution-gated
 (pinned separately; the in-block compute + ``_hist_call_*`` push is untouched).
 
@@ -214,12 +222,13 @@ def test_hoist_is_independent_of_run_mode():
 # Shapes: or-RHS, ternary arms, nesting depth, if conditions, expression stmts
 # ---------------------------------------------------------------------------
 
+
 def test_or_rhs_and_not_and_nested_comparison_depth():
     cpp = _cpp(
         "pred = close > open\n"
-        "a = pred or close > ta.sma(close, 5)\n"
-        "b = not (pred and (close > open or ta.lowest(low, 14) < close))\n"
-        "c = pred and (bar_index > 5 and (close - ta.ema(close, 9)) > 0)\n"
+        "a = pred or close > ta.sma(close, 5)[1]\n"
+        "b = not (pred and (close > open or ta.lowest(low, 14)[1] < close))\n"
+        "c = pred and (bar_index > 5 and (close - ta.ema(close, 9)[2]) > 0)\n"
         "plot(a or b or c ? 1 : 0)"
     )
     for n, member, arg in (
@@ -228,43 +237,49 @@ def test_or_rhs_and_not_and_nested_comparison_depth():
         (3, "_ta_ema_3", "current_bar_.close"),
     ):
         assert f"{member}.compute({arg})" in _hoist(cpp, n)
-    for var, n in (("a", 1), ("b", 2), ("c", 3)):
+    for var, n, offset in (("a", 1, 1), ("b", 2, 1), ("c", 3, 2)):
         line = _stmt(cpp, f"{var} = ")
-        assert f"_pf_every_bar_ta_{n}" in line and ".compute(" not in line
+        assert f"_hist_call_{n}[(int)({offset})]" in line and ".compute(" not in line
     assert _stmt(cpp, "b = ").strip().startswith("b = !((pred &&")
+
 
 
 def test_ternary_both_arms_and_condition_stays_eager():
     cpp = _cpp(
         "pred = close > open\n"
-        "x = pred ? ta.sma(close, 5) : ta.ema(close, 5)\n"
+        "x = pred ? ta.sma(close, 5)[1] : ta.ema(close, 5)[1]\n"
         "y = ta.rsi(close, 14) > 50 ? close : open\n"
         "plot(x + y)"
     )
     assert "_ta_sma_1.compute" in _hoist(cpp, 1)
     assert "_ta_ema_2.compute" in _hoist(cpp, 2)
     x_line = _stmt(cpp, "x = (")
-    assert "_pf_every_bar_ta_1" in x_line and "_pf_every_bar_ta_2" in x_line
+    assert "_hist_call_1[(int)(1)]" in x_line and "_hist_call_2[(int)(1)]" in x_line
+    assert ".compute(" not in x_line
     # The ternary condition is an eager operand: evaluated every bar already.
     y_line = _stmt(cpp, "y = (")
     assert "_ta_rsi_3.compute" in y_line and "_pf_every_bar_ta_" not in y_line
     assert len(re.findall(r"const auto _pf_every_bar_ta_\d+ = ", cpp)) == 2
 
 
-def test_nested_ta_hoists_inner_before_outer_and_history_push_in_between():
+
+def test_nested_history_read_hoists_inner_only_and_outer_reads_its_series():
+    """``ta.sma(ta.highest(high, 5)[1], 3)``: the inner call's history is read,
+    so it advances every bar; the outer SMA has no history read and keeps the
+    reached-only inline compute over the hoisted Series."""
     cpp = _cpp(
         "pred = close > open\n"
         "s = pred and ta.sma(ta.highest(high, 5)[1], 3) > close\n"
         "plot(s ? 1 : 0)"
     )
     inner = _hoist(cpp, 1)
-    outer = _hoist(cpp, 2)
     push = "        if (history_advances_new_bar()) _hist_call_1.push(_pf_every_bar_ta_1);"
     assert "_ta_highest_1.compute(current_bar_.high)" in inner
-    assert "_ta_sma_2.compute(_hist_call_1[(int)(1)])" in outer
     lines = _lines(cpp)
-    assert _index(cpp, inner) < lines.index(push) < _index(cpp, outer) < _index(cpp, _stmt(cpp, "s = ("))
-    assert "_pf_every_bar_ta_2" in _stmt(cpp, "s = (")
+    s_line = _stmt(cpp, "s = (")
+    assert _index(cpp, inner) < lines.index(push) < _index(cpp, s_line)
+    assert "_ta_sma_2.compute(_hist_call_1[(int)(1)])" in s_line
+    assert "_pf_every_bar_ta_2" not in cpp
 
 
 def test_top_level_if_condition_hoists_but_else_if_condition_does_not():
@@ -290,13 +305,14 @@ def test_top_level_if_condition_hoists_but_else_if_condition_does_not():
     assert "_pf_every_bar_ta_2" not in cpp
 
 
+
 def test_expression_statement_and_strategy_call_arguments_hoist():
     cpp = _cpp(
         "pred = close > open\n"
-        "plot(pred ? ta.sma(close, 5) : na)\n"
+        "plot(pred ? ta.sma(close, 5)[1] : na)\n"
         "if pred\n"
         "    strategy.entry(\"L\", strategy.long)\n"
-        "strategy.close(\"L\", when = pred and ta.ema(close, 9) > close)"
+        "strategy.close(\"L\", when = pred and ta.ema(close, 9)[1] > close)"
     )
     assert "_ta_sma_1.compute(current_bar_.close)" in _hoist(cpp, 1)
     assert "_ta_ema_2.compute(current_bar_.close)" in _hoist(cpp, 2)
@@ -305,16 +321,37 @@ def test_expression_statement_and_strategy_call_arguments_hoist():
     assert on_bar.count("_ta_ema_2.compute(") == 1
 
 
-def test_assignment_and_tuple_assign_values_hoist():
+
+def test_assignment_values_hoist():
     cpp = _cpp(
         "pred = close > open\n"
         "x = 0.0\n"
-        "x := pred ? ta.sma(close, 5) : x\n"
+        "x := pred ? ta.sma(close, 5)[1] : x\n"
         "plot(x)"
     )
     assert "_ta_sma_1.compute(current_bar_.close)" in _hoist(cpp, 1)
     x_line = _stmt(cpp, "x = ((pred)")
-    assert "_pf_every_bar_ta_1" in x_line and ".compute(" not in x_line
+    assert "_hist_call_1[(int)(1)]" in x_line and ".compute(" not in x_line
+
+
+def test_allow_listed_family_without_history_read_keeps_inline_lowering():
+    """The five 2026-09-04 hard-lane shapes: exact at 100% on the reached-only
+    inline compute, weak when hoisted. No ``[k]`` read -> no hoist."""
+    cpp = _cpp(
+        "[plusDI, minusDI, adxVal] = ta.dmi(14, 14)\n"
+        "isAdxStrong = adxVal > 30 and adxVal > ta.sma(adxVal, 7)\n"
+        "isSpring = close > open and (volume < ta.sma(volume, 20))\n"
+        "baseLong = ta.mom(close, 20) > 0 and ta.change(ta.sma(close, 50)) > 0\n"
+        "emaX = ta.crossover(close, ta.ema(close, 200)) or low <= ta.ema(close, 200) and high >= ta.ema(close, 200)\n"
+        "timeExit = bar_index > 3 and ta.highest(high, 10) / close > 1.05\n"
+        "plot(isAdxStrong or isSpring or baseLong or emaX or timeExit ? 1 : 0)"
+    )
+    assert "_pf_every_bar_ta_" not in cpp
+    assert "_ta_sma_" in _stmt(cpp, "isAdxStrong = (") and ".compute(adxVal)" in _stmt(cpp, "isAdxStrong = (")
+    assert ".compute(current_bar_.volume)" in _stmt(cpp, "isSpring = (")
+    assert ".compute(current_bar_.close)" in _stmt(cpp, "baseLong = (")
+    assert _stmt(cpp, "emaX = (").count("_ta_ema_") >= 3
+    assert "_ta_highest_" in _stmt(cpp, "timeExit = (")
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +405,7 @@ def test_var_initializer_is_not_hoisted():
 #   per-execution      cum, barssince, valuewhen, cross, crossover, rising 39/39,
 #                      math.sum 39/39 (every-bar 0..31/39)
 
+
 def test_source_clock_families_are_not_hoisted_and_use_held_source_history():
     cpp = _cpp(
         "gate = close > open\n"
@@ -378,12 +416,15 @@ def test_source_clock_families_are_not_hoisted_and_use_held_source_history():
     )
     assert "_pf_every_bar_ta_" not in cpp
     assert "struct _PFLazySourceClock {" in cpp
-    assert "_pf_lazy_src_clock_1.roc(current_bar_.close, _pf_lazy_src_hist_1[2])" in _stmt(cpp, "longish = (")
-    assert "_pf_lazy_src_clock_2.change(current_bar_.close, _pf_lazy_src_hist_2[2])" in _stmt(cpp, "ch = (")
-    assert "_pf_lazy_src_clock_3.change(current_bar_.close, _pf_lazy_src_hist_3[2])" in _stmt(cpp, "mo = (")
-    for n in (1, 2, 3):
-        assert f"std::vector<double> _precalc__ta_" not in cpp or f"_precalc__ta_roc_{n}" not in cpp
+    for var, n, method in (("longish", 1, "roc"), ("ch", 2, "change"), ("mo", 3, "change")):
+        line = _stmt(cpp, f"{var} = (")
+        assert (
+            f"_pf_lazy_src_clock_{n}.{method}(current_bar_.close, "
+            f"_pf_lazy_src_clock_{n}.previous_source(_pf_lazy_src_hist_{n}[2], "
+            f"_pf_lazy_src_chart_{n}[3], 3, bar_index_))"
+        ) in line
         assert f"Series<double> _pf_lazy_src_hist_{n}{{4}};" in cpp
+        assert f"Series<double> _pf_lazy_src_chart_{n}{{4}};" in cpp
     assert "_precalc__ta_roc" not in cpp
     assert "_precalc__ta_change" not in cpp
     assert "_precalc__ta_mom" not in cpp

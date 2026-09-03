@@ -4213,6 +4213,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             literal = info["length_literal"]
             capacity = f"{{{literal + 1}}}" if literal is not None and literal >= 1 else ""
             lines.append(f"    Series<double> {info['hist']}{capacity};")
+            if info["chart"] is not None:
+                lines.append(f"    Series<double> {info['chart']}{capacity};")
 
         # Security evaluator TA members (cloned from expression dependencies)
         # Skip for user function call expressions — their TA deps are internal to the function

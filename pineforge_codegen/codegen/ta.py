@@ -337,12 +337,23 @@ class TaSiteHelper:
     #                       exactly the reached-only inline ``compute`` lowering
     #                       (every-bar 0..31/39).
     #
-    # The hoist is an ALLOW-LIST. A broad every-bar hoist of every stateful
-    # family measured on Cloud Run against the full population (2026-09-04,
-    # like-for-like vs the same lab bundle) fixed the pinned shapes but cost
-    # 170 tiers / 30 hard-lane regressions: TradingView's clock under lazy
-    # evaluation is per family, so only families pinned every-bar by tape
-    # hoist (``LAZY_EVERY_BAR_TA``; ``lowest`` is ``highest``'s mirror).
+    # The hoist is an ALLOW-LIST and requires a direct ``[k]`` read. A broad
+    # every-bar hoist of every stateful family measured on Cloud Run against
+    # the full population (2026-09-04, like-for-like vs the same lab bundle)
+    # fixed the pinned shapes but cost 170 tiers / 30 hard-lane regressions,
+    # and hoisting allow-listed families WITHOUT a history read still broke
+    # four ETH hard-lane probes that main matched at 100%: ``adxVal > 30 and
+    # adxVal > ta.sma(adxVal, 7)`` (louislapis9), ``volume < ta.sma(volume,
+    # 20)`` under ``and`` (oliver1002 -- the original pf-probe-oliver-dual-
+    # vol-sma pin), ``ta.change(ta.sma(close, 50)) > 0`` under ``and``
+    # (ycelestine77), five ``ta.ema(close, 200)`` under ``or`` (quantbyboji),
+    # ``ta.highest(high, n) / entry > 1.05`` under ``and`` (miemomo3). Every
+    # every-bar tape (highest/sma/ema ``[1]`` under ``and``, the ternary
+    # ``ta.highest(high, 5)[1]``, robmagnaye) reads ``[k]`` on the call. So:
+    # TradingView keeps a lazily executed call on the reached-only clock
+    # unless the call's own history is referenced, in which case the call is
+    # evaluated on every bar. Only ``LAZY_EVERY_BAR_TA`` families (``lowest``
+    # is ``highest``'s mirror) with a direct ``[k]`` read hoist.
     # ``LAZY_SOURCE_CLOCK_TA`` routes to the hold-last clock;
     # ``LAZY_PER_EXECUTION_TA`` (the seven taped families -- ``math.sum``
     # 39/39 per-execution, na until three executed samples -- plus the exact
@@ -360,6 +371,53 @@ class TaSiteHelper:
         "family not pinned every-bar by tape (LAZY_EVERY_BAR_TA allow-list): "
         "existing lowering"
     )
+    NO_HISTORY_READ_REASON = (
+        "allow-listed family without a direct [k] history read: TradingView "
+        "keeps the reached-only clock (louislapis9/oliver1002/miemomo3/"
+        "ycelestine77/quantbyboji exact on main, 2026-09-04)"
+    )
+
+    _LAZY_SOURCE_CLOCK_BAR_SOURCES = frozenset({
+        "open", "high", "low", "close", "volume", "hl2", "hlc3", "ohlc4", "hlcc4",
+    })
+
+    def _script_has_user_binding(self, name: str) -> bool:
+        cache = getattr(self, "_user_binding_names", None)
+        if cache is None:
+            cache = set()
+            ast = getattr(self.ctx, "ast", None)
+            for node in self._walk_ast(ast):
+                if isinstance(node, VarDecl):
+                    cache.add(node.name)
+                elif isinstance(node, TupleAssign):
+                    cache.update(node.names)
+                elif isinstance(node, ForStmt):
+                    cache.add(node.var)
+                elif isinstance(node, ForInStmt):
+                    if node.var:
+                        cache.add(node.var)
+                    cache.update(node.vars or ())
+                elif isinstance(node, FuncDef):
+                    cache.add(node.name)
+                    cache.update(node.params)
+            self._user_binding_names = cache
+        return name in cache
+
+    def _lazy_source_clock_chart_source(self, site: "TACallSite"):
+        """The unshadowed bar-builtin source node, or None.
+
+        Between two executions closer than ``length`` bars the pin does not
+        distinguish the held read from #64's eager chart ``source[length]``;
+        the eager read is kept where the source is a plain chart builtin.
+        """
+        source = site.compute_args[0] if site.compute_args else None
+        if (
+            isinstance(source, Identifier)
+            and source.name in self._LAZY_SOURCE_CLOCK_BAR_SOURCES
+            and not self._script_has_user_binding(source.name)
+        ):
+            return source
+        return None
 
     @staticmethod
     def _lazy_source_clock_length_node(node):
@@ -430,9 +488,16 @@ class TaSiteHelper:
         clocks: dict[int, dict] = {}
         routed = self._lazy_edge_ta_hoist_plan()["source_clock"]
         for index, (node_id, info) in enumerate(routed.items(), start=1):
+            chart_source = self._lazy_source_clock_chart_source(info["site"])
             clocks[node_id] = {
                 "clock": allocate(f"_pf_lazy_src_clock_{index}", reserved_members),
                 "hist": allocate(f"_pf_lazy_src_hist_{index}", reserved_members),
+                "chart": (
+                    allocate(f"_pf_lazy_src_chart_{index}", reserved_members)
+                    if chart_source is not None
+                    else None
+                ),
+                "chart_source": chart_source,
                 "site": info["site"],
                 "node": info["node"],
                 "length_literal": info["length_literal"],
@@ -445,16 +510,22 @@ class TaSiteHelper:
         source = self._visit_expr(site.compute_args[0])
         length_node = self._lazy_source_clock_length_node(node)
         literal = self._lazy_source_clock_length_literal(length_node)
+        chart = info["chart"]
         if literal is not None:
-            previous = (
-                f"{info['hist']}[{literal - 1}]" if literal >= 1 else "na<double>()"
-            )
+            length_expr = str(literal)
+            held = f"{info['hist']}[{literal - 1}]" if literal >= 1 else "na<double>()"
+            eager = f"{chart}[{literal}]" if chart is not None else held
         else:
             length_expr = f"(int)({self._visit_expr(length_node)})"
-            previous = (
+            held = (
                 f"(({length_expr}) >= 1 ? {info['hist']}[({length_expr}) - 1] "
                 f": na<double>())"
             )
+            eager = f"{chart}[{length_expr}]" if chart is not None else held
+        previous = (
+            f"{info['clock']}.previous_source({held}, {eager}, {length_expr}, "
+            f"bar_index_)"
+        )
         method = "roc" if self._ta_name_from_site(site) == "roc" else "change"
         return f"{info['clock']}.{method}({source}, {previous})"
 
@@ -469,18 +540,25 @@ class TaSiteHelper:
                 "// TradingView keeps a lazily executed call's `source[k]` history per",
                 "// call: the source is written only on bars where the call executes,",
                 "// the last executed value is held on the bars it skips, and the",
-                "// history is na before the first execution. The paired Series holds",
-                "// `bar_base_source` (the value committed by earlier bars) once per",
-                "// chart bar, so `hist[length - 1]` is the source at the most recent",
-                "// execution at or before bar-length.",
+                "// history is na before the first execution. The paired hist Series",
+                "// holds `bar_base_source` (the value committed by earlier bars) once",
+                "// per chart bar, so `hist[length - 1]` is the source at the most",
+                "// recent execution at or before bar-length. Between two executions",
+                "// closer than `length` bars the tapes do not distinguish that read",
+                "// from the eager chart `source[length]`, so the #64 eager read is",
+                "// kept there for chart-builtin sources.",
                 f"struct {type_name} {{",
                 "    double committed_source = na<double>();",
+                "    int committed_bar = -1;",
                 "    double bar_base_source = na<double>();",
+                "    int bar_base_bar = -1;",
                 "    int working_bar = -1;",
                 "",
                 "    void reset() {",
                 "        committed_source = na<double>();",
+                "        committed_bar = -1;",
                 "        bar_base_source = na<double>();",
+                "        bar_base_bar = -1;",
                 "        working_bar = -1;",
                 "    }",
                 "",
@@ -489,12 +567,22 @@ class TaSiteHelper:
                 "    void begin_bar(int bar) {",
                 "        if (working_bar != bar) {",
                 "            bar_base_source = committed_source;",
+                "            bar_base_bar = committed_bar;",
                 "            working_bar = bar;",
                 "        }",
                 "    }",
                 "",
+                "    double previous_source(double held, double eager, int length,",
+                "                           int bar) const {",
+                "        if (bar_base_bar < 0 || length < 1) {",
+                "            return na<double>();",
+                "        }",
+                "        return bar - bar_base_bar >= length ? held : eager;",
+                "    }",
+                "",
                 "    double change(double source, double previous) {",
                 "        committed_source = source;",
+                "        committed_bar = working_bar;",
                 "        if (is_na(source) || is_na(previous)) {",
                 "            return na<double>();",
                 "        }",
@@ -503,6 +591,7 @@ class TaSiteHelper:
                 "",
                 "    double roc(double source, double previous) {",
                 "        committed_source = source;",
+                "        committed_bar = working_bar;",
                 "        if (is_na(source) || is_na(previous) || previous == 0.0) {",
                 "            return na<double>();",
                 "        }",
@@ -607,7 +696,9 @@ class TaSiteHelper:
 
     _LAZY_EDGE_HOIST_NAME_PREFIX = "_pf_every_bar_ta_"
 
-    def _lazy_edge_hoist_block_reason(self, site: "TACallSite") -> str | None:
+    def _lazy_edge_hoist_block_reason(
+        self, site: "TACallSite", history_read: bool = False
+    ) -> str | None:
         """Why an otherwise-eligible lazy-edge site is left on its lowering."""
         if getattr(site, "owner_func", None) is not None:
             return "site belongs to a user function body"
@@ -623,6 +714,8 @@ class TaSiteHelper:
             return "hold-last source-clock family with a non-numeric source"
         if family not in self.LAZY_EVERY_BAR_TA:
             return self.UNPINNED_LAZY_EDGE_REASON
+        if not history_read:
+            return self.NO_HISTORY_READ_REASON
         return None
 
     def _lazy_edge_ta_hoist_plan(self) -> dict:
@@ -631,7 +724,8 @@ class TaSiteHelper:
         Returns ``{"by_stmt": {id(stmt): [unit, ...]}, "call_nodes": set,
         "source_clock": {id(node): {"node", "site", "length_literal"}},
         "per_execution_nodes": set, "skipped": [(node, site, reason), ...]}``.
-        Only ``LAZY_EVERY_BAR_TA`` families become hoist units.
+        Only ``LAZY_EVERY_BAR_TA`` families whose call carries a direct
+        ``[k]`` history read (``Subscript`` on the call) become hoist units.
         ``source_clock`` sites (change/mom/roc) lower through
         ``_lazy_source_clock_expr``; ``per_execution_nodes`` keep the inline
         compute; both are opted out of precalc. Every other family is listed
@@ -664,7 +758,9 @@ class TaSiteHelper:
         skipped: list[tuple] = []
         counter = [0]
 
-        def scan(expr, under_lazy: bool, units: list[dict]) -> None:
+        def scan(
+            expr, under_lazy: bool, units: list[dict], history_read: bool = False
+        ) -> None:
             if expr is None:
                 return
             if isinstance(expr, FuncCall):
@@ -701,7 +797,7 @@ class TaSiteHelper:
                         ),
                     }
                     return
-                reason = self._lazy_edge_hoist_block_reason(site)
+                reason = self._lazy_edge_hoist_block_reason(site, history_read)
                 if reason is not None:
                     if family in self.LAZY_PER_EXECUTION_TA:
                         per_execution_nodes.add(id(expr))
@@ -733,7 +829,8 @@ class TaSiteHelper:
                 scan(expr.operand, under_lazy, units)
                 return
             if isinstance(expr, Subscript):
-                scan(expr.object, under_lazy, units)
+                # ``call(...)[k]``: the call's own history is referenced.
+                scan(expr.object, under_lazy, units, history_read=True)
                 scan(expr.index, under_lazy, units)
                 if isinstance(expr.object, FuncCall) and id(expr.object) in call_nodes:
                     units.append({"kind": "hist", "node": expr})
