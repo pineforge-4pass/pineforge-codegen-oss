@@ -329,8 +329,9 @@ class TaSiteHelper:
     #                       the history is na before the first execution
     #                       (call 1 of every value probe has no TV entry).
     #                       every-bar 0/38..0/39, ring-of-executions 0..1/39.
-    #   per-execution       cum, barssince, valuewhen, cross, crossover 39/39
-    #                       and rising 39/39 (strictly monotonic over its
+    #   per-execution       cum, barssince, valuewhen, cross, crossover 39/39,
+    #                       rising 39/39 (strictly monotonic over its executed
+    #                       samples) and math.sum 39/39 (na until three
     #                       executed samples) -- the native only ever sees the
     #                       samples of bars where the call executes, which is
     #                       exactly the reached-only inline ``compute`` lowering
@@ -343,7 +344,8 @@ class TaSiteHelper:
     # evaluation is per family, so only families pinned every-bar by tape
     # hoist (``LAZY_EVERY_BAR_TA``; ``lowest`` is ``highest``'s mirror).
     # ``LAZY_SOURCE_CLOCK_TA`` routes to the hold-last clock;
-    # ``LAZY_PER_EXECUTION_TA`` (the six taped families plus the exact
+    # ``LAZY_PER_EXECUTION_TA`` (the seven taped families -- ``math.sum``
+    # 39/39 per-execution, na until three executed samples -- plus the exact
     # mirrors ``crossunder``/``falling``) keeps the inline compute and never
     # precalcs. Every other family keeps its existing lowering unchanged
     # (inline compute when reached; precalc when static) until a tape pins
@@ -352,7 +354,7 @@ class TaSiteHelper:
     LAZY_SOURCE_CLOCK_TA = frozenset({"change", "mom", "roc"})
     LAZY_PER_EXECUTION_TA = frozenset({
         "cum", "barssince", "valuewhen", "cross", "crossover", "crossunder",
-        "rising", "falling",
+        "rising", "falling", "sum",
     })
     UNPINNED_LAZY_EDGE_REASON = (
         "family not pinned every-bar by tape (LAZY_EVERY_BAR_TA allow-list): "

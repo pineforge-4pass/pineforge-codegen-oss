@@ -365,8 +365,8 @@ def test_var_initializer_is_not_hoisted():
 # through the entry size) plus lazy-``and`` probes:
 #   hold-last source   roc 38/38 (+39/39 entries), change 39/39, mom 39/39
 #                      (every-bar 0/38..0/39; ring-of-executions 0..1/39)
-#   per-execution      cum, barssince, valuewhen, cross, crossover, rising 39/39
-#                      (every-bar 0..31/39)
+#   per-execution      cum, barssince, valuewhen, cross, crossover, rising 39/39,
+#                      math.sum 39/39 (every-bar 0..31/39)
 
 def test_source_clock_families_are_not_hoisted_and_use_held_source_history():
     cpp = _cpp(
@@ -399,7 +399,8 @@ def test_per_execution_families_keep_inline_compute_and_never_precalc():
         "d = gate and ta.crossover(close, sma5)\n"
         "e = gate and ta.cross(close, sma5)\n"
         "f = gate and ta.rising(close, 3)\n"
-        "plot(a + b + c + (d or e or f ? 1 : 0))"
+        "g = gate ? math.sum(close, 3) : na\n"
+        "plot(a + b + c + g + (d or e or f ? 1 : 0))"
     )
     assert "_pf_every_bar_ta_" not in cpp
     assert "_PFLazySourceClock" not in cpp
@@ -407,6 +408,7 @@ def test_per_execution_families_keep_inline_compute_and_never_precalc():
     for var, member in (
         ("a", "_ta_cum_2"), ("b", "_ta_barssince_3"), ("c", "_ta_valuewhen_4"),
         ("d", "_ta_crossover_5"), ("e", "_ta_cross_6"), ("f", "_ta_rising_7"),
+        ("g", "_ta_sum_8"),
     ):
         line = _stmt(cpp, f"{var} = (")
         assert f"{member}.compute(" in line, (var, line)

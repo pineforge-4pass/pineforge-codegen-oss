@@ -320,7 +320,7 @@ you delete or weaken the special case, the test will tell you.
    generated `_PFLazySourceClock` + `_pf_lazy_src_hist_N` members
    (`tests/test_lazy_source_clock*.py`; this replaced the #64 roc3-only
    clock, whose eager first-execution fallback the tapes refute);
-   `cum`/`barssince`/`valuewhen`/`cross*`/`rising`/`falling`
+   `cum`/`barssince`/`valuewhen`/`cross*`/`rising`/`falling`/`math.sum`
    (`LAZY_PER_EXECUTION_TA`) keep the reached-only inline compute, which is
    TradingView's per-execution clock, and never precalc.
    Sites inside `if`/loop/function bodies, `else if` conditions, `var`
