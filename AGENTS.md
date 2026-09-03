@@ -305,7 +305,8 @@ you delete or weaken the special case, the test will tell you.
    every-bar evaluation.** TradingView (pinned 2026-09-03 with `lab tv`,
    NYSE:F 1D) advances a stateful `ta.*` call on EVERY bar when it sits below
    a Pine-v6 lazy `and`/`or` RHS or a ternary arm of a top-level statement
-   AND the call's own history is referenced (`ta.sma(close, 5)[1]`);
+   AND the call's own history is referenced (`ta.sma(close, 5)[1]`; the
+   bare twins of every tape are per-execution);
    short-circuiting gates only the value, and `[1]` on it is the previous
    BAR. Without a `[k]` read the reached-only inline compute is TV's clock
    (oliver1002 / louislapis9 / ycelestine77 / quantbyboji / miemomo3 exact at

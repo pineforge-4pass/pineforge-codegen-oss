@@ -349,11 +349,17 @@ class TaSiteHelper:
     # (ycelestine77), five ``ta.ema(close, 200)`` under ``or`` (quantbyboji),
     # ``ta.highest(high, n) / entry > 1.05`` under ``and`` (miemomo3). Every
     # every-bar tape (highest/sma/ema ``[1]`` under ``and``, the ternary
-    # ``ta.highest(high, 5)[1]``, robmagnaye) reads ``[k]`` on the call. So:
-    # TradingView keeps a lazily executed call on the reached-only clock
-    # unless the call's own history is referenced, in which case the call is
-    # evaluated on every bar. Only ``LAZY_EVERY_BAR_TA`` families (``lowest``
-    # is ``highest``'s mirror) with a direct ``[k]`` read hoist.
+    # ``ta.highest(high, 5)[1]``, robmagnaye) reads ``[k]`` on the call, and
+    # the bare twins of those tapes (2026-09-04, same cadence-7 probes) are
+    # per-execution: ``close > ta.sma(close, 5)`` ring 39/39 (every-bar 23),
+    # ``close > ta.ema(close, 5)`` ring 39/39 (26), ``? ta.sma(close, 5) : na``
+    # ring 39/39 (2, na until five executed samples), ``? ta.highest(high, 5)
+    # : na`` ring 38/39 (11; TV is na with one executed sample, then the
+    # partial maximum). So: TradingView keeps a lazily executed call on the
+    # reached-only clock unless the call's own history is referenced (``[k]``),
+    # in which case it materialises a continuous series and the call is
+    # evaluated on every bar. Only ``LAZY_EVERY_BAR_TA`` families
+    # (``lowest`` is ``highest``'s mirror) with such a read hoist.
     # ``LAZY_SOURCE_CLOCK_TA`` routes to the hold-last clock;
     # ``LAZY_PER_EXECUTION_TA`` (the seven taped families -- ``math.sum``
     # 39/39 per-execution, na until three executed samples -- plus the exact

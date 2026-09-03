@@ -219,6 +219,57 @@ def test_hoist_is_independent_of_run_mode():
 
 
 # ---------------------------------------------------------------------------
+# The bare twins (2026-09-04, same cadence-7 probes on NYSE:F 1D): without a
+# history read TradingView runs the call per execution.
+#   c = bar_index % 7 == 3 and close > ta.sma(close, 5)   ring 39/39, every-bar 23/39
+#   c = bar_index % 7 == 3 and close > ta.ema(close, 5)   ring 39/39, every-bar 26/39
+#   v = bar_index % 7 == 3 ? ta.sma(close, 5) : na        ring 39/39, every-bar 2/39
+#   v = bar_index % 7 == 3 ? ta.highest(high, 5) : na     ring 38/39, every-bar 11/39
+# (their ``[1]`` twins: every-bar 39/39 each)
+# ---------------------------------------------------------------------------
+
+PIN_LAZYAND_SMA_BARE = (
+    "c = bar_index % 7 == 3 and close > ta.sma(close, 5)\n"
+    "if c\n"
+    "    strategy.entry(\"L\", strategy.long)\n"
+    "if bar_index % 7 == 4\n"
+    "    strategy.close(\"L\")"
+)
+PIN_LAZYAND_EMA_BARE = PIN_LAZYAND_SMA_BARE.replace("ta.sma(close, 5)", "ta.ema(close, 5)")
+PIN_TERN_SMA_BARE = (
+    "v = bar_index % 7 == 3 ? ta.sma(close, 5) : na\n"
+    "if not na(v)\n"
+    "    strategy.entry(\"L\", strategy.long, qty = math.round(v * 100))\n"
+    "if bar_index % 7 == 4\n"
+    "    strategy.close(\"L\")"
+)
+PIN_TERN_HIGHEST_BARE = PIN_TERN_SMA_BARE.replace("ta.sma(close, 5)", "ta.highest(high, 5)")
+
+
+@pytest.mark.parametrize(
+    "label, body, member, arg",
+    [
+        ("lazyand-sma-bare", PIN_LAZYAND_SMA_BARE, "_ta_sma_1", "current_bar_.close"),
+        ("lazyand-ema-bare", PIN_LAZYAND_EMA_BARE, "_ta_ema_1", "current_bar_.close"),
+        ("tern-sma-bare", PIN_TERN_SMA_BARE, "_ta_sma_1", "current_bar_.close"),
+        ("tern-highest-bare", PIN_TERN_HIGHEST_BARE, "_ta_highest_1", "current_bar_.high"),
+    ],
+)
+def test_bare_pins_keep_the_reached_only_inline_compute(label, body, member, arg):
+    cpp = _cpp(body)
+    assert "_pf_every_bar_ta_" not in cpp, label
+    stmt = _stmt(cpp, "c = (") if body.startswith("c =") else _stmt(cpp, "v = (")
+    assert f"{member}.compute({arg})" in stmt, label
+    assert _on_bar(cpp).count(f"{member}.compute(") == 1, label
+    # #58 behaviour is untouched: an ``and``-RHS sma/ema never precalcs. (A
+    # ternary-arm sma/ema and a static highest keep main's static-mode
+    # precalc eligibility; the lanes run dynamic mode.)
+    if body.startswith("c ="):
+        assert f"_precalc_{member}" not in cpp, label
+
+
+
+# ---------------------------------------------------------------------------
 # Shapes: or-RHS, ternary arms, nesting depth, if conditions, expression stmts
 # ---------------------------------------------------------------------------
 
