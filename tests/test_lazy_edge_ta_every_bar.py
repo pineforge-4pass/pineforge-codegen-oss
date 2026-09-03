@@ -218,12 +218,16 @@ def test_or_rhs_and_not_and_nested_comparison_depth():
     cpp = _cpp(
         "pred = close > open\n"
         "a = pred or close > ta.sma(close, 5)\n"
-        "b = not (pred and (close > open or ta.rsi(close, 14) > 50))\n"
+        "b = not (pred and (close > open or ta.lowest(low, 14) < close))\n"
         "c = pred and (bar_index > 5 and (close - ta.ema(close, 9)) > 0)\n"
         "plot(a or b or c ? 1 : 0)"
     )
-    for n, member in ((1, "_ta_sma_1"), (2, "_ta_rsi_2"), (3, "_ta_ema_3")):
-        assert f"{member}.compute(current_bar_.close)" in _hoist(cpp, n)
+    for n, member, arg in (
+        (1, "_ta_sma_1", "current_bar_.close"),
+        (2, "_ta_lowest_2", "current_bar_.low"),
+        (3, "_ta_ema_3", "current_bar_.close"),
+    ):
+        assert f"{member}.compute({arg})" in _hoist(cpp, n)
     for var, n in (("a", 1), ("b", 2), ("c", 3)):
         line = _stmt(cpp, f"{var} = ")
         assert f"_pf_every_bar_ta_{n}" in line and ".compute(" not in line
@@ -292,13 +296,13 @@ def test_expression_statement_and_strategy_call_arguments_hoist():
         "plot(pred ? ta.sma(close, 5) : na)\n"
         "if pred\n"
         "    strategy.entry(\"L\", strategy.long)\n"
-        "strategy.close(\"L\", when = pred and ta.rsi(close, 14) > 70)"
+        "strategy.close(\"L\", when = pred and ta.ema(close, 9) > close)"
     )
     assert "_ta_sma_1.compute(current_bar_.close)" in _hoist(cpp, 1)
-    assert "_ta_rsi_2.compute(current_bar_.close)" in _hoist(cpp, 2)
+    assert "_ta_ema_2.compute(current_bar_.close)" in _hoist(cpp, 2)
     on_bar = _on_bar(cpp)
     assert on_bar.count("_ta_sma_1.compute(") == 1
-    assert on_bar.count("_ta_rsi_2.compute(") == 1
+    assert on_bar.count("_ta_ema_2.compute(") == 1
 
 
 def test_assignment_and_tuple_assign_values_hoist():
@@ -356,15 +360,61 @@ def test_var_initializer_is_not_hoisted():
     assert "_pf_every_bar_ta_" not in cpp
 
 
-def test_pinned_lazy_saturated_roc3_clock_is_not_hoisted():
+# Per-family clocks below a lazy edge, pinned 2026-09-03 with cadence-7 ternary
+# probes on NYSE:F 1D (``v = bar_index % 7 == 3 ? <call> : na``, value exposed
+# through the entry size) plus lazy-``and`` probes:
+#   hold-last source   roc 38/38 (+39/39 entries), change 39/39, mom 39/39
+#                      (every-bar 0/38..0/39; ring-of-executions 0..1/39)
+#   per-execution      cum, barssince, valuewhen, cross, crossover, rising 39/39
+#                      (every-bar 0..31/39)
+
+def test_source_clock_families_are_not_hoisted_and_use_held_source_history():
     cpp = _cpp(
         "gate = close > open\n"
         "longish = gate and ta.roc(close, 3) > 0\n"
-        "plot(longish ? 1 : 0)"
+        "ch = gate ? ta.change(close, 3) : na\n"
+        "mo = gate or ta.mom(close, 3) > 0\n"
+        "plot(longish ? ch : mo ? 1 : 0)"
     )
     assert "_pf_every_bar_ta_" not in cpp
-    assert "_PFLazySaturatedROC3Clock" in cpp
-    assert ".evaluate(current_bar_.close, _pf_lazy_saturated_roc3_close_history[3], bar_index_)" in _stmt(cpp, "longish = (")
+    assert "struct _PFLazySourceClock {" in cpp
+    assert "_pf_lazy_src_clock_1.roc(current_bar_.close, _pf_lazy_src_hist_1[2])" in _stmt(cpp, "longish = (")
+    assert "_pf_lazy_src_clock_2.change(current_bar_.close, _pf_lazy_src_hist_2[2])" in _stmt(cpp, "ch = (")
+    assert "_pf_lazy_src_clock_3.change(current_bar_.close, _pf_lazy_src_hist_3[2])" in _stmt(cpp, "mo = (")
+    for n in (1, 2, 3):
+        assert f"std::vector<double> _precalc__ta_" not in cpp or f"_precalc__ta_roc_{n}" not in cpp
+        assert f"Series<double> _pf_lazy_src_hist_{n}{{4}};" in cpp
+    assert "_precalc__ta_roc" not in cpp
+    assert "_precalc__ta_change" not in cpp
+    assert "_precalc__ta_mom" not in cpp
+
+
+def test_per_execution_families_keep_inline_compute_and_never_precalc():
+    cpp = _cpp(
+        "sma5 = ta.sma(close, 5)\n"
+        "gate = bar_index % 7 == 3\n"
+        "a = gate ? ta.cum(close) : na\n"
+        "b = gate ? ta.barssince(close > sma5) : na\n"
+        "c = gate ? ta.valuewhen(close > sma5, close, 0) : na\n"
+        "d = gate and ta.crossover(close, sma5)\n"
+        "e = gate and ta.cross(close, sma5)\n"
+        "f = gate and ta.rising(close, 3)\n"
+        "plot(a + b + c + (d or e or f ? 1 : 0))"
+    )
+    assert "_pf_every_bar_ta_" not in cpp
+    assert "_PFLazySourceClock" not in cpp
+    on_bar = _on_bar(cpp)
+    for var, member in (
+        ("a", "_ta_cum_2"), ("b", "_ta_barssince_3"), ("c", "_ta_valuewhen_4"),
+        ("d", "_ta_crossover_5"), ("e", "_ta_cross_6"), ("f", "_ta_rising_7"),
+    ):
+        line = _stmt(cpp, f"{var} = (")
+        assert f"{member}.compute(" in line, (var, line)
+        assert "_use_precalc" not in line
+        assert f"_precalc_{member}" not in cpp
+    # The unconditional sma5 is untouched (eager, precalc-eligible).
+    assert "std::vector<double> _precalc__ta_sma_1" in cpp
+    assert on_bar.count("_ta_sma_1.compute(") == 1
 
 
 def test_security_payload_sites_are_not_hoisted():
@@ -375,6 +425,26 @@ def test_security_payload_sites_are_not_hoisted():
     )
     assert "_pf_every_bar_ta_" not in cpp
     assert "_sec0__ta_sma_1.compute(bar.close)" in cpp
+
+
+def test_unpinned_families_keep_their_existing_lowering():
+    """Allow-list: a family without an every-bar tape is neither hoisted nor
+    re-routed (2026-09-04 Cloud Run measurement of the broad hoist: -170
+    tiers / 30 hard lanes). Inline compute when reached; precalc as before."""
+    cpp = _cpp(
+        "pred = close > open\n"
+        "a = pred and ta.rsi(close, 14) > 50\n"
+        "b = pred ? ta.atr(14) : na\n"
+        "c = pred or ta.stdev(close, 20) > 1\n"
+        "d = pred and ta.wma(close, 9) > close\n"
+        "plot(a or c or d ? b : 0)"
+    )
+    assert "_pf_every_bar_ta_" not in cpp
+    assert "_PFLazySourceClock" not in cpp
+    for var, member in (("a", "_ta_rsi_1"), ("b", "_ta_atr_2"), ("c", "_ta_stdev_3"), ("d", "_ta_wma_4")):
+        assert f"{member}.compute(" in _stmt(cpp, f"{var} = ("), var
+    # Static sites keep main's precalc eligibility (static mode only).
+    assert "std::vector<double> _precalc__ta_rsi_1" in cpp
 
 
 def test_eager_top_level_sites_are_unchanged():

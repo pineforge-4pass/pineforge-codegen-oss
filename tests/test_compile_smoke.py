@@ -67,43 +67,47 @@ def test_minimal_strategy_compiles():
     compile_cpp(cpp, label="minimal_strategy")
 
 
-def test_lazy_saturated_roc_call_clocks_compile_and_are_copyable():
-    """Both structurally identical long/short clocks compile with COOF state."""
+def test_lazy_source_clocks_compile():
+    """change/mom/roc below a top-level lazy edge lower through the generated
+    hold-last source clock (tests/test_lazy_source_clock*.py)."""
     skip_if_no_compile_env()
     cpp = transpile('''//@version=6
-strategy("lazy ROC clocks", calc_on_order_fills=true)
+strategy("lazy source clocks")
+len = input.int(3, "len")
 gate = close > open
 longish = gate and ta.roc(close, 3) > 0
-shortish = gate and ta.roc(close, 3) < 0
-if longish or shortish
+shortish = gate and ta.roc(close, len) < 0
+ch = gate ? ta.change(close, 3) : na
+mo = gate or ta.mom(close, 2) > 0
+if longish or shortish or mo or not na(ch)
     strategy.entry("L", strategy.long)
 ''')
-    compile_cpp(cpp, label="lazy_saturated_roc_call_clocks")
+    compile_cpp(cpp, label="lazy_source_clocks")
 
 
-def test_lazy_saturated_roc_generated_names_compile_with_user_collisions():
+def test_lazy_source_clock_generated_names_compile_with_user_collisions():
     skip_if_no_compile_env()
     cpp = transpile('''//@version=6
-strategy("lazy ROC name collisions")
-type _PFLazySaturatedROC3Clock
+strategy("lazy source clock name collisions")
+type _PFLazySourceClock
     float value
-float _pf_lazy_saturated_roc3_clock_1 = 0.0
-float _pf_lazy_saturated_roc3_close_history = 0.0
+float _pf_lazy_src_clock_1 = 0.0
+float _pf_lazy_src_hist_1 = 0.0
 gate = close > open
 signal = gate and ta.roc(close, 3) > 0
 ''')
-    compile_cpp(cpp, label="lazy_saturated_roc_name_collisions")
+    compile_cpp(cpp, label="lazy_source_clock_name_collisions")
 
 
-def test_lazy_saturated_roc_clock_name_compiles_with_udf_collision():
+def test_lazy_source_clock_name_compiles_with_udf_collision():
     skip_if_no_compile_env()
     cpp = transpile('''//@version=6
-strategy("lazy ROC UDF collision")
-_pf_lazy_saturated_roc3_clock_1() => 1.0
-other = _pf_lazy_saturated_roc3_clock_1()
+strategy("lazy source clock UDF collision")
+_pf_lazy_src_clock_1() => 1.0
+other = _pf_lazy_src_clock_1()
 signal = close > open and ta.roc(close, 3) > 0
 ''')
-    compile_cpp(cpp, label="lazy_saturated_roc_udf_collision")
+    compile_cpp(cpp, label="lazy_source_clock_udf_collision")
 
 
 def test_calc_on_order_fills_mixed_script_state_checkpoint_compiles():

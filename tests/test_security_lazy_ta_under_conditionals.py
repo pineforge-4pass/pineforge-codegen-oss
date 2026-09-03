@@ -248,14 +248,12 @@ def test_chart_context_conditional_ta_is_hoisted_every_bar():
     assign = next(ln for ln in lines if ln.strip().startswith("v = ("))
     assert assign.strip() == "v = ((c) ? (_pf_every_bar_ta_1) : (0.0));"
     assert "_secval_" not in assign and "_secval_" not in ema_hoist
-    rsi_hoist = next(
-        ln for ln in lines if ln.strip().startswith("const auto _pf_every_bar_ta_2 = ")
-    )
-    assert "_ta_rsi_2.compute" in rsi_hoist
+    # ``ta.rsi`` has no every-bar tape yet: the allow-list leaves its inline
+    # reached-only compute in place (see LAZY_EVERY_BAR_TA in codegen/ta.py).
     w_assign = next(ln for ln in lines if ln.strip().startswith("w = ("))
-    assert "_pf_every_bar_ta_2" in w_assign and ".compute(" not in w_assign
+    assert "_ta_rsi_2.compute" in w_assign and "_pf_every_bar_ta_" not in w_assign
+    assert "_pf_every_bar_ta_2" not in cpp
     assert lines.index(ema_hoist) < lines.index(assign)
-    assert lines.index(rsi_hoist) < lines.index(w_assign)
 
 
 def test_chart_context_unconditional_ta_unchanged():

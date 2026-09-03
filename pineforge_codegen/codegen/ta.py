@@ -25,10 +25,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..ast_nodes import (
-    Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall,
-    ForInStmt, ForStmt, FuncDef, Identifier, IfStmt, MemberAccess, NaLiteral,
-    NumberLiteral, StringLiteral, Subscript, SwitchStmt, Ternary, TupleAssign,
-    TupleLiteral, TypeDecl, UnaryOp, VarDecl,
+    ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, EnumDecl, ExprStmt,
+    FuncCall, ForInStmt, ForStmt, FuncDef, Identifier, IfStmt, MemberAccess,
+    MethodDef, NaLiteral, NumberLiteral, StringLiteral, Subscript, SwitchStmt,
+    Ternary, TupleAssign, TupleLiteral, TypeDecl, TypeField, UnaryOp, VarDecl,
+    WhileStmt,
 )
 from .tables import TA_IMPLICIT_APPEND, TA_IMPLICIT_COMPUTE_FULL
 
@@ -200,18 +201,26 @@ class TaSiteHelper:
             return False
         return False
 
-    def _ta_call_nodes_by_lazy_scope(self) -> tuple[set[int], set[int], set[int]]:
-        """Classify chart ``ta.*`` sites below Pine-v6 lazy-expression edges.
+    # ------------------------------------------------------------------
+    # Lazy-edge classification in every scope -- consumed by the precalc gate
+    # ------------------------------------------------------------------
 
-        The first set contains sites below an ``and`` RHS, preserving the
-        already accepted lazy-SMA scope.  The second contains sites below any
-        Pine-v6 lazy edge: an ``and``/``or`` RHS or either ``?:`` branch.  The
-        broader set is consumed only by the recursive-EMA route;
-        other TA families retain their current precalculation behavior.  The
-        third is the narrow ``and``-only subset: the site is below an ``and``
-        RHS and is not nested anywhere inside an ``or`` or ternary expression.
-        It gives source-shaped lazy call clocks a stable AST identity without
-        inspecting generated member names.
+    _LAZY_SCOPE_STMT_TYPES = (
+        VarDecl, Assignment, TupleAssign, ExprStmt, IfStmt, ForStmt, ForInStmt,
+        WhileStmt, SwitchStmt, FuncDef, MethodDef, TypeDecl, EnumDecl,
+    )
+
+    def _ta_call_nodes_by_lazy_scope(self) -> tuple[set[int], set[int]]:
+        """Classify chart ``ta.*`` call nodes below Pine-v6 lazy edges, everywhere.
+
+        Returns ``(and_rhs, lazy_rhs)``: sites below an ``and`` RHS, and sites
+        below any lazy edge (an ``and``/``or`` RHS or a ``?:`` arm), walking the
+        top level, control-flow bodies, user-function bodies and UDT field
+        defaults. Entering a statement resets both flags, expression nodes
+        propagate them, and a ``request.security*`` payload is skipped because
+        its own evaluator lowers it. Consumed only by the block-scope opt-outs
+        in ``_ta_site_uses_precalc``; top-level statement operands are governed
+        by ``_lazy_edge_ta_hoist_plan`` instead.
         """
         cached = getattr(self, "_lazy_scope_ta_call_nodes", None)
         if cached is not None:
@@ -219,198 +228,78 @@ class TaSiteHelper:
 
         and_rhs: set[int] = set()
         lazy_rhs: set[int] = set()
-        plain_and_rhs: set[int] = set()
 
-        def note_ta_calls(
-            expr,
-            under_and_rhs: bool,
-            under_lazy_rhs: bool,
-            under_disallowed_shape: bool,
-        ) -> None:
-            if expr is None:
+        def note(value, under_and: bool, under_lazy: bool) -> None:
+            if value is None:
                 return
-            if isinstance(expr, FuncCall):
-                callee = expr.callee
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    note(item, under_and, under_lazy)
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    note(item, under_and, under_lazy)
+                return
+            if isinstance(value, TypeField):
+                note(value.default, False, False)
+                return
+            if not isinstance(value, ASTNode):
+                return
+            if isinstance(value, self._LAZY_SCOPE_STMT_TYPES):
+                for child in vars(value).values():
+                    note(child, False, False)
+                return
+            if isinstance(value, FuncCall):
+                callee = value.callee
                 is_security = (
                     isinstance(callee, MemberAccess)
                     and isinstance(callee.object, Identifier)
                     and callee.object.name == "request"
                     and callee.member in ("security", "security_lower_tf")
                 )
-                if isinstance(expr.callee, MemberAccess):
-                    obj = expr.callee.object
-                    if isinstance(obj, Identifier) and obj.name == "ta":
-                        if under_and_rhs:
-                            and_rhs.add(id(expr))
-                        if under_lazy_rhs:
-                            lazy_rhs.add(id(expr))
-                        if under_and_rhs and not under_disallowed_shape:
-                            plain_and_rhs.add(id(expr))
-                # A call target may itself be an evaluated expression, as in
-                # ``array.new_float(...).get(0)``. Walk the callee subtree so
-                # TA nested in a chained receiver inherits the surrounding
-                # lazy context. Plain identifiers and namespace receivers are
-                # leaves, so ordinary ``ta.sma`` / ``request.security`` calls
-                # remain unaffected here.
-                note_ta_calls(
-                    callee,
-                    under_and_rhs,
-                    under_lazy_rhs,
-                    under_disallowed_shape,
-                )
-                for idx, arg in enumerate(getattr(expr, "args", ()) or ()):
-                    # The third request.security* argument is evaluated by its
-                    # own security evaluator. Symbol, timeframe, and remaining
-                    # options are chart-context expressions and must still be
-                    # inspected for lazy chart TA.
+                # A chained receiver (``label.new(...).get_y()``) is an
+                # evaluated expression too; namespace/identifier callees are
+                # leaves.
+                note(callee, under_and, under_lazy)
+                for idx, arg in enumerate(getattr(value, "args", ()) or ()):
                     if is_security and idx == 2:
                         continue
-                    note_ta_calls(
-                        arg,
-                        under_and_rhs,
-                        under_lazy_rhs,
-                        under_disallowed_shape,
-                    )
-                for key, value in (getattr(expr, "kwargs", None) or {}).items():
+                    note(arg, under_and, under_lazy)
+                for key, kw_value in (getattr(value, "kwargs", None) or {}).items():
                     if is_security and key == "expression":
                         continue
-                    note_ta_calls(
-                        value,
-                        under_and_rhs,
-                        under_lazy_rhs,
-                        under_disallowed_shape,
-                    )
+                    note(kw_value, under_and, under_lazy)
+                if (
+                    isinstance(callee, MemberAccess)
+                    and isinstance(callee.object, Identifier)
+                    and callee.object.name == "ta"
+                ):
+                    if under_and:
+                        and_rhs.add(id(value))
+                    if under_lazy:
+                        lazy_rhs.add(id(value))
                 return
-            if isinstance(expr, BinOp):
-                if expr.op == "and":
-                    # LHS always runs first; RHS is short-circuit conditional.
-                    note_ta_calls(
-                        expr.left,
-                        under_and_rhs,
-                        under_lazy_rhs,
-                        under_disallowed_shape,
-                    )
-                    note_ta_calls(
-                        expr.right,
-                        True,
-                        True,
-                        under_disallowed_shape,
-                    )
-                elif expr.op == "or":
-                    # ``or`` preserves an enclosing ``and`` scope, but its own
-                    # RHS is a Pine-v6 lazy edge for the EMA classifier.
-                    note_ta_calls(expr.left, under_and_rhs, under_lazy_rhs, True)
-                    note_ta_calls(expr.right, under_and_rhs, True, True)
-                else:
-                    note_ta_calls(
-                        expr.left,
-                        under_and_rhs,
-                        under_lazy_rhs,
-                        under_disallowed_shape,
-                    )
-                    note_ta_calls(
-                        expr.right,
-                        under_and_rhs,
-                        under_lazy_rhs,
-                        under_disallowed_shape,
-                    )
+            if isinstance(value, BinOp) and value.op == "and":
+                note(value.left, under_and, under_lazy)
+                note(value.right, True, True)
                 return
-            if isinstance(expr, Ternary):
-                note_ta_calls(expr.condition, under_and_rhs, under_lazy_rhs, True)
-                note_ta_calls(expr.true_val, under_and_rhs, True, True)
-                note_ta_calls(expr.false_val, under_and_rhs, True, True)
+            if isinstance(value, BinOp) and value.op == "or":
+                note(value.left, under_and, under_lazy)
+                note(value.right, under_and, True)
                 return
-            if isinstance(expr, UnaryOp):
-                note_ta_calls(
-                    expr.operand,
-                    under_and_rhs,
-                    under_lazy_rhs,
-                    under_disallowed_shape,
-                )
+            if isinstance(value, Ternary):
+                note(value.condition, under_and, under_lazy)
+                note(value.true_val, under_and, True)
+                note(value.false_val, under_and, True)
                 return
-            if isinstance(expr, (MemberAccess, Subscript)):
-                note_ta_calls(
-                    getattr(expr, "object", None),
-                    under_and_rhs,
-                    under_lazy_rhs,
-                    under_disallowed_shape,
-                )
-                note_ta_calls(
-                    getattr(expr, "index", None),
-                    under_and_rhs,
-                    under_lazy_rhs,
-                    under_disallowed_shape,
-                )
-                return
-            if isinstance(expr, TupleLiteral):
-                for elem in expr.elements:
-                    note_ta_calls(
-                        elem,
-                        under_and_rhs,
-                        under_lazy_rhs,
-                        under_disallowed_shape,
-                    )
-                return
+            for child in vars(value).values():
+                note(child, under_and, under_lazy)
 
-        def walk_stmt(stmt) -> None:
-            if stmt is None:
-                return
-            if isinstance(stmt, VarDecl):
-                note_ta_calls(stmt.value, False, False, False)
-                return
-            if isinstance(stmt, ExprStmt):
-                note_ta_calls(
-                    getattr(stmt, "value", None) or getattr(stmt, "expr", None),
-                    False,
-                    False,
-                    False,
-                )
-                return
-            if isinstance(stmt, Assignment):
-                note_ta_calls(getattr(stmt, "target", None), False, False, False)
-                note_ta_calls(getattr(stmt, "value", None), False, False, False)
-                return
-            if isinstance(stmt, TupleAssign):
-                note_ta_calls(getattr(stmt, "value", None), False, False, False)
-                return
-            if isinstance(stmt, TypeDecl):
-                for field in getattr(stmt, "fields", ()) or ():
-                    note_ta_calls(
-                        getattr(field, "default", None), False, False, False
-                    )
-                return
-            # If / for / while / assign-like — best-effort field walk
-            for attr in ("condition", "body", "else_body", "else_ifs", "value", "target", "iterable"):
-                child = getattr(stmt, attr, None)
-                if child is None:
-                    continue
-                if isinstance(child, list):
-                    for item in child:
-                        if isinstance(item, (list, tuple)):
-                            for sub in item:
-                                walk_stmt(sub)
-                        elif hasattr(item, "body") or hasattr(item, "name") or hasattr(item, "value"):
-                            walk_stmt(item)
-                        else:
-                            note_ta_calls(item, False, False, False)
-                elif hasattr(child, "op") or hasattr(child, "args") or hasattr(child, "left"):
-                    note_ta_calls(child, False, False, False)
-                elif hasattr(child, "body") or hasattr(child, "value") or hasattr(child, "condition"):
-                    walk_stmt(child)
-
-        ast = getattr(self.ctx, "ast", None)
-        for stmt in getattr(ast, "body", ()) or ():
-            walk_stmt(stmt)
-        # User function bodies (original sites live here; clones share node ids
-        # only when they reuse the same FuncCall object — still best-effort).
+        note(getattr(self.ctx, "ast", None), False, False)
         for finfo in getattr(self.ctx, "func_infos", None) or []:
-            node = getattr(finfo, "node", None)
-            body = getattr(node, "body", None) if node is not None else None
-            if body:
-                for stmt in body:
-                    walk_stmt(stmt)
+            note(getattr(finfo, "node", None), False, False)
 
-        result = (and_rhs, lazy_rhs, plain_and_rhs)
+        result = (and_rhs, lazy_rhs)
         self._lazy_scope_ta_call_nodes = result
         return result
 
@@ -420,84 +309,87 @@ class TaSiteHelper:
     def _ta_call_nodes_under_lazy_rhs(self) -> set[int]:
         return self._ta_call_nodes_by_lazy_scope()[1]
 
-    def _ta_call_nodes_under_plain_and_rhs(self) -> set[int]:
-        return self._ta_call_nodes_by_lazy_scope()[2]
+    # ------------------------------------------------------------------
+    # TradingView's per-family clocks below a top-level lazy edge
+    # ------------------------------------------------------------------
+    #
+    # Pinned 2026-09-03 with ``lab tv`` on NYSE:F 1D (range 2025-04-01 ..
+    # 2026-05-01; cadence-7 ternary probes ``v = bar_index % 7 == 3 ? <call> :
+    # na`` exposing the value through the entry size, plus lazy-``and``
+    # probes), each scored per call against three models:
+    #
+    #   every-bar natives   highest 9/9, sma 25/25, ema 23/23 -- the runtime
+    #                       advances the built-in on every chart bar; only the
+    #                       value is gated (``_lazy_edge_ta_hoist_plan``).
+    #   hold-last source    roc 38/38 (+39/39 entries), change 39/39, mom
+    #                       39/39 -- TradingView computes these from the CALL'S
+    #                       OWN ``source[length]`` history: the source is
+    #                       written only on bars where the call executes, the
+    #                       last executed value is held on skipped bars, and
+    #                       the history is na before the first execution
+    #                       (call 1 of every value probe has no TV entry).
+    #                       every-bar 0/38..0/39, ring-of-executions 0..1/39.
+    #   per-execution       cum, barssince, valuewhen, cross, crossover 39/39
+    #                       and rising 39/39 (strictly monotonic over its
+    #                       executed samples) -- the native only ever sees the
+    #                       samples of bars where the call executes, which is
+    #                       exactly the reached-only inline ``compute`` lowering
+    #                       (every-bar 0..31/39).
+    #
+    # The hoist is an ALLOW-LIST. A broad every-bar hoist of every stateful
+    # family measured on Cloud Run against the full population (2026-09-04,
+    # like-for-like vs the same lab bundle) fixed the pinned shapes but cost
+    # 170 tiers / 30 hard-lane regressions: TradingView's clock under lazy
+    # evaluation is per family, so only families pinned every-bar by tape
+    # hoist (``LAZY_EVERY_BAR_TA``; ``lowest`` is ``highest``'s mirror).
+    # ``LAZY_SOURCE_CLOCK_TA`` routes to the hold-last clock;
+    # ``LAZY_PER_EXECUTION_TA`` (the six taped families plus the exact
+    # mirrors ``crossunder``/``falling``) keeps the inline compute and never
+    # precalcs. Every other family keeps its existing lowering unchanged
+    # (inline compute when reached; precalc when static) until a tape pins
+    # it -- ``_lazy_edge_hoist_plan()["skipped"]`` lists them per script.
+    LAZY_EVERY_BAR_TA = frozenset({"highest", "lowest", "sma", "ema"})
+    LAZY_SOURCE_CLOCK_TA = frozenset({"change", "mom", "roc"})
+    LAZY_PER_EXECUTION_TA = frozenset({
+        "cum", "barssince", "valuewhen", "cross", "crossover", "crossunder",
+        "rising", "falling",
+    })
+    UNPINNED_LAZY_EDGE_REASON = (
+        "family not pinned every-bar by tape (LAZY_EVERY_BAR_TA allow-list): "
+        "existing lowering"
+    )
 
-    def _ta_call_nodes_in_top_level_var_values(self) -> set[int]:
-        cached = getattr(self, "_top_level_var_value_ta_nodes", None)
-        if cached is not None:
-            return cached
-        result: set[int] = set()
-        ast = getattr(self.ctx, "ast", None)
-        for stmt in getattr(ast, "body", ()) or ():
-            if not isinstance(stmt, VarDecl):
-                continue
-            for child in self._walk_ast(stmt.value):
-                if isinstance(child, FuncCall):
-                    result.add(id(child))
-        self._top_level_var_value_ta_nodes = result
-        return result
+    @staticmethod
+    def _lazy_source_clock_length_node(node):
+        kwargs = getattr(node, "kwargs", None) or {}
+        if "length" in kwargs:
+            return kwargs["length"]
+        args = getattr(node, "args", ()) or ()
+        return args[1] if len(args) > 1 else None
 
-    def _script_has_user_binding(self, name: str) -> bool:
-        cache = getattr(self, "_user_binding_names", None)
-        if cache is None:
-            cache = set()
-            ast = getattr(self.ctx, "ast", None)
-            for node in self._walk_ast(ast):
-                if isinstance(node, VarDecl):
-                    cache.add(node.name)
-                elif isinstance(node, TupleAssign):
-                    cache.update(node.names)
-                elif isinstance(node, ForStmt):
-                    cache.add(node.var)
-                elif isinstance(node, ForInStmt):
-                    if node.var:
-                        cache.add(node.var)
-                    cache.update(node.vars or ())
-                elif isinstance(node, FuncDef):
-                    cache.add(node.name)
-                    cache.update(node.params)
-            self._user_binding_names = cache
-        return name in cache
-
-    def _is_lazy_saturated_roc3_site(self, site: "TACallSite") -> bool:
-        """Return whether ``site`` has the oracle-backed lazy ROC source shape.
-
-        Selection is deliberately syntactic and callsite-local: a direct
-        top-level variable value containing ``ta.roc(close, 3)`` below a plain
-        ``and`` RHS, where ``close`` is not shadowed by any user binding. User
-        functions, control-flow bodies, request.security evaluators,
-        aliases/other sources, named or dynamic lengths, shadowed built-ins,
-        and any surrounding ``or``/ternary shape remain on their existing eager
-        route. Comparator polarity is intentionally absent; two otherwise
-        identical callsites must not acquire different history semantics merely
-        because one compares above zero and one below it.
-        """
-        node = getattr(site, "node", None)
+    @staticmethod
+    def _lazy_source_clock_length_literal(length_node) -> int | None:
+        if length_node is None:
+            return 1
         if (
-            node is None
-            or getattr(site, "owner_func", None) is not None
-            or self._ta_name_from_site(site) != "roc"
-            or id(node) not in self._ta_call_nodes_under_plain_and_rhs()
-            or id(node) not in self._ta_call_nodes_in_top_level_var_values()
-            or self._script_has_user_binding("close")
-            or not isinstance(node, FuncCall)
-            or getattr(node, "kwargs", None)
-            or len(getattr(node, "args", ())) != 2
+            isinstance(length_node, NumberLiteral)
+            and not isinstance(length_node.value, bool)
+            and float(length_node.value) == int(length_node.value)
         ):
-            return False
-        source, length = node.args
-        return (
-            isinstance(source, Identifier)
-            and source.name == "close"
-            and isinstance(length, NumberLiteral)
-            and not isinstance(length.value, bool)
-            and length.value == 3
-        )
+            return int(length_node.value)
+        return None
 
-    def _prepare_lazy_saturated_roc3_sites(self) -> None:
-        """Assign one copyable clock member to each selected AST callsite."""
-        if hasattr(self, "_lazy_saturated_roc3_clock_by_node"):
+    def _lazy_source_clock_eligible(self, site: "TACallSite") -> bool:
+        """change/mom/roc with a numeric source; anything else keeps its lowering."""
+        if getattr(site, "owner_func", None) is not None or getattr(site, "returns_tuple", False):
+            return False
+        if not site.compute_args:
+            return False
+        return self._infer_type(site.compute_args[0]) in ("double", "int", "int64_t")
+
+    def _prepare_lazy_source_clock_sites(self) -> None:
+        """Allocate one clock + one held-source Series per routed site (idempotent)."""
+        if hasattr(self, "_lazy_source_clock_by_node"):
             return
 
         def allocate(base: str, reserved: set[str]) -> str:
@@ -531,76 +423,88 @@ class TaSiteHelper:
                 reserved_members.add(f"{emitted}_cs{callsite}")
         for instance in getattr(self, "_fresh_instances", ()):
             reserved_members.add(instance["name"])
-        self._lazy_saturated_roc3_type_name = allocate(
-            "_PFLazySaturatedROC3Clock", reserved_types
-        )
-        self._lazy_saturated_roc3_history_name = allocate(
-            "_pf_lazy_saturated_roc3_close_history", reserved_members
-        )
+        self._lazy_source_clock_type_name = allocate("_PFLazySourceClock", reserved_types)
 
-        clocks: dict[int, str] = {}
-        for index, site in enumerate(self.ctx.ta_call_sites):
-            if index in getattr(self, "_dead_ta_indices", set()):
-                continue
-            if self._is_lazy_saturated_roc3_site(site):
-                clocks[id(site.node)] = allocate(
-                    f"_pf_lazy_saturated_roc3_clock_{len(clocks) + 1}",
-                    reserved_members,
-                )
-        self._lazy_saturated_roc3_clock_by_node = clocks
+        clocks: dict[int, dict] = {}
+        routed = self._lazy_edge_ta_hoist_plan()["source_clock"]
+        for index, (node_id, info) in enumerate(routed.items(), start=1):
+            clocks[node_id] = {
+                "clock": allocate(f"_pf_lazy_src_clock_{index}", reserved_members),
+                "hist": allocate(f"_pf_lazy_src_hist_{index}", reserved_members),
+                "site": info["site"],
+                "node": info["node"],
+                "length_literal": info["length_literal"],
+            }
+        self._lazy_source_clock_by_node = clocks
 
-    def _lazy_saturated_roc3_clock_name(self, site: "TACallSite") -> str:
-        self._prepare_lazy_saturated_roc3_sites()
-        return self._lazy_saturated_roc3_clock_by_node[id(site.node)]
+    def _lazy_source_clock_expr(self, site: "TACallSite", node) -> str:
+        """Lower a reached change/mom/roc site through its hold-last source clock."""
+        info = self._lazy_source_clock_by_node[id(node)]
+        source = self._visit_expr(site.compute_args[0])
+        length_node = self._lazy_source_clock_length_node(node)
+        literal = self._lazy_source_clock_length_literal(length_node)
+        if literal is not None:
+            previous = (
+                f"{info['hist']}[{literal - 1}]" if literal >= 1 else "na<double>()"
+            )
+        else:
+            length_expr = f"(int)({self._visit_expr(length_node)})"
+            previous = (
+                f"(({length_expr}) >= 1 ? {info['hist']}[({length_expr}) - 1] "
+                f": na<double>())"
+            )
+        method = "roc" if self._ta_name_from_site(site) == "roc" else "change"
+        return f"{info['clock']}.{method}({source}, {previous})"
 
-    def _lazy_saturated_roc3_expr(self, site: "TACallSite") -> str:
-        """Lower a reached lazy ROC site through its per-callsite clock."""
-        clock = self._lazy_saturated_roc3_clock_name(site)
-        history = self._lazy_saturated_roc3_history_name
-        return (
-            f"{clock}.evaluate(current_bar_.close, "
-            f"{history}[3], bar_index_)"
-        )
-
-    def _emit_lazy_saturated_roc3_helper(self, lines: list[str]) -> None:
+    def _emit_lazy_source_clock_helper(self, lines: list[str]) -> None:
         """Emit the value-copyable generated runtime helper when needed."""
-        self._prepare_lazy_saturated_roc3_sites()
-        if not self._lazy_saturated_roc3_clock_by_node:
+        self._prepare_lazy_source_clock_sites()
+        if not self._lazy_source_clock_by_node:
             return
-        type_name = self._lazy_saturated_roc3_type_name
+        type_name = self._lazy_source_clock_type_name
         lines.extend(
             [
+                "// TradingView keeps a lazily executed call's `source[k]` history per",
+                "// call: the source is written only on bars where the call executes,",
+                "// the last executed value is held on the bars it skips, and the",
+                "// history is na before the first execution. The paired Series holds",
+                "// `bar_base_source` (the value committed by earlier bars) once per",
+                "// chart bar, so `hist[length - 1]` is the source at the most recent",
+                "// execution at or before bar-length.",
                 f"struct {type_name} {{",
                 "    double committed_source = na<double>();",
-                "    int committed_bar = -1;",
                 "    double bar_base_source = na<double>();",
-                "    int bar_base_bar = -1;",
                 "    int working_bar = -1;",
                 "",
                 "    void reset() {",
                 "        committed_source = na<double>();",
-                "        committed_bar = -1;",
                 "        bar_base_source = na<double>();",
-                "        bar_base_bar = -1;",
                 "        working_bar = -1;",
                 "    }",
                 "",
-                "    double evaluate(double source, double eager_previous, int bar) {",
+                "    // Once per bar before the script body; a same-bar recalculation",
+                "    // keeps the base frozen so the evaluation stays idempotent.",
+                "    void begin_bar(int bar) {",
                 "        if (working_bar != bar) {",
                 "            bar_base_source = committed_source;",
-                "            bar_base_bar = committed_bar;",
                 "            working_bar = bar;",
                 "        }",
-                "        const bool saturated = bar_base_bar >= 0 &&",
-                "            bar - bar_base_bar >= 3;",
-                "        const double previous = saturated ? bar_base_source : eager_previous;",
-                "        double result = na<double>();",
-                "        if (!is_na(source) && !is_na(previous) && previous != 0.0) {",
-                "            result = (source - previous) / previous * 100.0;",
-                "        }",
+                "    }",
+                "",
+                "    double change(double source, double previous) {",
                 "        committed_source = source;",
-                "        committed_bar = bar;",
-                "        return result;",
+                "        if (is_na(source) || is_na(previous)) {",
+                "            return na<double>();",
+                "        }",
+                "        return source - previous;",
+                "    }",
+                "",
+                "    double roc(double source, double previous) {",
+                "        committed_source = source;",
+                "        if (is_na(source) || is_na(previous) || previous == 0.0) {",
+                "            return na<double>();",
+                "        }",
+                "        return (source - previous) / previous * 100.0;",
                 "    }",
                 "};",
                 "",
@@ -622,7 +526,10 @@ class TaSiteHelper:
         ``and``/``or`` RHS or ternary arm -- see
         ``_lazy_edge_ta_hoist_plan``) advances on every chart bar by the pinned
         TV rule, which is exactly what precalc computes; the lazy-edge opt-outs
-        below therefore never apply to it.
+        below therefore never apply to it. A top-level lazy-edge site routed to
+        the hold-last source clock (change/mom/roc) or left on its
+        per-execution inline compute (cum/barssince/valuewhen/cross*/rising/...)
+        must never precalc.
 
         Re-pinned 2026-09-03: the old opt-out for a chart ``ta.sma`` under an
         ``and`` RHS (pf-probe-oliver-dual-vol-sma, "eager precalc is
@@ -638,10 +545,15 @@ class TaSiteHelper:
         and request.security sites retain their existing behavior."""
         if not getattr(site, "is_static", False):
             return False
-        if self._is_lazy_saturated_roc3_site(site):
-            return False
         node = getattr(site, "node", None)
-        if node is not None and id(node) in self._lazy_edge_hoisted_ta_call_nodes():
+        plan = self._lazy_edge_ta_hoist_plan()
+        if node is not None and (
+            id(node) in plan["source_clock"] or id(node) in plan["per_execution_nodes"]
+        ):
+            # Hold-last / per-execution clocks: precalc would advance the site
+            # on every bar, which the tapes refute for these families.
+            return False
+        if node is not None and id(node) in plan["call_nodes"]:
             return all(self._expr_safe_for_ta_precalc(arg) for arg in site.compute_args)
         ta_name = self._ta_name_from_site(site)
         if (
@@ -699,18 +611,30 @@ class TaSiteHelper:
             return "site belongs to a user function body"
         if getattr(site, "returns_tuple", False):
             return "tuple-returning site"
-        if self._is_lazy_saturated_roc3_site(site):
+        family = self._ta_name_from_site(site)
+        if family in self.LAZY_PER_EXECUTION_TA:
             return (
-                "pinned lazy saturated ta.roc(close, 3) clock "
-                "(tests/test_lazy_saturated_roc*.py)"
+                "per-execution native: the reached-only inline compute is "
+                "TradingView's clock (lab tv 2026-09-03)"
             )
+        if family in self.LAZY_SOURCE_CLOCK_TA:
+            return "hold-last source-clock family with a non-numeric source"
+        if family not in self.LAZY_EVERY_BAR_TA:
+            return self.UNPINNED_LAZY_EDGE_REASON
         return None
 
     def _lazy_edge_ta_hoist_plan(self) -> dict:
         """Plan (once) which top-level lazy-edge TA sites are hoisted.
 
         Returns ``{"by_stmt": {id(stmt): [unit, ...]}, "call_nodes": set,
-        "skipped": [(node, site, reason), ...]}``. A unit is either
+        "source_clock": {id(node): {"node", "site", "length_literal"}},
+        "per_execution_nodes": set, "skipped": [(node, site, reason), ...]}``.
+        Only ``LAZY_EVERY_BAR_TA`` families become hoist units.
+        ``source_clock`` sites (change/mom/roc) lower through
+        ``_lazy_source_clock_expr``; ``per_execution_nodes`` keep the inline
+        compute; both are opted out of precalc. Every other family is listed
+        in ``skipped`` with ``UNPINNED_LAZY_EDGE_REASON`` and keeps its
+        existing lowering. A hoist unit is either
         ``{"kind": "call", "node": FuncCall, "site": TACallSite, "name": str}``
         or ``{"kind": "hist", "node": Subscript}`` (a direct ``[k]`` on a hoisted
         call). Units are in evaluation order: a nested hoisted call precedes the
@@ -733,6 +657,8 @@ class TaSiteHelper:
 
         by_stmt: dict[int, list[dict]] = {}
         call_nodes: set[int] = set()
+        source_clock: dict[int, dict] = {}
+        per_execution_nodes: set[int] = set()
         skipped: list[tuple] = []
         counter = [0]
 
@@ -763,8 +689,20 @@ class TaSiteHelper:
                 site = self._get_ta_site(expr)
                 if site is None:
                     return
+                family = self._ta_name_from_site(site)
+                if family in self.LAZY_SOURCE_CLOCK_TA and self._lazy_source_clock_eligible(site):
+                    source_clock[id(expr)] = {
+                        "node": expr,
+                        "site": site,
+                        "length_literal": self._lazy_source_clock_length_literal(
+                            self._lazy_source_clock_length_node(expr)
+                        ),
+                    }
+                    return
                 reason = self._lazy_edge_hoist_block_reason(site)
                 if reason is not None:
+                    if family in self.LAZY_PER_EXECUTION_TA:
+                        per_execution_nodes.add(id(expr))
                     skipped.append((expr, site, reason))
                     return
                 counter[0] += 1
@@ -838,7 +776,13 @@ class TaSiteHelper:
             if units:
                 by_stmt[id(stmt)] = units
 
-        plan = {"by_stmt": by_stmt, "call_nodes": call_nodes, "skipped": skipped}
+        plan = {
+            "by_stmt": by_stmt,
+            "call_nodes": call_nodes,
+            "source_clock": source_clock,
+            "per_execution_nodes": per_execution_nodes,
+            "skipped": skipped,
+        }
         self._lazy_edge_hoist_plan_cache = plan
         return plan
 

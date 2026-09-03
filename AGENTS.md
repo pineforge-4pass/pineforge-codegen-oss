@@ -309,12 +309,25 @@ you delete or weaken the special case, the test will tell you.
    `const auto _pf_every_bar_ta_N = <site>;` (plus the site's `_hist_call_*`
    push for a direct `[k]`) BEFORE the statement, in dynamic mode too
    (`codegen/ta.py::_lazy_edge_ta_hoist_plan`, `_emit_lazy_edge_ta_hoists`;
-   `tests/test_lazy_edge_ta_every_bar.py`). Sites inside `if`/loop/function
-   bodies, `else if` conditions, `var` initializers, `request.security`
-   payloads, tuple-returning sites and the pinned lazy `ta.roc(close, 3)`
-   clock keep their existing lowering. The old "lazy SMA/EMA must not
-   precalc" pins (pf-probe-oliver-dual-vol-sma) encoded the refuted per-call
-   clock and were re-pinned in `test_codegen_validation_fixes.py`.
+   `tests/test_lazy_edge_ta_every_bar.py`). The rule is per family
+   (cadence-7 ternary/lazy-and probes, same tapes) and the hoist is an
+   ALLOW-LIST (`LAZY_EVERY_BAR_TA` = highest/lowest/sma/ema): a broad hoist
+   of every family cost 170 tiers / 30 hard lanes on Cloud Run
+   (2026-09-04), so an unpinned family keeps its existing lowering until a
+   tape pins it. `change`/`mom`/`roc` (`LAZY_SOURCE_CLOCK_TA`) read the
+   call's OWN held `source[length]` -- written only when the call executes,
+   held on skipped bars, na before the first execution -- through the
+   generated `_PFLazySourceClock` + `_pf_lazy_src_hist_N` members
+   (`tests/test_lazy_source_clock*.py`; this replaced the #64 roc3-only
+   clock, whose eager first-execution fallback the tapes refute);
+   `cum`/`barssince`/`valuewhen`/`cross*`/`rising`/`falling`
+   (`LAZY_PER_EXECUTION_TA`) keep the reached-only inline compute, which is
+   TradingView's per-execution clock, and never precalc.
+   Sites inside `if`/loop/function bodies, `else if` conditions, `var`
+   initializers, `request.security` payloads and tuple-returning sites keep
+   their existing lowering. The old "lazy SMA/EMA must not precalc" pins
+   (pf-probe-oliver-dual-vol-sma) encoded the refuted per-call clock and were
+   re-pinned in `test_codegen_validation_fixes.py`.
 
 ## How to add a new Pine v6 function
 

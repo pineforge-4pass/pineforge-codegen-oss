@@ -832,30 +832,34 @@ def test_and_rhs_sma_sites_are_hoisted_every_bar_and_precalc_eligible():
 
 
 
-def test_nested_ta_below_and_rhs_hoists_inner_then_outer():
-    """``ta.change(ta.sma(...))`` under an ``and`` RHS hoists both, inner first."""
+
+def test_nested_ta_below_and_rhs_hoists_inner_and_clocks_outer_change():
+    """``ta.change(ta.sma(...))`` under an ``and`` RHS: the SMA (every-bar
+    native) hoists; ``ta.change`` follows TradingView's hold-last source clock
+    over that hoisted value (lab tv 2026-09-03: change 39/39)."""
     cpp = _cpp(
         "base = ta.mom(close, 20) > 0 and ta.change(ta.sma(close, 50)) > 0\n"
         "plot(base ? 1 : 0)"
     )
     inner = _hoist_line(cpp, "_pf_every_bar_ta_1")
-    outer = _hoist_line(cpp, "_pf_every_bar_ta_2")
     assert "_ta_sma_" in inner and ".compute(current_bar_.close)" in inner
-    assert "_ta_change_" in outer and ".compute(_pf_every_bar_ta_1)" in outer
-    assert cpp.index(inner) < cpp.index(outer) < cpp.index(_stmt_line(cpp, "base = ("))
     base_line = _stmt_line(cpp, "base = (")
-    assert "_pf_every_bar_ta_2" in base_line and "_ta_change_" not in base_line
+    assert cpp.index(inner) < cpp.index(base_line)
+    assert "_pf_lazy_src_clock_1.change(_pf_every_bar_ta_1, _pf_lazy_src_hist_1[0])" in base_line
+    assert "_ta_change_" not in base_line
+    assert "_pf_every_bar_ta_2" not in cpp
     # The eager LHS ``ta.mom`` is not a lazy-edge site.
     assert "_ta_mom_" in base_line
 
 
 
-def test_lazy_edge_sites_hoist_every_bar_except_pinned_roc3_clock():
-    """Every lazy-edge TA family hoists; the pinned lazy ROC(close, 3) clock stays.
+def test_lazy_edge_sites_hoist_every_bar_except_source_clock_families():
+    """Every-bar families hoist; ``ta.roc`` follows the hold-last source clock.
 
-    ``_EVERY_BAR_RULE_NOTE`` covers sma/ema/highest. ``ta.roc(close, 3)`` below
-    a plain ``and`` RHS keeps its oracle-backed saturated call clock
-    (tests/test_lazy_saturated_roc*.py) -- that rule is not re-pinned here.
+    ``_EVERY_BAR_RULE_NOTE`` covers sma/ema/highest. ``ta.roc`` (with change
+    and mom) below a lazy edge reads the call's own held ``source[length]``
+    (lab tv 2026-09-03: roc 38/38 by value, every-bar 0/38) -- see
+    tests/test_lazy_source_clock*.py.
     """
     cpp = _cpp(
         "pred = close > open\n"
@@ -874,13 +878,10 @@ def test_lazy_edge_sites_hoist_every_bar_except_pinned_roc3_clock():
         assert f"std::vector<double> _precalc__ta_{name}_" in cpp
         assert f"_use_precalc ? _precalc__ta_{name}_" in cpp
     assert "std::vector<double> _precalc__ta_roc_" not in cpp
-    assert "_PFLazySaturatedROC3Clock" in cpp
+    assert "struct _PFLazySourceClock {" in cpp
     b_line = _stmt_line(cpp, "b = (")
-    assert (
-        ".evaluate(current_bar_.close, "
-        "_pf_lazy_saturated_roc3_close_history[3], bar_index_)"
-    ) in b_line
-    # a, c, d, e, f, g, h are hoisted (7 sites); b keeps its clock, i is eager.
+    assert "_pf_lazy_src_clock_1.roc(current_bar_.close, _pf_lazy_src_hist_1[2])" in b_line
+    # a, c, d, e, f, g, h are hoisted (7 sites); b uses its clock, i is eager.
     assert len(re.findall(r"const auto _pf_every_bar_ta_\d+ = ", cpp)) == 7
     for var in ("a", "c", "d", "e", "f", "g", "h"):
         assert "_pf_every_bar_ta_" in _stmt_line(cpp, f"{var} = (")
@@ -888,7 +889,6 @@ def test_lazy_edge_sites_hoist_every_bar_except_pinned_roc3_clock():
     # Every ema/sma site is every-bar, so every one is precalc-eligible.
     assert len(re.findall(r"std::vector<double> _precalc__ta_ema_", cpp)) == 4
     assert len(re.findall(r"std::vector<double> _precalc__ta_sma_", cpp)) == 2
-
 
 
 def test_precalculated_extrema_direct_history_uses_chart_bar_clock():

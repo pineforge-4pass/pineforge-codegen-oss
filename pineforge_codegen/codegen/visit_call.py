@@ -1431,8 +1431,10 @@ class CallVisitor:
             uses_precalc = self._ta_site_uses_precalc(site)
             if getattr(self, "_precalc_loop_active", False) and uses_precalc:
                 return f"_precalc_{ta_mem}[i]"
-            if self._is_lazy_saturated_roc3_site(site):
-                return self._lazy_saturated_roc3_expr(site)
+            if id(node) in getattr(self, "_lazy_source_clock_by_node", {}):
+                # change/mom/roc below a top-level lazy edge: TradingView reads
+                # the call's own held ``source[length]`` (see ``ta.py``).
+                return self._lazy_source_clock_expr(site, node)
             if uses_precalc:
                 return (
                     f"(_use_precalc ? _precalc_{ta_mem}[bar_index_] : "

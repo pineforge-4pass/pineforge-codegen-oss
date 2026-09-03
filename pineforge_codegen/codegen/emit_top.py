@@ -934,28 +934,29 @@ class TopLevelEmitter:
 
         # A GeneratedStrategy handle may execute multiple batch runs or
         # streaming lifecycles. BacktestEngine resets broker/base state, but
-        # generated members survive. Reset source-shaped lazy ROC clocks and
-        # their forced eager-fallback close history at the first genuine slot
-        # of each lifecycle. This lives in on_bar rather than a generated run
-        # wrapper because stream_begin() enters the base run path directly.
-        # COOF post-close recalculations have history_advances_new_bar()==false
-        # and therefore preserve the current committed clock/base.
-        if self._lazy_saturated_roc3_clock_by_node:
+        # generated members survive. Reset the hold-last source clocks
+        # (change/mom/roc below a top-level lazy edge) and their held-source
+        # Series at the first genuine slot of each lifecycle, then freeze this
+        # bar's base and record it once per chart bar. This lives in on_bar
+        # rather than a generated run wrapper because stream_begin() enters the
+        # base run path directly. COOF post-close recalculations have
+        # history_advances_new_bar()==false and therefore keep the same base.
+        if self._lazy_source_clock_by_node:
             lines.append(
                 "        if (history_advances_new_bar() && bar_index_ == 0) {"
             )
-            for clock_name in self._lazy_saturated_roc3_clock_by_node.values():
-                lines.append(f"            {clock_name}.reset();")
-            lines.append(
-                f"            {self._lazy_saturated_roc3_history_name}.clear();"
-            )
+            for info in self._lazy_source_clock_by_node.values():
+                lines.append(f"            {info['clock']}.reset();")
+                lines.append(f"            {info['hist']}.clear();")
             lines.append("        }")
-            self._emit_history_series_write(
-                lines,
-                "        ",
-                self._lazy_saturated_roc3_history_name,
-                "current_bar_.close",
-            )
+            for info in self._lazy_source_clock_by_node.values():
+                lines.append(f"        {info['clock']}.begin_bar(bar_index_);")
+                self._emit_history_series_write(
+                    lines,
+                    "        ",
+                    info["hist"],
+                    f"{info['clock']}.bar_base_source",
+                )
 
         # reset_run_state() owns engine/broker state, while these generated
         # Series members belong to the strategy object. Clear all of them on

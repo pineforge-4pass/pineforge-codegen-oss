@@ -3807,7 +3807,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # request.security helper-call results read at a history offset
         # (``myHelper()[k]``). Maps (sec_id, node-id) -> backing Series metadata.
         self._security_expr_hist_by_node: dict[tuple[int, int], dict] = {}
-        self._prepare_lazy_saturated_roc3_sites()
+        self._prepare_lazy_source_clock_sites()
 
         lines: list[str] = []
 
@@ -4040,11 +4040,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 )
             lines.append("")
 
-        # Source-shaped lazy ROC call clocks are generated support types, not
-        # script state themselves. Their per-callsite instances are declared
-        # below inside GeneratedStrategy and therefore join the automatic COOF
-        # checkpoint inventory.
-        self._emit_lazy_saturated_roc3_helper(lines)
+        # Hold-last source clocks (change/mom/roc below a top-level lazy edge)
+        # are generated support types, not script state themselves. Their
+        # per-callsite instances are declared below inside GeneratedStrategy
+        # and therefore join the automatic COOF checkpoint inventory.
+        self._emit_lazy_source_clock_helper(lines)
 
         # 2. Open class
         lines.append("class GeneratedStrategy : public BacktestEngine {")
@@ -4200,20 +4200,19 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 lines.append(f"    std::vector<{vtype}> _precalc_{site.member_name};")
         lines.append("    bool _use_precalc = false;")
 
-        for clock_name in self._lazy_saturated_roc3_clock_by_node.values():
+        for info in self._lazy_source_clock_by_node.values():
             lines.append(
-                f"    {self._lazy_saturated_roc3_type_name} {clock_name};"
+                f"    {self._lazy_source_clock_type_name} {info['clock']};"
             )
-        if self._lazy_saturated_roc3_clock_by_node:
-            # Dedicated eager close[3] fallback. Its fixed four-slot capacity
-            # is independent of the user's max_bars_back directive, which may
-            # legitimately be smaller than the offset this generated route
-            # requires. It is ordinary copyable script state and therefore
-            # joins the automatic COOF checkpoint below.
-            lines.append(
-                "    Series<double> "
-                f"{self._lazy_saturated_roc3_history_name}{{4}};"
-            )
+            # Held-source history on the chart clock. A literal length sizes
+            # it exactly (independent of the user's max_bars_back directive,
+            # which may legitimately be smaller than this generated route
+            # needs); a runtime length uses the Series default capacity. Both
+            # are ordinary copyable script state and join the automatic COOF
+            # checkpoint below.
+            literal = info["length_literal"]
+            capacity = f"{{{literal + 1}}}" if literal is not None and literal >= 1 else ""
+            lines.append(f"    Series<double> {info['hist']}{capacity};")
 
         # Security evaluator TA members (cloned from expression dependencies)
         # Skip for user function call expressions — their TA deps are internal to the function
