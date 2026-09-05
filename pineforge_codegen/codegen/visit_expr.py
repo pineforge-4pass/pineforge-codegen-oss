@@ -673,26 +673,40 @@ class ExprVisitor:
                     # to dead ``f5``'s first-in-order ``_ta_vwap_10`` and emitted
                     # ``use of undeclared identifier '_ta_vwap_10'``. A live read
                     # must bind to a live site.
-                    for _i, site in enumerate(self.ctx.ta_call_sites):
-                        if _i in self._dead_ta_indices:
+                    # The read's OWN site first (the analyzer keys the
+                    # synthetic call-site on this MemberAccess node), so two
+                    # bare reads are two sites, each advanced once per bar;
+                    # the first-live-site scan below stays as the fallback.
+                    _own = self._get_ta_site(node)
+                    _candidates = (
+                        [(self._ta_index_by_site_id.get(id(_own)), _own)]
+                        if _own is not None else []
+                    ) + list(enumerate(self.ctx.ta_call_sites))
+                    for _i, site in _candidates:
+                        if _i is None or _i in self._dead_ta_indices:
                             continue
                         ta_short = site.class_name.split("::")[-1].lower()
                         if site.member_name.startswith(f"_ta_{node.member}_"):
                             if node.member == "vwap":
                                 # Same implicit tail as TA_IMPLICIT_APPEND["vwap"]:
                                 # the symbol clock keys the Daily anchor reset.
+                                # The bare property is the VWAP of hlc3 (Pine
+                                # v6 reference; lab tv notrade-session-vwap-f1d,
+                                # 2026-09-05: TradingView's read equals hlc3 on
+                                # a daily bar), never of the close.
+                                _hlc3 = "((current_bar_.high + current_bar_.low + current_bar_.close) / 3.0)"
                                 return (
-                                    f"(history_advances_new_bar() ? {site.member_name}.compute("
-                                    "current_bar_.close, current_bar_.volume, current_bar_.timestamp"
+                                    f"(history_advances_new_bar() ? {self._ta_member_name(site)}.compute("
+                                    f"{_hlc3}, current_bar_.volume, current_bar_.timestamp"
                                     " PF_VWAP_SESSION_ANCHOR_ARGS(syminfo_.timezone, syminfo_.session)) "
-                                    f": {site.member_name}.recompute(current_bar_.close, "
+                                    f": {self._ta_member_name(site)}.recompute({_hlc3}, "
                                     "current_bar_.volume, current_bar_.timestamp"
                                     " PF_VWAP_SESSION_ANCHOR_ARGS(syminfo_.timezone, syminfo_.session)))"
                                 )
                             return (
-                                f"(history_advances_new_bar() ? {site.member_name}.compute("
+                                f"(history_advances_new_bar() ? {self._ta_member_name(site)}.compute("
                                 f"{TA_IMPLICIT_COMPUTE_FULL[node.member]}) : "
-                                f"{site.member_name}.recompute("
+                                f"{self._ta_member_name(site)}.recompute("
                                 f"{TA_IMPLICIT_COMPUTE_FULL[node.member]}))"
                             )
                     # No registered call site for this TA property read —

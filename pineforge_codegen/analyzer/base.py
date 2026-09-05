@@ -5973,7 +5973,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         callee=MemberAccess(object=Identifier(name="ta"), member=node.member),
                         args=[], kwargs={},
                     )
-                    return self._handle_ta_call(node.member, synthetic_call)
+                    before = len(self._ta_call_sites)
+                    result = self._handle_ta_call(node.member, synthetic_call)
+                    # The site belongs to THIS read: key it on the AST node the
+                    # codegen will meet (the MemberAccess), not on the synthetic
+                    # call nobody else holds. Without this a bare ``ta.vwap``
+                    # inside request.security() could not find its own site and
+                    # was lowered to the first live CHART member (advanced by the
+                    # chart bar AND every requested sub-bar, read through
+                    # history_advances_new_bar()); a second top-level read bound
+                    # to the first read's member as well.
+                    if len(self._ta_call_sites) > before:
+                        self._ta_call_sites[-1].node = node
+                    return result
                 return PineType.FLOAT
 
             # math.* properties
