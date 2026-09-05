@@ -222,6 +222,18 @@ TA_COMPUTE_ARGS = {
     "max": [0], "min": [0], "rci": [0],
 }
 
+# issue #178: ta.atr / ta.tr read their true range against the previous
+# CHART bar's close (close[1]) even when the call site executes sparsely —
+# the RMA advances on the executions only (TradingView pin 2026-09-06,
+# lab tv i178-sparse-atr-sense, BINANCE:BTCUSDT 60: 398/398 executions equal
+# the chart-close model, 0/398 the previous-execution model). The chart
+# context therefore passes ``BacktestEngine::prev_chart_close()`` as the
+# 4th compute() argument (the engine's always-on tracker); the per-object
+# prev_close (3-arg form) remains for request.security contexts, whose
+# ``bar.`` rewrite has no chart-close tracker.
+TA_CHART_PREV_CLOSE = {"atr", "tr"}
+TA_CHART_PREV_CLOSE_ARG = "prev_chart_close()"
+
 # TA functions whose ``.compute()`` always receives bar OHLC implicitly.
 TA_IMPLICIT_COMPUTE_FULL = {
     "atr": "current_bar_.high, current_bar_.low, current_bar_.close",
