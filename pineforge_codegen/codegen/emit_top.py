@@ -89,6 +89,7 @@ from ..analyzer import FuncInfo
 from ..symbols import PineType, method_receiver_cpp_token
 from .tables import (
     BAR_SERIES_PUSH,
+    TA_CHART_PREV_CLOSE_ARG,
     DRAWING_TYPE_TO_CPP,
     PINE_TYPE_TO_CPP,
     RUNTIME_REGISTER_SECURITY_EVAL_FN,
@@ -1976,6 +1977,14 @@ class TopLevelEmitter:
                 if self._ta_site_uses_precalc(site):
                     compute_args = self._ta_compute_args_for_site(site)
                     compute_args_bars = compute_args.replace("current_bar_.", "bars[i].")
+                    # issue #178: the precalc pre-pass walks the bar array
+                    # itself, so the previous CHART close is bars[i - 1]
+                    # (the engine's prev_chart_close() tracker only advances
+                    # at on_bar dispatch).
+                    compute_args_bars = compute_args_bars.replace(
+                        TA_CHART_PREV_CLOSE_ARG,
+                        "(i > 0 ? bars[i - 1].close : na<double>())",
+                    )
                     lines.append(f"            _precalc_{site.member_name}[i] = {site.member_name}.compute({compute_args_bars});")
         finally:
             self._precalc_loop_active = False

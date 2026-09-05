@@ -31,7 +31,12 @@ from ..ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, TypeDecl, TypeField, UnaryOp, VarDecl,
     WhileStmt,
 )
-from .tables import TA_IMPLICIT_APPEND, TA_IMPLICIT_COMPUTE_FULL
+from .tables import (
+    TA_CHART_PREV_CLOSE,
+    TA_CHART_PREV_CLOSE_ARG,
+    TA_IMPLICIT_APPEND,
+    TA_IMPLICIT_COMPUTE_FULL,
+)
 
 if TYPE_CHECKING:
     from ..analyzer import TACallSite
@@ -113,6 +118,10 @@ class TaSiteHelper:
 
         if ta_name in TA_IMPLICIT_COMPUTE_FULL:
             implicit = TA_IMPLICIT_COMPUTE_FULL[ta_name]
+            # issue #178: chart-context atr / tr take the previous CHART
+            # bar's close as a 4th argument (see TA_CHART_PREV_CLOSE).
+            if ta_name in TA_CHART_PREV_CLOSE:
+                implicit = f"{implicit}, {TA_CHART_PREV_CLOSE_ARG}"
             if site.compute_args:
                 explicit = ", ".join(self._visit_expr(a) for a in site.compute_args)
                 if ta_name in self._TA_IMPLICIT_REPLACE:

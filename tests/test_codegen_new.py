@@ -168,7 +168,7 @@ x = ta.tr(false)
     assert re.search(r"_ta_tr_\d+\(false\)", cpp), cpp
     # Compute is invoked with the bar OHLC implicitly threaded in.
     assert (
-        "_ta_tr_1.compute(current_bar_.high, current_bar_.low, current_bar_.close)"
+        "_ta_tr_1.compute(current_bar_.high, current_bar_.low, current_bar_.close, prev_chart_close())"
         in cpp
     )
 

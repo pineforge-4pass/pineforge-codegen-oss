@@ -92,7 +92,7 @@ def test_ta_tr_compute_uses_implicit_bar_ohlc():
     # implicit bar OHLC (high, low, close) — it never sees ``handle_na``.
     cpp = _generate(_wrap("x = ta.tr()"))
     assert (
-        "_ta_tr_1.compute(current_bar_.high, current_bar_.low, current_bar_.close)"
+        "_ta_tr_1.compute(current_bar_.high, current_bar_.low, current_bar_.close, prev_chart_close())"
         in cpp
     ), cpp
     # Defensive: the bool literal must NOT appear inside the compute call.
