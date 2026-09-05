@@ -97,3 +97,31 @@ def test_bare_property_inside_security_same_tf_as_chart():
     evaluator = evaluator[: evaluator.index("}\n")]
     assert "_sec0__ta_vwap_1.compute(" + HLC3_SEC in evaluator, evaluator
     assert "history_advances_new_bar()" not in evaluator, evaluator
+
+
+def test_user_declared_vwap_variable_is_not_the_property():
+    """A script's OWN ``vwap`` is a user variable, never the ``ta.vwap`` property.
+
+    van007trader-vwap-deviation-score-dyna computes ``float vwap = sumV > 0 ?
+    sumPV / sumV : na`` from its session accumulators and reads ``close - vwap``;
+    it matched TradingView 100% on seven intraday lanes before and after the
+    property rule above (ea90029 emits byte-identical C++ for it, 2026-09-05).
+    The hlc3 / own-site rule applies to ``ta.vwap`` reads only: no VWAP site,
+    no ``ta::VWAP`` member, and the read is the user's variable.
+    """
+    cpp = transpile(_pine(
+        "var float sumPV = 0.0\n"
+        "var float sumV = 0.0\n"
+        "float v = math.max(nz(volume, 0.0), 1.0)\n"
+        "sumPV := sumPV + hlc3 * v\n"
+        "sumV := sumV + v\n"
+        "float vwap = sumV > 0 ? sumPV / sumV : na\n"
+        "float z = (close - vwap) / 2.0\n"
+        "if z > 2.0\n"
+        "    strategy.entry(\"S\", strategy.short)\n"
+    ))
+    assert "_ta_vwap_" not in cpp, cpp
+    assert "ta::VWAP" not in cpp, cpp
+    assert "PF_VWAP_SESSION_ANCHOR_ARGS" not in cpp, cpp
+    assert "vwap" in cpp  # the user's own variable is what the read resolves to
+
