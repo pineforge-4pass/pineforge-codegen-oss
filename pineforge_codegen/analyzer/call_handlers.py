@@ -437,9 +437,15 @@ class CallHandlers:
             all_args = [default_arg]
 
         if func_name == "vwap" and not all_args:
-            default_src = Identifier(name="close")
+            # The bare ``ta.vwap`` property is the VWAP of hlc3 (Pine v6
+            # reference: "It uses hlc3 as its source series"); TradingView's
+            # own read equals hlc3 on a daily bar (lab tv
+            # notrade-session-vwap-f1d, NYSE:F 1D 2025-07-01..08-31, 42/42,
+            # 2026-09-05), where the engine used to read the bar's close.
+            default_src = Identifier(name="hlc3")
             self._visit(default_src)
-            self._series_bar_fields.add("close")
+            for field in ("high", "low", "close"):
+                self._series_bar_fields.add(field)
             all_args = [default_src]
 
         # Handle ta.highest(length) / ta.lowest(length) with 1 arg:

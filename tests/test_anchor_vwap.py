@@ -52,11 +52,13 @@ def test_ta_vwap_precalc_path_threads_symbol_clock():
 
 
 def test_ta_vwap_bare_property_read_threads_symbol_clock():
+    # The bare property is the VWAP of hlc3 (tests/test_vwap_property_source.py).
     cpp = transpile(_pine("v = ta.vwap\nw = ta.vwap"))
-    calls = [c for c in _calls(cpp, "compute") if "current_bar_.close" in c and "vwap" in c]
+    hlc3 = "((current_bar_.high + current_bar_.low + current_bar_.close) / 3.0)"
+    calls = [c for c in _calls(cpp, "compute") if hlc3 in c and "vwap" in c]
     assert calls, cpp
     for call in calls:
-        assert "current_bar_.close, current_bar_.volume, current_bar_.timestamp " + SYM_TAIL in call, call
+        assert hlc3 + ", current_bar_.volume, current_bar_.timestamp " + SYM_TAIL in call, call
 
 
 def test_ta_vwap_bands_form_threads_symbol_clock():

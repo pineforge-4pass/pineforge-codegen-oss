@@ -134,7 +134,7 @@ if close > ub
 
 
 def test_vwap_bare_property():
-    """Bare property form ta.vwap (no parens) should compile and compute from close, volume, timestamp."""
+    """Bare property form ta.vwap (no parens) should compile and compute from hlc3, volume, timestamp."""
     src = PRELUDE + """\
 v = ta.vwap
 if close > v
@@ -143,4 +143,5 @@ if close > v
     assert _has_no_errors(src)
     cpp = _transpile(src)
     assert "ta::VWAP" in cpp
-    assert "compute(current_bar_.close, current_bar_.volume, current_bar_.timestamp PF_VWAP_SESSION_ANCHOR_ARGS(syminfo_.timezone, syminfo_.session))" in cpp
+    # The bare property is the VWAP of hlc3 (tests/test_vwap_property_source.py).
+    assert "compute(((current_bar_.high + current_bar_.low + current_bar_.close) / 3.0), current_bar_.volume, current_bar_.timestamp PF_VWAP_SESSION_ANCHOR_ARGS(syminfo_.timezone, syminfo_.session))" in cpp
