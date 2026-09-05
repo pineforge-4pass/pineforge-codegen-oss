@@ -75,7 +75,9 @@ def method_receiver_type_name(spec: TypeSpec | None) -> str | None:
     if spec is None:
         return None
     if spec.kind in {"primitive", "udt"}:
-        return spec.name
+        # A wide (epoch-millisecond) element is still Pine ``int`` to the
+        # source: a user method declared on ``array<int>`` binds to it.
+        return "int" if spec.name == "int64" else spec.name
     if spec.kind == "array" and spec.element is not None:
         element = method_receiver_type_name(spec.element)
         return f"array<{element}>" if element is not None else None
@@ -106,7 +108,7 @@ def method_receiver_cpp_token(
 
     if spec is not None:
         if spec.kind in {"primitive", "udt"} and spec.name:
-            return spec.name
+            return "int" if spec.name == "int64" else spec.name
         if spec.kind == "array" and spec.element is not None:
             return f"array_{method_receiver_cpp_token(spec.element)}"
         if spec.kind == "map" and spec.key is not None and spec.value is not None:

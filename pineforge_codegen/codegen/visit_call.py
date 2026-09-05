@@ -1555,6 +1555,12 @@ class CallVisitor:
         if namespace == "array":
             if func_name in ("new", "new_float", "new_int", "new_bool", "new_string") or func_name in ARRAY_DRAWING_NEW_CTORS:
                 spec = self._type_spec_from_expr(node) or TypeSpec.array(TypeSpec.primitive("float"))
+                # The constructor of a wide int array (``_wide_int_array_names``)
+                # must spell the declared ``std::vector<int64_t>``: the
+                # declaration site names its target here.
+                target = getattr(self, "_array_ctor_target_name", None)
+                if target is not None:
+                    spec = self._widen_array_spec_for_name(target, spec)
                 cpp_type = self._type_spec_to_cpp(spec)
                 elem_spec = spec.element if spec.element is not None else TypeSpec.primitive("float")
                 init_default = self._default_for_spec(elem_spec)
@@ -1568,6 +1574,9 @@ class CallVisitor:
                 return f"{cpp_type}()"
             if func_name == "from":
                 spec = self._type_spec_from_expr(node) or TypeSpec.array(TypeSpec.primitive("float"))
+                target = getattr(self, "_array_ctor_target_name", None)
+                if target is not None:
+                    spec = self._widen_array_spec_for_name(target, spec)
                 elems = ", ".join(self._visit_expr(a) for a in node.args)
                 return f"{self._type_spec_to_cpp(spec)}{{{elems}}}"
             # Method calls: array.method(arr, args...)

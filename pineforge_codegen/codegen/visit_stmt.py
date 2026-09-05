@@ -495,6 +495,11 @@ class StmtVisitor:
                 )
                 previous_input_name = self._current_input_var_name
                 self._current_input_var_name = node.name
+                # A ``var`` int array that stores epoch milliseconds is declared
+                # ``std::vector<int64_t>``; its one-shot constructor here must
+                # spell the same type (visit_call array.new_* / array.from).
+                previous_ctor_target = getattr(self, "_array_ctor_target_name", None)
+                self._array_ctor_target_name = node.name
                 try:
                     type_spec = info.get("type_spec")
                     target_cpp_type = info.get("drawing_cpp")
@@ -535,6 +540,7 @@ class StmtVisitor:
                         init_cpp = self._visit_expr(node.value)
                 finally:
                     self._current_input_var_name = previous_input_name
+                    self._array_ctor_target_name = previous_ctor_target
                 if info.get("drawing_cpp") is None:
                     init_cpp = self._typed_na_init(
                         init_cpp, member_name, info["ptype"]
@@ -618,13 +624,19 @@ class StmtVisitor:
             func_name, namespace = self._resolve_callee(node.value.callee)
             if namespace == "array" and func_name in ARRAY_NEW_CTORS | {"new", "from", "copy", "slice"}:
                 captured = self._callable_collection_bindings.get(id(node))
-                spec = (
+                spec = self._widen_array_spec_for_name(
+                    node.name,
                     captured
                     if captured is not None and captured.kind == "array"
                     else self._type_spec_from_expr(node.value)
-                        or self._array_spec_for_name(node.name)
+                        or self._array_spec_for_name(node.name),
                 )
-                init = self._visit_expr(node.value)
+                previous_target = getattr(self, "_array_ctor_target_name", None)
+                self._array_ctor_target_name = node.name
+                try:
+                    init = self._visit_expr(node.value)
+                finally:
+                    self._array_ctor_target_name = previous_target
                 self._array_vars.add(node.name)
                 self._collection_types.setdefault(node.name, spec)
                 cpp_type = self._type_spec_to_cpp(spec)

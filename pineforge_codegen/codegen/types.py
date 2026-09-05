@@ -135,8 +135,9 @@ class TypeInferer:
         if spec is None:
             return "double"
         if spec.kind == "primitive":
-            return {"float": "double", "int": "int", "bool": "bool",
-                    "string": "std::string", "color": "int"}.get(spec.name or "float", "double")
+            return {"float": "double", "int": "int", "int64": "int64_t",
+                    "bool": "bool", "string": "std::string",
+                    "color": "int"}.get(spec.name or "float", "double")
         if spec.kind == "udt" and spec.name:
             # Drawing handle structs (P1): map BEFORE the _udt_defs check so
             # array<line> -> std::vector<Line> and scalar line -> Line instead
@@ -269,6 +270,175 @@ class TypeInferer:
         return self._default_for_type(cpp_type)
 
     def _collection_spec_for_name(self, name: str) -> TypeSpec | None:
+        """``_collection_spec_for_name_raw`` with the wide-int element applied
+        (``_widen_array_spec_for_name``): an ``array<int>`` that stores epoch
+        milliseconds resolves as ``std::vector<int64_t>`` everywhere it is
+        read, declared or passed."""
+        return self._widen_array_spec_for_name(
+            name, self._collection_spec_for_name_raw(name)
+        )
+
+    # Element-returning array reads whose result carries the receiver's wide
+    # provenance (``_expr_returns_wide_int``).
+    _WIDE_ARRAY_ELEMENT_READS = frozenset({
+        "get", "first", "last", "pop", "shift", "remove", "max", "min",
+    })
+    # Writers whose VALUE argument decides whether an int array is wide:
+    # name -> (functional-form value index, method-form value index).
+    _ARRAY_ELEMENT_WRITERS = {
+        "push": (1, 0), "unshift": (1, 0), "set": (2, 1), "insert": (2, 1),
+        "fill": (1, 0),
+    }
+
+    @staticmethod
+    def _int_fits_int32(value: int) -> bool:
+        return -(1 << 31) <= value < (1 << 31)
+
+    def _pure_int_literal_value(self, node) -> int | None:
+        """Exact value of an expression built only from int literals and
+        ``+ - *`` / unary minus, else ``None``.
+
+        Pine ``int`` is 64-bit: ``90 * 24 * 60 * 60 * 1000`` (three months in
+        milliseconds) is 7 776 000 000 on TradingView. Emitted as C++ ``int``
+        literal arithmetic the same product overflows (wraps to -813 934 592),
+        so a ``(time - t0) > threeMonths`` expiry fires on every bar (round 8
+        family U: latibonit15 execution-signals-confluence, six lanes; lab tv
+        u-lati-levels-nq15 vs the engine, 2026-09-05). Folding the literal
+        subtree in Python keeps the exact value; the caller emits it as a
+        64-bit literal only when it does not fit ``int32`` so every in-range
+        expression is byte-identical to before.
+        """
+        if isinstance(node, NumberLiteral):
+            return node.value if isinstance(node.value, int) and not isinstance(node.value, bool) else None
+        if isinstance(node, UnaryOp) and node.op == "-":
+            inner = self._pure_int_literal_value(node.operand)
+            return -inner if inner is not None else None
+        if isinstance(node, BinOp) and node.op in ("+", "-", "*"):
+            left = self._pure_int_literal_value(node.left)
+            if left is None:
+                return None
+            right = self._pure_int_literal_value(node.right)
+            if right is None:
+                return None
+            if node.op == "+":
+                return left + right
+            if node.op == "-":
+                return left - right
+            return left * right
+        return None
+
+    def _literal_overflows_int32(self, node) -> bool:
+        value = self._pure_int_literal_value(node)
+        return value is not None and not self._int_fits_int32(value)
+
+    def _array_receiver_and_value(self, call):
+        """``(receiver_name, value_node)`` of an element-writing array call in
+        either form (``array.push(a, v)`` / ``a.push(v)``), else ``None``."""
+        if not isinstance(call, FuncCall):
+            return None
+        func_name, namespace = self._resolve_callee(call.callee)
+        if func_name not in self._ARRAY_ELEMENT_WRITERS:
+            return None
+        functional_idx, method_idx = self._ARRAY_ELEMENT_WRITERS[func_name]
+        if namespace == "array":
+            receiver = call.args[0] if call.args else call.kwargs.get("id")
+            value = (call.args[functional_idx]
+                     if len(call.args) > functional_idx
+                     else call.kwargs.get("value"))
+        elif (isinstance(call.callee, MemberAccess)
+              and isinstance(call.callee.object, Identifier)):
+            receiver = call.callee.object
+            value = (call.args[method_idx]
+                     if len(call.args) > method_idx
+                     else call.kwargs.get("value"))
+        else:
+            return None
+        if not isinstance(receiver, Identifier) or value is None:
+            return None
+        return receiver.name, value
+
+    def _wide_int_array_names(self) -> set[str]:
+        """Names of int arrays that hold a wide integer: one that receives an
+        epoch-millisecond value (``time``, ``time_close``, ``timestamp(...)``,
+        a wide callable result, ...) through ``array.push`` / ``unshift`` /
+        ``set`` / ``insert`` / ``fill``, or is built by ``array.new_int`` /
+        ``array.new<int>`` / ``array.from`` from one. Their element type is
+        ``int64_t`` (TypeSpec primitive ``int64``): Pine's ``int`` holds the
+        epoch, ``std::vector<int>`` truncates it. Cached on the instance."""
+        cached = getattr(self, "_wide_int_array_cache", None)
+        if cached is not None:
+            return cached
+        # The scan below asks ``_expr_returns_wide_int``, whose receiver typing
+        # resolves collection specs through ``_collection_spec_for_name`` and so
+        # back here: publish the (growing) set first so the recursion reads the
+        # partial answer instead of re-entering, then iterate to the fixpoint so
+        # an array filled from another wide array's elements widens too.
+        names: set[str] = set()
+        self._wide_int_array_cache = names
+
+        def scan(nodes, owner_info):
+            for child in nodes:
+                if isinstance(child, FuncCall):
+                    pair = self._array_receiver_and_value(child)
+                    if pair is not None and self._expr_returns_wide_int(
+                        pair[1], owner_info, set(), None
+                    ):
+                        names.add(pair[0])
+                    continue
+                target = None
+                value = None
+                if isinstance(child, VarDecl):
+                    target, value = child.name, child.value
+                elif (isinstance(child, Assignment)
+                      and isinstance(child.target, Identifier)):
+                    target, value = child.target.name, child.value
+                if target is None or not isinstance(value, FuncCall):
+                    continue
+                fn, ns = self._resolve_callee(value.callee)
+                if ns != "array":
+                    continue
+                candidates = []
+                if fn in ("new_int", "new"):
+                    if fn == "new":
+                        targs = (self._template_args_from_call(value)
+                                 if hasattr(value, "annotations") else [])
+                        if not targs or targs[0] != "int":
+                            continue
+                    if len(value.args) > 1:
+                        candidates.append(value.args[1])
+                    if "initial_value" in value.kwargs:
+                        candidates.append(value.kwargs["initial_value"])
+                elif fn == "from":
+                    candidates = list(value.args)
+                if any(self._expr_returns_wide_int(c, owner_info, set(), None)
+                       for c in candidates):
+                    names.add(target)
+
+        ast = getattr(self.ctx, "ast", None)
+        for _round in range(8):
+            before = len(names)
+            if ast is not None:
+                scan(self._walk_ast(ast), None)
+            for info in getattr(self.ctx, "func_infos", ()):
+                node = getattr(info, "node", None)
+                if node is not None:
+                    scan(self._walk_ast_list(node.body), info)
+            if len(names) == before:
+                break
+        return names
+
+    def _widen_array_spec_for_name(self, name, spec):
+        """``array<int>`` -> ``array<int64>`` when ``name`` is a wide int
+        array; every other spec (and ``None``) passes through unchanged."""
+        if (spec is None or spec.kind != "array" or spec.element is None
+                or spec.element.kind != "primitive"
+                or spec.element.name != "int"):
+            return spec
+        if name in self._wide_int_array_names():
+            return TypeSpec.array(TypeSpec.primitive("int64"))
+        return spec
+
+    def _collection_spec_for_name_raw(self, name: str) -> TypeSpec | None:
         """Resolve collection metadata with lexical precedence.
 
         Source-ordered callable locals shadow loop bindings and parameters once
@@ -417,7 +587,9 @@ class TypeInferer:
                     return TypeSpec.primitive("string")
                 if node.op == "/" or left.name == "float" or right.name == "float":
                     return TypeSpec.primitive("float")
-                if left.name == "int" and right.name == "int":
+                if left.name in ("int", "int64") and right.name in ("int", "int64"):
+                    if "int64" in (left.name, right.name):
+                        return TypeSpec.primitive("int64")
                     return TypeSpec.primitive("int")
             return None
         spec = self._type_spec_from_expr(node)
@@ -976,7 +1148,7 @@ class TypeInferer:
                 "percentrank", "abs", "standardize", "covariance", "binary_search",
                 "binary_search_leftmost", "binary_search_rightmost", "sort_indices",
             }
-            if method in numeric_only and elem_cpp not in ("double", "int"):
+            if method in numeric_only and elem_cpp not in ("double", "int", "int64_t"):
                 self._codegen_error(
                     None,
                     f"array.{method} requires a numeric array",
@@ -1187,7 +1359,7 @@ class TypeInferer:
         # truly untyped slot may consult the per-callsite specialization map.
         spec = declared_spec
         if spec is not None and spec.kind == "primitive":
-            if spec.name == "int":
+            if spec.name in ("int", "int64"):
                 return "int64_t"
             if spec.name == "bool":
                 return "bool"
@@ -1217,7 +1389,7 @@ class TypeInferer:
         specs = list(getattr(func_info, "param_type_specs", ()) or ())
         spec = specs[index] if index < len(specs) else None
         if spec is not None and spec.kind == "primitive":
-            if spec.name == "int":
+            if spec.name in ("int", "int64"):
                 return "int64_t"
             if spec.name == "bool":
                 return "bool"
@@ -1352,8 +1524,25 @@ class TypeInferer:
             return self._expr_is_int64_builtin(expr)
         if self._expr_is_int64_builtin(expr):
             return True
+        if isinstance(expr, (BinOp, UnaryOp)) and self._literal_overflows_int32(expr):
+            # ``90 * 24 * 60 * 60 * 1000``: an int-literal product beyond
+            # int32 is a 64-bit value in Pine (``_pure_int_literal_value``).
+            return True
         if isinstance(expr, FuncCall):
             func_name, namespace = self._resolve_callee(expr.callee)
+            if func_name in self._WIDE_ARRAY_ELEMENT_READS:
+                # An element read off a wide int array (``array.get(times, i)``
+                # / ``times.get(i)``) carries the epoch: the destination must
+                # not narrow it (``_wide_int_array_names``).
+                receiver = None
+                if namespace == "array":
+                    receiver = expr.args[0] if expr.args else expr.kwargs.get("id")
+                elif (isinstance(expr.callee, MemberAccess)
+                      and isinstance(expr.callee.object, Identifier)):
+                    receiver = expr.callee.object
+                if (isinstance(receiver, Identifier)
+                        and receiver.name in self._wide_int_array_names()):
+                    return True
             if namespace is None and func_name in {
                 "int",
                 "float",

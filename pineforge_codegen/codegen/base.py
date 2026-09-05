@@ -1914,7 +1914,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 self._collection_types[name] = spec
             elif ns == "array" and fn in ({"new", "from"} | set(ARRAY_NEW_CTORS)):
                 self._array_vars.add(name)
-                spec = self._type_spec_from_expr(expr) or self._array_spec_for_name(name)
+                spec = self._widen_array_spec_for_name(
+                    name,
+                    self._type_spec_from_expr(expr) or self._array_spec_for_name(name),
+                )
                 self._collection_types[name] = spec
             elif ns == "map" and fn == "new":
                 self._map_vars.add(name)
@@ -1934,7 +1937,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             fn2, ns2 = self._resolve_callee(expr.callee)
             if ns2 == "array" and fn2 in ({"new", "from"} | set(ARRAY_NEW_CTORS)):
                 self._array_vars.add(name)
-                spec2 = self._type_spec_from_expr(expr) or self._array_spec_for_name(name)
+                spec2 = self._widen_array_spec_for_name(
+                    name,
+                    self._type_spec_from_expr(expr) or self._array_spec_for_name(name),
+                )
                 self._collection_types[name] = spec2
                 continue
             if name in self._matrix_specs:
@@ -4275,7 +4281,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 )
             ):
                 self._array_vars.add(name)
-                array_spec = exact_member_spec or self._array_spec_for_name(name)
+                array_spec = self._widen_array_spec_for_name(
+                    name, exact_member_spec or self._array_spec_for_name(name)
+                )
                 lines.append(
                     f"    {self._type_spec_to_cpp(array_spec)} {safe};"
                 )

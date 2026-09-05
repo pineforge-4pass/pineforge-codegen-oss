@@ -1051,6 +1051,13 @@ class ExprVisitor:
         return f"({left_cpp} {op} {right_cpp})"
 
     def _visit_binop(self, node: BinOp) -> str:
+        # An int-literal-only ``+ - *`` tree whose exact value leaves int32 is
+        # a 64-bit Pine int (``90 * 24 * 60 * 60 * 1000`` = 7 776 000 000);
+        # C++ ``int`` literal arithmetic would wrap it. Fold it here and spell
+        # the value as a 64-bit literal. In-range trees are emitted as before.
+        folded = self._pure_int_literal_value(node)
+        if folded is not None and not self._int_fits_int32(folded):
+            return f"static_cast<int64_t>({folded}LL)"
         left = self._visit_expr(node.left)
         right = self._visit_expr(node.right)
         cpp_ops = {"and": "&&", "or": "||"}

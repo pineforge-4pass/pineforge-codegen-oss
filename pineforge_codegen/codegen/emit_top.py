@@ -1035,6 +1035,11 @@ class TopLevelEmitter:
                 # declaration statements, not in the global on_bar preamble.
                 if name in getattr(self, "_func_local_var_names", ()):
                     continue
+                # A wide int array member (``std::vector<int64_t>``, see
+                # ``_wide_int_array_names``) needs its first-bar constructor
+                # spelled with the same element type: name the target for
+                # visit_call's ``array.new_*`` / ``array.from`` lowering.
+                self._array_ctor_target_name = name
                 safe = self._safe_name(name)
                 runtime_info = self._runtime_scalar_var_init_by_member.get(name)
                 if (runtime_info is not None
@@ -1131,6 +1136,7 @@ class TopLevelEmitter:
                             if cloned not in init_emitted:
                                 init_emitted.add(cloned)
                                 lines.append(f"            {cloned}.push({cpp_val});")
+            self._array_ctor_target_name = None
             lines.append("            _var_initialized = true;")
             lines.append("        } else {")
             for name, _, _ in self.ctx.var_members:
