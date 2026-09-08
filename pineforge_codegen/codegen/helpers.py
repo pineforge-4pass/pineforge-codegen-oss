@@ -30,6 +30,7 @@ CPP_RESERVED = {
     "exp", "log", "abs", "max", "min", "and", "or", "not",
     "int", "float", "bool", "string", "short", "long", "new", "delete",
     "class", "struct", "return", "void", "auto", "const", "static",
+    "prepare_script_run",
 }
 
 

@@ -215,7 +215,9 @@ def test_hoist_is_independent_of_run_mode():
     hoist = _hoist(cpp, 1)
     assert "_use_precalc ? _precalc__ta_highest_1[bar_index_] :" in hoist
     assert "history_advances_new_bar() ? _ta_highest_1.compute(current_bar_.high)" in hoist
-    assert "if (needs_dynamic) {\n            _use_precalc = false;" in cpp
+    preparation = cpp.split("void prepare_script_run(", 1)[1].split("\n    }", 1)[0]
+    assert "this->_use_precalc = false;" in preparation
+    assert "if (allow_precalculation) precalculate(bars, n);" in preparation
 
 
 # ---------------------------------------------------------------------------

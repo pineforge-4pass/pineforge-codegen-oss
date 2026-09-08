@@ -301,6 +301,39 @@ public:
         }
     }
 
+#ifndef PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1
+#error "Generated lifecycle reset requires a matching PineForge engine; rebuild with script-run preparation support"
+#endif
+    void prepare_script_run(const Bar* bars, int n, bool allow_precalculation) override {
+        _pf_script_state_checkpoint_.reset();
+        this->_ta_sma_1 = decltype(this->_ta_sma_1)(14);
+        this->_ta_sma_2 = decltype(this->_ta_sma_2)(14);
+        this->_ta_sma_3 = decltype(this->_ta_sma_3)(14);
+        this->_ta_sma_4 = decltype(this->_ta_sma_4)(14);
+        this->_ta_sma_5 = decltype(this->_ta_sma_5)(14);
+        this->_ta_sma_6 = decltype(this->_ta_sma_6)(14);
+        this->_ta_crossover_7 = decltype(this->_ta_crossover_7){};
+        this->_ta_crossunder_8 = decltype(this->_ta_crossunder_8){};
+        this->_use_precalc = false;
+        this->m = decltype(this->m){};
+        this->length = 0;
+        this->v1 = 0.0;
+        this->v2 = 0.0;
+        this->v1_mean = 0.0;
+        this->v2_mean = 0.0;
+        this->cov11 = 0.0;
+        this->cov12 = 0.0;
+        this->cov21 = 0.0;
+        this->cov22 = 0.0;
+        this->covReady = false;
+        this->lam = 0.0;
+        this->lamSma = 0.0;
+        this->_var_initialized = false;
+        this->_ta_initialized_ = false;
+        this->_inputs_initialized_ = false;
+        (void)bars; (void)n; (void)allow_precalculation;
+    }
+
     void on_bar(const Bar& bar) override {
         if (!_var_initialized) {
             m = PineMatrix::new_(2, 2, 0.0);

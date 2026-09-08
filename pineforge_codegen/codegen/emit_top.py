@@ -82,6 +82,8 @@ and ``..analyzer``.
 
 from __future__ import annotations
 
+import re
+
 from ..ast_nodes import (
     ExprStmt, FuncCall, Identifier, IfStmt, SwitchStmt, VarDecl,
 )
@@ -306,6 +308,71 @@ class TopLevelEmitter:
             seen.add(name)
             members.append(name)
         return members
+
+    def _emit_script_run_prepare(self, lines: list[str], declarations: list[str]) -> None:
+        """Reset every declared script member, then prepare this run's cache.
+
+        Unlike per-bar rollback, a new lifecycle also invalidates precalculated
+        vectors and initialization latches. Constructor arguments are taken from
+        the constructor's own plan; declaration defaults cover every other
+        member. The only nonassignable state is the UDT undo coordinator/arenas,
+        whose explicit reset retains their stable internal pointers.
+        """
+        constructor_values: dict[str, str] = {}
+        for initializer in self._script_constructor_initializers:
+            name, separator, arguments = initializer.partition("(")
+            if not separator or not arguments.endswith(")") or name in constructor_values:
+                raise AssertionError(f"unexpected generated constructor initializer: {initializer!r}")
+            constructor_values[name] = "(" + arguments
+
+        udt_state = set(getattr(self, "_udt_arena_member_names", {}).values())
+        if self._udt_defs:
+            udt_state.add(self._udt_undo_coordinator_member_name)
+
+        lines.extend([
+            "#ifndef PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1",
+            '#error "Generated lifecycle reset requires a matching PineForge engine; rebuild with script-run preparation support"',
+            "#endif",
+            "    void prepare_script_run(const Bar* bars, int n, bool allow_precalculation) override {",
+            "        _pf_script_state_checkpoint_.reset();",
+        ])
+        seen: set[str] = set()
+        for declaration in declarations:
+            name = self._script_state_member_name(declaration)
+            if name is None:
+                continue
+            if name in seen:
+                raise AssertionError(f"duplicate generated lifecycle member: {name}")
+            seen.add(name)
+            if name in udt_state:
+                lines.append(f"        this->{name}.reset_for_run();")
+                continue
+            if name in constructor_values:
+                value = f"decltype(this->{name}){constructor_values[name]}"
+            else:
+                text = declaration.strip()
+                match = re.search(r"(?<![A-Za-z_0-9])" + re.escape(name)
+                                  + r"(?=\s*(?:[=({;]))", text)
+                if match is None:
+                    raise AssertionError(f"cannot reset generated declaration: {declaration!r}")
+                suffix = text[match.end():-1].strip()
+                if not suffix:
+                    value = f"decltype(this->{name}){{}}"
+                elif suffix.startswith("=") and suffix[1:].strip():
+                    value = suffix[1:].strip()
+                elif ((suffix.startswith("(") and suffix.endswith(")"))
+                      or (suffix.startswith("{") and suffix.endswith("}"))):
+                    value = f"decltype(this->{name}){suffix}"
+                else:
+                    raise AssertionError(f"unknown generated reset initializer: {declaration!r}")
+            lines.append(f"        this->{name} = {value};")
+        if not set(constructor_values).issubset(seen) or not udt_state.issubset(seen):
+            raise AssertionError("generated lifecycle reset does not cover all constructor/UDT state")
+        if self._has_precalculated_ta():
+            lines.append("        if (allow_precalculation) precalculate(bars, n);")
+        else:
+            lines.append("        (void)bars; (void)n; (void)allow_precalculation;")
+        lines.append("    }")
 
     def _emit_handle_checkpoint_traits(self, lines: list[str]) -> None:
         """Emit recursive rollback adapters for shared-ID collection state.
@@ -747,6 +814,10 @@ class TopLevelEmitter:
                 cpp_val = self._typed_na_init(cpp_val, name, ptype)
                 if self._is_compile_time_value(cpp_val):
                     init_parts.append(f"{safe}({cpp_val})")
+        # This exact initializer plan also defines a cold generated lifecycle.
+        # Engine configuration in the constructor body is deliberately excluded.
+        self._script_constructor_initializers = tuple(init_parts)
+
         # Strategy params that map to engine members
         ctor_body: list[str] = []
         sp = self.ctx.strategy_params
@@ -1844,13 +1915,15 @@ class TopLevelEmitter:
         self._active_call_site_idx = None
         self._current_instance_name = None
 
-    def _emit_precalculate_and_run(self, lines: list[str]) -> None:
-        has_static_ta = any(
+    def _has_precalculated_ta(self) -> bool:
+        return any(
             self._ta_site_uses_precalc(site)
             for _ti, site in enumerate(self.ctx.ta_call_sites)
             if _ti not in self._dead_ta_indices
         )
-        if not has_static_ta:
+
+    def _emit_precalculate_and_run(self, lines: list[str]) -> None:
+        if not self._has_precalculated_ta():
             return
 
         replayed_source_series: list[str] = []
@@ -2024,23 +2097,6 @@ class TopLevelEmitter:
         lines.append("    }")
         lines.append("")
 
-        # Overridden run methods
-        lines.append("    void run(const Bar* bars, int n) {")
-        lines.append("        precalculate(bars, n);")
-        lines.append("        BacktestEngine::run(bars, n);")
-        lines.append("    }")
-        lines.append("")
-        lines.append("    void run(const Bar* input_bars, int n_input,")
-        lines.append("             const std::string& input_tf,")
-        lines.append("             const std::string& script_tf,")
-        lines.append("             bool bar_magnifier = false,")
-        lines.append("             int magnifier_samples = 4,")
-        lines.append("             MagnifierDistribution magnifier_dist = MagnifierDistribution::ENDPOINTS) {")
-        lines.append("        bool needs_dynamic = bar_magnifier || !input_tf.empty() || !script_tf.empty();")
-        lines.append("        if (needs_dynamic) {")
-        lines.append("            _use_precalc = false;")
-        lines.append("        } else {")
-        lines.append("            precalculate(input_bars, n_input);")
-        lines.append("        }")
-        lines.append("        BacktestEngine::run(input_bars, n_input, input_tf, script_tf, bar_magnifier, magnifier_samples, magnifier_dist);")
-        lines.append("    }")
+        # All run overloads are inherited. The base-owned lifecycle hook resets
+        # generated state before preparing this run's cache, including calls
+        # entered through stream_begin rather than the generated C wrappers.

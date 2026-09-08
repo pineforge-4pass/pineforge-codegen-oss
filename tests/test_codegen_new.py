@@ -61,9 +61,9 @@ def test_run_backtest_full_routes_to_tf_aware_run_when_only_script_tf_set():
 
     This pins the emitted guard so the regression cannot silently return.
     ``run_backtest_full`` is emitted for every strategy (no security calls
-    needed), so a bare strategy exercises the shim guard. The precalc-gating
-    ``run(...)`` overload is only emitted when there is a static TA call
-    site (``ta.sma`` here), so the body uses one to cover both guards.
+    needed), so a bare strategy exercises the shim guard. Static TA here also
+    pins that cache preparation obeys the engine-owned lifecycle decision.
+    The runtime's test_script_run_prepare covers empty/partial/explicit TFs.
     """
     cpp = _generate('//@version=6\nstrategy("T")\nx = ta.sma(close, 14)\nplot(x)\n')
 
@@ -73,12 +73,11 @@ def test_run_backtest_full_routes_to_tf_aware_run_when_only_script_tf_set():
     # The old AND-of-both-TFs guard must be gone.
     assert "!itf.empty() && !stf.empty() && itf != stf" not in cpp
 
-    # The run(...) overload that gates precalc must also route dynamically
-    # whenever either TF is set (not only when both differ).
-    assert (
-        "bool needs_dynamic = bar_magnifier || !input_tf.empty() || !script_tf.empty();"
-        in cpp
-    )
+    # The generated class must not bypass the base lifecycle boundary with a
+    # prepass in a hidden run overload. It uses the engine's explicit decision.
+    assert "void run(const Bar*" not in cpp
+    assert "if (allow_precalculation) precalculate(bars, n);" in cpp
+    assert "PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1" in cpp
     assert "!input_tf.empty() && !script_tf.empty() && input_tf != script_tf" not in cpp
 
 

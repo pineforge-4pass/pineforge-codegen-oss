@@ -3864,6 +3864,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 f"    {self._udt_undo_coordinator_cpp_name}& operator=(",
                 f"        {self._udt_undo_coordinator_cpp_name}&&) = delete;",
                 "",
+                "    void reset_for_run() {",
+                "        _pf_undo_.clear();",
+                "        _pf_active_ = false;",
+                "        // Keep generation monotonic: an old token cannot become valid again.",
+                "    }",
+                "",
                 "    Snapshot snapshot() {",
                 "        if (_pf_generation_ == std::numeric_limits<uint64_t>::max()) {",
                 '            throw std::overflow_error("UDT checkpoint generation exhausted");',
@@ -3940,6 +3946,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 f"        {self._udt_arena_template_cpp_name}&&) = delete;",
                 f"    {self._udt_arena_template_cpp_name}& operator=(",
                 f"        {self._udt_arena_template_cpp_name}&&) = delete;",
+                "",
+                "    void reset_for_run() {",
+                "        _pf_records_.clear();",
+                "        _pf_checkpoint_size_ = 0;",
+                "        _pf_checkpoint_generation_ = 0;",
+                "        _pf_checkpoint_active_ = false;",
+                "        // The arena remains attached to its original coordinator.",
+                "    }",
                 "",
                 "    _PFHandle create(_PFRecord value) {",
                 "        if (_pf_records_.size() > static_cast<std::size_t>(",
@@ -4507,7 +4521,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 8d. Drawing-objects-as-data arenas (gated on _uses_drawing so
         #     non-drawing strategies emit byte-identical C++). Each arena is a
-        #     per-strategy member -> reset-per-run is automatic. Caps come from
+        #     per-strategy member, reset by prepare_script_run. Caps come from
         #     the strategy() header max_*_count (default 50; linefill default 50).
         if self._uses_drawing:
             caps = self._drawing_caps or {}
@@ -4576,14 +4590,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # inventory from the declarations above so every future generated
         # state category is captured automatically (or generation fails loudly
         # if it introduces an unfamiliar declaration form).
+        _script_state_declarations = lines[_script_state_decl_start:-1]
         _script_state_members = self._collect_script_state_members(
-            lines[_script_state_decl_start:-1]
+            _script_state_declarations
         )
         self._emit_script_state_hooks(lines, _script_state_members)
         lines.append("")
 
         # 9. Constructor with TA initializer list
         self._emit_constructor(lines)
+        lines.append("")
+        self._emit_script_run_prepare(lines, _script_state_declarations)
         lines.append("")
 
         # 10. User-defined functions (with per-call-site variants for functions
