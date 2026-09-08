@@ -7,7 +7,7 @@
 // driven by per-bar ta.sma covariance entries, then eigenvalue derivation.
 //
 //@version=6
-strategy("Matrix Eigen PCA", overlay=false, initial_capital=1000000, currency=currency.USD, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
+strategy("Matrix Eigen PCA", overlay=false, initial_capital=1000000, process_orders_on_close=false, pyramiding=1, commission_type=strategy.commission.percent, commission_value=0, slippage=0, default_qty_type=strategy.fixed, default_qty_value=1)
 
 length = input.int(14, "Length", minval=2)
 v1 = close - open

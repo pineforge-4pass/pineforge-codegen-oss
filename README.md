@@ -9,8 +9,8 @@
 
 A pure-Python library that turns a PineScript v6 strategy into a complete C++
 source file you can compile against the [`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine)
-runtime — a deterministic native backtester validated **trade-for-trade against
-TradingView** (231/232 corpus parity).
+runtime. See the engine's [current validation scoreboard](https://github.com/pineforge-4pass/pineforge-engine#validation-scoreboard)
+for the complete TradingView comparison, pinned results, and grading details.
 
 It is **source-available and free for personal trading** — research, backtest,
 and trade your own account with your own capital at no cost. See
