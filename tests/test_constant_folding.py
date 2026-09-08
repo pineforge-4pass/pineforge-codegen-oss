@@ -6,6 +6,7 @@ import re
 import pytest
 
 from pineforge_codegen import Analyzer, CodeGen, Lexer, Parser, transpile
+from pineforge_codegen.codegen import constant_fold
 from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 
@@ -87,15 +88,55 @@ def test_existing_numeric_folds_are_preserved(expression: str, expected: str) ->
     assert gen._resolve_known(expression) == expected
 
 
-@pytest.mark.parametrize(("expression", "expected"), [
-    ("math.round(math.sqrt(length))", "4"),
-    ("math.ceil(length / 3)", "6"),
-    ("math.floor(length / 3)", "5"),
+@pytest.mark.parametrize("expression", [
+    "math.round(math.sqrt(length))",
+    "math.ceil(length / 3)",
+    "math.floor(length / 3)",
 ])
-def test_named_math_functions_fold_without_imports(expression: str, expected: str) -> None:
+def test_previously_unfolded_math_keeps_its_existing_fallback(expression: str) -> None:
     gen = _generator()
     gen._known_vars["length"] = 16
-    assert gen._resolve_known(expression) == expected
+    assert gen._resolve_known(expression) == expression
+
+
+def test_new_math_domain_does_not_disagree_with_runtime_rounding() -> None:
+    # The old folder did not admit sqrt: its import rewrite failed. Adding it
+    # here would newly fold round(sqrt(6.25)) to Python's 2, while runtime C++
+    # std::round computes 3. Retain the old rejection until semantics are pinned.
+    source = '''//@version=6
+strategy("keep existing math domain")
+value = ta.sma(close, math.round(math.sqrt(6.25)))
+'''
+    with pytest.raises(CompileError):
+        transpile(source)
+
+
+@pytest.mark.parametrize("name", ["round", "math.round"])
+@pytest.mark.parametrize("precision", [-1000000000, 1000000000])
+def test_round_precision_is_bounded_before_callable_dispatch(monkeypatch, name, precision) -> None:
+    calls = []
+
+    def sentinel(*args):
+        calls.append(args)
+        return 0
+
+    # A harmless sentinel proves that rejection happens before the integer
+    # round implementation could allocate a power of ten for huge ndigits.
+    monkeypatch.setitem(constant_fold._FUNCTIONS, name, sentinel)
+    expression = f"{name}(1, {precision})"
+    assert _generator()._resolve_known(expression) == expression
+    assert calls == []
+
+
+@pytest.mark.parametrize(("expression", "expected"), [
+    ("round(125, -1)", "120"),
+    ("round(135, -1)", "140"),
+    ("math.round(1.25, 1)", "1.2"),
+    ("round(1, -1024)", "0"),
+    ("round(1, 1024)", "1"),
+])
+def test_bounded_round_precision_preserves_existing_values(expression: str, expected: str) -> None:
+    assert _generator()._resolve_known(expression) == expected
 
 
 @pytest.mark.parametrize("expression", [
@@ -144,16 +185,34 @@ def test_folded_math_ta_lengths_compile_and_keep_runtime_input_reads() -> None:
     cpp = transpile('''//@version=6
 strategy("bounded numeric constructors")
 length = input.int(16, "Length")
-root = math.round(math.sqrt(length))
-first = ta.sma(close, root)
-second = ta.sma(close, math.ceil(16 / 3))
-third = ta.sma(close, math.floor(16 / 3))
+rounded = math.round(length / 3)
+first = ta.sma(close, rounded)
+second = ta.sma(close, math.abs(-6))
+third = ta.sma(close, math.pow(5, 1))
 fourth = ta.sma(close, math.abs(-8) / 2)
 fifth = ta.sma(close, math.pow(2, 3))
 ''')
     constructor = next(line for line in cpp.splitlines() if "explicit GeneratedStrategy()" in line)
-    assert re.findall(r"_ta_sma_\d+\((\d+)\)", constructor) == ["4", "6", "5", "4", "8"]
+    assert re.findall(r"_ta_sma_\d+\((\d+)\)", constructor) == ["5", "6", "5", "4", "8"]
     reset = next(line for line in cpp.splitlines() if "_ta_sma_1 = ta::SMA" in line)
     assert 'get_input_int("Length", 16)' in reset
-    assert "std::sqrt" in reset and "std::round" in reset
+    assert "std::round" in reset
     compile_cpp(cpp, label="safe-numeric-constructors")
+
+
+def test_unfolded_math_keeps_existing_input_reset_and_compiles() -> None:
+    cpp = transpile('''//@version=6
+strategy("existing runtime math domain")
+length = input.int(16, "Length")
+root = math.round(math.sqrt(length))
+first = ta.sma(close, root)
+second = ta.sma(close, math.ceil(length / 3))
+third = ta.sma(close, math.floor(length / 3))
+''')
+    constructor = next(line for line in cpp.splitlines() if "explicit GeneratedStrategy()" in line)
+    assert re.findall(r"_ta_sma_\d+\((\d+)\)", constructor) == ["1", "1", "1"]
+    resets = [line for line in cpp.splitlines() if "= ta::SMA" in line]
+    assert any('get_input_int("Length", 16)' in line and "std::sqrt" in line for line in resets)
+    assert any('get_input_int("Length", 16)' in line and "std::ceil" in line for line in resets)
+    assert any('get_input_int("Length", 16)' in line and "std::floor" in line for line in resets)
+    compile_cpp(cpp, label="existing-unfolded-math-input-resets")

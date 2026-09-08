@@ -28,9 +28,9 @@ _FUNCTIONS = {
     # Keep the existing folder's rounding behavior; this repair does not
     # change numeric semantics to match a different rounding convention.
     "math.round": round,
-    "math.sqrt": math.sqrt,
-    "math.ceil": math.ceil,
-    "math.floor": math.floor,
+    # sqrt/ceil/floor previously took a failed import rewrite and did not
+    # fold. Keep that domain unchanged: newly admitting sqrt under Python's
+    # round, for example, can disagree with the existing C++ runtime round.
     "math.pow": math.pow,
     "math.exp": math.exp,
     "math.log": math.log,
@@ -50,6 +50,7 @@ _MAX_SOURCE_LENGTH = 8192
 _MAX_NODES = 512
 _MAX_DEPTH = 64
 _MAX_INTEGER_BITS = 1024
+_MAX_ROUND_DIGITS = 1024
 
 
 def _numeric(value: object) -> int | float | bool:
@@ -106,6 +107,17 @@ def fold_numeric_expression(
                 raise ValueError("numeric function name is shadowed")
             function = _FUNCTIONS[spelling]
             args = [visit(arg, depth + 1) for arg in node.args]
+            if spelling in ("round", "math.round"):
+                # CPython's integer round builds 10**(-ndigits). A small
+                # integer operand can still request enormous work, so bound
+                # this argument BEFORE dispatch, not only the returned value.
+                if not 1 <= len(args) <= 2:
+                    raise ValueError("unsupported round argument count")
+                if len(args) == 2 and (
+                    type(args[1]) not in (int, bool)
+                    or abs(args[1]) > _MAX_ROUND_DIGITS
+                ):
+                    raise ValueError("round precision is not bounded")
             return _numeric(function(*args))
         raise ValueError("not numeric expression syntax")
 
