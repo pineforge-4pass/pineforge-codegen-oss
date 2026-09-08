@@ -102,6 +102,7 @@ TA_TUPLE_RESULT_TYPES = {
 # CPP_RESERVED + the NamingHelper mixin are pulled in from helpers.py so the
 # small naming/walk utilities can be shared with future visitor mixins.
 from .helpers import CPP_RESERVED, NamingHelper
+from .constant_fold import fold_numeric_expression
 
 # TypeInferer mixin owns the ~15 type-spec / C++-type inference helpers
 # previously scattered across this module; see ``codegen/types.py``.
@@ -109,8 +110,7 @@ from .types import TypeInferer
 
 # TaSiteHelper owns site lookup, .compute() arg construction, and the TA
 # call-site machinery. The runtime-reset chain (_resolve_known and friends)
-# stays on CodeGen for now because it relies on Python's compile-time
-# expression evaluator.
+# stays on CodeGen for now because it shares the constructor constant folder.
 from .ta import TaSiteHelper
 
 # InputHelper owns Pine input.* analysis (defaults, titles, getter dispatch,
@@ -179,8 +179,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     _prescan_strategy_series), and the runtime-reset chain
     (_resolve_known / _is_skip_expr / _runtime_ctor_arg_for_reset /
     _collect_ta_runtime_resets / _emit_ta_runtime_reset) — kept here
-    because the chain relies on Python's compile-time expression
-    evaluator.
+    because the chain shares the constructor constant folder.
     """
 
     def __init__(self, ctx: AnalyzerContext) -> None:
@@ -4719,39 +4718,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Also resolve bar field references
         if arg_str in BAR_FIELDS:
             return BAR_FIELDS[arg_str]
-        # Try to evaluate expressions by substituting known variables
+        # Fold only numeric syntax. Bind names as primitive values rather than
+        # rewriting source or exposing Python builtins/module objects to it.
         if any(c in arg_str for c in "+-*/()."):
-            try:
-                resolved = arg_str
-                # Sort by length (longest first) to avoid partial replacements
-                for name in sorted(self._known_vars, key=len, reverse=True):
-                    if self._known_var_is_lexically_shadowed(name):
-                        continue
-                    val = self._known_vars[name]
-                    if isinstance(val, (int, float)):
-                        import re
-                        resolved = re.sub(rf'\b{re.escape(name)}\b', str(val), resolved)
-                # Map Pine math functions to Python equivalents for eval
-                eval_str = resolved
-                eval_str = eval_str.replace("math.round", "round")
-                eval_str = eval_str.replace("math.sqrt", "__import__('math').sqrt")
-                eval_str = eval_str.replace("math.ceil", "__import__('math').ceil")
-                eval_str = eval_str.replace("math.floor", "__import__('math').floor")
-                eval_str = eval_str.replace("math.abs", "abs")
-                # Evaluate safely (only allow numeric operations).
-                # Acquire the builtin through indirection so this file does
-                # not contain the literal three-letter token followed by ``(``
-                # — a repository-wide security hook blocks file writes
-                # containing that pattern.
-                _expr_evaluator = getattr(__builtins__, "eval", None) or __builtins__["eval"]
-                result = _expr_evaluator(eval_str, {"__builtins__": {}},
-                              {"round": round, "abs": abs,
-                               "math": __import__("math")})
+            values = {
+                name: value for name, value in self._known_vars.items()
+                if not self._known_var_is_lexically_shadowed(name)
+            }
+            result = fold_numeric_expression(arg_str, values)
+            if result is not None:
                 if isinstance(result, float) and result == int(result):
                     return str(int(result))
                 return str(result)
-            except Exception:
-                pass
         return arg_str
 
     # _is_input_call / _is_input_call_by_name / _get_input_default /
