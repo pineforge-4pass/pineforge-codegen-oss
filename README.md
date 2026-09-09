@@ -198,6 +198,13 @@ to build `libpineforge.a`, compile your transpiled `.cpp` into a strategy `.so`,
 feed it OHLCV, and read back the closed-trade list. The codegen version must
 target a matching engine ABI (see [`VERSION`](VERSION)).
 
+Generated strategies reset persistent Pine state before each new batch or stream
+warmup through the engine's script-run preparation hook. Input settings survive a
+new run, and ticks within one stream preserve accumulated state. Regenerate the
+strategy C++ and rebuild compiled modules with matching engine headers and library
+to use this lifecycle; replacing only the runtime archive does not retrofit
+already compiled modules.
+
 Prefer no local build? A hosted transpile API + MCP server is available so AI
 agents can transpile and backtest for you — see <https://www.pineforge.dev>.
 
