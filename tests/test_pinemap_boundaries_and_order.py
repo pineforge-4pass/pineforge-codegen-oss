@@ -208,7 +208,7 @@ observed = combine(left, right)
     cpp = transpile(source)
     assert "__pf_call_arg_" not in cpp
     assert sha256(cpp.encode()).hexdigest() == (
-        "63847a261a0258bea15bb456ca1d18a605a83f529814c9cc9f2d48bd98b29971"
+        "03259ec28c22ce068da06f4b87d314021e45446b28c15b1785a77c77a3ed1bd4"
     )
 
 

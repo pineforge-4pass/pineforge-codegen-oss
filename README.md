@@ -254,3 +254,21 @@ is source-available, not OSI open source.
 
 Commercial licenses are available — flexible terms for funds, products, and
 hosted/embedded use. Email **luis@4pass.com.tw** with your use case for a quote.
+
+## Explicit Pine execution attachment
+
+Generated constructors select `attach_pine_execution_adapter()` before host
+metadata when `PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1` is available.
+Its current scope is the Pine intraday cap and retained-parent priority rule.
+A guarded `enable_pine_intraday_cap()` fallback supports existing cap-only
+engines; engines with neither capability keep their established defaults.
+Risk statements remain in source execution order. This bridge requires matching
+engine headers and runtime; it is not cross-version C++ binary compatibility.
+
+Regenerate old cap-only generated C++ before using the new engine for Pine
+execution. Such old source may still compile but does not attach the priority
+rule, and metadata cannot silently restore it. Rebuild all modules against the
+new matching C++ layout (`engine_script_run_v4`); old fingerprint versions are
+not comparable. The extraction preserves Pine policy under explicit attachment;
+it does not implement the generic native child-activation scheduler or prove
+campaign neutrality. Compile-only corpus checks do not run Pine backtests.

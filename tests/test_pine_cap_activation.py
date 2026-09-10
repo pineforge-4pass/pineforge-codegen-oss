@@ -42,8 +42,11 @@ def test_constructor_explicitly_selects_compatibility_with_old_engine_bridge(sou
         "void set_strategy_override", 1
     )[0]
     assert cpp.count("enable_pine_intraday_cap();") == 1
+    assert cpp.count("attach_pine_execution_adapter();") == 1
     assert (
-        "#if defined(PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1)\n"
+        "#if defined(PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1)\n"
+        "        pineforge::BacktestEngine::attach_pine_execution_adapter();\n"
+        "#elif defined(PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1)\n"
         "        pineforge::BacktestEngine::enable_pine_intraday_cap();\n"
         "#endif"
     ) in constructor
@@ -74,6 +77,7 @@ def test_multiple_risk_limits_keep_source_order_and_do_not_reset_attachment():
         "max_intraday_filled_orders_ = (int)(3);",
     ]
     assert cpp.count("enable_pine_intraday_cap();") == 1
+    assert cpp.count("attach_pine_execution_adapter();") == 1
 
 
 def test_cap_constructor_fallback_compiles_when_capability_is_absent():
@@ -82,7 +86,34 @@ def test_cap_constructor_fallback_compiles_when_capability_is_absent():
     # member when the capability is absent; it does not assert runtime parity.
     cpp = (
         "#include <pineforge/engine.hpp>\n"
+        "#undef PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1\n"
         "#undef PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1\n"
         + transpile(_SOURCES[2])
     )
     compile_cpp(cpp, label="pine-cap-old-engine-constructor-bridge")
+
+
+def test_cap_only_bridge_and_new_method_name_shadow():
+    source = """//@version=6
+strategy("execution method shadow")
+attach_pine_execution_adapter = input.int(2)
+strategy.risk.max_intraday_filled_orders(attach_pine_execution_adapter)
+"""
+    cpp = transpile(source)
+    assert "pineforge::BacktestEngine::attach_pine_execution_adapter();" in cpp
+    compile_cpp(cpp, label="pine-execution-method-shadow")
+    # Prove the cap-only branch parses independently of the newer member.
+    compile_cpp("#include <pineforge/engine.hpp>\n"
+                "#undef PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1\n" + cpp,
+                label="pine-execution-cap-only-bridge")
+
+
+def test_execution_attachment_is_before_metadata_and_not_in_script_reset():
+    cpp = transpile(_SOURCES[0])
+    constructor = cpp.split("explicit GeneratedStrategy()", 1)[1].split(
+        "void set_strategy_override", 1)[0]
+    assert "attach_pine_execution_adapter();" in constructor
+    assert cpp.count("attach_pine_execution_adapter();") == 1
+    assert "set_syminfo_metadata(" not in constructor
+    # Runtime metadata is supplied by the host after strategy_create returns.
+    assert "return new GeneratedStrategy();" in cpp

@@ -796,10 +796,15 @@ class TopLevelEmitter:
 
         # New engines default to an independent native constructor. Select
         # Pine compatibility before strategy_create returns and before any
-        # host metadata setter, while old engine headers retain their default.
+        # host metadata setter. The adapter currently owns cap and retained-
+        # parent priority only. Cap-only engines retain their legacy priority
+        # default; older headers need neither hook. Always compile/link with
+        # matching engine headers and runtime. This is not a binary ABI bridge.
         # This is configuration, deliberately outside script-state reset.
         ctor_body: list[str] = [
-            "#if defined(PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1)",
+            "#if defined(PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1)",
+            "        pineforge::BacktestEngine::attach_pine_execution_adapter();",
+            "#elif defined(PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1)",
             "        pineforge::BacktestEngine::enable_pine_intraday_cap();",
             "#endif",
         ]
