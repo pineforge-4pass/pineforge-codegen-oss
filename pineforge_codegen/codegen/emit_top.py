@@ -187,37 +187,13 @@ class TopLevelEmitter:
         from .helpers_syminfo import emit_syminfo_helpers
         lines.extend(emit_syminfo_helpers())
 
-    def _script_has_strategy_close(self) -> bool:
-        """True if the script's AST contains a ``strategy.close*`` call.
-
-        Scans the entire program body (including nested function /
-        method bodies) for any ``FuncCall`` whose callee resolves to
-        ``strategy.close`` or ``strategy.close_all``. Comments are
-        not considered (parser strips them). Result is independent of
-        whether the close call ever runs at backtest time — this is a
-        purely static script-shape check used by the engine's flip path
-        to choose between TV's empirical growth rule and the standard
-        Pine semantic.
-
-        Mixin contract: relies on ``self._walk_ast`` (NamingHelper) and
-        ``self._resolve_callee`` (NamingHelper); host class must
-        provide ``self.ctx.ast``."""
-        from ..ast_nodes import FuncCall  # local to avoid circular import
-        for node in self._walk_ast(self.ctx.ast):
-            if not isinstance(node, FuncCall):
-                continue
-            func_name, namespace = self._resolve_callee(node.callee)
-            if namespace == "strategy" and func_name in ("close", "close_all"):
-                return True
-        return False
-
     def _script_has_input_source(self) -> bool:
         """True if the script's AST contains an ``input.source(...)`` call.
 
         Gates the engine's native source-series push: the runtime only
         advances ``_src_<field>_`` (paying the per-bar cost) when
         ``_src_series_active_`` is set, which the ctor does iff this returns
-        True. Same static-shape scan style as ``_script_has_strategy_close``."""
+        True. This is a history-storage requirement, not a broker policy."""
         from ..ast_nodes import FuncCall  # local to avoid circular import
         for node in self._walk_ast(self.ctx.ast):
             if not isinstance(node, FuncCall):
@@ -818,8 +794,16 @@ class TopLevelEmitter:
         # Engine configuration in the constructor body is deliberately excluded.
         self._script_constructor_initializers = tuple(init_parts)
 
+        # New engines default to an independent native constructor. Select
+        # Pine compatibility before strategy_create returns and before any
+        # host metadata setter, while old engine headers retain their default.
+        # This is configuration, deliberately outside script-state reset.
+        ctor_body: list[str] = [
+            "#if defined(PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1)",
+            "        pineforge::BacktestEngine::enable_pine_intraday_cap();",
+            "#endif",
+        ]
         # Strategy params that map to engine members
-        ctor_body: list[str] = []
         sp = self.ctx.strategy_params
 
         if sp.get("process_orders_on_close") is True:
@@ -875,16 +859,6 @@ class TopLevelEmitter:
         # close_entries_rule: "FIFO" (default) or "ANY"
         if sp.get("close_entries_rule") == "ANY":
             ctor_body.append("        close_entries_rule_any_ = true;")
-
-        # Detect ``strategy.close`` / ``strategy.close_all`` calls anywhere in
-        # the script body. The runtime uses this flag in its priced-entry flip
-        # path to reproduce TradingView's empirical
-        # ``new_size = |old| + qty`` rule (see
-        # docs/codegen-gaps/validation-tv-pyramiding-override.md). The flag
-        # is set once per compilation; it is independent of how many times
-        # the close call actually fires at runtime.
-        if self._script_has_strategy_close():
-            ctor_body.append("        script_has_strategy_close_ = true;")
 
         # Turn on native source-series history only when the script uses
         # input.source — otherwise the engine pays nothing per bar.

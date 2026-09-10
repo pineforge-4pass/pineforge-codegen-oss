@@ -534,7 +534,7 @@ strategy("crowded callable fixnan only")
 inner(float src) => fixnan(src)
 outer(float src) => inner(src)
 noise = inner(high)
-a = outer(close)
+a = outer(volume)
 b = outer(open)
 '''
     driver = r'''
@@ -542,10 +542,11 @@ b = outer(open)
 #include <limits>
 int main() {
     double nan = std::numeric_limits<double>::quiet_NaN();
+    // Missing volume is a valid series operand; OHLC must remain finite.
     Bar bars[] = {
-        Bar{1.0, 11.0, 0.0, 10.0, 1.0, 1000},
-        Bar{2.0, 21.0, 1.0, nan, 2.0, 61000},
-        Bar{3.0, 31.0, 2.0, nan, 3.0, 121000},
+        Bar{1.0, 11.0, 0.0, 10.0, 10.0, 1000},
+        Bar{2.0, 21.0, 1.0, 20.0, nan, 61000},
+        Bar{3.0, 31.0, 2.0, 30.0, nan, 121000},
     };
     GeneratedStrategy strategy;
     strategy.run(bars, 3);
@@ -567,7 +568,7 @@ inner(float src) =>
 middle(float src) => inner(src)
 outer(float src) => middle(src)
 noise = inner(high)
-a = outer(close)
+a = outer(volume)
 b = outer(open)
 '''
     driver = r'''
@@ -575,10 +576,11 @@ b = outer(open)
 #include <limits>
 int main() {
     double nan = std::numeric_limits<double>::quiet_NaN();
+    // Missing volume is a valid series operand; OHLC must remain finite.
     Bar bars[] = {
-        Bar{1.0, 11.0, 0.0, 10.0, 1.0, 1000},
-        Bar{2.0, 21.0, 1.0, nan, 2.0, 61000},
-        Bar{3.0, 31.0, 2.0, nan, 3.0, 121000},
+        Bar{1.0, 11.0, 0.0, 10.0, 10.0, 1000},
+        Bar{2.0, 21.0, 1.0, 20.0, nan, 61000},
+        Bar{3.0, 31.0, 2.0, 30.0, nan, 121000},
     };
     GeneratedStrategy strategy;
     strategy.run(bars, 3);

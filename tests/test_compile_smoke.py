@@ -67,6 +67,16 @@ def test_minimal_strategy_compiles():
     compile_cpp(cpp, label="minimal_strategy")
 
 
+@pytest.mark.parametrize("close_call", [
+    'strategy.close("L")',
+    'strategy.close_all()',
+])
+def test_unreachable_close_has_no_engine_capability_dependency(close_call):
+    cpp = transpile(_pine(f'if false\n    {close_call}'))
+    assert "script_has_strategy_close" not in cpp
+    compile_cpp(cpp, label="unreachable_close_without_capability")
+
+
 def test_lazy_source_clocks_compile():
     """change/mom/roc below a top-level lazy edge lower through the generated
     hold-last source clock (tests/test_lazy_source_clock*.py)."""

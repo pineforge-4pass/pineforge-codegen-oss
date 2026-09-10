@@ -269,6 +269,9 @@ public:
     }
 
     explicit GeneratedStrategy() : _ta_sma_1(14), _ta_sma_2(14), _ta_sma_3(14), _ta_sma_4(14), _ta_sma_5(14), _ta_sma_6(14) {
+#if defined(PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1)
+        pineforge::BacktestEngine::enable_pine_intraday_cap();
+#endif
         initial_capital_ = 1000000.0;
         default_qty_type_ = QtyType::FIXED;
         default_qty_value_ = 1.0;

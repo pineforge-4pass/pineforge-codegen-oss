@@ -33,8 +33,10 @@ from tests import _compile as compile_env
 _PINE_MATRIX = """//@version=6
 strategy("Float relational runtime matrix")
 
-float lhs = close
-float rhs = open
+float lhs = input.float(1.0, "lhs")
+float rhs = input.float(1.0, "rhs")
+mixed_i = input.time(0, "mixed_i")
+float mixed_f = input.float(0.0, "mixed_f")
 int eq_out = lhs == rhs ? 1 : 0
 int ne_out = lhs != rhs ? 1 : 0
 int lt_out = lhs < rhs ? 1 : 0
@@ -42,12 +44,12 @@ int gt_out = lhs > rhs ? 1 : 0
 int le_out = lhs <= rhs ? 1 : 0
 int ge_out = lhs >= rhs ? 1 : 0
 
-int mix_eq_out = time == volume ? 1 : 0
-int mix_ne_out = time != volume ? 1 : 0
-int mix_lt_out = time < volume ? 1 : 0
-int mix_gt_out = time > volume ? 1 : 0
-int mix_le_out = time <= volume ? 1 : 0
-int mix_ge_out = time >= volume ? 1 : 0
+int mix_eq_out = mixed_i == mixed_f ? 1 : 0
+int mix_ne_out = mixed_i != mixed_f ? 1 : 0
+int mix_lt_out = mixed_i < mixed_f ? 1 : 0
+int mix_gt_out = mixed_i > mixed_f ? 1 : 0
+int mix_le_out = mixed_i <= mixed_f ? 1 : 0
+int mix_ge_out = mixed_i >= mixed_f ? 1 : 0
 
 bump() =>
     var float calls = 0.0
@@ -61,6 +63,8 @@ int once_out = bump() == 1.0 ? 1 : 0
 _CPP_DRIVER = r"""
 #include <iostream>
 #include <limits>
+#include <iomanip>
+#include <sstream>
 
 int main() {
     struct Row {
@@ -111,11 +115,22 @@ int main() {
 
     for (const Row& row : rows) {
         GeneratedStrategy strategy;
-        // The strategy reads lhs/rhs from close/open and the mixed pair from
-        // time/volume.  No orders are placed, so arbitrary finite high/low are
-        // sufficient even for the non-finite operand rows.
-        Bar bar{row.rhs, 1.0, 1.0, row.lhs, row.mixed_f, row.mixed_i};
+        // Numeric comparison operands are script inputs, not market bars.
+        // Preserve binary64 values and the full int64 mixed operand, including
+        // the NA sentinel, while executing against structurally valid OHLCV.
+        auto scalar = [](double value) {
+            std::ostringstream out;
+            out << std::setprecision(std::numeric_limits<double>::max_digits10)
+                << value;
+            return out.str();
+        };
+        strategy.set_input("lhs", scalar(row.lhs));
+        strategy.set_input("rhs", scalar(row.rhs));
+        strategy.set_input("mixed_i", std::to_string(row.mixed_i));
+        strategy.set_input("mixed_f", scalar(row.mixed_f));
+        Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 60000};
         strategy.run(&bar, 1);
+        if (!strategy.last_error().empty()) return 7;
         std::cout
             << row.name
             << '\t' << strategy.eq_out

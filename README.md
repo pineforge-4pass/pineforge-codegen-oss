@@ -205,6 +205,12 @@ strategy C++ and rebuild compiled modules with matching engine headers and libra
 to use this lifecycle; replacing only the runtime archive does not retrofit
 already compiled modules.
 
+Generated constructors do not configure order behavior from the presence of
+`strategy.close` or `strategy.close_all` in the source. Regenerate older C++
+that assigns `script_has_strategy_close_` before compiling with engine headers
+that remove this obsolete member. Reachable close commands keep their ordinary
+runtime lowering.
+
 Prefer no local build? A hosted transpile API + MCP server is available so AI
 agents can transpile and backtest for you — see <https://www.pineforge.dev>.
 

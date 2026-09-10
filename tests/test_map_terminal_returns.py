@@ -390,7 +390,7 @@ def test_map_terminal_return_forms_compile():
 def test_nonterminal_pinemap_output_hash_is_stable():
     cpp = transpile(_NONTERMINAL_SOURCE)
     assert sha256(cpp.encode()).hexdigest() == (
-        "b03b45f848b070707fecd02aab263dd4244bc1107205be4b12dfdfff3f97cc97"
+        "32205e2b0d6a7ab1cf52e3f144cd1c33af3467f4d0b21a12864c54e118f69c48"
     )
 
 
@@ -425,5 +425,5 @@ observed = f(map.new<string, string>())
 def test_unresolved_parameter_keeps_lexical_precedence_over_global_map():
     cpp = transpile(_SHADOWED_UNRESOLVED_PARAM_SOURCE)
     assert sha256(cpp.encode()).hexdigest() == (
-        "b5d53aa0bcc9fe495e4ad47a5f7837e2298f904e2af5494820a06d70cd990a86"
+        "4505cec63c797ae57884381bb3f9a66dbfbed62f6741ac230b33465d2f2244d0"
     )
