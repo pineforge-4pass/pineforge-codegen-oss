@@ -152,3 +152,41 @@ strategy.risk.max_position_size(7.0)
         "risk_max_position_size_",
     ):
         assert f"{member} =" not in cpp
+
+
+def test_risk_direction_uses_the_pine_signed_encoding_for_all_values():
+    cpp = transpile('''//@version=6
+strategy("source host direction encoding")
+strategy.risk.allow_entry_in(strategy.direction.short)
+strategy.risk.allow_entry_in(strategy.direction.long)
+strategy.risk.allow_entry_in(strategy.direction.all)
+''')
+
+    calls = [
+        line.strip() for line in cpp.splitlines() if "set_pine_risk_direction" in line
+    ]
+    assert calls == [
+        "set_pine_risk_direction(-1);",
+        "set_pine_risk_direction(1);",
+        "set_pine_risk_direction(0);",
+    ]
+
+
+def test_risk_percent_flags_are_true_only_for_percent_of_equity():
+    cpp = transpile('''//@version=6
+strategy("source host percent flags")
+strategy.risk.max_drawdown(10, strategy.percent_of_equity)
+strategy.risk.max_drawdown(500, strategy.cash)
+strategy.risk.max_intraday_loss(10, strategy.percent_of_equity)
+strategy.risk.max_intraday_loss(500, strategy.cash)
+''')
+
+    calls = [
+        line.strip() for line in cpp.splitlines() if "set_pine_risk_max_" in line
+    ]
+    assert calls == [
+        "set_pine_risk_max_drawdown((double)(10), true);",
+        "set_pine_risk_max_drawdown((double)(500), false);",
+        "set_pine_risk_max_intraday_loss((double)(10), true);",
+        "set_pine_risk_max_intraday_loss((double)(500), false);",
+    ]
