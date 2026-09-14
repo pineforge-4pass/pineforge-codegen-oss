@@ -1,4 +1,4 @@
-#include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 #include <pineforge/ta.hpp>
 #include <pineforge/math.hpp>
 #include <pineforge/series.hpp>
@@ -149,7 +149,7 @@ struct _PFCheckpointTraits<std::vector<_PFElement, _PFAllocator>> {
     }
 };
 
-class GeneratedStrategy : public BacktestEngine {
+class GeneratedStrategy : public pineforge::source::PineStrategyHost {
 public:
     ta::SMA _ta_sma_1;
     ta::SMA _ta_sma_2;
@@ -339,7 +339,7 @@ public:
         (void)bars; (void)n; (void)allow_precalculation;
     }
 
-    void on_bar(const Bar& bar) override {
+    void on_source_bar(const Bar& bar) override {
         if (!_var_initialized) {
             m = PineMatrix::new_(2, 2, 0.0);
             _var_initialized = true;

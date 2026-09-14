@@ -107,7 +107,7 @@ class TopLevelEmitter:
     Mixed into ``CodeGen``; not intended to be instantiated standalone."""
 
     def _emit_includes(self, lines: list[str]) -> None:
-        lines.append('#include <pineforge/engine.hpp>')
+        lines.append('#include <pineforge/source/pine_strategy_host.hpp>')
         lines.append('#include <pineforge/ta.hpp>')
         lines.append('#include <pineforge/math.hpp>')
         lines.append('#include <pineforge/series.hpp>')
@@ -981,7 +981,7 @@ class TopLevelEmitter:
         self._lexical_udt_types = {}
         self._lexical_series_bindings = {}
         self._lexical_known_var_tombstones = set()
-        lines.append("    void on_bar(const Bar& bar) override {")
+        lines.append("    void on_source_bar(const Bar& bar) override {")
 
         # A GeneratedStrategy handle may execute multiple batch runs or
         # streaming lifecycles. BacktestEngine resets broker/base state, but

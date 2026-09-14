@@ -178,7 +178,7 @@ def test_post_fill_recalc_updates_current_history_slot_but_barstate_stays_new():
     lowering to ``is_first_tick_``.
     """
     cpp = transpile(_HISTORY_ADVANCE_PROBE)
-    on_bar = cpp.split("void on_bar(const Bar& bar) override {", 1)[1].split(
+    on_bar = cpp.split("void on_source_bar(const Bar& bar) override {", 1)[1].split(
         "\n    }", 1
     )[0]
 
@@ -288,7 +288,7 @@ def test_inline_history_buffers_are_owned_independent_and_clear_at_bar_zero():
     assert len(set(arg_members)) == 4
     assert "static thread_local Series" not in cpp
 
-    on_bar = cpp.split("void on_bar(const Bar& bar) override {", 1)[1].split(
+    on_bar = cpp.split("void on_source_bar(const Bar& bar) override {", 1)[1].split(
         "\n    }", 1
     )[0]
     for member in hist_members + arg_members:
@@ -439,7 +439,7 @@ def test_every_strategy_history_member_pushes_or_updates():
         )
     )
     cpp = transpile(_strategy(", calc_on_order_fills=true", body))
-    on_bar = cpp.split("void on_bar(const Bar& bar) override {", 1)[1].split(
+    on_bar = cpp.split("void on_source_bar(const Bar& bar) override {", 1)[1].split(
         "\n    }", 1
     )[0]
 

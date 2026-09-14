@@ -2,7 +2,7 @@
 
 The pragma adds a per-bar instrumentation hook: each occurrence binds a
 label to a Pine expression and the codegen emits, at the bottom of every
-``on_bar()``, a ``trace(label, value)`` call wrapped in
+``on_source_bar()``, a ``trace(label, value)`` call wrapped in
 ``if (trace_enabled_) { ... }`` so cost is zero when tracing is off.
 The engine API (``trace`` overloads + ``trace_enabled_`` flag) is owned
 by a parallel runtime patch — these tests therefore assert only on the
@@ -26,11 +26,11 @@ from pineforge_codegen.pragmas import (
 
 
 def _on_bar_body(cpp: str) -> str:
-    """Slice the generated C++ between the ``on_bar(...)`` opener and the
+    """Slice the generated C++ between the ``on_source_bar(...)`` opener and the
     matching closing ``}``. Used so assertions about ordering / scoping
     aren't fooled by other top-level emissions in the file."""
-    m = re.search(r"void on_bar\(const Bar& bar\) override \{(.*?)\n    \}", cpp, re.DOTALL)
-    assert m is not None, f"could not locate on_bar() in generated C++:\n{cpp[:600]}"
+    m = re.search(r"void on_source_bar\(const Bar& bar\) override \{(.*?)\n    \}", cpp, re.DOTALL)
+    assert m is not None, f"could not locate on_source_bar() in generated C++:\n{cpp[:600]}"
     return m.group(1)
 
 

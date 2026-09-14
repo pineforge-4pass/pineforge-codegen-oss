@@ -388,7 +388,7 @@ observed = scalar
     # Whole-output pin includes the generic run-lifecycle reset. The ordinary
     # non-map lowering and its direct value checkpoint remain unchanged.
     assert sha256(cpp.encode()).hexdigest() == (
-        "113d27f98bebd9ead384d6e9fe72f753c6eee69dde1fb98f1230ead7f4d12f4c"
+        "c9c0ab4d8bafcdfd3d80fe1d907c11d02143100f5fd56430335f6c311f318a1c"
     )
     assert '#include <pineforge/map.hpp>' not in cpp
     assert "_PFCheckpointTraits" not in cpp

@@ -57,7 +57,7 @@ def test_constructor_explicitly_selects_compatibility_with_old_engine_bridge(sou
 def test_conditional_risk_limit_is_still_in_on_bar_after_constructor():
     cpp = transpile(_SOURCES[2])
     select = cpp.index("enable_pine_intraday_cap();")
-    on_bar = cpp.index("void on_bar(")
+    on_bar = cpp.index("void on_source_bar(")
     statement = cpp.index("max_intraday_filled_orders_ = (int)(limit);")
     assert select < on_bar < statement
     assert cpp.count("max_intraday_filled_orders_ =") == 1

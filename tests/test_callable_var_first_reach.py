@@ -381,7 +381,7 @@ reach_count = reached.size()
 first_reach = reach_count > 0 ? reached.get(0) : -1
 '''
     cpp = transpile(source)
-    body = cpp[cpp.index("double probe_cs0("):cpp.index("    void on_bar(")]
+    body = cpp[cpp.index("double probe_cs0("):cpp.index("    void on_source_bar(")]
     assert body.index("if (active) {") < body.index(
         "if (!this->_pf_var_init_state)"
     )
@@ -418,7 +418,7 @@ probe(float src, bool active) =>
 value = probe(close, bar_index != 1)
 '''
     cpp = transpile(source)
-    body = cpp[cpp.index("double probe_cs0("):cpp.index("    void on_bar(")]
+    body = cpp[cpp.index("double probe_cs0("):cpp.index("    void on_source_bar(")]
     assert "if (active) {" in body
     assert "_hoist_" not in body
     # The conditional SMA sees bars 0 and 2, so its final value is 20. Pine

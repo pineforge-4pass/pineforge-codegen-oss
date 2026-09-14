@@ -93,7 +93,7 @@ def test_clock_contract_hold_last_base_and_na_guards():
 
 def test_on_bar_resets_then_records_the_held_source_before_statements():
     cpp = _cpp("x = close > open and ta.roc(close, 3) > 0")
-    on_bar = cpp.split("void on_bar(const Bar& bar) override {", 1)[1].split(
+    on_bar = cpp.split("void on_source_bar(const Bar& bar) override {", 1)[1].split(
         "\n    }", 1
     )[0]
     reset_guard = "if (history_advances_new_bar() && bar_index_ == 0) {"

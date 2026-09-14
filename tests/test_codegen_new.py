@@ -86,14 +86,14 @@ def test_run_backtest_full_routes_to_tf_aware_run_when_only_script_tf_set():
 
 def test_includes_present():
     cpp = _generate('//@version=6\nstrategy("T")\n')
-    assert '#include <pineforge/engine.hpp>' in cpp
+    assert '#include <pineforge/source/pine_strategy_host.hpp>' in cpp
     assert '#include <pineforge/ta.hpp>' in cpp
 
 
 def test_class_structure():
     cpp = _generate('//@version=6\nstrategy("T")\n')
-    assert "class GeneratedStrategy : public BacktestEngine" in cpp
-    assert "void on_bar(const Bar& bar) override" in cpp
+    assert "class GeneratedStrategy : public pineforge::source::PineStrategyHost" in cpp
+    assert "void on_source_bar(const Bar& bar) override" in cpp
     assert 'extern "C"' in cpp
     assert "strategy_create" in cpp
 

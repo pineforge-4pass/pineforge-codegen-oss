@@ -61,8 +61,7 @@ cpp = transpile(pine)
 print(cpp)          # complete C++ source string
 ```
 
-The output `#include`s `<pineforge/engine.hpp>`, `<pineforge/ta.hpp>`, … and
-compiles into a `.so` exposing the engine's documented C-ABI.
+The output `#include`s `<pineforge/source/pine_strategy_host.hpp>`, `<pineforge/ta.hpp>`, …; its `GeneratedStrategy` derives from `pineforge::source::PineStrategyHost` and compiles into a `.so` exposing the engine's documented C-ABI.
 
 ## Usage
 
