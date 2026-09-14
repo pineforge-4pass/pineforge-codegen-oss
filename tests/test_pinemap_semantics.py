@@ -385,10 +385,10 @@ scalar += close
 observed = scalar
 '''
     cpp = transpile(source)
-    # Whole-output pin includes the generic run-lifecycle reset. The ordinary
-    # non-map lowering and its direct value checkpoint remain unchanged.
+    # Whole-output pin includes the generated source-host constructor and
+    # lifecycle reset. The ordinary non-map lowering remains unchanged.
     assert sha256(cpp.encode()).hexdigest() == (
-        "c9c0ab4d8bafcdfd3d80fe1d907c11d02143100f5fd56430335f6c311f318a1c"
+        "1d822b51179dfff05d5b1ecc9b2bfdb7ae2e33b2d497463b96c9f4d6b9b30a38"
     )
     assert '#include <pineforge/map.hpp>' not in cpp
     assert "_PFCheckpointTraits" not in cpp

@@ -464,8 +464,8 @@ def test_strategy_entry_forwards_qty_type():
 def test_strategy_direction_long_maps_to_long_only_risk():
     src = '//@version=6\nstrategy("T")\nstrategy.risk.allow_entry_in(strategy.direction.long)\n'
     cpp = _generate(src)
-    assert "risk_direction_ = RiskDirection::LONG_ONLY;" in cpp
-    assert "risk_direction_ = RiskDirection::SHORT_ONLY;" not in cpp
+    assert "set_pine_risk_direction(1);" in cpp
+    assert "set_pine_risk_direction(-1);" not in cpp
 
 
 def test_strategy_close():
@@ -1318,7 +1318,7 @@ def test_runtime_error():
 
 def test_strategy_risk_max_drawdown():
     cpp = _generate('//@version=6\nstrategy("T")\nstrategy.risk.max_drawdown(1000)')
-    assert "risk_max_drawdown_" in cpp
+    assert "set_pine_risk_max_drawdown((double)(1000), false);" in cpp
 
 
 def test_closed_trade_direction():

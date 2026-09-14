@@ -803,22 +803,23 @@ class TopLevelEmitter:
         # This is configuration, deliberately outside script-state reset.
         ctor_body: list[str] = [
             "#if defined(PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1)",
-            "        pineforge::BacktestEngine::attach_pine_execution_adapter();",
+            "        pineforge::source::PineStrategyHost::attach_pine_execution_adapter();",
             "#elif defined(PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1)",
-            "        pineforge::BacktestEngine::enable_pine_intraday_cap();",
+            "        pineforge::source::PineStrategyHost::enable_pine_intraday_cap();",
             "#endif",
+            "        pineforge::source::PineStrategyConfig cfg{};",
         ]
-        # Strategy params that map to engine members
+        # Strategy params that map to the source host's config surface.
         sp = self.ctx.strategy_params
 
         if sp.get("process_orders_on_close") is True:
-            ctor_body.append("        process_orders_on_close_ = true;")
+            ctor_body.append("        cfg.process_orders_on_close = true;")
 
         if sp.get("calc_on_order_fills") is True:
-            ctor_body.append("        calc_on_order_fills_ = true;")
+            ctor_body.append("        cfg.calc_on_order_fills = true;")
 
         if "initial_capital" in sp and isinstance(sp["initial_capital"], (int, float)):
-            ctor_body.append(f"        initial_capital_ = {float(sp['initial_capital'])};")
+            ctor_body.append(f"        cfg.initial_capital = {float(sp['initial_capital'])};")
 
         # default_qty_type: strategy.fixed / strategy.percent_of_equity / strategy.cash
         qty_type_map = {
@@ -828,13 +829,15 @@ class TopLevelEmitter:
         }
         qty_type = sp.get("default_qty_type")
         if qty_type in qty_type_map:
-            ctor_body.append(f"        default_qty_type_ = {qty_type_map[qty_type]};")
+            ctor_body.append(
+                f"        cfg.default_qty_type = static_cast<int>({qty_type_map[qty_type]});"
+            )
 
         if "default_qty_value" in sp and isinstance(sp["default_qty_value"], (int, float)):
-            ctor_body.append(f"        default_qty_value_ = {float(sp['default_qty_value'])};")
+            ctor_body.append(f"        cfg.default_qty_value = {float(sp['default_qty_value'])};")
 
         if "pyramiding" in sp and isinstance(sp["pyramiding"], int):
-            ctor_body.append(f"        pyramiding_ = {sp['pyramiding']};")
+            ctor_body.append(f"        cfg.pyramiding = {sp['pyramiding']};")
 
         # commission_type: strategy.commission.percent / .cash_per_order / .cash_per_contract
         comm_type_map = {
@@ -844,31 +847,35 @@ class TopLevelEmitter:
         }
         comm_type = sp.get("commission_type")
         if comm_type in comm_type_map:
-            ctor_body.append(f"        commission_type_ = {comm_type_map[comm_type]};")
+            ctor_body.append(
+                f"        cfg.commission_type = static_cast<int>({comm_type_map[comm_type]});"
+            )
 
         if "commission_value" in sp and isinstance(sp["commission_value"], (int, float)):
-            ctor_body.append(f"        commission_value_ = {float(sp['commission_value'])};")
+            ctor_body.append(f"        cfg.commission_value = {float(sp['commission_value'])};")
 
         if "slippage" in sp and isinstance(sp["slippage"], (int, float)):
-            ctor_body.append(f"        slippage_ = {int(sp['slippage'])};")
+            ctor_body.append(f"        cfg.slippage = {int(sp['slippage'])};")
 
         # margin_long / margin_short: percent of position value required as
         # equity (default 100 = 1x leverage). When required_margin exceeds
         # available equity, TV silently rejects the fill — engine mirrors
         # this in execute_market_entry's FLAT branch.
         if "margin_long" in sp and isinstance(sp["margin_long"], (int, float)):
-            ctor_body.append(f"        margin_long_ = {float(sp['margin_long'])};")
+            ctor_body.append(f"        cfg.margin_long = {float(sp['margin_long'])};")
         if "margin_short" in sp and isinstance(sp["margin_short"], (int, float)):
-            ctor_body.append(f"        margin_short_ = {float(sp['margin_short'])};")
+            ctor_body.append(f"        cfg.margin_short = {float(sp['margin_short'])};")
 
         # close_entries_rule: "FIFO" (default) or "ANY"
         if sp.get("close_entries_rule") == "ANY":
-            ctor_body.append("        close_entries_rule_any_ = true;")
+            ctor_body.append("        cfg.close_entries_rule_any = true;")
 
         # Turn on native source-series history only when the script uses
         # input.source — otherwise the engine pays nothing per bar.
         if self._script_has_input_source():
-            ctor_body.append("        _src_series_active_ = true;")
+            ctor_body.append("        cfg.src_series_active = true;")
+
+        ctor_body.append("        configure_pine_strategy(cfg);")
 
         if init_parts and ctor_body:
             lines.append(f"    explicit GeneratedStrategy() : {', '.join(init_parts)} {{")
@@ -885,26 +892,37 @@ class TopLevelEmitter:
 
         lines.append("")
         lines.append("    void set_strategy_override(const std::string& key, const std::string& value) {")
-        lines.append('        if (key == "initial_capital") { initial_capital_ = std::stod(value); return; }')
-        lines.append('        if (key == "commission_value") { commission_value_ = std::stod(value); return; }')
-        lines.append('        if (key == "default_qty_value") { default_qty_value_ = std::stod(value); return; }')
-        lines.append('        if (key == "pyramiding") { pyramiding_ = std::stoi(value); return; }')
-        lines.append('        if (key == "slippage") { slippage_ = std::stoi(value); return; }')
-        lines.append('        if (key == "process_orders_on_close") { process_orders_on_close_ = (value == "true" || value == "1"); return; }')
-        lines.append('        if (key == "calc_on_order_fills") { calc_on_order_fills_ = (value == "true" || value == "1"); return; }')
-        lines.append('        if (key == "close_entries_rule") { close_entries_rule_any_ = (value == "ANY" || value == "any" || value == "1"); return; }')
-        lines.append('        if (key == "default_qty_type") {')
-        lines.append('            if (value == "fixed" || value == "strategy.fixed" || value == "0") default_qty_type_ = QtyType::FIXED;')
-        lines.append('            else if (value == "percent_of_equity" || value == "strategy.percent_of_equity" || value == "1") default_qty_type_ = QtyType::PERCENT_OF_EQUITY;')
-        lines.append('            else if (value == "cash" || value == "strategy.cash" || value == "2") default_qty_type_ = QtyType::CASH;')
+        lines.append("        pineforge::source::StrategyOverrides overrides{};")
+        lines.append('        if (key == "initial_capital") {')
+        lines.append("            overrides.initial_capital = std::stod(value);")
+        lines.append('        } else if (key == "commission_value") {')
+        lines.append("            overrides.commission_value = std::stod(value);")
+        lines.append('        } else if (key == "default_qty_value") {')
+        lines.append("            overrides.default_qty_value = std::stod(value);")
+        lines.append('        } else if (key == "pyramiding") {')
+        lines.append("            overrides.pyramiding = std::stoi(value);")
+        lines.append('        } else if (key == "slippage") {')
+        lines.append("            overrides.slippage = std::stoi(value);")
+        lines.append('        } else if (key == "process_orders_on_close") {')
+        lines.append('            overrides.process_orders_on_close = (value == "true" || value == "1");')
+        lines.append('        } else if (key == "calc_on_order_fills") {')
+        lines.append('            overrides.calc_on_order_fills = (value == "true" || value == "1");')
+        lines.append('        } else if (key == "close_entries_rule") {')
+        lines.append('            overrides.close_entries_rule = (value == "ANY" || value == "any" || value == "1");')
+        lines.append('        } else if (key == "default_qty_type") {')
+        lines.append('            if (value == "fixed" || value == "strategy.fixed" || value == "0") overrides.default_qty_type = static_cast<int>(QtyType::FIXED);')
+        lines.append('            else if (value == "percent_of_equity" || value == "strategy.percent_of_equity" || value == "1") overrides.default_qty_type = static_cast<int>(QtyType::PERCENT_OF_EQUITY);')
+        lines.append('            else if (value == "cash" || value == "strategy.cash" || value == "2") overrides.default_qty_type = static_cast<int>(QtyType::CASH);')
+        lines.append("            else return;")
+        lines.append('        } else if (key == "commission_type") {')
+        lines.append('            if (value == "percent" || value == "strategy.commission.percent" || value == "0") overrides.commission_type = static_cast<int>(CommissionType::PERCENT);')
+        lines.append('            else if (value == "cash_per_order" || value == "strategy.commission.cash_per_order" || value == "1") overrides.commission_type = static_cast<int>(CommissionType::CASH_PER_ORDER);')
+        lines.append('            else if (value == "cash_per_contract" || value == "strategy.commission.cash_per_contract" || value == "2") overrides.commission_type = static_cast<int>(CommissionType::CASH_PER_CONTRACT);')
+        lines.append("            else return;")
+        lines.append("        } else {")
         lines.append("            return;")
         lines.append("        }")
-        lines.append('        if (key == "commission_type") {')
-        lines.append('            if (value == "percent" || value == "strategy.commission.percent" || value == "0") commission_type_ = CommissionType::PERCENT;')
-        lines.append('            else if (value == "cash_per_order" || value == "strategy.commission.cash_per_order" || value == "1") commission_type_ = CommissionType::CASH_PER_ORDER;')
-        lines.append('            else if (value == "cash_per_contract" || value == "strategy.commission.cash_per_contract" || value == "2") commission_type_ = CommissionType::CASH_PER_CONTRACT;')
-        lines.append("            return;")
-        lines.append("        }")
+        lines.append("        pineforge::source::PineStrategyHost::set_strategy_override(overrides);")
         lines.append("    }")
 
         if self._security_eval_info:

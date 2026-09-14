@@ -14,11 +14,12 @@ def _strategy(header: str, body: str = "") -> str:
 def test_calc_on_order_fills_declaration_and_runtime_override_plumbing():
     cpp = transpile(_strategy(", calc_on_order_fills=true"))
 
-    assert "calc_on_order_fills_ = true;" in cpp
+    assert "cfg.calc_on_order_fills = true;" in cpp
     assert (
-        'if (key == "calc_on_order_fills") { calc_on_order_fills_ = '
-        '(value == "true" || value == "1"); return; }'
+        'overrides.calc_on_order_fills = '
+        '(value == "true" || value == "1");'
     ) in cpp
+    assert "pineforge::source::PineStrategyHost::set_strategy_override(overrides);" in cpp
 
 
 def test_calc_on_order_fills_false_and_calc_on_every_tick_are_independent():
@@ -33,8 +34,8 @@ def test_calc_on_order_fills_false_and_calc_on_every_tick_are_independent():
     every_tick_ctor = every_tick_only.split("explicit GeneratedStrategy()", 1)[
         1
     ].split("void set_strategy_override", 1)[0]
-    assert "calc_on_order_fills_ = true;" not in false_ctor
-    assert "calc_on_order_fills_ = true;" not in every_tick_ctor
+    assert "cfg.calc_on_order_fills = true;" not in false_ctor
+    assert "cfg.calc_on_order_fills = true;" not in every_tick_ctor
 
 
 _ROLLBACK_PROBE = '''//@version=6

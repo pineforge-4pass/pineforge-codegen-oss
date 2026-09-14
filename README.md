@@ -256,8 +256,9 @@ hosted/embedded use. Email **luis@4pass.com.tw** with your use case for a quote.
 
 ## Explicit Pine execution attachment
 
-Generated constructors select `attach_pine_execution_adapter()` before host
-metadata when `PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1` is available.
+Generated constructors configure their `PineStrategyConfig` before host
+metadata and select `attach_pine_execution_adapter()` when
+`PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1` is available.
 Its current scope is the Pine intraday cap and retained-parent priority rule.
 A guarded `enable_pine_intraday_cap()` fallback supports existing cap-only
 engines; engines with neither capability keep their established defaults.

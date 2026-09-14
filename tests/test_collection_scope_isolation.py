@@ -835,7 +835,7 @@ matrix_result = matrix_probe()
 
 def test_unique_local_collection_output_hash_is_stable() -> None:
     cpp = transpile(_IDENTITY_SOURCE)
-    assert len(cpp) == 13454
+    assert len(cpp) == 14048
     assert sha256(cpp.encode()).hexdigest() == (
-        "ceccb33a781edc3d1f4c8e619ef4d97c8b0a4c877aba6d231329a24549787aff"
+        "3e811b8da0bfa832577a6e261d9f2ee145c6a88368d964d84b9c94cac6ede616"
     )

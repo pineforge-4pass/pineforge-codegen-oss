@@ -64,7 +64,7 @@ observed = typed_keywords(global_values, global_source)
 def test_valid_existing_positional_and_typed_keyword_forms_do_not_drift():
     cpp = transpile(_VALID_EXISTING_FORMS)
     assert sha256(cpp.encode()).hexdigest() == (
-        "6a4507879288b7ef8c2c15d45d40123340cee72b15d14b39cdacad6a974b6721"
+        "6d8475b06b3393521b6be96296c9791aee166380117be0347279869305e7fff6"
     )
 
 
@@ -78,7 +78,7 @@ probe(map<string, int> map) =>
     map.get("key")
 observed = probe(map.new<string, int>())
 ''',
-            "b2acda81f2867b680fa36e06697c23e8a94d63dcdef43f90cb7013534335dbb9",
+            "c3e1ad52f99ed628a7692606e9aef13c50b6dc22ffa9714d0bf71ccdc8060434",
         ),
         (
             '''//@version=6
@@ -89,7 +89,7 @@ probe() =>
     map.get("key")
 observed = probe()
 ''',
-            "1c9b1060be204dae13495f5ef355981522f530e2d25c66ee6c84a751796862b4",
+            "69048a24494dc0d684aabecfbffc5b86aba80ce3c26cbae6848e4ede5ca5bda6",
         ),
         (
             '''//@version=6
@@ -98,7 +98,7 @@ map<string, int> map = map.new<string, int>()
 map.put("key", 1)
 observed = map.get("key")
 ''',
-            "2280a9606f191788716a24ca7228eefae8582f9f3c64a229a0431e759681c198",
+            "2f6db3cfce2f6b908fc6c4485c0187a6418e3599a94be678f4bcb43e1e2b3b90",
         ),
     ],
 )
@@ -141,7 +141,7 @@ def test_security_timeframe_clone_keeps_preceding_map_namespace_source_order():
     )
 
     assert sha256(cpp.encode()).hexdigest() == (
-        "894a1134089d3a6695e72a375d3902647b83a0bcf9a2667fbc3de8c5ce43ec43"
+        "74f31ea3937aed127eed7641d0d9a9f23c64e5c746e09596a8a284799f9b3686"
     )
 
 
@@ -159,7 +159,7 @@ observed = foreign
     cpp = transpile(source, filename="synthetic-lexical-map-source-order.pine")
 
     assert sha256(cpp.encode()).hexdigest() == (
-        "473a266c3cc3b102b50128a5048931bbba6d69b95dc54025b05f9eac5018344b"
+        "5a087945ff76c28afd2112c7441c43e34436b9f60febf11f37204547a23438ed"
     )
 
 
@@ -204,22 +204,22 @@ for i = 0 to 0
     [
         (
             _LATER_GLOBAL_MAP_SOURCE,
-            "3fd7de332c831b6e11a3f3194e39c70e418e016d85163cfe3a7d448f530b2fdf",
+            "bc28346812b8fb9427e9394f81fe51ca59565fae6daa505ce09cc55b51a1f042",
             34.0,
         ),
         (
             _NESTED_LEXICAL_MAP_ROOT_SOURCE,
-            "4c6ed253039da54ffc3b4b3efcbee59cabe694568f1b4cad48ecd25629ac1cde",
+            "b305db152684f9e7496f051f075880cbeed620775d5fbb63beb7d765f2091d04",
             7.0,
         ),
         (
             _BLOCK_LOCAL_MAP_ISOLATION_SOURCE,
-            "3603ddcf0f3c3a8654ee4b2c2d247d1416690b83561937b9068093873af498c6",
+            "1211d22c8be706089ca26b687259aad3a5ac693621eacc6a6ae0a5a23b72fd1e",
             923.0,
         ),
         (
             _FOR_BLOCK_LOCAL_MAP_SOURCE,
-            "53275850006e4cbbc27df0667baaf7762613db3ff6c3ce0e4499f5590c47a4ce",
+            "aa2d0b0195b24dfac6e0dada1f511e3614d25c65a9f1a51b21766c5d4daa23af",
             8.0,
         ),
     ],
