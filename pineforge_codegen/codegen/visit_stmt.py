@@ -346,35 +346,44 @@ class StmtVisitor:
                         and node.expr.args):
                     risk_func = c.member
                     _RISK_MEMBER_MAP = {
-                        "max_intraday_filled_orders": ("max_intraday_filled_orders_", "int"),
-                        "max_drawdown": ("risk_max_drawdown_", "double"),
-                        "max_intraday_loss": ("risk_max_intraday_loss_", "double"),
-                        "max_position_size": ("risk_max_position_size_", "double"),
-                        "max_cons_loss_days": ("risk_max_cons_loss_days_", "int"),
+                        "max_intraday_filled_orders": (
+                            "set_pine_risk_max_intraday_filled_orders", "int"
+                        ),
+                        "max_drawdown": ("set_pine_risk_max_drawdown", "double"),
+                        "max_intraday_loss": ("set_pine_risk_max_intraday_loss", "double"),
+                        "max_position_size": ("set_pine_risk_max_position_size", "double"),
+                        "max_cons_loss_days": ("set_pine_risk_max_cons_loss_days", "int"),
                     }
                     if risk_func == "allow_entry_in":
                         val = self._visit_expr(node.expr.args[0])
                         if val == "1":
-                            lines.append(f"{pad}risk_direction_ = RiskDirection::LONG_ONLY;")
+                            direction = "1"
                         elif val == "-1":
-                            lines.append(f"{pad}risk_direction_ = RiskDirection::SHORT_ONLY;")
+                            direction = "-1"
                         else:
-                            lines.append(f"{pad}risk_direction_ = RiskDirection::BOTH;")
+                            direction = "0"
+                        lines.append(f"{pad}set_pine_risk_direction({direction});")
                         return
                     if risk_func in _RISK_MEMBER_MAP:
-                        member, cast_type = _RISK_MEMBER_MAP[risk_func]
+                        setter, cast_type = _RISK_MEMBER_MAP[risk_func]
                         val = self._visit_expr(node.expr.args[0])
-                        lines.append(f"{pad}{member} = ({cast_type})({val});")
-                        # Handle percent_of_equity flag for max_drawdown / max_intraday_loss
+                        # The percent flag travels with the matching setter so
+                        # every risk update atomically replaces both fields.
                         if risk_func in ("max_drawdown", "max_intraday_loss") and len(node.expr.args) >= 2:
                             arg2 = node.expr.args[1]
                             is_pct = (isinstance(arg2, MemberAccess)
                                       and isinstance(arg2.object, Identifier)
                                       and arg2.object.name == "strategy"
                                       and arg2.member == "percent_of_equity")
-                            if is_pct:
-                                pct_flag = "risk_max_drawdown_is_pct_" if risk_func == "max_drawdown" else "risk_max_intraday_loss_is_pct_"
-                                lines.append(f"{pad}{pct_flag} = true;")
+                        else:
+                            is_pct = False
+                        if risk_func in ("max_drawdown", "max_intraday_loss"):
+                            lines.append(
+                                f"{pad}{setter}(({cast_type})({val}), "
+                                f"{'true' if is_pct else 'false'});"
+                            )
+                        else:
+                            lines.append(f"{pad}{setter}(({cast_type})({val}));")
                         return
             if self._is_skip_expr(node.expr):
                 return

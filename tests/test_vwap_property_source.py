@@ -59,7 +59,7 @@ def test_property_and_explicit_hlc3_call_agree():
 
 def test_two_bare_reads_are_two_sites_each_advanced_once():
     cpp = transpile(_pine("v = ta.vwap\nw = ta.vwap"))
-    body = cpp[cpp.index("void on_bar("):]
+    body = cpp[cpp.index("void on_source_bar("):]
     body = body[: body.index("void precalculate(")] if "void precalculate(" in body else body
     assert len([c for c in _calls(body, "_ta_vwap_1.compute")]) == 1, body
     assert len([c for c in _calls(body, "_ta_vwap_2.compute")]) == 1, body
@@ -124,4 +124,3 @@ def test_user_declared_vwap_variable_is_not_the_property():
     assert "ta::VWAP" not in cpp, cpp
     assert "PF_VWAP_SESSION_ANCHOR_ARGS" not in cpp, cpp
     assert "vwap" in cpp  # the user's own variable is what the read resolves to
-

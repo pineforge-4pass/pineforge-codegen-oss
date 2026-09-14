@@ -70,7 +70,7 @@ var float directInput = input.float(4.5, "Direct Seed")
     assert "fromInput = length;" in cpp
     assert "directInput = get_input_double(\"Direct Seed\", 4.5);" in cpp
 
-    on_bar = cpp[cpp.index("    void on_bar("):]
+    on_bar = cpp[cpp.index("    void on_source_bar("):]
     input_pos = on_bar.index('length = get_input_int("Length", 3);')
     ema_pos = on_bar.index("emaValue =")
     plain_pos = on_bar.index("plainValue =")
@@ -98,7 +98,7 @@ if close < 0
     assert "bool _pf_var_init_pending__blk1 = false;" in cpp
     assert "pending = current_bar_.low;" in cpp
     assert "pending__blk1 = current_bar_.high;" in cpp
-    on_bar = cpp[cpp.index("    void on_bar("):]
+    on_bar = cpp[cpp.index("    void on_source_bar("):]
     assert on_bar.index("if (!_pf_var_init_pending)") > on_bar.index("if (([&]")
 
 

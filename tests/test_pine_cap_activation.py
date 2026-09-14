@@ -45,9 +45,9 @@ def test_constructor_explicitly_selects_compatibility_with_old_engine_bridge(sou
     assert cpp.count("attach_pine_execution_adapter();") == 1
     assert (
         "#if defined(PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1)\n"
-        "        pineforge::BacktestEngine::attach_pine_execution_adapter();\n"
+        "        pineforge::source::PineStrategyHost::attach_pine_execution_adapter();\n"
         "#elif defined(PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1)\n"
-        "        pineforge::BacktestEngine::enable_pine_intraday_cap();\n"
+        "        pineforge::source::PineStrategyHost::enable_pine_intraday_cap();\n"
         "#endif"
     ) in constructor
     assert "max_intraday_filled_orders_ =" not in constructor
@@ -57,10 +57,10 @@ def test_constructor_explicitly_selects_compatibility_with_old_engine_bridge(sou
 def test_conditional_risk_limit_is_still_in_on_bar_after_constructor():
     cpp = transpile(_SOURCES[2])
     select = cpp.index("enable_pine_intraday_cap();")
-    on_bar = cpp.index("void on_bar(")
-    statement = cpp.index("max_intraday_filled_orders_ = (int)(limit);")
+    on_bar = cpp.index("void on_source_bar(")
+    statement = cpp.index("set_pine_risk_max_intraday_filled_orders((int)(limit));")
     assert select < on_bar < statement
-    assert cpp.count("max_intraday_filled_orders_ =") == 1
+    assert cpp.count("set_pine_risk_max_intraday_filled_orders(") == 1
     prefix = cpp[on_bar:statement]
     assert "if (" in prefix and "pine_bar_index()" in prefix
 
@@ -69,12 +69,12 @@ def test_multiple_risk_limits_keep_source_order_and_do_not_reset_attachment():
     cpp = transpile(_SOURCES[3])
     statements = [
         line.strip() for line in cpp.splitlines()
-        if "max_intraday_filled_orders_ =" in line
+        if "set_pine_risk_max_intraday_filled_orders(" in line
     ]
     assert statements == [
-        "max_intraday_filled_orders_ = (int)(3);",
-        "max_intraday_filled_orders_ = (int)(4);",
-        "max_intraday_filled_orders_ = (int)(3);",
+        "set_pine_risk_max_intraday_filled_orders((int)(3));",
+        "set_pine_risk_max_intraday_filled_orders((int)(4));",
+        "set_pine_risk_max_intraday_filled_orders((int)(3));",
     ]
     assert cpp.count("enable_pine_intraday_cap();") == 1
     assert cpp.count("attach_pine_execution_adapter();") == 1
@@ -100,7 +100,7 @@ attach_pine_execution_adapter = input.int(2)
 strategy.risk.max_intraday_filled_orders(attach_pine_execution_adapter)
 """
     cpp = transpile(source)
-    assert "pineforge::BacktestEngine::attach_pine_execution_adapter();" in cpp
+    assert "pineforge::source::PineStrategyHost::attach_pine_execution_adapter();" in cpp
     compile_cpp(cpp, label="pine-execution-method-shadow")
     # Prove the cap-only branch parses independently of the newer member.
     compile_cpp("#include <pineforge/engine.hpp>\n"

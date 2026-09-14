@@ -4066,7 +4066,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._emit_lazy_source_clock_helper(lines)
 
         # 2. Open class
-        lines.append("class GeneratedStrategy : public BacktestEngine {")
+        lines.append("class GeneratedStrategy : public pineforge::source::PineStrategyHost {")
         lines.append("public:")
         _script_state_decl_start = len(lines)
 

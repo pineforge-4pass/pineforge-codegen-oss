@@ -110,10 +110,10 @@ def test_input_source_sets_active_flag():
     # The ctor turns on the engine's native source-series push only when
     # the script uses input.source.
     cpp = _emit('input.source(close, "s")')
-    assert "_src_series_active_ = true;" in cpp
+    assert "cfg.src_series_active = true;" in cpp
     # A script without input.source must NOT pay the cost.
     no_src = transpile('//@version=6\nstrategy("t")\nplot(close)\n')
-    assert "_src_series_active_ = true;" not in no_src
+    assert "cfg.src_series_active = true;" not in no_src
 
 
 # --- get_input_int64 (color) --------------------------------------------

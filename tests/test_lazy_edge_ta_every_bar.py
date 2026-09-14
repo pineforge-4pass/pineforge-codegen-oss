@@ -59,7 +59,7 @@ def _cpp(body: str) -> str:
 
 
 def _on_bar(cpp: str) -> str:
-    return cpp.split("void on_bar(", 1)[1].split("\n    }\n", 1)[0]
+    return cpp.split("void on_source_bar(", 1)[1].split("\n    }\n", 1)[0]
 
 
 def _lines(cpp: str) -> list[str]:

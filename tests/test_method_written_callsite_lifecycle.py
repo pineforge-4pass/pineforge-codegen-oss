@@ -312,7 +312,7 @@ first = holder.sample(close, bar_index >= 1)
 '''
     cpp = transpile(source)
     body = cpp[
-        cpp.index("double _udt_Holder_sample_cs0("):cpp.index("    void on_bar(")
+        cpp.index("double _udt_Holder_sample_cs0("):cpp.index("    void on_source_bar(")
     ]
     assert body.index("if (active) {") < body.index(
         "if (!this->_pf_var_init_state)"
