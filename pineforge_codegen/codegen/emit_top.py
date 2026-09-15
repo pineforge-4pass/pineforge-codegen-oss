@@ -176,6 +176,11 @@ class TopLevelEmitter:
         # byte-identical — mirrors the matrix.hpp gating above.
         if getattr(self, "_uses_drawing", False):
             lines.append('#include <pineforge/drawing.hpp>')
+        lines.extend([
+            "#ifndef PINEFORGE_HAS_NATIVE_LOWERING_V1",
+            '#error "generated code requires pineforge-engine native lowering v1 (PINEFORGE_HAS_NATIVE_LOWERING_V1)"',
+            "#endif",
+        ])
         lines.append("")
         # Compatibility shim for the namespace-wrap refactor: unqualified
         # references to BacktestEngine / Bar / na<T>() / ta::* / etc. resolve

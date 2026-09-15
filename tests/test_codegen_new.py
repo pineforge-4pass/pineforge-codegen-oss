@@ -90,6 +90,19 @@ def test_includes_present():
     assert '#include <pineforge/ta.hpp>' in cpp
 
 
+def test_native_lowering_capability_is_required_once_after_engine_includes():
+    cpp = _generate('//@version=6\nstrategy("T")\n')
+    guard = (
+        "#ifndef PINEFORGE_HAS_NATIVE_LOWERING_V1\n"
+        '#error "generated code requires pineforge-engine native lowering v1 '
+        '(PINEFORGE_HAS_NATIVE_LOWERING_V1)"\n'
+        "#endif"
+    )
+    assert cpp.count(guard) == 1
+    assert cpp.index('#include <pineforge/source/pine_strategy_host.hpp>') < cpp.index(guard)
+    assert cpp.index(guard) < cpp.index("using namespace pineforge;")
+
+
 def test_class_structure():
     cpp = _generate('//@version=6\nstrategy("T")\n')
     assert "class GeneratedStrategy : public pineforge::source::PineStrategyHost" in cpp
@@ -526,6 +539,35 @@ def test_strategy_exit_forwards_comment_to_runtime():
     cpp = _generate(src)
     assert 'std::string("stop exit")' in cpp
     assert 'strategy_exit(std::string("X"), std::string("Long")' in cpp
+    assert "strategy_exit_cancel_bracket(" not in cpp
+
+
+def test_priceless_strategy_exit_cancels_bracket_with_from_entry_and_comment():
+    cpp = _generate(
+        'strategy.exit(id="cancel", from_entry="Long", comment="remove bracket")'
+    )
+    assert (
+        'strategy_exit_cancel_bracket(std::string("cancel"), '
+        'std::string("Long"), std::string("remove bracket"));'
+    ) in cpp
+    assert "strategy_close(" not in cpp
+
+
+def test_priceless_strategy_exit_cancels_bracket_with_default_from_entry_and_comment():
+    cpp = _generate('strategy.exit("cancel")')
+    assert 'strategy_exit_cancel_bracket(std::string("cancel"), "", "");' in cpp
+    assert "strategy_close(" not in cpp
+
+
+def test_strategy_convert_to_account_and_symbol_remain_identity_lowerings():
+    cpp = _generate(
+        "to_account = strategy.convert_to_account(close)\n"
+        "to_symbol = strategy.convert_to_symbol(open)"
+    )
+    assert "to_account = (current_bar_.close);" in cpp
+    assert "to_symbol = (current_bar_.open);" in cpp
+    assert "strategy_convert_to_account" not in cpp
+    assert "strategy_convert_to_symbol" not in cpp
 
 
 def test_strategy_position_size():
@@ -1555,7 +1597,7 @@ def test_barstate_tick_members_use_runtime_state():
 if barstate.isnew and barstate.isconfirmed
     strategy.entry("L", strategy.long)
 """)
-    assert "is_first_tick_" in cpp
+    assert "is_first_tick()" in cpp
     assert "is_last_tick_" in cpp
 
 

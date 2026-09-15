@@ -2555,8 +2555,8 @@ class CallVisitor:
                 return (f"strategy_exit({exit_id}, {from_id}, {limit_val}, {stop_val}, "
                         f"{trail_pts}, {trail_off}, {trail_pr}, {qty_pct}, {comment}, "
                         f"{qty_val}, {oca_val}, {profit_ticks}, {loss_ticks})")
-            close_comment = self._visit_expr(comment_n) if comment_n is not None else '""'
-            return f"strategy_close({exit_id}, {close_comment})"
+            comment = self._visit_expr(comment_n) if comment_n is not None else '""'
+            return f"strategy_exit_cancel_bracket({exit_id}, {from_id}, {comment})"
 
         if func_name == "cancel":
             p = self._resolve_func_args(node, "strategy.close")  # same shape: id first
