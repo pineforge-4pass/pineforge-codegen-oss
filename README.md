@@ -23,6 +23,22 @@ and trade your own account with your own capital at no cost. See
 - First complete PineScript v6 → C++ transpiler with a real support checker (to
   our knowledge).
 
+## What this owns
+
+This repository owns **Pine → C++ translation only**. It turns a Pine v6 script
+into a `GeneratedStrategy`: the indicator math plus the `strategy.entry` /
+`exit` / `close` / … calls, emitted on the engine's
+`pineforge::source::PineStrategyHost` with code that attaches the engine's Pine
+execution adapter.
+
+It does **not** own execution semantics. Order lifecycle, bracket legs,
+fill-price and slippage rules, `process_orders_on_close` / `calc_on_order_fills`,
+margin revival and trail/stop behaviour — everything TradingView parity depends
+on at run time — live in the engine's source-adapter runtime
+([`src/source/`](https://github.com/pineforge-4pass/pineforge-engine/tree/main/src/source)),
+which maps them onto the engine's Pine-agnostic kernel. See the engine's
+[architecture notes](https://github.com/pineforge-4pass/pineforge-engine#architecture-kernel-vs-parity).
+
 ---
 
 ## Install
@@ -182,6 +198,10 @@ pine source
   └─ 5. CodeGen                    → C++ source string
 ```
 
+The emitted `GeneratedStrategy` does not execute orders itself: its
+`strategy.*` calls go to the engine's Pine execution adapter, which it attaches
+in its constructor.
+
 ## Compile & run against the engine
 
 The emitted C++ targets the C-ABI in `<pineforge/pineforge.h>`. To build and run
@@ -256,10 +276,17 @@ hosted/embedded use. Email **luis@4pass.com.tw** with your use case for a quote.
 
 ## Explicit Pine execution attachment
 
+The Pine execution adapter is the engine's full Pine execution runtime
+(`PineExecutionAdapter` and `PineStrategyHost` in the engine's `src/source/`):
+order lifecycle, bracket legs, fill-price and slippage rules, POOC /
+`calc_on_order_fills`, margin revival, trail/stop semantics, the intraday caps
+and the retained-parent priority rule. Codegen's job is to emit the strategy
+that attaches it and the `strategy.*` calls it executes, against a matching
+engine ABI.
+
 Generated constructors configure their `PineStrategyConfig` before host
 metadata and select `attach_pine_execution_adapter()` when
 `PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1` is available.
-Its current scope is the Pine intraday cap and retained-parent priority rule.
 A guarded `enable_pine_intraday_cap()` fallback supports existing cap-only
 engines; engines with neither capability keep their established defaults.
 Risk statements remain in source execution order. This bridge requires matching
