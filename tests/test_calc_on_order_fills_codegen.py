@@ -176,7 +176,7 @@ def test_post_fill_recalc_updates_current_history_slot_but_barstate_stays_new():
     fill recalculation.  History advancement therefore has a separate runtime
     predicate: every rolling member updates its existing current-bar slot when
     the ordinary-close checkpoint is restored, while ``barstate.isnew`` keeps
-    lowering to ``is_first_tick_``.
+    lowering to ``is_first_tick()``.
     """
     cpp = transpile(_HISTORY_ADVANCE_PROBE)
     on_bar = cpp.split("void on_source_bar(const Bar& bar) override {", 1)[1].split(
@@ -229,7 +229,7 @@ def test_post_fill_recalc_updates_current_history_slot_but_barstate_stays_new():
 
     # Mutation guard: coupling barstate.isnew to history advancement would make
     # it false during historical fill recalcs, contrary to Pine semantics.
-    assert "if (is_first_tick_) {" in on_bar
+    assert "if (is_first_tick()) {" in on_bar
     assert "if (history_advances_new_bar()) {\n            strategy_entry" not in on_bar
 
 

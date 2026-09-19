@@ -794,7 +794,7 @@ class ExprVisitor:
                 if node.member == "islast":
                     return "barstate_islast_"
                 if node.member == "isnew":
-                    return "is_first_tick_"
+                    return "is_first_tick()"
                 if node.member == "isconfirmed":
                     return "is_last_tick_"
                 if node.member == "ishistory":

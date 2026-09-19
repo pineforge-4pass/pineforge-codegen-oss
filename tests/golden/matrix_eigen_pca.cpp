@@ -22,6 +22,9 @@
 #include <pineforge/str_utils.hpp>
 #include <pineforge/session_time.hpp>
 #include <pineforge/matrix.hpp>
+#ifndef PINEFORGE_HAS_NATIVE_LOWERING_V1
+#error "generated code requires pineforge-engine native lowering v1 (PINEFORGE_HAS_NATIVE_LOWERING_V1)"
+#endif
 
 using namespace pineforge;
 
