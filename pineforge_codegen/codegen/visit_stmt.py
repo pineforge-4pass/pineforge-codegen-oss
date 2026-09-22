@@ -1130,8 +1130,16 @@ class StmtVisitor:
                     )
                     lines.append(f"{pad}{safe} = {rhs};")
                 else:
-                    val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
-                    lines.append(f"{pad}{safe} {node.op} {val_cpp};")
+                    # Narrow the WHOLE compound expression, not the operand:
+                    # ``x -= 0.5`` on an int slot truncated (x - 0.5), and
+                    # truncating the operand first would round differently.
+                    combined = self._coerce_int_slot(
+                        f"{safe} {node.op[0]} {val_cpp}", node.value, int_slot,
+                    )
+                    if combined != f"{safe} {node.op[0]} {val_cpp}":
+                        lines.append(f"{pad}{safe} = {combined};")
+                    else:
+                        lines.append(f"{pad}{safe} {node.op} {val_cpp};")
         else:
             tct = self._nullable_collection_target_cpp_type(name=target_name)
             if tct is None:
@@ -1153,8 +1161,16 @@ class StmtVisitor:
                     )
                     lines.append(f"{pad}{safe} = {rhs};")
                 else:
-                    val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
-                    lines.append(f"{pad}{safe} {node.op} {val_cpp};")
+                    # Narrow the WHOLE compound expression, not the operand:
+                    # ``x -= 0.5`` on an int slot truncated (x - 0.5), and
+                    # truncating the operand first would round differently.
+                    combined = self._coerce_int_slot(
+                        f"{safe} {node.op[0]} {val_cpp}", node.value, int_slot,
+                    )
+                    if combined != f"{safe} {node.op[0]} {val_cpp}":
+                        lines.append(f"{pad}{safe} = {combined};")
+                    else:
+                        lines.append(f"{pad}{safe} {node.op} {val_cpp};")
 
     def _visit_tuple_assign(self, node: TupleAssign, lines: list[str], pad: str) -> None:
         is_top_level = any(id(node) == id(stmt) for stmt in self.ctx.ast.body)
