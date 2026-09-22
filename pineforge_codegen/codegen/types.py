@@ -1819,7 +1819,7 @@ class TypeInferer:
         if isinstance(node, NumberLiteral):
             return isinstance(node.value, float)
         if isinstance(node, (BoolLiteral, StringLiteral, ColorLiteral)):
-            # A color literal lowers to a packed-ARGB ``int64_t`` literal.
+            # A colour literal lowers to a packed-ARGB ``int64_t`` literal.
             return False
         if isinstance(node, Subscript) and isinstance(node.object, Identifier):
             # A history read keeps the series' element type.
@@ -1829,11 +1829,9 @@ class TypeInferer:
             if base in self.ctx.series_vars or base in self.ctx.series_bar_fields:
                 return self._series_type_for(base) == "double"
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
-            # ``color.red`` and friends lower to packed-ARGB integer constants;
-            # the trade-book counters lower to a sized integer.
+            # color.* lowers to a packed-ARGB integer constant; session.*
+            # lowers to a ``pine_session_*`` predicate (bool).
             if node.object.name in ("color", "session"):
-                # color.* lowers to a packed-ARGB integer constant; session.*
-                # lowers to a ``pine_session_*`` predicate (bool).
                 return False
             if (node.object.name == "strategy"
                     and node.member in self._INTEGRAL_STRATEGY_MEMBERS):
