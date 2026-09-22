@@ -14,17 +14,27 @@ in `test_regression_*` survived for so long.
 
 ```bash
 # 1. Full pytest suite WITH the engine env var. Without the env var
-#    the 237 compile-only tests cleanly skip, which means every
-#    codegen change goes unverified at the C++ level. The env var is
-#    NOT optional for change verification — it is only optional for a
+#    the compile-only tests cleanly skip, which means every codegen
+#    change goes unverified at the C++ level. The env var is NOT
+#    optional for change verification — it is only optional for a
 #    quick "did I break a unit test" sanity loop during development.
 #    CRITICAL: Always rebuild the sibling pineforge-engine first if any
 #    C++ headers or source changed!
 export PINEFORGE_ENGINE_INCLUDE=../pineforge-engine/include
+# Eigen is not on a system include path on every machine; without it
+# every compile test skips even with a good engine include. Point this
+# at the tree CMake fetched if `Eigen/Dense` is not found by default:
+export PINEFORGE_EIGEN_INCLUDE=../pineforge-engine/build/_deps/eigen-src
+# A built runtime unlocks the run-the-emitted-TU tests (they skip without
+# it); auto-detected from a build*/lib/ beside the engine checkout.
+export PINEFORGE_ENGINE_LIB=../pineforge-engine/build/lib/libpineforge.a
 pytest
 
-# Expected at HEAD: 944 passed, 1 skipped, 0 failed.
-#                   1 skip is the pre-existing test_parser.py:335.
+# Measured 2026-09-23: 2844 passed, 2 skipped, 0 failed (~18 min).
+#   Skip 1: test_parser.py:350, empty parameter set (pre-existing).
+#   Skip 2: test_codegen_golden.py:39, which needs the engine corpus at
+#           the sibling path and skips when the engine include is
+#           somewhere else.
 ```
 
 ```bash
@@ -34,9 +44,9 @@ pytest
 #    must transpile + compile against the engine headers.)
 pytest tests/test_compile_corpus.py
 
-# Expected at HEAD: 206 passed in ~47 s
-#   (basic 9 + community 11 + validation 147 + 16 validation_* sub-buckets
-#    + parity-anomalies 2).
+# Measured 2026-09-23: 314 passed in ~4 min
+#   (312 corpus/validation probes at corpus gitlink 442d497, plus the 2
+#    parity anomalies).
 ```
 
 If either check newly fails, fix it before doing anything else. Adding
@@ -301,6 +311,31 @@ you delete or weaken the special case, the test will tell you.
    in Pine v6; both lack `direction`. `TRADE_ACCESSOR_METHODS` is kept
    as the union for back-compat but new code should prefer the side-
    specific constant.
+9. **No implicit `double` -> integer narrowing, ever.** A `double`
+  expression reaching an `int` / `int64_t` slot must go through
+   `helpers.na_preserving_int_cast` (`is_na(_pf_v) ? na<int>() :
+   (int)_pf_v`), applied by `types._coerce_int_slot`. An *implicit*
+   narrowing of a NaN is undefined ([conv.fpint]) and the compilers
+   disagree: AppleClang arm64 and g++ aarch64 give 0 at every `-O`,
+   g++ x86-64 gives `INT_MIN` at `-O0`/`-O1` and 0 from `-O2`. The
+   engine's contract (`include/pineforge/na.hpp`) is that an integer
+   `na` IS `std::numeric_limits<T>::min()`, which is what `is_na(T)`
+   tests, so one bench slot booked 2412 trades built at `-O3` and 2411
+   (TradingView's count) at `-O1` from the same source. A plain
+   `(int)x` cast does NOT fix this — it only silences the warning; the
+   `is_na` test is what makes it defined. Where the value is needed is
+   decided by `types._emitted_value_is_double`, which is deliberately
+   NOT `_infer_type(node) == "double"`: `_infer_type` answers "what
+   does this slot hold" (Pine's `int` for `math.round(x)`, whose
+   emission is a `double` `std::round(x)`) and falls back to `double`
+   for shapes it cannot resolve (integer arithmetic, loop binders,
+   colour constants, `bar_index`). Both directions of that mismatch
+   are enumerated there; extend it, not `_infer_type`, when adding a
+   lowering. The check that keeps the class closed is the compiler:
+   `tests/test_na_int_narrowing.py` compiles a per-site battery with
+   `-Wfloat-conversion` and requires an empty diagnostic list.
+   Conversions to `bool` are out of scope — a boolean conversion is
+   `!= 0`, which is defined for NaN.
 
 ## How to add a new Pine v6 function
 
@@ -361,14 +396,19 @@ Expected counts at HEAD:
 
 | Mode                                                    | passed | skipped | failed |
 | ------------------------------------------------------- | ------ | ------- | ------ |
-| With sibling engine auto-detected (or env var set)      | 944    | 1       | **0**  |
-| Without engine (no sibling, no `PINEFORGE_ENGINE_INCLUDE`) | varies | 237+  | **0**  |
+| With engine headers + Eigen + a built runtime           | 2844   | 2       | **0**  |
+| Without a resolvable compile environment                | 1933   | 600     | **0**  |
 
-The 1 skip is `test_parser.py:335` (empty parameter set, pre-existing,
-unrelated). When no engine include is resolvable, the 237 compile-only
-tests (31 smoke + 206 corpus) skip cleanly. Auto-detection: `tests/_compile.py`
-walks up to 8 directory levels looking for a `pineforge-engine/include` sibling
-— no env var needed when the engine repo is checked out at `../pineforge-engine`.
+Measured 2026-09-23. The 2 skips are `test_parser.py:350` (empty parameter
+set, pre-existing, unrelated) and `test_codegen_golden.py:39` (wants the
+engine corpus at the sibling path). The two modes do not sum to the same
+total: `test_compile_corpus.py` parametrizes over the corpus it can actually
+see, so it collects fewer items without one. Auto-detection:
+`tests/_compile.py` walks up to 8 directory levels looking for a
+`pineforge-engine/include` sibling — no env var needed when the engine repo is
+checked out at `../pineforge-engine` — but Eigen and the built runtime have no
+sibling fallback beyond `build*/`, so check the skip count, not just the
+failure count, before believing a green run covered the C++ level.
 
 ## Conventions
 
