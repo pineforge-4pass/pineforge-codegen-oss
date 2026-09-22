@@ -20,6 +20,32 @@ from ..ast_nodes import (
 )
 
 
+# Integer C++ types an na-capable ``double`` expression may be narrowed into.
+# ``bool`` is deliberately absent: a boolean conversion is ``!= 0``, which is
+# defined for NaN, so it is a different (semantic, not undefined) problem.
+NA_PRESERVING_INT_TYPES = ("int", "int64_t")
+
+
+def na_preserving_int_cast(value_cpp: str, int_cpp_type: str = "int") -> str:
+    """Narrow a ``double`` expression to an integer type without losing ``na``.
+
+    An *implicit* ``double`` -> ``int`` conversion of a NaN is undefined
+    behaviour ([conv.fpint]), and compilers disagree in practice: AppleClang
+    arm64 and g++ aarch64 produce 0 at every ``-O``, g++ x86-64 produces
+    ``INT_MIN`` at ``-O0``/``-O1`` and 0 from ``-O2``. The engine's contract
+    (``include/pineforge/na.hpp``) is that an integer ``na`` *is*
+    ``std::numeric_limits<T>::min()``, which is what ``is_na(T)`` tests, so
+    every such narrowing must be spelled out.
+
+    The value is evaluated exactly once. ``na`` in, ``na<T>()`` out; anything
+    else truncates toward zero exactly as the implicit conversion did, so a
+    non-``na`` result is bit-for-bit what it was before.
+    """
+    return (f"[&](){{ double _pf_v = (double)({value_cpp}); "
+            f"return is_na(_pf_v) ? na<{int_cpp_type}>() : "
+            f"({int_cpp_type})_pf_v; }}()")
+
+
 # C++ reserved names that conflict with PineScript identifiers when used
 # verbatim as variable names. Carried forward from the historic codegen.py
 # table; intentionally narrower than the full C++ keyword set because Pine

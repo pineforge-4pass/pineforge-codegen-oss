@@ -554,6 +554,10 @@ class StmtVisitor:
                     init_cpp = self._typed_na_init(
                         init_cpp, member_name, info["ptype"]
                     )
+                    init_cpp = self._coerce_int_slot(
+                        init_cpp, node.value,
+                        self._int_slot_cpp_type(member_name),
+                    )
                 lines.append(f"{pad}if (!{flag_expr}) {{")
                 # A history-referenced persistent primitive is a Series<T> too,
                 # not just a drawing handle.  The per-bar carry has already
@@ -773,6 +777,10 @@ class StmtVisitor:
                     else None
                 ),
             )
+            cpp_val = self._coerce_int_slot(
+                cpp_val, node.value,
+                self._int_slot_cpp_type(None, self._series_type_for(node.name)),
+            )
             self._emit_history_series_write(lines, pad, safe, cpp_val)
             return
 
@@ -799,6 +807,10 @@ class StmtVisitor:
                 selection_cpp_type = self._drawing_target_cpp_type(
                     node.name,
                     cpp_type,
+                )
+            if selection_cpp_type is None:
+                selection_cpp_type = self._int_slot_cpp_type(
+                    node.name, cpp_type,
                 )
             if not is_global_member:
                 default = self._default_for_type(cpp_type)
@@ -859,6 +871,12 @@ class StmtVisitor:
             node.value,
             node.name,
             target_cpp_type=target_cpp_type,
+        )
+        # ``cpp_type`` is None for a hoisted global; the slot resolver then
+        # reads the member declaration instead.
+        cpp_val = self._coerce_int_slot(
+            cpp_val, node.value,
+            self._int_slot_cpp_type(node.name, cpp_type),
         )
         if is_global_member:
             lines.append(f"{pad}{safe} = {cpp_val};")
@@ -992,6 +1010,8 @@ class StmtVisitor:
                     target_name,
                     None,
                 )
+            if selection_cpp_type is None:
+                selection_cpp_type = self._int_slot_cpp_type(target_name)
             indent = len(pad) // 4
             self._visit_if_switch_expr(
                 node.value,
@@ -1031,13 +1051,21 @@ class StmtVisitor:
             val_cpp = self._visit_rhs_value(
                 node.value, target_cpp_type=target_cpp_type
             )
+            field_int = self._udt_field_int_cpp_type(node.target)
             if node.op == ":=":
+                val_cpp = self._coerce_int_slot(val_cpp, node.value, field_int)
                 lines.append(f"{pad}{target_cpp} = {val_cpp};")
             else:
                 rhs = self._compound_assign_rhs(target_cpp, node.op, val_cpp)
                 if rhs is not None:
+                    rhs = self._coerce_int_slot(
+                        rhs, node.value, field_int, value_is_double=True,
+                    )
                     lines.append(f"{pad}{target_cpp} = {rhs};")
                 else:
+                    val_cpp = self._coerce_int_slot(
+                        val_cpp, node.value, field_int,
+                    )
                     lines.append(f"{pad}{target_cpp} {node.op} {val_cpp};")
             return
 
@@ -1055,17 +1083,27 @@ class StmtVisitor:
                     None,
                 ),
             )
+            elem_int = self._int_slot_cpp_type(
+                None, self._series_type_for(target_name),
+            )
             if node.op == ":=":
+                val_cpp = self._coerce_int_slot(val_cpp, node.value, elem_int)
                 lines.append(f"{pad}{safe}.update({val_cpp});")
             else:
                 rhs = self._compound_assign_rhs(f"{safe}[0]", node.op, val_cpp)
                 if rhs is not None:
                     # x /= y → x.update((double)x[0] / (double)y); x %= y → fmod
+                    rhs = self._coerce_int_slot(
+                        rhs, node.value, elem_int, value_is_double=True,
+                    )
                     lines.append(f"{pad}{safe}.update({rhs});")
                 else:
                     # Compound assignment: x += y → x.update(x[0] + y)
                     op_char = node.op[0]  # e.g., "+" from "+="
-                    lines.append(f"{pad}{safe}.update({safe}[0] {op_char} {val_cpp});")
+                    combined = self._coerce_int_slot(
+                        f"{safe}[0] {op_char} {val_cpp}", node.value, elem_int,
+                    )
+                    lines.append(f"{pad}{safe}.update({combined});")
         elif target_name in self._var_names:
             # A bare-``na`` reassignment must adopt the target's declared scalar
             # type (``x := na`` -> ``na<int>()`` not ``na<double>()``); otherwise
@@ -1078,13 +1116,21 @@ class StmtVisitor:
             if tct is None and self._is_na_expr(node.value):
                 tct = self._na_reassign_cpp_type(target_name)
             val_cpp = self._visit_rhs_value(node.value, target_name, target_cpp_type=tct)
+            int_slot = self._int_slot_cpp_type(target_name)
             if node.op == ":=":
+                val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
                 lines.append(f"{pad}{safe} = {val_cpp};")
             else:
                 rhs = self._compound_assign_rhs(safe, node.op, val_cpp)
                 if rhs is not None:
+                    # ``/=`` and ``%=`` lower to an always-double form, so an
+                    # int target narrows whatever the operands were.
+                    rhs = self._coerce_int_slot(
+                        rhs, node.value, int_slot, value_is_double=True,
+                    )
                     lines.append(f"{pad}{safe} = {rhs};")
                 else:
+                    val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
                     lines.append(f"{pad}{safe} {node.op} {val_cpp};")
         else:
             tct = self._nullable_collection_target_cpp_type(name=target_name)
@@ -1093,13 +1139,21 @@ class StmtVisitor:
             if tct is None and self._is_na_expr(node.value):
                 tct = self._na_reassign_cpp_type(target_name)
             val_cpp = self._visit_rhs_value(node.value, target_name, target_cpp_type=tct)
+            int_slot = self._int_slot_cpp_type(target_name)
             if node.op == ":=":
+                val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
                 lines.append(f"{pad}{safe} = {val_cpp};")
             else:
                 rhs = self._compound_assign_rhs(safe, node.op, val_cpp)
                 if rhs is not None:
+                    # ``/=`` and ``%=`` lower to an always-double form, so an
+                    # int target narrows whatever the operands were.
+                    rhs = self._coerce_int_slot(
+                        rhs, node.value, int_slot, value_is_double=True,
+                    )
                     lines.append(f"{pad}{safe} = {rhs};")
                 else:
+                    val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
                     lines.append(f"{pad}{safe} {node.op} {val_cpp};")
 
     def _visit_tuple_assign(self, node: TupleAssign, lines: list[str], pad: str) -> None:
@@ -1527,22 +1581,50 @@ class StmtVisitor:
             )
         )
         end_eval = f"_for_end_eval_{fid}" if end_mentions_binder else None
+        # ``from``/``to``/``by`` land in ``int`` slots. A double-valued bound
+        # (an array size, an na-able expression, ...) narrows there, which is
+        # undefined for na — so spell the conversion out. A bound that IS na
+        # then reads as na<int>() (INT_MIN), and the loop must run zero times
+        # rather than descend two billion steps toward it, so the guarded form
+        # also tests the bounds. Loops whose bounds were already integral emit
+        # exactly as before.
+        start_cpp = self._coerce_int_slot(f"({start})", node.start, "int")
+        end_cpp = self._coerce_int_slot(f"({end})", node.end, "int")
+        step_cpp = self._coerce_int_slot(f"({step})", node.step, "int")
+        na_capable = (
+            start_cpp != f"({start})"
+            or end_cpp != f"({end})"
+            or step_cpp != f"({step})"
+        )
         if end_eval is not None:
             # The ``to`` expression is authored outside the loop-binder scope,
             # but its refresh executes inside the generated C++ ``for`` where
             # the binder would shadow a same-named outer member/parameter. A
             # pre-binder lambda preserves the authored lexical binding while
             # still reevaluating the expression after every iteration.
-            lines.append(f"{pad}auto {end_eval} = [&]() {{ return ({end}); }};")
-        lines.append(f"{pad}int {s_var} = ({start});")
-        end_expr = f"{end_eval}()" if end_eval is not None else f"({end})"
+            lines.append(f"{pad}auto {end_eval} = [&]() {{ return {end_cpp}; }};")
+        lines.append(f"{pad}int {s_var} = {start_cpp};")
+        end_expr = f"{end_eval}()" if end_eval is not None else end_cpp
         lines.append(f"{pad}int {e_var} = {end_expr};")
-        lines.append(f"{pad}int {step_var} = ({step});")
-        lines.append(f"{pad}if ({step_var} < 0) {step_var} = -{step_var};")
+        lines.append(f"{pad}int {step_var} = {step_cpp};")
+        if na_capable:
+            # ``-na<int>()`` would overflow; leave an na step alone and let the
+            # loop condition reject it.
+            lines.append(
+                f"{pad}if (!is_na({step_var}) && {step_var} < 0)"
+                f" {step_var} = -{step_var};"
+            )
+        else:
+            lines.append(f"{pad}if ({step_var} < 0) {step_var} = -{step_var};")
         lines.append(f"{pad}if ({step_var} == 0) {step_var} = 1;")
         lines.append(f"{pad}const bool {down_var} = ({s_var} > {e_var});")
+        na_guard = (
+            f"!is_na({s_var}) && !is_na({e_var}) && !is_na({step_var}) && "
+            if na_capable else ""
+        )
         lines.append(
             f"{pad}for (int {var} = {s_var}; "
+            f"{na_guard}"
             f"({down_var} ? ({var} >= {e_var}) : ({var} <= {e_var})); "
             f"{var} += ({down_var} ? -{step_var} : {step_var}), "
             f"{e_var} = {end_expr}) {{"
@@ -1786,9 +1868,13 @@ class StmtVisitor:
                     if self._call_is_void(stmt.expr):
                         self._visit_stmt(stmt, lines, indent)
                         return
-                    cpp = self._visit_rhs_value(
+                    cpp = self._coerce_int_slot(
+                        self._visit_rhs_value(
+                            stmt.expr,
+                            target_cpp_type=target_cpp_type,
+                        ),
                         stmt.expr,
-                        target_cpp_type=target_cpp_type,
+                        self._int_slot_cpp_type(None, target_cpp_type),
                     )
                     pad = "    " * indent
                     lines.append(f"{pad}{target} = {cpp};")

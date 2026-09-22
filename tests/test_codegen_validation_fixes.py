@@ -671,7 +671,14 @@ def test_counted_loop_dynamic_end_uses_outer_same_named_series():
         "    total += i\n"
         "plot(prior + total)"
     )
-    assert "auto _for_end_eval_0 = [&]() { return (i[0]); };" in cpp
+    # The ``to`` expression reads the OUTER series ``i[0]``, not the loop
+    # binder. It is a double, so the int loop bound also carries the
+    # na-preserving narrowing (see test_na_int_narrowing.py); what this test
+    # pins is which ``i`` the lambda reads.
+    assert (
+        "auto _for_end_eval_0 = [&]() { return [&](){ double _pf_v = "
+        "(double)((i[0])); return is_na(_pf_v) ? na<int>() : (int)_pf_v; }(); };"
+    ) in cpp
     assert "int _for_end_0 = _for_end_eval_0();" in cpp
     assert "_for_end_0 = _for_end_eval_0()" in cpp
     assert "_for_end_0 = (i)" not in cpp

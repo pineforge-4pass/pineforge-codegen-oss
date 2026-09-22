@@ -134,6 +134,52 @@ var int acc = 0
 acc += math.round(ta.sma(close, 20))
 plot(acc)
 """,
+    "for_bounds_from_array_size": """//@version=6
+strategy("s", overlay=true)
+var a = array.new<float>(0)
+a.push(close)
+total = 0.0
+for i = 0 to a.size() - 1
+    total += a.get(i)
+plot(total)
+""",
+    "runtime_var_init": """//@version=6
+strategy("s", overlay=true)
+var int anchor = bar_index - ta.highestbars(high, 20)
+plot(anchor)
+""",
+    "color_parameter": """//@version=6
+strategy("s", overlay=true)
+paint(color c) => na(c) ? 0 : 1
+plot(paint(na))
+""",
+    "trade_accessor_index": """//@version=6
+strategy("s", overlay=true)
+idx = math.round(ta.sma(close, 20))
+p = strategy.closedtrades > 0 ? strategy.closedtrades.profit(idx) : 0.0
+plot(p)
+""",
+    "udt_int_field": """//@version=6
+strategy("s", overlay=true)
+type Zone
+    int strength
+var z = Zone.new(0)
+z.strength := math.round(ta.sma(close, 20))
+plot(z.strength)
+""",
+    "int_series_history": """//@version=6
+strategy("s", overlay=true)
+var int state = 0
+state := math.round(ta.sma(close, 20))
+prev = state[1]
+plot(prev)
+""",
+    "timestamp_calendar_fields": """//@version=6
+strategy("s", overlay=true)
+h = math.round(ta.sma(close, 20))
+ts = timestamp(2024, 1, 1, h, 0, 0)
+plot(ts > 0 ? 1 : 0)
+""",
 }
 
 
