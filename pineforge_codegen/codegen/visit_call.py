@@ -150,6 +150,7 @@ from ..method_binding import (
 )
 from .. import signatures as sigs
 from .drawing import ALL_DRAWING_METHODS
+from .helpers import na_preserving_int_cast
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_METHODS,
@@ -1886,13 +1887,18 @@ class CallVisitor:
                              "month, day[, hour, minute, second]).",
                     )
                 args = [self._visit_expr(a) for a in node.args]
+                # Every calendar field lands in an ``int`` inside the lambda.
+                fields = [
+                    self._coerce_int_slot(a, node.args[i], "int")
+                    for i, a in enumerate(args)
+                ]
                 tz = args[0]
-                yr = args[1] if len(args) > 1 else "1970"
-                mo = args[2] if len(args) > 2 else "1"
-                dy = args[3] if len(args) > 3 else "1"
-                hr = args[4] if len(args) > 4 else "0"
-                mn = args[5] if len(args) > 5 else "0"
-                sc = args[6] if len(args) > 6 else "0"
+                yr = fields[1] if len(fields) > 1 else "1970"
+                mo = fields[2] if len(fields) > 2 else "1"
+                dy = fields[3] if len(fields) > 3 else "1"
+                hr = fields[4] if len(fields) > 4 else "0"
+                mn = fields[5] if len(fields) > 5 else "0"
+                sc = fields[6] if len(fields) > 6 else "0"
                 return _timestamp_calendar_lambda(tz, yr, mo, dy, hr, mn, sc)
             else:
                 # Numeric form requires year, month, and day (hour/minute/
@@ -1911,7 +1917,10 @@ class CallVisitor:
                              "[, hour, minute, second]); the dateString "
                              "overload is not supported in PineForge.",
                     )
-                args = [self._visit_expr(a) for a in merged]
+                args = [
+                    self._coerce_int_slot(self._visit_expr(a), a, "int")
+                    for a in merged
+                ]
                 yr = args[0]
                 mo = args[1] if len(args) > 1 else "1"
                 dy = args[2] if len(args) > 2 else "1"
@@ -1943,8 +1952,7 @@ class CallVisitor:
             # Pine int(na) → na (int form). Evaluate once, propagate na via
             # the engine's int sentinel instead of collapsing NaN to 0.
             x = self._visit_expr(node.args[0])
-            return (f"[&](){{ double _pf_v = (double)({x}); "
-                    f"return is_na(_pf_v) ? na<int>() : (int)_pf_v; }}()")
+            return na_preserving_int_cast(x)
         if func_name == "float" and namespace is None and node.args:
             return f"(double)({self._visit_expr(node.args[0])})"
         if func_name == "bool" and namespace is None and node.args:
@@ -2334,6 +2342,12 @@ class CallVisitor:
         # arg that is exactly such a drawing-style constant read.
         if namespace is None and func_name in self._func_names:
             self._coerce_drawing_style_string_args(func_name, node.args, all_args)
+            # A double-valued argument bound to an integer parameter narrows at
+            # the call boundary, which is undefined for na.
+            self._coerce_int_param_args(
+                func_name, ordered_arg_nodes, all_args,
+                self.ctx.func_call_cs_map.get(id(node), (None, None))[1],
+            )
         # Default args (parser does not store defaults): isInSession(sess, res = timeframe.period)
         if namespace is None and func_name in self._func_names:
             fi = self._func_info_map.get(func_name)
@@ -2379,6 +2393,24 @@ class CallVisitor:
                 source_order_nodes=[*node.args, *node.kwargs.values()],
             )
         return f"{call_head}({', '.join(all_args)})"
+
+    def _coerce_int_param_args(self, func_name, arg_nodes, all_args,
+                               call_site_idx) -> None:
+        """In-place narrow every argument bound to an integer parameter.
+
+        Pine ``color`` parameters are integers in the emitted signature too, so
+        a ``na`` colour argument (``na<double>()``) is a NaN crossing into an
+        ``int`` — undefined, and it defeats ``is_na`` on the other side."""
+        fi = self._func_info_map.get(func_name)
+        if not fi or not getattr(fi, "node", None) or not fi.node.params:
+            return
+        for i, arg in enumerate(arg_nodes):
+            if i >= len(all_args):
+                break
+            int_cpp = self._func_param_int_cpp_type(fi, i, call_site_idx)
+            if int_cpp is None:
+                continue
+            all_args[i] = self._coerce_int_slot(all_args[i], arg, int_cpp)
 
     def _coerce_drawing_style_string_args(self, func_name, arg_nodes, all_args) -> None:
         """In-place coerce positional args bound to a ``std::string`` user-function
@@ -2585,7 +2617,14 @@ class CallVisitor:
         if isinstance(node.callee, MemberAccess):
             inner = node.callee.object
             if isinstance(inner, MemberAccess) and inner.member in ("closedtrades", "opentrades"):
-                idx = self._visit_expr(node.args[0]) if node.args else "0"
+                # The engine's accessors take an ``int`` trade index; a
+                # double-valued Pine expression narrows into it.
+                idx = (
+                    self._coerce_int_slot(
+                        self._visit_expr(node.args[0]), node.args[0], "int",
+                    )
+                    if node.args else "0"
+                )
                 is_open = inner.member == "opentrades"
                 # Open trades have no exit metadata in Pine
                 if is_open and func_name in (
@@ -2639,7 +2678,10 @@ class CallVisitor:
         args = [self._visit_expr(a) for a in node.args]
         if func_name == "new":
             if len(args) >= 2:
-                return f'pine_color::new_color({args[0]}, (int)({args[1]}))'
+                base = self._coerce_int_slot(
+                    args[0], node.args[0] if node.args else None, "int64_t",
+                )
+                return f'pine_color::new_color({base}, (int)({args[1]}))'
             return "0"
         if func_name in ("r", "g", "b", "t"):
             if args:

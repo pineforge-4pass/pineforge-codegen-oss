@@ -33,12 +33,16 @@ tables it needs come from ``codegen/tables.py``.
 
 from __future__ import annotations
 
+import re
+
 from ..ast_nodes import (
-    ASTNode, Assignment, BinOp, BoolLiteral, ExprStmt, FuncCall, FuncDef, Identifier, IfStmt,
+    ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, FuncDef,
+    Identifier, IfStmt,
     MemberAccess, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
     Subscript, Ternary, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
+from .helpers import NA_PRESERVING_INT_TYPES, na_preserving_int_cast
 from .. import signatures as sigs
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
@@ -68,6 +72,14 @@ COLLECTION_MUTATING_METHODS = frozenset({
     # matrix
     "add_row", "add_col", "remove_row", "remove_col", "reshape",
     "swap_rows", "swap_columns",
+})
+
+
+# Binary operators whose emitted C++ result is a ``bool``, never a number.
+# Pine's ``and``/``or`` lower to ``&&``/``||`` and the relational operators go
+# through the na-aware comparison lambda, which returns ``bool``.
+_BOOL_RESULT_BINOPS = frozenset({
+    "==", "!=", "<", ">", "<=", ">=", "and", "or", "&&", "||",
 })
 
 
@@ -1751,6 +1763,293 @@ class TypeInferer:
         if self._expr_is_int64_builtin(expr):
             return True
         return name in self._int64_reassign_targets()
+
+    # ------------------------------------------------------------------
+    # na-preserving double -> int narrowing
+    # ------------------------------------------------------------------
+
+    # Pine functions whose declared return type is ``int`` but whose C++
+    # lowering is a ``double``-valued expression, so the Pine-facing type is
+    # not enough to decide whether a narrowing happens.
+    _DOUBLE_EMITTING_INT_CALLS = {
+        ("math", "round"), ("math", "floor"), ("math", "ceil"),
+    }
+
+    # Built-ins whose lowering is an integer-valued engine expression, in
+    # either the bare-variable or the call form: ``pine_bar_index()`` and the
+    # ``pine_<field>()`` calendar helpers return ``int``, the epoch-ms readings
+    # return ``int64_t``. ``_infer_type`` reports ``double`` for all of them
+    # (they are ``BAR_BUILTINS``), which would wrap an already-integral value.
+    _INTEGRAL_BUILTINS = frozenset({
+        "bar_index", "last_bar_index",
+        "year", "month", "dayofmonth", "dayofweek",
+        "hour", "minute", "second", "weekofyear",
+        "time", "timenow", "time_close", "last_bar_time", "time_tradingday",
+    })
+
+    # ``strategy.closedtrades`` / ``strategy.opentrades`` read the trade-book
+    # sizes, emitted as ``((int)trades_.size())``.
+    _INTEGRAL_STRATEGY_MEMBERS = frozenset({"closedtrades", "opentrades"})
+
+    # Emitted text that is already an integer value: an integer literal, an
+    # integer ``na`` sentinel, or a value that has been through the
+    # na-preserving cast. Recognising these keeps the coercion idempotent and
+    # keeps int-valued constants (``display.*``, ``color.*``, enum members,
+    # …) out of it, whatever the Pine-facing inference says about them.
+    _INTEGRAL_CPP_TEXT = re.compile(
+        r"^\s*(?:\(\s*)*[-+]?(?:0[xX][0-9a-fA-F]+|\d+)(?:LL|ULL|L|U)?"
+        r"(?:\s*\))*\s*$"
+        r"|^na<int(?:64_t)?>\(\)$"
+        r"|^\[&\]\(\)\{ double _pf_v = "
+    )
+
+    def _emitted_value_is_double(self, node) -> bool:
+        """True when the C++ expression emitted for ``node`` has type ``double``.
+
+        This is deliberately *not* ``_infer_type(node) == "double"``.
+        ``_infer_type`` answers "what type does this slot hold", which for
+        ``math.round(x)`` is Pine's ``int`` even though the emission is
+        ``std::round(x)``, a ``double`` — and which falls back to ``double``
+        for any shape it cannot resolve, including integer arithmetic. Only
+        this function's answer decides whether a value reaching an integer
+        slot needs the na-preserving cast.
+        """
+        if node is None:
+            return False
+        if isinstance(node, NumberLiteral):
+            return isinstance(node.value, float)
+        if isinstance(node, (BoolLiteral, StringLiteral, ColorLiteral)):
+            # A color literal lowers to a packed-ARGB ``int64_t`` literal.
+            return False
+        if isinstance(node, Subscript) and isinstance(node.object, Identifier):
+            # A history read keeps the series' element type.
+            base = node.object.name
+            if base in self._INTEGRAL_BUILTINS:
+                return False
+            if base in self.ctx.series_vars or base in self.ctx.series_bar_fields:
+                return self._series_type_for(base) == "double"
+        if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
+            # ``color.red`` and friends lower to packed-ARGB integer constants;
+            # the trade-book counters lower to a sized integer.
+            if node.object.name in ("color", "session"):
+                # color.* lowers to a packed-ARGB integer constant; session.*
+                # lowers to a ``pine_session_*`` predicate (bool).
+                return False
+            if (node.object.name == "strategy"
+                    and node.member in self._INTEGRAL_STRATEGY_MEMBERS):
+                return False
+        if isinstance(node, NaLiteral):
+            return True
+        if isinstance(node, UnaryOp):
+            if node.op in ("not", "!"):
+                return False
+            return self._emitted_value_is_double(node.operand)
+        if isinstance(node, BinOp):
+            if node.op in _BOOL_RESULT_BINOPS:
+                return False
+            if node.op in ("/", "%"):
+                # Both lower through an explicit double form
+                # (``(double)a / (double)b`` / ``std::fmod``).
+                return True
+            return (self._emitted_value_is_double(node.left)
+                    or self._emitted_value_is_double(node.right))
+        if isinstance(node, Ternary):
+            # C++ gives a mixed int/double conditional the common type
+            # ``double``, so one double arm narrows the whole expression.
+            return (self._emitted_value_is_double(node.true_val)
+                    or self._emitted_value_is_double(node.false_val))
+        if isinstance(node, Identifier):
+            name = node.name
+            if name in getattr(self, "_current_loop_vars", set()):
+                # A counted-loop binder is emitted as ``for (int i = ...)``,
+                # whatever ``_infer_type`` reports for the Pine binding.
+                return False
+            if (name in self._INTEGRAL_BUILTINS
+                    and name not in self._current_func_param_types
+                    and name not in self._known_vars):
+                return False
+            # Builtins, constants and parameters are resolved precisely by
+            # ``_infer_type``; a user variable's *storage* is what the read
+            # emits, and that can be a double where the Pine type is an int
+            # (a hoisted global is declared from its initializer).
+            if not (name in BAR_FIELDS or name in BAR_BUILTINS
+                    or name in self._known_vars
+                    or name in getattr(
+                        self, "_current_func_series_param_types", {})
+                    or name in self._current_func_param_types):
+                declared = self._slot_scalar_cpp_type(name)
+                if declared is not None:
+                    return declared == "double"
+        if isinstance(node, FuncCall):
+            func_name, namespace = self._resolve_callee(node.callee)
+            if (namespace, func_name) in self._DOUBLE_EMITTING_INT_CALLS:
+                # The 2-arg precision overload is a float in Pine as well and
+                # falls through to the generic check.
+                return len(node.args) + len(node.kwargs or {}) == 1
+            if namespace is None and func_name in ("int", "bool"):
+                # Already spelled as an explicit, na-preserving cast.
+                return False
+            if namespace is None and func_name == "nz" and node.args:
+                # ``nz(x)`` / ``nz(x, y)`` keep the replaced value's type.
+                return self._emitted_value_is_double(node.args[0])
+            if namespace == "timeframe" and func_name == "in_seconds":
+                return False
+            if namespace == "session":
+                return False
+            if namespace is None and func_name in self._INTEGRAL_BUILTINS:
+                # ``year(t)`` / ``hour(t, tz)`` lower to the same integer
+                # ``pine_<field>()`` helpers as their bare-variable forms.
+                return False
+            if namespace == "color":
+                # Every color.* lowering is an integer (packed ARGB, or a
+                # channel read).
+                return False
+            if namespace == "ta":
+                # Every ta.* call site lowers to a ta:: class
+                # ``compute()``/``recompute()``, which returns a double even
+                # where Pine's type is an int (``ta.highestbars``,
+                # ``ta.barssince``, ...).
+                return func_name not in TA_RETURNS_BOOL
+        return self._infer_type(node) == "double"
+
+    def _slot_scalar_cpp_type(self, name: str) -> str | None:
+        """The C++ type of the storage a write to the scalar ``name`` lands in.
+
+        Reads the declaration sites in the order the emitter itself uses:
+        ``var`` member, function-local, parameter, then hoisted global member.
+        Unlike ``_na_reassign_cpp_type`` the global case mirrors
+        ``base.generate``'s member layout (``_infer_type`` of the initializer)
+        rather than the analyzer's ``PineType``: the two disagree for
+        e.g. ``x = math.round(...)``, and the declaration is the real storage.
+        """
+        for vname, ptype, _init in self.ctx.var_members:
+            if vname == name:
+                return PINE_TYPE_TO_CPP.get(ptype, "double")
+        local = getattr(self, "_current_func_local_types", {}).get(name)
+        if local is not None:
+            return local
+        param = getattr(self, "_current_func_param_types", {}).get(name)
+        if param is not None:
+            return param
+        for gname, gptype in self.ctx.global_var_decls:
+            if gname != name:
+                continue
+            if (name in getattr(self, "_direct_program_tuple_binding_names", ())
+                    and gptype == PineType.BOOL):
+                return "bool"
+            expr = getattr(self.ctx, "global_expr_map", {}).get(name)
+            if expr is not None:
+                return self._infer_type(expr)
+            return PINE_TYPE_TO_CPP.get(gptype, "double")
+        return None
+
+    def _int_slot_cpp_type(self, name: str | None,
+                           declared: str | None = None) -> str | None:
+        """``"int"``/``"int64_t"`` when a write to this slot narrows, else ``None``.
+
+        ``declared`` short-circuits the lookup for an emitter that already
+        knows the storage type it is about to spell (a local declaration).
+        """
+        if declared is not None:
+            resolved = declared
+        elif name is None:
+            return None
+        else:
+            resolved = self._slot_scalar_cpp_type(name)
+            if (resolved == "int" and name is not None
+                    and self._is_int64_builtin_init(name)):
+                resolved = "int64_t"
+        return resolved if resolved in NA_PRESERVING_INT_TYPES else None
+
+    def _func_param_int_cpp_type(self, fi, index: int,
+                                 call_site_idx: int | None) -> str | None:
+        """``"int"``/``"int64_t"`` when parameter ``index`` of ``fi`` is an integer.
+
+        Mirrors the parameter-type branches of ``emit_top._emit_func_def`` in
+        the same order, keeping only the outcomes that are integers: a value
+        crossing into one of those parameters narrows, and Pine's ``color`` is
+        one of them (the engine packs a color as an integer). History
+        parameters become ``const Series<T>&`` and are not a narrowing slot.
+        """
+        node = getattr(fi, "node", None)
+        if node is None or index >= len(node.params or ()):
+            return None
+        param = node.params[index]
+        if getattr(fi, "is_udt_method", False) and index == 0:
+            return None
+        if fi.name == "isInSession" and index < 2:
+            return None
+        if param in self.ctx.func_series_vars.get(fi.name, set()):
+            return None
+        declared = list(
+            getattr(self.ctx, "func_declared_param_type_specs", {}).get(
+                fi.name, ()
+            )
+        )
+        variant = (
+            getattr(self.ctx, "func_callsite_param_types", {}).get(
+                (fi.name, call_site_idx), ()
+            )
+            if call_site_idx is not None
+            else ()
+        )
+        if (index >= len(declared) or declared[index] is None) and index < len(variant):
+            return {
+                PineType.INT: "int64_t",
+                PineType.COLOR: "int",
+            }.get(variant[index])
+        specs = getattr(fi, "param_type_specs", []) or []
+        if index < len(specs) and specs[index] is not None:
+            cpp_t = self._type_spec_to_cpp(specs[index])
+            return cpp_t if cpp_t in NA_PRESERVING_INT_TYPES else None
+        if index < len(fi.param_types):
+            cpp_t = PINE_TYPE_TO_CPP.get(fi.param_types[index], "double")
+            return cpp_t if cpp_t in NA_PRESERVING_INT_TYPES else None
+        return None
+
+    def _udt_field_int_cpp_type(self, target_node) -> str | None:
+        """Integer C++ type of a UDT field write target, else ``None``.
+
+        Mirrors the record layout in ``base.generate``, which widens a Pine
+        ``int`` field to ``int64_t`` so epoch values and the na sentinel fit.
+        """
+        if not isinstance(target_node, MemberAccess):
+            return None
+        owner = self._type_spec_from_expr(target_node.object)
+        if owner is None or owner.kind != "udt" or not owner.name:
+            return None
+        spec = (self._udt_field_type_specs.get(owner.name) or {}).get(
+            target_node.member
+        )
+        if spec is None:
+            return None
+        cpp_type = self._type_spec_to_cpp(spec)
+        if cpp_type == "int":
+            cpp_type = "int64_t"
+        return cpp_type if cpp_type in NA_PRESERVING_INT_TYPES else None
+
+    def _coerce_int_slot(self, cpp_val: str, node, target_cpp_type: str | None,
+                         *, value_is_double: bool | None = None) -> str:
+        """Route a value into an ``int``/``int64_t`` slot without losing ``na``.
+
+        Returns ``cpp_val`` untouched unless the slot is an integer type AND
+        the emitted value is a ``double`` — i.e. exactly at the implicit
+        narrowings that are undefined for NaN. ``value_is_double`` overrides
+        the node-based judgement for emitters that build their own expression
+        text (loop bounds, compound-assignment right-hand sides).
+        """
+        if target_cpp_type not in NA_PRESERVING_INT_TYPES:
+            return cpp_val
+        if cpp_val == "na<double>()":
+            # A bare na needs no round trip through the NaN.
+            return f"na<{target_cpp_type}>()"
+        if self._INTEGRAL_CPP_TEXT.match(cpp_val):
+            return cpp_val
+        if value_is_double is None:
+            value_is_double = self._emitted_value_is_double(node)
+        if not value_is_double:
+            return cpp_val
+        return na_preserving_int_cast(cpp_val, target_cpp_type)
 
     def _na_reassign_cpp_type(self, name: str) -> str | None:
         """Declared scalar C++ type of a ``:=`` reassignment target ``name``, so a

@@ -1831,10 +1831,14 @@ class TopLevelEmitter:
                 # through to the default return.
                 self._visit_stmt(node.body[0], lines, indent=2)
             elif expr:
-                lines.append(
-                    "        return "
-                    f"{self._visit_rhs_value(expr, target_cpp_type=rhs_return_cpp_type)};"
+                ret_cpp = self._coerce_int_slot(
+                    self._visit_rhs_value(
+                        expr, target_cpp_type=rhs_return_cpp_type
+                    ),
+                    expr,
+                    self._int_slot_cpp_type(None, ret_type),
                 )
+                lines.append(f"        return {ret_cpp};")
                 emitted_return = True
         else:
             for i, s in enumerate(node.body):
@@ -1848,10 +1852,14 @@ class TopLevelEmitter:
                     if self._call_is_void(s.expr) or self._is_skip_expr(s.expr):
                         self._visit_stmt(s, lines, indent=2)
                     else:
-                        lines.append(
-                            "        return "
-                            f"{self._visit_rhs_value(s.expr, target_cpp_type=rhs_return_cpp_type)};"
+                        ret_cpp = self._coerce_int_slot(
+                            self._visit_rhs_value(
+                                s.expr, target_cpp_type=rhs_return_cpp_type
+                            ),
+                            s.expr,
+                            self._int_slot_cpp_type(None, ret_type),
                         )
+                        lines.append(f"        return {ret_cpp};")
                         emitted_return = True
                 elif i == len(node.body) - 1 and isinstance(s, (SwitchStmt, IfStmt)):
                     # Switch/if as last statement = return expression in PineScript
@@ -1870,7 +1878,11 @@ class TopLevelEmitter:
                         "_func_ret",
                         lines,
                         indent=2,
-                        target_cpp_type=rhs_return_cpp_type,
+                        target_cpp_type=(
+                            rhs_return_cpp_type
+                            if rhs_return_cpp_type is not None
+                            else self._int_slot_cpp_type(None, ret_type)
+                        ),
                     )
                     lines.append(f"        return _func_ret;")
                     emitted_return = True
