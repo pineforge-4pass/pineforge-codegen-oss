@@ -154,10 +154,31 @@ def _resolve_generated_include(engine_inc: Path | None) -> Path | None:
     return None
 
 
+def _resolve_engine_lib() -> Path | None:
+    """Resolve a built ``libpineforge.a`` for the run-the-emitted-TU tests.
+
+    Syntax checking only needs headers; *running* an emitted translation unit
+    needs the compiled runtime. ``PINEFORGE_ENGINE_LIB`` names the archive
+    directly; otherwise any ``build*/lib/libpineforge.a`` beside the resolved
+    engine include is accepted. Returns ``None`` when nothing is built, so the
+    behavioural tests skip instead of failing on a header-only checkout.
+    """
+    raw = os.environ.get("PINEFORGE_ENGINE_LIB", "")
+    if raw:
+        p = Path(raw).expanduser()
+        return p.resolve() if p.is_file() else None
+    if _ENGINE_INC is None:
+        return None
+    for cand in sorted(_ENGINE_INC.parent.glob("build*/lib/libpineforge.a")):
+        return cand.resolve()
+    return None
+
+
 _ENGINE_INC = _resolve_engine_include()
 _EIGEN_INC = _resolve_eigen_include()
 _COMPILER = _resolve_compiler()
 _GENERATED_INC = _resolve_generated_include(_ENGINE_INC)
+_ENGINE_LIB = _resolve_engine_lib()
 
 
 def have_compile_env() -> bool:
@@ -242,3 +263,122 @@ def compile_cpp(cpp_source: str, *, label: str = "snippet") -> None:
             os.unlink(cpp_path)
         except OSError:
             pass
+
+
+def _include_flags(*, isolate_headers: bool) -> list[str]:
+    """``-I`` / ``-isystem`` flags for the engine, Eigen and version.h trees.
+
+    ``isolate_headers`` switches to ``-isystem`` so warnings raised *inside*
+    the engine headers stay out of the picture and a warning-based check only
+    judges the emitted translation unit's own code.
+    """
+    assert _ENGINE_INC is not None and _EIGEN_INC is not None
+    inc = "-isystem" if isolate_headers else "-I"
+    flags = [inc, str(_ENGINE_INC), inc, str(_EIGEN_INC)]
+    if _GENERATED_INC is not None:
+        flags += [inc, str(_GENERATED_INC)]
+    return flags
+
+
+def narrowing_diagnostics(cpp_source: str, *, label: str = "snippet") -> list[str]:
+    """Every implicit floating-point -> integer conversion the emitted TU contains.
+
+    The compiler, not a regex, is the oracle for the na->int narrowing class:
+    ``-Wfloat-conversion`` fires on exactly the implicit ``double`` -> integer
+    conversions that are undefined for NaN ([conv.fpint]) and that the engine's
+    ``na<T>()`` contract says must read as the integer sentinel. Explicit casts
+    — including codegen's own ``is_na(_pf_v) ? na<int>() : (int)_pf_v`` lowering
+    — are silent, so a clean list means every narrowing went through it.
+
+    Conversions to ``bool`` are excluded: a boolean conversion is
+    ``!= 0`` (defined for NaN), a different class from the [conv.fpint] UB.
+
+    Returns the raw diagnostic lines (empty == clean).
+    """
+    skip_if_no_compile_env()
+    assert _COMPILER is not None
+    with tempfile.NamedTemporaryFile(suffix=".cpp", delete=False, mode="w") as f:
+        f.write(cpp_source)
+        cpp_path = f.name
+    try:
+        cmd = [
+            _COMPILER, "-std=c++17", "-fsyntax-only", "-Wfloat-conversion",
+            *_include_flags(isolate_headers=True),
+            cpp_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        out = (result.stderr or "") + (result.stdout or "")
+        if result.returncode != 0:
+            raise AssertionError(
+                f"narrowing scan could not compile {label} (exit={result.returncode}):\n"
+                + "\n".join(out.splitlines()[:40])
+            )
+        hits = [
+            ln.replace(cpp_path, label)
+            for ln in out.splitlines()
+            if "-Wfloat-conversion" in ln and "to 'bool'" not in ln
+        ]
+        return hits
+    finally:
+        try:
+            os.unlink(cpp_path)
+        except OSError:
+            pass
+
+
+def have_engine_lib() -> bool:
+    """True when a built ``libpineforge.a`` is available to link against."""
+    return _ENGINE_LIB is not None
+
+
+def skip_if_no_engine_lib() -> None:
+    skip_if_no_compile_env()
+    if _ENGINE_LIB is None:
+        pytest.skip(
+            "No built libpineforge.a. Set PINEFORGE_ENGINE_LIB to the archive "
+            "(or configure a build*/lib/ beside the engine checkout) to run the "
+            "emitted translation unit."
+        )
+
+
+def run_emitted_tu(cpp_source: str, driver_main: str, *, opt: str,
+                   label: str = "snippet") -> str:
+    """Compile the emitted TU together with ``driver_main`` at ``opt`` and run it.
+
+    The generated source is included verbatim — this exercises the translation
+    unit codegen actually ships, not a hand-extracted fragment — and the
+    binary is linked against the real engine runtime. ``opt`` is a single
+    optimisation flag (``-O0`` … ``-O3``): the na->int narrowing class resolves
+    differently per optimisation level, so a behavioural check is only
+    meaningful when it pins more than one.
+
+    Returns the program's stdout.
+    """
+    skip_if_no_engine_lib()
+    assert _COMPILER is not None and _ENGINE_LIB is not None
+    tmpdir = tempfile.mkdtemp(prefix="pineforge_tu_")
+    try:
+        gen = Path(tmpdir) / "generated.cpp"
+        gen.write_text(cpp_source)
+        drv = Path(tmpdir) / "driver.cpp"
+        drv.write_text('#include "generated.cpp"\n' + driver_main)
+        exe = Path(tmpdir) / "driver"
+        cmd = [
+            _COMPILER, "-std=c++17", opt,
+            *_include_flags(isolate_headers=True),
+            "-I", tmpdir, str(drv), str(_ENGINE_LIB), "-o", str(exe),
+        ]
+        build = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if build.returncode != 0:
+            raise AssertionError(
+                f"could not build {label} at {opt} (exit={build.returncode}):\n"
+                + "\n".join((build.stderr or build.stdout).splitlines()[:40])
+            )
+        run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=120)
+        if run.returncode != 0:
+            raise AssertionError(
+                f"{label} at {opt} exited {run.returncode}:\n{run.stdout}\n{run.stderr}"
+            )
+        return run.stdout
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
