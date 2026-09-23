@@ -417,12 +417,12 @@ class Lexer:
             self._read_leading_dot_number(start_line, start_col)
             return
 
-        # Strings
-        if ch == '"':
-            self._read_string(start_line, start_col)
-            return
-        if ch == "'":
-            self._read_string_single(start_line, start_col)
+        # Strings: three quotes of one kind open a multiline string.
+        if ch in "\"'":
+            if self.source.startswith(ch * 3, self.pos):
+                self._read_multiline(ch, start_line, start_col)
+            else:
+                self._read_quoted(ch, start_line, start_col)
             return
 
         # Color literals (#rrggbb or #rrggbbaa)
@@ -571,26 +571,81 @@ class Lexer:
     # change" -- the backslash is dropped and the character kept.
     _STRING_ESCAPES = {"n": "\n", "t": "\t"}
 
-    def _read_string(self, start_line: int, start_col: int) -> None:
-        self._read_quoted('"', start_line, start_col)
+    def _read_escape(self, buf: list[str]) -> None:
+        self._advance()  # skip backslash
+        ch = self._advance()
+        buf.append(self._STRING_ESCAPES.get(ch, ch))
 
-    def _read_string_single(self, start_line: int, start_col: int) -> None:
-        self._read_quoted("'", start_line, start_col)
-
+    # Pine v6 User Manual, Strings: "In Pine v6, programmers can use line
+    # wrapping to define single-line literal strings across multiple code
+    # lines, where each wrapped line has an indentation of one or more spaces.
+    # However, the resulting character sequence adds only one space to the
+    # start of the wrapped lines, and it does not automatically add line
+    # terminators." A line break inside a single-line string therefore reads
+    # as one space when the next line is indented; otherwise the string is
+    # unterminated.
     def _read_quoted(self, quote: str, start_line: int, start_col: int) -> None:
         self._advance()  # consume the opening quote
         buf: list[str] = []
         while not self._at_end() and self.source[self.pos] != quote:
-            if self.source[self.pos] == "\\" and self.pos + 1 < len(self.source):
-                self._advance()  # skip backslash
-                ch = self._advance()
-                buf.append(self._STRING_ESCAPES.get(ch, ch))
+            ch = self.source[self.pos]
+            if ch == "\\" and self.pos + 1 < len(self.source):
+                self._read_escape(buf)
+                continue
+            if ch == "\n":
+                nxt = self.pos + 1
+                indent = nxt
+                while indent < len(self.source) and self.source[indent] in " \t":
+                    indent += 1
+                if indent == nxt or indent >= len(self.source) or self.source[indent] == "\n":
+                    break  # not a wrapped line: the literal is unterminated
+                self._advance_to(indent)
+                buf.append(" ")
                 continue
             buf.append(self._advance())
-        if not self._at_end():
+        if self._at_end() or self.source[self.pos] != quote:
+            self._emit_diagnostic(
+                "Unterminated string literal: the line ends before its closing quote "
+                "and the next line is not indented as a wrapped line.",
+                start_line, start_col, start_col + 1,
+                hint=('Close the string on its line, indent the line it wraps onto, '
+                      'or use a multiline string (\"\"\"...\"\"\").'),
+            )
+        else:
             self._advance()  # consume the closing quote
         value = "".join(buf)
         self._emit(TokenType.STRING, value, start_line, start_col, self.col)
+
+    # Pine v6 User Manual, Strings, "Multiline strings": "A multiline string
+    # is a literal character sequence enclosed by three pairs of ASCII
+    # quotation marks (e.g. \"\"\"...\"\"\") or apostrophes (e.g.,
+    # '''...''')." Everything between the delimiters is literal text -- line
+    # breaks become U+000A, "including any space characters used for
+    # indentation" -- and a quote needs no backslash unless three in a row
+    # would end the string; escapes read as in any Pine string. The string
+    # ends at the first run of three unescaped delimiter quotes.
+    def _read_multiline(self, quote: str, start_line: int, start_col: int) -> None:
+        delimiter = quote * 3
+        self._advance_to(self.pos + 3)  # consume the opening delimiter
+        buf: list[str] = []
+        while not self._at_end():
+            if self.source.startswith(delimiter, self.pos):
+                self._advance_to(self.pos + 3)
+                self._emit(TokenType.STRING, "".join(buf), start_line, start_col, self.col)
+                return
+            if self.source[self.pos] == "\\" and self.pos + 1 < len(self.source):
+                self._read_escape(buf)
+                continue
+            buf.append(self._advance())
+        self._emit_diagnostic(
+            f"Unterminated multiline string literal: no closing {delimiter} before "
+            "the end of the script.",
+            start_line, start_col, start_col + 3,
+            hint=(f"A multiline string ends at the next {chr(34) * 3} (or {chr(39) * 3} "
+                  f"for one opened with {chr(39) * 3}); escape a quote that would end "
+                  "it early."),
+        )
+        self._emit(TokenType.STRING, "".join(buf), start_line, start_col, self.col)
 
     def _read_ident(self, start_line: int, start_col: int) -> None:
         buf: list[str] = []
