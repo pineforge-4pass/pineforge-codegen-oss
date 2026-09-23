@@ -41,7 +41,8 @@ def is_input_call(node) -> bool:
 
 def pine_string_literal(value: str) -> str:
     """The double-quoted literal the lexer reads back as ``value``."""
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return '"' + (value.replace("\\", "\\\\").replace('"', '\\"')
+                  .replace("\n", "\\n").replace("\t", "\\t")) + '"'
 
 
 def spell_input_call(node: FuncCall, title: str | None = None) -> str | None:

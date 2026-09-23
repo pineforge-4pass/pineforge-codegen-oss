@@ -104,6 +104,7 @@ class NamingHelper:
             .replace('"', '\\"')
             .replace("\n", "\\n")
             .replace("\r", "\\r")
+            .replace("\t", "\\t")
         )
 
     def _safe_name(self, name: str) -> str:

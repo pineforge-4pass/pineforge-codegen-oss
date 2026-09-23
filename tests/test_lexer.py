@@ -55,3 +55,18 @@ def test_end_col_on_tokens():
 def test_import_keyword():
     tokens = Lexer("import foo\n").tokenize()
     assert tokens[0].type == TokenType.IMPORT
+
+
+def test_string_escapes_follow_the_pine_manual():
+    # Pine v6 User Manual, Strings, "Escape sequences": a backslash makes a
+    # quote or a backslash literal, \n is U+000A, \t is U+0009, and before any
+    # other character the character keeps its meaning (the backslash drops).
+    cases = {
+        r'"a\nb"': "a\nb", r'"a\tb"': "a\tb", r'"a\\b"': "a\\b", r'"a\"b"': 'a"b',
+        r"'a\'b'": "a'b", r"'a\nb'": "a\nb", r'"\\n"': "\\n",
+        # Not documented: kept as the lexer always read them.
+        r'"a\Tb"': "aTb", r'"a\rb"': "arb", r'"\u0041"': "u0041", r'"\x41"': "x41",
+    }
+    for src, value in cases.items():
+        tokens = Lexer(f"s = {src}\n").tokenize()
+        assert [t.value for t in tokens if t.type == TokenType.STRING] == [value], src

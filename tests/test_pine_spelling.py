@@ -22,7 +22,8 @@ def _parse(text: str):
     return Parser(Lexer(text).tokenize(), source=text)._parse_expression()
 
 
-@pytest.mark.parametrize("value", ['plain', 'say "hi"', 'back\\slash', "it's", 'a(b, c)'])
+@pytest.mark.parametrize("value", ['plain', 'say "hi"', 'back\\slash', "it's", 'a(b, c)',
+                                   "two\nlines", "tab\tbed", 'all\t"of"\\ it\n'])
 def test_string_literal_reads_back_as_its_value(value: str) -> None:
     assert _parse(pine_string_literal(value)).value == value
 
