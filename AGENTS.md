@@ -479,8 +479,9 @@ you delete or weaken the special case, the test will tell you.
    as U+000A and indentation kept; a single-line literal that continues on
    an indented line reads the break as one space (the manual's deprecated
    line wrapping); one never closed is refused at its opening quote. A
-   `// @pf-trace` line inside a multiline string is still read as a pragma
-   (the pragma pre-pass scans raw lines). `tests/test_e2e_string_escapes.py`
+   `// @pf-trace` line inside a multiline or wrapped string is text, not a
+   pragma: the pre-pass uses the Pine lexer to exclude string spans.
+   `tests/test_e2e_string_escapes.py`
    and `tests/test_e2e_multiline_strings.py` pin each escape and the
    manual's multiline examples through the manifest, an override and
    per-bar `str.*` traces.
