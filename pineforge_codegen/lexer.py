@@ -563,27 +563,32 @@ class Lexer:
         value = "0." + frac
         self._emit(TokenType.NUMBER, value, start_line, start_col, start_col + len(value))
 
+    # Pine v6 User Manual, Strings, "Escape sequences": a backslash makes a
+    # quotation mark or a backslash literal, "The \\n sequence represents the
+    # newline character (U+000A)", "The \\t sequence represents the horizontal
+    # tab character (U+0009)", and "If a backslash applied to a character does
+    # not form a supported escape sequence, the character's meaning does not
+    # change" -- the backslash is dropped and the character kept.
+    _STRING_ESCAPES = {"n": "\n", "t": "\t"}
+
     def _read_string(self, start_line: int, start_col: int) -> None:
-        self._advance()  # consume opening "
-        buf: list[str] = []
-        while not self._at_end() and self.source[self.pos] != '"':
-            if self.source[self.pos] == "\\" and self.pos + 1 < len(self.source):
-                self._advance()  # skip backslash
-            buf.append(self._advance())
-        if not self._at_end():
-            self._advance()  # consume closing "
-        value = "".join(buf)
-        self._emit(TokenType.STRING, value, start_line, start_col, self.col)
+        self._read_quoted('"', start_line, start_col)
 
     def _read_string_single(self, start_line: int, start_col: int) -> None:
-        self._advance()  # consume opening '
+        self._read_quoted("'", start_line, start_col)
+
+    def _read_quoted(self, quote: str, start_line: int, start_col: int) -> None:
+        self._advance()  # consume the opening quote
         buf: list[str] = []
-        while not self._at_end() and self.source[self.pos] != "'":
+        while not self._at_end() and self.source[self.pos] != quote:
             if self.source[self.pos] == "\\" and self.pos + 1 < len(self.source):
-                self._advance()
+                self._advance()  # skip backslash
+                ch = self._advance()
+                buf.append(self._STRING_ESCAPES.get(ch, ch))
+                continue
             buf.append(self._advance())
         if not self._at_end():
-            self._advance()  # consume closing '
+            self._advance()  # consume the closing quote
         value = "".join(buf)
         self._emit(TokenType.STRING, value, start_line, start_col, self.col)
 
