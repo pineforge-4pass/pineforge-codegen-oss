@@ -95,6 +95,12 @@ TA_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 def _ta(short_name: str, *sigs: FuncSig) -> None:
     TA_FUNCTIONS[short_name] = _func(f"ta.{short_name}", *sigs)
 
+# Parameter names, order and the required/optional split are TradingView's
+# (Pine v6 reference): the support checker binds every ta.* call to one of
+# these signatures and refuses an argument that binds to no parameter
+# (``_check_ta_arguments``). A default marks an optional parameter; None, a
+# required one.
+
 # --- Moving Averages ---
 _ta("sma",     _sig([("source", F), ("length", I)]))
 _ta("ema",     _sig([("source", F), ("length", I)]))
@@ -102,9 +108,10 @@ _ta("rma",     _sig([("source", F), ("length", I)]))
 _ta("wma",     _sig([("source", F), ("length", I)]))
 _ta("hma",     _sig([("source", F), ("length", I)]))
 _ta("vwma",    _sig([("source", F), ("length", I)]))
-_ta("alma",    _sig([("source", F), ("length", I), ("offset", F, 0.85), ("sigma", F, 6.0)]))
+_ta("alma",    _sig([("series", F), ("length", I), ("offset", F), ("sigma", F),
+                     ("floor", B, False)]))
 _ta("swma",    _sig([("source", F)]))
-_ta("linreg",  _sig([("source", F), ("length", I), ("offset", I, 0)]))
+_ta("linreg",  _sig([("source", F), ("length", I), ("offset", I)]))
 
 # --- Oscillators ---
 _ta("rsi",     _sig([("source", F), ("length", I)]))
@@ -113,7 +120,7 @@ _ta("cci",     _sig([("source", F), ("length", I)]))
 _ta("mfi",     _sig([("series", F), ("length", I)]))
 _ta("mom",     _sig([("source", F), ("length", I)]))
 _ta("roc",     _sig([("source", F), ("length", I)]))
-_ta("cmo",     _sig([("source", F), ("length", I)]))
+_ta("cmo",     _sig([("series", F), ("length", I)]))
 _ta("tsi",     _sig([("source", F), ("short_length", I), ("long_length", I)]))
 _ta("wpr",     _sig([("length", I)]))
 _ta("cog",     _sig([("source", F), ("length", I)]))
@@ -123,12 +130,12 @@ _ta("macd",    _sig([("source", F), ("fastlen", I), ("slowlen", I), ("siglen", I
                     returns_tuple=True, tuple_count=3))
 
 # --- Bollinger Bands / Keltner ---
-_ta("bb",      _sig([("source", F), ("length", I), ("mult", F, 2.0)],
+_ta("bb",      _sig([("series", F), ("length", I), ("mult", F)],
                     returns_tuple=True, tuple_count=3))
-_ta("kc",      _sig([("source", F), ("length", I), ("mult", F, 1.5)],
+_ta("kc",      _sig([("series", F), ("length", I), ("mult", F), ("useTrueRange", B, True)],
                     returns_tuple=True, tuple_count=3))
-_ta("bbw",     _sig([("source", F), ("length", I), ("mult", F, 2.0)]))
-_ta("kcw",     _sig([("source", F), ("length", I), ("mult", F, 1.5)]))
+_ta("bbw",     _sig([("series", F), ("length", I), ("mult", F)]))
+_ta("kcw",     _sig([("series", F), ("length", I), ("mult", F), ("useTrueRange", B, True)]))
 
 # --- Volatility & Range ---
 _ta("atr",     _sig([("length", I)]))
@@ -141,7 +148,7 @@ _ta("supertrend", _sig([("factor", F), ("atrPeriod", I)],
                        returns_tuple=True, tuple_count=2))
 _ta("dmi",     _sig([("diLength", I), ("adxSmoothing", I)],
                     returns_tuple=True, tuple_count=3))
-_ta("sar",     _sig([("start", F, 0.02), ("inc", F, 0.02), ("max", F, 0.2)]))
+_ta("sar",     _sig([("start", F), ("inc", F), ("max", F)]))
 
 # --- Crossover / State ---
 _ta("crossover",  _sig([("source1", F), ("source2", F)], ret=B))
@@ -161,8 +168,14 @@ _ta("highest",
 _ta("lowest",
     _sig([("source", F), ("length", I)]),
     _sig([("length", I)]))
-_ta("highestbars", _sig([("source", F), ("length", I)], ret=I))
-_ta("lowestbars",  _sig([("source", F), ("length", I)], ret=I))
+# ta.highestbars / ta.lowestbars: "One arg version: length is the number of
+# bars back. Algorithm uses high [low] as a source series."
+_ta("highestbars",
+    _sig([("source", F), ("length", I)], ret=I),
+    _sig([("length", I)], ret=I))
+_ta("lowestbars",
+    _sig([("source", F), ("length", I)], ret=I),
+    _sig([("length", I)], ret=I))
 _ta("median",      _sig([("source", F), ("length", I)]))
 _ta("percentrank", _sig([("source", F), ("length", I)]))
 _ta("percentile_nearest_rank",       _sig([("source", F), ("length", I), ("percentage", F)]))
@@ -180,14 +193,17 @@ _ta("pivotlow",
     _sig([("leftbars", I), ("rightbars", I)]))
 
 # --- Volume indicators ---
-# ta.vwap has TWO overloads:
-#   ta.vwap(source, anchor, stdev_mult)      — 3-arg bands form (primary), returns [vwap, upper, lower]
-#   ta.vwap(source)                          — scalar 1-arg form (daily anchor)
-# Note: primary is the 3-arg form so param_names covers all kwargs; the
-# analyzer remaps 3-arg calls to the internal "vwap_bands" dispatch key.
-_ta("vwap",    _sig([("source", F), ("anchor", B), ("stdev_mult", F)],
+# ta.vwap has TWO overloads (TradingView):
+#   ta.vwap(source, anchor, stdev_mult)      — bands form (primary), returns [vwap, upper, lower]
+#   ta.vwap(source, anchor)                  — scalar form
+# ``anchor`` is optional in both ("The default is equivalent to passing
+# timeframe.change() with "1D" as its argument"). The primary is the widest
+# form so param_names covers every keyword; the analyzer remaps the bands
+# form to the internal "vwap_bands" dispatch key.
+_VWAP_DAILY_ANCHOR = 'timeframe.change("1D")'
+_ta("vwap",    _sig([("source", F), ("anchor", B, _VWAP_DAILY_ANCHOR), ("stdev_mult", F)],
                     returns_tuple=True, tuple_count=3),
-               _sig([("source", F)]))
+               _sig([("source", F), ("anchor", B, _VWAP_DAILY_ANCHOR)]))
 
 # --- Statistical (additional) ---
 _ta("mode",    _sig([("source", F), ("length", I)]))
@@ -674,6 +690,8 @@ DISPLAY_VARIABLES: dict[str, PineType] = {
 TA_DEFAULT_SOURCE = {
     "highest": "high",
     "lowest": "low",
+    "highestbars": "high",
+    "lowestbars": "low",
     "pivothigh": "high",
     "pivotlow": "low",
 }

@@ -528,12 +528,18 @@ class SupportChecker:
         # Names declared ``var`` / ``varip`` anywhere: their declaration value
         # is the first bar's only, so it does not describe later bars.
         self._persistent_decl_names: set[str] = set()
+        # How many times each name is bound anywhere in the script -- a
+        # declaration, a callable parameter, a loop variable, a tuple element
+        # -- so a constant argument read through a name is trusted only when
+        # that name has exactly one binding and no scope can shadow it.
+        self._binding_counts: dict[str, int] = {}
 
     # -- Public API --
 
     def check(self) -> list[Diagnostic]:
         self._collect_user_definitions(self._ast)
         self._collect_scalar_rebinds(self._ast)
+        self._count_bindings(self._ast)
         for stmt in self._ast.body:
             self._visit(stmt)
         return self._diagnostics
@@ -581,6 +587,39 @@ class SupportChecker:
                 for item in value.values():
                     if isinstance(item, ASTNode):
                         self._collect_scalar_rebinds(item)
+
+    def _count_bindings(self, node) -> None:
+        """Pre-pass: count every binding of every name (``_binding_counts``)."""
+        if isinstance(node, list):
+            for item in node:
+                self._count_bindings(item)
+            return
+        if not isinstance(node, ASTNode):
+            return
+        names: list = []
+        if isinstance(node, VarDecl):
+            names = [node.name]
+        elif isinstance(node, (FuncDef, MethodDef)):
+            names = list(node.params)
+        elif isinstance(node, ForStmt):
+            names = [node.var]
+        elif isinstance(node, ForInStmt):
+            names = [node.var] if node.var else list(node.vars or ())
+        elif isinstance(node, TupleAssign):
+            names = list(node.names)
+        for name in names:
+            name = name if isinstance(name, str) else getattr(name, "name", None)
+            if name:
+                self._binding_counts[name] = self._binding_counts.get(name, 0) + 1
+        for key, value in vars(node).items():
+            if key in ("loc", "annotations"):
+                continue
+            if key == "cases":
+                value = [item for case in value for item in case]
+            elif isinstance(value, dict):
+                value = list(value.values())
+            if isinstance(value, (ASTNode, list)):
+                self._count_bindings(value)
 
     def _collect_user_definitions(self, ast: Program) -> None:
         for stmt in ast.body:
@@ -1321,8 +1360,8 @@ class SupportChecker:
             self._err(node, f"ta.{name}(...) is not implemented in PineForge runtime.")
             self._visit_children(node)
             return
-        if ns == "ta" and name == "vwap":
-            self._check_ta_vwap_anchor(node)
+        if ns == "ta":
+            self._check_ta_call(node, name)
         if ns == "math" and name not in SUPPORTED_MATH:
             self._err(node, f"math.{name}(...) is not implemented in PineForge runtime.")
             self._visit_children(node)
@@ -1748,6 +1787,235 @@ class SupportChecker:
                     f"(got a non-constant expression).",
                     hint=f"Allowed values: {sorted(allowed)}.",
                 )
+
+    # -- ta.* call arguments --
+
+    def _check_ta_call(self, node: FuncCall, name: str) -> None:
+        """Bind the call's arguments to TradingView's signature, then flag (or,
+        for a spelling that never compiled, refuse) a parameter value the
+        engine's class cannot compute."""
+        if not self._check_ta_arguments(node, name):
+            return
+        if name == "vwap":
+            self._check_ta_vwap_anchor(node)
+        elif name == "alma":
+            self._check_ta_alma_floor(node)
+        elif name in ("kc", "kcw"):
+            self._check_ta_keltner_true_range(node, name)
+        elif name == "pivot_point_levels":
+            self._check_ta_pivot_point_levels(node)
+
+    @staticmethod
+    def _ta_signature_text(name: str) -> str:
+        """TradingView's signature(s) of ``ta.<name>``, optional parameters
+        with their defaults."""
+        def spell(sig) -> str:
+            parts = []
+            for p in sig.params:
+                if p.default is None:
+                    parts.append(p.name)
+                elif isinstance(p.default, bool):
+                    parts.append(f"{p.name} = {'true' if p.default else 'false'}")
+                else:
+                    parts.append(f"{p.name} = {p.default}")
+            return f"ta.{name}({', '.join(parts)})"
+        return " or ".join(spell(sig) for sig in sigs.TA_FUNCTIONS[name].signatures)
+
+    @staticmethod
+    def _ta_binding_problem(sig, node: FuncCall):
+        """Why ``node``'s arguments do not bind to ``sig``, as ``(rank, message,
+        node to point at)``, or None when they bind. A lower rank is the more
+        useful report when no overload binds."""
+        names = [p.name for p in sig.params]
+        if len(node.args) > len(names):
+            return ((2, 0), f"takes at most {len(names)} arguments, got {len(node.args)}",
+                    node.args[len(names)])
+        for key, value in node.kwargs.items():
+            if key not in names:
+                return (3, 0), f"has no parameter '{key}'", value
+            if names.index(key) < len(node.args):
+                return (1, 0), f"got '{key}' twice, by position and by keyword", value
+        bound = set(names[:len(node.args)]) | set(node.kwargs)
+        missing = [p.name for p in sig.params if p.default is None and p.name not in bound]
+        if missing:
+            listed = ", ".join(f"'{m}'" for m in missing)
+            noun = "arguments" if len(missing) > 1 else "argument"
+            return (0, len(missing)), f"is missing its {noun} {listed}", None
+        return None
+
+    def _check_ta_arguments(self, node: FuncCall, name: str) -> bool:
+        """Refuse a ``ta.*`` call whose arguments bind to none of TradingView's
+        signatures (``signatures.TA_FUNCTIONS``), as TradingView does.
+
+        The analyzer routes the arguments by position, each to a constructor or
+        ``compute()`` slot. An argument that binds to no parameter used to be
+        dropped (a misspelt or foreign keyword, a keyword given after the same
+        positional), shifted into the next constructor slot (a keyword skipping
+        a required parameter: ``ta.alma(close, 9, sigma=4)`` built
+        ``ALMA(9, 4)``) or passed to a ``compute()`` overload that does not
+        exist (one too many, or a missing required one): a silently wrong
+        indicator or a C++ compile failure. Returns True when they bind.
+        """
+        func = sigs.TA_FUNCTIONS.get(name)
+        if func is None:
+            return True
+        if name == "vwap" and not node.args and not node.kwargs:
+            # ``ta.vwap()`` reads like the bare ``ta.vwap`` property (the VWAP
+            # of hlc3), which is what it has always compiled to.
+            return True
+        problems = []
+        for sig in func.signatures:
+            problem = self._ta_binding_problem(sig, node)
+            if problem is None:
+                return True
+            problems.append((problem[0], -len(sig.params), problem[1], problem[2]))
+        _rank, _width, message, at = min(problems, key=lambda p: (p[0], p[1]))
+        self._err(
+            expr_start(at if at is not None else node),
+            f"ta.{name} {message} (TradingView: {self._ta_signature_text(name)}).",
+            hint="Use the parameters of TradingView's signature.",
+        )
+        return False
+
+    def _ta_argument(self, node: FuncCall, name: str, param: str):
+        """The argument bound to ``param`` (the call's arguments bind to the
+        widest signature naming it), or None when it is omitted."""
+        if param in node.kwargs:
+            return node.kwargs[param]
+        for sig in sorted(sigs.TA_FUNCTIONS[name].signatures, key=lambda s: -len(s.params)):
+            names = [p.name for p in sig.params]
+            if param in names:
+                index = names.index(param)
+                return node.args[index] if index < len(node.args) else None
+        return None
+
+    def _is_constant_bool(self, node, value: bool, _seen: frozenset = frozenset()) -> bool:
+        """``node`` is the literal ``value``, directly or through a name bound
+        exactly once in the script -- never reassigned, not ``var`` -- to it."""
+        if isinstance(node, BoolLiteral):
+            return node.value is value
+        if isinstance(node, Identifier) and node.name not in _seen:
+            if (self._binding_counts.get(node.name) != 1
+                    or node.name in self._scalar_rebinds
+                    or node.name in self._persistent_decl_names):
+                return False
+            definition = self._scalar_defs.get(node.name)
+            return definition is not None and self._is_constant_bool(
+                definition, value, _seen | {node.name})
+        return False
+
+    def _check_ta_alma_floor(self, node: FuncCall) -> None:
+        """Flag or refuse an ``ta.alma`` floor that is not the constant false.
+
+        TradingView: ``floor (simple bool) ... Specifies whether the offset
+        calculation is floored before ALMA is calculated. Default value is
+        false.`` The engine's ``ta::ALMA(length, offset, sigma)`` always uses
+        ``m = offset * (length - 1)``; the codegen passes it no floor. By
+        keyword the floor was always dropped (the registry did not know it),
+        so that spelling keeps the unfloored ALMA it has always computed, with
+        a warning; the positional one reached ``ALMA::compute(src)`` and never
+        compiled, so it stays refused.
+        """
+        floor = self._ta_argument(node, "alma", "floor")
+        if floor is None or self._is_constant_bool(floor, False):
+            return
+        if "floor" in node.kwargs:
+            self._warn(
+                expr_start(floor),
+                "ta.alma floor is approximated: the engine's ta::ALMA has no floor "
+                "input and always computes its offset m = offset * (length - 1) "
+                "unfloored, so this call ignores floor and runs the unfloored ALMA.",
+                hint=("Omit floor or pass floor=false to run it exactly. A floored "
+                      "ALMA needs engine support: a ta::ALMA that uses "
+                      "math.floor(offset * (length - 1)) as m."),
+            )
+            return
+        self._err(
+            expr_start(floor),
+            "ta.alma floor is not supported: the engine's ta::ALMA always computes "
+            "its offset m = offset * (length - 1) unfloored and has no floor input, "
+            "so a floor that is not the constant false would silently compute an "
+            "unfloored ALMA.",
+            hint=("Omit floor or pass false. A floored ALMA needs engine support: a "
+                  "ta::ALMA that uses math.floor(offset * (length - 1)) as m."),
+        )
+
+    def _check_ta_keltner_true_range(self, node: FuncCall, name: str) -> None:
+        """Flag or refuse a ``ta.kc`` / ``ta.kcw`` useTrueRange that is not
+        the constant true.
+
+        TradingView: ``useTrueRange (simple bool) ... Specifies if True Range
+        is used; default is true. If the value is false, the range will be
+        calculated with the expression (high - low).`` The engine's
+        ``ta::KC`` (and ``ta::KCW``, which wraps it) always averages the true
+        range; the codegen passes it no range choice. By keyword the flag was
+        always dropped, so that spelling keeps the true-range channel it has
+        always computed, with a warning; the positional one reached a
+        ``compute()`` overload that does not exist, so it stays refused.
+        """
+        use_true_range = self._ta_argument(node, name, "useTrueRange")
+        if use_true_range is None or self._is_constant_bool(use_true_range, True):
+            return
+        cls, what = (("ta::KC", "Keltner channel") if name == "kc"
+                     else ("ta::KCW (over ta::KC)", "Keltner channel width"))
+        if "useTrueRange" in node.kwargs:
+            self._warn(
+                expr_start(use_true_range),
+                f"ta.{name} useTrueRange is approximated: the engine's {cls} always "
+                "averages the true range and has no high - low range input, so this "
+                f"call ignores useTrueRange and runs the true-range {what}.",
+                hint=("Omit useTrueRange or pass useTrueRange=true to run it exactly. "
+                      "A high - low range needs engine support: a "
+                      f"{cls.split(' ')[0]} whose range series is high - low."),
+            )
+            return
+        self._err(
+            expr_start(use_true_range),
+            f"ta.{name} useTrueRange is not supported: the engine's {cls} always "
+            "averages the true range and has no high - low range input, so a "
+            "useTrueRange that is not the constant true would silently compute a "
+            f"true-range {what}.",
+            hint=("Omit useTrueRange or pass true. A high - low range needs engine "
+                  f"support: a {cls.split(' ')[0]} whose range series is high - low."),
+        )
+
+    def _check_ta_pivot_point_levels(self, node: FuncCall) -> None:
+        """Flag the ``ta.pivot_point_levels`` anchor and developing values the
+        emission does not compute.
+
+        The codegen lowers the call to ``ta::pivot_point_levels(type, high[1],
+        low[1], close[1])``: the levels of the previous bar, the period that an
+        anchor true on every bar closes, with ``developing = false`` ("the
+        values are those calculated the last time the anchor condition was
+        true"). It has always dropped both arguments, and every spelling
+        compiled, so another anchor or ``developing = true`` keeps that
+        previous-bar lowering with a warning naming what the engine lacks.
+        """
+        anchor = self._ta_argument(node, "pivot_point_levels", "anchor")
+        if anchor is not None and not self._is_constant_bool(anchor, True):
+            self._warn(
+                expr_start(anchor),
+                "ta.pivot_point_levels anchor is approximated: PineForge passes the "
+                "engine's ta::pivot_point_levels the previous bar's high, low and "
+                "close -- the period an anchor that is true on every bar closes -- "
+                "and the engine has no anchored-period accumulation, so this call "
+                "ignores its anchor and computes the previous bar's pivots.",
+                hint=("Pass anchor = true to run it exactly. Another anchor needs "
+                      "engine support: pivot levels over the high, low and close "
+                      "accumulated since the anchor was last true."),
+            )
+        developing = self._ta_argument(node, "pivot_point_levels", "developing")
+        if developing is not None and not self._is_constant_bool(developing, False):
+            self._warn(
+                expr_start(developing),
+                "ta.pivot_point_levels developing is approximated: PineForge computes "
+                "the levels of the last completed period and the engine has no "
+                "developing-period levels, so this call ignores developing and "
+                "computes completed-period pivots.",
+                hint=("Omit developing or pass false to run it exactly. Developing "
+                      "pivots need engine support: levels recalculated over the "
+                      "period in progress."),
+            )
 
     # -- ta.vwap anchor --
 

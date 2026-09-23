@@ -77,6 +77,7 @@ from .contracts import FixnanCallSite, FuncInfo, SecurityCallInfo, TACallSite
 from .tables import (
     BAR_FIELDS, TA_CLASS_MAP, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
     TA_TUPLE_RETURNS, TA_TUPLE_ELEMENT_COUNTS, TA_COMPUTE_ARGS,
+    TA_LENGTH_ONLY_DEFAULT_SOURCE,
 )
 
 
@@ -453,15 +454,18 @@ class CallHandlers:
                 self._series_bar_fields.add(field)
             all_args = [default_src]
 
-        # Handle ta.highest(length) / ta.lowest(length) with 1 arg:
-        # single arg is the length, source defaults to high/low respectively.
-        # Remap so all_args = [default_source, length_arg].
-        _DEFAULT_SOURCE = {"highest": "high", "lowest": "low"}
-        if func_name in _DEFAULT_SOURCE and len(all_args) == 1:
-            default_src = Identifier(name=_DEFAULT_SOURCE[func_name])
+        # The one-arg forms ta.highest(length) / ta.lowest(length) /
+        # ta.highestbars(length) / ta.lowestbars(length), positional or
+        # ``length=``: the source defaults to high / low. Remap so all_args =
+        # [default_source, length_arg]; highestbars / lowestbars used to send
+        # the length to compute() as the source.
+        default_source = TA_LENGTH_ONLY_DEFAULT_SOURCE.get(func_name)
+        if default_source is not None and (
+                len(all_args) == 1 or (len(all_args) == 2 and all_args[0] is None)):
+            default_src = Identifier(name=default_source)
             self._visit(default_src)
-            self._series_bar_fields.add(_DEFAULT_SOURCE[func_name])
-            all_args = [default_src, all_args[0]]
+            self._series_bar_fields.add(default_source)
+            all_args = [default_src, all_args[-1]]
 
         self._ta_counter += 1
         class_name = TA_CLASS_MAP[func_name]
