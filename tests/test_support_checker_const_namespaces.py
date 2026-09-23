@@ -141,5 +141,7 @@ def test_export_in_expression_rejected():
 
 def test_export_function_definition_rejected():
     src = PRELUDE + "export f(float x) =>\n    x * 2\nplot(close)\n"
-    with pytest.raises(CompileError, match="export"):
+    with pytest.raises(CompileError, match="export") as caught:
         transpile(src)
+    assert caught.value.diagnostics[0].location.line == 3
+    assert caught.value.diagnostics[0].location.col == 1

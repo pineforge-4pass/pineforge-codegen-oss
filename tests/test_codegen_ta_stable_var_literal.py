@@ -58,22 +58,15 @@ def _assert_exact_pivot_ctor_rejection(
     )
 
 
-def _assert_parse_recovery_fences_sma(source: str, *, expected_line: int) -> None:
-    program = Parser(Lexer(source).tokenize(), source=source).parse()
-    assert (program.annotations or {}).get("parse_recovery_count") == 1
-
+def _assert_parse_error_precedes_sma(source: str, *, expected_line: int) -> None:
     with pytest.raises(CompileError) as caught:
         transpile(source, filename="stable-var-parse-recovery.pine")
 
     assert len(caught.value.diagnostics) == 1
     diagnostic = caught.value.diagnostics[0]
-    assert diagnostic.phase is Phase.CODEGEN
+    assert diagnostic.phase is Phase.PARSER
     assert diagnostic.location.line == expected_line
-    assert diagnostic.message == (
-        "Unsupported TA constructor length 'p' for ta::SMA: it is neither a "
-        "compile-time constant nor derived from an input, so PineForge cannot "
-        "size the indicator buffer."
-    )
+    assert "Expected IDENT" in diagnostic.message
 
 
 def _assert_method_declaration_fences_sma(
@@ -287,7 +280,7 @@ z = ta.sma(close, p)
     ],
     ids=["top-level", "nested-block"],
 )
-def test_any_unrelated_parse_recovery_fences_literal_admission(
+def test_any_unrelated_parse_error_precedes_literal_admission(
     bad_fragment: str,
 ) -> None:
     source = (
@@ -295,9 +288,9 @@ def test_any_unrelated_parse_recovery_fences_literal_admission(
         + bad_fragment
         + "\nvar int p = 5\nz = ta.sma(close, p)\n"
     )
-    expected_line = source.splitlines().index("z = ta.sma(close, p)") + 1
+    expected_line = [line.strip() for line in source.splitlines()].index("var int = 1") + 1
 
-    _assert_parse_recovery_fences_sma(source, expected_line=expected_line)
+    _assert_parse_error_precedes_sma(source, expected_line=expected_line)
 
 
 def test_clean_direct_source_has_no_parse_recovery_annotation() -> None:
