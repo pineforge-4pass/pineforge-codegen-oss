@@ -185,16 +185,14 @@ x = ta.tr(false)
     )
 
 
-def test_ta_tr_default_handles_first_bar_with_high_low():
-    # Property form ``ta.tr`` (no parens) keeps the legacy ``handle_na=true``
-    # semantics in TV; the codegen still emits the inline expression so the
-    # first-bar fallback is ``high - low``.
+def test_ta_tr_bare_is_na_on_first_bar():
+    # TradingView's bare property is ta.tr(handle_na=false).
     src = """//@version=6
 strategy("T")
 x = ta.tr
 """
     cpp = _generate(src)
-    assert "std::isnan(_s_close[1]) ? (current_bar_.high - current_bar_.low)" in cpp
+    assert "std::isnan(_s_close[1]) ? na<double>()" in cpp
 
 
 def test_ta_call_site_member():

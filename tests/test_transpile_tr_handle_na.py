@@ -9,9 +9,8 @@ defaulted ``handle_na`` to ``true``; these tests pin the new behaviour:
   ``handle_na=false`` baked into the constructor initialiser list.
 * ``ta.tr(true)`` opts into the legacy ``high - low`` first-bar branch.
 * ``ta.tr(handle_na=true)`` is keyword-equivalent to ``ta.tr(true)``.
-* The bare property form ``ta.tr`` (no parens) keeps the inline legacy
-  semantics — covered in ``test_codegen_new.py`` to avoid duplicating the
-  inline-expression assertion here.
+* The bare property form ``ta.tr`` (no parens) stays inline but reads
+  ``na`` on bar 0, equivalent to ``ta.tr(false)``.
 
 The C++ runtime side of the contract lives in ``pineforge-engine/tests/test_ta.cpp``
 (``test_tr_handle_na_default_returns_na_on_first_bar`` /
@@ -100,14 +99,13 @@ def test_ta_tr_compute_uses_implicit_bar_ohlc():
     assert "_ta_tr_1.compute(false" not in cpp
 
 
-def test_ta_tr_property_form_stays_inline_with_legacy_semantics():
-    # ``ta.tr`` (no parens) is the legacy property form — TV keeps the
-    # ``handle_na=true`` first-bar fallback for it. PineForge mirrors this
-    # by emitting the inline expression instead of allocating a ``ta::TR``.
+def test_ta_tr_property_form_stays_inline_with_false_handle_na():
+    # TradingView's bare ``ta.tr`` property is equivalent to ta.tr(false).
+    # The inline expression returns na on bar 0 without a ta::TR instance.
     cpp = _generate(_wrap("x = ta.tr"))
     assert "ta::TR _ta_tr_" not in cpp
     assert (
-        "std::isnan(_s_close[1]) ? (current_bar_.high - current_bar_.low)"
+        "std::isnan(_s_close[1]) ? na<double>()"
         in cpp
     )
 

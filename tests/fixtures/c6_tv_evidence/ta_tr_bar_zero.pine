@@ -1,0 +1,6 @@
+//@version=6
+strategy("c6 ta.tr bar-zero sense", overlay=true, process_orders_on_close=true)
+if bar_index == 0
+    strategy.entry(na(ta.tr) ? "bare-na" : "bare-value", strategy.long)
+if bar_index == 1
+    strategy.close_all()
