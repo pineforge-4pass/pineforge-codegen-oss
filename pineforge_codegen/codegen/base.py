@@ -2932,6 +2932,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                            for a in node.args)
             if namespace == "input":
                 return True
+            # The generic ``input(...)`` is the leaf an inline TA length
+            # already admits (``_is_stable_inline_input``: not the source
+            # overload ``input(close)``, a constant defval); it used to fall to
+            # the user-function branch below and read as a series.
+            if namespace is None and func_name == "input":
+                return self._is_stable_inline_input(node)
             if namespace is None and func_name in ("int", "float", "bool", "string"):
                 return all(self._expr_is_stable(a, _udf_stack, _depth)
                            for a in node.args)
