@@ -164,13 +164,7 @@ TA_CASES: tuple[Case, ...] = (
     Case("highest", _vs_self("ta.highest(high, {len})"), (LEN,)),
     Case("highest_1arg", _vs_self("ta.highest({len})"), (LEN,)),
     Case("lowest", _vs_self("ta.lowest(low, {len})"), (LEN,)),
-    Case("change", _vs_zero("ta.change(close, {len})"), (LEN,),
-         override_inert=(
-             "ta.change(src, n) computes a one-bar change for every n, in the "
-             "literal and the bound spelling too: the codegen hands n to the "
-             "ta::Change constructor, which only bounds the history, while "
-             "ta::Change::compute reads the lookback from its own length "
-             "argument (default 1)")),
+    Case("change", _vs_zero("ta.change(close, {len})"), (LEN,)),
     Case("wma", _vs_close("ta.wma(close, {len})"), (LEN,)),
     Case("hma", _vs_close("ta.hma(close, {len})"), (LEN,)),
     Case("math_sum", _vs_zero("math.sum(close - open, {len})"), (LEN,)),

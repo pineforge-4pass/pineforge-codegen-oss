@@ -173,7 +173,7 @@ TA_COMPUTE_ARGS = {
     "stoch": [0, 1, 2],
     "highest": [0], "lowest": [0],
     "crossover": [0, 1], "crossunder": [0, 1], "cross": [0, 1],
-    "change": [0],
+    "change": [0, 1],    # source + length (the ctor only bounds the history)
     "supertrend": [],    # supertrend gets bar data implicitly
     "dmi": [],           # dmi gets bar data implicitly
     "bb": [0],
