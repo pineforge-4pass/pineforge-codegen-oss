@@ -1964,17 +1964,15 @@ class TopLevelEmitter:
             if self._ta_site_uses_precalc(site):
                 lines.append(f"        _precalc_{site.member_name}.resize(n);")
 
-        # Reset indicators to clean slate
+        # Reset indicators to clean slate, built with the arguments this run
+        # uses (an input override resizes the precalculated series too).
         lines.append("")
         for _ti, site in enumerate(self.ctx.ta_call_sites):
             if _ti in self._dead_ta_indices:
                 continue
             if self._ta_site_uses_precalc(site):
-                resolved = [self._resolve_ta_ctor_arg(a) for a in site.ctor_args]
-                safe_resolved = []
-                for r in resolved:
-                    safe_resolved.append(r if self._is_compile_time_value(r) else "1")
-                lines.append(f"        {site.member_name} = {site.class_name}({', '.join(safe_resolved)});")
+                run_args, _any_runtime = self._ta_run_ctor_args(site)
+                lines.append(f"        {site.member_name} = {site.class_name}({', '.join(run_args)});")
 
         # Clear series
         lines.append("")
@@ -2090,11 +2088,8 @@ class TopLevelEmitter:
             if _ti in self._dead_ta_indices:
                 continue
             if self._ta_site_uses_precalc(site):
-                resolved = [self._resolve_ta_ctor_arg(a) for a in site.ctor_args]
-                safe_resolved = []
-                for r in resolved:
-                    safe_resolved.append(r if self._is_compile_time_value(r) else "1")
-                lines.append(f"        {site.member_name} = {site.class_name}({', '.join(safe_resolved)});")
+                run_args, _any_runtime = self._ta_run_ctor_args(site)
+                lines.append(f"        {site.member_name} = {site.class_name}({', '.join(run_args)});")
 
         for field_name in sorted(self.ctx.series_bar_fields):
             lines.append(f"        _s_{field_name}.clear();")

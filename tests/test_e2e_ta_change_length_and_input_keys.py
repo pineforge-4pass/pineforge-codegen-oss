@@ -23,9 +23,10 @@ the app's glue, compile against the built engine runtime, run on the real
 15m feed with ``inputs.json`` overrides and ``--trace-json`` values).
 
 The TA calls under an input override are direct assignments
-(``x = ta.ema(close, n)``) on purpose: a TA call nested inside a larger
-expression reads its precalculated series, which is sized from the input's
-default, so no override reaches it in any spelling (a separate defect).
+(``x = ta.ema(close, n)``): when this lane landed, a TA call nested inside a
+larger expression read a precalculated series sized from the input's
+default, so no override reached it in any spelling. Lane C4 fixed that
+separately (``tests/test_e2e_precalc_input_override.py``).
 
 Skips cleanly without the engine environment ``tests/_e2e.py`` needs.
 """

@@ -5234,6 +5234,27 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return rendered
 
 
+    def _ta_run_ctor_args(self, site: TACallSite) -> tuple[list[str], bool]:
+        """The constructor arguments a chart TA site runs with, and whether any
+        is a runtime expression: an input- or timeframe-backed argument as its
+        override-aware runtime read, a compile-time one as its value, any other
+        as the placeholder ``1`` (the constructor guard refuses those first).
+        The ``_ta_initialized_`` reset and ``precalculate()`` both build the
+        site from these, so a precalculated series is sized like the live
+        indicator; built from the compile-time values instead, it kept the
+        input's default (or ``1``) under every override."""
+        args: list[str] = []
+        any_runtime = False
+        for a in site.ctor_args:
+            rt = self._runtime_ctor_arg_for_reset(a)
+            if rt is not None:
+                args.append(rt)
+                any_runtime = True
+            else:
+                resolved = self._resolve_ta_ctor_arg(a)
+                args.append(resolved if self._is_compile_time_value(resolved) else "1")
+        return args, any_runtime
+
     def _collect_ta_runtime_resets(
         self,
         *,
@@ -5254,16 +5275,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 continue
             if not site.ctor_args:
                 continue
-            runtime_args: list[str] = []
-            any_runtime = False
-            for a in site.ctor_args:
-                rt = self._runtime_ctor_arg_for_reset(a)
-                if rt is not None:
-                    runtime_args.append(rt)
-                    any_runtime = True
-                else:
-                    resolved = self._resolve_ta_ctor_arg(a)
-                    runtime_args.append(resolved if self._is_compile_time_value(resolved) else "1")
+            runtime_args, any_runtime = self._ta_run_ctor_args(site)
             if any_runtime:
                 resets.append(
                     f"{site.member_name} = {site.class_name}({', '.join(runtime_args)});"
