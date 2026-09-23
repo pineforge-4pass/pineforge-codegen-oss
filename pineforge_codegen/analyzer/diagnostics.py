@@ -31,7 +31,7 @@ from ..ast_nodes import (
     UnaryOp,
 )
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
-from ..pine_spelling import is_input_call, pine_string_literal
+from ..pine_spelling import input_binding_names, is_input_call, pine_string_literal
 from .. import tv_input_choices as tv_in
 from .tables import BAR_FIELDS
 
@@ -98,6 +98,18 @@ class DiagnosticsHelper:
     # would otherwise silently reassociate under C++ precedence.
     _NONATOMIC_EXPR_NODES = (BinOp, UnaryOp, Ternary)
 
+    def _input_binding_name(self, node: FuncCall) -> str | None:
+        """The declared name an untitled global-scope input call is keyed by
+        (``pine_spelling.input_binding_names``), or None. Every input takes its
+        title as argument #2 or ``title=``."""
+        if len(node.args) > 1 or "title" in node.kwargs:
+            return None
+        names = getattr(self, "_input_binding_names_cache", None)
+        if names is None:
+            names = input_binding_names(self._ast.body)
+            self._input_binding_names_cache = names
+        return names.get(id(node))
+
     def _operand_to_str(self, node: ASTNode) -> str:
         s = self._expr_to_str(node)
         if isinstance(node, self._NONATOMIC_EXPR_NODES):
@@ -129,8 +141,12 @@ class DiagnosticsHelper:
                 # The codegen reads an inline input's title, defval and bounds
                 # back from this spelling; without its keyword arguments
                 # ``input.int(defval=9, title="fast")`` would become
-                # ``input.int()``.
+                # ``input.int()``. An untitled call a declaration names (a
+                # ``var`` initializer's) is keyed by that name, spelled title=.
                 args += [f"{k}={self._expr_to_str(v)}" for k, v in node.kwargs.items()]
+                bound = self._input_binding_name(node)
+                if bound is not None:
+                    args.append(f"title={pine_string_literal(bound)}")
             callee_str = self._expr_to_str(node.callee)
             return f"{callee_str}({', '.join(args)})"
         if isinstance(node, TupleLiteral):

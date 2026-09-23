@@ -3024,9 +3024,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # refuses a recursive UDF (returns None -> caller leaves it untracked
             # -> the ctor guard rejects it loudly) instead of recursing forever.
             # An inline input call is spelled in full (title, keyword args):
-            # the reset re-parses it and keys the override by that title.
+            # the reset re-parses it and keys the override by that title. An
+            # untitled call a declaration names carries that name as title=.
             if self._is_stable_inline_input(node):
-                return spell_input_call(node)
+                return spell_input_call(node, title=self._input_spelling_title(node))
             fn, ns = self._resolve_callee(node.callee)
             if ns is None and fn is not None and self._get_udf_def(fn) is not None:
                 inlined = self._inline_single_expr_udf(node, _udf_stack, _depth)

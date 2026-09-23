@@ -12,12 +12,14 @@ caller treat each inline input call as one leaf.
 
 from __future__ import annotations
 
+import dataclasses
 import re
-from typing import Callable
+from typing import Callable, Iterator
 
 from .ast_nodes import (
-    BoolLiteral, FuncCall, Identifier, MemberAccess, NaLiteral, NumberLiteral,
-    StringLiteral, TupleLiteral, UnaryOp,
+    ASTNode, BoolLiteral, FuncCall, FuncDef, Identifier, MemberAccess,
+    MethodDef, NaLiteral, NumberLiteral, StringLiteral, TupleLiteral, UnaryOp,
+    VarDecl,
 )
 
 _STRING_OR_IDENT = re.compile(
@@ -42,14 +44,19 @@ def pine_string_literal(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def spell_input_call(node: FuncCall) -> str | None:
+def spell_input_call(node: FuncCall, title: str | None = None) -> str | None:
     """An input call spelled with every argument, keywords included, so the
     text re-parses to the same call. None when an argument is not one of the
     constant shapes an input takes (literal, name, ``display.none``-style
-    member, signed number, ``options`` list)."""
+    member, signed number, ``options`` list).
+
+    ``title`` spells an untitled call's key as its ``title=`` argument: the
+    re-parsed call has lost the declaration that named it."""
     parts = [_spell_input_arg(a) for a in node.args]
     parts += [None if (v := _spell_input_arg(value)) is None else f"{key}={v}"
               for key, value in node.kwargs.items()]
+    if title is not None:
+        parts.append(f"title={pine_string_literal(title)}")
     callee = _spell_input_arg(node.callee)
     if callee is None or None in parts:
         return None
@@ -77,6 +84,50 @@ def _spell_input_arg(node) -> str | None:
         elems = [_spell_input_arg(e) for e in node.elements]
         return None if None in elems else "[" + ", ".join(elems) + "]"
     return None
+
+
+# Statement fields holding a local block. Pine declares script inputs at
+# global scope only.
+_LOCAL_SCOPE_FIELDS = frozenset({"body", "else_body", "default_body"})
+
+
+def global_input_calls(node) -> Iterator[FuncCall]:
+    """The input calls ``node`` makes at global scope, in source order -- not
+    inside if/for/while/switch blocks or callable bodies."""
+    if isinstance(node, list):
+        for item in node:
+            yield from global_input_calls(item)
+        return
+    if not isinstance(node, ASTNode) or isinstance(node, (FuncDef, MethodDef)):
+        return
+    if is_input_call(node):
+        yield node
+        return
+    for f in dataclasses.fields(node):
+        if f.name in ("loc", "annotations") or f.name in _LOCAL_SCOPE_FIELDS:
+            continue
+        value = getattr(node, f.name)
+        if f.name == "cases":
+            value = [case_expr for case_expr, _stmts in value]
+        elif isinstance(value, dict):
+            value = list(value.values())
+        yield from global_input_calls(value)
+
+
+def input_binding_names(body) -> dict[int, str]:
+    """``id(call) -> name`` for every global-scope input call a declaration
+    names: the call bound straight to ``name = input.*()``, and any call in a
+    ``var`` / ``varip`` initializer. TradingView keys an input with no title
+    by that variable name ("If not specified, the variable name is used as the
+    input's title"), and so does every PineForge getter and the manifest."""
+    names: dict[int, str] = {}
+    for stmt in body or []:
+        if not isinstance(stmt, VarDecl):
+            continue
+        for node in global_input_calls(stmt):
+            if stmt.value is node or stmt.is_var or stmt.is_varip:
+                names[id(node)] = stmt.name
+    return names
 
 
 def sub_identifiers(text: str, repl: Callable[[re.Match], str]) -> str:
