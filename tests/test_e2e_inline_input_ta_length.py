@@ -230,6 +230,8 @@ TA_CASES: tuple[Case, ...] = (
          (_int("len", 20, "Stdev Length", 40), _bool("biased", True, "Biased", False))),
     Case("variance", _vs_self("ta.variance(close, {len}, {biased})"),
          (_int("len", 20, "Variance Length", 40), _bool("biased", True, "Biased", False))),
+    Case("valuewhen", _vs_close("ta.valuewhen(close > open, close, {occ})"),
+         (_int("occ", 2, "Occurrence", 3),)),
     Case("vwap_bands",
          '[v, up, lo] = ta.vwap(close, timeframe.change("D"), {mult})\n'
          'if ta.crossover(close, up)\n    strategy.entry("L", strategy.long)\n'
@@ -331,7 +333,7 @@ TA_REGISTRY_CASES = {
     "bb": "bb", "kc": "kc", "sar": "sar", "pivothigh": "pivots",
     "pivotlow": "pivots", "alma": "alma", "mfi": "mfi", "tsi": "tsi",
     "wpr": "wpr", "bbw": "bbw", "kcw": "kcw", "tr": "tr", "stdev": "stdev",
-    "variance": "variance", "vwap_bands": "vwap_bands",
+    "variance": "variance", "valuewhen": "valuewhen", "vwap_bands": "vwap_bands",
 }
 
 ALL_CASES = TA_CASES + SHAPE_CASES
