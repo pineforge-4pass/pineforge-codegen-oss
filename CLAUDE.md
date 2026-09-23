@@ -35,9 +35,9 @@ export PINEFORGE_EIGEN_INCLUDE=../pineforge-engine/build/_deps/eigen-src
 export PINEFORGE_ENGINE_LIB=../pineforge-engine/build/lib/libpineforge.a
 pytest
 
-# Measured 2026-09-23: 3046 passed, 2 skipped, 0 failed (~20-35 min on 16
-# cores, depending on load; the eight tests/test_e2e_*.py modules build and
-# run ~320 strategy libraries, ~4-6 min of it).
+# Measured 2026-09-24: 3146 passed, 2 skipped, 0 failed (~25-40 min on 16
+# cores, depending on load; the thirteen tests/test_e2e_*.py modules build
+# and run their strategy libraries in ~9 min of it).
 #   Skip 1: test_parser.py:350, empty parameter set (pre-existing).
 #   Skip 2: test_codegen_golden.py:39, which needs the engine corpus at
 #           the sibling path and skips when the engine include is
@@ -51,7 +51,7 @@ pytest
 #    must transpile + compile against the engine headers.)
 pytest tests/test_compile_corpus.py
 
-# Measured 2026-09-23: 314 passed in ~6-7 min (load average ~20-190)
+# Measured 2026-09-24: 314 passed in ~6-7 min (load average ~20-190)
 #   (312 corpus/validation probes at corpus gitlink 9182e3d, plus the 2
 #    parity anomalies).
 ```
@@ -181,7 +181,8 @@ tests/
 ├── test_compile_corpus.py          Parametrized over every
 │                                   corpus/<bucket>/<strategy>/strategy.pine
 │                                   from a sibling pineforge-engine
-│                                   checkout (206 strategies, ~47 s).
+│                                   checkout (314 items at corpus gitlink
+│                                   9182e3d, ~6-7 min).
 ├── test_official_surface.py        Locks SUPPORTED_* and signatures.* to
 │                                   the Pine v6 official inventory
 │                                   (sourced from user-pinescript-docs MCP).
@@ -214,9 +215,10 @@ tests/
    AND removing it from any KNOWN_*_OMISSIONS set; new omissions need a
    one-line rationale right next to the constant.
 5. **Every corpus strategy must transpile + compile.**
-  `test_compile_corpus.py` parametrizes over all 206
-   `corpus/*/*/strategy.pine` files. Per the "REQUIRED before claiming
-   any change is done" block at the top of this file, this is a
+  `test_compile_corpus.py` parametrizes over every
+   `corpus/*/*/strategy.pine` file (314 items at corpus gitlink 9182e3d).
+   Per the "REQUIRED before claiming any change is done" block at the top
+   of this file, this is a
    mandatory check on every change — not just changes to `analyzer/` or
    `codegen/` — because parser, lexer, support-checker, and signature
    tweaks can also break corpus strategies via second-order effects.
@@ -229,10 +231,18 @@ tests/
 `pineforge_codegen.support_checker` is the gate. Its job is to fail
 loudly **before** codegen so users never get a silently miscompiled
 strategy. An error raises `CompileError` (carrying every diagnostic); the
-warnings of a script that transpiles (support checker, then analyzer
-`ctx.diagnostics`) come back as `transpile_full(...)["diagnostics"]` and in
-`transpile_json`'s success envelope under `diagnostics`, in the error
-envelope's entry format. The taxonomy:
+warnings of a script that transpiles (support checker, then analyzer and
+codegen `ctx.diagnostics` -- the codegen appends through `_codegen_warning`)
+come back as `transpile_full(...)["diagnostics"]` and in `transpile_json`'s
+success envelope under `diagnostics`, in the error envelope's entry format.
+
+A change must never make a script that transpiles and compiles today fail
+to transpile: when the engine cannot express what such a script asks for, it
+keeps its current lowering and gets a WARNING naming the approximation and
+the missing engine capability. Refuse only a spelling TradingView itself
+rejects, or one that already failed the C++ compile (supervisor rule, since
+C4 W8 lost 15 excellent campaign probes to a refusal of a working shape). The
+taxonomy:
 
 
 | Bucket                           | What                                                                 |
@@ -248,6 +258,9 @@ envelope's entry format. The taxonomy:
 | TF literal validation            | `request.security` / `request.security_lower_tf` `timeframe` string literals validated against Pine v6 format at parse time. |
 | `ta.vwap` anchor                 | The engine's `ta::VWAP` resets only when the symbol's session day changes (`_check_ta_vwap_anchor`). The default anchor -- omitted, or `timeframe.change("1D")` / `("D")`, directly or through a never-reassigned non-`var` binding -- runs exactly. The band form `ta.vwap(src, anchor, mult)` with any other anchor keeps its session-day approximation (its pre-C4 lowering; strategies graded against TradingView rely on it) and WARNS that the anchor is approximated. The 2-arg form with any other anchor is refused naming the missing engine capability (it used to fail the C++ compile). |
 | Input titles (codegen)           | `_check_input_titles` refuses a title that is not a compile-time string constant (TradingView: `title (const string)`) before generation; PineForge keys every override by the title. |
+| Input keys (codegen)             | `_check_input_keys` WARNS, once per override key that several inputs share (the title, else the name of the declaration holding the call: two untitled calls in one declaration, two outside any declaration, an untitled call and another titled with its name, a title repeated across `group=`s), naming every input the key reaches: one override sets all of them. TradingView tells such inputs apart, so the script transpiles unchanged (closed strategies 125-cleightyp and 162-nicocashfx repeat titles across groups and grade excellent at their defaults). |
+| `ta.*` call arguments            | `_check_ta_arguments` binds every `ta.*` call to TradingView's signature (`signatures.TA_FUNCTIONS`: TradingView's parameter names, e.g. `series` for `ta.alma` / `bb` / `bbw` / `cmo` / `kc` / `kcw`, and required/optional split) and refuses what TradingView rejects: an unknown keyword, an argument too many, one given twice or a missing required one -- each used to be dropped, shifted into the next constructor slot or passed to a `compute()` that does not exist. `ta.vwap()` with no argument reads as the bare property, as it always has. |
+| `ta.*` values the engine lacks   | Only the value the engine class computes runs exactly: `ta.alma` `floor` false (`ta::ALMA` has no floor), `ta.kc` / `ta.kcw` `useTrueRange` true (`ta::KC` always averages the true range), `ta.pivot_point_levels` `anchor` true and `developing` false (the emission reads the previous bar's HLC) -- as a literal or through a name bound once to one. Any other value in a spelling that compiled before C5 -- `floor=` / `useTrueRange=` by keyword (the keyword was dropped), every pivot anchor / developing -- keeps that lowering and WARNS naming the approximation and the missing engine capability; a positional `floor` / `useTrueRange` other than that value (it reached a `compute()` overload that does not exist) is refused. |
 | syminfo na-gap warning           | `SUPPORTED_SYMINFO` = every `SYMINFO_MEMBER_MAP` key, but members whose emission is `na<T>()` or a `get_syminfo_metadata(...)` lookup (root/pricescale/minmove/mincontract/current_contract/expiration_date/isin/sector/industry + fundamentals/recommendations/target_price_*) form `_SYMINFO_SILENT_GAP_FIELDS` (derived from the emission table, so new na-accept fields can't drift out): every read WARNS that the value is na until a data feed injects it. |
 
 
@@ -295,7 +308,15 @@ you delete or weaken the special case, the test will tell you.
    prefix heuristics (`"`, `std::string`, `pine_str`) are NOT
    sufficient; bare identifiers and bound results lose their
    string-ness. Booleans go through a TV-style ternary
-   (`(v ? "true" : "false")`) so backtest logs match TradingView.
+   (`(v ? "true" : "false")`) so backtest logs match TradingView. The
+   lowering is `visit_call._str_format_expr`, shared with
+   `log.info` / `log.warning` / `log.error(fmt, arg0, ...)` (TradingView:
+   the second overloads of `log.*()` have "the same parameter signature and
+   formatting behaviors as str.format()"; the arguments used to be dropped);
+   `log.*(message)` logs its message as is. Numbers render through
+   `std::to_string` (six decimals), not TradingView's `#,###.###`, and the
+   engine's `str_format` has no `{0,number,...}` patterns or apostrophe
+   quoting. `tests/test_e2e_log_format.py` pins the log lines end to end.
 4. **Per-call-site TA cloning.** Multiple `ta.sma(close, ...)` call
   sites need separate `ta::SMA` instances (one per call site),
    addressed via `_cs0`, `_cs1`, … suffixes. The analyzer assigns
@@ -371,7 +392,10 @@ you delete or weaken the special case, the test will tell you.
    title used to read as an unknown identifier). An inline call is
    admitted exactly when its bound spelling would be input-backed
    (`_is_stable_inline_input`: not a source input, constant defval); a
-   length that is otherwise a series stays refused. The input manifest
+   length that is otherwise a series stays refused. A generic `input()` is
+   the same leaf in a declared length (`len = input(9) + 1`:
+   `_expr_is_stable` admits it through `_is_stable_inline_input`;
+   `tests/test_e2e_generic_input_length.py`). The input manifest
    lists every global-scope input call, inline ones too, with `title` =
    the key the C++ reads it by. `tests/test_e2e_inline_input_ta_length.py`
    pins it end to end, for every TA constructor.
@@ -388,10 +412,19 @@ you delete or weaken the special case, the test will tell you.
    `occurrence >= 2` read `na`). `ta.vwap`'s anchor reaches neither
    (`TA_COMPUTE_ARGS["vwap"] = [0]`): the support checker admits the default
    anchor, warns on a band form's other anchor, refuses a 2-arg form's.
-   Check a new TA's `compute()` signature in `ta.hpp` for
-   non-source parameters: `ta.alma`'s `floor` and `ta.kc` / `ta.kcw`'s
-   `useTrueRange` still reach `compute()` overloads that do not exist (the
-   TU fails to compile). `tests/test_e2e_ta_change_length_and_input_keys.py`
+   Neither do `ta.alma`'s `floor` nor `ta.kc` /
+   `ta.kcw`'s `useTrueRange` (`TA_COMPUTE_ARGS` alma / kc / kcw = `[0]`;
+   they used to reach `compute()` overloads that do not exist; see "`ta.*`
+   values the engine lacks" for what the support checker warns on). The
+   routing table is the ANALYZER's `TA_COMPUTE_ARGS` (analyzer/tables.py):
+   without an entry every non-constructor argument goes to `compute()`, so a
+   new TA whose `compute()` in `ta.hpp` does not take every such Pine
+   parameter needs one. The one-arg `ta.highest` / `lowest` / `highestbars`
+   / `lowestbars(length)` forms (positional or `length=`) read high / low
+   (`TA_LENGTH_ONLY_DEFAULT_SOURCE`). `tests/test_e2e_ta_argument_routing.py`
+   compares every routed spelling with a spelled-out reference, every warned
+   one with the pre-C5 (e6a64cd) build of the same script, and pins every
+   refusal. `tests/test_e2e_ta_change_length_and_input_keys.py`
    pins `ta.change` bar by bar against `src - src[n]`,
    `tests/test_e2e_valuewhen_occurrence.py` `ta.valuewhen` against a
    spelled-out chain, `tests/test_e2e_vwap_anchor.py` `ta.vwap` against a
@@ -401,18 +434,21 @@ you delete or weaken the special case, the test will tell you.
    lists: the title's value (`_input_title_value`: a literal, a `+` of
    constants, or a never-reassigned non-`var` global name bound to one;
    `_check_input_titles` refuses any other title before generation), else
-   the name of the declaration binding the call
-   (`pine_spelling.input_binding_names`: `v = input.*()`, or any call in a
-   `var` initializer — TradingView: "If not specified, the variable name is
-   used as the input's title"), else `""`. The name comes from the call
-   node, not from the caller, so the member, the TA reset, a
+   the name of the declaration holding the call
+   (`pine_spelling.input_binding_names`: `v = input.*()`, or a call nested
+   anywhere in a declaration's value, `var` or not — TradingView: "If not
+   specified, the variable name is used as the input's title"), else `""`.
+   The name comes from the call node, not from the caller, so the member,
+   the TA reset, a
    request.security timeframe and an alias's read (`b = a`) agree; a call
    re-spelled for a derived length carries it as `title=`, since the
    re-parsed node has no declaration. `_input_key_literal` spells the key
-   as a C++ literal (a title holding `"` or `\` used to break the TU). An
-   untitled call nested in a plain binding (`n = input.int(9) * 2`) is
-   keyed `""` in the manifest and the C++ alike, so two such inputs share
-   one key. `tests/test_e2e_untitled_input_keys.py` and
+   as a C++ literal (a title holding `"` or `\` used to break the TU). Inputs
+   sharing a key cannot be overridden apart, so `_check_input_keys` warns
+   (see "Input keys" above; an untitled call nested in a plain declaration
+   used to be keyed `""`).
+   `tests/test_e2e_untitled_input_keys.py`,
+   `tests/test_e2e_nested_input_keys.py` and
    `tests/test_e2e_input_title_constant.py` pin it end to end.
 13. **A precalculated TA site is built like the live one.** A static chart
    TA site (bar-data `compute()` arguments) is precalculated:
@@ -432,9 +468,16 @@ you delete or weaken the special case, the test will tell you.
    not change": `\T`, `\r`, `\u`, `\x`, `\0`, ...). A value reaches C++
    through `_cpp_string_escape` (escapes `\n`, `\r`, `\t`) and a Pine
    re-spelling through `pine_string_literal` (spells `\n`, `\t`). A
-   multiline `"""..."""` literal is not lexed as one (it reads as `""`).
-   `tests/test_e2e_string_escapes.py` pins each escape through the
-   manifest, an override and per-bar `str.*` traces.
+   multiline `"""..."""` / `'''...'''` literal (`_read_multiline`) is
+   everything up to the first three unescaped delimiter quotes, line breaks
+   as U+000A and indentation kept; a single-line literal that continues on
+   an indented line reads the break as one space (the manual's deprecated
+   line wrapping); one never closed is refused at its opening quote. A
+   `// @pf-trace` line inside a multiline string is still read as a pragma
+   (the pragma pre-pass scans raw lines). `tests/test_e2e_string_escapes.py`
+   and `tests/test_e2e_multiline_strings.py` pin each escape and the
+   manual's multiline examples through the manifest, an override and
+   per-bar `str.*` traces.
 15. **Top-level lazy-edge `ta.*` sites whose history is read are hoisted to
     every-bar evaluation.** TradingView (pinned 2026-09-03 with `lab tv`,
     NYSE:F 1D) advances a stateful `ta.*` call on EVERY bar when it sits below
@@ -474,7 +517,9 @@ you delete or weaken the special case, the test will tell you.
 
 Worked example: adding hypothetical `ta.foo(source, length)`.
 
-1. **Signature** — `signatures.py`:
+1. **Signature** — `signatures.py`, with TradingView's parameter names
+  and required/optional split (a default marks an optional parameter): the
+  support checker binds every call to it and refuses what does not bind.
   ```python
    _ta("foo", _sig([("source", F), ("length", I)]))
   ```
@@ -483,10 +528,14 @@ Worked example: adding hypothetical `ta.foo(source, length)`.
    TA_CLASS_MAP["foo"] = "ta::Foo"
    TA_PERIOD_ARG["foo"] = 1            # length-arg index
   ```
-3. **Codegen dispatch** — `codegen/tables.py`:
+3. **Compute routing** — `analyzer/tables.py` (the table that routes;
+  `codegen/tables.py` keeps a descriptive copy):
   ```python
    TA_COMPUTE_ARGS["foo"] = [0]         # which positional args go to .compute()
   ```
+  Without an entry every non-constructor argument reaches `.compute()`: add
+  one whenever `ta::Foo::compute` does not take every such Pine parameter,
+  and refuse (support checker) a parameter value the class cannot compute.
 4. **Support whitelist** — `support_checker.py`:
   `SUPPORTED_TA` is derived from `TA_CLASS_MAP` automatically; nothing
    to do.
@@ -510,16 +559,16 @@ See "REQUIRED before claiming any change is done" at the top of this
 file for the mandatory verification path. Recap:
 
 ```bash
-# Quick dev loop — pure transpiler, zero native deps. < 1 s.
+# Quick dev loop — pure transpiler, zero native deps. ~10 s.
 # Use during development for fast iteration. NOT sufficient to claim
-# a change is done — the 237 compile tests skip in this mode.
+# a change is done — 837 compile and E2E tests skip in this mode.
 pytest
 
-# REQUIRED before claiming any change is done. ~55 s.
+# REQUIRED before claiming any change is done. ~25-40 min.
 export PINEFORGE_ENGINE_INCLUDE=/path/to/pineforge-engine/include
 pytest
 
-# Subset shortcut — corpus sweep alone (~47 s) when iterating on a
+# Subset shortcut — corpus sweep alone (~6-7 min) when iterating on a
 # change that you suspect specifically affects corpus coverage.
 pytest tests/test_compile_corpus.py
 ```
@@ -529,10 +578,10 @@ Expected counts at HEAD:
 
 | Mode                                                    | passed | skipped | failed |
 | ------------------------------------------------------- | ------ | ------- | ------ |
-| With engine headers + Eigen + a built runtime           | 3046   | 2       | **0**  |
-| Without a resolvable compile environment                | 1974   | 761     | **0**  |
+| With engine headers + Eigen + a built runtime           | 3146   | 2       | **0**  |
+| Without a resolvable compile environment                | 1998   | 837     | **0**  |
 
-Measured 2026-09-23. The 2 skips are `test_parser.py:350` (empty parameter
+Measured 2026-09-24. The 2 skips are `test_parser.py:350` (empty parameter
 set, pre-existing, unrelated) and `test_codegen_golden.py:39` (wants the
 engine corpus at the sibling path). The two modes do not sum to the same
 total: `test_compile_corpus.py` parametrizes over the corpus it can actually
@@ -574,9 +623,10 @@ understanding which once-broken codepath it pins. The xfail->pass
 history is intentional.
 - **Always finish with `PINEFORGE_ENGINE_INCLUDE=... pytest`.** See the
 "REQUIRED before claiming any change is done" block at the top.
-A diff that passes the pure-transpiler tests but fails on 1 / 206
-corpus strategies (or 1 / 31 compile smokes) is still a regression.
-Don't report a change as done until the 944-pass run is green.
+A diff that passes the pure-transpiler tests but fails on 1 / 314
+corpus items (or one compile smoke) is still a regression.
+Don't report a change as done until the full engine-env run (3146 passed,
+measured 2026-09-24) is green.
 - **Don't update the version in `pyproject.toml`** without confirming
 the engine ABI tag listed in the README's version table actually
 exists upstream and exposes the symbols we emit.
