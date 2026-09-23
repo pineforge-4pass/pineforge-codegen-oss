@@ -16,21 +16,17 @@ Mixin contract — host class must provide:
 
 from __future__ import annotations
 
-import dataclasses
-
 from ..ast_nodes import (
-    ASTNode,
     BoolLiteral,
     FuncCall,
-    FuncDef,
     Identifier,
     MemberAccess,
-    MethodDef,
     NumberLiteral,
     StringLiteral,
     VarDecl,
 )
 from .. import signatures as sigs
+from ..pine_spelling import global_input_calls, input_binding_names
 
 
 class InputHelper:
@@ -109,14 +105,9 @@ class InputHelper:
                 return True, members.index(default.member)
         return False, None
 
-    def _get_input_title(self, node: FuncCall, var_name: str | None = None) -> str:
-        """Pull the title string from an ``input(...)`` call.
-
-        Reads positional arg #2 or the ``title=`` kwarg via the
-        signatures registry. When the title isn't a ``StringLiteral``
-        (e.g. computed at runtime), the rendered C++ expression is
-        returned. Falls back to ``var_name`` when no title is provided
-        so generated UI labels still have a stable identity."""
+    def _input_title_node(self, node: FuncCall):
+        """The title argument of an ``input(...)`` call -- positional arg #2 or
+        the ``title=`` kwarg, via the signatures registry -- or None."""
         func_name, namespace = self._resolve_callee(node.callee)
         param_names = None
         if namespace == "input" and func_name in sigs.INPUT_FUNCTIONS:
@@ -132,11 +123,45 @@ class InputHelper:
                     if i >= len(merged) or merged[i] is None:
                         merged[i] = node.kwargs[pname]
             if len(merged) > 1 and merged[1] is not None:
-                title_node = merged[1]
-                if isinstance(title_node, StringLiteral):
-                    return title_node.value
-                return self._visit_expr(title_node)
+                return merged[1]
+        return None
+
+    def _input_binding_names(self) -> dict[int, str]:
+        """``id(call) -> name`` for the global-scope input calls a declaration
+        names (``pine_spelling.input_binding_names``)."""
+        names = getattr(self, "_input_binding_names_cache", None)
+        if names is None:
+            names = input_binding_names(self.ctx.ast.body)
+            self._input_binding_names_cache = names
+        return names
+
+    def _get_input_title(self, node: FuncCall, var_name: str | None = None) -> str:
+        """The key an ``input(...)`` call is read and listed by: its title,
+        else the name of the declaration binding it, else ``var_name``, else
+        "".
+
+        The binding name comes from the call node itself, so every getter of
+        one input -- the member, the TA reset, a request.security timeframe,
+        an alias's read (``b = a``) -- keys it like the manifest does, whatever
+        name the caller passes. When the title isn't a ``StringLiteral``
+        (e.g. computed at runtime), the rendered C++ expression is returned."""
+        title_node = self._input_title_node(node)
+        if title_node is not None:
+            if isinstance(title_node, StringLiteral):
+                return title_node.value
+            return self._visit_expr(title_node)
+        bound = self._input_binding_names().get(id(node))
+        if bound is not None:
+            return bound
         return var_name if var_name else ""
+
+    def _input_spelling_title(self, node: FuncCall) -> str | None:
+        """The key an untitled call's re-spelling must carry as ``title=``:
+        its binding name. A spelled call is re-parsed into a new node, which
+        no declaration names."""
+        if self._input_title_node(node) is not None:
+            return None
+        return self._input_binding_names().get(id(node))
 
     # Native price series accepted as an input.source defval. The analyzer
     # hard-rejects anything else (see support_checker), so a defval reaching
@@ -352,38 +377,12 @@ class InputHelper:
         """
         out: list[dict] = []
         for stmt in self.ctx.ast.body:
-            for node in self._global_input_calls(stmt):
+            for node in global_input_calls(stmt):
                 bound = isinstance(stmt, VarDecl) and (
                     stmt.value is node or stmt.is_var or stmt.is_varip)
                 out.append(self._input_manifest_entry(
                     node, stmt.name if bound else None))
         return out
-
-    # Statement fields holding a local block. Pine declares script inputs at
-    # global scope only.
-    _LOCAL_SCOPE_FIELDS = frozenset({"body", "else_body", "default_body"})
-
-    def _global_input_calls(self, node):
-        """Yield the input calls ``node`` makes at global scope, in source
-        order -- not inside if/for/while/switch blocks or callable bodies."""
-        if isinstance(node, list):
-            for item in node:
-                yield from self._global_input_calls(item)
-            return
-        if not isinstance(node, ASTNode) or isinstance(node, (FuncDef, MethodDef)):
-            return
-        if isinstance(node, FuncCall) and self._is_input_call(node):
-            yield node
-            return
-        for f in dataclasses.fields(node):
-            if f.name in ("loc", "annotations") or f.name in self._LOCAL_SCOPE_FIELDS:
-                continue
-            value = getattr(node, f.name)
-            if f.name == "cases":
-                value = [case_expr for case_expr, _stmts in value]
-            elif isinstance(value, dict):
-                value = list(value.values())
-            yield from self._global_input_calls(value)
 
     def _input_manifest_entry(self, node: FuncCall, var_name: str | None) -> dict:
         func_name, namespace = self._resolve_callee(node.callee)
