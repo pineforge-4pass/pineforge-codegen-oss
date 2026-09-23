@@ -563,3 +563,18 @@ def test_string_constant_needing_escapes_compiles(outcomes) -> None:
     assert digest(a) == digest(b), (
         f"str.length of the constant: {_summary(a)} vs the literal 10's {_summary(b)}")
     print(f"E2E const string: str.length(Q) == 10  {_summary(a)}")
+
+
+def test_ta_change_length_from_a_request_security_helper_param_is_refused(tmp_path) -> None:
+    """A request.security evaluator is a class method, so a TA compute()
+    argument naming a parameter of the helper holding the request is out of
+    scope there -- refused like ``ta.sma(src, 14)`` or ``ta.linreg(close,
+    14, off)`` with ``src`` / ``off`` parameters. Before the length reached
+    compute() this shape transpiled and silently computed a one-bar change."""
+    pine = tmp_path / "strategy.pine"
+    pine.write_text(HEADER + 'htf(n) => request.security(syminfo.tickerid, "60", '
+                    "ta.change(close, n))\nx = htf(14)\n" + _long_on_cross("x", "0"))
+    result = transpile_json(pine)
+    assert not result["ok"], "a helper-parameter length inside request.security transpiled"
+    assert [(d["line"], d["col"], d["message"]) for d in result["diagnostics"]] == [
+        (3, 69, "Unknown variable 'n' — not a PineForge builtin or a declared variable.")]

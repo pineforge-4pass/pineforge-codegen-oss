@@ -174,6 +174,10 @@ TA_MULTI_CTOR = {
 TA_COMPUTE_ARGS = {
     "stdev": [0],
     "variance": [0],
+    # ta::Change's constructor only bounds the kept history; compute() reads
+    # the lookback from its own ``length`` argument (default 1), so the length
+    # goes to both. Without it ``ta.change(src, 14)`` was a one-bar change.
+    "change": [0, 1],
 }
 
 # No-state functions (no constructor args, stateless or self-contained)
