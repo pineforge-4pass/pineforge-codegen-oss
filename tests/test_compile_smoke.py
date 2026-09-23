@@ -755,9 +755,8 @@ kr   = matrix.kron(m, n)
 
 def test_regression_str_format_with_string_typed_args_compiles():
     """``str.format(fmt, sval)`` with any string-typed (not just literal)
-    arg used to double-wrap the value in ``std::to_string``. Now the
-    wrap is gated on the analyzer's inferred PineType, so STRING-typed
-    args pass through unchanged and bool args render TV-style as
+    arg used to double-wrap the value in ``std::to_string``. Typed format
+    arguments now preserve strings and render bool args TV-style as
     ``"true"`` / ``"false"`` rather than ``"1"`` / ``"0"``."""
     skip_if_no_compile_env()
     src = """//@version=6
@@ -767,13 +766,13 @@ a = str.format("{0} bar", sval)
 b = str.format("{0} {1} {2}", close, true, "literal")
 """
     cpp = transpile(src)
-    # The string-typed argument must NOT be wrapped in std::to_string;
-    # the boolean must render TV-style as "true"/"false".
+    # The string-typed argument must not be wrapped in std::to_string;
+    # the formatter's bool overload renders "true"/"false".
     assert "std::to_string(sval)" not in cpp, (
         "str.format double-wrapped a STRING-typed argument; "
-        "regression in the _infer_type-based gate?"
+        "regression in typed format arguments?"
     )
-    assert 'std::string("true")' in cpp, (
+    assert 'text(value ? "true" : "false")' in cpp, (
         "bool args to str.format should render TV-style as \"true\"/\"false\"."
     )
     compile_cpp(cpp, label="regression_str_format_string_args")

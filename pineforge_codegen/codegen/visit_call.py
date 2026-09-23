@@ -2704,36 +2704,11 @@ class CallVisitor:
         return "0"
 
     def _str_format_expr(self, fmt_node, arg_nodes) -> str:
-        """``str.format(fmt, arg0, ...)``: the runtime
-        ``pine_str_format(fmt, vector<string>)`` substitutes ``{i}`` with
-        argument ``i``, every argument already converted to ``std::string``.
-
-        The conversion is keyed on ``_infer_type``: a source-text-prefix
-        heuristic (``"`` / ``std::string`` / ``pine_str``) mis-classified any
-        string-typed bare identifier or string-returning helper call (e.g.
-        ``str.tostring(x)`` bound to a variable), so ``std::string`` args now
-        pass through unchanged. Booleans render as 0/1 via std::to_string;
-        they get the TV-style "true"/"false" so backtest logs and alert
-        messages line up with the TradingView side. Also the lowering of a
-        ``log.*(fmt, arg0, ...)`` message."""
+        """Shared TradingView MessageFormat lowering for str.format and log.*."""
         fmt_arg = self._visit_expr(fmt_node)
-        rest = []
-        for orig in arg_nodes:
-            visited = self._visit_expr(orig)
-            inferred = self._infer_type(orig)
-            if inferred == "std::string":
-                rest.append(visited)
-                continue
-            if inferred == "bool":
-                rest.append(
-                    f'({visited} ? std::string("true") : std::string("false"))'
-                )
-                continue
-            rest.append(f'std::to_string({visited})')
-        if rest:
-            vec = "{" + ", ".join(rest) + "}"
-            return f'pine_str_format({fmt_arg}, {vec})'
-        return fmt_arg
+        rest = [f"_PFTvFormatValue({self._visit_expr(orig)})" for orig in arg_nodes]
+        vec = "{" + ", ".join(rest) + "}"
+        return f'pine_str_format_tv({fmt_arg}, {vec})'
 
     def _visit_str_call(self, func_name: str, node) -> str:
         args = _merge_kwargs(node.args, node.kwargs,
@@ -2753,10 +2728,16 @@ class CallVisitor:
                         return (
                             f"pine_enum_str_at({et}_str_values, {n}, {var})"
                         )
+            inferred = self._infer_type(val_arg) if val_arg is not None else ""
+            if inferred == "std::string":
+                return args[0] if args else 'std::string("")'
+            if inferred == "bool":
+                return (f'({args[0]} ? std::string("true") : '
+                        'std::string("false"))')
             if len(args) >= 2:
-                return f"pine_str_tostring({args[0]}, {args[1]}, syminfo_mintick_)"
+                return f"pine_str_tostring_tv({args[0]}, {args[1]}, syminfo_mintick_)"
             if len(args) >= 1:
-                return f"std::to_string({args[0]})"
+                return f"pine_str_tostring_tv({args[0]}, std::string(), syminfo_mintick_)"
             return 'std::string("")'
 
         if func_name == "substring":

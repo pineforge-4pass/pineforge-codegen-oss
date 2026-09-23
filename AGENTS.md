@@ -35,8 +35,8 @@ export PINEFORGE_EIGEN_INCLUDE=../pineforge-engine/build/_deps/eigen-src
 export PINEFORGE_ENGINE_LIB=../pineforge-engine/build/lib/libpineforge.a
 pytest
 
-# Measured 2026-09-24: 3147 passed, 2 skipped, 0 failed (~25-40 min on 16
-# cores, depending on load; the fourteen tests/test_e2e_*.py modules build
+# Measured 2026-09-24: 3156 passed, 2 skipped, 0 failed (~25-40 min on 16
+# cores, depending on load; the nineteen tests/test_e2e_*.py modules build
 # and run their strategy libraries in ~9 min of it).
 #   Skip 1: test_parser.py:350, empty parameter set (pre-existing).
 #   Skip 2: test_codegen_golden.py:39, which needs the engine corpus at
@@ -308,20 +308,22 @@ you delete or weaken the special case, the test will tell you.
    the LHS as `PineMatrix` instead of the analyzer's default `double`.
    Methods returning primitives (`det`, `rank`, `trace`, …) or arrays
    (`row`, `col`, `eigenvalues`) must NOT be in the set.
-3. `**str.format(fmt, ...)`** uses `_infer_type` (codegen/types.py) to
-  decide whether to wrap each arg in `std::to_string`. Source-text
-   prefix heuristics (`"`, `std::string`, `pine_str`) are NOT
-   sufficient; bare identifiers and bound results lose their
-   string-ness. Booleans go through a TV-style ternary
-   (`(v ? "true" : "false")`) so backtest logs match TradingView. The
-   lowering is `visit_call._str_format_expr`, shared with
+3. **`str.format` / `str.tostring` / `log.*` number text.** The emitted
+   helper in `codegen/tv_number_format.py` takes typed format arguments and
+   renders TradingView's `#,###.###` default for `str.format`, its
+   `{0,number,...}` styles and apostrophe quoting, and `str.tostring`'s
+   `#.##########` default, custom `#`/`0`/`%` patterns, percent and volume.
+   `format.mintick` delegates to the engine's tick-rounding formatter.
+   The lowering is `visit_call._str_format_expr`, shared with
    `log.info` / `log.warning` / `log.error(fmt, arg0, ...)` (TradingView:
    the second overloads of `log.*()` have "the same parameter signature and
    formatting behaviors as str.format()"; the arguments used to be dropped);
-   `log.*(message)` logs its message as is. Numbers render through
-   `std::to_string` (six decimals), not TradingView's `#,###.###`, and the
-   engine's `str_format` has no `{0,number,...}` patterns or apostrophe
-   quoting. `tests/test_e2e_log_format.py` pins the log lines end to end.
+   `log.*(message)` logs its message as is. The engine's `str_format` only
+   substitutes plain `{i}`; its `str_tostring` uses six fixed decimals by
+   default, multiplies `format.percent` by 100, and retains two decimals for
+   every volume. The codegen helper covers those gaps without an engine ABI
+   change. `tests/test_e2e_tv_number_rendering.py` pins 28 TradingView order
+   Signals, while `tests/test_e2e_log_format.py` pins dynamic log lines.
    `signatures.py` names the first `str.format` parameter `formatString`,
    and the call visitor binds `str.format(formatString="...")`.
 4. **Per-call-site TA cloning.** Multiple `ta.sma(close, ...)` call
@@ -569,7 +571,7 @@ file for the mandatory verification path. Recap:
 ```bash
 # Quick dev loop — pure transpiler, zero native deps. ~10 s.
 # Use during development for fast iteration. NOT sufficient to claim
-# a change is done — 838 compile and E2E tests skip in this mode.
+# a change is done — 843 compile and E2E tests skip in this mode.
 pytest
 
 # REQUIRED before claiming any change is done. ~25-40 min.
@@ -586,8 +588,8 @@ Expected counts at HEAD:
 
 | Mode                                                    | passed | skipped | failed |
 | ------------------------------------------------------- | ------ | ------- | ------ |
-| With engine headers + Eigen + a built runtime           | 3147   | 2       | **0**  |
-| Without a resolvable compile environment                | 1998   | 838     | **0**  |
+| With engine headers + Eigen + a built runtime           | 3156   | 2       | **0**  |
+| Without a resolvable compile environment                | 2002   | 843     | **0**  |
 
 Measured 2026-09-24. The 2 skips are `test_parser.py:350` (empty parameter
 set, pre-existing, unrelated) and `test_codegen_golden.py:39` (wants the
@@ -633,7 +635,7 @@ history is intentional.
 "REQUIRED before claiming any change is done" block at the top.
 A diff that passes the pure-transpiler tests but fails on 1 / 314
 corpus items (or one compile smoke) is still a regression.
-Don't report a change as done until the full engine-env run (3147 passed,
+Don't report a change as done until the full engine-env run (3156 passed,
 measured 2026-09-24) is green.
 - **Don't update the version in `pyproject.toml`** without confirming
 the engine ABI tag listed in the README's version table actually
