@@ -321,6 +321,8 @@ you delete or weaken the special case, the test will tell you.
    `std::to_string` (six decimals), not TradingView's `#,###.###`, and the
    engine's `str_format` has no `{0,number,...}` patterns or apostrophe
    quoting. `tests/test_e2e_log_format.py` pins the log lines end to end.
+   `signatures.py` names the first `str.format` parameter `formatString`,
+   and the call visitor binds `str.format(formatString="...")`.
 4. **Per-call-site TA cloning.** Multiple `ta.sma(close, ...)` call
   sites need separate `ta::SMA` instances (one per call site),
    addressed via `_cs0`, `_cs1`, … suffixes. The analyzer assigns

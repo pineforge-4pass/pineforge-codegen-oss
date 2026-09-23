@@ -165,7 +165,6 @@ from .tables import (
     MATRIX_METHODS,
     MATRIX_METHOD_KWARGS,
     MATRIX_NUMERIC_ONLY,
-    MATRIX_SORT_ALLOWED_GENERIC_ELEMS,
     SKIP_FUNC_NAMES,
     SKIP_NAMESPACES,
     SKIP_VAR_TYPES,
@@ -173,7 +172,6 @@ from .tables import (
     TIME_FIELD_EXPRS,
     _math_minmax_na_expr,
     _merge_kwargs,
-    tz_time_field_lambda,
 )
 
 
@@ -2769,8 +2767,10 @@ class CallVisitor:
             return 'std::string("")'
 
         if func_name == "format":
-            if node.args:
-                return self._str_format_expr(node.args[0], node.args[1:])
+            format_node = (node.args[0] if node.args
+                           else node.kwargs.get("formatString"))
+            if format_node is not None:
+                return self._str_format_expr(format_node, node.args[1:])
             return 'std::string("")'
 
         if func_name == "format_time":
