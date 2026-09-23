@@ -26,14 +26,15 @@ def test_string_with_backslash_is_escaped():
 
 
 def test_input_title_with_quotes_and_backslashes_is_escaped():
-    # Every getter reading the input -- the member, the TA reset, a source
-    # input and its precalculate() replay, an inline call -- keys it by a C++
-    # literal of the title (the E2E compiles, runs and overrides these).
+    # Every getter reading the input -- the member, the TA reset and the two
+    # precalculate() constructions of the EMA, a source input and its
+    # precalculate() replay, an inline call -- keys it by a C++ literal of the
+    # title (the E2E compiles, runs and overrides these).
     cpp = _cpp('len = input.int(9, "He said \\"fast\\" \\\\ C:\\\\bars")\n'
                "src = input.source(close, 'px \"q\"')\n"
                'x = ta.ema(src, len) + input.float(0.0, "off \\"pts\\"")\n'
                "plot(x)")
-    assert cpp.count(r'get_input_int("He said \"fast\" \\ C:\\bars", 9)') == 2
+    assert cpp.count(r'get_input_int("He said \"fast\" \\ C:\\bars", 9)') == 4
     assert r'get_input_source("px \"q\"", _src_close_)' in cpp
     assert r'get_input_double("off \"pts\"", 0.0)' in cpp
     assert '"He said "fast"' not in cpp  # the broken (unescaped) form
