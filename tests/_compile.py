@@ -180,6 +180,12 @@ _COMPILER = _resolve_compiler()
 _GENERATED_INC = _resolve_generated_include(_ENGINE_INC)
 _ENGINE_LIB = _resolve_engine_lib()
 
+# Every compile that emits code for a strategy TU passes these. The engine
+# builds libpineforge with -ffp-contract=off and hands it to every CMake
+# consumer (TradingView's runtime has no FMA, so each multiply-add rounds
+# twice); without it AppleClang and aarch64 g++ fuse a * b + c even at -O0.
+STRATEGY_FP_FLAGS = ("-ffp-contract=off",)
+
 
 def have_compile_env() -> bool:
     """Cheap check used by parametrized tests to decide collection."""
@@ -364,7 +370,7 @@ def run_emitted_tu(cpp_source: str, driver_main: str, *, opt: str,
         drv.write_text('#include "generated.cpp"\n' + driver_main)
         exe = Path(tmpdir) / "driver"
         cmd = [
-            _COMPILER, "-std=c++17", opt,
+            _COMPILER, "-std=c++17", opt, *STRATEGY_FP_FLAGS,
             *_include_flags(isolate_headers=True),
             "-I", tmpdir, str(drv), str(_ENGINE_LIB), "-o", str(exe),
         ]

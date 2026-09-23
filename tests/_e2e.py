@@ -130,8 +130,8 @@ def build_strategy_library(cpp: str, workdir: Path) -> None:
         link = [f"-Wl,-force_load,{lib}"]
     else:
         link = ["-Wl,--whole-archive", lib, "-Wl,--no-whole-archive"]
-    cmd = [compile_env._COMPILER, "-std=c++17", "-O2", "-fPIC", "-shared",
-           *compile_env._include_flags(isolate_headers=True),
+    cmd = [compile_env._COMPILER, "-std=c++17", "-O2", *compile_env.STRATEGY_FP_FLAGS,
+           "-fPIC", "-shared", *compile_env._include_flags(isolate_headers=True),
            str(workdir / "generated.cpp"), *link, "-o", str(workdir / "strategy.so")]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:

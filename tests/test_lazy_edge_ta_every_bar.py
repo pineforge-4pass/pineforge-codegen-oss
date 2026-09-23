@@ -664,7 +664,8 @@ def _compile_and_run(source: str) -> str:
         cpp = Path(tmp) / "lazy_edge.cpp"
         exe = Path(tmp) / "lazy_edge"
         cpp.write_text(source)
-        command = [compiler, "-std=c++17", "-O0", "-I", str(engine_inc), "-I", str(eigen_inc)]
+        command = [compiler, "-std=c++17", "-O0",
+                   *compile_env.STRATEGY_FP_FLAGS, "-I", str(engine_inc), "-I", str(eigen_inc)]
         if compile_env._GENERATED_INC is not None:
             command += ["-I", str(compile_env._GENERATED_INC)]
         command += [str(cpp), str(engine_lib), "-pthread", "-o", str(exe)]

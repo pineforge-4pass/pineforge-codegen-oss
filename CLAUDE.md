@@ -35,8 +35,8 @@ export PINEFORGE_EIGEN_INCLUDE=../pineforge-engine/build/_deps/eigen-src
 export PINEFORGE_ENGINE_LIB=../pineforge-engine/build/lib/libpineforge.a
 pytest
 
-# Measured 2026-09-24: 3146 passed, 2 skipped, 0 failed (~25-40 min on 16
-# cores, depending on load; the thirteen tests/test_e2e_*.py modules build
+# Measured 2026-09-24: 3147 passed, 2 skipped, 0 failed (~25-40 min on 16
+# cores, depending on load; the fourteen tests/test_e2e_*.py modules build
 # and run their strategy libraries in ~9 min of it).
 #   Skip 1: test_parser.py:350, empty parameter set (pre-existing).
 #   Skip 2: test_codegen_golden.py:39, which needs the engine corpus at
@@ -165,6 +165,9 @@ tests/
 │                                   PINEFORGE_ENGINE_INCLUDE +
 │                                   PINEFORGE_EIGEN_INCLUDE + CXX env vars.
 │                                   Cleanly skips when env is missing.
+│                                   STRATEGY_FP_FLAGS (-ffp-contract=off,
+│                                   as the engine builds) goes on every
+│                                   compile that emits a strategy TU.
 ├── _e2e.py                         Shared harness of the test_e2e_*.py
 │                                   modules: transpile through gate/glue.py
 │                                   transpile_json, build the TU against the
@@ -561,7 +564,7 @@ file for the mandatory verification path. Recap:
 ```bash
 # Quick dev loop — pure transpiler, zero native deps. ~10 s.
 # Use during development for fast iteration. NOT sufficient to claim
-# a change is done — 837 compile and E2E tests skip in this mode.
+# a change is done — 838 compile and E2E tests skip in this mode.
 pytest
 
 # REQUIRED before claiming any change is done. ~25-40 min.
@@ -578,8 +581,8 @@ Expected counts at HEAD:
 
 | Mode                                                    | passed | skipped | failed |
 | ------------------------------------------------------- | ------ | ------- | ------ |
-| With engine headers + Eigen + a built runtime           | 3146   | 2       | **0**  |
-| Without a resolvable compile environment                | 1998   | 837     | **0**  |
+| With engine headers + Eigen + a built runtime           | 3147   | 2       | **0**  |
+| Without a resolvable compile environment                | 1998   | 838     | **0**  |
 
 Measured 2026-09-24. The 2 skips are `test_parser.py:350` (empty parameter
 set, pre-existing, unrelated) and `test_codegen_golden.py:39` (wants the
@@ -625,7 +628,7 @@ history is intentional.
 "REQUIRED before claiming any change is done" block at the top.
 A diff that passes the pure-transpiler tests but fails on 1 / 314
 corpus items (or one compile smoke) is still a regression.
-Don't report a change as done until the full engine-env run (3146 passed,
+Don't report a change as done until the full engine-env run (3147 passed,
 measured 2026-09-24) is green.
 - **Don't update the version in `pyproject.toml`** without confirming
 the engine ABI tag listed in the README's version table actually
