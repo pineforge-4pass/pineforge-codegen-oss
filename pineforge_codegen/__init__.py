@@ -4,8 +4,10 @@ from .lexer import Lexer
 from .parser import Parser
 from .analyzer import Analyzer
 from .codegen import CodeGen
+from .errors import CompileError, Level
 from .finite_ta_length import expand_finite_choice_extrema_lengths
 from .pragmas import extract_pf_trace_pragmas
+from .support_checker import check_support as _support_diagnostics
 from .support_checker import check_support_or_raise
 
 
@@ -72,17 +74,25 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
       :meth:`CodeGen.extract_input_manifest`.
     - ``strategyParams``: the literal ``strategy(...)`` kwargs the analyzer
       surfaced (e.g. ``initial_capital``, ``pyramiding``).
+    - ``diagnostics``: the warnings (:class:`~pineforge_codegen.errors.Diagnostic`,
+      ``Level.WARNING``) the support checker and the analyzer raised for a
+      script that transpiled -- e.g. an approximated ``ta.vwap`` anchor. An
+      error still raises ``CompileError``, which carries the warnings too.
 
     Args mirror :func:`transpile`.
 
     Returns:
-        ``{"cpp": str, "inputs": list[dict], "strategyParams": dict}``.
+        ``{"cpp": str, "inputs": list[dict], "strategyParams": dict,
+        "diagnostics": list[Diagnostic]}``.
     """
     pragmas = extract_pf_trace_pragmas(pine_source)
     tokens = Lexer(pine_source, filename=filename).tokenize()
     ast = Parser(tokens, source=pine_source, filename=filename).parse()
+    support_diagnostics = []
     if check_support:
-        check_support_or_raise(ast, filename=filename)
+        support_diagnostics = _support_diagnostics(ast, filename=filename)
+        if any(d.level == Level.ERROR for d in support_diagnostics):
+            raise CompileError(support_diagnostics)
     ast = expand_finite_choice_extrema_lengths(ast)
     ctx = Analyzer(ast, filename=filename).analyze()
     ctx.pf_trace_pragmas = pragmas
@@ -92,4 +102,6 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
         "cpp": cpp,
         "inputs": gen.extract_input_manifest(),
         "strategyParams": dict(ctx.strategy_params),
+        "diagnostics": [d for d in (*support_diagnostics, *ctx.diagnostics)
+                        if d.level == Level.WARNING],
     }

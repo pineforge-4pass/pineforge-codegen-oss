@@ -13,23 +13,31 @@ from pineforge_codegen import transpile_full
 from pineforge_codegen.errors import CompileError
 
 
+def _diagnostic_entries(diagnostics) -> list:
+    diags = []
+    for d in diagnostics:
+        loc = d.location
+        message = d.message + " — " + d.hint if getattr(d, "hint", None) else d.message
+        entry = {
+            "line": loc.line if loc else 1,
+            "col": loc.col if loc else 1,
+            "message": message,
+            "severity": getattr(d.level, "value", "error"),
+        }
+        end_col = getattr(loc, "end_col", None) if loc else None
+        if end_col is not None:
+            entry["endCol"] = end_col
+        diags.append(entry)
+    return diags
+
+
 def transpile_json(source: str) -> str:
     try:
         full = transpile_full(source)
     except CompileError as e:
-        diags = []
-        for d in e.diagnostics:
-            loc = d.location
-            message = d.message + " — " + d.hint if getattr(d, "hint", None) else d.message
-            entry = {
-                "line": loc.line if loc else 1,
-                "col": loc.col if loc else 1,
-                "message": message,
-                "severity": getattr(d.level, "value", "error"),
-            }
-            end_col = getattr(loc, "end_col", None) if loc else None
-            if end_col is not None:
-                entry["endCol"] = end_col
-            diags.append(entry)
-        return json.dumps({"ok": False, "error": str(e), "diagnostics": diags})
-    return json.dumps({"ok": True, "cpp": full["cpp"], "inputs": full["inputs"], "strategyParams": full["strategyParams"]})
+        return json.dumps({"ok": False, "error": str(e),
+                           "diagnostics": _diagnostic_entries(e.diagnostics)})
+    # A script that transpiled carries its warnings in the same entry format.
+    return json.dumps({"ok": True, "cpp": full["cpp"], "inputs": full["inputs"],
+                       "strategyParams": full["strategyParams"],
+                       "diagnostics": _diagnostic_entries(full["diagnostics"])})

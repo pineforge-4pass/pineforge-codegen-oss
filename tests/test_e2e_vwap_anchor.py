@@ -1,5 +1,6 @@
-"""E2E: every ``ta.vwap`` form either computes the anchored VWAP exactly or is
-refused at transpile time (lane C4, defect 3).
+"""E2E: every ``ta.vwap`` form computes the anchored VWAP exactly, runs its
+pre-C4 session-day approximation with a warning, or is refused at transpile
+time (lane C4, defect 3).
 
 TradingView (Pine v6 reference, ``ta.vwap``): ``anchor (series bool) The
 condition that triggers the reset of VWAP calculations. When true,
@@ -12,7 +13,7 @@ session day changes -- exactly the default anchor -- and has no input for any
 other. The codegen forwarded the 2-argument form's anchor to a
 ``compute()`` overload that does not exist (the TU failed to compile), and
 dropped the 3-argument band form's anchor (a daily VWAP whatever the
-anchor). Now:
+anchor), silently. Now:
 
 * an anchor spelling ``timeframe.change("1D")`` (or ``"D"``) -- directly or
   through a never-reassigned binding -- is the default and runs on the
@@ -21,8 +22,15 @@ anchor). Now:
   (running sums of ``src * volume``, ``volume`` and ``src * src * volume``
   reset where ``timeframe.change("1D")`` is true), and a strategy trading on
   it must book the reference's trades;
-* any other anchor is refused by ``transpile_json`` with a diagnostic
-  naming the missing engine capability.
+* the band form ``ta.vwap(src, anchor, mult)`` with any other anchor keeps
+  its pre-C4 lowering -- the anchor dropped, the engine's session-day VWAP
+  -- and ``transpile_json`` now says so in a warning (supervisor ruling:
+  a strategy relying on that approximation grades excellent against
+  TradingView, so refusing it lost correct results); its trades must equal
+  the build of the same script transpiled by the pre-C4 codegen
+  (``PRE_C4``, via ``git archive``), whose C++ is compared too;
+* the 2-argument form with any other anchor, which never compiled before,
+  is refused with a diagnostic naming the missing engine capability.
 
 The reference's sums start at 0 on the first bar, as the engine's do. The
 Pine reference adds "Calculations only begin the first time the anchor
@@ -49,7 +57,8 @@ import pytest
 
 from tests._e2e import (
     Build, Outcome, derive_chart_feed, digest, execute_all, ok,
-    per_bar_mismatches, skip_unless_e2e_env, summary, transpile_json,
+    per_bar_mismatches, reference_codegen, skip_unless_e2e_env, summary,
+    transpile_json,
 )
 
 
@@ -134,6 +143,58 @@ ANCHOR_REFUSAL = (
 )
 
 
+ANCHOR_APPROXIMATION = (
+    "ta.vwap anchor is approximated: the engine's ta::VWAP has no "
+    "reset-on-anchor input yet and resets only when the symbol's session day "
+    "changes, so this band form ignores its anchor and runs the session-day "
+    "VWAP. — Omit the anchor or pass timeframe.change(\"1D\") to run it "
+    "exactly."
+)
+
+# The codegen before lane C4 (db003cb, origin/main when C4 began its
+# amendment): the band form dropped its anchor.
+PRE_C4 = "db003cbde884b5a40a99fc9aa72b998fb7279134"
+_SESSION_ANCHOR = ("anchorTs = timestamp(\"America/New_York\", year, month, dayofmonth, 9, 30)\n"
+                   "isNewNy = time >= anchorTs and (na(time[1]) or time[1] < anchorTs)\n")
+
+
+@dataclass(frozen=True)
+class Approximated:
+    """A band form with a non-default anchor: accepted with
+    ``ANCHOR_APPROXIMATION`` at ``(line, col)`` of its anchor, and trading
+    exactly like ``PRE_C4``'s transpile of ``pre_c4_body`` (the same body; a
+    keyword spelling, which did not compile there, uses its positional
+    twin)."""
+    name: str
+    body: str
+    line: int
+    col: int
+    pre_c4_body: str | None = None
+
+    def subject(self) -> Build:
+        return Build(HEADER + self.body + TRADE)
+
+    def pre_c4(self, codegen) -> Build:
+        return Build(HEADER + (self.pre_c4_body or self.body) + TRADE, codegen=codegen)
+
+
+APPROXIMATED: tuple[Approximated, ...] = (
+    Approximated("bands_weekly",
+                 '[x, up, lo] = ta.vwap(close, timeframe.change("W"), 1.0)\n', 3, 30),
+    # The closed strategy 125-cleightyp's shape: a New York session anchor.
+    Approximated("bands_session_anchor",
+                 _SESSION_ANCHOR + "[x, up, lo] = ta.vwap(ohlc4, isNewNy, 1)\n", 5, 30),
+    Approximated("bands_keyword_weekly",
+                 '[x, up, lo] = ta.vwap(close, anchor=timeframe.change("W"), stdev_mult=1.0)\n',
+                 3, 37,
+                 pre_c4_body='[x, up, lo] = ta.vwap(close, timeframe.change("W"), 1.0)\n'),
+    Approximated("bands_all_keywords_custom",
+                 "[x, up, lo] = ta.vwap(source=ohlc4, anchor=close > open, stdev_mult=2)\n",
+                 3, 44, pre_c4_body="[x, up, lo] = ta.vwap(ohlc4, close > open, 2)\n"),
+)
+APPROXIMATED_BY_NAME = {c.name: c for c in APPROXIMATED}
+
+
 @dataclass(frozen=True)
 class Refused:
     """``body`` is refused with ``ANCHOR_REFUSAL`` at ``(line, col)`` of its
@@ -149,11 +210,8 @@ REFUSED: tuple[Refused, ...] = (
     Refused("two_arg_custom_bool", "x = ta.vwap(close, close > open)\n", 3, 20),
     Refused("two_arg_keyword_weekly",
             'x = ta.vwap(source=close, anchor=timeframe.change("1W"))\n', 3, 34),
-    Refused("bands_weekly", '[x, up, lo] = ta.vwap(close, timeframe.change("W"), 1.0)\n', 3, 30),
-    Refused("bands_session_anchor",
-            "anchorTs = timestamp(\"America/New_York\", year, month, dayofmonth, 9, 30)\n"
-            "isNewNy = time >= anchorTs and (na(time[1]) or time[1] < anchorTs)\n"
-            "[x, up, lo] = ta.vwap(ohlc4, isNewNy, 1)\n", 5, 30),
+    Refused("two_arg_session_anchor",
+            _SESSION_ANCHOR + "x = ta.vwap(ohlc4, isNewNy)\n", 5, 20),
     # A binding of the daily anchor that is reassigned, or persistent, is not
     # the default anchor.
     Refused("reassigned_alias",
@@ -174,11 +232,18 @@ def outcomes(request, tmp_path_factory) -> dict[str, Outcome]:
     base = tmp_path_factory.mktemp("e2e_vwap_anchor")
     feed = derive_chart_feed(engine_root, base / "ohlcv_ETH-USDT-USDT_15m.csv")
     builds: dict[str, Build] = {}
+    pre_c4 = reference_codegen(PRE_C4)
     for item in request.session.items:
-        if getattr(item, "originalname", None) == "test_vwap_anchor_form_equals_spelled_out":
+        name = getattr(item, "originalname", None)
+        if name == "test_vwap_anchor_form_equals_spelled_out":
             case = ACCEPTED_BY_NAME[item.callspec.params["case_name"]]
             builds[f"{case.name}/subject"] = case.subject()
             builds[f"{case.name}/reference"] = case.reference()
+        elif name == "test_band_form_anchor_is_approximated_with_a_warning":
+            approx = APPROXIMATED_BY_NAME[item.callspec.params["case_name"]]
+            builds[f"{approx.name}/subject"] = approx.subject()
+            if pre_c4 is not None:
+                builds[f"{approx.name}/pre_c4"] = approx.pre_c4(pre_c4)
     return execute_all(engine_root, feed, base, builds)
 
 
@@ -198,6 +263,26 @@ def test_vwap_anchor_form_equals_spelled_out(case_name: str, outcomes) -> None:
     assert not failures, f"[{case_name}] " + "\n  ".join(failures)
     print(f"E2E vwap {case_name}: ta.vwap == spelled-out anchored VWAP  "
           f"{compared} traced values equal, {summary(a)}")
+
+
+@pytest.mark.parametrize("case_name", list(APPROXIMATED_BY_NAME))
+def test_band_form_anchor_is_approximated_with_a_warning(case_name: str, outcomes) -> None:
+    case = APPROXIMATED_BY_NAME[case_name]
+    subject = ok(outcomes, f"{case_name}/subject")
+    if f"{case_name}/pre_c4" not in outcomes:
+        pytest.skip(f"the pre-C4 codegen ({PRE_C4[:12]}) is not in this checkout's history")
+    pre_c4 = ok(outcomes, f"{case_name}/pre_c4")
+    warnings = [(d["line"], d["col"], d["message"])
+                for d in subject.transpiled.get("diagnostics", [])
+                if d["severity"] == "warning" and d["message"].startswith("ta.vwap")]
+    assert warnings == [(case.line, case.col, ANCHOR_APPROXIMATION)], (
+        f"[{case_name}] warnings {subject.transpiled.get('diagnostics')}")
+    a, b = subject.trades["default"], pre_c4.trades["default"]
+    assert digest(a) == digest(b), (
+        f"[{case_name}] trades {summary(a)} vs the pre-C4 build's {summary(b)}")
+    same_cpp = subject.transpiled["cpp"] == pre_c4.transpiled["cpp"]
+    print(f"E2E vwap {case_name}: warned at {case.line}:{case.col}, trades == pre-C4 "
+          f"({PRE_C4[:7]}) build  {summary(a)}  C++ identical to pre-C4: {same_cpp}")
 
 
 @pytest.mark.parametrize("case_name", list(REFUSED_BY_NAME))
