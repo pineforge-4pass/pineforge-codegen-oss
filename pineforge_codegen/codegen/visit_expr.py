@@ -654,7 +654,7 @@ class ExprVisitor:
             if ns == "ta":
                 if node.member == "tr":
                     return ("(std::isnan(_s_close[1]) ? "
-                            "(current_bar_.high - current_bar_.low) : "
+                            "na<double>() : "
                             "std::max(current_bar_.high - current_bar_.low, "
                             "std::max(std::abs(current_bar_.high - _s_close[1]), "
                             "std::abs(current_bar_.low - _s_close[1]))))")
@@ -685,7 +685,6 @@ class ExprVisitor:
                     for _i, site in _candidates:
                         if _i is None or _i in self._dead_ta_indices:
                             continue
-                        ta_short = site.class_name.split("::")[-1].lower()
                         if site.member_name.startswith(f"_ta_{node.member}_"):
                             if node.member == "vwap":
                                 # Same implicit tail as TA_IMPLICIT_APPEND["vwap"]:
