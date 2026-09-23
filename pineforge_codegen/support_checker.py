@@ -1756,16 +1756,30 @@ class SupportChecker:
     _VWAP_DAILY_ANCHOR_TFS = frozenset({"D", "1D"})
 
     def _check_ta_vwap_anchor(self, node: FuncCall) -> None:
-        """Refuse a ``ta.vwap`` anchor the engine cannot run.
+        """Refuse or flag a ``ta.vwap`` anchor the engine cannot run.
 
         TradingView resets the accumulation on every bar where the ``series
         bool`` anchor is true. The engine's ``ta::VWAP`` resets only when the
         symbol's session day changes -- the default anchor -- and has no input
         for any other, so the codegen drops the anchor argument: exact for the
-        default, a silently daily VWAP for anything else.
+        default. The band form ``ta.vwap(src, anchor, mult)`` has always run
+        that session-day approximation for any anchor, and strategies graded
+        against TradingView rely on it, so it keeps it and says so in a
+        warning; the 2-argument form never compiled with an anchor, so any
+        anchor but the default stays refused.
         """
         anchor = node.args[1] if len(node.args) > 1 else node.kwargs.get("anchor")
         if anchor is None or self._is_daily_timeframe_change(anchor):
+            return
+        if len(node.args) > 2 or "stdev_mult" in node.kwargs:
+            self._warn(
+                expr_start(anchor),
+                "ta.vwap anchor is approximated: the engine's ta::VWAP has no "
+                "reset-on-anchor input yet and resets only when the symbol's "
+                "session day changes, so this band form ignores its anchor and "
+                "runs the session-day VWAP.",
+                hint='Omit the anchor or pass timeframe.change("1D") to run it exactly.',
+            )
             return
         self._err(
             expr_start(anchor),

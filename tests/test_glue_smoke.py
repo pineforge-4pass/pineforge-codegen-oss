@@ -6,6 +6,7 @@ sys.path when pytest runs from there) and asserts the transpile_json envelope:
 
 - valid source -> ok:true with inputs[] and strategyParams (the new manifest)
 - invalid source -> ok:false with a diagnostics key (error branch untouched)
+- valid source -> its warnings under diagnostics, in the same entry format
 """
 import importlib.util
 import json
@@ -41,3 +42,20 @@ def test_invalid_source_still_returns_error_envelope():
     d = json.loads(glue.transpile_json("strategy("))
     assert d["ok"] is False
     assert "diagnostics" in d
+
+
+def test_valid_source_carries_its_warnings():
+    # A script that transpiles returns its warnings under "diagnostics", in the
+    # error envelope's entry format -- here the band form's approximated anchor.
+    glue = _load_glue()
+    src = (
+        "//@version=6\n"
+        'strategy("T")\n'
+        '[v, u, l] = ta.vwap(close, timeframe.change("W"), 1.0)\n'
+        "if close > u\n"
+        '    strategy.entry("L", strategy.long)\n'
+    )
+    d = json.loads(glue.transpile_json(src))
+    assert d["ok"] is True
+    assert [(e["line"], e["col"], e["severity"]) for e in d["diagnostics"]
+            if e["message"].startswith("ta.vwap anchor is approximated")] == [(3, 28, "warning")]

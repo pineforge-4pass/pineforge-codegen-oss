@@ -26,11 +26,14 @@ import concurrent.futures
 import csv
 import hashlib
 import importlib.util
+import io
 import json
 import math
 import os
 import subprocess
 import sys
+import tarfile
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,7 +43,6 @@ from tests import _compile as compile_env
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-GLUE_DIR = REPO_ROOT / "gate"
 
 
 # ---------------------------------------------------------------------------
@@ -85,14 +87,39 @@ _GLUE_MAIN = (
 )
 
 
-def transpile_json(pine: Path) -> dict:
-    env = dict(os.environ, PYTHONPATH=str(REPO_ROOT))
+def transpile_json(pine: Path, root: Path = REPO_ROOT) -> dict:
+    """``transpile_json`` of the glue and codegen under ``root`` (this checkout
+    by default, or a ``reference_codegen`` tree)."""
+    env = dict(os.environ, PYTHONPATH=str(root))
     proc = subprocess.run(
-        [sys.executable, "-c", _GLUE_MAIN, str(GLUE_DIR), str(pine)],
-        capture_output=True, text=True, timeout=300, env=env, cwd=REPO_ROOT)
+        [sys.executable, "-c", _GLUE_MAIN, str(root / "gate"), str(pine)],
+        capture_output=True, text=True, timeout=300, env=env, cwd=root)
     if proc.returncode != 0:
         raise RuntimeError(f"transpile_json crashed on {pine}:\n{proc.stderr}")
     return json.loads(proc.stdout)
+
+
+_REFERENCE_TREES: dict[str, Path | None] = {}
+
+
+def reference_codegen(commit: str) -> Path | None:
+    """This repository's ``pineforge_codegen`` and ``gate`` as of ``commit``
+    (``git archive``), extracted once per session, to transpile a script the
+    way that commit did; None when git or the commit is unavailable."""
+    if commit not in _REFERENCE_TREES:
+        tree = None
+        proc = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "archive", "--format=tar", commit,
+             "pineforge_codegen", "gate"], capture_output=True, timeout=120)
+        if proc.returncode == 0:
+            tree = Path(tempfile.mkdtemp(prefix=f"pf-codegen-{commit[:12]}-"))
+            with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
+                if hasattr(tarfile, "data_filter"):
+                    tar.extractall(tree, filter="data")
+                else:
+                    tar.extractall(tree)
+        _REFERENCE_TREES[commit] = tree
+    return _REFERENCE_TREES[commit]
 
 
 def build_strategy_library(cpp: str, workdir: Path) -> None:
@@ -155,10 +182,12 @@ def summary(blob: bytes) -> str:
 @dataclass(frozen=True)
 class Build:
     """One strategy source and the input overrides it runs under. Every build
-    runs at its defaults; ``overrides`` adds a second run under them."""
+    runs at its defaults; ``overrides`` adds a second run under them.
+    ``codegen`` transpiles it with another codegen tree (``reference_codegen``)."""
     source: str
     overrides: dict | None = None
     trace: bool = False
+    codegen: Path | None = None
 
 
 @dataclass
@@ -176,7 +205,7 @@ def execute(engine_root: Path, feed: Path, workdir: Path, build: Build) -> Outco
     pine = workdir / "strategy.pine"
     pine.write_text(build.source, encoding="utf-8")
     try:
-        outcome.transpiled = transpile_json(pine)
+        outcome.transpiled = transpile_json(pine, build.codegen or REPO_ROOT)
         if not outcome.transpiled.get("ok"):
             outcome.error = "transpile_json refused it:\n" + json.dumps(
                 outcome.transpiled.get("diagnostics"), indent=1, ensure_ascii=False)
