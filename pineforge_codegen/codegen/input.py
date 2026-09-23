@@ -17,6 +17,8 @@ Mixin contract — host class must provide:
 from __future__ import annotations
 
 from ..ast_nodes import (
+    ASTNode,
+    BinOp,
     BoolLiteral,
     FuncCall,
     Identifier,
@@ -26,7 +28,7 @@ from ..ast_nodes import (
     VarDecl,
 )
 from .. import signatures as sigs
-from ..pine_spelling import global_input_calls, input_binding_names
+from ..pine_spelling import expr_start, global_input_calls, input_binding_names
 
 
 class InputHelper:
@@ -136,24 +138,75 @@ class InputHelper:
         return names
 
     def _get_input_title(self, node: FuncCall, var_name: str | None = None) -> str:
-        """The key an ``input(...)`` call is read and listed by: its title,
-        else the name of the declaration binding it, else ``var_name``, else
-        "".
+        """The key an ``input(...)`` call is read and listed by: its title's
+        string value, else the name of the declaration binding it, else
+        ``var_name``, else "".
 
         The binding name comes from the call node itself, so every getter of
         one input -- the member, the TA reset, a request.security timeframe,
         an alias's read (``b = a``) -- keys it like the manifest does, whatever
-        name the caller passes. When the title isn't a ``StringLiteral``
-        (e.g. computed at runtime), the rendered C++ expression is returned."""
+        name the caller passes. A title that is not a compile-time string
+        constant is refused (``_input_title_value``)."""
         title_node = self._input_title_node(node)
         if title_node is not None:
-            if isinstance(title_node, StringLiteral):
-                return title_node.value
-            return self._visit_expr(title_node)
+            title = self._input_title_value(title_node)
+            if title is None:
+                self._refuse_input_title(title_node)
+            return title
         bound = self._input_binding_names().get(id(node))
         if bound is not None:
             return bound
         return var_name if var_name else ""
+
+    def _input_title_value(self, node, _seen: frozenset = frozenset()) -> str | None:
+        """A title expression's compile-time string value, or None. TradingView
+        takes ``title (const string)``: a string literal, a ``+`` of constant
+        strings, or a name bound once at global scope, never reassigned and not
+        ``var``, to one (``ctx.global_expr_map``)."""
+        if isinstance(node, StringLiteral):
+            return node.value
+        if isinstance(node, BinOp) and node.op == "+":
+            left = self._input_title_value(node.left, _seen)
+            right = self._input_title_value(node.right, _seen)
+            return None if left is None or right is None else left + right
+        if (isinstance(node, Identifier) and node.name not in _seen
+                and not self._known_var_is_lexically_shadowed(node.name)):
+            value = (getattr(self.ctx, "global_expr_map", None) or {}).get(node.name)
+            if value is not None:
+                return self._input_title_value(value, _seen | {node.name})
+        return None
+
+    def _refuse_input_title(self, title_node) -> None:
+        spelled = f"'{title_node.name}' " if isinstance(title_node, Identifier) else ""
+        self._codegen_error(
+            expr_start(title_node),
+            f"input title {spelled}is not a constant string: TradingView declares "
+            "title (const string), and PineForge keys an input override by its title.",
+            hint='Use a string literal, or a name bound once at global scope to one '
+                 '(T = "Length").',
+        )
+
+    def _check_input_titles(self) -> None:
+        """Refuse the first input call anywhere in the script whose title is not
+        a compile-time string constant, before any getter keys it: its C++ text
+        used to become the key (``std::string("Len")``)."""
+        stack: list = [self.ctx.ast]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (list, tuple)):
+                stack.extend(reversed(node))
+                continue
+            if isinstance(node, dict):
+                stack.extend(reversed(list(node.values())))
+                continue
+            if not isinstance(node, ASTNode):
+                continue
+            if isinstance(node, FuncCall) and self._is_input_call(node):
+                title_node = self._input_title_node(node)
+                if title_node is not None and self._input_title_value(title_node) is None:
+                    self._refuse_input_title(title_node)
+            stack.extend(reversed([v for k, v in vars(node).items()
+                                   if k not in ("loc", "annotations")]))
 
     def _input_spelling_title(self, node: FuncCall) -> str | None:
         """The key an untitled call's re-spelling must carry as ``title=``:

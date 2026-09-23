@@ -42,6 +42,7 @@ from .ast_nodes import (
     TypeDecl, EnumDecl, MethodDef,
 )
 from .errors import SourceLocation, Diagnostic, CompileError, Level, Phase
+from .pine_spelling import expr_start
 from . import signatures as sigs
 from .tv_input_choices import INPUT_SOURCE_SERIES_IDS
 from .analyzer import TA_CLASS_MAP
@@ -402,25 +403,6 @@ def _loc(node: ASTNode | None, fallback_file: str) -> SourceLocation:
     if node is not None and getattr(node, "loc", None) is not None:
         return node.loc
     return SourceLocation(file=fallback_file, line=1, col=1, end_col=1)
-
-
-def _expr_start(node: ASTNode) -> ASTNode:
-    """The leftmost sub-node of an expression, whose location is the
-    expression's first token (a call's own location is its ``(``)."""
-    while True:
-        if isinstance(node, FuncCall):
-            child = node.callee
-        elif isinstance(node, (MemberAccess, Subscript)):
-            child = node.object
-        elif isinstance(node, BinOp):
-            child = node.left
-        elif isinstance(node, Ternary):
-            child = node.condition
-        else:
-            return node
-        if getattr(child, "loc", None) is None:
-            return node
-        node = child
 
 
 def _qualified_name(callee: ASTNode) -> tuple[str | None, str | None]:
@@ -1786,7 +1768,7 @@ class SupportChecker:
         if anchor is None or self._is_daily_timeframe_change(anchor):
             return
         self._err(
-            _expr_start(anchor),
+            expr_start(anchor),
             "ta.vwap anchor is not supported: the engine's ta::VWAP resets its "
             "accumulation only when the symbol's session day changes (the "
             'default anchor, timeframe.change("1D")) and has no reset-on-anchor '
