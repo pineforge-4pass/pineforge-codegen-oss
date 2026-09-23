@@ -126,6 +126,9 @@ TA_PERIOD_ARG = {
     # Task 5
     "mode": 1, "range": 1, "dev": 1,
     "rci": 1,
+    # ta::ValueWhen keeps max(1, max_occurrence + 1) values, its constructor's
+    # bound; compute() reads values_[occurrence]. See TA_COMPUTE_ARGS.
+    "valuewhen": 2,
 }
 
 # Functions that return tuples
@@ -178,10 +181,14 @@ TA_COMPUTE_ARGS = {
     # the lookback from its own ``length`` argument (default 1), so the length
     # goes to both. Without it ``ta.change(src, 14)`` was a one-bar change.
     "change": [0, 1],
+    # The mirror image: compute(condition, source, occurrence) always had the
+    # occurrence, but the history bound is the constructor's max_occurrence
+    # (default 1, two values kept), so every occurrence >= 2 read na.
+    "valuewhen": [0, 1, 2],
 }
 
 # No-state functions (no constructor args, stateless or self-contained)
-TA_NO_CTOR = {"crossover", "crossunder", "cross", "cum", "swma", "barssince", "valuewhen",
+TA_NO_CTOR = {"crossover", "crossunder", "cross", "cum", "swma", "barssince",
               "max", "min",
               "obv", "accdist", "nvi", "pvi", "pvt", "wad", "wvad", "iii", "vwap"}
 
