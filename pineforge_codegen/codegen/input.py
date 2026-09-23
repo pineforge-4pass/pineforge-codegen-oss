@@ -15,11 +15,16 @@ Mixin contract — host class must provide:
 
 from __future__ import annotations
 
+import dataclasses
+
 from ..ast_nodes import (
+    ASTNode,
     BoolLiteral,
     FuncCall,
+    FuncDef,
     Identifier,
     MemberAccess,
+    MethodDef,
     NumberLiteral,
     StringLiteral,
     VarDecl,
@@ -88,6 +93,20 @@ class InputHelper:
         if "defval" in node.kwargs:
             return node.kwargs["defval"]
         return None
+
+    def _input_default_value(self, node: FuncCall) -> tuple[bool, object]:
+        """``(True, value)`` when the defval is the constant a ``v = input...``
+        binding records as ``v``'s known value -- a number, bool or string
+        literal, or a declared enum member (its index) -- else ``(False, None)``.
+        Only such an input is a stable scalar the TA reset can re-read."""
+        default = self._get_input_default(node)
+        if isinstance(default, (NumberLiteral, BoolLiteral, StringLiteral)):
+            return True, default.value
+        if isinstance(default, MemberAccess) and isinstance(default.object, Identifier):
+            members = self._enum_defs.get(default.object.name)
+            if members is not None and default.member in members:
+                return True, members.index(default.member)
+        return False, None
 
     def _get_input_title(self, node: FuncCall, var_name: str | None = None) -> str:
         """Pull the title string from an ``input(...)`` call.
@@ -310,75 +329,106 @@ class InputHelper:
         return names, merged
 
     def extract_input_manifest(self) -> list[dict]:
-        """Walk top-level ``var = input.*(...)`` decls into an InputDef list.
+        """Walk the script's global-scope ``input.*()`` calls into an InputDef
+        list, one entry per call site in source order: a top-level
+        ``var = input.*(...)`` declaration and an inline call inside an
+        expression (``ta.ema(close, input.int(9, "Fast"))``) alike.
 
         Each entry: ``{title, type, default[, min, max, step, options]}``. The
         optional keys are emitted only when the corresponding signature
         argument is a const literal; a bound/option referencing a non-literal
-        is omitted (never crashes). One pass over ``self.ctx.ast.body``.
+        is omitted (never crashes). ``title`` is the key the emitted C++ reads
+        the input by: the title argument, else the declared name (a ``var``
+        declaration lends it to calls nested in its initializer), else "".
         """
         out: list[dict] = []
         for stmt in self.ctx.ast.body:
-            if not (
-                isinstance(stmt, VarDecl)
-                and isinstance(stmt.value, FuncCall)
-                and self._is_input_call(stmt.value)
-            ):
-                continue
-            node = stmt.value
-            func_name, namespace = self._resolve_callee(node.callee)
-            names, merged = self._merged_args(node, func_name, namespace)
-            title = self._get_input_title(node, var_name=stmt.name)
-            default_node = self._get_input_default(node)
-            default_val = (
-                self._literal_or_none(default_node)
-                if default_node is not None
-                else None
-            )
-            if namespace == "input":
-                form_type = self._FORM_TYPE.get(func_name, "string")
-            else:
-                # Plain ``input(...)``: Pine types the result by its defval.
-                # The codegen already emits the matching scalar getter, so the
-                # manifest must mirror that — infer from the resolved default's
-                # Python type. ``bool`` MUST be tested before ``int`` because
-                # ``isinstance(True, int)`` is True. A None/non-literal default
-                # falls back to "string".
-                if isinstance(default_val, bool):
-                    form_type = "bool"
-                elif isinstance(default_val, int):
-                    form_type = "int"
-                elif isinstance(default_val, float):
-                    form_type = "float"
-                elif isinstance(default_val, str):
-                    form_type = "string"
-                else:
-                    form_type = "string"
-            entry: dict = {
-                "title": title,
-                "type": form_type,
-                "default": default_val,
-            }
-            # Pull min/max/step/options by signature param name; emit only
-            # const literals so the override form never references a runtime
-            # value it can't reproduce.
-            if names:
-                idx = {n: i for i, n in enumerate(names)}
-                for key, pname in (("min", "minval"), ("max", "maxval"), ("step", "step")):
-                    i = idx.get(pname)
-                    if i is not None and i < len(merged) and merged[i] is not None:
-                        v = self._literal_or_none(merged[i])
-                        # bool is an int subclass — exclude it from numeric bounds
-                        if isinstance(v, (int, float)) and not isinstance(v, bool):
-                            entry[key] = v
-                oi = idx.get("options")
-                if oi is not None and oi < len(merged) and merged[oi] is not None:
-                    opts_node = merged[oi]
-                    elems = getattr(opts_node, "elements", None)
-                    if elems is not None:
-                        vals = [self._literal_or_none(e) for e in elems]
-                        # any non-const element -> omit the whole options list
-                        if vals and all(isinstance(v, str) for v in vals):
-                            entry["options"] = vals
-            out.append(entry)
+            for node in self._global_input_calls(stmt):
+                bound = isinstance(stmt, VarDecl) and (
+                    stmt.value is node or stmt.is_var or stmt.is_varip)
+                out.append(self._input_manifest_entry(
+                    node, stmt.name if bound else None))
         return out
+
+    # Statement fields holding a local block. Pine declares script inputs at
+    # global scope only.
+    _LOCAL_SCOPE_FIELDS = frozenset({"body", "else_body", "default_body"})
+
+    def _global_input_calls(self, node):
+        """Yield the input calls ``node`` makes at global scope, in source
+        order -- not inside if/for/while/switch blocks or callable bodies."""
+        if isinstance(node, list):
+            for item in node:
+                yield from self._global_input_calls(item)
+            return
+        if not isinstance(node, ASTNode) or isinstance(node, (FuncDef, MethodDef)):
+            return
+        if isinstance(node, FuncCall) and self._is_input_call(node):
+            yield node
+            return
+        for f in dataclasses.fields(node):
+            if f.name in ("loc", "annotations") or f.name in self._LOCAL_SCOPE_FIELDS:
+                continue
+            value = getattr(node, f.name)
+            if f.name == "cases":
+                value = [case_expr for case_expr, _stmts in value]
+            elif isinstance(value, dict):
+                value = list(value.values())
+            yield from self._global_input_calls(value)
+
+    def _input_manifest_entry(self, node: FuncCall, var_name: str | None) -> dict:
+        func_name, namespace = self._resolve_callee(node.callee)
+        names, merged = self._merged_args(node, func_name, namespace)
+        title = self._get_input_title(node, var_name=var_name)
+        default_node = self._get_input_default(node)
+        default_val = (
+            self._literal_or_none(default_node)
+            if default_node is not None
+            else None
+        )
+        if namespace == "input":
+            form_type = self._FORM_TYPE.get(func_name, "string")
+        else:
+            # Plain ``input(...)``: Pine types the result by its defval.
+            # The codegen already emits the matching scalar getter, so the
+            # manifest must mirror that — infer from the resolved default's
+            # Python type. ``bool`` MUST be tested before ``int`` because
+            # ``isinstance(True, int)`` is True. A None/non-literal default
+            # falls back to "string".
+            if isinstance(default_val, bool):
+                form_type = "bool"
+            elif isinstance(default_val, int):
+                form_type = "int"
+            elif isinstance(default_val, float):
+                form_type = "float"
+            elif isinstance(default_val, str):
+                form_type = "string"
+            else:
+                form_type = "string"
+        entry: dict = {
+            "title": title,
+            "type": form_type,
+            "default": default_val,
+        }
+        # Pull min/max/step/options by signature param name; emit only
+        # const literals so the override form never references a runtime
+        # value it can't reproduce.
+        if names:
+            idx = {n: i for i, n in enumerate(names)}
+            for key, pname in (("min", "minval"), ("max", "maxval"), ("step", "step")):
+                i = idx.get(pname)
+                if i is not None and i < len(merged) and merged[i] is not None:
+                    v = self._literal_or_none(merged[i])
+                    # bool is an int subclass — exclude it from numeric bounds
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        entry[key] = v
+            oi = idx.get("options")
+            if oi is not None and oi < len(merged) and merged[oi] is not None:
+                opts_node = merged[oi]
+                elems = getattr(opts_node, "elements", None)
+                if elems is not None:
+                    vals = [self._literal_or_none(e) for e in elems]
+                    # any non-const element -> omit the whole options list
+                    if vals and all(isinstance(v, str) for v in vals):
+                        entry["options"] = vals
+        return entry

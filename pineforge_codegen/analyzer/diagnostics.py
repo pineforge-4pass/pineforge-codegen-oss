@@ -27,9 +27,11 @@ from __future__ import annotations
 
 from ..ast_nodes import (
     ASTNode, BinOp, BoolLiteral, FuncCall, Identifier, MemberAccess,
-    NaLiteral, NumberLiteral, StringLiteral, Subscript, Ternary, UnaryOp,
+    NaLiteral, NumberLiteral, StringLiteral, Subscript, Ternary, TupleLiteral,
+    UnaryOp,
 )
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from ..pine_spelling import is_input_call, pine_string_literal
 from .. import tv_input_choices as tv_in
 from .tables import BAR_FIELDS
 
@@ -108,7 +110,7 @@ class DiagnosticsHelper:
         if isinstance(node, NumberLiteral):
             return str(node.value)
         if isinstance(node, StringLiteral):
-            return f'"{node.value}"'
+            return pine_string_literal(node.value)
         if isinstance(node, BoolLiteral):
             return "true" if node.value else "false"
         if isinstance(node, NaLiteral):
@@ -122,9 +124,17 @@ class DiagnosticsHelper:
         if isinstance(node, UnaryOp):
             return f"{node.op}{self._operand_to_str(node.operand)}"
         if isinstance(node, FuncCall):
-            args = ", ".join(self._expr_to_str(a) for a in node.args)
+            args = [self._expr_to_str(a) for a in node.args]
+            if is_input_call(node):
+                # The codegen reads an inline input's title, defval and bounds
+                # back from this spelling; without its keyword arguments
+                # ``input.int(defval=9, title="fast")`` would become
+                # ``input.int()``.
+                args += [f"{k}={self._expr_to_str(v)}" for k, v in node.kwargs.items()]
             callee_str = self._expr_to_str(node.callee)
-            return f"{callee_str}({args})"
+            return f"{callee_str}({', '.join(args)})"
+        if isinstance(node, TupleLiteral):
+            return "[" + ", ".join(self._expr_to_str(e) for e in node.elements) + "]"
         if isinstance(node, Subscript):
             return f"{self._expr_to_str(node.object)}[{self._expr_to_str(node.index)}]"
         if isinstance(node, Ternary):

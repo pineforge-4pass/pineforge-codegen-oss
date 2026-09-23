@@ -29,6 +29,9 @@ from ..analyzer import (
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from ..pine_spelling import (
+    input_call_spans, pine_string_literal, spell_input_call, sub_identifiers,
+)
 
 
 @dataclass(frozen=True)
@@ -2339,9 +2342,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 self._stable_var_ctor_literals[stmt.name] = literal_record
             # Mark input-backed iff the init references an input, so the reset
             # emits override-aware get_input_*() reads for it.
-            import re as _re
-            toks = set(_re.findall(r"[A-Za-z_][A-Za-z_0-9]*", expr_str))
-            if any(t in self._input_backed_vars for t in toks):
+            if self._refs_input(expr_str):
                 self._input_backed_vars.add(stmt.name)
 
     @staticmethod
@@ -2655,7 +2656,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # Fold to a compile-time literal when possible (so the ctor-init
             # list can use it directly); otherwise record the raw expression
             # for the runtime reset path to expand.
-            folded = self._resolve_known(final)
+            folded = self._resolve_known_through_inputs(final)
             if self._is_compile_time_value(folded):
                 try:
                     num = float(folded)
@@ -2668,9 +2669,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._stable_runtime_vars.add(target_name)
             # Mark input-backed iff the expression references an input so the
             # override-aware get_input_*() reads are emitted on the reset path.
-            import re as _re
-            toks = set(_re.findall(r"[A-Za-z_][A-Za-z_0-9]*", final))
-            if any(t in self._input_backed_vars for t in toks):
+            if self._refs_input(final):
                 self._input_backed_vars.add(target_name)
 
     def _find_reassigned_vars(self) -> set[str]:
@@ -3008,6 +3007,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # ordinary ``callee(args)`` rendering below. The stack/depth guard
             # refuses a recursive UDF (returns None -> caller leaves it untracked
             # -> the ctor guard rejects it loudly) instead of recursing forever.
+            # An inline input call is spelled in full (title, keyword args):
+            # the reset re-parses it and keys the override by that title.
+            if self._is_stable_inline_input(node):
+                return spell_input_call(node)
             fn, ns = self._resolve_callee(node.callee)
             if ns is None and fn is not None and self._get_udf_def(fn) is not None:
                 inlined = self._inline_single_expr_udf(node, _udf_stack, _depth)
@@ -3057,25 +3060,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._timeframe_period_vars.add(node.name)
         # Input calls: extract default value
         elif isinstance(node.value, FuncCall) and self._is_input_call(node.value):
-            default = self._get_input_default(node.value)
-            stored = False
-            if isinstance(default, NumberLiteral):
-                self._known_vars[node.name] = default.value
-                stored = True
-            elif isinstance(default, BoolLiteral):
-                self._known_vars[node.name] = default.value
-                stored = True
-            elif isinstance(default, StringLiteral):
-                self._known_vars[node.name] = default.value
-                stored = True
-            elif isinstance(default, MemberAccess) and isinstance(default.object, Identifier):
-                en = default.object.name
-                if en in self._enum_defs and default.member in self._enum_defs[en]:
-                    self._known_vars[node.name] = self._enum_defs[en].index(
-                        default.member
-                    )
-                    stored = True
+            stored, default = self._input_default_value(node.value)
             if stored:
+                self._known_vars[node.name] = default
                 self._input_backed_vars.add(node.name)
                 self._input_var_to_call[node.name] = node.value
         # Class-scope arithmetic / ternaries / casts over known, input-backed,
@@ -3098,8 +3085,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             expr_str = self._arith_expr_to_str(node.value)
             if expr_str is not None and self._expr_is_stable(node.value):
                 import re as _re
-                tokens = set(_re.findall(r"[A-Za-z_][A-Za-z_0-9]*", expr_str))
-                refs_input = any(t in self._input_backed_vars for t in tokens)
+                tokens = set(_re.findall(r"[A-Za-z_][A-Za-z_0-9]*",
+                                         self._inline_inputs_masked(expr_str)))
+                refs_input = self._refs_input(expr_str)
                 refs_derived = any(t in self._derived_input_expr for t in tokens)
                 # The stability classifier already proved this expression is a
                 # bar-invariant scalar (inputs / constants / timeframe.* /
@@ -3107,7 +3095,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # stable exprs (and the TA reset path) can reference / expand
                 # it — e.g. ``pi = math.asin(1) * 2`` feeds ``beta`` feeds
                 # ``alpha`` feeds a function-local ``filterLen``.
-                folded = self._resolve_known(expr_str)
+                folded = self._resolve_known_through_inputs(expr_str)
                 if self._is_compile_time_value(folded):
                     try:
                         num = float(folded)
@@ -4712,7 +4700,80 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             and not self._known_var_is_lexically_shadowed(arg_str)
         ):
             return str(self._stable_var_ctor_literals[arg_str].value)
+        # An inline input's placeholder is its defval, as a bound
+        # ``v = input.int(9, ...)`` contributes through ``_known_vars``; the
+        # runtime reset still sizes the indicator from the live input.
+        folded = self._fold_inline_input_defaults(arg_str)
+        if folded is not None and self._is_compile_time_value(folded):
+            return folded
         return resolved
+
+    # An inline ``input.*()`` call inside a ctor-arg / derived-length spelling
+    # is one leaf of the expression. It qualifies exactly when its bound
+    # spelling ``v = <call>`` would make ``v`` input-backed
+    # (``_collect_known_var``): not a source input, and a constant defval.
+
+    def _is_stable_inline_input(self, node) -> bool:
+        return (isinstance(node, FuncCall)
+                and self._is_input_call(node)
+                and not self._is_source_input(node)
+                and self._input_default_value(node)[0])
+
+    def _inline_input_calls(self, expr: str) -> list[tuple[int, int, FuncCall]] | None:
+        """Each inline input call in ``expr`` as ``(start, end, call)``; None
+        when one is not a stable inline input or does not re-parse."""
+        from ..lexer import Lexer
+        from ..parser import Parser
+        calls = []
+        for start, end in input_call_spans(expr):
+            text = expr[start:end]
+            try:
+                node = Parser(Lexer(text).tokenize(), source=text)._parse_expression()
+            except Exception:
+                return None
+            if not self._is_stable_inline_input(node):
+                return None
+            calls.append((start, end, node))
+        return calls
+
+    def _inline_inputs_masked(self, expr: str) -> str:
+        """``expr`` with each inline input call reduced to the bare word
+        ``input``, so identifier scans never read its title string or keyword
+        names. Unchanged when one of the calls is not a stable inline input."""
+        for start, end, _call in reversed(self._inline_input_calls(expr) or ()):
+            expr = expr[:start] + "input" + expr[end:]
+        return expr
+
+    def _refs_input(self, expr: str) -> bool:
+        """Whether a stable-expression spelling reads an input: an inline
+        input call or an input-backed name."""
+        masked = self._inline_inputs_masked(expr)
+        if masked != expr:
+            return True
+        return any(t in self._input_backed_vars
+                   for t in re.findall(r"[A-Za-z_][A-Za-z_0-9]*", expr))
+
+    def _fold_inline_input_defaults(self, expr: str) -> str | None:
+        """``expr`` const-folded with each inline input call read as its
+        defval; None when it has none or one is not a stable inline input."""
+        calls = self._inline_input_calls(expr)
+        if not calls:
+            return None
+        for start, end, call in reversed(calls):
+            value = self._input_default_value(call)[1]
+            if isinstance(value, bool):
+                literal = "true" if value else "false"
+            elif isinstance(value, str):
+                literal = pine_string_literal(value)
+            else:
+                literal = str(value)
+            expr = expr[:start] + literal + expr[end:]
+        return self._resolve_known(expr)
+
+    def _resolve_known_through_inputs(self, expr: str) -> str:
+        """``_resolve_known``, reading each inline input call as its defval."""
+        folded = self._fold_inline_input_defaults(expr)
+        return folded if folded is not None else self._resolve_known(expr)
 
     def _resolve_known(self, arg_str: str) -> str:
         """Resolve a string arg, replacing known var names with their values.
@@ -4965,11 +5026,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     inner = self._derived_input_expr[nm]
                     return "(" + _expand_derived(inner, seen | {nm}, depth + 1) + ")"
                 return nm
-            return ident_re.sub(_rep, s)
+            return sub_identifiers(s, _rep)
 
         expanded = _expand_derived(arg_str)
 
-        tokens = set(ident_re.findall(expanded))
+        # An inline input call is one leaf of the expression; its title string
+        # and keyword names are not identifiers the gate below should judge.
+        tokens = set(ident_re.findall(self._inline_inputs_masked(expanded)))
         if any(
             self._known_var_is_lexically_shadowed(name)
             for name in tokens
