@@ -4,6 +4,11 @@
 > codebase invariants below are wrong, the truth is the test suite —
 > update this file alongside any change that would break one of these
 > claims.
+>
+> This file is the harness-neutral twin of `CLAUDE.md` (Codex, OpenCode and
+> other agents read it): keep the two in step. Only the last section, the
+> parity campaign gate that a harness without Claude Code's hooks must run by
+> hand, is this file's own.
 
 ## REQUIRED before claiming any change is done
 
@@ -14,17 +19,29 @@ in `test_regression_*` survived for so long.
 
 ```bash
 # 1. Full pytest suite WITH the engine env var. Without the env var
-#    the 237 compile-only tests cleanly skip, which means every
-#    codegen change goes unverified at the C++ level. The env var is
-#    NOT optional for change verification — it is only optional for a
+#    the compile-only tests cleanly skip, which means every codegen
+#    change goes unverified at the C++ level. The env var is NOT
+#    optional for change verification — it is only optional for a
 #    quick "did I break a unit test" sanity loop during development.
 #    CRITICAL: Always rebuild the sibling pineforge-engine first if any
 #    C++ headers or source changed!
 export PINEFORGE_ENGINE_INCLUDE=../pineforge-engine/include
+# Eigen is not on a system include path on every machine; without it
+# every compile test skips even with a good engine include. Point this
+# at the tree CMake fetched if `Eigen/Dense` is not found by default:
+export PINEFORGE_EIGEN_INCLUDE=../pineforge-engine/build/_deps/eigen-src
+# A built runtime unlocks the run-the-emitted-TU tests (they skip without
+# it); auto-detected from a build*/lib/ beside the engine checkout.
+export PINEFORGE_ENGINE_LIB=../pineforge-engine/build/lib/libpineforge.a
 pytest
 
-# Expected at HEAD: 944 passed, 1 skipped, 0 failed.
-#                   1 skip is the pre-existing test_parser.py:335.
+# Measured 2026-09-23: 3042 passed, 2 skipped, 0 failed (~20-35 min on 16
+# cores, depending on load; the eight tests/test_e2e_*.py modules build and
+# run ~320 strategy libraries, ~4-6 min of it).
+#   Skip 1: test_parser.py:350, empty parameter set (pre-existing).
+#   Skip 2: test_codegen_golden.py:39, which needs the engine corpus at
+#           the sibling path and skips when the engine include is
+#           somewhere else.
 ```
 
 ```bash
@@ -34,9 +51,9 @@ pytest
 #    must transpile + compile against the engine headers.)
 pytest tests/test_compile_corpus.py
 
-# Expected at HEAD: 206 passed in ~47 s
-#   (basic 9 + community 11 + validation 147 + 16 validation_* sub-buckets
-#    + parity-anomalies 2).
+# Measured 2026-09-23: 314 passed in ~6-7 min (load average ~20-190)
+#   (312 corpus/validation probes at corpus gitlink 9182e3d, plus the 2
+#    parity anomalies).
 ```
 
 If either check newly fails, fix it before doing anything else. Adding
@@ -101,6 +118,9 @@ pineforge_codegen/
 ├── tv_input_choices.py             input.string options metadata
 ├── errors.py                       CompileError + SourceLocation +
 │                                   Diagnostic + Level / Phase
+├── pine_spelling.py                String-literal-safe helpers for the Pine
+│                                   spellings of TA ctor args (inline
+│                                   input calls kept whole; see quirk 10)
 ├── analyzer/
 │   ├── base.py        (~1.4k loc)  Analyzer class — workhorse.
 │   ├── call_handlers.py            Per-call-namespace lowering helpers.
@@ -145,6 +165,12 @@ tests/
 │                                   PINEFORGE_ENGINE_INCLUDE +
 │                                   PINEFORGE_EIGEN_INCLUDE + CXX env vars.
 │                                   Cleanly skips when env is missing.
+├── _e2e.py                         Shared harness of the test_e2e_*.py
+│                                   modules: transpile through gate/glue.py
+│                                   transpile_json, build the TU against the
+│                                   built runtime, run the engine's
+│                                   run_strategy.py on the corpus 15m feed
+│                                   (inputs.json overrides, @pf-trace).
 ├── test_compile_smoke.py           Hand-picked Pine snippets that hit
 │                                   every dispatch lane; +3 regression
 │                                   tests for once-broken paths
@@ -214,6 +240,8 @@ strategy. The taxonomy:
 | `SUPPORTED_*` frozensets         | Per-namespace whitelist of names codegen knows how to emit.          |
 | `varip` VarDecl check            | `varip` declarations rejected outright — batch backtests have no realtime tick state. |
 | TF literal validation            | `request.security` / `request.security_lower_tf` `timeframe` string literals validated against Pine v6 format at parse time. |
+| `ta.vwap` anchor                 | Only the default daily anchor runs: `timeframe.change("1D")` / `("D")`, directly or through a never-reassigned non-`var` binding (`_check_ta_vwap_anchor`). The engine's `ta::VWAP` resets only when the symbol's session day changes, so any other anchor is refused naming that missing capability (the 2-arg form used to fail the C++ compile, the band form to run a silent daily VWAP). |
+| Input titles (codegen)           | `_check_input_titles` refuses a title that is not a compile-time string constant (TradingView: `title (const string)`) before generation; PineForge keys every override by the title. |
 | syminfo na-gap warning           | `SUPPORTED_SYMINFO` = every `SYMINFO_MEMBER_MAP` key, but members whose emission is `na<T>()` or a `get_syminfo_metadata(...)` lookup (root/pricescale/minmove/mincontract/current_contract/expiration_date/isin/sector/industry + fundamentals/recommendations/target_price_*) form `_SYMINFO_SILENT_GAP_FIELDS` (derived from the emission table, so new na-accept fields can't drift out): every read WARNS that the value is na until a data feed injects it. |
 
 
@@ -301,40 +329,139 @@ you delete or weaken the special case, the test will tell you.
    in Pine v6; both lack `direction`. `TRADE_ACCESSOR_METHODS` is kept
    as the union for back-compat but new code should prefer the side-
    specific constant.
-9. **Top-level lazy-edge `ta.*` sites whose history is read are hoisted to
-   every-bar evaluation.** TradingView (pinned 2026-09-03 with `lab tv`,
-   NYSE:F 1D) advances a stateful `ta.*` call on EVERY bar when it sits below
-   a Pine-v6 lazy `and`/`or` RHS or a ternary arm of a top-level statement
-   AND the call's own history is referenced (`ta.sma(close, 5)[1]`; the
-   bare twins of every tape are per-execution);
-   short-circuiting gates only the value, and `[1]` on it is the previous
-   BAR. Without a `[k]` read the reached-only inline compute is TV's clock
-   (oliver1002 / louislapis9 / ycelestine77 / quantbyboji / miemomo3 exact at
-   100% on it, 2026-09-04). For a `[k]`-read site codegen emits
-   `const auto _pf_every_bar_ta_N = <site>;` (plus the site's `_hist_call_*`
-   push for a direct `[k]`) BEFORE the statement, in dynamic mode too
-   (`codegen/ta.py::_lazy_edge_ta_hoist_plan`, `_emit_lazy_edge_ta_hoists`;
-   `tests/test_lazy_edge_ta_every_bar.py`). The rule is per family
-   (cadence-7 ternary/lazy-and probes, same tapes) and the hoist is an
-   ALLOW-LIST (`LAZY_EVERY_BAR_TA` = highest/lowest/sma/ema) gated on the
-   `[k]` read: a broad hoist of every family cost 170 tiers / 30 hard lanes
-   on Cloud Run (2026-09-04), so an unpinned family keeps its existing
-   lowering until a tape pins it. `change`/`mom`/`roc` (`LAZY_SOURCE_CLOCK_TA`) read the
-   call's OWN held `source[length]` -- written only when the call executes,
-   held on skipped bars, na before the first execution -- through the
-   generated `_PFLazySourceClock` + `_pf_lazy_src_hist_N` members
-   (`tests/test_lazy_source_clock*.py`; this replaced the #64 roc3-only
-   clock, whose eager first-execution fallback the tapes refute; its eager
-   chart `source[length]` read between executions closer than `length` bars
-   is kept for chart-builtin sources via `_pf_lazy_src_chart_N`);
-   `cum`/`barssince`/`valuewhen`/`cross*`/`rising`/`falling`/`math.sum`
-   (`LAZY_PER_EXECUTION_TA`) keep the reached-only inline compute, which is
-   TradingView's per-execution clock, and never precalc.
-   Sites inside `if`/loop/function bodies, `else if` conditions, `var`
-   initializers, `request.security` payloads and tuple-returning sites keep
-   their existing lowering. The old "lazy SMA/EMA must not precalc" pins
-   (pf-probe-oliver-dual-vol-sma) encoded the refuted per-call clock and were
-   re-pinned in `test_codegen_validation_fixes.py`.
+9. **No implicit `double` -> integer narrowing, ever.** A `double`
+  expression reaching an `int` / `int64_t` slot must go through
+   `helpers.na_preserving_int_cast` (`is_na(_pf_v) ? na<int>() :
+   (int)_pf_v`), applied by `types._coerce_int_slot`. An *implicit*
+   narrowing of a NaN is undefined ([conv.fpint]) and the compilers
+   disagree: AppleClang arm64 and g++ aarch64 give 0 at every `-O`,
+   g++ x86-64 gives `INT_MIN` at `-O0`/`-O1` and 0 from `-O2`. The
+   engine's contract (`include/pineforge/na.hpp`) is that an integer
+   `na` IS `std::numeric_limits<T>::min()`, which is what `is_na(T)`
+   tests, so one bench slot booked 2412 trades built at `-O3` and 2411
+   (TradingView's count) at `-O1` from the same source. A plain
+   `(int)x` cast does NOT fix this — it only silences the warning; the
+   `is_na` test is what makes it defined. Where the value is needed is
+   decided by `types._emitted_value_is_double`, which is deliberately
+   NOT `_infer_type(node) == "double"`: `_infer_type` answers "what
+   does this slot hold" (Pine's `int` for `math.round(x)`, whose
+   emission is a `double` `std::round(x)`) and falls back to `double`
+   for shapes it cannot resolve (integer arithmetic, loop binders,
+   colour constants, `bar_index`). Both directions of that mismatch
+   are enumerated there; extend it, not `_infer_type`, when adding a
+   lowering. The check that keeps the class closed is the compiler:
+   `tests/test_na_int_narrowing.py` compiles a per-site battery with
+   `-Wfloat-conversion` and requires an empty diagnostic list.
+   Conversions to `bool` are out of scope — a boolean conversion is
+   `!= 0`, which is defined for NaN.
+10. **An inline `input.*()` call is one leaf of a TA length.** TA ctor
+   args (and derived / user-function lengths) reach the codegen as Pine
+   source spellings. `pine_spelling.py` keeps an inline input call whole
+   there — keyword args included, strings escaped — and the codegen
+   masks its argument text (title string, keyword names) out of every
+   identifier scan, so `ta.ema(close, input.int(9, "fast"))` gets the
+   same reset, placeholder and manifest entry as
+   `len = input.int(9, "fast")` + `ta.ema(close, len)` (issue #132; the
+   title used to read as an unknown identifier). An inline call is
+   admitted exactly when its bound spelling would be input-backed
+   (`_is_stable_inline_input`: not a source input, constant defval); a
+   length that is otherwise a series stays refused. The input manifest
+   lists every global-scope input call, inline ones too, with `title` =
+   the key the C++ reads it by. `tests/test_e2e_inline_input_ta_length.py`
+   pins it end to end, for every TA constructor.
+11. **A lookback that is a `compute()` argument goes to `compute()`.** Most
+   `ta::` classes take their length in the constructor and only sources in
+   `compute()`. `ta::Change` splits it: the constructor's `max_length`
+   only bounds the kept history, `compute(src, length = 1)` reads the
+   lookback, so `TA_COMPUTE_ARGS["change"] = [0, 1]` (analyzer) sends the
+   length to both — without it every `ta.change(src, n)` was a one-bar
+   change. `ta::ValueWhen` is the mirror image: `occurrence` always reached
+   `compute()`, but the history bound is the constructor's `max_occurrence`
+   (default 1, two values kept), so `TA_PERIOD_ARG["valuewhen"] = 2` sends
+   it to the constructor as well (it sat in `TA_NO_CTOR`, and every
+   `occurrence >= 2` read `na`). `ta.vwap`'s anchor reaches neither
+   (`TA_COMPUTE_ARGS["vwap"] = [0]`; the support checker admits only the
+   default anchor). Check a new TA's `compute()` signature in `ta.hpp` for
+   non-source parameters: `ta.alma`'s `floor` and `ta.kc` / `ta.kcw`'s
+   `useTrueRange` still reach `compute()` overloads that do not exist (the
+   TU fails to compile). `tests/test_e2e_ta_change_length_and_input_keys.py`
+   pins `ta.change` bar by bar against `src - src[n]`,
+   `tests/test_e2e_valuewhen_occurrence.py` `ta.valuewhen` against a
+   spelled-out chain, `tests/test_e2e_vwap_anchor.py` `ta.vwap` against a
+   spelled-out anchored VWAP.
+12. **One key per input, whichever path reads it.** A `get_input_*()` read
+   keys the input by `_get_input_title(call, ...)`, the string the manifest
+   lists: the title's value (`_input_title_value`: a literal, a `+` of
+   constants, or a never-reassigned non-`var` global name bound to one;
+   `_check_input_titles` refuses any other title before generation), else
+   the name of the declaration binding the call
+   (`pine_spelling.input_binding_names`: `v = input.*()`, or any call in a
+   `var` initializer — TradingView: "If not specified, the variable name is
+   used as the input's title"), else `""`. The name comes from the call
+   node, not from the caller, so the member, the TA reset, a
+   request.security timeframe and an alias's read (`b = a`) agree; a call
+   re-spelled for a derived length carries it as `title=`, since the
+   re-parsed node has no declaration. `_input_key_literal` spells the key
+   as a C++ literal (a title holding `"` or `\` used to break the TU). An
+   untitled call nested in a plain binding (`n = input.int(9) * 2`) is
+   keyed `""` in the manifest and the C++ alike, so two such inputs share
+   one key. `tests/test_e2e_untitled_input_keys.py` and
+   `tests/test_e2e_input_title_constant.py` pin it end to end.
+13. **A precalculated TA site is built like the live one.** A static chart
+   TA site (bar-data `compute()` arguments) is precalculated:
+   `prepare_script_run()` calls `precalculate()` when the engine allows it
+   (no magnifier, empty timeframes), and a call nested in an expression
+   then reads `_precalc_<member>[bar_index_]` (a direct `x = ta.foo(...)`
+   assignment does not).
+   `precalculate()` builds each site from `_ta_run_ctor_args`, the same
+   override-aware arguments as the `_ta_initialized_` reset, never from
+   compile-time values — those are the input's default (or the placeholder
+   `1` for a length that does not fold), and an override never reached a
+   nested call. `tests/test_e2e_precalc_input_override.py` pins every
+   spelling against literal-length twins.
+14. **String escapes are the Pine manual's.** The lexer (`_read_quoted`)
+   reads `\n` / `\t` as U+000A / U+0009 and `\\`, `\"`, `\'` as the
+   character; any other `\X` reads as `X` ("the character's meaning does
+   not change": `\T`, `\r`, `\u`, `\x`, `\0`, ...). A value reaches C++
+   through `_cpp_string_escape` (escapes `\n`, `\r`, `\t`) and a Pine
+   re-spelling through `pine_string_literal` (spells `\n`, `\t`). A
+   multiline `"""..."""` literal is not lexed as one (it reads as `""`).
+   `tests/test_e2e_string_escapes.py` pins each escape through the
+   manifest, an override and per-bar `str.*` traces.
+15. **Top-level lazy-edge `ta.*` sites whose history is read are hoisted to
+    every-bar evaluation.** TradingView (pinned 2026-09-03 with `lab tv`,
+    NYSE:F 1D) advances a stateful `ta.*` call on EVERY bar when it sits below
+    a Pine-v6 lazy `and`/`or` RHS or a ternary arm of a top-level statement
+    AND the call's own history is referenced (`ta.sma(close, 5)[1]`; the
+    bare twins of every tape are per-execution);
+    short-circuiting gates only the value, and `[1]` on it is the previous
+    BAR. Without a `[k]` read the reached-only inline compute is TV's clock
+    (oliver1002 / louislapis9 / ycelestine77 / quantbyboji / miemomo3 exact at
+    100% on it, 2026-09-04). For a `[k]`-read site codegen emits
+    `const auto _pf_every_bar_ta_N = <site>;` (plus the site's `_hist_call_*`
+    push for a direct `[k]`) BEFORE the statement, in dynamic mode too
+    (`codegen/ta.py::_lazy_edge_ta_hoist_plan`, `_emit_lazy_edge_ta_hoists`;
+    `tests/test_lazy_edge_ta_every_bar.py`). The rule is per family
+    (cadence-7 ternary/lazy-and probes, same tapes) and the hoist is an
+    ALLOW-LIST (`LAZY_EVERY_BAR_TA` = highest/lowest/sma/ema) gated on the
+    `[k]` read: a broad hoist of every family cost 170 tiers / 30 hard lanes
+    on Cloud Run (2026-09-04), so an unpinned family keeps its existing
+    lowering until a tape pins it. `change`/`mom`/`roc` (`LAZY_SOURCE_CLOCK_TA`) read the
+    call's OWN held `source[length]` -- written only when the call executes,
+    held on skipped bars, na before the first execution -- through the
+    generated `_PFLazySourceClock` + `_pf_lazy_src_hist_N` members
+    (`tests/test_lazy_source_clock*.py`; this replaced the #64 roc3-only
+    clock, whose eager first-execution fallback the tapes refute; its eager
+    chart `source[length]` read between executions closer than `length` bars
+    is kept for chart-builtin sources via `_pf_lazy_src_chart_N`);
+    `cum`/`barssince`/`valuewhen`/`cross*`/`rising`/`falling`/`math.sum`
+    (`LAZY_PER_EXECUTION_TA`) keep the reached-only inline compute, which is
+    TradingView's per-execution clock, and never precalc.
+    Sites inside `if`/loop/function bodies, `else if` conditions, `var`
+    initializers, `request.security` payloads and tuple-returning sites keep
+    their existing lowering. The old "lazy SMA/EMA must not precalc" pins
+    (pf-probe-oliver-dual-vol-sma) encoded the refuted per-call clock and were
+    re-pinned in `test_codegen_validation_fixes.py`.
 
 ## How to add a new Pine v6 function
 
@@ -395,14 +522,19 @@ Expected counts at HEAD:
 
 | Mode                                                    | passed | skipped | failed |
 | ------------------------------------------------------- | ------ | ------- | ------ |
-| With sibling engine auto-detected (or env var set)      | 944    | 1       | **0**  |
-| Without engine (no sibling, no `PINEFORGE_ENGINE_INCLUDE`) | varies | 237+  | **0**  |
+| With engine headers + Eigen + a built runtime           | 3042   | 2       | **0**  |
+| Without a resolvable compile environment                | 1974   | 757     | **0**  |
 
-The 1 skip is `test_parser.py:335` (empty parameter set, pre-existing,
-unrelated). When no engine include is resolvable, the 237 compile-only
-tests (31 smoke + 206 corpus) skip cleanly. Auto-detection: `tests/_compile.py`
-walks up to 8 directory levels looking for a `pineforge-engine/include` sibling
-— no env var needed when the engine repo is checked out at `../pineforge-engine`.
+Measured 2026-09-23. The 2 skips are `test_parser.py:350` (empty parameter
+set, pre-existing, unrelated) and `test_codegen_golden.py:39` (wants the
+engine corpus at the sibling path). The two modes do not sum to the same
+total: `test_compile_corpus.py` parametrizes over the corpus it can actually
+see, so it collects fewer items without one. Auto-detection:
+`tests/_compile.py` walks up to 8 directory levels looking for a
+`pineforge-engine/include` sibling — no env var needed when the engine repo is
+checked out at `../pineforge-engine` — but Eigen and the built runtime have no
+sibling fallback beyond `build*/`, so check the skip count, not just the
+failure count, before believing a green run covered the C++ level.
 
 ## Conventions
 
@@ -443,7 +575,6 @@ the engine ABI tag listed in the README's version table actually
 exists upstream and exposes the symbols we emit.
 - **Don't introduce runtime dependencies.** Pure-Python is the install
 contract. Test extras (pytest) are the only allowed `[project.optional-dependencies]`.
-
 
 ## Parity campaign gate (applies on EVERY harness)
 
