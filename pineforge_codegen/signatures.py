@@ -79,7 +79,7 @@ def _func(name: str, *sigs: FuncSig) -> IntrinsicFunc:
 
 # Shortcuts for common param types
 F = PineType.FLOAT
-I = PineType.INT
+I = PineType.INT  # noqa: E741 - signature table uses single-letter type aliases
 B = PineType.BOOL
 S = PineType.STRING
 NA = PineType.NA
@@ -353,7 +353,7 @@ _str("tostring",
      _sig([("value", F)], ret=S),
      _sig([("value", F), ("format", S)], ret=S))
 _str("tonumber",    _sig([("string", S)], ret=F))
-_str("format",      _sig([("formatStr", S)], ret=S))  # variadic
+_str("format",      _sig([("formatString", S)], ret=S))  # variadic
 _str("format_time", _sig([("time", I), ("format", S), ("timezone", S, "")], ret=S))
 _str("length",      _sig([("string", S)], ret=I))
 _str("contains",    _sig([("source", S), ("str", S)], ret=B))
