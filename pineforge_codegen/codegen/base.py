@@ -3804,6 +3804,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
     def generate(self) -> str:
         """Generate C++ source from the AnalyzerContext."""
+        # Every input is keyed by its title: refuse a non-constant one first.
+        self._check_input_titles()
         # Context-sensitive instance pre-pass (needs the naming helpers populated
         # in __init__). Computes nested stateful-helper dispatch + fresh instances.
         self._build_func_instances()

@@ -17,9 +17,9 @@ import re
 from typing import Callable, Iterator
 
 from .ast_nodes import (
-    ASTNode, BoolLiteral, FuncCall, FuncDef, Identifier, MemberAccess,
-    MethodDef, NaLiteral, NumberLiteral, StringLiteral, TupleLiteral, UnaryOp,
-    VarDecl,
+    ASTNode, BinOp, BoolLiteral, FuncCall, FuncDef, Identifier, MemberAccess,
+    MethodDef, NaLiteral, NumberLiteral, StringLiteral, Subscript, Ternary,
+    TupleLiteral, UnaryOp, VarDecl,
 )
 
 _STRING_OR_IDENT = re.compile(
@@ -84,6 +84,25 @@ def _spell_input_arg(node) -> str | None:
         elems = [_spell_input_arg(e) for e in node.elements]
         return None if None in elems else "[" + ", ".join(elems) + "]"
     return None
+
+
+def expr_start(node: ASTNode) -> ASTNode:
+    """The leftmost sub-node of an expression, whose location is the
+    expression's first token (a call's own location is its ``(``)."""
+    while True:
+        if isinstance(node, FuncCall):
+            child = node.callee
+        elif isinstance(node, (MemberAccess, Subscript)):
+            child = node.object
+        elif isinstance(node, BinOp):
+            child = node.left
+        elif isinstance(node, Ternary):
+            child = node.condition
+        else:
+            return node
+        if getattr(child, "loc", None) is None:
+            return node
+        node = child
 
 
 # Statement fields holding a local block. Pine declares script inputs at
