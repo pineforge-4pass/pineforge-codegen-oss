@@ -40,17 +40,38 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .errors import CompileError
 from .lexer import Lexer
 from .parser import Parser
 
 
-# Anchored to start/end of line so a stray ``// @pf-trace`` substring
-# inside a string literal or block comment cannot match. ``\s+`` after
+# Anchored to start/end of line; lexical string spans are excluded below.
+# ``\s+`` after
 # ``//`` requires at least one space before ``@pf-trace`` (the spec is
 # ``// @pf-trace ``, distinct from Pine's ``//@version=N``).
 _PRAGMA_RE = re.compile(
     r"^\s*//\s+@pf-trace\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$"
 )
+
+
+class _StringSpanLexer(Lexer):
+    """Use the Pine lexer itself to locate lines inside string literals."""
+
+    def __init__(self, source: str) -> None:
+        super().__init__(source)
+        self.string_lines: set[int] = set()
+
+    def _record_string_lines(self, start_line: int) -> None:
+        if self.line > start_line:
+            self.string_lines.update(range(start_line + 1, self.line + 1))
+
+    def _read_multiline(self, quote: str, start_line: int, start_col: int) -> None:
+        super()._read_multiline(quote, start_line, start_col)
+        self._record_string_lines(start_line)
+
+    def _read_quoted(self, quote: str, start_line: int, start_col: int) -> None:
+        super()._read_quoted(quote, start_line, start_col)
+        self._record_string_lines(start_line)
 
 
 @dataclass
@@ -93,10 +114,22 @@ def extract_pf_trace_pragmas(source: str) -> list[PfTracePragma]:
         scripts) — callers should treat this as the zero-overhead
         path.
     """
+    candidates = [(lineno, match)
+                  for lineno, raw in enumerate(source.splitlines(), start=1)
+                  if (match := _PRAGMA_RE.match(raw)) is not None]
+    if not candidates:
+        return []
+    lexer = _StringSpanLexer(source)
+    try:
+        lexer.tokenize()
+    except CompileError:
+        # This lexical pass only finds string spans. The main Lexer run owns
+        # syntax diagnostics; extraction itself has historically accepted
+        # arbitrary source text, including malformed block comments.
+        pass
     pragmas: list[PfTracePragma] = []
-    for lineno, raw in enumerate(source.splitlines(), start=1):
-        m = _PRAGMA_RE.match(raw)
-        if not m:
+    for lineno, m in candidates:
+        if lineno in lexer.string_lines:
             continue
         name = m.group(1)
         expr_source = m.group(2)
