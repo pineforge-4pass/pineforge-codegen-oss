@@ -33,7 +33,7 @@ var float seededLow = low
 varip float seededHigh = high
 var float literalSeed = 7.5
 seededLow += 1.0
-    seededHigh += 1.0
+seededHigh += 1.0
 """, check_support=False)
 
     assert "double seededLow = na<double>();" in cpp

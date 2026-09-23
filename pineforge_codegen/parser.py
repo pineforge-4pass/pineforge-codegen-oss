@@ -22,7 +22,7 @@ from .ast_nodes import (
     IfStmt, ForStmt, ForInStmt, WhileStmt, SwitchStmt, BreakStmt, ContinueStmt,
     FuncDef, ExprStmt,
     BinOp, UnaryOp, Ternary, FuncCall, Subscript,
-    Identifier, MemberAccess, TypeAnnotation,
+    Identifier, MemberAccess,
     NumberLiteral, StringLiteral, BoolLiteral, NaLiteral, ColorLiteral,
     TupleLiteral,
     TypeField, TypeDecl, EnumDecl, MethodDef,
@@ -30,7 +30,9 @@ from .ast_nodes import (
 
 
 class ParseError(Exception):
-    pass
+    def __init__(self, message: str, token: Token) -> None:
+        super().__init__(message)
+        self.token = token
 
 
 # Type annotation keywords
@@ -56,7 +58,6 @@ class Parser:
         self.pos = 0
         self._source = source
         self._filename = filename
-        self._recovery_count = 0
 
     # ------------------------------------------------------------------
     # Helpers
@@ -94,8 +95,8 @@ class Parser:
             return self._advance()
         cur = self._current()
         raise ParseError(
-            f"Expected {tt.name} got {cur.type.name}({cur.value!r}) "
-            f"L{cur.line}:{cur.col}. {msg}"
+            f"Expected {tt.name}, got {cur.type.name}({cur.value!r}). {msg}".strip(),
+            cur,
         )
 
     def _skip_newlines(self) -> None:
@@ -139,14 +140,11 @@ class Parser:
                         prog.body.extend(stmt)
                     else:
                         prog.body.append(stmt)
-            except ParseError:
-                # Error recovery: skip to next newline and continue
-                self._recover()
+                self._expect_statement_end()
+            except ParseError as error:
+                self._raise_syntax_error(error)
             self._skip_newlines()
 
-        if self._recovery_count:
-            prog.annotations = dict(prog.annotations or {})
-            prog.annotations["parse_recovery_count"] = self._recovery_count
         return prog
 
     def _extract_version(self) -> int | None:
@@ -158,13 +156,24 @@ class Parser:
             return int(m.group(1))
         return None
 
-    def _recover(self) -> None:
-        """Skip tokens until next NEWLINE or EOF for error recovery."""
-        self._recovery_count += 1
-        while not self._at_end() and not self._check(TokenType.NEWLINE):
-            self._advance()
-        if self._check(TokenType.NEWLINE):
-            self._advance()
+    def _raise_syntax_error(self, error: ParseError) -> None:
+        raise CompileError([Diagnostic(
+            level=Level.ERROR, phase=Phase.PARSER,
+            location=self._loc(error.token), message=str(error),
+        )]) from error
+
+    def _expect_statement_end(self) -> None:
+        """A second expression on the same Pine line is a syntax error."""
+        cur = self._current()
+        if cur.type in (TokenType.NEWLINE, TokenType.DEDENT, TokenType.EOF_TOKEN):
+            return
+        previous = self.tokens[self.pos - 1]
+        if previous.type == TokenType.DEDENT or cur.line > previous.line:
+            return
+        raise ParseError(
+            f"Unexpected token {cur.type.name}({cur.value!r}) after statement; "
+            "expected a line break or comma", cur,
+        )
 
     # ------------------------------------------------------------------
     # Statement parsing
@@ -210,6 +219,16 @@ class Parser:
         if cur.type == TokenType.CONTINUE:
             tok = self._advance()
             return self._set_loc(ContinueStmt(), tok)
+
+        # ``export`` starts a declaration in Pine libraries, but no strategy
+        # may export a function. Refuse it at the authored keyword instead of
+        # parsing it as a standalone expression and reporting its function
+        # name as an unrelated trailing token.
+        if cur.type == TokenType.IDENT and cur.value == "export":
+            raise ParseError(
+                "'export' declarations belong to Pine libraries; "
+                "PineForge transpiles strategies only", cur,
+            )
 
         # import statement
         if cur.type == TokenType.IMPORT:
@@ -991,8 +1010,9 @@ class Parser:
                         stmts.extend(stmt)
                     else:
                         stmts.append(stmt)
-            except ParseError:
-                self._recover()
+                self._expect_statement_end()
+            except ParseError as error:
+                self._raise_syntax_error(error)
             self._skip_newlines()
         return stmts
 
@@ -1356,6 +1376,4 @@ class Parser:
             node = Identifier(name=cur.value)
             return self._set_loc(node, cur)
 
-        raise ParseError(
-            f"Unexpected token {cur.type.name}({cur.value!r}) at L{cur.line}:{cur.col}"
-        )
+        raise ParseError(f"Unexpected token {cur.type.name}({cur.value!r})", cur)
