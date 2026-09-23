@@ -4,6 +4,11 @@
 > codebase invariants below are wrong, the truth is the test suite —
 > update this file alongside any change that would break one of these
 > claims.
+>
+> `AGENTS.md` is this file's harness-neutral twin (Codex, OpenCode and other
+> agents read it): keep the two in step. Only its last section, the parity
+> campaign gate that a harness without Claude Code's hooks must run by hand,
+> is its own.
 
 ## REQUIRED before claiming any change is done
 
@@ -430,6 +435,40 @@ you delete or weaken the special case, the test will tell you.
    multiline `"""..."""` literal is not lexed as one (it reads as `""`).
    `tests/test_e2e_string_escapes.py` pins each escape through the
    manifest, an override and per-bar `str.*` traces.
+15. **Top-level lazy-edge `ta.*` sites whose history is read are hoisted to
+    every-bar evaluation.** TradingView (pinned 2026-09-03 with `lab tv`,
+    NYSE:F 1D) advances a stateful `ta.*` call on EVERY bar when it sits below
+    a Pine-v6 lazy `and`/`or` RHS or a ternary arm of a top-level statement
+    AND the call's own history is referenced (`ta.sma(close, 5)[1]`; the
+    bare twins of every tape are per-execution);
+    short-circuiting gates only the value, and `[1]` on it is the previous
+    BAR. Without a `[k]` read the reached-only inline compute is TV's clock
+    (oliver1002 / louislapis9 / ycelestine77 / quantbyboji / miemomo3 exact at
+    100% on it, 2026-09-04). For a `[k]`-read site codegen emits
+    `const auto _pf_every_bar_ta_N = <site>;` (plus the site's `_hist_call_*`
+    push for a direct `[k]`) BEFORE the statement, in dynamic mode too
+    (`codegen/ta.py::_lazy_edge_ta_hoist_plan`, `_emit_lazy_edge_ta_hoists`;
+    `tests/test_lazy_edge_ta_every_bar.py`). The rule is per family
+    (cadence-7 ternary/lazy-and probes, same tapes) and the hoist is an
+    ALLOW-LIST (`LAZY_EVERY_BAR_TA` = highest/lowest/sma/ema) gated on the
+    `[k]` read: a broad hoist of every family cost 170 tiers / 30 hard lanes
+    on Cloud Run (2026-09-04), so an unpinned family keeps its existing
+    lowering until a tape pins it. `change`/`mom`/`roc` (`LAZY_SOURCE_CLOCK_TA`) read the
+    call's OWN held `source[length]` -- written only when the call executes,
+    held on skipped bars, na before the first execution -- through the
+    generated `_PFLazySourceClock` + `_pf_lazy_src_hist_N` members
+    (`tests/test_lazy_source_clock*.py`; this replaced the #64 roc3-only
+    clock, whose eager first-execution fallback the tapes refute; its eager
+    chart `source[length]` read between executions closer than `length` bars
+    is kept for chart-builtin sources via `_pf_lazy_src_chart_N`);
+    `cum`/`barssince`/`valuewhen`/`cross*`/`rising`/`falling`/`math.sum`
+    (`LAZY_PER_EXECUTION_TA`) keep the reached-only inline compute, which is
+    TradingView's per-execution clock, and never precalc.
+    Sites inside `if`/loop/function bodies, `else if` conditions, `var`
+    initializers, `request.security` payloads and tuple-returning sites keep
+    their existing lowering. The old "lazy SMA/EMA must not precalc" pins
+    (pf-probe-oliver-dual-vol-sma) encoded the refuted per-call clock and were
+    re-pinned in `test_codegen_validation_fixes.py`.
 
 ## How to add a new Pine v6 function
 
