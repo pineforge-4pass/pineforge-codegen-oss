@@ -6,50 +6,31 @@ the variable-bound spelling (pineforge-codegen-oss#132).
 derived from an input`` while ``len = input.int(9, "fast")`` followed by
 ``ta.ema(close, len)`` was accepted.
 
-Every case is driven from outside, through the interfaces a client uses:
-
-1. transpile: the ``transpile_json`` contract of pineforge-app's Pyodide glue
-   (``gate/glue.py`` is its canonical copy), run as a subprocess. Its JSON
-   carries the C++, the diagnostics the app shows, and the input manifest
-   the app builds its override form from.
-2. compile: the emitted TU as a strategy shared library linked against the
-   built engine runtime (the engine's ``corpus/CMakeLists.txt`` recipe).
-3. run: the engine's ``scripts/run_strategy.py`` C-ABI harness over the
-   corpus's real ETH-USDT 1m feed, resampled to the 15m chart feed by the
-   engine's own ``derive_corpus_feeds`` resampler into a temp dir (never
-   into the engine checkout). Input overrides travel through
-   ``inputs.json`` -> ``strategy_set_input``, keyed by the input title.
+Every case is driven from outside, through the interfaces a client uses
+(``tests/_e2e.py``: transpile through the app's glue, compile against the
+built engine runtime, run on the real 15m feed with ``inputs.json``
+overrides keyed by the input title).
 
 For each case the inline spelling and its variable-bound twin must produce
 byte-identical ``engine_trades.csv`` at the defaults and under an input
 override, and identical input manifests. The override has to change the
 trades, so the equality cannot hold because both spellings ignore the input.
 
-Needs PINEFORGE_ENGINE_INCLUDE (+ Eigen) and a built runtime
-(PINEFORGE_ENGINE_LIB), with the engine checkout's ``scripts/`` and corpus
-feed beside the include dir. Skips cleanly otherwise, like every compile test.
+Skips cleanly without the engine environment ``tests/_e2e.py`` needs.
 """
 
 from __future__ import annotations
 
-import concurrent.futures
-import csv
-import hashlib
-import importlib.util
 import json
-import os
-import subprocess
-import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from tests import _compile as compile_env
-
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-GLUE_DIR = REPO_ROOT / "gate"
+from tests._e2e import (
+    Build, Outcome, derive_chart_feed, digest, execute_all,
+    skip_unless_e2e_env, trade_count, transpile_json,
+)
 
 # The strategy from the issue body, verbatim.
 ISSUE_132_SOURCE = """//@version=6
@@ -366,159 +347,35 @@ def test_every_ta_constructor_with_arguments_has_a_case() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Interfaces
-# ---------------------------------------------------------------------------
-
-def _engine_root() -> Path | None:
-    inc = compile_env._ENGINE_INC
-    return inc.parent if inc is not None else None
-
-
-def _skip_unless_e2e_env() -> Path:
-    compile_env.skip_if_no_engine_lib()
-    root = _engine_root()
-    assert root is not None
-    if not (root / "scripts" / "run_strategy.py").is_file():
-        pytest.skip(f"engine checkout {root} has no scripts/run_strategy.py")
-    feed = root / "corpus" / "data" / "ohlcv_ETH-USDT-USDT_1m.csv"
-    if not feed.is_file() or feed.stat().st_size < 1_000_000:
-        pytest.skip(f"corpus 1m feed missing or an unsmudged LFS pointer: {feed}")
-    return root
-
-
-def _derive_chart_feed(engine_root: Path, out: Path) -> Path:
-    """The corpus's 15m chart feed, via the engine's own resampler."""
-    spec = importlib.util.spec_from_file_location(
-        "_pf_derive_corpus_feeds", engine_root / "scripts" / "derive_corpus_feeds.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    with mod.SOURCE_1M.open() as fh:
-        next(fh)
-        buckets = mod._resample_15m(fh)
-    out.write_text("\n".join([mod.HEADER, *map(mod._format_bucket, buckets)]) + "\n")
-    return out
-
-
-_GLUE_MAIN = (
-    "import sys\n"
-    "sys.path.insert(0, sys.argv[1])\n"
-    "import glue\n"
-    "sys.stdout.write(glue.transpile_json(open(sys.argv[2], encoding='utf-8').read()))\n"
-)
-
-
-def transpile_json(pine: Path) -> dict:
-    env = dict(os.environ, PYTHONPATH=str(REPO_ROOT))
-    proc = subprocess.run(
-        [sys.executable, "-c", _GLUE_MAIN, str(GLUE_DIR), str(pine)],
-        capture_output=True, text=True, timeout=300, env=env, cwd=REPO_ROOT)
-    if proc.returncode != 0:
-        raise RuntimeError(f"transpile_json crashed on {pine}:\n{proc.stderr}")
-    return json.loads(proc.stdout)
-
-
-def build_strategy_library(cpp: str, workdir: Path) -> None:
-    (workdir / "generated.cpp").write_text(cpp)
-    lib = str(compile_env._ENGINE_LIB)
-    if sys.platform == "darwin":
-        link = [f"-Wl,-force_load,{lib}"]
-    else:
-        link = ["-Wl,--whole-archive", lib, "-Wl,--no-whole-archive"]
-    cmd = [compile_env._COMPILER, "-std=c++17", "-O2", "-fPIC", "-shared",
-           *compile_env._include_flags(isolate_headers=True),
-           str(workdir / "generated.cpp"), *link, "-o", str(workdir / "strategy.so")]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if proc.returncode != 0:
-        raise RuntimeError(f"compile failed in {workdir}:\n"
-                           + "\n".join(proc.stderr.splitlines()[:40]))
-
-
-def run_trades(engine_root: Path, workdir: Path, feed: Path,
-               overrides: dict | None, tag: str) -> bytes:
-    out = workdir / f"engine_trades_{tag}.csv"
-    cmd = [sys.executable, str(engine_root / "scripts" / "run_strategy.py"),
-           str(workdir), "--ohlcv", str(feed), "--no-trim-output", "-o", str(out)]
-    if overrides is not None:
-        inputs = workdir / f"inputs_{tag}.json"
-        inputs.write_text(json.dumps(overrides))
-        cmd += ["--inputs-json", str(inputs)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if proc.returncode != 0:
-        raise RuntimeError(f"run_strategy failed in {workdir}:\n{proc.stdout}\n{proc.stderr}")
-    return out.read_bytes()
-
-
-def trade_count(trades_csv: bytes) -> int:
-    rows = csv.DictReader(trades_csv.decode().splitlines())
-    return len({row["Trade #"] for row in rows})
-
-
-def digest(blob: bytes) -> str:
-    return hashlib.sha256(blob).hexdigest()
-
-
-# ---------------------------------------------------------------------------
 # Execution: every selected case's two spellings are built and run in
 # parallel once per session; each test then judges its own case.
 # ---------------------------------------------------------------------------
 
 @dataclass
-class Spelling:
-    source: str
-    transpiled: dict | None = field(default=None, repr=False)
-    error: str | None = None
-    trades: dict[str, bytes] = field(default_factory=dict, repr=False)
-
-
-@dataclass
 class CaseRun:
-    inline: Spelling
-    bound: Spelling
-
-
-def _run_spelling(engine_root: Path, feed: Path, workdir: Path,
-                  source: str, overrides: dict) -> Spelling:
-    sp = Spelling(source=source)
-    workdir.mkdir(parents=True, exist_ok=True)
-    pine = workdir / "strategy.pine"
-    pine.write_text(source)
-    try:
-        sp.transpiled = transpile_json(pine)
-        if not sp.transpiled.get("ok"):
-            sp.error = "transpile_json refused it:\n" + json.dumps(
-                sp.transpiled.get("diagnostics"), indent=1)
-            return sp
-        build_strategy_library(sp.transpiled["cpp"], workdir)
-        sp.trades["default"] = run_trades(engine_root, workdir, feed, None, "default")
-        sp.trades["override"] = run_trades(engine_root, workdir, feed, overrides, "override")
-    except Exception as exc:  # recorded and asserted by the case's own test
-        sp.error = str(exc)
-    return sp
+    inline: Outcome
+    bound: Outcome
 
 
 @pytest.fixture(scope="session")
 def case_runs(request, tmp_path_factory) -> dict[str, CaseRun]:
-    engine_root = _skip_unless_e2e_env()
+    engine_root = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("e2e_inline_input")
-    feed = _derive_chart_feed(engine_root, base / "ohlcv_ETH-USDT-USDT_15m.csv")
+    feed = derive_chart_feed(engine_root, base / "ohlcv_ETH-USDT-USDT_15m.csv")
     selected = [
         item.callspec.params["case_name"]
         for item in request.session.items
         if getattr(item, "originalname", None) == "test_inline_input_matches_bound_spelling"
     ] or list(CASES_BY_NAME)
-    jobs = {}
-    workers = max(2, min(8, (os.cpu_count() or 4) // 2))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        for name in selected:
-            case = CASES_BY_NAME[name]
-            for spelling, source in (("inline", case.inline_source()),
-                                     ("bound", case.bound_source())):
-                jobs[(name, spelling)] = pool.submit(
-                    _run_spelling, engine_root, feed, base / name / spelling,
-                    source, case.overrides())
+    builds = {}
+    for name in selected:
+        case = CASES_BY_NAME[name]
+        builds[f"{name}/inline"] = Build(case.inline_source(), case.overrides())
+        builds[f"{name}/bound"] = Build(case.bound_source(), case.overrides())
+    outcomes = execute_all(engine_root, feed, base, builds)
     return {
-        name: CaseRun(inline=jobs[(name, "inline")].result(),
-                      bound=jobs[(name, "bound")].result())
+        name: CaseRun(inline=outcomes[f"{name}/inline"],
+                      bound=outcomes[f"{name}/bound"])
         for name in selected
     }
 
@@ -532,7 +389,7 @@ def test_inline_input_matches_bound_spelling(case_name: str, case_runs) -> None:
                     f"{run.bound.error}", pytrace=False)
     if run.inline.error is not None:
         pytest.fail(f"[{case_name}] inline spelling failed:\n{run.inline.error}\n"
-                    f"--- source ---\n{run.inline.source}", pytrace=False)
+                    f"--- source ---\n{run.inline.build.source}", pytrace=False)
 
     inline_inputs = run.inline.transpiled["inputs"]
     bound_inputs = run.bound.transpiled["inputs"]
