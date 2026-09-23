@@ -30,7 +30,9 @@ export PINEFORGE_EIGEN_INCLUDE=../pineforge-engine/build/_deps/eigen-src
 export PINEFORGE_ENGINE_LIB=../pineforge-engine/build/lib/libpineforge.a
 pytest
 
-# Measured 2026-09-23: 2844 passed, 2 skipped, 0 failed (~18 min).
+# Measured 2026-09-23: 2937 passed, 2 skipped, 0 failed (~35 min at load
+# average ~20 on 16 cores; tests/test_e2e_inline_input_ta_length.py builds
+# and runs ~150 strategy libraries, ~4 min of it).
 #   Skip 1: test_parser.py:350, empty parameter set (pre-existing).
 #   Skip 2: test_codegen_golden.py:39, which needs the engine corpus at
 #           the sibling path and skips when the engine include is
@@ -44,8 +46,8 @@ pytest
 #    must transpile + compile against the engine headers.)
 pytest tests/test_compile_corpus.py
 
-# Measured 2026-09-23: 314 passed in ~4 min
-#   (312 corpus/validation probes at corpus gitlink 442d497, plus the 2
+# Measured 2026-09-23: 314 passed in ~6 min at load average ~20
+#   (312 corpus/validation probes at corpus gitlink 9182e3d, plus the 2
 #    parity anomalies).
 ```
 
@@ -111,6 +113,9 @@ pineforge_codegen/
 ├── tv_input_choices.py             input.string options metadata
 ├── errors.py                       CompileError + SourceLocation +
 │                                   Diagnostic + Level / Phase
+├── pine_spelling.py                String-literal-safe helpers for the Pine
+│                                   spellings of TA ctor args (inline
+│                                   input calls kept whole; see quirk 10)
 ├── analyzer/
 │   ├── base.py        (~1.4k loc)  Analyzer class — workhorse.
 │   ├── call_handlers.py            Per-call-namespace lowering helpers.
@@ -336,6 +341,21 @@ you delete or weaken the special case, the test will tell you.
    `-Wfloat-conversion` and requires an empty diagnostic list.
    Conversions to `bool` are out of scope — a boolean conversion is
    `!= 0`, which is defined for NaN.
+10. **An inline `input.*()` call is one leaf of a TA length.** TA ctor
+   args (and derived / user-function lengths) reach the codegen as Pine
+   source spellings. `pine_spelling.py` keeps an inline input call whole
+   there — keyword args included, strings escaped — and the codegen
+   masks its argument text (title string, keyword names) out of every
+   identifier scan, so `ta.ema(close, input.int(9, "fast"))` gets the
+   same reset, placeholder and manifest entry as
+   `len = input.int(9, "fast")` + `ta.ema(close, len)` (issue #132; the
+   title used to read as an unknown identifier). An inline call is
+   admitted exactly when its bound spelling would be input-backed
+   (`_is_stable_inline_input`: not a source input, constant defval); a
+   length that is otherwise a series stays refused. The input manifest
+   lists every global-scope input call, inline ones too, with `title` =
+   the key the C++ reads it by. `tests/test_e2e_inline_input_ta_length.py`
+   pins it end to end, for every TA constructor.
 
 ## How to add a new Pine v6 function
 
@@ -396,8 +416,8 @@ Expected counts at HEAD:
 
 | Mode                                                    | passed | skipped | failed |
 | ------------------------------------------------------- | ------ | ------- | ------ |
-| With engine headers + Eigen + a built runtime           | 2844   | 2       | **0**  |
-| Without a resolvable compile environment                | 1933   | 600     | **0**  |
+| With engine headers + Eigen + a built runtime           | 2937   | 2       | **0**  |
+| Without a resolvable compile environment                | 1952   | 674     | **0**  |
 
 Measured 2026-09-23. The 2 skips are `test_parser.py:350` (empty parameter
 set, pre-existing, unrelated) and `test_codegen_golden.py:39` (wants the
