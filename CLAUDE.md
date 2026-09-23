@@ -30,7 +30,7 @@ export PINEFORGE_EIGEN_INCLUDE=../pineforge-engine/build/_deps/eigen-src
 export PINEFORGE_ENGINE_LIB=../pineforge-engine/build/lib/libpineforge.a
 pytest
 
-# Measured 2026-09-23: 3042 passed, 2 skipped, 0 failed (~20-35 min on 16
+# Measured 2026-09-23: 3046 passed, 2 skipped, 0 failed (~20-35 min on 16
 # cores, depending on load; the eight tests/test_e2e_*.py modules build and
 # run ~320 strategy libraries, ~4-6 min of it).
 #   Skip 1: test_parser.py:350, empty parameter set (pre-existing).
@@ -165,7 +165,9 @@ tests/
 │                                   transpile_json, build the TU against the
 │                                   built runtime, run the engine's
 │                                   run_strategy.py on the corpus 15m feed
-│                                   (inputs.json overrides, @pf-trace).
+│                                   (inputs.json overrides, @pf-trace);
+│                                   reference_codegen() transpiles with
+│                                   another commit's codegen (git archive).
 ├── test_compile_smoke.py           Hand-picked Pine snippets that hit
 │                                   every dispatch lane; +3 regression
 │                                   tests for once-broken paths
@@ -221,7 +223,11 @@ tests/
 
 `pineforge_codegen.support_checker` is the gate. Its job is to fail
 loudly **before** codegen so users never get a silently miscompiled
-strategy. The taxonomy:
+strategy. An error raises `CompileError` (carrying every diagnostic); the
+warnings of a script that transpiles (support checker, then analyzer
+`ctx.diagnostics`) come back as `transpile_full(...)["diagnostics"]` and in
+`transpile_json`'s success envelope under `diagnostics`, in the error
+envelope's entry format. The taxonomy:
 
 
 | Bucket                           | What                                                                 |
@@ -235,7 +241,7 @@ strategy. The taxonomy:
 | `SUPPORTED_*` frozensets         | Per-namespace whitelist of names codegen knows how to emit.          |
 | `varip` VarDecl check            | `varip` declarations rejected outright — batch backtests have no realtime tick state. |
 | TF literal validation            | `request.security` / `request.security_lower_tf` `timeframe` string literals validated against Pine v6 format at parse time. |
-| `ta.vwap` anchor                 | Only the default daily anchor runs: `timeframe.change("1D")` / `("D")`, directly or through a never-reassigned non-`var` binding (`_check_ta_vwap_anchor`). The engine's `ta::VWAP` resets only when the symbol's session day changes, so any other anchor is refused naming that missing capability (the 2-arg form used to fail the C++ compile, the band form to run a silent daily VWAP). |
+| `ta.vwap` anchor                 | The engine's `ta::VWAP` resets only when the symbol's session day changes (`_check_ta_vwap_anchor`). The default anchor -- omitted, or `timeframe.change("1D")` / `("D")`, directly or through a never-reassigned non-`var` binding -- runs exactly. The band form `ta.vwap(src, anchor, mult)` with any other anchor keeps its session-day approximation (its pre-C4 lowering; strategies graded against TradingView rely on it) and WARNS that the anchor is approximated. The 2-arg form with any other anchor is refused naming the missing engine capability (it used to fail the C++ compile). |
 | Input titles (codegen)           | `_check_input_titles` refuses a title that is not a compile-time string constant (TradingView: `title (const string)`) before generation; PineForge keys every override by the title. |
 | syminfo na-gap warning           | `SUPPORTED_SYMINFO` = every `SYMINFO_MEMBER_MAP` key, but members whose emission is `na<T>()` or a `get_syminfo_metadata(...)` lookup (root/pricescale/minmove/mincontract/current_contract/expiration_date/isin/sector/industry + fundamentals/recommendations/target_price_*) form `_SYMINFO_SILENT_GAP_FIELDS` (derived from the emission table, so new na-accept fields can't drift out): every read WARNS that the value is na until a data feed injects it. |
 
@@ -375,8 +381,9 @@ you delete or weaken the special case, the test will tell you.
    (default 1, two values kept), so `TA_PERIOD_ARG["valuewhen"] = 2` sends
    it to the constructor as well (it sat in `TA_NO_CTOR`, and every
    `occurrence >= 2` read `na`). `ta.vwap`'s anchor reaches neither
-   (`TA_COMPUTE_ARGS["vwap"] = [0]`; the support checker admits only the
-   default anchor). Check a new TA's `compute()` signature in `ta.hpp` for
+   (`TA_COMPUTE_ARGS["vwap"] = [0]`): the support checker admits the default
+   anchor, warns on a band form's other anchor, refuses a 2-arg form's.
+   Check a new TA's `compute()` signature in `ta.hpp` for
    non-source parameters: `ta.alma`'s `floor` and `ta.kc` / `ta.kcw`'s
    `useTrueRange` still reach `compute()` overloads that do not exist (the
    TU fails to compile). `tests/test_e2e_ta_change_length_and_input_keys.py`
@@ -483,8 +490,8 @@ Expected counts at HEAD:
 
 | Mode                                                    | passed | skipped | failed |
 | ------------------------------------------------------- | ------ | ------- | ------ |
-| With engine headers + Eigen + a built runtime           | 3042   | 2       | **0**  |
-| Without a resolvable compile environment                | 1974   | 757     | **0**  |
+| With engine headers + Eigen + a built runtime           | 3046   | 2       | **0**  |
+| Without a resolvable compile environment                | 1974   | 761     | **0**  |
 
 Measured 2026-09-23. The 2 skips are `test_parser.py:350` (empty parameter
 set, pre-existing, unrelated) and `test_codegen_golden.py:39` (wants the
