@@ -30,9 +30,9 @@ export PINEFORGE_EIGEN_INCLUDE=../pineforge-engine/build/_deps/eigen-src
 export PINEFORGE_ENGINE_LIB=../pineforge-engine/build/lib/libpineforge.a
 pytest
 
-# Measured 2026-09-23: 2966 passed, 2 skipped, 0 failed (~30-35 min on 16
-# cores, depending on load; the two tests/test_e2e_*.py modules build and
-# run ~190 strategy libraries, ~2-5 min of it).
+# Measured 2026-09-23: 3042 passed, 2 skipped, 0 failed (~20-35 min on 16
+# cores, depending on load; the eight tests/test_e2e_*.py modules build and
+# run ~320 strategy libraries, ~4-6 min of it).
 #   Skip 1: test_parser.py:350, empty parameter set (pre-existing).
 #   Skip 2: test_codegen_golden.py:39, which needs the engine corpus at
 #           the sibling path and skips when the engine include is
@@ -160,6 +160,12 @@ tests/
 │                                   PINEFORGE_ENGINE_INCLUDE +
 │                                   PINEFORGE_EIGEN_INCLUDE + CXX env vars.
 │                                   Cleanly skips when env is missing.
+├── _e2e.py                         Shared harness of the test_e2e_*.py
+│                                   modules: transpile through gate/glue.py
+│                                   transpile_json, build the TU against the
+│                                   built runtime, run the engine's
+│                                   run_strategy.py on the corpus 15m feed
+│                                   (inputs.json overrides, @pf-trace).
 ├── test_compile_smoke.py           Hand-picked Pine snippets that hit
 │                                   every dispatch lane; +3 regression
 │                                   tests for once-broken paths
@@ -229,6 +235,8 @@ strategy. The taxonomy:
 | `SUPPORTED_*` frozensets         | Per-namespace whitelist of names codegen knows how to emit.          |
 | `varip` VarDecl check            | `varip` declarations rejected outright — batch backtests have no realtime tick state. |
 | TF literal validation            | `request.security` / `request.security_lower_tf` `timeframe` string literals validated against Pine v6 format at parse time. |
+| `ta.vwap` anchor                 | Only the default daily anchor runs: `timeframe.change("1D")` / `("D")`, directly or through a never-reassigned non-`var` binding (`_check_ta_vwap_anchor`). The engine's `ta::VWAP` resets only when the symbol's session day changes, so any other anchor is refused naming that missing capability (the 2-arg form used to fail the C++ compile, the band form to run a silent daily VWAP). |
+| Input titles (codegen)           | `_check_input_titles` refuses a title that is not a compile-time string constant (TradingView: `title (const string)`) before generation; PineForge keys every override by the title. |
 | syminfo na-gap warning           | `SUPPORTED_SYMINFO` = every `SYMINFO_MEMBER_MAP` key, but members whose emission is `na<T>()` or a `get_syminfo_metadata(...)` lookup (root/pricescale/minmove/mincontract/current_contract/expiration_date/isin/sector/industry + fundamentals/recommendations/target_price_*) form `_SYMINFO_SILENT_GAP_FIELDS` (derived from the emission table, so new na-accept fields can't drift out): every read WARNS that the value is na until a data feed injects it. |
 
 
@@ -362,23 +370,59 @@ you delete or weaken the special case, the test will tell you.
    only bounds the kept history, `compute(src, length = 1)` reads the
    lookback, so `TA_COMPUTE_ARGS["change"] = [0, 1]` (analyzer) sends the
    length to both — without it every `ta.change(src, n)` was a one-bar
-   change. `ta::ValueWhen` is the mirror image and still open: `occurrence`
-   reaches `compute()`, but the history bound is the constructor's
-   `max_occurrence`, never passed (`valuewhen` is in `TA_NO_CTOR`), so
-   `occurrence >= 2` reads `na`. Check a new TA's `compute()` signature in
-   `ta.hpp` for non-source parameters.
-   `tests/test_e2e_ta_change_length_and_input_keys.py` pins `ta.change`
-   bar by bar against `src - src[n]`.
+   change. `ta::ValueWhen` is the mirror image: `occurrence` always reached
+   `compute()`, but the history bound is the constructor's `max_occurrence`
+   (default 1, two values kept), so `TA_PERIOD_ARG["valuewhen"] = 2` sends
+   it to the constructor as well (it sat in `TA_NO_CTOR`, and every
+   `occurrence >= 2` read `na`). `ta.vwap`'s anchor reaches neither
+   (`TA_COMPUTE_ARGS["vwap"] = [0]`; the support checker admits only the
+   default anchor). Check a new TA's `compute()` signature in `ta.hpp` for
+   non-source parameters: `ta.alma`'s `floor` and `ta.kc` / `ta.kcw`'s
+   `useTrueRange` still reach `compute()` overloads that do not exist (the
+   TU fails to compile). `tests/test_e2e_ta_change_length_and_input_keys.py`
+   pins `ta.change` bar by bar against `src - src[n]`,
+   `tests/test_e2e_valuewhen_occurrence.py` `ta.valuewhen` against a
+   spelled-out chain, `tests/test_e2e_vwap_anchor.py` `ta.vwap` against a
+   spelled-out anchored VWAP.
 12. **One key per input, whichever path reads it.** A `get_input_*()` read
-   keys the input by `_get_input_title(call, var_name=...)` — the title,
-   else the declaring name, the string the manifest lists — spelled as a
-   C++ literal by `_input_key_literal` (a title holding `"` or `\` used to
-   break the TU). A never-reassigned `var v = input.*()` is registered like
-   `v = input.*()` (`_collect_known_var`), so the TA reset reads it through
-   its call node under the member's key; re-spelling the call in a derived
-   expression drops the name (still true of an untitled call nested in a
-   `var` initializer, or of a plain untitled binding with stable `:=`
-   reassignments: the reset reads those under `""`).
+   keys the input by `_get_input_title(call, ...)`, the string the manifest
+   lists: the title's value (`_input_title_value`: a literal, a `+` of
+   constants, or a never-reassigned non-`var` global name bound to one;
+   `_check_input_titles` refuses any other title before generation), else
+   the name of the declaration binding the call
+   (`pine_spelling.input_binding_names`: `v = input.*()`, or any call in a
+   `var` initializer — TradingView: "If not specified, the variable name is
+   used as the input's title"), else `""`. The name comes from the call
+   node, not from the caller, so the member, the TA reset, a
+   request.security timeframe and an alias's read (`b = a`) agree; a call
+   re-spelled for a derived length carries it as `title=`, since the
+   re-parsed node has no declaration. `_input_key_literal` spells the key
+   as a C++ literal (a title holding `"` or `\` used to break the TU). An
+   untitled call nested in a plain binding (`n = input.int(9) * 2`) is
+   keyed `""` in the manifest and the C++ alike, so two such inputs share
+   one key. `tests/test_e2e_untitled_input_keys.py` and
+   `tests/test_e2e_input_title_constant.py` pin it end to end.
+13. **A precalculated TA site is built like the live one.** A static chart
+   TA site (bar-data `compute()` arguments) is precalculated:
+   `prepare_script_run()` calls `precalculate()` when the engine allows it
+   (no magnifier, empty timeframes), and a call nested in an expression
+   then reads `_precalc_<member>[bar_index_]` (a direct `x = ta.foo(...)`
+   assignment does not).
+   `precalculate()` builds each site from `_ta_run_ctor_args`, the same
+   override-aware arguments as the `_ta_initialized_` reset, never from
+   compile-time values — those are the input's default (or the placeholder
+   `1` for a length that does not fold), and an override never reached a
+   nested call. `tests/test_e2e_precalc_input_override.py` pins every
+   spelling against literal-length twins.
+14. **String escapes are the Pine manual's.** The lexer (`_read_quoted`)
+   reads `\n` / `\t` as U+000A / U+0009 and `\\`, `\"`, `\'` as the
+   character; any other `\X` reads as `X` ("the character's meaning does
+   not change": `\T`, `\r`, `\u`, `\x`, `\0`, ...). A value reaches C++
+   through `_cpp_string_escape` (escapes `\n`, `\r`, `\t`) and a Pine
+   re-spelling through `pine_string_literal` (spells `\n`, `\t`). A
+   multiline `"""..."""` literal is not lexed as one (it reads as `""`).
+   `tests/test_e2e_string_escapes.py` pins each escape through the
+   manifest, an override and per-bar `str.*` traces.
 
 ## How to add a new Pine v6 function
 
@@ -439,8 +483,8 @@ Expected counts at HEAD:
 
 | Mode                                                    | passed | skipped | failed |
 | ------------------------------------------------------- | ------ | ------- | ------ |
-| With engine headers + Eigen + a built runtime           | 2966   | 2       | **0**  |
-| Without a resolvable compile environment                | 1957   | 698     | **0**  |
+| With engine headers + Eigen + a built runtime           | 3042   | 2       | **0**  |
+| Without a resolvable compile environment                | 1974   | 757     | **0**  |
 
 Measured 2026-09-23. The 2 skips are `test_parser.py:350` (empty parameter
 set, pre-existing, unrelated) and `test_codegen_golden.py:39` (wants the
