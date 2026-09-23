@@ -406,7 +406,7 @@ class ExprVisitor:
             if isinstance(val, (int, float)):
                 return str(val)
             if isinstance(val, str):
-                return f'std::string("{val}")'
+                return f'std::string("{self._cpp_string_escape(val)}")'
         # TA runtime-reset lowering: an input-backed var renders as its
         # override-aware getter (not the member name), because the reset may
         # run before the input members are initialised (evaluate_security path).

@@ -11,6 +11,7 @@ Mixin contract — host class must provide:
 - ``self._resolve_callee`` (``NamingHelper``).
 - ``self._visit_expr`` (visitor mixin, currently on ``base.py``;
   used to render the title-arg fallback expression).
+- ``self._cpp_string_escape`` (``NamingHelper``).
 """
 
 from __future__ import annotations
@@ -221,7 +222,7 @@ class InputHelper:
         if self._is_source_input(node):
             default = self._get_input_default(node)
             base = self._source_defval_to_base_series(default)
-            return f'get_input_source("{title}", {base})[0]'
+            return f'get_input_source({self._input_key_literal(title)}, {base})[0]'
         default = self._get_input_default(node)
         default_cpp = self._visit_expr(default) if default is not None else "0"
         getter = self._input_type_to_getter(func_name, namespace)
@@ -243,7 +244,15 @@ class InputHelper:
             elif isinstance(default, StringLiteral):
                 getter = "get_input_string"
         default_cpp = self._coerce_string_input_default(getter, default_cpp)
-        return f'{getter}("{title}", {default_cpp})'
+        return f'{getter}({self._input_key_literal(title)}, {default_cpp})'
+
+    def _input_key_literal(self, title: str) -> str:
+        """``title`` as the C++ string literal the input getters key it by.
+
+        A title is arbitrary Pine string text; pasted verbatim, a quote in it
+        ends the literal early and a backslash escapes the next character, so
+        the TU no longer compiles."""
+        return f'"{self._cpp_string_escape(title)}"'
 
     def _coerce_string_input_default(self, getter: str, default_cpp: str) -> str:
         """String getters take a ``std::string`` default. An unresolved default
