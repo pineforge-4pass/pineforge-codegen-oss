@@ -193,7 +193,7 @@ def test_timestamp_tz_missing_day_rejected():
 
 def test_string_cast_numeric():
     cpp = _gen("s = string(close)\nplot(close)\n")
-    assert "std::to_string(current_bar_.close)" in cpp
+    assert "pine_str_tostring_tv(current_bar_.close" in cpp
 
 
 def test_string_cast_string_passthrough():

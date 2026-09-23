@@ -1,0 +1,50 @@
+//@version=6
+strategy("c6 number rendering sense", overlay=true, process_orders_on_close=true)
+if bar_index == 0
+    strategy.entry("dflt:" + str.tostring(1234.56789), strategy.long)
+if bar_index == 1
+    strategy.close_all()
+if bar_index == 3
+    strategy.entry("pattern:" + str.tostring(1.2, "#.##"), strategy.long)
+if bar_index == 4
+    strategy.close_all()
+if bar_index == 6
+    strategy.entry("zeros:" + str.tostring(1.2, "#.00"), strategy.long)
+if bar_index == 7
+    strategy.close_all()
+if bar_index == 9
+    strategy.entry("percent:" + str.tostring(1.2345, format.percent), strategy.long)
+if bar_index == 10
+    strategy.close_all()
+if bar_index == 12
+    strategy.entry("volume:" + str.tostring(1250, format.volume), strategy.long)
+if bar_index == 13
+    strategy.close_all()
+if bar_index == 15
+    strategy.entry("mintick:" + str.tostring(1.2345, format.mintick), strategy.long)
+if bar_index == 16
+    strategy.close_all()
+if bar_index == 18
+    strategy.entry("fmt_default:" + str.format("{0}", 1234.56789), strategy.long)
+if bar_index == 19
+    strategy.close_all()
+if bar_index == 21
+    strategy.entry("fmt_pattern:" + str.format("{0,number,#.##}", 1234.56789), strategy.long)
+if bar_index == 22
+    strategy.close_all()
+if bar_index == 24
+    strategy.entry("fmt_integer:" + str.format("{0,number,integer}", 1234.56789), strategy.long)
+if bar_index == 25
+    strategy.close_all()
+if bar_index == 27
+    strategy.entry("fmt_percent:" + str.format("{0,number,percent}", 0.1234), strategy.long)
+if bar_index == 28
+    strategy.close_all()
+if bar_index == 30
+    strategy.entry("fmt_currency:" + str.format("{0,number,currency}", 1234.56789), strategy.long)
+if bar_index == 31
+    strategy.close_all()
+if bar_index == 33
+    strategy.entry("fmt_quote:" + str.format("{0}", 1234.56789), strategy.long)
+if bar_index == 34
+    strategy.close_all()

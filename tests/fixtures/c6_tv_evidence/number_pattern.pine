@@ -1,0 +1,22 @@
+//@version=6
+strategy("c6 format pattern sense", overlay=true, process_orders_on_close=true)
+if bar_index == 0
+    strategy.entry("mintick_trail:" + str.tostring(1.2, format.mintick), strategy.long)
+if bar_index == 1
+    strategy.close_all()
+if bar_index == 3
+    strategy.entry("mintick_int:" + str.tostring(2, format.mintick), strategy.long)
+if bar_index == 4
+    strategy.close_all()
+if bar_index == 6
+    strategy.entry("tostring_pcpat:" + str.tostring(0.1234, "#.##%"), strategy.long)
+if bar_index == 7
+    strategy.close_all()
+if bar_index == 9
+    strategy.entry("format_pcpat:" + str.format("{0,number,#.##%}", 0.1234), strategy.long)
+if bar_index == 10
+    strategy.close_all()
+if bar_index == 12
+    strategy.entry("format_quote2:" + str.format("''{0}", 2.5), strategy.long)
+if bar_index == 13
+    strategy.close_all()

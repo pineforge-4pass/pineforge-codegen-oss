@@ -1,6 +1,7 @@
 """Tests for the new CodeGen that reads from AnalyzerContext."""
 
 import re
+import re as _re
 
 import pytest
 
@@ -855,7 +856,7 @@ def test_str_tonumber():
 def test_str_tostring():
     src = '//@version=6\nstrategy("T")\nx = str.tostring(42)\n'
     cpp = _generate(src)
-    assert "to_string" in cpp
+    assert "pine_str_tostring_tv" in cpp
 
 
 # === Extended array method tests ===
@@ -1043,7 +1044,7 @@ def test_color_rgb():
     assert "0" in cpp
 
 
-def test_color_new():
+def test_color_new_visual_noop():
     src = "c = color.new(color.red, 50)\n"
     cpp = _generate_raw(src)
     # color.new returns 0 (color as int)
@@ -1651,9 +1652,6 @@ if is_last
 # onto ONE shared (last-written) TA member and leaving the rest DECLARED-but-
 # never-COMPUTED ("dead"). This pins the context-sensitive (call-path) cloning
 # that gives each path its own member. (Was: all clones shared one member.)
-
-import re as _re
-
 
 def _ta_decls_and_computed(cpp: str):
     decls = _re.findall(r'ta::(?:Highest|Lowest|Change|Sma|Ema) (_ta_\w+);', cpp)

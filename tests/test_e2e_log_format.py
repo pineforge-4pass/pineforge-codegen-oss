@@ -9,17 +9,10 @@ and formatting behaviors as str.format()." The codegen emitted
 ``pine_log_info(<formatString>)`` and dropped every argument, so a log line
 read ``close {0}`` whatever the bar.
 
-A log call with arguments now lowers exactly like ``log.info(str.format(
-formatString, arg0, ...))``: the engine's ``pine_str_format`` substitutes each
-``{i}`` with its argument, rendered as the codegen renders every
-``str.format`` argument (a string as is, a bool as ``true`` / ``false``, a
-number through ``std::to_string``), and leaves a placeholder with no argument
-as its literal text, as TradingView does ("If a placeholder refers to a
-nonexistent argument, the formatted result treats that placeholder as a
-literal character sequence"). That number rendering is PineForge's
-``str.format`` rendering, not TradingView's: its default numeric format is
-``#,###.###`` and it reads ``{0,number,...}`` patterns and apostrophe quoting,
-which the engine's ``str_format`` does not. The single-argument
+A log call with arguments lowers exactly like ``log.info(str.format(
+formatString, arg0, ...))``: numeric arguments use TradingView's default
+``#,###.###`` format, strings stay as is, booleans read ``true``/``false``,
+and a placeholder with no argument remains literal. The single-argument
 ``log.info(message)`` overload logs its message as is.
 
 Each case logs on the first three bars; the run's stderr (the engine writes
@@ -52,9 +45,9 @@ TRADE = ("x = ta.ema(close, 9)\n"
 LOG_PREFIXES = ("[INFO] ", "[WARN] ", "[ERROR] ")
 
 
-def _cpp_double(v: float) -> str:
-    """``std::to_string(double)``: printf ``%f``."""
-    return "%f" % v
+def _tv_number(v: float) -> str:
+    """The reference's default #,###.### on these chart-feed values."""
+    return f"{v:,.3f}".rstrip("0").rstrip(".")
 
 
 @dataclass(frozen=True)
@@ -85,12 +78,12 @@ CASES: tuple[LogCase, ...] = (
     LogCase("info_arguments",
             'log.info("bar {0}: close {1} volume {2} up {3} tag {4}", n, close, volume, close > open, s)',
             'log.info(str.format("bar {0}: close {1} volume {2} up {3} tag {4}", n, close, volume, close > open, s))',
-            lambda bar: (f"[INFO] bar {bar['n']}: close {_cpp_double(float(bar['close']))} "
-                         f"volume {_cpp_double(float(bar['volume']))} up {_up(bar)} tag tag")),
+            lambda bar: (f"[INFO] bar {bar['n']}: close {_tv_number(float(bar['close']))} "
+                         f"volume {_tv_number(float(bar['volume']))} up {_up(bar)} tag tag")),
     LogCase("warning_reordered",
             'log.warning("{1} before {0}", "a", high)',
             'log.warning(str.format("{1} before {0}", "a", high))',
-            lambda bar: f"[WARN] {_cpp_double(float(bar['high']))} before a"),
+            lambda bar: f"[WARN] {_tv_number(float(bar['high']))} before a"),
     LogCase("error_repeated",
             'log.error("n={0}, again {0}", n)',
             'log.error(str.format("n={0}, again {0}", n))',
@@ -98,7 +91,7 @@ CASES: tuple[LogCase, ...] = (
     LogCase("placeholder_without_argument",
             'log.info("{0} and {5}", low)',
             'log.info(str.format("{0} and {5}", low))',
-            lambda bar: f"[INFO] {_cpp_double(float(bar['low']))} and {{5}}"),
+            lambda bar: f"[INFO] {_tv_number(float(bar['low']))} and {{5}}"),
     # Control: the one-argument overload logs its message as is.
     LogCase("message_only", 'log.info("plain {0} text")', 'log.info("plain {0} text")',
             lambda bar: "[INFO] plain {0} text"),

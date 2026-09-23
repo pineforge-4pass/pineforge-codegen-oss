@@ -1,0 +1,50 @@
+//@version=6
+strategy("c6 number rendering edge sense", overlay=true, process_orders_on_close=true)
+if bar_index == 0
+    strategy.entry("vol2500:" + str.tostring(2500, format.volume), strategy.long)
+if bar_index == 1
+    strategy.close_all()
+if bar_index == 3
+    strategy.entry("vol1000:" + str.tostring(1000, format.volume), strategy.long)
+if bar_index == 4
+    strategy.close_all()
+if bar_index == 6
+    strategy.entry("vol12:" + str.tostring(12.34, format.volume), strategy.long)
+if bar_index == 7
+    strategy.close_all()
+if bar_index == 9
+    strategy.entry("pc1:" + str.tostring(1.005, format.percent), strategy.long)
+if bar_index == 10
+    strategy.close_all()
+if bar_index == 12
+    strategy.entry("na:" + str.tostring(float(na)), strategy.long)
+if bar_index == 13
+    strategy.close_all()
+if bar_index == 15
+    strategy.entry("prec:" + str.tostring(0.1234567890123), strategy.long)
+if bar_index == 16
+    strategy.close_all()
+if bar_index == 18
+    strategy.entry("group:" + str.tostring(1234.56789, "#,###.##"), strategy.long)
+if bar_index == 19
+    strategy.close_all()
+if bar_index == 21
+    strategy.entry("negcurr:" + str.format("{0,number,currency}", -1234.567), strategy.long)
+if bar_index == 22
+    strategy.close_all()
+if bar_index == 24
+    strategy.entry("negpc:" + str.format("{0,number,percent}", -0.1234), strategy.long)
+if bar_index == 25
+    strategy.close_all()
+if bar_index == 27
+    strategy.entry("quoted:" + str.format("'{0}' {0}", 2.5), strategy.long)
+if bar_index == 28
+    strategy.close_all()
+if bar_index == 30
+    strategy.entry("fmtzero:" + str.format("{0,number,#.00}", 1.2), strategy.long)
+if bar_index == 31
+    strategy.close_all()
+if bar_index == 33
+    strategy.entry("bool:" + str.format("{0}", true), strategy.long)
+if bar_index == 34
+    strategy.close_all()

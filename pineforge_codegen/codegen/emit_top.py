@@ -85,7 +85,7 @@ from __future__ import annotations
 import re
 
 from ..ast_nodes import (
-    ExprStmt, FuncCall, Identifier, IfStmt, SwitchStmt, VarDecl,
+    ExprStmt, FuncCall, IfStmt, SwitchStmt, VarDecl,
 )
 from ..analyzer import FuncInfo
 from ..symbols import PineType, method_receiver_cpp_token
@@ -97,6 +97,7 @@ from .tables import (
     RUNTIME_REGISTER_SECURITY_EVAL_FN,
     RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN,
 )
+from .tv_number_format import TV_NUMBER_FORMAT_CPP
 
 
 class TopLevelEmitter:
@@ -107,6 +108,19 @@ class TopLevelEmitter:
     Mixed into ``CodeGen``; not intended to be instantiated standalone."""
 
     def _emit_includes(self, lines: list[str]) -> None:
+        roots = [self.ctx.ast] + [
+            pragma.expr_node for pragma in (self.ctx.pf_trace_pragmas or [])
+        ]
+        self._uses_tv_number_format = any(
+            (namespace == "str" and func_name in {"format", "tostring"})
+            or (namespace is None and func_name == "tostring")
+            or (namespace == "log" and func_name in {"info", "warning", "error"}
+                and len(node.args) > 1)
+            for root in roots
+            for node in self._walk_ast(root)
+            if isinstance(node, FuncCall)
+            for func_name, namespace in [self._resolve_callee(node.callee)]
+        )
         lines.append('#include <pineforge/source/pine_strategy_host.hpp>')
         lines.append('#include <pineforge/ta.hpp>')
         lines.append('#include <pineforge/math.hpp>')
@@ -121,6 +135,9 @@ class TopLevelEmitter:
         lines.append("#include <numeric>")
         lines.append("#include <string>")
         lines.append("#include <vector>")
+        if self._uses_tv_number_format:
+            lines.extend(("#include <sstream>", "#include <iomanip>",
+                          "#include <locale>"))
         if getattr(self, "_udt_defs", {}):
             lines.append("#include <deque>")
             lines.append("#include <functional>")
@@ -188,6 +205,9 @@ class TopLevelEmitter:
         # in favour of fully qualified names emitted at each call site.
         lines.append("using namespace pineforge;")
         lines.append("")
+        if self._uses_tv_number_format:
+            lines.append(TV_NUMBER_FORMAT_CPP)
+            lines.append("")
         # Syminfo derivation helpers (_pf_derive_main_tickerid, _pf_derive_country)
         from .helpers_syminfo import emit_syminfo_helpers
         lines.extend(emit_syminfo_helpers())
@@ -1884,7 +1904,7 @@ class TopLevelEmitter:
                             else self._int_slot_cpp_type(None, ret_type)
                         ),
                     )
-                    lines.append(f"        return _func_ret;")
+                    lines.append("        return _func_ret;")
                     emitted_return = True
                 else:
                     self._visit_stmt(s, lines, indent=2)
