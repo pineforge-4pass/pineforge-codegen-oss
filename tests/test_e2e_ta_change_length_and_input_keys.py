@@ -18,65 +18,33 @@ Three silent codegen defects, each pinned from outside:
    key ``"n"`` but the TA reset re-read it under ``""``, so overriding ``n``
    never resized ``ta.ema(close, n)``.
 
-Interfaces, as a client drives them:
-
-1. transpile: the ``transpile_json`` contract of pineforge-app's Pyodide glue
-   (``gate/glue.py`` is its canonical copy), run as a subprocess. Its JSON
-   carries the C++ and the input manifest the app builds its override form
-   from.
-2. compile: the emitted TU as a strategy shared library linked against the
-   built engine runtime (the engine's ``corpus/CMakeLists.txt`` recipe).
-3. run: the engine's ``scripts/run_strategy.py`` C-ABI harness over the
-   corpus's real ETH-USDT 1m feed, resampled to the 15m chart feed by the
-   engine's own ``derive_corpus_feeds`` resampler into a temp dir (never into
-   the engine checkout). Overrides travel through ``inputs.json`` ->
-   ``strategy_set_input``, keyed by the manifest title; per-bar values come
-   back through ``--trace-json``.
+Interfaces, as a client drives them: ``tests/_e2e.py`` (transpile through
+the app's glue, compile against the built engine runtime, run on the real
+15m feed with ``inputs.json`` overrides and ``--trace-json`` values).
 
 The TA calls under an input override are direct assignments
 (``x = ta.ema(close, n)``) on purpose: a TA call nested inside a larger
 expression reads its precalculated series, which is sized from the input's
 default, so no override reaches it in any spelling (a separate defect).
 
-Needs PINEFORGE_ENGINE_INCLUDE (+ Eigen) and a built runtime
-(PINEFORGE_ENGINE_LIB), with the engine checkout's ``scripts/`` and corpus
-feed beside the include dir. Skips cleanly otherwise, like every compile test.
+Skips cleanly without the engine environment ``tests/_e2e.py`` needs.
 """
 
 from __future__ import annotations
 
-import concurrent.futures
-import csv
-import hashlib
-import importlib.util
-import json
-import math
-import os
-import subprocess
-import sys
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 
 import pytest
 
-from tests import _compile as compile_env
-
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-GLUE_DIR = REPO_ROOT / "gate"
+from tests._e2e import (
+    Build, Outcome, derive_chart_feed, digest, execute_all, ok,
+    per_bar_mismatches, skip_unless_e2e_env, summary, transpile_json,
+)
 
 
 # ---------------------------------------------------------------------------
 # Strategies
 # ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class Build:
-    """One strategy source and the input overrides it runs under."""
-    source: str
-    overrides: dict | None = None
-    trace: bool = False
-
 
 # One header for every build: byte-compared runs differ only where meant to.
 HEADER = '//@version=6\nstrategy("e2e-c3", overlay=true)\n'
@@ -273,144 +241,9 @@ KEY_BY_NAME = {c.name: c for c in KEY_CASES}
 
 
 # ---------------------------------------------------------------------------
-# Interfaces
-# ---------------------------------------------------------------------------
-
-def _engine_root() -> Path | None:
-    inc = compile_env._ENGINE_INC
-    return inc.parent if inc is not None else None
-
-
-def _skip_unless_e2e_env() -> Path:
-    compile_env.skip_if_no_engine_lib()
-    root = _engine_root()
-    assert root is not None
-    if not (root / "scripts" / "run_strategy.py").is_file():
-        pytest.skip(f"engine checkout {root} has no scripts/run_strategy.py")
-    feed = root / "corpus" / "data" / "ohlcv_ETH-USDT-USDT_1m.csv"
-    if not feed.is_file() or feed.stat().st_size < 1_000_000:
-        pytest.skip(f"corpus 1m feed missing or an unsmudged LFS pointer: {feed}")
-    return root
-
-
-def _derive_chart_feed(engine_root: Path, out: Path) -> Path:
-    """The corpus's 15m chart feed, via the engine's own resampler."""
-    spec = importlib.util.spec_from_file_location(
-        "_pf_derive_corpus_feeds", engine_root / "scripts" / "derive_corpus_feeds.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    with mod.SOURCE_1M.open() as fh:
-        next(fh)
-        buckets = mod._resample_15m(fh)
-    out.write_text("\n".join([mod.HEADER, *map(mod._format_bucket, buckets)]) + "\n")
-    return out
-
-
-_GLUE_MAIN = (
-    "import sys\n"
-    "sys.path.insert(0, sys.argv[1])\n"
-    "import glue\n"
-    "sys.stdout.write(glue.transpile_json(open(sys.argv[2], encoding='utf-8').read()))\n"
-)
-
-
-def transpile_json(pine: Path) -> dict:
-    env = dict(os.environ, PYTHONPATH=str(REPO_ROOT))
-    proc = subprocess.run(
-        [sys.executable, "-c", _GLUE_MAIN, str(GLUE_DIR), str(pine)],
-        capture_output=True, text=True, timeout=300, env=env, cwd=REPO_ROOT)
-    if proc.returncode != 0:
-        raise RuntimeError(f"transpile_json crashed on {pine}:\n{proc.stderr}")
-    return json.loads(proc.stdout)
-
-
-def build_strategy_library(cpp: str, workdir: Path) -> None:
-    (workdir / "generated.cpp").write_text(cpp)
-    lib = str(compile_env._ENGINE_LIB)
-    if sys.platform == "darwin":
-        link = [f"-Wl,-force_load,{lib}"]
-    else:
-        link = ["-Wl,--whole-archive", lib, "-Wl,--no-whole-archive"]
-    cmd = [compile_env._COMPILER, "-std=c++17", "-O2", "-fPIC", "-shared",
-           *compile_env._include_flags(isolate_headers=True),
-           str(workdir / "generated.cpp"), *link, "-o", str(workdir / "strategy.so")]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if proc.returncode != 0:
-        raise RuntimeError(f"compile failed in {workdir}:\n"
-                           + "\n".join(proc.stderr.splitlines()[:20]))
-
-
-def run_strategy(engine_root: Path, workdir: Path, feed: Path,
-                 overrides: dict | None, tag: str, trace: bool
-                 ) -> tuple[bytes, list[dict] | None]:
-    out = workdir / f"engine_trades_{tag}.csv"
-    cmd = [sys.executable, str(engine_root / "scripts" / "run_strategy.py"),
-           str(workdir), "--ohlcv", str(feed), "--no-trim-output", "-o", str(out)]
-    if overrides is not None:
-        inputs = workdir / f"inputs_{tag}.json"
-        inputs.write_text(json.dumps(overrides))
-        cmd += ["--inputs-json", str(inputs)]
-    trace_path = workdir / f"trace_{tag}.json"
-    if trace:
-        cmd += ["--trace-json", str(trace_path)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if proc.returncode != 0:
-        raise RuntimeError(f"run_strategy failed in {workdir}:\n{proc.stdout}\n{proc.stderr}")
-    records = json.loads(trace_path.read_text())["trace"] if trace else None
-    return out.read_bytes(), records
-
-
-def trade_count(trades_csv: bytes) -> int:
-    return len({row["Trade #"] for row in csv.DictReader(trades_csv.decode().splitlines())})
-
-
-def digest(blob: bytes) -> str:
-    return hashlib.sha256(blob).hexdigest()
-
-
-def _summary(blob: bytes) -> str:
-    return f"{trade_count(blob)} trades sha256 {digest(blob)[:16]}"
-
-
-# ---------------------------------------------------------------------------
 # Execution: every build the selected tests need is transpiled, compiled and
 # run in parallel once per session; each test then judges its own case.
 # ---------------------------------------------------------------------------
-
-@dataclass
-class Outcome:
-    build: Build
-    transpiled: dict | None = field(default=None, repr=False)
-    error: str | None = None
-    trades: dict[str, bytes] = field(default_factory=dict, repr=False)
-    traces: dict[str, list[dict]] = field(default_factory=dict, repr=False)
-
-
-def _execute(engine_root: Path, feed: Path, workdir: Path, build: Build) -> Outcome:
-    outcome = Outcome(build=build)
-    workdir.mkdir(parents=True, exist_ok=True)
-    pine = workdir / "strategy.pine"
-    pine.write_text(build.source, encoding="utf-8")
-    try:
-        outcome.transpiled = transpile_json(pine)
-        if not outcome.transpiled.get("ok"):
-            outcome.error = "transpile_json refused it:\n" + json.dumps(
-                outcome.transpiled.get("diagnostics"), indent=1, ensure_ascii=False)
-            return outcome
-        build_strategy_library(outcome.transpiled["cpp"], workdir)
-        runs = [("default", None)]
-        if build.overrides is not None:
-            runs.append(("override", build.overrides))
-        for tag, overrides in runs:
-            trades, records = run_strategy(engine_root, workdir, feed, overrides,
-                                           tag, build.trace)
-            outcome.trades[tag] = trades
-            if records is not None:
-                outcome.traces[tag] = records
-    except Exception as exc:  # recorded and asserted by the case's own test
-        outcome.error = str(exc)
-    return outcome
-
 
 _TESTS = {
     "test_ta_change_equals_spelled_out_difference": "change",
@@ -422,93 +255,47 @@ _TESTS = {
 
 @pytest.fixture(scope="session")
 def outcomes(request, tmp_path_factory) -> dict[str, Outcome]:
-    engine_root = _skip_unless_e2e_env()
+    engine_root = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("e2e_ta_change_input_keys")
-    feed = _derive_chart_feed(engine_root, base / "ohlcv_ETH-USDT-USDT_15m.csv")
+    feed = derive_chart_feed(engine_root, base / "ohlcv_ETH-USDT-USDT_15m.csv")
     builds: dict[str, Build] = {}
     for item in request.session.items:
         kind = _TESTS.get(getattr(item, "originalname", None))
         if kind is not None:
             params = getattr(item, "callspec", None)
             builds.update(_builds_for(kind, params.params["case_name"] if params else ""))
-    workers = max(2, min(8, (os.cpu_count() or 4) // 2))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        jobs = {key: pool.submit(_execute, engine_root, feed, base / key, b)
-                for key, b in builds.items()}
-        return {key: job.result() for key, job in jobs.items()}
-
-
-def _ok(outcomes: dict[str, Outcome], key: str) -> Outcome:
-    outcome = outcomes[key]
-    if outcome.error is not None:
-        pytest.fail(f"[{key}] {outcome.error}\n--- source ---\n{outcome.build.source}",
-                    pytrace=False)
-    return outcome
-
-
-def _same(a: float, b: float) -> bool:
-    return (math.isnan(a) and math.isnan(b)) or a == b
-
-
-def _per_bar_mismatches(subject: list[dict], reference: list[dict]
-                        ) -> tuple[int, int, str | None]:
-    """``(bars compared, mismatching bars, first mismatch)`` over the traced
-    series both runs share, matched by trace name and bar."""
-    by_name: dict[str, list[dict]] = {}
-    for rec in reference:
-        by_name.setdefault(rec["name"], []).append(rec)
-    compared = mismatched = 0
-    first = None
-    positions: dict[str, int] = {}
-    for rec in subject:
-        name = rec["name"]
-        i = positions.get(name, 0)
-        positions[name] = i + 1
-        refs = by_name.get(name, [])
-        ref = refs[i] if i < len(refs) else None
-        compared += 1
-        if (ref is None or ref["timestamp"] != rec["timestamp"]
-                or not _same(rec["value"], ref["value"])):
-            mismatched += 1
-            if first is None:
-                first = (f"{name} at bar {rec['bar_index']} (ts {rec['timestamp']}): "
-                         f"ta.change {rec['value']!r} vs spelled-out "
-                         f"{None if ref is None else ref['value']!r}")
-    if sum(len(v) for v in by_name.values()) != compared:
-        mismatched += 1
-        first = first or "the two runs traced different numbers of bars"
-    return compared, mismatched, first
+    return execute_all(engine_root, feed, base, builds)
 
 
 @pytest.mark.parametrize("case_name", list(CHANGE_BY_NAME))
 def test_ta_change_equals_spelled_out_difference(case_name: str, outcomes) -> None:
     case = CHANGE_BY_NAME[case_name]
-    subject = _ok(outcomes, f"change/{case_name}/subject")
-    reference = _ok(outcomes, f"change/{case_name}/reference")
+    subject = ok(outcomes, f"change/{case_name}/subject")
+    reference = ok(outcomes, f"change/{case_name}/reference")
     failures = []
     lines = []
     for tag in subject.trades:
-        compared, mismatched, first = _per_bar_mismatches(
-            subject.traces[tag], reference.traces[tag])
+        compared, mismatched, first = per_bar_mismatches(
+            subject.traces[tag], reference.traces[tag], ("ta.change", "spelled-out"))
         a, b = subject.trades[tag], reference.trades[tag]
         if mismatched:
             failures.append(
                 f"{tag}: ta.change differs from the spelled-out difference on "
                 f"{mismatched} of {compared} traced bars; first: {first}")
         if digest(a) != digest(b):
-            failures.append(f"{tag}: trades differ: ta.change {_summary(a)} vs "
-                            f"spelled-out {_summary(b)}")
-        lines.append(f"{tag} {compared} bars equal, {_summary(a)}")
+            failures.append(f"{tag}: trades differ: ta.change {summary(a)} vs "
+                            f"spelled-out {summary(b)}")
+        lines.append(f"{tag} {compared} bars equal, {summary(a)}")
     if case.override is not None:
         default, override = subject.trades["default"], subject.trades["override"]
         if default == override:
             failures.append(f"override {case.override} left the trades unchanged "
-                            f"({_summary(default)})")
-        lit = _ok(outcomes, f"change/{case.override_equals}/subject")
+                            f"({summary(default)})")
+        lit = ok(outcomes, f"change/{case.override_equals}/subject")
         if digest(override) != digest(lit.trades["default"]):
             failures.append(
-                f"override {case.override} gives {_summary(override)}, not the "
-                f"{case.override_equals} build's {_summary(lit.trades['default'])}")
+                f"override {case.override} gives {summary(override)}, not the "
+                f"{case.override_equals} build's {summary(lit.trades['default'])}")
         else:
             lines.append(f"override == {case.override_equals}")
     assert not failures, f"[{case_name}] " + "\n  ".join(failures)
@@ -518,51 +305,51 @@ def test_ta_change_equals_spelled_out_difference(case_name: str, outcomes) -> No
 @pytest.mark.parametrize("case_name", list(TITLE_BY_NAME))
 def test_input_title_needing_escapes_compiles_and_overrides(case_name: str, outcomes) -> None:
     case = TITLE_BY_NAME[case_name]
-    subject = _ok(outcomes, f"title/{case_name}/subject")
-    twin = _ok(outcomes, f"title/{case_name}/twin")
+    subject = ok(outcomes, f"title/{case_name}/subject")
+    twin = ok(outcomes, f"title/{case_name}/twin")
     for tag in ("default", "override"):
         a, b = subject.trades[tag], twin.trades[tag]
         assert digest(a) == digest(b), (
-            f"[{case_name}] {tag} trades differ: {_summary(a)} vs the plain-title "
-            f"twin's {_summary(b)}")
+            f"[{case_name}] {tag} trades differ: {summary(a)} vs the plain-title "
+            f"twin's {summary(b)}")
     assert subject.trades["default"] != subject.trades["override"], (
         f"[{case_name}] override {subject.build.overrides} left the trades unchanged")
     titles = [e["title"] for e in subject.transpiled["inputs"]]
     assert titles == [case.title], f"[{case_name}] manifest titles {titles}"
     print(f"E2E title {case_name}: title {case.title!r} == plain {case.plain!r}  "
-          f"default {_summary(subject.trades['default'])}  override "
-          f"{subject.build.overrides} {_summary(subject.trades['override'])}")
+          f"default {summary(subject.trades['default'])}  override "
+          f"{subject.build.overrides} {summary(subject.trades['override'])}")
 
 
 @pytest.mark.parametrize("case_name", list(KEY_BY_NAME))
 def test_untitled_var_input_override_resizes_ta(case_name: str, outcomes) -> None:
     case = KEY_BY_NAME[case_name]
-    subject = _ok(outcomes, f"key/{case_name}")
-    twin = _ok(outcomes, "key/titled_twin")
+    subject = ok(outcomes, f"key/{case_name}")
+    twin = ok(outcomes, "key/titled_twin")
     titles = [e["title"] for e in subject.transpiled["inputs"]]
     assert titles == [case.key], f"[{case_name}] manifest titles {titles}"
     failures = []
     for tag in ("default", "override"):
         a, b = subject.trades[tag], twin.trades[tag]
         if digest(a) != digest(b):
-            failures.append(f"{tag} trades {_summary(a)} vs the titled twin's "
-                            f"{_summary(b)}")
+            failures.append(f"{tag} trades {summary(a)} vs the titled twin's "
+                            f"{summary(b)}")
     if subject.trades["default"] == subject.trades["override"]:
         failures.append(f"override {subject.build.overrides} left the trades "
-                        f"unchanged ({_summary(subject.trades['default'])})")
+                        f"unchanged ({summary(subject.trades['default'])})")
     assert not failures, f"[{case_name}] " + "\n  ".join(failures)
     print(f"E2E key {case_name}: {case.decl!r} == titled twin  default "
-          f"{_summary(subject.trades['default'])}  override "
-          f"{subject.build.overrides} {_summary(subject.trades['override'])}")
+          f"{summary(subject.trades['default'])}  override "
+          f"{subject.build.overrides} {summary(subject.trades['override'])}")
 
 
 def test_string_constant_needing_escapes_compiles(outcomes) -> None:
-    subject = _ok(outcomes, "const/subject")
-    twin = _ok(outcomes, "const/twin")
+    subject = ok(outcomes, "const/subject")
+    twin = ok(outcomes, "const/twin")
     a, b = subject.trades["default"], twin.trades["default"]
     assert digest(a) == digest(b), (
-        f"str.length of the constant: {_summary(a)} vs the literal 10's {_summary(b)}")
-    print(f"E2E const string: str.length(Q) == 10  {_summary(a)}")
+        f"str.length of the constant: {summary(a)} vs the literal 10's {summary(b)}")
+    print(f"E2E const string: str.length(Q) == 10  {summary(a)}")
 
 
 def test_ta_change_length_from_a_request_security_helper_param_is_refused(tmp_path) -> None:
