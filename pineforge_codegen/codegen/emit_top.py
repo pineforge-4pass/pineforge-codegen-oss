@@ -1292,7 +1292,7 @@ class TopLevelEmitter:
                         title = self._get_input_title(stmt.value, var_name=stmt.name)
                         getter = self._input_type_to_getter(func_name_i, namespace_i)
                         default_cpp = self._coerce_string_input_default(getter, default_cpp)
-                        cpp_val = f'{getter}("{title}", {default_cpp})'
+                        cpp_val = f'{getter}({self._input_key_literal(title)}, {default_cpp})'
                         static_vars.append(f"{safe} = {cpp_val};")
 
         if static_vars:
@@ -2050,7 +2050,7 @@ class TopLevelEmitter:
             default = self._get_input_default(stmt.value)
             base = self._source_defval_to_base_series(default)
             title = self._get_input_title(stmt.value, var_name=stmt.name)
-            cpp_val = f'get_input_source("{title}", {base})[0]'
+            cpp_val = f'get_input_source({self._input_key_literal(title)}, {base})[0]'
             # A source var subscripted elsewhere in the script (e.g. ``src[1]``)
             # is declared ``Series<double>``, not a scalar double, mirroring
             # the normal per-bar path's ``{safe}.push({cpp_val})`` (see
