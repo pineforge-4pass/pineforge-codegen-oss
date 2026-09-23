@@ -22,7 +22,7 @@ import re
 
 import pytest
 
-from pineforge_codegen import transpile
+from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.errors import CompileError
 
 
@@ -180,6 +180,28 @@ plot(sig)
     )
     assert "ta::RMA(len)" not in cpp
     assert "ta::RMA(input(15))" not in cpp
+
+
+def test_nested_user_func_untitled_inputs_share_a_key_warning():
+    # Both untitled calls are keyed by the declared name ``sig``: one override
+    # sets both. The script still transpiles; a warning names the two inputs.
+    full = transpile_full("""//@version=6
+strategy("derived-nested-inline-input")
+dirmov(len) =>
+    truerange = ta.rma(ta.tr, len)
+    plus = ta.rma(close, len) / truerange
+adx(dilen, adxlen) =>
+    x = dirmov(dilen)
+    ta.rma(x, adxlen)
+sig = adx(input(15), input(15))
+plot(sig)
+""")
+    shared = [d.message for d in full["diagnostics"] if d.message.startswith("input key")]
+    assert shared == [
+        "input key 'sig' is shared by the inputs at 9:11 and 9:22: PineForge sets an "
+        "input override by its title, else by the name of the declaration holding it, "
+        "so one override sets all of them."]
+    assert [e["title"] for e in full["inputs"]] == ["sig", "sig"]
 
 
 # ---------------------------------------------------------------------------
