@@ -404,6 +404,25 @@ def _loc(node: ASTNode | None, fallback_file: str) -> SourceLocation:
     return SourceLocation(file=fallback_file, line=1, col=1, end_col=1)
 
 
+def _expr_start(node: ASTNode) -> ASTNode:
+    """The leftmost sub-node of an expression, whose location is the
+    expression's first token (a call's own location is its ``(``)."""
+    while True:
+        if isinstance(node, FuncCall):
+            child = node.callee
+        elif isinstance(node, (MemberAccess, Subscript)):
+            child = node.object
+        elif isinstance(node, BinOp):
+            child = node.left
+        elif isinstance(node, Ternary):
+            child = node.condition
+        else:
+            return node
+        if getattr(child, "loc", None) is None:
+            return node
+        node = child
+
+
 def _qualified_name(callee: ASTNode) -> tuple[str | None, str | None]:
     """Return (namespace, function_name) for a call's callee, or (None, None)."""
     if isinstance(callee, Identifier):
@@ -524,6 +543,9 @@ class SupportChecker:
         # (below) as well as during the visit, so a rebind that lexically
         # FOLLOWS the request.security call cannot slip past.
         self._scalar_rebinds: dict[str, list[ASTNode]] = {}
+        # Names declared ``var`` / ``varip`` anywhere: their declaration value
+        # is the first bar's only, so it does not describe later bars.
+        self._persistent_decl_names: set[str] = set()
 
     # -- Public API --
 
@@ -1009,6 +1031,8 @@ class SupportChecker:
     def _visit_VarDecl(self, node: VarDecl) -> None:
         if node.name and node.value is not None:
             self._scalar_defs.setdefault(node.name, node.value)
+        if node.name and (node.is_var or node.is_varip):
+            self._persistent_decl_names.add(node.name)
         if node.type_hint in self._user_types:
             self._var_udt_types[node.name] = node.type_hint
         elif isinstance(node.value, FuncCall):
@@ -1315,6 +1339,8 @@ class SupportChecker:
             self._err(node, f"ta.{name}(...) is not implemented in PineForge runtime.")
             self._visit_children(node)
             return
+        if ns == "ta" and name == "vwap":
+            self._check_ta_vwap_anchor(node)
         if ns == "math" and name not in SUPPORTED_MATH:
             self._err(node, f"math.{name}(...) is not implemented in PineForge runtime.")
             self._visit_children(node)
@@ -1740,6 +1766,52 @@ class SupportChecker:
                     f"(got a non-constant expression).",
                     hint=f"Allowed values: {sorted(allowed)}.",
                 )
+
+    # -- ta.vwap anchor --
+
+    # Timeframe strings naming the symbol's daily bar: ``ta.vwap``'s default
+    # anchor is ``timeframe.change("1D")``.
+    _VWAP_DAILY_ANCHOR_TFS = frozenset({"D", "1D"})
+
+    def _check_ta_vwap_anchor(self, node: FuncCall) -> None:
+        """Refuse a ``ta.vwap`` anchor the engine cannot run.
+
+        TradingView resets the accumulation on every bar where the ``series
+        bool`` anchor is true. The engine's ``ta::VWAP`` resets only when the
+        symbol's session day changes -- the default anchor -- and has no input
+        for any other, so the codegen drops the anchor argument: exact for the
+        default, a silently daily VWAP for anything else.
+        """
+        anchor = node.args[1] if len(node.args) > 1 else node.kwargs.get("anchor")
+        if anchor is None or self._is_daily_timeframe_change(anchor):
+            return
+        self._err(
+            _expr_start(anchor),
+            "ta.vwap anchor is not supported: the engine's ta::VWAP resets its "
+            "accumulation only when the symbol's session day changes (the "
+            'default anchor, timeframe.change("1D")) and has no reset-on-anchor '
+            "input, so any other anchor would silently compute a daily VWAP.",
+            hint=('Omit the anchor or pass timeframe.change("1D"). Another anchor '
+                  "needs engine support: a ta::VWAP that resets on a bar where the "
+                  "anchor is true and returns na until it first is."),
+        )
+
+    def _is_daily_timeframe_change(self, node: ASTNode, _seen: frozenset = frozenset()) -> bool:
+        """``timeframe.change("1D")`` / ``("D")``, directly or through a
+        never-reassigned, non-``var`` binding of it."""
+        if isinstance(node, FuncCall):
+            ns, fname = _qualified_name(node.callee)
+            if (ns, fname) != ("timeframe", "change") or len(node.args) + len(node.kwargs) != 1:
+                return False
+            tf = node.args[0] if node.args else node.kwargs.get("timeframe")
+            return isinstance(tf, StringLiteral) and tf.value in self._VWAP_DAILY_ANCHOR_TFS
+        if isinstance(node, Identifier) and node.name not in _seen:
+            if node.name in self._scalar_rebinds or node.name in self._persistent_decl_names:
+                return False
+            definition = self._scalar_defs.get(node.name)
+            return definition is not None and self._is_daily_timeframe_change(
+                definition, _seen | {node.name})
+        return False
 
     def _is_barmerge_member(self, node: ASTNode, *allowed: str) -> bool:
         if not isinstance(node, MemberAccess):

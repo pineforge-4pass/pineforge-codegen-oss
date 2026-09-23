@@ -409,6 +409,7 @@ class CallHandlers:
         # ta.vwap(source, anchor, stdev_mult) → 3-arg bands form.
         # When called with 3 args (or anchor/stdev_mult kwargs), remap to the
         # internal "vwap_bands" key which maps to ta::VWAPBands (returns tuple).
+        merged_v = None
         if func_name == "vwap":
             param_names_v = ["source", "anchor", "stdev_mult"]
             merged_v = list(node.args)
@@ -424,8 +425,12 @@ class CallHandlers:
         if func_name not in TA_CLASS_MAP:
             return PineType.FLOAT
 
-        # Merge positional + kwargs into a unified arg list
-        all_args = self._merge_ta_args(func_name, node)
+        # Merge positional + kwargs into a unified arg list. The band form has
+        # no signature of its own: its arguments are ``ta.vwap``'s, merged above.
+        if func_name == "vwap_bands" and merged_v is not None:
+            all_args = merged_v
+        else:
+            all_args = self._merge_ta_args(func_name, node)
 
         # ta.tr(handle_na) — TV v6 default for handle_na is false. When the
         # caller omits the arg, inject the explicit ``false`` so the C++
@@ -466,8 +471,8 @@ class CallHandlers:
         # vwap_bands special dispatch: ta.vwap(source, anchor, stdev_mult)
         # ctor receives stdev_mult only; compute receives source only.
         # The anchor arg (index 1) is the Pine-level "when to reset" series;
-        # our VWAPBands wrapper uses UTC-day boundaries matching the daily
-        # anchor default, so anchor is intentionally ignored in codegen.
+        # our VWAPBands wrapper resets on the symbol's session day, the
+        # default anchor, which is the only one the support checker admits.
         if func_name == "vwap_bands":
             ctor_args: list[str] = []
             if len(all_args) >= 3 and all_args[2] is not None:

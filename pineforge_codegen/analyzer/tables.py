@@ -185,6 +185,11 @@ TA_COMPUTE_ARGS = {
     # occurrence, but the history bound is the constructor's max_occurrence
     # (default 1, two values kept), so every occurrence >= 2 read na.
     "valuewhen": [0, 1, 2],
+    # ``ta.vwap(source, anchor)``: only the source reaches compute(); the
+    # engine resets on the symbol's session day, the one anchor the support
+    # checker admits (timeframe.change("1D")). The anchor used to be forwarded
+    # to a compute() overload that does not exist.
+    "vwap": [0],
 }
 
 # No-state functions (no constructor args, stateless or self-contained)

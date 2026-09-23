@@ -216,7 +216,8 @@ TA_COMPUTE_ARGS = {
     "iii": [],
     "vwap": [0],  # source explicit, volume appended
     # 3-arg bands form: only source (arg 0) goes to compute(); anchor (arg 1) is
-    # the Pine series gate (not forwarded); stdev_mult (arg 2) went to the ctor.
+    # not forwarded -- the engine resets on the symbol's session day, the only
+    # anchor the support checker admits; stdev_mult (arg 2) went to the ctor.
     "vwap_bands": [0],
     "mode": [0], "range": [0], "dev": [0],
     "max": [0], "min": [0], "rci": [0],
