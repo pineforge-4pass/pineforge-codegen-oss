@@ -23,3 +23,24 @@ def test_string_with_embedded_double_quotes_is_escaped():
 def test_string_with_backslash_is_escaped():
     cpp = _cpp("p = 'a\\\\b'\nplot(str.length(p))")
     assert "\\\\" in cpp
+
+
+def test_input_title_with_quotes_and_backslashes_is_escaped():
+    # Every getter reading the input -- the member, the TA reset, a source
+    # input and its precalculate() replay, an inline call -- keys it by a C++
+    # literal of the title (the E2E compiles, runs and overrides these).
+    cpp = _cpp('len = input.int(9, "He said \\"fast\\" \\\\ C:\\\\bars")\n'
+               "src = input.source(close, 'px \"q\"')\n"
+               'x = ta.ema(src, len) + input.float(0.0, "off \\"pts\\"")\n'
+               "plot(x)")
+    assert cpp.count(r'get_input_int("He said \"fast\" \\ C:\\bars", 9)') == 2
+    assert r'get_input_source("px \"q\"", _src_close_)' in cpp
+    assert r'get_input_double("off \"pts\"", 0.0)' in cpp
+    assert '"He said "fast"' not in cpp  # the broken (unescaped) form
+
+
+def test_string_constant_inlined_at_its_use_is_escaped():
+    cpp = _cpp('Q = "say \\"hi\\""\n'
+               'if str.length(Q) > 3\n    strategy.entry("L", strategy.long)')
+    assert 'std::string("say "hi"")' not in cpp
+    assert cpp.count(r'std::string("say \"hi\"")') >= 2  # the member and its use

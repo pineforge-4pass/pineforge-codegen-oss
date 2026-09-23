@@ -471,6 +471,13 @@ class TestTAKwargs:
         cpp = _generate(_pine('x = ta.change(source=close, length=1)'))
         assert "ta::Change" in cpp
 
+    def test_ta_change_length_reaches_compute(self):
+        # ta::Change's ctor only bounds the history; compute() takes the
+        # lookback from its own argument (the E2E pins the values).
+        cpp = _generate(_pine('x = ta.change(source=close, length=14)'))
+        assert "_ta_change_1.compute(current_bar_.close, 14)" in cpp
+        assert "_ta_change_1.recompute(current_bar_.close, 14)" in cpp
+
     def test_ta_crossover_kwargs(self):
         cpp = _generate(_pine('fast = ta.sma(close, 10)\nslow = ta.sma(close, 20)\nx = ta.crossover(source1=fast, source2=slow)'))
         assert "ta::Crossover" in cpp
