@@ -2067,13 +2067,21 @@ class CallVisitor:
                     )
             return "0.0"
 
-        # log.* calls (log.error, log.warning, log.info)
+        # log.* calls (log.error, log.warning, log.info). TradingView: "The
+        # second overloads of all log.*() functions have the same parameter
+        # signature and formatting behaviors as str.format()": log.info(fmt,
+        # arg0, ...) logs str.format(fmt, arg0, ...). The one-argument
+        # log.info(message) logs its message as is.
         if namespace == "log":
             log_funcs = {"info": "pine_log_info", "warning": "pine_log_warning", "error": "pine_log_error"}
             if func_name in log_funcs:
-                log_args = [self._visit_expr(a) for a in node.args]
-                msg_arg = log_args[0] if log_args else '""'
-                return f'{log_funcs[func_name]}({msg_arg})'
+                message = (node.args[0] if node.args
+                           else node.kwargs.get("message", node.kwargs.get("formatString")))
+                if message is None:
+                    return f'{log_funcs[func_name]}("")'
+                if len(node.args) > 1:
+                    return f'{log_funcs[func_name]}({self._str_format_expr(message, node.args[1:])})'
+                return f'{log_funcs[func_name]}({self._visit_expr(message)})'
             return '"" /* unsupported log */'
 
         # timeframe.* calls (e.g., timeframe.change) — not supported in single-TF backtest
@@ -2697,6 +2705,38 @@ class CallVisitor:
             return "0"
         return "0"
 
+    def _str_format_expr(self, fmt_node, arg_nodes) -> str:
+        """``str.format(fmt, arg0, ...)``: the runtime
+        ``pine_str_format(fmt, vector<string>)`` substitutes ``{i}`` with
+        argument ``i``, every argument already converted to ``std::string``.
+
+        The conversion is keyed on ``_infer_type``: a source-text-prefix
+        heuristic (``"`` / ``std::string`` / ``pine_str``) mis-classified any
+        string-typed bare identifier or string-returning helper call (e.g.
+        ``str.tostring(x)`` bound to a variable), so ``std::string`` args now
+        pass through unchanged. Booleans render as 0/1 via std::to_string;
+        they get the TV-style "true"/"false" so backtest logs and alert
+        messages line up with the TradingView side. Also the lowering of a
+        ``log.*(fmt, arg0, ...)`` message."""
+        fmt_arg = self._visit_expr(fmt_node)
+        rest = []
+        for orig in arg_nodes:
+            visited = self._visit_expr(orig)
+            inferred = self._infer_type(orig)
+            if inferred == "std::string":
+                rest.append(visited)
+                continue
+            if inferred == "bool":
+                rest.append(
+                    f'({visited} ? std::string("true") : std::string("false"))'
+                )
+                continue
+            rest.append(f'std::to_string({visited})')
+        if rest:
+            vec = "{" + ", ".join(rest) + "}"
+            return f'pine_str_format({fmt_arg}, {vec})'
+        return fmt_arg
+
     def _visit_str_call(self, func_name: str, node) -> str:
         args = _merge_kwargs(node.args, node.kwargs,
                              sigs.get_param_names("str", func_name), self._visit_expr)
@@ -2729,38 +2769,8 @@ class CallVisitor:
             return 'std::string("")'
 
         if func_name == "format":
-            # str.format is variadic: signature has only ``formatStr``; the
-            # remaining args are placeholder substitutions. The runtime
-            # ``pine_str_format(fmt, vector<string>)`` requires every arg
-            # already converted to ``std::string``. We previously gated the
-            # ``std::to_string`` wrap on a source-text-prefix heuristic
-            # (``"`` / ``std::string`` / ``pine_str``), which mis-classified
-            # any string-typed bare identifier or string-returning helper
-            # call (e.g. ``str.tostring(x)`` bound to a variable). The type
-            # check below uses the analyzer's inferred PineType instead so
-            # ``std::string`` args pass through unchanged.
             if node.args:
-                fmt_arg = self._visit_expr(node.args[0])
-                rest = []
-                for orig in node.args[1:]:
-                    visited = self._visit_expr(orig)
-                    inferred = self._infer_type(orig)
-                    if inferred == "std::string":
-                        rest.append(visited)
-                        continue
-                    # Booleans render as 0/1 via std::to_string; force the
-                    # TV-style "true"/"false" output so backtest logs and
-                    # alert messages line up with the TradingView side.
-                    if inferred == "bool":
-                        rest.append(
-                            f'({visited} ? std::string("true") : std::string("false"))'
-                        )
-                        continue
-                    rest.append(f'std::to_string({visited})')
-                if rest:
-                    vec = "{" + ", ".join(rest) + "}"
-                    return f'pine_str_format({fmt_arg}, {vec})'
-                return fmt_arg
+                return self._str_format_expr(node.args[0], node.args[1:])
             return 'std::string("")'
 
         if func_name == "format_time":

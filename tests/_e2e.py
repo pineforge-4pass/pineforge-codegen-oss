@@ -12,7 +12,8 @@ through the interfaces a client uses.
    engine's own ``derive_corpus_feeds`` resampler into a temp dir (never
    into the engine checkout). Input overrides travel through
    ``inputs.json`` -> ``strategy_set_input``, keyed by the manifest title;
-   per-bar values come back through ``--trace-json`` (``@pf-trace``).
+   per-bar values come back through ``--trace-json`` (``@pf-trace``), and
+   the run's stderr -- where the engine writes ``log.*`` lines -- is kept.
 
 Needs PINEFORGE_ENGINE_INCLUDE (+ Eigen) and a built runtime
 (PINEFORGE_ENGINE_LIB), with the engine checkout's ``scripts/`` and corpus
@@ -140,9 +141,9 @@ def build_strategy_library(cpp: str, workdir: Path) -> None:
 
 def run_strategy(engine_root: Path, workdir: Path, feed: Path,
                  overrides: dict | None, tag: str, trace: bool = False
-                 ) -> tuple[bytes, list[dict] | None]:
-    """The run's ``engine_trades.csv`` bytes, and its trace records when
-    ``trace`` asks for them."""
+                 ) -> tuple[bytes, list[dict] | None, str]:
+    """The run's ``engine_trades.csv`` bytes, its trace records when
+    ``trace`` asks for them, and its stderr."""
     out = workdir / f"engine_trades_{tag}.csv"
     cmd = [sys.executable, str(engine_root / "scripts" / "run_strategy.py"),
            str(workdir), "--ohlcv", str(feed), "--no-trim-output", "-o", str(out)]
@@ -157,7 +158,7 @@ def run_strategy(engine_root: Path, workdir: Path, feed: Path,
     if proc.returncode != 0:
         raise RuntimeError(f"run_strategy failed in {workdir}:\n{proc.stdout}\n{proc.stderr}")
     records = json.loads(trace_path.read_text())["trace"] if trace else None
-    return out.read_bytes(), records
+    return out.read_bytes(), records, proc.stderr
 
 
 def trade_count(trades_csv: bytes) -> int:
@@ -197,6 +198,7 @@ class Outcome:
     error: str | None = None
     trades: dict[str, bytes] = field(default_factory=dict, repr=False)
     traces: dict[str, list[dict]] = field(default_factory=dict, repr=False)
+    logs: dict[str, str] = field(default_factory=dict, repr=False)
 
 
 def execute(engine_root: Path, feed: Path, workdir: Path, build: Build) -> Outcome:
@@ -215,9 +217,10 @@ def execute(engine_root: Path, feed: Path, workdir: Path, build: Build) -> Outco
         if build.overrides is not None:
             runs.append(("override", build.overrides))
         for tag, overrides in runs:
-            trades, records = run_strategy(engine_root, workdir, feed, overrides,
-                                           tag, build.trace)
+            trades, records, stderr = run_strategy(engine_root, workdir, feed, overrides,
+                                                   tag, build.trace)
             outcome.trades[tag] = trades
+            outcome.logs[tag] = stderr
             if records is not None:
                 outcome.traces[tag] = records
     except Exception as exc:  # recorded and asserted by the case's own test
