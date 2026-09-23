@@ -136,17 +136,18 @@ def global_input_calls(node) -> Iterator[FuncCall]:
 
 def input_binding_names(body) -> dict[int, str]:
     """``id(call) -> name`` for every global-scope input call a declaration
-    names: the call bound straight to ``name = input.*()``, and any call in a
-    ``var`` / ``varip`` initializer. TradingView keys an input with no title
-    by that variable name ("If not specified, the variable name is used as the
-    input's title"), and so does every PineForge getter and the manifest."""
+    holds: bound straight to ``name = input.*()`` or nested anywhere in the
+    declaration's value (``n = input.int(9) * 2``, ``x = ta.ema(close,
+    input.int(9))``, a ``var`` initializer). TradingView keys an input with no
+    title by that variable name ("If not specified, the variable name is used
+    as the input's title"), and so does every PineForge getter and the
+    manifest."""
     names: dict[int, str] = {}
     for stmt in body or []:
         if not isinstance(stmt, VarDecl):
             continue
         for node in global_input_calls(stmt):
-            if stmt.value is node or stmt.is_var or stmt.is_varip:
-                names[id(node)] = stmt.name
+            names[id(node)] = stmt.name
     return names
 
 

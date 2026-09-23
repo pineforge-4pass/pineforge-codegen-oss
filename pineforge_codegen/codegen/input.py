@@ -208,6 +208,36 @@ class InputHelper:
             stack.extend(reversed([v for k, v in vars(node).items()
                                    if k not in ("loc", "annotations")]))
 
+    def _check_input_keys(self) -> None:
+        """Warn about inputs of the script that share an override key.
+
+        An override reaches every input keyed by its title, else by the name of
+        the declaration holding the call (``_get_input_title``, the manifest's
+        ``title``), so inputs that share one cannot be overridden apart: two
+        untitled calls in one declaration (``n = input.int(9) +
+        input.int(3)``), two outside any declaration (keyed ""), an untitled
+        call and another input titled with its name, or one title repeated
+        across input groups (TradingView tells them apart; PineForge's
+        override protocol does not). The script still transpiles unchanged --
+        at its defaults every input reads its own default -- and one warning
+        per shared key names every input that key reaches.
+        """
+        calls_by_key: dict[str, list[FuncCall]] = {}
+        for node, name in self._global_input_calls_with_names():
+            calls_by_key.setdefault(self._get_input_title(node, var_name=name), []).append(node)
+        for key, calls in calls_by_key.items():
+            if len(calls) < 2:
+                continue
+            spots = [f"{loc.line}:{loc.col}" for loc in (expr_start(c).loc for c in calls)]
+            listed = f"{', '.join(spots[:-1])} and {spots[-1]}"
+            self._codegen_warning(
+                expr_start(calls[1]),
+                f"input key '{key}' is shared by the inputs at {listed}: PineForge "
+                "sets an input override by its title, else by the name of the "
+                "declaration holding it, so one override sets all of them.",
+                hint="Give each input its own title to override them apart.",
+            )
+
     def _input_spelling_title(self, node: FuncCall) -> str | None:
         """The key an untitled call's re-spelling must carry as ``title=``:
         its binding name. A spelled call is re-parsed into a new node, which
@@ -425,16 +455,19 @@ class InputHelper:
         optional keys are emitted only when the corresponding signature
         argument is a const literal; a bound/option referencing a non-literal
         is omitted (never crashes). ``title`` is the key the emitted C++ reads
-        the input by: the title argument, else the declared name (a ``var``
-        declaration lends it to calls nested in its initializer), else "".
+        the input by: the title argument, else the name of the declaration
+        holding the call (``pine_spelling.input_binding_names``), else "".
         """
-        out: list[dict] = []
+        return [self._input_manifest_entry(node, name)
+                for node, name in self._global_input_calls_with_names()]
+
+    def _global_input_calls_with_names(self) -> list[tuple[FuncCall, str | None]]:
+        """Every global-scope input call in source order, with the name of the
+        declaration holding it (None outside a declaration)."""
+        out = []
         for stmt in self.ctx.ast.body:
             for node in global_input_calls(stmt):
-                bound = isinstance(stmt, VarDecl) and (
-                    stmt.value is node or stmt.is_var or stmt.is_varip)
-                out.append(self._input_manifest_entry(
-                    node, stmt.name if bound else None))
+                out.append((node, stmt.name if isinstance(stmt, VarDecl) else None))
         return out
 
     def _input_manifest_entry(self, node: FuncCall, var_name: str | None) -> dict:

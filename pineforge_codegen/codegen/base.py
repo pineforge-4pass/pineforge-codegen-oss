@@ -3147,6 +3147,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     # Public entry point
     # ------------------------------------------------------------------
 
+    def _codegen_warning(self, node: ASTNode | None, message: str,
+                         hint: str | None = None) -> None:
+        """Record a warning on ``ctx.diagnostics``, the list ``transpile_full``
+        returns beside the C++ (after the support checker's)."""
+        loc = node.loc if node is not None else None
+        if loc is None:
+            loc = SourceLocation(file=self.ctx.filename, line=1, col=1, end_col=1)
+        self.ctx.diagnostics.append(Diagnostic(
+            level=Level.WARNING, phase=Phase.CODEGEN, location=loc,
+            message=message, hint=hint))
+
     def _codegen_error(self, node: ASTNode | None, message: str, hint: str | None = None) -> None:
         loc = node.loc if node is not None else None
         if loc is None:
@@ -3806,8 +3817,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
     def generate(self) -> str:
         """Generate C++ source from the AnalyzerContext."""
-        # Every input is keyed by its title: refuse a non-constant one first.
+        # Every input is keyed by its title: refuse a non-constant one first,
+        # then flag inputs one override key would reach together.
         self._check_input_titles()
+        self._check_input_keys()
         # Context-sensitive instance pre-pass (needs the naming helpers populated
         # in __init__). Computes nested stateful-helper dispatch + fresh instances.
         self._build_func_instances()
