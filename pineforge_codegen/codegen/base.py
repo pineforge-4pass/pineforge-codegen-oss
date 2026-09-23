@@ -2318,6 +2318,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         rejected by the constructor guard. Names are NOT folded into
         ``_known_vars`` (no use-site inlining): only the length-analysis path is
         affected, and the ``var`` member still emits and initializes normally.
+
+        The exception is ``var v = input.*()`` itself, which is registered like
+        the plain binding ``v = input.*()`` (``_collect_known_var``).
         """
         literal_candidates = self._admitted_stable_var_ctor_literals(reassigned)
 
@@ -2331,6 +2334,19 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 continue
             if self._decl_binding_is_series(id(stmt), stmt.name):
                 continue
+            # A never-reassigned ``var v = input.*()`` holds the input's value
+            # on every bar, as ``v = input.*()`` does, so it is registered the
+            # same way: an input-backed name read through its input call. The
+            # TA runtime reset then keys the input by
+            # ``_get_input_title(call, var_name=v)``, the key the member reads
+            # it by. Recorded below as a derived expression, the reset re-read
+            # the call's own spelling instead: an untitled input under "" and
+            # without its keyword arguments, so an override never resized the
+            # indicator.
+            if self._is_var_input_binding(stmt):
+                self._collect_known_var(stmt)
+                if stmt.name in self._input_var_to_call:
+                    continue
             if stmt.value is None or not self._expr_is_stable(stmt.value):
                 continue
             expr_str = self._arith_expr_to_str(stmt.value)
@@ -3029,14 +3045,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return f"{callee}({', '.join(parts)})"
         return None
 
+    def _is_var_input_binding(self, node: VarDecl) -> bool:
+        """``var v = input.*()``: a ``var`` bound straight to an input call."""
+        return (node.is_var and not node.is_varip
+                and isinstance(node.value, FuncCall)
+                and self._is_input_call(node.value))
+
     def _collect_known_var(self, node: VarDecl) -> None:
         """Extract known constant value from a VarDecl."""
         # Don't inline series variables — their values change over time
         if self._decl_binding_is_series(id(node), node.name):
             return
         # Don't inline var/varip variables — they're mutable state that persists
-        # across bars and can be reassigned with :=
-        if node.is_var or node.is_varip:
+        # across bars and can be reassigned with := (callers pass never-
+        # reassigned names only, so ``var v = input.*()`` is the plain binding).
+        if (node.is_var or node.is_varip) and not self._is_var_input_binding(node):
             return
         if isinstance(node.value, NumberLiteral):
             self._known_vars[node.name] = node.value.value
