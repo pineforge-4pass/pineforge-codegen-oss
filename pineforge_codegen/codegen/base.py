@@ -25,6 +25,7 @@ from ..analyzer import (
     TA_MULTI_CTOR,
     TA_NO_CTOR,
     TA_PERIOD_ARG,
+    TA_LENGTH_ONLY_DEFAULT_SOURCE,
 )
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .. import signatures as sigs
@@ -2271,10 +2272,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         all_args.append(None)
                     all_args[i] = node.kwargs[pname]
 
-        if func_name == "highest" and len(all_args) == 1:
-            all_args = [Identifier(name="high"), all_args[0]]
-        elif func_name == "lowest" and len(all_args) == 1:
-            all_args = [Identifier(name="low"), all_args[0]]
+        # The one-arg length forms read high / low (as the analyzer's merge).
+        default_source = TA_LENGTH_ONLY_DEFAULT_SOURCE.get(func_name)
+        if default_source is not None and (
+                len(all_args) == 1 or (len(all_args) == 2 and all_args[0] is None)):
+            all_args = [Identifier(name=default_source), all_args[-1]]
 
         return all_args
 

@@ -491,12 +491,41 @@ class TestTAKwargs:
         assert "ta::MACD" in cpp
 
     def test_ta_bb_kwargs(self):
-        cpp = _generate(_pine('[mid, up, lo] = ta.bb(source=close, length=20, mult=2.0)'))
+        # TradingView names ta.bb's source ``series``; ``source=`` used to be
+        # the registry's name and left compute() without its source.
+        cpp = _generate(_pine('[mid, up, lo] = ta.bb(series=close, length=20, mult=2.0)'))
         assert "ta::BB" in cpp
+        assert "_ta_bb_1.compute(current_bar_.close)" in cpp
 
     def test_ta_kc_kwargs(self):
-        cpp = _generate(_pine('[mid, up, lo] = ta.kc(source=close, length=20, mult=1.5)'))
+        cpp = _generate(_pine('[mid, up, lo] = ta.kc(series=close, length=20, mult=1.5)'))
         assert "ta::KC" in cpp
+        assert ("_ta_kc_1.compute(current_bar_.close, current_bar_.high, "
+                "current_bar_.low, current_bar_.close)") in cpp
+
+    def test_ta_kc_true_range_stays_out_of_compute(self):
+        # ta::KC always averages the true range (the support checker admits
+        # only useTrueRange = true); the flag must not reach compute().
+        for spelling in ('ta.kc(close, 20, 1.5, true)',
+                         'ta.kc(series=close, length=20, mult=1.5, useTrueRange=true)'):
+            cpp = _generate(_pine(f'[mid, up, lo] = {spelling}'))
+            assert ("_ta_kc_1.compute(current_bar_.close, current_bar_.high, "
+                    "current_bar_.low, current_bar_.close)") in cpp, spelling
+
+    def test_ta_alma_floor_stays_out_of_compute(self):
+        # ta::ALMA has no floor (the support checker admits only floor = false).
+        for spelling in ('ta.alma(close, 9, 0.85, 6.0, false)',
+                         'ta.alma(series=close, length=9, offset=0.85, sigma=6.0, floor=false)'):
+            cpp = _generate(_pine(f'x = {spelling}'))
+            assert "_ta_alma_1(9, 0.85, 6)" in cpp, spelling
+            assert "_ta_alma_1.compute(current_bar_.close)" in cpp, spelling
+
+    def test_ta_highestbars_length_only_reads_high(self):
+        for spelling, field in (('ta.highestbars(10)', 'high'), ('ta.lowestbars(length=10)', 'low')):
+            cpp = _generate(_pine(f'x = {spelling}'))
+            fn = spelling.split('(')[0].split('.')[1]
+            assert f"_ta_{fn}_1(10)" in cpp, spelling
+            assert f"_ta_{fn}_1.compute(current_bar_.{field})" in cpp, spelling
 
     def test_ta_supertrend_kwargs(self):
         cpp = _generate(_pine('[st, dir] = ta.supertrend(factor=3.0, atrPeriod=10)'))

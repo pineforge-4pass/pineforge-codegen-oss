@@ -190,6 +190,26 @@ TA_COMPUTE_ARGS = {
     # checker admits (timeframe.change("1D")). The anchor used to be forwarded
     # to a compute() overload that does not exist.
     "vwap": [0],
+    # ``ta.alma(series, length, offset, sigma, floor)``: ta::ALMA takes no
+    # floor (m = offset * (length - 1), unfloored), the value the support
+    # checker admits (false); ``floor`` used to reach ALMA::compute(src).
+    "alma": [0],
+    # ``ta.kc`` / ``ta.kcw(series, length, mult, useTrueRange)``: ta::KC
+    # always averages the true range, the value the support checker admits
+    # (true); ``useTrueRange`` used to reach a compute() overload that does
+    # not exist. high / low / close are appended implicitly.
+    "kc": [0],
+    "kcw": [0],
+}
+
+# The one-argument forms ``ta.highest(length)`` / ``ta.lowest(length)`` /
+# ``ta.highestbars(length)`` / ``ta.lowestbars(length)`` (positional or
+# ``length=``) read this bar field as their source (TradingView: "One arg
+# version: length is the number of bars back. Algorithm uses high as a source
+# series.").
+TA_LENGTH_ONLY_DEFAULT_SOURCE = {
+    "highest": "high", "lowest": "low",
+    "highestbars": "high", "lowestbars": "low",
 }
 
 # No-state functions (no constructor args, stateless or self-contained)
