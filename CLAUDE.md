@@ -30,9 +30,9 @@ export PINEFORGE_EIGEN_INCLUDE=../pineforge-engine/build/_deps/eigen-src
 export PINEFORGE_ENGINE_LIB=../pineforge-engine/build/lib/libpineforge.a
 pytest
 
-# Measured 2026-09-23: 2937 passed, 2 skipped, 0 failed (~35 min at load
-# average ~20 on 16 cores; tests/test_e2e_inline_input_ta_length.py builds
-# and runs ~150 strategy libraries, ~4 min of it).
+# Measured 2026-09-23: 2966 passed, 2 skipped, 0 failed (~30-35 min on 16
+# cores, depending on load; the two tests/test_e2e_*.py modules build and
+# run ~190 strategy libraries, ~2-5 min of it).
 #   Skip 1: test_parser.py:350, empty parameter set (pre-existing).
 #   Skip 2: test_codegen_golden.py:39, which needs the engine corpus at
 #           the sibling path and skips when the engine include is
@@ -46,7 +46,7 @@ pytest
 #    must transpile + compile against the engine headers.)
 pytest tests/test_compile_corpus.py
 
-# Measured 2026-09-23: 314 passed in ~6 min at load average ~20
+# Measured 2026-09-23: 314 passed in ~6-7 min (load average ~20-190)
 #   (312 corpus/validation probes at corpus gitlink 9182e3d, plus the 2
 #    parity anomalies).
 ```
@@ -356,6 +356,29 @@ you delete or weaken the special case, the test will tell you.
    lists every global-scope input call, inline ones too, with `title` =
    the key the C++ reads it by. `tests/test_e2e_inline_input_ta_length.py`
    pins it end to end, for every TA constructor.
+11. **A lookback that is a `compute()` argument goes to `compute()`.** Most
+   `ta::` classes take their length in the constructor and only sources in
+   `compute()`. `ta::Change` splits it: the constructor's `max_length`
+   only bounds the kept history, `compute(src, length = 1)` reads the
+   lookback, so `TA_COMPUTE_ARGS["change"] = [0, 1]` (analyzer) sends the
+   length to both — without it every `ta.change(src, n)` was a one-bar
+   change. `ta::ValueWhen` is the mirror image and still open: `occurrence`
+   reaches `compute()`, but the history bound is the constructor's
+   `max_occurrence`, never passed (`valuewhen` is in `TA_NO_CTOR`), so
+   `occurrence >= 2` reads `na`. Check a new TA's `compute()` signature in
+   `ta.hpp` for non-source parameters.
+   `tests/test_e2e_ta_change_length_and_input_keys.py` pins `ta.change`
+   bar by bar against `src - src[n]`.
+12. **One key per input, whichever path reads it.** A `get_input_*()` read
+   keys the input by `_get_input_title(call, var_name=...)` — the title,
+   else the declaring name, the string the manifest lists — spelled as a
+   C++ literal by `_input_key_literal` (a title holding `"` or `\` used to
+   break the TU). A never-reassigned `var v = input.*()` is registered like
+   `v = input.*()` (`_collect_known_var`), so the TA reset reads it through
+   its call node under the member's key; re-spelling the call in a derived
+   expression drops the name (still true of an untitled call nested in a
+   `var` initializer, or of a plain untitled binding with stable `:=`
+   reassignments: the reset reads those under `""`).
 
 ## How to add a new Pine v6 function
 
@@ -416,8 +439,8 @@ Expected counts at HEAD:
 
 | Mode                                                    | passed | skipped | failed |
 | ------------------------------------------------------- | ------ | ------- | ------ |
-| With engine headers + Eigen + a built runtime           | 2937   | 2       | **0**  |
-| Without a resolvable compile environment                | 1952   | 674     | **0**  |
+| With engine headers + Eigen + a built runtime           | 2966   | 2       | **0**  |
+| Without a resolvable compile environment                | 1957   | 698     | **0**  |
 
 Measured 2026-09-23. The 2 skips are `test_parser.py:350` (empty parameter
 set, pre-existing, unrelated) and `test_codegen_golden.py:39` (wants the
