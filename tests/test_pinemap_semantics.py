@@ -314,6 +314,7 @@ def _compile_and_run(cpp_source: str, *, label: str) -> str:
             compile_env._COMPILER,
             "-std=c++17",
             "-O0",
+            *compile_env.STRATEGY_FP_FLAGS,
             "-I",
             str(compile_env._ENGINE_INC),
             "-I",
