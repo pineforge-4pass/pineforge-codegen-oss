@@ -136,8 +136,8 @@ class TopLevelEmitter:
         lines.append("#include <string>")
         lines.append("#include <vector>")
         if self._uses_tv_number_format:
-            lines.extend(("#include <sstream>", "#include <iomanip>",
-                          "#include <locale>"))
+            lines.extend(("#include <charconv>", "#include <system_error>",
+                          "#include <stdexcept>"))
         if getattr(self, "_udt_defs", {}):
             lines.append("#include <deque>")
             lines.append("#include <functional>")

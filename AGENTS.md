@@ -35,7 +35,7 @@ export PINEFORGE_EIGEN_INCLUDE=../pineforge-engine/build/_deps/eigen-src
 export PINEFORGE_ENGINE_LIB=../pineforge-engine/build/lib/libpineforge.a
 pytest
 
-# Measured 2026-09-24: 3156 passed, 2 skipped, 0 failed (~25-40 min on 16
+# Measured 2026-09-24: 3157 passed, 2 skipped, 0 failed (~25-40 min on 16
 # cores, depending on load; the nineteen tests/test_e2e_*.py modules build
 # and run their strategy libraries in ~9 min of it).
 #   Skip 1: test_parser.py:350, empty parameter set (pre-existing).
@@ -157,6 +157,8 @@ pineforge_codegen/
     │                               "PineMatrix"). Used to gate emission
     │                               choices that the analyzer's PineType
     │                               enum is too coarse for.
+    ├── tv_number_format.py         TU-local numeric formatter emitted for
+    │                               str.tostring / str.format / log.*.
     ├── input.py                    input.* / `input()` lowering.
     └── helpers.py                  CPP_RESERVED + small text helpers.
 tests/
@@ -314,6 +316,11 @@ you delete or weaken the special case, the test will tell you.
    `{0,number,...}` styles and apostrophe quoting, and `str.tostring`'s
    `#.##########` default, custom `#`/`0`/`%` patterns, percent and volume.
    `format.mintick` delegates to the engine's tick-rounding formatter.
+   Numeric rounding converts a double to its shortest round-trip decimal with
+   C++17 `std::to_chars`, shifts the decimal point as digits, then rounds the
+   first discarded digit half-up; it uses no floating-point intermediate or
+   `long double`. `tests/test_tv_number_format_rounding.py` pins 42 edge
+   cases on AppleClang arm64 and GCC 13 Linux amd64.
    The lowering is `visit_call._str_format_expr`, shared with
    `log.info` / `log.warning` / `log.error(fmt, arg0, ...)` (TradingView:
    the second overloads of `log.*()` have "the same parameter signature and
@@ -571,7 +578,7 @@ file for the mandatory verification path. Recap:
 ```bash
 # Quick dev loop — pure transpiler, zero native deps. ~10 s.
 # Use during development for fast iteration. NOT sufficient to claim
-# a change is done — 843 compile and E2E tests skip in this mode.
+# a change is done — 844 compile and E2E tests skip in this mode.
 pytest
 
 # REQUIRED before claiming any change is done. ~25-40 min.
@@ -588,8 +595,8 @@ Expected counts at HEAD:
 
 | Mode                                                    | passed | skipped | failed |
 | ------------------------------------------------------- | ------ | ------- | ------ |
-| With engine headers + Eigen + a built runtime           | 3156   | 2       | **0**  |
-| Without a resolvable compile environment                | 2002   | 843     | **0**  |
+| With engine headers + Eigen + a built runtime           | 3157   | 2       | **0**  |
+| Without a resolvable compile environment                | 2002   | 844     | **0**  |
 
 Measured 2026-09-24. The 2 skips are `test_parser.py:350` (empty parameter
 set, pre-existing, unrelated) and `test_codegen_golden.py:39` (wants the
@@ -635,7 +642,7 @@ history is intentional.
 "REQUIRED before claiming any change is done" block at the top.
 A diff that passes the pure-transpiler tests but fails on 1 / 314
 corpus items (or one compile smoke) is still a regression.
-Don't report a change as done until the full engine-env run (3156 passed,
+Don't report a change as done until the full engine-env run (3157 passed,
 measured 2026-09-24) is green.
 - **Don't update the version in `pyproject.toml`** without confirming
 the engine ABI tag listed in the README's version table actually
