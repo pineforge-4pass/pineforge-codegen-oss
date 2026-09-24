@@ -69,7 +69,9 @@ TA_PROPERTY_VARIABLES: frozenset[str] = frozenset(
     {"obv", "accdist", "nvi", "pvi", "pvt", "wad", "wvad", "iii"}
 )
 SUPPORTED_TA: frozenset[str] = frozenset(
-    set(TA_CLASS_MAP) - {"sum", "vwap_bands"} - set(TA_PROPERTY_VARIABLES) | {"tr", "pivot_point_levels"}
+    set(TA_CLASS_MAP) - {
+        "sum", "vwap_bands", "vwap_anchored", "vwap_anchored_bands"
+    } - set(TA_PROPERTY_VARIABLES) | {"tr", "pivot_point_levels"}
 )
 SUPPORTED_MATH: frozenset[str] = frozenset(
     set(MATH_FUNC_MAP) | set(sigs.MATH_CONSTANTS) | set(sigs.MATH_FUNCTIONS)
@@ -1905,117 +1907,20 @@ class SupportChecker:
         return False
 
     def _check_ta_alma_floor(self, node: FuncCall) -> None:
-        """Flag or refuse an ``ta.alma`` floor that is not the constant false.
+        """TA1's ``ta::ALMA`` accepts the Pine ``floor`` input exactly.
 
-        TradingView: ``floor (simple bool) ... Specifies whether the offset
-        calculation is floored before ALMA is calculated. Default value is
-        false.`` The engine's ``ta::ALMA(length, offset, sigma)`` always uses
-        ``m = offset * (length - 1)``; the codegen passes it no floor. By
-        keyword the floor was always dropped (the registry did not know it),
-        so that spelling keeps the unfloored ALMA it has always computed, with
-        a warning; the positional one reached ``ALMA::compute(src)`` and never
-        compiled, so it stays refused.
+        The generated compatibility shim keeps the same source compilable
+        against an older engine and drops the argument there.
         """
-        floor = self._ta_argument(node, "alma", "floor")
-        if floor is None or self._is_constant_bool(floor, False):
-            return
-        if "floor" in node.kwargs:
-            self._warn(
-                expr_start(floor),
-                "ta.alma floor is approximated: the engine's ta::ALMA has no floor "
-                "input and always computes its offset m = offset * (length - 1) "
-                "unfloored, so this call ignores floor and runs the unfloored ALMA.",
-                hint=("Omit floor or pass floor=false to run it exactly. A floored "
-                      "ALMA needs engine support: a ta::ALMA that uses "
-                      "math.floor(offset * (length - 1)) as m."),
-            )
-            return
-        self._err(
-            expr_start(floor),
-            "ta.alma floor is not supported: the engine's ta::ALMA always computes "
-            "its offset m = offset * (length - 1) unfloored and has no floor input, "
-            "so a floor that is not the constant false would silently compute an "
-            "unfloored ALMA.",
-            hint=("Omit floor or pass false. A floored ALMA needs engine support: a "
-                  "ta::ALMA that uses math.floor(offset * (length - 1)) as m."),
-        )
+        return
 
     def _check_ta_keltner_true_range(self, node: FuncCall, name: str) -> None:
-        """Flag or refuse a ``ta.kc`` / ``ta.kcw`` useTrueRange that is not
-        the constant true.
-
-        TradingView: ``useTrueRange (simple bool) ... Specifies if True Range
-        is used; default is true. If the value is false, the range will be
-        calculated with the expression (high - low).`` The engine's
-        ``ta::KC`` (and ``ta::KCW``, which wraps it) always averages the true
-        range; the codegen passes it no range choice. By keyword the flag was
-        always dropped, so that spelling keeps the true-range channel it has
-        always computed, with a warning; the positional one reached a
-        ``compute()`` overload that does not exist, so it stays refused.
-        """
-        use_true_range = self._ta_argument(node, name, "useTrueRange")
-        if use_true_range is None or self._is_constant_bool(use_true_range, True):
-            return
-        cls, what = (("ta::KC", "Keltner channel") if name == "kc"
-                     else ("ta::KCW (over ta::KC)", "Keltner channel width"))
-        if "useTrueRange" in node.kwargs:
-            self._warn(
-                expr_start(use_true_range),
-                f"ta.{name} useTrueRange is approximated: the engine's {cls} always "
-                "averages the true range and has no high - low range input, so this "
-                f"call ignores useTrueRange and runs the true-range {what}.",
-                hint=("Omit useTrueRange or pass useTrueRange=true to run it exactly. "
-                      "A high - low range needs engine support: a "
-                      f"{cls.split(' ')[0]} whose range series is high - low."),
-            )
-            return
-        self._err(
-            expr_start(use_true_range),
-            f"ta.{name} useTrueRange is not supported: the engine's {cls} always "
-            "averages the true range and has no high - low range input, so a "
-            "useTrueRange that is not the constant true would silently compute a "
-            f"true-range {what}.",
-            hint=("Omit useTrueRange or pass true. A high - low range needs engine "
-                  f"support: a {cls.split(' ')[0]} whose range series is high - low."),
-        )
+        """TA1's KC/KCW classes accept ``useTrueRange`` exactly."""
+        return
 
     def _check_ta_pivot_point_levels(self, node: FuncCall) -> None:
-        """Flag the ``ta.pivot_point_levels`` anchor and developing values the
-        emission does not compute.
-
-        The codegen lowers the call to ``ta::pivot_point_levels(type, high[1],
-        low[1], close[1])``: the levels of the previous bar, the period that an
-        anchor true on every bar closes, with ``developing = false`` ("the
-        values are those calculated the last time the anchor condition was
-        true"). It has always dropped both arguments, and every spelling
-        compiled, so another anchor or ``developing = true`` keeps that
-        previous-bar lowering with a warning naming what the engine lacks.
-        """
-        anchor = self._ta_argument(node, "pivot_point_levels", "anchor")
-        if anchor is not None and not self._is_constant_bool(anchor, True):
-            self._warn(
-                expr_start(anchor),
-                "ta.pivot_point_levels anchor is approximated: PineForge passes the "
-                "engine's ta::pivot_point_levels the previous bar's high, low and "
-                "close -- the period an anchor that is true on every bar closes -- "
-                "and the engine has no anchored-period accumulation, so this call "
-                "ignores its anchor and computes the previous bar's pivots.",
-                hint=("Pass anchor = true to run it exactly. Another anchor needs "
-                      "engine support: pivot levels over the high, low and close "
-                      "accumulated since the anchor was last true."),
-            )
-        developing = self._ta_argument(node, "pivot_point_levels", "developing")
-        if developing is not None and not self._is_constant_bool(developing, False):
-            self._warn(
-                expr_start(developing),
-                "ta.pivot_point_levels developing is approximated: PineForge computes "
-                "the levels of the last completed period and the engine has no "
-                "developing-period levels, so this call ignores developing and "
-                "computes completed-period pivots.",
-                hint=("Omit developing or pass false to run it exactly. Developing "
-                      "pivots need engine support: levels recalculated over the "
-                      "period in progress."),
-            )
+        """TA1's ``PivotPointLevels`` accepts anchor and developing exactly."""
+        return
 
     # -- ta.vwap anchor --
 
@@ -2024,41 +1929,12 @@ class SupportChecker:
     _VWAP_DAILY_ANCHOR_TFS = frozenset({"D", "1D"})
 
     def _check_ta_vwap_anchor(self, node: FuncCall) -> None:
-        """Refuse or flag a ``ta.vwap`` anchor the engine cannot run.
+        """TA1's anchored VWAP classes accept every Pine anchor expression.
 
-        TradingView resets the accumulation on every bar where the ``series
-        bool`` anchor is true. The engine's ``ta::VWAP`` resets only when the
-        symbol's session day changes -- the default anchor -- and has no input
-        for any other, so the codegen drops the anchor argument: exact for the
-        default. The band form ``ta.vwap(src, anchor, mult)`` has always run
-        that session-day approximation for any anchor, and strategies graded
-        against TradingView rely on it, so it keeps it and says so in a
-        warning; the 2-argument form never compiled with an anchor, so any
-        anchor but the default stays refused.
+        The code generator keeps the historical class for the default daily
+        anchor and emits the compatibility shim for every other anchor.
         """
-        anchor = node.args[1] if len(node.args) > 1 else node.kwargs.get("anchor")
-        if anchor is None or self._is_daily_timeframe_change(anchor):
-            return
-        if len(node.args) > 2 or "stdev_mult" in node.kwargs:
-            self._warn(
-                expr_start(anchor),
-                "ta.vwap anchor is approximated: the engine's ta::VWAP has no "
-                "reset-on-anchor input yet and resets only when the symbol's "
-                "session day changes, so this band form ignores its anchor and "
-                "runs the session-day VWAP.",
-                hint='Omit the anchor or pass timeframe.change("1D") to run it exactly.',
-            )
-            return
-        self._err(
-            expr_start(anchor),
-            "ta.vwap anchor is not supported: the engine's ta::VWAP resets its "
-            "accumulation only when the symbol's session day changes (the "
-            'default anchor, timeframe.change("1D")) and has no reset-on-anchor '
-            "input, so any other anchor would silently compute a daily VWAP.",
-            hint=('Omit the anchor or pass timeframe.change("1D"). Another anchor '
-                  "needs engine support: a ta::VWAP that resets on a bar where the "
-                  "anchor is true and returns na until it first is."),
-        )
+        return
 
     def _is_daily_timeframe_change(self, node: ASTNode, _seen: frozenset = frozenset()) -> bool:
         """``timeframe.change("1D")`` / ``("D")``, directly or through a

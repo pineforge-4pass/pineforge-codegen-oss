@@ -90,6 +90,7 @@ TA_TUPLE_RESULT_TYPES = {
     "bb": "ta::BBResult",
     "kc": "ta::KCResult",
     "vwap_bands": "ta::VWAPBandsResult",
+    "vwap_anchored_bands": "ta::VWAPBandsResult",
 }
 
 # (TA_IMPLICIT_COMPUTE / TA_COMPUTE_ARGS now imported from .tables above.)
@@ -3182,7 +3183,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
     def _ta_return_type(self, site: TACallSite) -> str:
         if getattr(site, "returns_tuple", False):
-            return f"{site.class_name}Result"
+            return TA_TUPLE_RESULT_TYPES.get(
+                self._ta_name_from_site(site), f"{site.class_name}Result"
+            )
         if site.class_name in ("ta::Crossover", "ta::Crossunder", "ta::Cross"):
             return "bool"
         return "double"
@@ -4755,6 +4758,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return folded
         return resolved
 
+    @staticmethod
+    def _ta_ctor_arg_is_bool(site: TACallSite, position: int) -> bool:
+        """Whether a TA shim constructor slot is a Pine simple bool."""
+        return (
+            (site.class_name == "_PFALMA" and position == 3)
+            or (site.class_name in ("_PFKC", "_PFKCW") and position == 2)
+        )
+
     # An inline ``input.*()`` call inside a ctor-arg / derived-length spelling
     # is one leaf of the expression. It qualifies exactly when its bound
     # spelling ``v = <call>`` would make ``v`` input-backed
@@ -5371,7 +5382,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                             self._codegen_error(
                                 getattr(site, "node", None),
                                 f"Unsupported requested-context TA constructor "
-                                f"length '{a}' for {site.class_name}: the "
+                                f"{'flag' if self._ta_ctor_arg_is_bool(site, arg_pos) else 'length'} "
+                                f"'{a}' for {site.class_name}: the "
                                 "helper-bound expression is not a stable "
                                 "per-run scalar.",
                                 hint=("Use a literal, an input.*() value, "

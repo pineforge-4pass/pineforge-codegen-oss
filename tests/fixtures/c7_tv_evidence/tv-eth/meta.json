@@ -1,0 +1,16 @@
+{
+  "title": "TA1 probe - ta.vwap first session day",
+  "slug": "ta1-vwap-first-day-eth",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-24T02:48:23.310Z",
+  "chart": {
+    "symbol": "BINANCE:ETHUSDT.P",
+    "interval": "15",
+    "from": "2025-04-01",
+    "to": "2025-04-10"
+  },
+  "pine_sha256": "990110155c90a13471a11463e74eb7c8caf347e3c6bcb7dbfd874c2b190757d2",
+  "tv_trades_sha256": "3b238cd07b4fbac6c4a2d7d33ae0d3db5796faa6fbc842c70a88091eb2fe1f8b",
+  "tv_trades_rows": 10
+}

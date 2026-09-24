@@ -513,11 +513,12 @@ class TestTAKwargs:
                     "current_bar_.low, current_bar_.close)") in cpp, spelling
 
     def test_ta_alma_floor_stays_out_of_compute(self):
-        # ta::ALMA has no floor (the support checker admits only floor = false).
+        # TA1's ALMA takes floor in the constructor; the compute call remains
+        # source-only. The generated shim keeps this compilable on old engines.
         for spelling in ('ta.alma(close, 9, 0.85, 6.0, false)',
                          'ta.alma(series=close, length=9, offset=0.85, sigma=6.0, floor=false)'):
             cpp = _generate(_pine(f'x = {spelling}'))
-            assert "_ta_alma_1(9, 0.85, 6)" in cpp, spelling
+            assert "_ta_alma_1(9, 0.85, 6, false)" in cpp, spelling
             assert "_ta_alma_1.compute(current_bar_.close)" in cpp, spelling
 
     def test_ta_highestbars_length_only_reads_high(self):

@@ -205,12 +205,226 @@ class TopLevelEmitter:
         # in favour of fully qualified names emitted at each call site.
         lines.append("using namespace pineforge;")
         lines.append("")
+        self._emit_ta_compat_shims(lines)
         if self._uses_tv_number_format:
             lines.append(TV_NUMBER_FORMAT_CPP)
             lines.append("")
         # Syminfo derivation helpers (_pf_derive_main_tickerid, _pf_derive_country)
         from .helpers_syminfo import emit_syminfo_helpers
         lines.extend(emit_syminfo_helpers())
+
+    def _emit_ta_compat_shims(self, lines: list[str]) -> None:
+        """Emit source-level adapters for TA1 arguments and anchored forms.
+
+        The adapters are selected by feature macros exported from
+        ``pineforge/ta.hpp``. This lets one generated TU compile against the
+        TA1 engine and the previous engine while keeping the Pine call-site
+        shape identical. The old branch deliberately preserves the historical
+        lowering; it is only selected when the corresponding macro is absent.
+        """
+        classes = {
+            site.class_name for site in getattr(self.ctx, "ta_call_sites", ())
+        }
+
+        if "_PFALMA" in classes:
+            lines.extend([
+                "#ifdef PF_ALMA_HAS_FLOOR",
+                "class _PFALMA {",
+                "    ta::ALMA impl_;",
+                "public:",
+                "    _PFALMA(int length, double offset, double sigma, bool floor = false)"
+                " : impl_(length, offset, sigma, floor) {}",
+                "    double compute(double src) { return impl_.compute(src); }",
+                "    double recompute(double src) { return impl_.recompute(src); }",
+                "};",
+                "#else",
+                "class _PFALMA {",
+                "    ta::ALMA impl_;",
+                "public:",
+                "    _PFALMA(int length, double offset, double sigma, bool = false)"
+                " : impl_(length, offset, sigma) {}",
+                "    double compute(double src) { return impl_.compute(src); }",
+                "    double recompute(double src) { return impl_.recompute(src); }",
+                "};",
+                "#endif",
+                "",
+            ])
+
+        if "_PFKC" in classes:
+            lines.extend([
+                "#ifdef PF_KC_HAS_USE_TRUE_RANGE",
+                "class _PFKC {",
+                "    ta::KC impl_;",
+                "public:",
+                "    _PFKC(int length, double mult, bool use_true_range = true)"
+                " : impl_(length, mult, use_true_range) {}",
+                "    ta::KCResult compute(double src, double high, double low, double close)"
+                " { return impl_.compute(src, high, low, close); }",
+                "    ta::KCResult recompute(double src, double high, double low, double close)"
+                " { return impl_.recompute(src, high, low, close); }",
+                "};",
+                "#else",
+                "class _PFKC {",
+                "    ta::KC impl_;",
+                "public:",
+                "    _PFKC(int length, double mult, bool = true) : impl_(length, mult) {}",
+                "    ta::KCResult compute(double src, double high, double low, double close)"
+                " { return impl_.compute(src, high, low, close); }",
+                "    ta::KCResult recompute(double src, double high, double low, double close)"
+                " { return impl_.recompute(src, high, low, close); }",
+                "};",
+                "#endif",
+                "",
+            ])
+
+        if "_PFKCW" in classes:
+            lines.extend([
+                "#ifdef PF_KC_HAS_USE_TRUE_RANGE",
+                "class _PFKCW {",
+                "    ta::KCW impl_;",
+                "public:",
+                "    _PFKCW(int length, double mult, bool use_true_range = true)"
+                " : impl_(length, mult, use_true_range) {}",
+                "    double compute(double src, double high, double low, double close)"
+                " { return impl_.compute(src, high, low, close); }",
+                "    double recompute(double src, double high, double low, double close)"
+                " { return impl_.recompute(src, high, low, close); }",
+                "};",
+                "#else",
+                "class _PFKCW {",
+                "    ta::KCW impl_;",
+                "public:",
+                "    _PFKCW(int length, double mult, bool = true) : impl_(length, mult) {}",
+                "    double compute(double src, double high, double low, double close)"
+                " { return impl_.compute(src, high, low, close); }",
+                "    double recompute(double src, double high, double low, double close)"
+                " { return impl_.recompute(src, high, low, close); }",
+                "};",
+                "#endif",
+                "",
+            ])
+
+        if "_PFAnchoredVWAP" in classes:
+            lines.extend([
+                "#ifdef PF_VWAP_HAS_ANCHOR_INPUT",
+                "class _PFAnchoredVWAP {",
+                "    ta::AnchoredVWAP impl_;",
+                "public:",
+                "    double compute(double src, double volume, int64_t timestamp,"
+                " const std::string& tz, const std::string& session, bool anchor) {",
+                "        (void)timestamp; (void)tz; (void)session;",
+                "        return impl_.compute(src, volume, anchor);",
+                "    }",
+                "    double recompute(double src, double volume, int64_t timestamp,"
+                " const std::string& tz, const std::string& session, bool anchor) {",
+                "        (void)timestamp; (void)tz; (void)session;",
+                "        return impl_.recompute(src, volume, anchor);",
+                "    }",
+                "};",
+                "#else",
+                "class _PFAnchoredVWAP {",
+                "    ta::VWAP impl_;",
+                "public:",
+                "    double compute(double src, double volume, int64_t timestamp,"
+                " const std::string& tz, const std::string& session, bool) {",
+                "#ifdef PF_VWAP_HAS_SESSION_ANCHOR",
+                "        return impl_.compute(src, volume, timestamp, tz, session);",
+                "#else",
+                "        (void)tz; (void)session;",
+                "        return impl_.compute(src, volume, timestamp);",
+                "#endif",
+                "    }",
+                "    double recompute(double src, double volume, int64_t timestamp,"
+                " const std::string& tz, const std::string& session, bool) {",
+                "#ifdef PF_VWAP_HAS_SESSION_ANCHOR",
+                "        return impl_.recompute(src, volume, timestamp, tz, session);",
+                "#else",
+                "        (void)tz; (void)session;",
+                "        return impl_.recompute(src, volume, timestamp);",
+                "#endif",
+                "    }",
+                "};",
+                "#endif",
+                "",
+            ])
+
+        if "_PFAnchoredVWAPBands" in classes:
+            lines.extend([
+                "#ifdef PF_VWAP_HAS_ANCHOR_INPUT",
+                "class _PFAnchoredVWAPBands {",
+                "    ta::AnchoredVWAPBands impl_;",
+                "public:",
+                "    explicit _PFAnchoredVWAPBands(double mult) : impl_(mult) {}",
+                "    ta::VWAPBandsResult compute(double src, double volume, int64_t timestamp,"
+                " const std::string& tz, const std::string& session, bool anchor) {",
+                "        (void)timestamp; (void)tz; (void)session;",
+                "        return impl_.compute(src, volume, anchor);",
+                "    }",
+                "    ta::VWAPBandsResult recompute(double src, double volume, int64_t timestamp,"
+                " const std::string& tz, const std::string& session, bool anchor) {",
+                "        (void)timestamp; (void)tz; (void)session;",
+                "        return impl_.recompute(src, volume, anchor);",
+                "    }",
+                "};",
+                "#else",
+                "class _PFAnchoredVWAPBands {",
+                "    ta::VWAP impl_;",
+                "    double mult_;",
+                "public:",
+                "    explicit _PFAnchoredVWAPBands(double mult) : mult_(mult) {}",
+                "    ta::VWAPBandsResult compute(double src, double volume, int64_t timestamp,"
+                " const std::string& tz, const std::string& session, bool) {",
+                "#ifdef PF_VWAP_HAS_SESSION_ANCHOR",
+                "        return impl_.compute_bands(src, volume, timestamp, mult_, tz, session);",
+                "#else",
+                "        (void)tz; (void)session;",
+                "        return impl_.compute_bands(src, volume, timestamp, mult_);",
+                "#endif",
+                "    }",
+                "    ta::VWAPBandsResult recompute(double src, double volume, int64_t timestamp,"
+                " const std::string& tz, const std::string& session, bool) {",
+                "#ifdef PF_VWAP_HAS_SESSION_ANCHOR",
+                "        return impl_.recompute_bands(src, volume, timestamp, mult_, tz, session);",
+                "#else",
+                "        (void)tz; (void)session;",
+                "        return impl_.recompute_bands(src, volume, timestamp, mult_);",
+                "#endif",
+                "    }",
+                "};",
+                "#endif",
+                "",
+            ])
+
+        if "_PFPivotPointLevels" in classes:
+            lines.extend([
+                "#ifdef PF_PIVOT_LEVELS_HAS_ANCHOR",
+                "class _PFPivotPointLevels {",
+                "    ta::PivotPointLevels impl_;",
+                "public:",
+                "    std::vector<double> compute(const std::string& type, bool anchor,"
+                " bool developing, double open, double high, double low, double close) {",
+                "        return impl_.compute(type, anchor, developing, open, high, low, close);",
+                "    }",
+                "    std::vector<double> recompute(const std::string& type, bool anchor,"
+                " bool developing, double open, double high, double low, double close) {",
+                "        return impl_.recompute(type, anchor, developing, open, high, low, close);",
+                "    }",
+                "};",
+                "#else",
+                "class _PFPivotPointLevels {",
+                "public:",
+                "    std::vector<double> compute(const std::string& type, bool, bool,"
+                " double, double high, double low, double close) {",
+                "        return ta::pivot_point_levels(type, high, low, close);",
+                "    }",
+                "    std::vector<double> recompute(const std::string& type, bool, bool,"
+                " double, double high, double low, double close) {",
+                "        return ta::pivot_point_levels(type, high, low, close);",
+                "    }",
+                "};",
+                "#endif",
+                "",
+            ])
 
     def _script_has_input_source(self) -> bool:
         """True if the script's AST contains an ``input.source(...)`` call.
@@ -717,7 +931,7 @@ class TopLevelEmitter:
                 # DO expand to a runtime expr (input-backed / arithmetic-over-input,
                 # incl. function-derived lengths) are safe: the `!_ta_initialized_`
                 # reset overwrites the placeholder before the first compute.
-                for a in site.ctor_args:
+                for arg_pos, a in enumerate(site.ctor_args):
                     r = self._resolve_ta_ctor_arg(a)
                     if (not self._is_compile_time_value(r)
                             and self._runtime_ctor_arg_for_reset(a) is None):
@@ -732,15 +946,27 @@ class TopLevelEmitter:
                             self._collect_ta_runtime_resets(
                                 security_source_node=site.node
                             )
-                        self._codegen_error(
-                            getattr(site, "node", None),
-                            f"Unsupported TA constructor length '{a}' for "
-                            f"{site.class_name}: it is neither a compile-time "
-                            f"constant nor derived from an input, so PineForge "
-                            f"cannot size the indicator buffer.",
-                            hint=("Use a literal, an input.*() value, or "
-                                  "arithmetic over those for TA lengths."),
-                        )
+                        if self._ta_ctor_arg_is_bool(site, arg_pos):
+                            message = (
+                                f"Unsupported TA constructor flag '{a}' for "
+                                f"{site.class_name}: it is neither a compile-time "
+                                "constant nor derived from an input, so PineForge "
+                                "cannot initialize the indicator with a stable "
+                                "per-run value."
+                            )
+                            hint = ("Use a literal, an input.*() value, or "
+                                    "arithmetic over those for TA constructor "
+                                    "arguments.")
+                        else:
+                            message = (
+                                f"Unsupported TA constructor length '{a}' for "
+                                f"{site.class_name}: it is neither a compile-time "
+                                "constant nor derived from an input, so PineForge "
+                                "cannot size the indicator buffer."
+                            )
+                            hint = ("Use a literal, an input.*() value, or "
+                                    "arithmetic over those for TA lengths.")
+                        self._codegen_error(getattr(site, "node", None), message, hint=hint)
                 resolved = [self._resolve_ta_ctor_arg(a) for a in site.ctor_args]
                 # Compile-time placeholder for the init list; the runtime reset
                 # (when the arg is input-derived) overwrites it on the first bar.

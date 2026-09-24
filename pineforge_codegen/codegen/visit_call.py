@@ -1978,6 +1978,14 @@ class CallVisitor:
 
         # ta.pivot_point_levels — free function, not a stateful indicator
         if namespace == "ta" and func_name == "pivot_point_levels":
+            routed_site = self._get_ta_site(node)
+            if routed_site is not None:
+                compute_args = self._ta_compute_args_for_site(routed_site)
+                ta_mem = self._ta_member_name(routed_site)
+                return (
+                    f"(history_advances_new_bar() ? {ta_mem}.compute({compute_args}) "
+                    f": {ta_mem}.recompute({compute_args}))"
+                )
             if node.kwargs:
                 args = _merge_kwargs(
                     node.args,

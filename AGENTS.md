@@ -261,13 +261,13 @@ taxonomy:
 | `SUPPORTED_*` frozensets         | Per-namespace whitelist of names codegen knows how to emit.          |
 | `varip` VarDecl check            | `varip` declarations rejected outright — batch backtests have no realtime tick state. |
 | TF literal validation            | `request.security` / `request.security_lower_tf` `timeframe` string literals validated against Pine v6 format at parse time. |
-| `ta.vwap` anchor                 | The engine's `ta::VWAP` resets only when the symbol's session day changes (`_check_ta_vwap_anchor`). The default anchor -- omitted, or `timeframe.change("1D")` / `("D")`, directly or through a never-reassigned non-`var` binding -- runs exactly. The band form `ta.vwap(src, anchor, mult)` with any other anchor keeps its session-day approximation (its pre-C4 lowering; strategies graded against TradingView rely on it) and WARNS that the anchor is approximated. The 2-arg form with any other anchor is refused naming the missing engine capability (it used to fail the C++ compile). |
+| `ta.vwap` anchor                 | Omitted-anchor VWAP and its band form keep `ta::VWAP` / `ta::VWAPBands` exactly. Every explicit scalar or band anchor, including `timeframe.change("1D")` / `("D")`, is passed per bar to the TA1 anchored VWAP shim; a TU built against an older engine falls back to the historical session-day lowering. TradingView tapes for both a mid-session and a day-boundary start show the explicit daily form is `na` until the first day change, while omitted-anchor VWAP is finite from bar 0. |
 | Input titles (codegen)           | `_check_input_titles` refuses a title that is not a compile-time string constant (TradingView: `title (const string)`) before generation; PineForge keys every override by the title. |
 | Input keys (codegen)             | `_check_input_keys` WARNS, once per override key that several inputs share (the title, else the name of the declaration holding the call: two untitled calls in one declaration, two outside any declaration, an untitled call and another titled with its name, a title repeated across `group=`s), naming every input the key reaches: one override sets all of them. TradingView tells such inputs apart, so the script transpiles unchanged (closed strategies 125-cleightyp and 162-nicocashfx repeat titles across groups and grade excellent at their defaults). |
 | Parser syntax                    | A `ParseError` at top level or inside a block raises a located `CompileError` instead of discarding tokens. Adjacent expressions on one line (`x = 1 2`, `s = "a" "b"`) are rejected at the second token. The 312 validation probes, 602 corpus `.pine` files and 101 closed strategies had zero parser recovery events at the 2026-09-24 census; no validated script lost support. |
 | Bare `ta.tr`                    | The variable equals `ta.tr(false)`: it is `na` when the previous close is `na`, including bar 0. The explicit `ta.tr(true)` and `ta.atr` paths retain their own first-bar behavior. TradingView's 2025-04-01 `c6-ta-tr-bar-zero` trade booked Signal `bare-na`; `tests/test_e2e_bare_ta_tr.py` compares the emitted bar traces and trades with `ta.tr(false)`. |
 | `ta.*` call arguments            | `_check_ta_arguments` binds every `ta.*` call to TradingView's signature (`signatures.TA_FUNCTIONS`: TradingView's parameter names, e.g. `series` for `ta.alma` / `bb` / `bbw` / `cmo` / `kc` / `kcw`, and required/optional split) and refuses what TradingView rejects: an unknown keyword, an argument too many, one given twice or a missing required one -- each used to be dropped, shifted into the next constructor slot or passed to a `compute()` that does not exist. `ta.vwap()` with no argument reads as the bare property, as it always has. |
-| `ta.*` values the engine lacks   | Only the value the engine class computes runs exactly: `ta.alma` `floor` false (`ta::ALMA` has no floor), `ta.kc` / `ta.kcw` `useTrueRange` true (`ta::KC` always averages the true range), `ta.pivot_point_levels` `anchor` true and `developing` false (the emission reads the previous bar's HLC) -- as a literal or through a name bound once to one. Any other value in a spelling that compiled before C5 -- `floor=` / `useTrueRange=` by keyword (the keyword was dropped), every pivot anchor / developing -- keeps that lowering and WARNS naming the approximation and the missing engine capability; a positional `floor` / `useTrueRange` other than that value (it reached a `compute()` overload that does not exist) is refused. |
+| `ta.*` TA1 arguments | The TA1 engine computes `ta.alma` `floor`, `ta.kc` / `ta.kcw` `useTrueRange`, explicit `ta.vwap` anchors, and `ta.pivot_point_levels` `anchor` / `developing` exactly. The generated TU selects those APIs with `PF_ALMA_HAS_FLOOR`, `PF_KC_HAS_USE_TRUE_RANGE`, `PF_VWAP_HAS_ANCHOR_INPUT`, and `PF_PIVOT_LEVELS_HAS_ANCHOR`; when a macro is absent, the shim falls back to the historical lowering. Only omitted-anchor VWAP keeps `ta::VWAP` / `ta::VWAPBands`; every explicit anchor, including `timeframe.change("1D"|"D")`, uses `ta::AnchoredVWAP` / `ta::AnchoredVWAPBands`. The pivot free function remains only for literal/aliased `anchor=true, developing=false`; every other spelling uses `ta::PivotPointLevels`. |
 | syminfo na-gap warning           | `SUPPORTED_SYMINFO` = every `SYMINFO_MEMBER_MAP` key, but members whose emission is `na<T>()` or a `get_syminfo_metadata(...)` lookup (root/pricescale/minmove/mincontract/current_contract/expiration_date/isin/sector/industry + fundamentals/recommendations/target_price_*) form `_SYMINFO_SILENT_GAP_FIELDS` (derived from the emission table, so new na-accept fields can't drift out): every read WARNS that the value is na until a data feed injects it. |
 
 
@@ -345,9 +345,10 @@ you delete or weaken the special case, the test will tell you.
    to `_s_<name>` series whenever the script reads them with `[k]`. The
    analyzer registers them in `ctx.series_bar_fields`; the codegen
    declares `Series<double> _s_close;` etc. and pushes the current bar's
-   value at the top of `on_bar`. `pivot_point_levels` always reads the
-   PREVIOUS bar's HLC (`_s_high[1]`, `_s_low[1]`, `_s_close[1]`) per
-   Pine v6 semantics with `developing=false`.
+   value at the top of `on_bar`. `pivot_point_levels` reads the
+   PREVIOUS bar's HLC (`_s_high[1]`, `_s_low[1]`, `_s_close[1]`) on the
+   free-function `anchor=true, developing=false` route. Other forms use the
+   TA1 anchored-period class.
 6. **`request.security` is strict.** Only `symbol`, `timeframe`,
   `expression`, `gaps`, `lookahead`, and `ignore_invalid_symbol` are
    allowed (`ignore_invalid_symbol` is accepted but inert — the symbol is
@@ -425,14 +426,13 @@ you delete or weaken the special case, the test will tell you.
    `compute()`, but the history bound is the constructor's `max_occurrence`
    (default 1, two values kept), so `TA_PERIOD_ARG["valuewhen"] = 2` sends
    it to the constructor as well (it sat in `TA_NO_CTOR`, and every
-   `occurrence >= 2` read `na`). `ta.vwap`'s anchor reaches neither
-   (`TA_COMPUTE_ARGS["vwap"] = [0]`): the support checker admits the default
-   anchor, warns on a band form's other anchor, refuses a 2-arg form's.
-   Neither do `ta.alma`'s `floor` nor `ta.kc` /
-   `ta.kcw`'s `useTrueRange` (`TA_COMPUTE_ARGS` alma / kc / kcw = `[0]`;
-   they used to reach `compute()` overloads that do not exist; see "`ta.*`
-   values the engine lacks" for what the support checker warns on). The
-   routing table is the ANALYZER's `TA_COMPUTE_ARGS` (analyzer/tables.py):
+   `occurrence >= 2` read `na`). `ta.vwap`'s default anchor keeps the
+   historical VWAP route; every other anchor is carried in the anchored
+   shim's per-bar compute arguments. `ta.alma`'s `floor` and `ta.kc` /
+   `ta.kcw`'s `useTrueRange` are constructor arguments in the TA1 shims.
+   Feature macros select the exact TA1 classes and the shim branches preserve
+   the old lowering when a macro is absent. The routing table is the
+   ANALYZER's `TA_COMPUTE_ARGS` (analyzer/tables.py):
    without an entry every non-constructor argument goes to `compute()`, so a
    new TA whose `compute()` in `ta.hpp` does not take every such Pine
    parameter needs one. The one-arg `ta.highest` / `lowest` / `highestbars`

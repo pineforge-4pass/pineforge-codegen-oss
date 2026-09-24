@@ -82,9 +82,9 @@ if close > ub
     strategy.entry("long", strategy.long)
 """
     cpp = _transpile(src)
-    # Initializer list: _ta_vwap_bands_N(stdev_mult)
-    assert re.search(r"_ta_vwap_bands_\d+\(2", cpp), \
-        "Expected _ta_vwap_bands_N(2...) in initializer list"
+    # Explicit anchors use the TA1 anchored bands shim.
+    assert re.search(r"_ta_vwap_anchored_bands_\d+\(2", cpp), \
+        "Expected _ta_vwap_anchored_bands_N(2...) in initializer list"
 
 
 def test_vwap_1arg_still_scalar():

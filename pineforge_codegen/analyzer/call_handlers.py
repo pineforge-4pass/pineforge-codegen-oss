@@ -386,6 +386,57 @@ class CallHandlers:
             merged.pop()
         return merged
 
+    def _is_constant_bool_literal(self, node, value: bool, _seen=frozenset()) -> bool:
+        """Small analyzer-side counterpart of the support checker's constant
+        bool test. The analyzer already records global expression bindings and
+        global reassignments; use those records so a one-time alias of true or
+        false follows the same route as the literal spelling."""
+        if isinstance(node, BoolLiteral):
+            return node.value is value
+        if isinstance(node, Identifier) and node.name not in _seen:
+            if node.name in getattr(self, "_global_reassigned_names", set()):
+                return False
+            expr = self._global_expr_map.get(node.name)
+            return expr is not None and self._is_constant_bool_literal(
+                expr, value, _seen | {node.name}
+            )
+        return False
+
+    def _constant_string_literal(self, node, _seen=frozenset()) -> str | None:
+        """Resolve a never-reassigned global string literal for pivot routing."""
+        if isinstance(node, StringLiteral):
+            return node.value
+        if isinstance(node, Identifier) and node.name not in _seen:
+            if node.name in getattr(self, "_global_reassigned_names", set()):
+                return None
+            expr = self._global_expr_map.get(node.name)
+            if expr is not None:
+                return self._constant_string_literal(expr, _seen | {node.name})
+        return None
+
+    def _is_daily_vwap_anchor(self, node, _seen=frozenset()) -> bool:
+        """Recognize PineForge's established default VWAP anchor."""
+        if isinstance(node, FuncCall):
+            callee = node.callee
+            if (
+                isinstance(callee, MemberAccess)
+                and isinstance(callee.object, Identifier)
+                and callee.object.name == "timeframe"
+                and callee.member == "change"
+                and len(node.args) + len(node.kwargs) == 1
+            ):
+                tf = node.args[0] if node.args else node.kwargs.get("timeframe")
+                return isinstance(tf, StringLiteral) and tf.value in {"D", "1D"}
+            return False
+        if isinstance(node, Identifier) and node.name not in _seen:
+            if node.name in getattr(self, "_global_reassigned_names", set()):
+                return False
+            expr = self._global_expr_map.get(node.name)
+            return expr is not None and self._is_daily_vwap_anchor(
+                expr, _seen | {node.name}
+            )
+        return False
+
     def _handle_ta_call(self, func_name: str, node: FuncCall) -> PineType:
         """Handle ta.* function calls."""
         # Visit all args for side effects (series detection, etc.)
@@ -393,19 +444,6 @@ class CallHandlers:
             self._visit(arg)
         for val in node.kwargs.values():
             self._visit(val)
-
-        # ta.pivot_point_levels is a free runtime function (not a stateful
-        # indicator), but its codegen lowers to use `_s_high[1]`, `_s_low[1]`,
-        # `_s_close[1]` so the pivot is calculated from the PREVIOUS bar's
-        # HLC (matching Pine v6 semantics where `developing` defaults to
-        # false). Register the bar-field history series here so that the
-        # codegen emits the corresponding `Series<double> _s_high/...` members
-        # and pushes them at the top of every on_bar tick.
-        if func_name == "pivot_point_levels":
-            self._series_bar_fields.add("high")
-            self._series_bar_fields.add("low")
-            self._series_bar_fields.add("close")
-            return PineType.FLOAT  # actual array<float> handled by type inference
 
         # ta.vwap(source, anchor, stdev_mult) → 3-arg bands form.
         # When called with 3 args (or anchor/stdev_mult kwargs), remap to the
@@ -423,12 +461,24 @@ class CallHandlers:
             if len(merged_v) >= 3:
                 func_name = "vwap_bands"
 
-        if func_name not in TA_CLASS_MAP:
+            # An explicit anchor, including timeframe.change("1D"/"D"), is a
+            # Pine series condition. TA1's anchored classes must see it on
+            # every bar; only the omitted-anchor spelling keeps the historical
+            # session-day VWAP class.
+            anchor = merged_v[1] if len(merged_v) > 1 else None
+            if anchor is not None:
+                func_name = (
+                    "vwap_anchored_bands"
+                    if len(merged_v) >= 3
+                    else "vwap_anchored"
+                )
+
+        if func_name not in TA_CLASS_MAP and func_name != "pivot_point_levels":
             return PineType.FLOAT
 
         # Merge positional + kwargs into a unified arg list. The band form has
         # no signature of its own: its arguments are ``ta.vwap``'s, merged above.
-        if func_name == "vwap_bands" and merged_v is not None:
+        if func_name in ("vwap_bands", "vwap_anchored", "vwap_anchored_bands") and merged_v is not None:
             all_args = merged_v
         else:
             all_args = self._merge_ta_args(func_name, node)
@@ -453,6 +503,43 @@ class CallHandlers:
             for field in ("high", "low", "close"):
                 self._series_bar_fields.add(field)
             all_args = [default_src]
+
+        # ``pivot_point_levels(type, anchor, developing)`` retains the
+        # historical free-function lowering only for the exact spelling the
+        # free function computes: anchor=true on every bar and
+        # developing=false for the Fibonacci, Classic, and Camarilla types.
+        # The public TradingView pivot tape pins Traditional, Woodie, and DM
+        # to the TA1 formulas, including the high Traditional levels.
+        if func_name == "pivot_point_levels":
+            self._series_bar_fields.update(("high", "low", "close"))
+            all_args = self._merge_ta_args(func_name, node)
+            if len(all_args) >= 2 and len(all_args) < 3:
+                all_args.append(BoolLiteral(value=False))
+            exact = (
+                len(all_args) >= 3
+                and self._is_constant_bool_literal(all_args[1], True)
+                and self._is_constant_bool_literal(all_args[2], False)
+                and self._constant_string_literal(all_args[0]) in {
+                    "Fibonacci", "Classic", "Camarilla"
+                }
+            )
+            if exact:
+                return PineType.FLOAT
+            self._ta_counter += 1
+            site = TACallSite(
+                member_name=f"_ta_pivot_point_levels_{self._ta_counter}",
+                class_name="_PFPivotPointLevels",
+                ctor_args=[],
+                compute_args=all_args[:3],
+                returns_tuple=False,
+                node=node,
+                is_static=False,
+                owner_func=(self._enclosing_func_names[-1]
+                            if self._enclosing_func_names else None),
+            )
+            self._ta_call_sites.append(site)
+            self._ta_member_names.add(site.member_name)
+            return PineType.FLOAT  # actual array<float> handled by type inference
 
         # The one-arg forms ta.highest(length) / ta.lowest(length) /
         # ta.highestbars(length) / ta.lowestbars(length), positional or

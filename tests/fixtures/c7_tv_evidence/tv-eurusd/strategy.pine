@@ -1,0 +1,42 @@
+//@version=6
+// TA1 item-6 probe: the bar on which ta.vwap first has a value when the
+// chart's first bar is not the first bar of its session day.
+// Each marker entry is placed on the bar where its event first happens and
+// fills at the next bar's open; the tape's Signal column names the marker.
+//   S_chart_start   the chart's first bar (bar_index 0)
+//   C_day_change    first bar on which timeframe.change("1D") is true
+//   V_default_vwap  first bar on which ta.vwap(close) is not na
+//   E_explicit_vwap first bar on which ta.vwap(close, timeframe.change("1D")) is not na
+//   A_anchor5_vwap  first bar on which ta.vwap(close, bar_index == 5) is not na
+strategy("TA1 probe - ta.vwap first session day", overlay=true,
+     initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1,
+     pyramiding=10, commission_type=strategy.commission.percent, commission_value=0,
+     slippage=0, process_orders_on_close=false)
+
+vDefault = ta.vwap(close)
+vExplicit = ta.vwap(close, timeframe.change("1D"))
+vAnchor5 = ta.vwap(close, bar_index == 5)
+
+var bool seenStart = false
+var bool seenChange = false
+var bool seenDefault = false
+var bool seenExplicit = false
+var bool seenAnchor5 = false
+
+if not seenStart
+    seenStart := true
+    strategy.entry("S_chart_start", strategy.long)
+if not seenChange and timeframe.change("1D")
+    seenChange := true
+    strategy.entry("C_day_change", strategy.long)
+if not seenDefault and not na(vDefault)
+    seenDefault := true
+    strategy.entry("V_default_vwap", strategy.long)
+if not seenExplicit and not na(vExplicit)
+    seenExplicit := true
+    strategy.entry("E_explicit_vwap", strategy.long)
+if not seenAnchor5 and not na(vAnchor5)
+    seenAnchor5 := true
+    strategy.entry("A_anchor5_vwap", strategy.long)
+if bar_index == 300
+    strategy.close_all(comment="done")
