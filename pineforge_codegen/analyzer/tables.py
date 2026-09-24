@@ -47,7 +47,7 @@ TA_CLASS_MAP = {
     "dmi": "ta::DMI",
     "sar": "ta::SAR",
     "bb": "ta::BB",
-    "kc": "ta::KC",
+    "kc": "_PFKC",
     "wma": "ta::WMA",
     "hma": "ta::HMA",
     "stdev": "ta::StdDev",
@@ -72,7 +72,7 @@ TA_CLASS_MAP = {
     "highestbars": "ta::HighestBars",
     "lowestbars": "ta::LowestBars",
     # Batch 4 — remaining TA functions
-    "alma": "ta::ALMA",
+    "alma": "_PFALMA",
     "swma": "ta::SWMA",
     "mfi": "ta::MFI",
     "cmo": "ta::CMO",
@@ -80,7 +80,7 @@ TA_CLASS_MAP = {
     "wpr": "ta::WPR",
     "cog": "ta::COG",
     "bbw": "ta::BBW",
-    "kcw": "ta::KCW",
+    "kcw": "_PFKCW",
     "barssince": "ta::BarsSince",
     "valuewhen": "ta::ValueWhen",
     "correlation": "ta::Correlation",
@@ -90,6 +90,8 @@ TA_CLASS_MAP = {
     "vwap": "ta::VWAP",
     # 3-arg form: ta.vwap(source, anchor, stdev_mult) → tuple [vwap, upper, lower]
     "vwap_bands": "ta::VWAPBands",
+    "vwap_anchored": "_PFAnchoredVWAP",
+    "vwap_anchored_bands": "_PFAnchoredVWAPBands",
     "obv": "ta::OBV",
     "accdist": "ta::AccDist",
     "nvi": "ta::NVI",
@@ -132,7 +134,8 @@ TA_PERIOD_ARG = {
 }
 
 # Functions that return tuples
-TA_TUPLE_RETURNS = {"macd", "supertrend", "dmi", "bb", "kc", "vwap_bands"}
+TA_TUPLE_RETURNS = {"macd", "supertrend", "dmi", "bb", "kc", "vwap_bands",
+                    "vwap_anchored_bands"}
 TA_TUPLE_ELEMENT_COUNTS = {
     "macd": 3,
     "supertrend": 2,
@@ -140,6 +143,7 @@ TA_TUPLE_ELEMENT_COUNTS = {
     "bb": 3,
     "kc": 3,
     "vwap_bands": 3,
+    "vwap_anchored_bands": 3,
 }
 
 # Functions with multiple constructor args
@@ -149,12 +153,12 @@ TA_MULTI_CTOR = {
     "supertrend": [0, 1],    # factor, atr_period
     "dmi": [0, 1],           # di_length, adx_smoothing
     "bb": [1, 2],            # length, mult
-    "kc": [1, 2],            # length, mult
+    "kc": [1, 2, 3],         # length, mult, useTrueRange
     "sar": [0, 1, 2],        # start, increment, maximum
     "pivothigh": [0, 1],     # left_bars, right_bars
     "pivotlow": [0, 1],      # left_bars, right_bars
     # Batch 4
-    "alma": [1, 2, 3],      # length, offset, sigma
+    "alma": [1, 2, 3, 4],   # length, offset, sigma, floor
     "mfi": [1],              # length (src is compute arg, vol implicit)
     # Pine signature: ta.tsi(source, short_length, long_length) — positions
     # 1 and 2 carry the lengths that initialize the four nested EMAs;
@@ -165,7 +169,8 @@ TA_MULTI_CTOR = {
     "tsi": [1, 2],           # short_length, long_length
     "wpr": [0],              # length
     "bbw": [1, 2],           # length, mult
-    "kcw": [1, 2],           # length, mult
+    "kcw": [1, 2, 3],        # length, mult, useTrueRange
+    "vwap_anchored_bands": [2],  # source, anchor, stdev_mult
     "tr":  [0],              # handle_na (compile-time bool)
     "stdev": [1, 2],         # length, biased
     "variance": [1, 2],      # length, biased
@@ -185,10 +190,8 @@ TA_COMPUTE_ARGS = {
     # occurrence, but the history bound is the constructor's max_occurrence
     # (default 1, two values kept), so every occurrence >= 2 read na.
     "valuewhen": [0, 1, 2],
-    # ``ta.vwap(source, anchor)``: only the source reaches compute(); the
-    # engine resets on the symbol's session day, the one anchor the support
-    # checker admits (timeframe.change("1D")). The anchor used to be forwarded
-    # to a compute() overload that does not exist.
+    # ``ta.vwap(source, anchor)`` is split into a dedicated anchored site in
+    # call_handlers; this entry remains for the omitted-anchor scalar form.
     "vwap": [0],
     # ``ta.alma(series, length, offset, sigma, floor)``: ta::ALMA takes no
     # floor (m = offset * (length - 1), unfloored), the value the support
@@ -200,6 +203,8 @@ TA_COMPUTE_ARGS = {
     # not exist. high / low / close are appended implicitly.
     "kc": [0],
     "kcw": [0],
+    "vwap_anchored": [0, 1],
+    "vwap_anchored_bands": [0, 1],
 }
 
 # The one-argument forms ``ta.highest(length)`` / ``ta.lowest(length)`` /

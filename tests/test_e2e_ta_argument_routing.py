@@ -111,6 +111,11 @@ ALMA_REFERENCE = (
     "x = refSum / refNorm\n"
 )
 
+ALMA_FLOOR_REFERENCE = ALMA_REFERENCE.replace(
+    "refM = 0.7 * (12 - 1)",
+    "refM = math.floor(0.7 * (12 - 1))",
+)
+
 # TradingView's f_kc(close, 20, 1.5, true): basis = ta.ema(src, length),
 # span = ta.tr, rangeEma = ta.ema(span, length), bands basis +- rangeEma * mult.
 # ``ta.tr`` is spelled ``ta.tr(false)``, which TradingView declares it
@@ -121,12 +126,27 @@ KC_REFERENCE = (
     "refSpan = ta.tr(false)\n"
     "refRangeEma = ta.ema(refSpan, 20)\n"
     "refOff = refRangeEma * 1.5\n"
-    "m = na(refRangeEma) ? na : refBasis\n"
+    "m = refBasis\n"
     "u = refBasis + refOff\n"
     "l = refBasis - refOff\n"
 )
 # TradingView's f_kcw: ((basis + rangeEma * mult) - (basis - rangeEma * mult)) / basis.
 KCW_REFERENCE = KC_REFERENCE + "x = (u - l) / m\n"
+
+KC_HIGH_LOW_REFERENCE = (
+    "refBasis = ta.ema(close, 20)\n"
+    "refSpan = high - low\n"
+    "refRangeEma = ta.ema(refSpan, 20)\n"
+    "refOff = refRangeEma * 1.5\n"
+    "m = refBasis\n"
+    "u = refBasis + refOff\n"
+    "l = refBasis - refOff\n"
+)
+KCW_HIGH_LOW_REFERENCE = KC_HIGH_LOW_REFERENCE + "x = (u - l) / m\n"
+PIVOT_TRADE = (
+    'if not na(x) and strategy.position_size == 0\n'
+    '    strategy.entry("L", strategy.long)\n'
+)
 
 
 @dataclass(frozen=True)
@@ -157,6 +177,10 @@ ROUTED: tuple[Routed, ...] = (
            "x = ta.alma(close, 12, 0.7, 4.5, floor=false)\n", ALMA_REFERENCE),
     Routed("alma_floor_false_binding",
            "noFloor = false\nx = ta.alma(close, 12, 0.7, 4.5, noFloor)\n", ALMA_REFERENCE),
+    Routed("alma_floor_true", "x = ta.alma(close, 12, 0.7, 4.5, true)\n",
+           ALMA_FLOOR_REFERENCE),
+    Routed("alma_floor_true_keyword",
+           "x = ta.alma(close, 12, 0.7, 4.5, floor=true)\n", ALMA_FLOOR_REFERENCE),
     Routed("alma_series_keyword",
            "x = ta.alma(series=close, length=12, offset=0.7, sigma=4.5, floor=false)\n",
            ALMA_REFERENCE),
@@ -174,6 +198,16 @@ ROUTED: tuple[Routed, ...] = (
            trade=_trade("x", "0.02")),
     Routed("kcw_true_range_keyword", "x = ta.kcw(close, 20, 1.5, useTrueRange=true)\n",
            KCW_REFERENCE, trade=_trade("x", "0.02")),
+    Routed("kc_high_low_range", "[m, u, l] = ta.kc(close, 20, 1.5, false)\n",
+           KC_HIGH_LOW_REFERENCE, traced=("m", "u", "l"), trade=KC_TRADE),
+    Routed("kc_high_low_range_keyword",
+           "[m, u, l] = ta.kc(close, 20, 1.5, useTrueRange=false)\n",
+           KC_HIGH_LOW_REFERENCE, traced=("m", "u", "l"), trade=KC_TRADE),
+    Routed("kc_high_low_range_input",
+           '[m, u, l] = ta.kc(close, 20, 1.5, useTrueRange=input.bool(false, "TR"))\n',
+           KC_HIGH_LOW_REFERENCE, traced=("m", "u", "l"), trade=KC_TRADE),
+    Routed("kcw_high_low_range", "x = ta.kcw(close, 20, 1.5, false)\n",
+           KCW_HIGH_LOW_REFERENCE, trade=_trade("x", "0.02")),
     # TradingView's parameter name ``series``.
     Routed("bb_series_keyword",
            "[m, u, l] = ta.bb(series=close, length=20, mult=2.0)\n",
@@ -211,6 +245,10 @@ ROUTED: tuple[Routed, ...] = (
     Routed("pivot_levels_anchor_true",
            'lv = ta.pivot_point_levels("Traditional", true)\nx = array.get(lv, 1)\n',
            "pp = (high[1] + low[1] + close[1]) / 3\nx = pp * 2 - low[1]\n"),
+    Routed("pivot_levels_developing",
+           'lv = ta.pivot_point_levels("Traditional", true, true)\nx = array.get(lv, 1)\n',
+           "p = (high + low + close) / 3\nx = p * 2 - low\n",
+           trade=PIVOT_TRADE),
 )
 ROUTED_BY_NAME = {c.name: c for c in ROUTED}
 assert len(ROUTED_BY_NAME) == len(ROUTED), "duplicate case name"
@@ -300,45 +338,7 @@ class Approximated:
 
 _SEC = 'request.security(syminfo.tickerid, "60", '
 _PIVOT_R1 = "x = array.get(lv, 1)\n"
-APPROXIMATED: tuple[Approximated, ...] = (
-    Approximated("alma_floor_true_keyword", "x = ta.alma(close, 12, 0.7, 4.5, floor=true)\n",
-                 ((3, 40, ALMA_FLOOR_APPROX),)),
-    Approximated("alma_floor_input_keyword",
-                 'useFloor = input.bool(false, "Floor")\n'
-                 "x = ta.alma(close, 12, 0.7, 4.5, floor=useFloor)\n",
-                 ((4, 40, ALMA_FLOOR_APPROX),)),
-    Approximated("alma_floor_reassigned_keyword",
-                 "f = false\nif close > open\n    f := true\n"
-                 "x = ta.alma(close, 12, 0.7, 4.5, floor=f)\n",
-                 ((6, 40, ALMA_FLOOR_APPROX),)),
-    Approximated("security_alma_floor_keyword",
-                 "x = " + _SEC + "ta.alma(close, 12, 0.7, 4.5, floor=true))\n",
-                 ((3, 81, ALMA_FLOOR_APPROX),)),
-    Approximated("kc_high_low_range_keyword",
-                 "[m, u, l] = ta.kc(close, 20, 1.5, useTrueRange=false)\n",
-                 ((3, 48, KC_TRUE_RANGE_APPROX),), trade=KC_TRADE),
-    Approximated("kc_true_range_input_keyword",
-                 '[m, u, l] = ta.kc(close, 20, 1.5, useTrueRange=input.bool(true, "TR"))\n',
-                 ((3, 48, KC_TRUE_RANGE_APPROX),), trade=KC_TRADE),
-    Approximated("kcw_high_low_range_keyword",
-                 "x = ta.kcw(close, 20, 1.5, useTrueRange=false)\n",
-                 ((3, 41, KCW_TRUE_RANGE_APPROX),), trade=_trade("x", "0.02")),
-    Approximated("security_kc_high_low_range_keyword",
-                 "[m, u, l] = " + _SEC + "ta.kc(close, 20, 1.5, useTrueRange=false))\n",
-                 ((3, 89, KC_TRUE_RANGE_APPROX),), trade=KC_TRADE),
-    Approximated("pivot_levels_daily_anchor",
-                 'lv = ta.pivot_point_levels("Traditional", timeframe.change("1D"))\n'
-                 + _PIVOT_R1, ((3, 43, PIVOT_ANCHOR_APPROX),)),
-    Approximated("pivot_levels_anchor_keyword",
-                 'lv = ta.pivot_point_levels(type="Traditional", anchor=timeframe.change("1D"))\n'
-                 + _PIVOT_R1, ((3, 55, PIVOT_ANCHOR_APPROX),)),
-    Approximated("pivot_levels_developing",
-                 'lv = ta.pivot_point_levels("Traditional", true, true)\n' + _PIVOT_R1,
-                 ((3, 49, PIVOT_DEVELOPING_APPROX),)),
-    Approximated("pivot_levels_anchor_and_developing",
-                 'lv = ta.pivot_point_levels("Fibonacci", close > open, true)\n' + _PIVOT_R1,
-                 ((3, 41, PIVOT_ANCHOR_APPROX), (3, 55, PIVOT_DEVELOPING_APPROX))),
-)
+APPROXIMATED: tuple[Approximated, ...] = ()
 APPROXIMATED_BY_NAME = {c.name: c for c in APPROXIMATED}
 assert len(APPROXIMATED_BY_NAME) == len(APPROXIMATED), "duplicate case name"
 _WARNED_FUNCTIONS = ("ta.alma ", "ta.kc ", "ta.kcw ", "ta.pivot_point_levels ")
@@ -356,24 +356,6 @@ class Refused:
 
 
 REFUSED: tuple[Refused, ...] = (
-    # Positional spellings: they reached a compute() overload that does not
-    # exist, so they never compiled.
-    Refused("alma_floor_true", "x = ta.alma(close, 12, 0.7, 4.5, true)\n", 3, 34, ALMA_FLOOR),
-    Refused("alma_floor_input",
-            'useFloor = input.bool(false, "Floor")\nx = ta.alma(close, 12, 0.7, 4.5, useFloor)\n',
-            4, 34, ALMA_FLOOR),
-    Refused("alma_floor_reassigned",
-            "f = false\nif close > open\n    f := true\nx = ta.alma(close, 12, 0.7, 4.5, f)\n",
-            6, 34, ALMA_FLOOR),
-    Refused("kc_high_low_range", "[m, u, l] = ta.kc(close, 20, 1.5, false)\n", 3, 35,
-            KC_TRUE_RANGE),
-    Refused("kc_true_range_input",
-            '[m, u, l] = ta.kc(close, 20, 1.5, input.bool(true, "TR"))\n', 3, 35,
-            KC_TRUE_RANGE),
-    Refused("kcw_high_low_range", "x = ta.kcw(close, 20, 1.5, false)\n", 3, 28, KCW_TRUE_RANGE),
-    Refused("security_kc_high_low_range",
-            '[m, u, l] = request.security(syminfo.tickerid, "60", ta.kc(close, 20, 1.5, false))\n',
-            3, 76, KC_TRUE_RANGE),
     # Arguments that bind to no parameter of TradingView's signature: spellings
     # TradingView itself rejects.
     Refused("alma_two_args", "x = ta.alma(close, 9)\n", 3, 5,
@@ -425,7 +407,9 @@ def outcomes(request, tmp_path_factory) -> dict[str, Outcome]:
             case = ROUTED_BY_NAME[item.callspec.params["case_name"]]
             builds[f"{case.name}/subject"] = case.subject()
             builds[f"{case.name}/reference"] = case.reference()
-        elif name == "test_engine_limited_value_is_approximated_with_a_warning":
+        elif (name == "test_engine_limited_value_is_approximated_with_a_warning"
+              and getattr(item, "callspec", None) is not None
+              and item.callspec.params.get("case_name") in APPROXIMATED_BY_NAME):
             approx = APPROXIMATED_BY_NAME[item.callspec.params["case_name"]]
             builds[f"{approx.name}/subject"] = approx.subject()
             if pre_c5 is not None:

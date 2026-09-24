@@ -140,15 +140,12 @@ def test_official_ta_property_variables_reject_function_call_form(name):
 
 
 def test_pivot_point_levels_global_initializes_as_vector():
-    # Pine v6 semantics: with `developing=false` (default), the pivot is
-    # computed from the LAST CLOSED period's HLC. Codegen lowers this to
-    # `_s_high[1]/_s_low[1]/_s_close[1]` (previous bar) — passing the
-    # current bar's HLC produced TV-shifted-by-one-bar values across all
-    # 11 levels.
+    # Traditional's high levels, Woodie, and DM use the TA1 anchored class:
+    # the old free function differs from TradingView on those formulas.
     cpp = transpile(_pine('levels = ta.pivot_point_levels("Traditional", true)\nx = levels[0]'))
     assert "std::vector<double> levels;" in cpp
-    assert 'ta::pivot_point_levels(std::string("Traditional"), _s_high[1], _s_low[1], _s_close[1])' in cpp
-    # Series members must be auto-declared and pushed at the top of on_bar
+    assert "_PFPivotPointLevels _ta_pivot_point_levels_1;" in cpp
+    assert '_ta_pivot_point_levels_1.compute(std::string("Traditional"), true, false,' in cpp
     assert "Series<double> _s_high;" in cpp
     assert "Series<double> _s_low;" in cpp
     assert "Series<double> _s_close;" in cpp
@@ -158,6 +155,6 @@ def test_pivot_point_levels_global_initializes_as_vector():
 def test_pivot_point_levels_developing_and_kwargs_use_runtime_ohlc_shape():
     positional = transpile(_pine('levels = ta.pivot_point_levels("Traditional", true, false)'))
     keyword = transpile(_pine('levels = ta.pivot_point_levels(type="Traditional", anchor=true, developing=false)'))
-    expected = 'ta::pivot_point_levels(std::string("Traditional"), _s_high[1], _s_low[1], _s_close[1])'
+    expected = '_ta_pivot_point_levels_1.compute(std::string("Traditional"), true, false,'
     assert expected in positional
     assert expected in keyword

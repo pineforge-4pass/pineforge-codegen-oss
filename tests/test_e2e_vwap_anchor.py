@@ -1,55 +1,19 @@
-"""E2E: every ``ta.vwap`` form computes the anchored VWAP exactly, runs its
-pre-C4 session-day approximation with a warning, or is refused at transpile
-time (lane C4, defect 3).
+"""E2E: omitted-anchor VWAP keeps the historical session-day class while every
+explicit anchor, including timeframe.change("1D"/"D"), uses the TA1 anchored
+class. The tests compare traced values and trades with a spelled-out running
+sum and assert the first-value bars witnessed by the public TradingView probe
+in ``tests/fixtures/c7_tv_evidence``.
 
-TradingView (Pine v6 reference, ``ta.vwap``): ``anchor (series bool) The
-condition that triggers the reset of VWAP calculations. When true,
-calculations reset; when false, calculations proceed using the values
-accumulated since the previous reset. Optional. The default is equivalent to
-passing timeframe.change() with "1D" as its argument.``
-
-The engine's ``ta::VWAP`` resets its accumulation only when the symbol's
-session day changes -- exactly the default anchor -- and has no input for any
-other. The codegen forwarded the 2-argument form's anchor to a
-``compute()`` overload that does not exist (the TU failed to compile), and
-dropped the 3-argument band form's anchor (a daily VWAP whatever the
-anchor), silently. Now:
-
-* an anchor spelling ``timeframe.change("1D")`` (or ``"D"``) -- directly or
-  through a never-reassigned binding -- is the default and runs on the
-  engine's daily reset, exactly like ``ta.vwap(source)``; each such form is
-  compared bar by bar (``@pf-trace``) with a spelled-out anchored VWAP
-  (running sums of ``src * volume``, ``volume`` and ``src * src * volume``
-  reset where ``timeframe.change("1D")`` is true), and a strategy trading on
-  it must book the reference's trades;
-* the band form ``ta.vwap(src, anchor, mult)`` with any other anchor keeps
-  its pre-C4 lowering -- the anchor dropped, the engine's session-day VWAP
-  -- and ``transpile_json`` now says so in a warning (supervisor ruling:
-  a strategy relying on that approximation grades excellent against
-  TradingView, so refusing it lost correct results); its trades must equal
-  the build of the same script transpiled by the pre-C4 codegen
-  (``PRE_C4``, via ``git archive``), whose C++ is compared too;
-* the 2-argument form with any other anchor, which never compiled before,
-  is refused with a diagnostic naming the missing engine capability.
-
-The reference's sums start at 0 on the first bar, as the engine's do. The
-Pine reference adds "Calculations only begin the first time the anchor
-condition becomes true. Until then, the function returns na.", and
-``timeframe.change("1D")`` is false on the first bar, so TradingView's
-default-anchored VWAP is na for the first partial session day while every
-PineForge spelling of it -- ``ta.vwap(source)`` included -- already has
-values there: a divergence of the engine's ``ta::VWAP`` on that first day
-only, the same for every accepted form, left to the engine lane.
-
-The reference rounds each product and sum on its own statement, as the
-engine does (it is built with ``-ffp-contract=off``), so no FMA contraction
-in the strategy TU can separate the two.
+The old-engine compatibility branch is compiled separately against the
+pre-TA1 engine headers; it retains the former session-day lowering there.
 
 Interfaces: ``tests/_e2e.py``.
 """
 
+
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,17 +33,28 @@ TRADE = ("if ta.crossover(close, x)\n"
          '    strategy.close("L")\n')
 
 
-def _reference(src: str, bands: str | None = None) -> str:
+def _reference(src: str, bands: str | None = None,
+               anchor: str = 'timeframe.change("1D")',
+               wait_for_anchor: bool = False) -> str:
     """The VWAP of ``src`` anchored on ``timeframe.change("1D")``, spelled out
     with its sums starting at the first bar; with ``bands`` (a stdev
     multiplier) also its ``up`` / ``lo`` bands."""
     text = (f"refPv = {src} * volume\n"
             f"refPv2 = {src} * {src} * volume\n"
             'var float sPv = 0.0\nvar float sVol = 0.0\nvar float sPv2 = 0.0\n'
-            'if timeframe.change("1D")\n'
+            f"if {anchor}\n"
             "    sPv := 0.0\n    sVol := 0.0\n    sPv2 := 0.0\n"
             "sPv := sPv + refPv\nsVol := sVol + volume\nsPv2 := sPv2 + refPv2\n"
-            "x = sPv / sVol\n")
+            + ("x = (started ? sPv / sVol : na)\n" if wait_for_anchor
+               else "x = sPv / sVol\n"))
+    if wait_for_anchor:
+        text = text.replace(
+            "var float sPv2 = 0.0\n",
+            "var float sPv2 = 0.0\nvar bool started = false\n",
+        ).replace(
+            f"if {anchor}\n",
+            f"if {anchor}\n    started := true\n",
+        )
     if bands is not None:
         text += ("refMeanSq = x * x\n"
                  "refVar = sPv2 / sVol - refMeanSq\n"
@@ -99,6 +74,8 @@ class Accepted:
     subject_body: str
     src: str = "close"
     bands: str | None = None
+    anchor: str = 'timeframe.change("1D")'
+    wait_for_anchor: bool = False
 
     def _trace(self) -> str:
         return TRACE_BANDS if self.bands is not None else TRACE_X
@@ -107,27 +84,39 @@ class Accepted:
         return Build(HEADER + self.subject_body + self._trace() + TRADE, trace=True)
 
     def reference(self) -> Build:
-        return Build(HEADER + _reference(self.src, self.bands) + self._trace() + TRADE,
+        return Build(HEADER + _reference(self.src, self.bands, self.anchor,
+                                         self.wait_for_anchor) + self._trace() + TRADE,
                      trace=True)
 
 
 ACCEPTED: tuple[Accepted, ...] = (
-    Accepted("two_arg_1D", 'x = ta.vwap(close, timeframe.change("1D"))\n'),
-    Accepted("two_arg_D", 'x = ta.vwap(close, timeframe.change("D"))\n'),
+    Accepted("two_arg_1D", 'x = ta.vwap(close, timeframe.change("1D"))\n',
+             wait_for_anchor=True),
+    Accepted("two_arg_D", 'x = ta.vwap(close, timeframe.change("D"))\n',
+             wait_for_anchor=True),
     Accepted("two_arg_keywords",
-             'x = ta.vwap(source=close, anchor=timeframe.change("1D"))\n'),
+             'x = ta.vwap(source=close, anchor=timeframe.change("1D"))\n',
+             wait_for_anchor=True),
     Accepted("two_arg_alias",
-             'newDay = timeframe.change("1D")\nx = ta.vwap(hlc3, newDay)\n', src="hlc3"),
-    Accepted("two_arg_nested", 'x = ta.vwap(close, timeframe.change("1D")) * 1.0\n'),
+             'newDay = timeframe.change("1D")\nx = ta.vwap(hlc3, newDay)\n',
+             src="hlc3", wait_for_anchor=True),
+    Accepted("two_arg_nested", 'x = ta.vwap(close, timeframe.change("1D")) * 1.0\n',
+             wait_for_anchor=True),
     Accepted("bands_1D", '[x, up, lo] = ta.vwap(close, timeframe.change("1D"), 1.5)\n',
-             bands="1.5"),
+             bands="1.5", wait_for_anchor=True),
     Accepted("bands_keywords",
              '[x, up, lo] = ta.vwap(close, stdev_mult=1.5, anchor=timeframe.change("D"))\n',
-             bands="1.5"),
+             bands="1.5", wait_for_anchor=True),
     # Controls: the default anchor, spelled by omission.
     Accepted("one_arg", "x = ta.vwap(close)\n"),
     Accepted("bands_no_anchor", "[x, up, lo] = ta.vwap(close, stdev_mult=1.5)\n",
              bands="1.5"),
+    Accepted("two_arg_weekly", 'x = ta.vwap(close, timeframe.change("W"))\n',
+             anchor='timeframe.change("W")', wait_for_anchor=True),
+    Accepted("two_arg_custom", "x = ta.vwap(close, close > open)\n",
+             anchor="close > open", wait_for_anchor=True),
+    Accepted("bands_custom", "[x, up, lo] = ta.vwap(close, close > open, 1.5)\n",
+             bands="1.5", anchor="close > open", wait_for_anchor=True),
 )
 ACCEPTED_BY_NAME = {c.name: c for c in ACCEPTED}
 
@@ -178,20 +167,7 @@ class Approximated:
         return Build(HEADER + (self.pre_c4_body or self.body) + TRADE, codegen=codegen)
 
 
-APPROXIMATED: tuple[Approximated, ...] = (
-    Approximated("bands_weekly",
-                 '[x, up, lo] = ta.vwap(close, timeframe.change("W"), 1.0)\n', 3, 30),
-    # The closed strategy 125-cleightyp's shape: a New York session anchor.
-    Approximated("bands_session_anchor",
-                 _SESSION_ANCHOR + "[x, up, lo] = ta.vwap(ohlc4, isNewNy, 1)\n", 5, 30),
-    Approximated("bands_keyword_weekly",
-                 '[x, up, lo] = ta.vwap(close, anchor=timeframe.change("W"), stdev_mult=1.0)\n',
-                 3, 37,
-                 pre_c4_body='[x, up, lo] = ta.vwap(close, timeframe.change("W"), 1.0)\n'),
-    Approximated("bands_all_keywords_custom",
-                 "[x, up, lo] = ta.vwap(source=ohlc4, anchor=close > open, stdev_mult=2)\n",
-                 3, 44, pre_c4_body="[x, up, lo] = ta.vwap(ohlc4, close > open, 2)\n"),
-)
+APPROXIMATED: tuple[Approximated, ...] = ()
 APPROXIMATED_BY_NAME = {c.name: c for c in APPROXIMATED}
 
 
@@ -205,25 +181,19 @@ class Refused:
     col: int
 
 
-REFUSED: tuple[Refused, ...] = (
-    Refused("two_arg_weekly", 'x = ta.vwap(close, timeframe.change("W"))\n', 3, 20),
-    Refused("two_arg_custom_bool", "x = ta.vwap(close, close > open)\n", 3, 20),
-    Refused("two_arg_keyword_weekly",
-            'x = ta.vwap(source=close, anchor=timeframe.change("1W"))\n', 3, 34),
-    Refused("two_arg_session_anchor",
-            _SESSION_ANCHOR + "x = ta.vwap(ohlc4, isNewNy)\n", 5, 20),
-    # A binding of the daily anchor that is reassigned, or persistent, is not
-    # the default anchor.
-    Refused("reassigned_alias",
-            'a = timeframe.change("1D")\nif close > open\n    a := timeframe.change("W")\n'
-            "x = ta.vwap(close, a)\n", 6, 20),
-    Refused("var_alias", 'var a = timeframe.change("1D")\nx = ta.vwap(close, a)\n', 4, 20),
-    # An input-selected anchor timeframe (the Pine reference's own example).
-    Refused("input_timeframe",
-            'tf = input.timeframe("1D", "Anchor")\nx = ta.vwap(close, timeframe.change(tf))\n',
-            4, 20),
-)
+REFUSED: tuple[Refused, ...] = ()
 REFUSED_BY_NAME = {c.name: c for c in REFUSED}
+
+
+FIRST_VALUE_SOURCE = (
+    HEADER +
+    'vDefault = ta.vwap(close)\n'
+    'vExplicit = ta.vwap(close, timeframe.change("1D"))\n'
+    'vAnchor5 = ta.vwap(close, bar_index == 5)\n'
+    '// @pf-trace vDefault=vDefault\n'
+    '// @pf-trace vExplicit=vExplicit\n'
+    '// @pf-trace vAnchor5=vAnchor5\n'
+)
 
 
 @pytest.fixture(scope="session")
@@ -239,7 +209,11 @@ def outcomes(request, tmp_path_factory) -> dict[str, Outcome]:
             case = ACCEPTED_BY_NAME[item.callspec.params["case_name"]]
             builds[f"{case.name}/subject"] = case.subject()
             builds[f"{case.name}/reference"] = case.reference()
-        elif name == "test_band_form_anchor_is_approximated_with_a_warning":
+        elif name == "test_vwap_explicit_anchor_first_values":
+            builds["first_values"] = Build(FIRST_VALUE_SOURCE, trace=True)
+        elif (name == "test_band_form_anchor_is_approximated_with_a_warning"
+              and getattr(item, "callspec", None) is not None
+              and item.callspec.params.get("case_name") in APPROXIMATED_BY_NAME):
             approx = APPROXIMATED_BY_NAME[item.callspec.params["case_name"]]
             builds[f"{approx.name}/subject"] = approx.subject()
             if pre_c4 is not None:
@@ -263,6 +237,26 @@ def test_vwap_anchor_form_equals_spelled_out(case_name: str, outcomes) -> None:
     assert not failures, f"[{case_name}] " + "\n  ".join(failures)
     print(f"E2E vwap {case_name}: ta.vwap == spelled-out anchored VWAP  "
           f"{compared} traced values equal, {summary(a)}")
+
+
+def test_vwap_explicit_anchor_first_values(outcomes) -> None:
+    """The public TV probe witnesses the first-value bars on both feeds:
+    omitted-anchor VWAP starts on bar 0, the explicit daily anchor starts on
+    the first daily change, and ``bar_index == 5`` starts on bar 5."""
+    subject = ok(outcomes, "first_values")
+    expected = {"vDefault": 0, "vExplicit": 96, "vAnchor5": 5}
+    failures = []
+    for name, first_bar in expected.items():
+        records = [r for r in subject.traces["default"] if r["name"] == name]
+        finite = [r for r in records if not math.isnan(r["value"])]
+        if not finite:
+            failures.append(f"{name} never became finite")
+        elif finite[0]["bar_index"] != first_bar:
+            failures.append(
+                f"{name} first finite bar {finite[0]['bar_index']} != {first_bar}"
+            )
+    assert not failures, "first-value bars diverged from the public TradingView probe: " + "; ".join(failures)
+    print("E2E vwap first values: omitted=bar 0, explicit daily=bar 96, bar-index anchor=bar 5")
 
 
 @pytest.mark.parametrize("case_name", list(APPROXIMATED_BY_NAME))

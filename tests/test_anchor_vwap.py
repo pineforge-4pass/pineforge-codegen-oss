@@ -66,7 +66,8 @@ def test_ta_vwap_bands_form_threads_symbol_clock():
     calls = [c for c in _calls(cpp, "compute") if "vwap" in c and "volume" in c]
     assert calls, cpp
     for call in calls:
-        assert SYM_TAIL in call, call
+        assert ("current_bar_.timestamp, syminfo_.timezone, syminfo_.session, "
+                "tf_change(") in call, call
 
 
 def test_vwap_prelude_shim_gated_on_usage():

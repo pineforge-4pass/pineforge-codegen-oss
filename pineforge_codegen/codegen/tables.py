@@ -215,9 +215,9 @@ TA_COMPUTE_ARGS = {
     "wvad": [],
     "iii": [],
     "vwap": [0],  # source explicit, volume appended
-    # 3-arg bands form: only source (arg 0) goes to compute(); anchor (arg 1) is
-    # not forwarded -- the engine resets on the symbol's session day, the only
-    # anchor the support checker admits; stdev_mult (arg 2) went to the ctor.
+    # 3-arg bands form without an explicit anchor: source (arg 0) goes to
+    # compute(); stdev_mult (arg 2) goes to the ctor. Explicit anchors are
+    # remapped to the anchored shim by the analyzer.
     "vwap_bands": [0],
     "mode": [0], "range": [0], "dev": [0],
     "max": [0], "min": [0], "rci": [0],
@@ -283,6 +283,7 @@ TA_TUPLE_FIELDS = {
     "dmi": ["diplus", "diminus", "adx"],
     # ta.vwap 3-arg bands form → VWAPBandsResult {vwap, upper, lower}
     "vwap_bands": ["vwap", "upper", "lower"],
+    "vwap_anchored_bands": ["vwap", "upper", "lower"],
 }
 
 

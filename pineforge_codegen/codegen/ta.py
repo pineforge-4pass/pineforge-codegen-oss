@@ -116,6 +116,28 @@ class TaSiteHelper:
           when applicable (e.g. ``vwma()`` -> ``volume`` only)."""
         ta_name = self._ta_name_from_site(site)
 
+        # TA1's new stateful wrappers need the Pine anchor after the chart
+        # clock arguments. The compatibility shims use the timestamp and
+        # symbol clock only on an older engine; the TA1 branch ignores them.
+        if site.class_name in ("_PFAnchoredVWAP", "_PFAnchoredVWAPBands"):
+            explicit = [self._visit_expr(a) for a in site.compute_args]
+            if len(explicit) < 2:
+                raise AssertionError("anchored VWAP site is missing source/anchor")
+            return (
+                f"{explicit[0]}, current_bar_.volume, current_bar_.timestamp, "
+                f"syminfo_.timezone, syminfo_.session, {explicit[1]}"
+            )
+
+        if site.class_name == "_PFPivotPointLevels":
+            explicit = [self._visit_expr(a) for a in site.compute_args]
+            if len(explicit) < 3:
+                raise AssertionError("pivot TA1 site is missing anchor arguments")
+            return (
+                f"{explicit[0]}, {explicit[1]}, {explicit[2]}, "
+                "current_bar_.open, current_bar_.high, current_bar_.low, "
+                "current_bar_.close"
+            )
+
         if ta_name in TA_IMPLICIT_COMPUTE_FULL:
             implicit = TA_IMPLICIT_COMPUTE_FULL[ta_name]
             # issue #178: chart-context atr / tr take the previous CHART
@@ -950,6 +972,40 @@ class TaSiteHelper:
         through ``_build_security_expr`` so identifiers referencing
         mutable globals get rebound to the security-context shadows."""
         ta_name = self._ta_name_from_site(site)
+
+        if site.class_name in ("_PFAnchoredVWAP", "_PFAnchoredVWAPBands"):
+            explicit = [
+                self._build_security_expr(
+                    sec_id, a, None, ta_results,
+                    security_mutable_names=security_mutable_names,
+                    helper_binding_stack=helper_binding_stack,
+                    emitted_lines=emitted_lines,
+                )
+                for a in site.compute_args
+            ]
+            if len(explicit) < 2:
+                raise AssertionError("anchored VWAP security site is missing source/anchor")
+            return (
+                f"{explicit[0]}, bar.volume, bar.timestamp, syminfo_.timezone, "
+                f"syminfo_.session, {explicit[1]}"
+            )
+
+        if site.class_name == "_PFPivotPointLevels":
+            explicit = [
+                self._build_security_expr(
+                    sec_id, a, None, ta_results,
+                    security_mutable_names=security_mutable_names,
+                    helper_binding_stack=helper_binding_stack,
+                    emitted_lines=emitted_lines,
+                )
+                for a in site.compute_args
+            ]
+            if len(explicit) < 3:
+                raise AssertionError("pivot security site is missing anchor arguments")
+            return (
+                f"{explicit[0]}, {explicit[1]}, {explicit[2]}, bar.open, bar.high, "
+                "bar.low, bar.close"
+            )
 
         if ta_name in TA_IMPLICIT_COMPUTE_FULL:
             implicit = TA_IMPLICIT_COMPUTE_FULL[ta_name].replace("current_bar_.", "bar.")

@@ -1,0 +1,16 @@
+{
+  "title": "C7 pivot formula probe",
+  "slug": "c7-pivot-levels-formula-4",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-24T02:27:11.130Z",
+  "chart": {
+    "symbol": "BINANCE:ETHUSDT.P",
+    "interval": "15",
+    "from": "2025-04-01",
+    "to": "2025-04-08"
+  },
+  "pine_sha256": "71f9f4fddf7e9337b33da782fdf54371c50dd794fc4397efe8a1e24be35e6396",
+  "tv_trades_sha256": "40777a30c78c2211555638c16b0d3e642bd5379a71541b17f29274e61fd4da72",
+  "tv_trades_rows": 110
+}
