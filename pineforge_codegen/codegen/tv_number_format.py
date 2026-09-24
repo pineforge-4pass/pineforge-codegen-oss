@@ -35,46 +35,115 @@ static std::string _pf_tv_trim(const std::string& value) {
     return value.substr(first, last - first + 1);
 }
 
+static void _pf_tv_increment_digits(std::string& digits) {
+    for (size_t i = digits.size(); i > 0; --i) {
+        if (digits[i - 1] != '9') {
+            ++digits[i - 1];
+            return;
+        }
+        digits[i - 1] = '0';
+    }
+    digits.insert(digits.begin(), '1');
+}
+
 static std::string _pf_tv_decimal(double value, int min_fraction,
-                                  int max_fraction, bool grouping) {
+                                  int max_fraction, bool grouping,
+                                  int decimal_shift = 0) {
     if (std::isnan(value)) return "NaN";
     if (std::isinf(value)) return value < 0 ? "-Infinity" : "Infinity";
     max_fraction = std::max(0, std::min(max_fraction, 15));
     min_fraction = std::max(0, std::min(min_fraction, max_fraction));
-    const bool negative = value < 0;
-    const long double magnitude = std::fabs(static_cast<long double>(value));
-    const long double scale = std::pow(10.0L, max_fraction);
-    // Pine formats the shortest decimal representation at half ties. The
-    // small allowance removes binary64 representation noise at that tie
-    // (e.g. 1.005 to two places) without changing ordinary decimal rounding.
-    const long double rounded = magnitude < 1.0e17L / scale
-        ? std::floor(magnitude * scale + 0.5L + 1.0e-12L) / scale
-        : magnitude;
-    std::ostringstream stream;
-    stream.imbue(std::locale::classic());
-    stream << std::fixed << std::setprecision(max_fraction) << rounded;
-    std::string digits = stream.str();
-    const size_t dot = digits.find('.');
-    if (dot != std::string::npos) {
-        while (digits.size() > dot + 1 + static_cast<size_t>(min_fraction)
-               && digits.back() == '0') digits.pop_back();
-        if (digits.back() == '.') digits.pop_back();
+
+    // C++17's no-precision to_chars gives the shortest round-trip decimal
+    // spelling of this binary64 value. All subsequent scaling and rounding
+    // operate on its digits, never on a floating-point intermediate.
+    char buffer[128];
+    const auto converted = std::to_chars(buffer, buffer + sizeof buffer, value);
+    if (converted.ec != std::errc{})
+        throw std::runtime_error("shortest-decimal conversion failed");
+    std::string spelling(buffer, converted.ptr);
+    const bool negative = !spelling.empty() && spelling[0] == '-';
+    if (negative) spelling.erase(0, 1);
+
+    const size_t exponent_pos = spelling.find_first_of("eE");
+    const std::string mantissa = spelling.substr(0, exponent_pos);
+    int exponent = 0;
+    if (exponent_pos != std::string::npos) {
+        size_t i = exponent_pos + 1;
+        bool exponent_negative = false;
+        if (i < spelling.size() && (spelling[i] == '+' || spelling[i] == '-')) {
+            exponent_negative = spelling[i] == '-';
+            ++i;
+        }
+        for (; i < spelling.size(); ++i)
+            exponent = exponent * 10 + (spelling[i] - '0');
+        if (exponent_negative) exponent = -exponent;
     }
+
+    std::string digits;
+    int decimal_point = 0;
+    bool after_point = false;
+    for (char ch : mantissa) {
+        if (ch == '.') {
+            after_point = true;
+        } else {
+            digits += ch;
+            if (!after_point) ++decimal_point;
+        }
+    }
+    decimal_point += exponent + decimal_shift;
+    const size_t leading_zeroes = digits.find_first_not_of('0');
+    if (leading_zeroes == std::string::npos) {
+        digits = "0";
+        decimal_point = 1;
+    } else {
+        digits.erase(0, leading_zeroes);
+        decimal_point -= static_cast<int>(leading_zeroes);
+    }
+
+    // The retained digits form an integer in units of 10^-max_fraction.
+    // The first discarded decimal digit decides a half-up tie exactly.
+    std::string units;
+    if (digits == "0") {
+        units = "0";
+    } else {
+        const int keep = decimal_point + max_fraction;
+        if (keep < 0) {
+            units = "0";
+        } else if (keep == 0) {
+            units = digits[0] >= '5' ? "1" : "0";
+        } else if (keep >= static_cast<int>(digits.size())) {
+            units = digits;
+            units.append(static_cast<size_t>(keep) - digits.size(), '0');
+        } else {
+            units = digits.substr(0, static_cast<size_t>(keep));
+            if (digits[static_cast<size_t>(keep)] >= '5')
+                _pf_tv_increment_digits(units);
+        }
+    }
+    const bool nonzero = units.find_first_not_of('0') != std::string::npos;
+    if (!nonzero) units = "0";
+    if (units.size() <= static_cast<size_t>(max_fraction))
+        units.insert(0, static_cast<size_t>(max_fraction) + 1 - units.size(), '0');
+    const size_t integer_size = units.size() - static_cast<size_t>(max_fraction);
+    std::string integer = units.substr(0, integer_size);
+    std::string fraction = units.substr(integer_size);
+    while (fraction.size() > static_cast<size_t>(min_fraction)
+           && fraction.back() == '0') fraction.pop_back();
     if (grouping) {
-        const size_t integer_end = digits.find('.');
-        const size_t integer_size = integer_end == std::string::npos
-            ? digits.size() : integer_end;
         std::string grouped;
         for (size_t i = 0; i < integer_size; ++i) {
             if (i && (integer_size - i) % 3 == 0) grouped += ',';
-            grouped += digits[i];
+            grouped += integer[i];
         }
-        digits = grouped + digits.substr(integer_size);
+        integer = grouped;
     }
-    return (negative && rounded != 0.0L ? "-" : "") + digits;
+    return (negative && nonzero ? "-" : "") + integer
+        + (fraction.empty() ? "" : "." + fraction);
 }
 
 static std::string _pf_tv_pattern(double value, const std::string& pattern) {
+    if (!std::isfinite(value)) return _pf_tv_decimal(value, 0, 0, false);
     const std::string fmt = _pf_tv_trim(pattern);
     const size_t dot = fmt.find('.');
     const std::string integer = fmt.substr(0, dot);
@@ -84,8 +153,8 @@ static std::string _pf_tv_pattern(double value, const std::string& pattern) {
     const int min_fraction = static_cast<int>(std::count(fraction.begin(), fraction.end(), '0'));
     const bool grouping = integer.find(',') != std::string::npos;
     const bool percent = fmt.find('%') != std::string::npos;
-    return _pf_tv_decimal(percent ? value * 100.0 : value,
-                          min_fraction, max_fraction, grouping)
+    return _pf_tv_decimal(value, min_fraction, max_fraction, grouping,
+                          percent ? 2 : 0)
         + (percent ? "%" : "");
 }
 
@@ -100,13 +169,14 @@ static std::string pine_str_tostring_tv(double value,
         return _pf_tv_pattern(value, "#.##") + "%";
     if (format_mode == "volume") {
         const double magnitude = std::fabs(value);
-        double divisor = 1.0;
+        int decimal_shift = 0;
         const char* unit = "";
-        if (magnitude >= 1.0e12) { divisor = 1.0e12; unit = "T"; }
-        else if (magnitude >= 1.0e9) { divisor = 1.0e9; unit = "B"; }
-        else if (magnitude >= 1.0e6) { divisor = 1.0e6; unit = "M"; }
-        else if (magnitude >= 1.0e3) { divisor = 1.0e3; unit = "K"; }
-        return _pf_tv_pattern(value / divisor, divisor == 1.0 ? "#" : "#.##") + unit;
+        if (magnitude >= 1.0e12) { decimal_shift = -12; unit = "T"; }
+        else if (magnitude >= 1.0e9) { decimal_shift = -9; unit = "B"; }
+        else if (magnitude >= 1.0e6) { decimal_shift = -6; unit = "M"; }
+        else if (magnitude >= 1.0e3) { decimal_shift = -3; unit = "K"; }
+        return _pf_tv_decimal(value, 0, decimal_shift ? 2 : 0, false,
+                              decimal_shift) + unit;
     }
     return _pf_tv_pattern(value, format_mode.empty() ? "#.##########" : format_mode);
 }
@@ -122,13 +192,14 @@ static std::string pine_str_tostring_tv(T value,
 }
 
 static std::string _pf_tv_number_style(double value, const std::string& style) {
+    if (!std::isfinite(value)) return _pf_tv_decimal(value, 0, 0, false);
     const std::string fmt = _pf_tv_trim(style);
     if (fmt.empty()) return _pf_tv_pattern(value, "#,###.###");
     if (fmt == "integer") return _pf_tv_pattern(value, "#,###");
-    if (fmt == "percent") return _pf_tv_pattern(value * 100.0, "#,###") + "%";
+    if (fmt == "percent") return _pf_tv_decimal(value, 0, 0, true, 2) + "%";
     if (fmt == "currency") {
-        const std::string digits = _pf_tv_decimal(std::fabs(value), 2, 2, true);
-        return (value < 0 ? "-$" : "$") + digits;
+        const std::string digits = _pf_tv_decimal(value, 2, 2, true);
+        return digits[0] == '-' ? "-$" + digits.substr(1) : "$" + digits;
     }
     return _pf_tv_pattern(value, fmt);
 }
