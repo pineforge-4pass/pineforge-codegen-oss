@@ -1,0 +1,16 @@
+{
+  "title": "CG-ISMARKET session flags",
+  "slug": "cgim-flags-es1-60-dst-nov",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-25T21:55:52.765Z",
+  "chart": {
+    "symbol": "CME_MINI:ES1!",
+    "interval": "60",
+    "from": "2025-10-26",
+    "to": "2025-11-07"
+  },
+  "pine_sha256": "78898de72eeff09ef33a75e40f94da2b8ec9fbc301264183ba048e2e5f130225",
+  "tv_trades_sha256": "b477e11c942c31189e03684ec3d700c1f7a45e7f78c2e2e8f932f59c23fd51d8",
+  "tv_trades_rows": 418
+}

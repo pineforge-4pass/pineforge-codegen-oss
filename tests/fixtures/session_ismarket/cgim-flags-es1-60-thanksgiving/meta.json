@@ -1,0 +1,16 @@
+{
+  "title": "CG-ISMARKET session flags",
+  "slug": "cgim-flags-es1-60-thanksgiving",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-25T21:55:56.087Z",
+  "chart": {
+    "symbol": "CME_MINI:ES1!",
+    "interval": "60",
+    "from": "2025-11-23",
+    "to": "2025-12-05"
+  },
+  "pine_sha256": "78898de72eeff09ef33a75e40f94da2b8ec9fbc301264183ba048e2e5f130225",
+  "tv_trades_sha256": "54dfac6128b63df3ffe32e898df3ec0829998a700d2f2d78b7d1aebf140397f4",
+  "tv_trades_rows": 384
+}
