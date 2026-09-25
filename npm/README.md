@@ -2,6 +2,8 @@
 
 Gate-validated Pyodide payload for the PineScript v6 → C++ transpiler. Built and
 published from `pineforge-codegen-oss` by `.github/workflows/publish-pyodide.yml`.
+Stable releases are on the `latest` dist-tag; prereleases (for example `1.0.0-rc.1`)
+are on `next` only (`npm install @pineforge/codegen-pyodide@next`).
 
 ## Contents
 - `pineforge_codegen-<version>.tar.gz` — the gate-validated archive (unpack into Pyodide).
