@@ -405,7 +405,7 @@ def test_bool_cast_numeric_na_is_false_not_cpp_nan_truthy():
         "plot(isUp ? close : open)\n"
     )
     assert "(bool)(na<double>())" not in cpp
-    assert "is_na(_pf_v) ? false : (bool)_pf_v" in cpp
+    assert "is_na(_pf_bool_v) ? false : (_pf_bool_v != 0)" in cpp
     assert "var bool" not in cpp
     assert "bool isUp" in cpp
     assert "bool fromClose" in cpp
@@ -676,8 +676,8 @@ def test_counted_loop_dynamic_end_uses_outer_same_named_series():
     # na-preserving narrowing (see test_na_int_narrowing.py); what this test
     # pins is which ``i`` the lambda reads.
     assert (
-        "auto _for_end_eval_0 = [&]() { return [&](){ double _pf_v = "
-        "(double)((i[0])); return is_na(_pf_v) ? na<int>() : (int)_pf_v; }(); };"
+        "auto _for_end_eval_0 = [&]() { return [&](){ auto _pf_v = "
+        "((i[0])); return is_na(_pf_v) ? na<int>() : (int)_pf_v; }(); };"
     ) in cpp
     assert "int _for_end_0 = _for_end_eval_0();" in cpp
     assert "_for_end_0 = _for_end_eval_0()" in cpp

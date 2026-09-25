@@ -259,9 +259,9 @@ class TopLevelEmitter:
                 "    _PFKC(int length, double mult, bool use_true_range = true)"
                 " : impl_(length, mult, use_true_range) {}",
                 "    ta::KCResult compute(double src, double high, double low, double close)"
-                " { return impl_.compute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "    ta::KCResult recompute(double src, double high, double low, double close)"
-                " { return impl_.recompute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "};",
                 "#else",
                 "class _PFKC {",
@@ -269,9 +269,9 @@ class TopLevelEmitter:
                 "public:",
                 "    _PFKC(int length, double mult, bool = true) : impl_(length, mult) {}",
                 "    ta::KCResult compute(double src, double high, double low, double close)"
-                " { return impl_.compute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "    ta::KCResult recompute(double src, double high, double low, double close)"
-                " { return impl_.recompute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "};",
                 "#endif",
                 "",
@@ -286,9 +286,9 @@ class TopLevelEmitter:
                 "    _PFKCW(int length, double mult, bool use_true_range = true)"
                 " : impl_(length, mult, use_true_range) {}",
                 "    double compute(double src, double high, double low, double close)"
-                " { return impl_.compute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "    double recompute(double src, double high, double low, double close)"
-                " { return impl_.recompute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "};",
                 "#else",
                 "class _PFKCW {",
@@ -296,9 +296,9 @@ class TopLevelEmitter:
                 "public:",
                 "    _PFKCW(int length, double mult, bool = true) : impl_(length, mult) {}",
                 "    double compute(double src, double high, double low, double close)"
-                " { return impl_.compute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "    double recompute(double src, double high, double low, double close)"
-                " { return impl_.recompute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "};",
                 "#endif",
                 "",
@@ -764,7 +764,8 @@ class TopLevelEmitter:
                 for field in fields
                 if field.name not in self._udt_omitted_fields.get(type_name, set())
             ]
-            checkpoint_fields = [field.name for field in emitted_fields]
+            checkpoint_fields = [self._safe_name(field.name)
+                                 for field in emitted_fields]
             lines.append("template <>")
             lines.append(f"struct {checkpoint_traits}<{record_type}> {{")
             lines.append("    struct snapshot_type {")
@@ -971,11 +972,14 @@ class TopLevelEmitter:
                 # Compile-time placeholder for the init list; the runtime reset
                 # (when the arg is input-derived) overwrites it on the first bar.
                 safe_resolved = []
-                for r in resolved:
+                for arg_pos, r in enumerate(resolved):
                     if self._is_compile_time_value(r):
-                        safe_resolved.append(r)
+                        rendered = r
                     else:
-                        safe_resolved.append("1")
+                        rendered = "1"
+                    if self._ta_ctor_arg_is_bool(site, arg_pos):
+                        rendered = self._ta_ctor_bool_cpp(rendered)
+                    safe_resolved.append(rendered)
                 init_parts.append(f"{site.member_name}({', '.join(safe_resolved)})")
         # Security evaluator TA ctor args (skip for user function call expressions)
         for info in self._security_eval_info:
@@ -991,10 +995,11 @@ class TopLevelEmitter:
                     )
                     resolved = [self._resolve_ta_ctor_arg(a) for a in ctor_args]
                     safe_resolved = []
-                    for r in resolved:
-                        safe_resolved.append(
-                            r if self._is_compile_time_value(r) else "1"
-                        )
+                    for arg_pos, r in enumerate(resolved):
+                        rendered = r if self._is_compile_time_value(r) else "1"
+                        if self._ta_ctor_arg_is_bool(site, arg_pos):
+                            rendered = self._ta_ctor_bool_cpp(rendered)
+                        safe_resolved.append(rendered)
                     init_parts.append(f"{variant['member_name']}({', '.join(safe_resolved)})")
 
         # Non-series var members with compile-time init (deduplicate by name)
@@ -1895,7 +1900,7 @@ class TopLevelEmitter:
                     PineType.FLOAT: "double",
                     PineType.BOOL: "bool",
                     PineType.STRING: "std::string",
-                    PineType.COLOR: "int",
+                    PineType.COLOR: "int64_t",
                 }[variant_pt]
             elif i < len(getattr(fi, "param_type_specs", [])) and fi.param_type_specs[i] is not None:
                 # Precise per-param TypeSpec (declared hint or call-site inference):
@@ -1933,14 +1938,21 @@ class TopLevelEmitter:
         # without it the function would be emitted as returning ``double`` and
         # clang errors with "no viable conversion from T to double". Probe:
         # data/validation/udt-method-probe-20-udt-return-from-func.
+        return_udt_name = getattr(fi, "udt_return_type", None)
+        return_udt = bool(return_udt_name and return_udt_name in self._udt_defs)
         if fi.returns_tuple:
             # Infer actual tuple element types from function body's last expression
             tuple_types_list = self._infer_tuple_types(node, fi.tuple_element_count)
             ret_type = f"std::tuple<{', '.join(tuple_types_list)}>"
-        elif getattr(fi, "udt_return_type", None):
+        elif return_udt_name:
             # A function returning a drawing handle must emit the C++ handle
             # struct (Line/Box/Label/Linefill), not the unknown lowercase name.
-            ret_type = DRAWING_TYPE_TO_CPP.get(fi.udt_return_type, fi.udt_return_type)
+            ret_type = DRAWING_TYPE_TO_CPP.get(
+                return_udt_name,
+                self._safe_name(return_udt_name)
+                if return_udt
+                else return_udt_name,
+            )
         elif self._func_int_return_uses_wide_history(
             fi, call_site_idx=call_site_idx
         ):
@@ -1965,13 +1977,16 @@ class TopLevelEmitter:
             ret_type = self._type_spec_to_cpp(fi.return_type_spec)
         else:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")
-        rhs_return_cpp_type = (
-            ret_type
-            if (self._is_nullable_collection_cpp_type(ret_type)
-                or ret_type in DRAWING_TYPE_TO_CPP.values()
-                or ret_type in self._udt_defs)
-            else None
-        )
+        if return_udt:
+            # Keep the authored UDT spelling here for target typing; the
+            # expression visitor converts it to the escaped C++ handle name
+            # at the point it emits ``T{}``.
+            rhs_return_cpp_type = return_udt_name
+        elif (self._is_nullable_collection_cpp_type(ret_type)
+              or ret_type in DRAWING_TYPE_TO_CPP.values()):
+            rhs_return_cpp_type = ret_type
+        else:
+            rhs_return_cpp_type = None
 
         # For per-call-site variants, suffix the function name and activate TA + var remapping
         func_name = (
@@ -2114,7 +2129,7 @@ class TopLevelEmitter:
                     # default (``Label _func_ret = Label{};``) — falling through
                     # to ``_default_for_type`` would emit ``0.0`` and clang would
                     # reject ``Label _func_ret = 0.0;``.
-                    if ret_type in self._udt_defs or ret_type in DRAWING_TYPE_TO_CPP.values():
+                    if return_udt or ret_type in DRAWING_TYPE_TO_CPP.values():
                         default_ret = f"{ret_type}{{}}"
                     else:
                         default_ret = self._default_for_type(ret_type)
@@ -2142,7 +2157,7 @@ class TopLevelEmitter:
                 default_vals = ", ".join(["0.0"] * fi.tuple_element_count)
                 lines.append(f"        return std::make_tuple({default_vals});")
             else:
-                if ret_type in self._udt_defs or ret_type in DRAWING_TYPE_TO_CPP.values():
+                if return_udt or ret_type in DRAWING_TYPE_TO_CPP.values():
                     default_ret = f"{ret_type}{{}}"
                 else:
                     default_ret = self._default_for_type(ret_type)

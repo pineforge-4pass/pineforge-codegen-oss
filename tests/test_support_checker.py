@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from pineforge_codegen import transpile_full
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from pineforge_codegen.errors import CompileError, Level
@@ -449,6 +450,84 @@ def test_request_security_symbol_compound_rebind_rejected():
         + 'a = request.security(sym, "60", close)\n'
     )
     _expect_error(src, "current chart symbol")
+
+
+def test_request_security_local_shadow_rebind_does_not_taint_global():
+    src = (
+        PRELUDE
+        + 'sym = syminfo.tickerid\n'
+        + 'local_fn() =>\n'
+        + '    sym = "EXCH:OTHER"\n'
+        + '    sym := "EXCH:OTHER2"\n'
+        + '    1\n'
+        + 'data = request.security(sym, "D", close)\n'
+    )
+    assert _errors(src) == []
+    assert not [d for d in _warnings(src) if "alternate symbol" in d.message]
+
+
+def test_request_security_local_shadow_resolves_its_own_declaration():
+    src = (
+        PRELUDE
+        + 'sym = "EXCH:OTHER"\n'
+        + 'local_fn() =>\n'
+        + '    sym = syminfo.tickerid\n'
+        + '    request.security(sym, "D", close)\n'
+        + 'data = local_fn()\n'
+    )
+    assert _errors(src) == []
+
+
+def test_request_security_previously_accepted_unsafe_local_shadow_warns():
+    src = (
+        PRELUDE
+        + 'sym = syminfo.tickerid\n'
+        + 'local_fn() =>\n'
+        + '    sym = "EXCH:OTHER"\n'
+        + '    request.security(sym, "D", close)\n'
+        + 'data = local_fn()\n'
+    )
+    assert _errors(src) == []
+    assert len([d for d in _warnings(src) if "can select an alternate symbol" in d.message]) == 1
+
+
+def test_request_security_nested_rebind_of_global_still_rejected():
+    src = (
+        PRELUDE
+        + 'sym = syminfo.tickerid\n'
+        + 'if close > open\n'
+        + '    sym := "EXCH:OTHER"\n'
+        + 'data = request.security(sym, "D", close)\n'
+    )
+    _expect_error(src, "current chart symbol")
+
+
+def test_request_security_mixed_ternary_warns_without_refusal():
+    src = PRELUDE + 'data = request.security(true ? "EXCH:OTHER" : syminfo.tickerid, "D", close)\n'
+    result = transpile_full(src)
+    warnings = [d for d in result["diagnostics"] if "can select an alternate symbol" in d.message]
+    assert len(warnings) == 1
+    assert warnings[0].location.line == 3
+
+
+def test_request_security_mixed_ternary_through_alias_warns():
+    src = (
+        PRELUDE
+        + 'sym = close > open ? syminfo.tickerid : "EXCH:OTHER"\n'
+        + 'data = request.security(sym, "D", close)\n'
+    )
+    assert _errors(src) == []
+    assert len([d for d in _warnings(src) if "can select an alternate symbol" in d.message]) == 1
+
+
+def test_request_security_all_chart_safe_ternary_does_not_warn():
+    src = (
+        PRELUDE
+        + 'sym = close > open ? syminfo.tickerid : syminfo.ticker\n'
+        + 'data = request.security(sym, "D", close)\n'
+    )
+    assert _errors(src) == []
+    assert not [d for d in _warnings(src) if "alternate symbol" in d.message]
 
 
 # ---------------------------------------------------------------------------

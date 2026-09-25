@@ -73,6 +73,7 @@ classes from ``..ast_nodes``.
 
 from __future__ import annotations
 
+from ..errors import Phase
 from ..ast_nodes import (
     ASTNode,
     Assignment,
@@ -123,6 +124,10 @@ class StmtVisitor:
     # ------------------------------------------------------------------
 
     def _visit_stmt(self, node: ASTNode, lines: list[str], indent: int) -> None:
+        if self._budget is not None:
+            self._budget_visit_count += 1
+            if self._budget_visit_count % 128 == 0:
+                self._budget.check(node.loc, Phase.CODEGEN)
         pad = "    " * indent
 
         if isinstance(node, StrategyDecl):
@@ -676,7 +681,11 @@ class StmtVisitor:
                 if len(node.value.args) >= 2:
                     r = self._visit_expr(node.value.args[0])
                     c = self._visit_expr(node.value.args[1])
-                    v = self._visit_expr(node.value.args[2]) if len(node.value.args) > 2 else self._default_for_spec(elem_spec)
+                    v = (
+                        self._array_init_value_expr(elem_spec, node.value.args[2])
+                        if len(node.value.args) > 2
+                        else self._default_for_spec(elem_spec)
+                    )
                     init = f"{cpp_type}::new_({r}, {c}, {v})"
                 else:
                     init = f"{cpp_type}::new_(0, 0, {self._default_for_spec(elem_spec)})"
@@ -751,11 +760,23 @@ class StmtVisitor:
         site = self._get_ta_site(node.value)
         if site is not None:
             compute_args = self._ta_compute_args_for_site(site)
-            ret_type = "bool" if self._ta_name_from_site(site) in TA_RETURNS_BOOL else "double"
+            ret_type = (
+                self._type_for_decl(node)
+                if node.type_hint and not is_global_member
+                else "bool" if self._ta_name_from_site(site) in TA_RETURNS_BOOL
+                else "double"
+            )
             ta_name = self._ta_member_name(site)
             ta_expr = (
                 f"(history_advances_new_bar() ? {ta_name}.compute({compute_args}) "
                 f": {ta_name}.recompute({compute_args}))"
+            )
+            ta_expr = self._coerce_int_slot(
+                ta_expr,
+                node.value,
+                self._int_slot_cpp_type(
+                    node.name, None if is_global_member else ret_type
+                ),
             )
             if declaration_is_series:
                 self._emit_history_series_write(lines, pad, safe, ta_expr)
@@ -1280,7 +1301,9 @@ class StmtVisitor:
                 and self._decl_binding_is_series(id(node), name)
             }
             if not series_names and not global_targets.intersection(node.names):
-                binding_names = ", ".join(node.names)
+                binding_names = ", ".join(
+                    self._safe_name(name) for name in node.names
+                )
                 lines.append(f"{pad}auto [{binding_names}] = {call_expr};")
                 return
 
@@ -1349,7 +1372,9 @@ class StmtVisitor:
                             f"{pad}{self._safe_name(name)} = {field_expr};"
                         )
                     else:
-                        lines.append(f"{pad}double {name} = {field_expr};")
+                        lines.append(
+                            f"{pad}double {self._safe_name(name)} = {field_expr};"
+                        )
             return
 
         # User-defined function returning a tuple: use C++17 structured bindings
@@ -1556,7 +1581,9 @@ class StmtVisitor:
     def _visit_if_body(self, node: IfStmt, lines: list[str], indent: int) -> None:
         pad = "    " * indent
 
-        cond = self._visit_expr(node.condition)
+        cond = self._coerce_bool_expr(
+            self._visit_expr(node.condition), node.condition
+        )
         lines.append(f"{pad}if ({cond}) {{")
         self._visit_block_statements(node.body, lines, indent + 1)
         lines.append(f"{pad}}}")
@@ -1764,7 +1791,9 @@ class StmtVisitor:
                     f"{pad}    auto {value_cpp} = {map_token}.get({key_cpp});"
                 )
         elif node.vars:
-            bindings = ", ".join(node.vars)
+            bindings = ", ".join(
+                self._safe_name(name) for name in node.vars
+            )
             lines.append(f"{pad}for (auto [{bindings}] : {iterable}) {{")
         _blk_saved = self._push_block_var_remap(node)
         loop_binding_names = (
@@ -1817,7 +1846,9 @@ class StmtVisitor:
 
     def _visit_while(self, node: WhileStmt, lines: list[str], indent: int) -> None:
         pad = "    " * indent
-        cond = self._visit_expr(node.condition)
+        cond = self._coerce_bool_expr(
+            self._visit_expr(node.condition), node.condition
+        )
         lines.append(f"{pad}while ({cond}) {{")
         _blk_saved = self._push_block_var_remap(node)
         try:
@@ -1842,7 +1873,9 @@ class StmtVisitor:
         else:
             for i, (case_expr, case_body) in enumerate(node.cases):
                 prefix = "if" if i == 0 else "else if"
-                cond = self._visit_expr(case_expr)
+                cond = self._coerce_bool_expr(
+                    self._visit_expr(case_expr), case_expr
+                )
                 lines.append(f"{pad}{prefix} ({cond}) {{")
                 self._visit_block_statements(case_body, lines, indent + 1)
                 lines.append(f"{pad}}}")
@@ -1939,7 +1972,9 @@ class StmtVisitor:
             lines.append(f"{pad}}}")
 
         if isinstance(node, IfStmt):
-            cond = self._visit_expr(node.condition)
+            cond = self._coerce_bool_expr(
+                self._visit_expr(node.condition), node.condition
+            )
             lines.append(f"{pad}if ({cond}) {{")
             self._emit_block_with_assign(
                 node.body,
@@ -1995,7 +2030,9 @@ class StmtVisitor:
             else:
                 for i, (case_expr, case_body) in enumerate(node.cases):
                     prefix = "if" if i == 0 else "else if"
-                    cond = self._visit_expr(case_expr)
+                    cond = self._coerce_bool_expr(
+                        self._visit_expr(case_expr), case_expr
+                    )
                     lines.append(f"{pad}{prefix} ({cond}) {{")
                     self._emit_block_with_assign(
                         case_body,

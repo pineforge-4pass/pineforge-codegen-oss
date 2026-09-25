@@ -145,7 +145,7 @@ plot(x)
     cpp = transpile(src)
     body = _eval_body(cpp)
     assert "Series<double> _sec0__ta_ema_1_hist;" in cpp
-    assert 'int _hidx = (int)(get_input_int("Offset", 2));' in body
+    assert 'int _hidx = get_input_int("Offset", 2);' in body
     assert "_sec0__ta_ema_1_hist.push(_secval_0);" in body
     assert "_sec0__ta_ema_1_hist.clear();" in cpp
 
@@ -285,7 +285,7 @@ plot(x + chartControl)
 """
     cpp = transpile(src)
     body = _eval_body(cpp)
-    assert 'int _hidx = (int)(get_input_int("Offset", 2));' in body
+    assert 'int _hidx = get_input_int("Offset", 2);' in body
     assert "_sec0__ta_ema_1_hist[_hidx - 1]" in body
     assert "_sec0__ta_ema_1_hist.push(_secval_0);" in body
     compile_cpp(cpp, label="security_global_ta_alias_helper_local_offset")
@@ -334,7 +334,7 @@ plot(x)
 """
     cpp = transpile(src)
     body = _eval_body(cpp)
-    assert 'int _hidx = (int)(get_input_int("Offset", 2));' in body
+    assert 'int _hidx = get_input_int("Offset", 2);' in body
     assert "_sec0__ta_ema_1_hist[_hidx - 1]" in body
     assert "_sec0__ta_ema_1_hist.push(_secval_0);" in body
     compile_cpp(cpp, label="security_containing_udf_input_history_offset")
@@ -366,7 +366,7 @@ x = requested(idx=k)
 plot(x)
 """
     cpp = transpile(src)
-    assert 'int _hidx = (int)(get_input_int("Offset", 2));' in _eval_body(cpp)
+    assert 'int _hidx = get_input_int("Offset", 2);' in _eval_body(cpp)
     compile_cpp(cpp, label="security_keyword_udf_input_history_offset")
 
 

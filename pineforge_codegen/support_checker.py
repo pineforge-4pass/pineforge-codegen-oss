@@ -527,6 +527,13 @@ class SupportChecker:
         # (below) as well as during the visit, so a rebind that lexically
         # FOLLOWS the request.security call cannot slip past.
         self._scalar_rebinds: dict[str, list[ASTNode]] = {}
+        self._scalar_rebind_ids: set[int] = set()
+        # request.security needs lexical bindings rather than bare names: a
+        # function-local `sym := ...` cannot change an unrelated global `sym`.
+        # Indexed before the visit so rebinds after a security call count too.
+        self._security_symbol_refs: dict[int, object] = {}
+        self._security_symbol_defs: dict[object, ASTNode] = {}
+        self._security_symbol_rebinds: dict[object, list[ASTNode]] = {}
         # Names declared ``var`` / ``varip`` anywhere: their declaration value
         # is the first bar's only, so it does not describe later bars.
         self._persistent_decl_names: set[str] = set()
@@ -541,6 +548,7 @@ class SupportChecker:
     def check(self) -> list[Diagnostic]:
         self._collect_user_definitions(self._ast)
         self._collect_scalar_rebinds(self._ast)
+        self._index_security_symbol_bindings()
         self._count_bindings(self._ast)
         for stmt in self._ast.body:
             self._visit(stmt)
@@ -564,9 +572,11 @@ class SupportChecker:
         target = node.target
         if not isinstance(target, Identifier) or node.value is None:
             return
-        recorded = self._scalar_rebinds.setdefault(target.name, [])
-        if not any(value is node.value for value in recorded):
-            recorded.append(node.value)
+        # A set, not a scan of the list: a name reassigned k times would
+        # otherwise cost k**2.
+        if id(node.value) not in self._scalar_rebind_ids:
+            self._scalar_rebind_ids.add(id(node.value))
+            self._scalar_rebinds.setdefault(target.name, []).append(node.value)
 
     def _collect_scalar_rebinds(self, node: ASTNode) -> None:
         """Pre-pass: collect every scalar rebind anywhere in the AST.
@@ -589,6 +599,97 @@ class SupportChecker:
                 for item in value.values():
                     if isinstance(item, ASTNode):
                         self._collect_scalar_rebinds(item)
+
+    def _index_security_symbol_bindings(self) -> None:
+        """Bind symbol reads and every ``:=`` to their lexical declaration.
+
+        Declarations in a function, branch or loop body shadow outer names;
+        reassignments without a local declaration resolve outwards. The
+        whole-block index keeps later rebinds visible to an earlier security
+        call, matching the existing conservative check.
+        """
+        def resolve(name: str, scopes: tuple[dict[str, object], ...]) -> object | None:
+            for scope in reversed(scopes):
+                if name in scope:
+                    return scope[name]
+            return None
+
+        def walk_value(value: object, scopes: tuple[dict[str, object], ...]) -> None:
+            if isinstance(value, ASTNode):
+                walk(value, scopes)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    walk_value(item, scopes)
+            elif isinstance(value, dict):
+                for item in value.values():
+                    walk_value(item, scopes)
+
+        def block(statements: list, scopes: tuple[dict[str, object], ...],
+                  binders: dict[str, object] | None = None) -> None:
+            scope = dict(binders or {})
+            for stmt in statements:
+                if isinstance(stmt, VarDecl) and stmt.name:
+                    binding = id(stmt)
+                    scope.setdefault(stmt.name, binding)
+                    if stmt.value is not None:
+                        self._security_symbol_defs[binding] = stmt.value
+                elif isinstance(stmt, TupleAssign):
+                    for name in stmt.names:
+                        scope.setdefault(name, ("tuple", id(stmt), name))
+            nested = (*scopes, scope)
+            for stmt in statements:
+                walk_value(stmt, nested)
+
+        def walk(node: ASTNode, scopes: tuple[dict[str, object], ...]) -> None:
+            if isinstance(node, Identifier):
+                binding = resolve(node.name, scopes)
+                if binding is not None:
+                    self._security_symbol_refs[id(node)] = binding
+                return
+            if isinstance(node, Assignment):
+                if isinstance(node.target, Identifier) and node.value is not None:
+                    binding = resolve(node.target.name, scopes)
+                    if binding is not None:
+                        self._security_symbol_rebinds.setdefault(binding, []).append(node.value)
+                walk_value(node.target, scopes)
+                walk_value(node.value, scopes)
+                return
+            if isinstance(node, (FuncDef, MethodDef)):
+                params = {name: ("param", id(node), name) for name in node.params}
+                block(node.body, scopes, params)
+                return
+            if isinstance(node, IfStmt):
+                walk_value(node.condition, scopes)
+                block(node.body, scopes)
+                block(node.else_body, scopes)
+                return
+            if isinstance(node, ForStmt):
+                for value in (node.start, node.end, node.step):
+                    walk_value(value, scopes)
+                block(node.body, scopes, {node.var: ("loop", id(node), node.var)})
+                return
+            if isinstance(node, ForInStmt):
+                walk_value(node.iterable, scopes)
+                names = [node.var] if node.var else list(node.vars or ())
+                block(node.body, scopes, {
+                    name: ("loop", id(node), name) for name in names
+                })
+                return
+            if isinstance(node, WhileStmt):
+                walk_value(node.condition, scopes)
+                block(node.body, scopes)
+                return
+            if isinstance(node, SwitchStmt):
+                walk_value(node.expr, scopes)
+                for case_expr, body in node.cases:
+                    walk_value(case_expr, scopes)
+                    block(body, scopes)
+                block(node.default_body, scopes)
+                return
+            for value in vars(node).values():
+                walk_value(value, scopes)
+
+        block(self._ast.body, ())
 
     def _count_bindings(self, node) -> None:
         """Pre-pass: count every binding of every name (``_binding_counts``)."""
@@ -1364,6 +1465,16 @@ class SupportChecker:
             return
         if ns == "ta":
             self._check_ta_call(node, name)
+            if name == "ema":
+                self._warn(
+                    node,
+                    "ta.ema initial warmup is approximated: PineForge may "
+                    "return a finite value before TradingView does.",
+                    hint="A covered length-20 TradingView tape first returns "
+                         "a finite EMA at bar 19; standalone PineForge EMA "
+                         "is finite at bar 0. Its established lowering stays "
+                         "in place pending per-call-site population parity.",
+                )
         if ns == "math" and name not in SUPPORTED_MATH:
             self._err(node, f"math.{name}(...) is not implemented in PineForge runtime.")
             self._visit_children(node)
@@ -1702,12 +1813,24 @@ class SupportChecker:
         elif "symbol" in node.kwargs:
             symbol_node = node.kwargs["symbol"]
 
-        if symbol_node is not None and not self._is_current_symbol_expr(symbol_node):
-            self._err(
-                symbol_node,
-                "request.security symbol must reference the current chart symbol.",
-                hint="Use syminfo.tickerid or syminfo.ticker; PineForge backtests do not load alternate symbols.",
-            )
+        if symbol_node is not None:
+            scoped_safe = self._is_current_symbol_expr(symbol_node)
+            legacy_safe = self._is_current_symbol_expr(symbol_node, legacy_names=True)
+            if not scoped_safe and not legacy_safe:
+                self._err(
+                    symbol_node,
+                    "request.security symbol must reference the current chart symbol.",
+                    hint="Use syminfo.tickerid or syminfo.ticker; PineForge backtests do not load alternate symbols.",
+                )
+            elif not scoped_safe or not self._is_current_symbol_expr(
+                symbol_node, require_all_paths=True
+            ):
+                self._warn(
+                    symbol_node,
+                    "request.security symbol can select an alternate symbol, but "
+                    "PineForge always loads the current chart symbol.",
+                    hint="Every reachable symbol value must resolve to syminfo.tickerid or syminfo.ticker for exact results.",
+                )
 
         # timeframe literal-format check (positional [1] or kwarg).
         tf_node = node.kwargs.get("timeframe")
@@ -1960,9 +2083,10 @@ class SupportChecker:
             return False
         return node.member in allowed
 
-    def _is_current_symbol_expr(self, node: ASTNode, _seen: set[str] | None = None) -> bool:
-        if _seen is None:
-            _seen = set()
+    def _is_current_symbol_expr(
+        self, node: ASTNode, _seen: frozenset[object] = frozenset(),
+        *, require_all_paths: bool = False, legacy_names: bool = False,
+    ) -> bool:
         chain = _resolve_member_chain(node)
         if chain in SECURITY_CURRENT_SYMBOL_NAMES:
             return True
@@ -1975,34 +2099,68 @@ class SupportChecker:
         if isinstance(node, FuncCall):
             ns, fname = _qualified_name(node.callee)
             if ns == "ticker" and fname in ("inherit", "standard", "heikinashi"):
-                if node.args and self._is_current_symbol_expr(node.args[0], _seen):
+                if node.args and self._is_current_symbol_expr(
+                    node.args[0], _seen, require_all_paths=require_all_paths,
+                    legacy_names=legacy_names,
+                ):
                     return True
-                if "symbol" in node.kwargs and self._is_current_symbol_expr(node.kwargs["symbol"], _seen):
+                if "symbol" in node.kwargs and self._is_current_symbol_expr(
+                    node.kwargs["symbol"], _seen,
+                    require_all_paths=require_all_paths, legacy_names=legacy_names,
+                ):
                     return True
-        # A ternary symbol (``cond ? other : syminfo.tickerid``) resolves to the
-        # chart symbol whenever EITHER branch does. PineForge only ever loads the
-        # chart symbol, so this is exact at any config where the chosen branch is
-        # the chart symbol; an unconditional cross-symbol expression still errors.
+        # Preserve admission for a working script with an unreachable alternate
+        # branch; the all-paths pass diagnoses a possibly wrong feed.
         if isinstance(node, Ternary):
-            return (self._is_current_symbol_expr(node.true_val, _seen)
-                    or self._is_current_symbol_expr(node.false_val, _seen))
+            true_safe = self._is_current_symbol_expr(
+                node.true_val, _seen, require_all_paths=require_all_paths,
+                legacy_names=legacy_names,
+            )
+            false_safe = self._is_current_symbol_expr(
+                node.false_val, _seen, require_all_paths=require_all_paths,
+                legacy_names=legacy_names,
+            )
+            return true_safe and false_safe if require_all_paths else true_safe or false_safe
         # Def-use: resolve a bare identifier through its declaration value so an
         # aliased symbol is accepted (``haTicker = ticker.heikinashi(...)`` then
         # ``request.security(haTicker, ...)``). Every ``:=`` rebind of the name
         # must resolve to the chart symbol too: the declaration alone does not
-        # pin the value the call actually receives. Name-cycle-guarded.
-        if isinstance(node, Identifier) and node.name not in _seen:
-            definition = self._scalar_defs.get(node.name)
-            rebinds = self._scalar_rebinds.get(node.name)
-            if definition is not None or rebinds:
-                _seen.add(node.name)
-                if rebinds and not all(
-                    self._is_current_symbol_expr(value, _seen) for value in rebinds
-                ):
+        # pin the value the call actually receives. Binding-cycle-guarded.
+        if isinstance(node, Identifier):
+            if legacy_names:
+                binding = ("legacy", node.name)
+                if binding in _seen:
                     return False
+                definition = self._scalar_defs.get(node.name)
                 if definition is None:
                     return False
-                return self._is_current_symbol_expr(definition, _seen)
+                seen = _seen | {binding}
+                return self._is_current_symbol_expr(
+                    definition, seen, require_all_paths=require_all_paths,
+                    legacy_names=True,
+                ) and all(
+                    self._is_current_symbol_expr(
+                        value, seen, require_all_paths=require_all_paths,
+                        legacy_names=True,
+                    )
+                    for value in self._scalar_rebinds.get(node.name, ())
+                )
+            binding = self._security_symbol_refs.get(id(node))
+            if binding is not None and binding not in _seen:
+                definition = self._security_symbol_defs.get(binding)
+                if definition is None:
+                    return False
+                seen = _seen | {binding}
+                if not self._is_current_symbol_expr(
+                    definition, seen, require_all_paths=require_all_paths
+                ):
+                    return False
+                return all(
+                    self._is_current_symbol_expr(
+                        value, seen, require_all_paths=require_all_paths
+                    )
+                    for value in self._security_symbol_rebinds.get(binding, ())
+                )
         return False
 
     # -- Pine timeframe-literal validation --

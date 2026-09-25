@@ -92,7 +92,10 @@ def test_single_expression_matrix_void_method_does_not_return_void_call() -> Non
         cpp,
     )
     assert "return self.set((int)(row), (int)(col), value);" not in cpp
-    assert "self.set((int)(row), (int)(col), value);" in cpp
+    assert "self.set(" in cpp
+    assert "_pf_idx_v = (row)" in cpp
+    assert "_pf_idx_v = (col)" in cpp
+    assert "return is_na(_pf_idx_v) ? na<int>()" in cpp
     assert "return 0.0;" in cpp
 
 

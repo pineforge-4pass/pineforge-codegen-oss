@@ -21,6 +21,9 @@ from pineforge_codegen.errors import (
     Phase,
     SourceLocation,
 )
+from pineforge_codegen.limits import (
+    MAX_NESTING_DEPTH, TimeBudget, check_source_size, limit_error,
+)
 
 
 class TokenType(Enum):
@@ -173,7 +176,8 @@ class Lexer:
         TokenType.PERCENT_EQUALS,
     }
 
-    def __init__(self, source: str, filename: str = "<input>") -> None:
+    def __init__(self, source: str, filename: str = "<input>",
+                 budget: TimeBudget | None = None) -> None:
         self.source = source
         self.filename = filename
         self.pos = 0
@@ -184,6 +188,7 @@ class Lexer:
         self.paren_depth = 0  # Track () and [] nesting to suppress NEWLINE/INDENT/DEDENT
         self._in_continuation = False  # True when current line is a continuation
         self._diagnostics: list[Diagnostic] = []
+        self._budget = budget
 
     def _peek(self, offset: int = 0) -> str:
         idx = self.pos + offset
@@ -197,6 +202,11 @@ class Lexer:
             self.col = 1
         else:
             self.col += 1
+        if self._budget is not None and self.pos % 1024 == 0:
+            self._budget.check(
+                SourceLocation(self.filename, self.line, self.col, self.col + 1),
+                Phase.LEXER,
+            )
         return ch
 
     def _at_end(self) -> bool:
@@ -223,6 +233,7 @@ class Lexer:
             self._advance()
 
     def tokenize(self) -> list[Token]:
+        check_source_size(self.source, self.filename)
         while not self._at_end():
             self._tokenize_line()
 
@@ -318,6 +329,11 @@ class Lexer:
             current_indent = self.indent_stack[-1]
             if indent_level > current_indent:
                 self.indent_stack.append(indent_level)
+                if len(self.indent_stack) - 1 > MAX_NESTING_DEPTH:
+                    raise limit_error(
+                        f"Block nesting depth exceeds {MAX_NESTING_DEPTH} levels.",
+                        SourceLocation(self.filename, self.line, 1, 2), Phase.LEXER,
+                    )
                 self._emit(TokenType.INDENT, "", self.line, 1)
             elif indent_level < current_indent:
                 while len(self.indent_stack) > 1 and self.indent_stack[-1] > indent_level:
@@ -492,6 +508,12 @@ class Lexer:
             tt = singles[ch]
             if tt in (TokenType.LPAREN, TokenType.LBRACKET):
                 self.paren_depth += 1
+                if self.paren_depth > MAX_NESTING_DEPTH:
+                    raise limit_error(
+                        f"Delimiter nesting depth exceeds {MAX_NESTING_DEPTH} levels.",
+                        SourceLocation(self.filename, start_line, start_col,
+                                       start_col + 1), Phase.LEXER,
+                    )
             elif tt in (TokenType.RPAREN, TokenType.RBRACKET):
                 self.paren_depth = max(0, self.paren_depth - 1)
             self._emit(tt, ch, start_line, start_col, start_col + 1)

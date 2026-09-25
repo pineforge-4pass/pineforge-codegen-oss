@@ -31,6 +31,7 @@ from ..ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, TypeDecl, TypeField, UnaryOp, VarDecl,
     WhileStmt,
 )
+from .helpers import pine_index_int_cast
 from .tables import (
     TA_CHART_PREV_CLOSE,
     TA_CHART_PREV_CLOSE_ARG,
@@ -100,6 +101,21 @@ class TaSiteHelper:
     # .compute() arg-string construction
     # ------------------------------------------------------------------
 
+    _TA_BOOL_COMPUTE_ARGS = {
+        "barssince": frozenset({0}),
+        "valuewhen": frozenset({0}),
+        "pivot_point_levels": frozenset({1, 2}),
+        "vwap_anchored": frozenset({1}),
+        "vwap_anchored_bands": frozenset({1}),
+    }
+
+    def _ta_compute_arg_cpp(self, ta_name: str, position: int, node) -> str:
+        """Render one TA compute argument with Pine bool truthiness."""
+        rendered = self._visit_expr(node)
+        if position in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()):
+            return self._coerce_bool_expr(rendered, node)
+        return rendered
+
     def _ta_compute_args_for_site(self, site: "TACallSite") -> str:
         """Build the C++ argument string for ``<member>.compute(...)`` of a TA site.
 
@@ -120,7 +136,10 @@ class TaSiteHelper:
         # clock arguments. The compatibility shims use the timestamp and
         # symbol clock only on an older engine; the TA1 branch ignores them.
         if site.class_name in ("_PFAnchoredVWAP", "_PFAnchoredVWAPBands"):
-            explicit = [self._visit_expr(a) for a in site.compute_args]
+            explicit = [
+                self._ta_compute_arg_cpp(ta_name, i, a)
+                for i, a in enumerate(site.compute_args)
+            ]
             if len(explicit) < 2:
                 raise AssertionError("anchored VWAP site is missing source/anchor")
             return (
@@ -129,7 +148,10 @@ class TaSiteHelper:
             )
 
         if site.class_name == "_PFPivotPointLevels":
-            explicit = [self._visit_expr(a) for a in site.compute_args]
+            explicit = [
+                self._ta_compute_arg_cpp(ta_name, i, a)
+                for i, a in enumerate(site.compute_args)
+            ]
             if len(explicit) < 3:
                 raise AssertionError("pivot TA1 site is missing anchor arguments")
             return (
@@ -145,14 +167,20 @@ class TaSiteHelper:
             if ta_name in TA_CHART_PREV_CLOSE:
                 implicit = f"{implicit}, {TA_CHART_PREV_CLOSE_ARG}"
             if site.compute_args:
-                explicit = ", ".join(self._visit_expr(a) for a in site.compute_args)
+                explicit = ", ".join(
+                    self._ta_compute_arg_cpp(ta_name, i, a)
+                    for i, a in enumerate(site.compute_args)
+                )
                 if ta_name in self._TA_IMPLICIT_REPLACE:
                     return explicit
                 return f"{explicit}, {implicit}" if explicit else implicit
             return implicit
 
         if site.compute_args:
-            explicit = ", ".join(self._visit_expr(a) for a in site.compute_args)
+            explicit = ", ".join(
+                self._ta_compute_arg_cpp(ta_name, i, a)
+                for i, a in enumerate(site.compute_args)
+            )
             if ta_name in TA_IMPLICIT_APPEND:
                 return f"{explicit}, {TA_IMPLICIT_APPEND[ta_name]}"
             return explicit
@@ -553,7 +581,13 @@ class TaSiteHelper:
             held = f"{info['hist']}[{literal - 1}]" if literal >= 1 else "na<double>()"
             eager = f"{chart}[{literal}]" if chart is not None else held
         else:
-            length_expr = f"(int)({self._visit_expr(length_node)})"
+            length_raw = self._visit_expr(length_node)
+            length_expr = self._coerce_int_slot(
+                length_raw, length_node, "int"
+            )
+            if (length_expr == length_raw
+                    and not self._emitted_value_is_double(length_node)):
+                length_expr = pine_index_int_cast(length_raw)
             held = (
                 f"(({length_expr}) >= 1 ? {info['hist']}[({length_expr}) - 1] "
                 f": na<double>())"
@@ -975,13 +1009,22 @@ class TaSiteHelper:
 
         if site.class_name in ("_PFAnchoredVWAP", "_PFAnchoredVWAPBands"):
             explicit = [
+                self._coerce_bool_expr(
+                    self._build_security_expr(
+                        sec_id, a, None, ta_results,
+                        security_mutable_names=security_mutable_names,
+                        helper_binding_stack=helper_binding_stack,
+                        emitted_lines=emitted_lines,
+                    ),
+                    a,
+                ) if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()) else
                 self._build_security_expr(
                     sec_id, a, None, ta_results,
                     security_mutable_names=security_mutable_names,
                     helper_binding_stack=helper_binding_stack,
                     emitted_lines=emitted_lines,
                 )
-                for a in site.compute_args
+                for i, a in enumerate(site.compute_args)
             ]
             if len(explicit) < 2:
                 raise AssertionError("anchored VWAP security site is missing source/anchor")
@@ -992,13 +1035,22 @@ class TaSiteHelper:
 
         if site.class_name == "_PFPivotPointLevels":
             explicit = [
+                self._coerce_bool_expr(
+                    self._build_security_expr(
+                        sec_id, a, None, ta_results,
+                        security_mutable_names=security_mutable_names,
+                        helper_binding_stack=helper_binding_stack,
+                        emitted_lines=emitted_lines,
+                    ),
+                    a,
+                ) if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ()) else
                 self._build_security_expr(
                     sec_id, a, None, ta_results,
                     security_mutable_names=security_mutable_names,
                     helper_binding_stack=helper_binding_stack,
                     emitted_lines=emitted_lines,
                 )
-                for a in site.compute_args
+                for i, a in enumerate(site.compute_args)
             ]
             if len(explicit) < 3:
                 raise AssertionError("pivot security site is missing anchor arguments")
@@ -1011,16 +1063,31 @@ class TaSiteHelper:
             implicit = TA_IMPLICIT_COMPUTE_FULL[ta_name].replace("current_bar_.", "bar.")
             if site.compute_args:
                 explicit = ", ".join(
-                    self._build_security_expr(
-                        sec_id,
-                        a,
-                        None,
-                        ta_results,
-                        security_mutable_names=security_mutable_names,
-                        helper_binding_stack=helper_binding_stack,
-                        emitted_lines=emitted_lines,
+                    (
+                        self._coerce_bool_expr(
+                            self._build_security_expr(
+                                sec_id,
+                                a,
+                                None,
+                                ta_results,
+                                security_mutable_names=security_mutable_names,
+                                helper_binding_stack=helper_binding_stack,
+                                emitted_lines=emitted_lines,
+                            ),
+                            a,
+                        )
+                        if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ())
+                        else self._build_security_expr(
+                            sec_id,
+                            a,
+                            None,
+                            ta_results,
+                            security_mutable_names=security_mutable_names,
+                            helper_binding_stack=helper_binding_stack,
+                            emitted_lines=emitted_lines,
+                        )
                     )
-                    for a in site.compute_args
+                    for i, a in enumerate(site.compute_args)
                 )
                 if ta_name in self._TA_IMPLICIT_REPLACE:
                     return explicit
@@ -1029,16 +1096,31 @@ class TaSiteHelper:
 
         if site.compute_args:
             explicit = ", ".join(
-                self._build_security_expr(
-                    sec_id,
-                    a,
-                    None,
-                    ta_results,
-                    security_mutable_names=security_mutable_names,
-                    helper_binding_stack=helper_binding_stack,
-                    emitted_lines=emitted_lines,
+                (
+                    self._coerce_bool_expr(
+                        self._build_security_expr(
+                            sec_id,
+                            a,
+                            None,
+                            ta_results,
+                            security_mutable_names=security_mutable_names,
+                            helper_binding_stack=helper_binding_stack,
+                            emitted_lines=emitted_lines,
+                        ),
+                        a,
+                    )
+                    if i in self._TA_BOOL_COMPUTE_ARGS.get(ta_name, ())
+                    else self._build_security_expr(
+                        sec_id,
+                        a,
+                        None,
+                        ta_results,
+                        security_mutable_names=security_mutable_names,
+                        helper_binding_stack=helper_binding_stack,
+                        emitted_lines=emitted_lines,
+                    )
                 )
-                for a in site.compute_args
+                for i, a in enumerate(site.compute_args)
             )
             if ta_name in TA_IMPLICIT_APPEND:
                 implicit = TA_IMPLICIT_APPEND[ta_name].replace("current_bar_.", "bar.")

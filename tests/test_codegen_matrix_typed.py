@@ -37,10 +37,10 @@ def test_to_cpp_matrix_int():
     assert cg._type_spec_to_cpp(spec) == "PineGenericMatrix<int>"
 
 
-def test_to_cpp_matrix_color_lowers_to_int():
+def test_to_cpp_matrix_color_lowers_to_int64():
     cg = _make_codegen()
     spec = TypeSpec.matrix(TypeSpec.primitive("color"))
-    assert cg._type_spec_to_cpp(spec) == "PineGenericMatrix<int>"
+    assert cg._type_spec_to_cpp(spec) == "PineGenericMatrix<int64_t>"
 
 
 def test_to_cpp_matrix_udt():
@@ -125,13 +125,13 @@ var m = matrix.new<float>(2, 2, 0.0)
     assert "PineGenericMatrix" not in cpp
 
 
-def test_matrix_new_color_lowers_to_int():
+def test_matrix_new_color_lowers_to_int64():
     src = '''//@version=6
 strategy("t")
 var m = matrix.new<color>(2, 2)
 '''
     cpp = _emit(src)
-    assert "PineGenericMatrix<int>::new_(2, 2," in cpp
+    assert "PineGenericMatrix<int64_t>::new_(2, 2," in cpp
 
 
 def test_matrix_new_udt_uses_brace_init():

@@ -213,7 +213,8 @@ def skip_if_no_compile_env() -> None:
         )
 
 
-def compile_cpp(cpp_source: str, *, label: str = "snippet") -> None:
+def compile_cpp(cpp_source: str, *, label: str = "snippet",
+                standard: str = "c++17") -> None:
     """Run ``-fsyntax-only`` on ``cpp_source``; raise AssertionError on failure.
 
     This intentionally does NOT link or run anything. The single failure
@@ -237,7 +238,7 @@ def compile_cpp(cpp_source: str, *, label: str = "snippet") -> None:
     try:
         cmd = [
             _COMPILER,
-            "-std=c++17",
+            f"-std={standard}",
             "-fsyntax-only",
             "-I", str(_ENGINE_INC),
             "-I", str(_EIGEN_INC),

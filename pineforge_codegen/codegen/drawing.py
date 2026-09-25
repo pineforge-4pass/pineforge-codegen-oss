@@ -219,8 +219,10 @@ class DrawingVisitor:
             y1 = self._visit_expr(vals.get("y1"))
             x2 = self._visit_expr(vals.get("x2"))
             y2 = self._visit_expr(vals.get("y2"))
-            return (f"pf_line_new({arena}, (int64_t)({x1}), (double)({y1}), "
-                    f"(int64_t)({x2}), (double)({y2}), {xloc}, {el}, {er})")
+            x1 = self._coerce_int_slot_with_cast(x1, vals.get("x1"), "int64_t")
+            x2 = self._coerce_int_slot_with_cast(x2, vals.get("x2"), "int64_t")
+            return (f"pf_line_new({arena}, {x1}, (double)({y1}), "
+                    f"{x2}, (double)({y2}), {xloc}, {el}, {er})")
 
         if dtype == "box":
             vals = self._merge_drawing_args(node, _BOX_CTOR_PTS if use_pts else _BOX_CTOR)
@@ -233,8 +235,10 @@ class DrawingVisitor:
             top = self._visit_expr(vals.get("top"))
             right = self._visit_expr(vals.get("right"))
             bottom = self._visit_expr(vals.get("bottom"))
-            return (f"pf_box_new({arena}, (int64_t)({left}), (double)({top}), "
-                    f"(int64_t)({right}), (double)({bottom}), {xloc})")
+            left = self._coerce_int_slot_with_cast(left, vals.get("left"), "int64_t")
+            right = self._coerce_int_slot_with_cast(right, vals.get("right"), "int64_t")
+            return (f"pf_box_new({arena}, {left}, (double)({top}), "
+                    f"{right}, (double)({bottom}), {xloc})")
 
         if dtype == "label":
             vals = self._merge_drawing_args(node, _LABEL_CTOR_PTS if use_pts else _LABEL_CTOR)
@@ -247,7 +251,8 @@ class DrawingVisitor:
             x = self._visit_expr(vals.get("x"))
             y = self._visit_expr(vals.get("y"))
             xloc = self._lower_xloc(vals.get("xloc"))
-            return (f"pf_label_new({arena}, (int64_t)({x}), (double)({y}), "
+            x = self._coerce_int_slot_with_cast(x, vals.get("x"), "int64_t")
+            return (f"pf_label_new({arena}, {x}, (double)({y}), "
                     f"{text}, {xloc}, {yloc})")
 
         return "0"  # unreachable
@@ -269,20 +274,24 @@ class DrawingVisitor:
             vals = self._merge_drawing_args(node, ["index", "price"])
             idx = self._visit_expr(vals.get("index"))
             price = self._visit_expr(vals.get("price"))
-            return (f"ChartPoint{{ .index=(int64_t)({idx}), .time=na<int64_t>(), "
+            idx = self._coerce_int_slot_with_cast(idx, vals.get("index"), "int64_t")
+            return (f"ChartPoint{{ .index={idx}, .time=na<int64_t>(), "
                     f".price=({price}) }}")
         if func_name == "from_time":
             vals = self._merge_drawing_args(node, ["time", "price"])
             tm = self._visit_expr(vals.get("time"))
             price = self._visit_expr(vals.get("price"))
-            return (f"ChartPoint{{ .index=na<int64_t>(), .time=(int64_t)({tm}), "
+            tm = self._coerce_int_slot_with_cast(tm, vals.get("time"), "int64_t")
+            return (f"ChartPoint{{ .index=na<int64_t>(), .time={tm}, "
                     f".price=({price}) }}")
         if func_name == "new":
             vals = self._merge_drawing_args(node, ["time", "index", "price"])
             tm = self._visit_expr(vals.get("time"))
             idx = self._visit_expr(vals.get("index"))
             price = self._visit_expr(vals.get("price"))
-            return (f"ChartPoint{{ .index=(int64_t)({idx}), .time=(int64_t)({tm}), "
+            idx = self._coerce_int_slot_with_cast(idx, vals.get("index"), "int64_t")
+            tm = self._coerce_int_slot_with_cast(tm, vals.get("time"), "int64_t")
+            return (f"ChartPoint{{ .index={idx}, .time={tm}, "
                     f".price=({price}) }}")
         return "ChartPoint{}"
 
@@ -329,25 +338,25 @@ class DrawingVisitor:
         if m == "get_y2":
             return f"pf_line_get_y2({a}, {r})"
         if m == "get_price":
-            return f"pf_line_get_price({a}, {r}, (int64_t)({av[0]}))"
+            return f"pf_line_get_price({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')})"
         if m == "set_x1":
-            return f"pf_line_set_x1({a}, {r}, (int64_t)({av[0]}))"
+            return f"pf_line_set_x1({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')})"
         if m == "set_x2":
-            return f"pf_line_set_x2({a}, {r}, (int64_t)({av[0]}))"
+            return f"pf_line_set_x2({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')})"
         if m == "set_y1":
             return f"pf_line_set_y1({a}, {r}, (double)({av[0]}))"
         if m == "set_y2":
             return f"pf_line_set_y2({a}, {r}, (double)({av[0]}))"
         if m == "set_xy1":
-            return f"pf_line_set_xy1({a}, {r}, (int64_t)({av[0]}), (double)({av[1]}))"
+            return f"pf_line_set_xy1({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, (double)({av[1]}))"
         if m == "set_xy2":
-            return f"pf_line_set_xy2({a}, {r}, (int64_t)({av[0]}), (double)({av[1]}))"
+            return f"pf_line_set_xy2({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, (double)({av[1]}))"
         if m == "set_first_point":
             return f"pf_line_set_first_point({a}, {r}, {av[0]})"
         if m == "set_second_point":
             return f"pf_line_set_second_point({a}, {r}, {av[0]})"
         if m == "set_xloc":
-            return f"pf_line_set_xloc({a}, {r}, (int64_t)({av[0]}), (int64_t)({av[1]}), {self._lower_xloc(raw[2])})"
+            return f"pf_line_set_xloc({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, {self._coerce_int_slot_with_cast(av[1], raw[1], 'int64_t')}, {self._lower_xloc(raw[2])})"
         if m == "copy":
             return f"pf_line_copy({a}, {r})"
         if m == "delete":
@@ -364,23 +373,23 @@ class DrawingVisitor:
         if m == "get_bottom":
             return f"pf_box_get_bottom({a}, {r})"
         if m == "set_left":
-            return f"pf_box_set_left({a}, {r}, (int64_t)({av[0]}))"
+            return f"pf_box_set_left({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')})"
         if m == "set_right":
-            return f"pf_box_set_right({a}, {r}, (int64_t)({av[0]}))"
+            return f"pf_box_set_right({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')})"
         if m == "set_top":
             return f"pf_box_set_top({a}, {r}, (double)({av[0]}))"
         if m == "set_bottom":
             return f"pf_box_set_bottom({a}, {r}, (double)({av[0]}))"
         if m == "set_lefttop":
-            return f"pf_box_set_lefttop({a}, {r}, (int64_t)({av[0]}), (double)({av[1]}))"
+            return f"pf_box_set_lefttop({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, (double)({av[1]}))"
         if m == "set_rightbottom":
-            return f"pf_box_set_rightbottom({a}, {r}, (int64_t)({av[0]}), (double)({av[1]}))"
+            return f"pf_box_set_rightbottom({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, (double)({av[1]}))"
         if m == "set_top_left_point":
             return f"pf_box_set_top_left_point({a}, {r}, {av[0]})"
         if m == "set_bottom_right_point":
             return f"pf_box_set_bottom_right_point({a}, {r}, {av[0]})"
         if m == "set_xloc":
-            return f"pf_box_set_xloc({a}, {r}, (int64_t)({av[0]}), (int64_t)({av[1]}), {self._lower_xloc(raw[2])})"
+            return f"pf_box_set_xloc({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, {self._coerce_int_slot_with_cast(av[1], raw[1], 'int64_t')}, {self._lower_xloc(raw[2])})"
         if m == "copy":
             return f"pf_box_copy({a}, {r})"
         if m == "delete":
@@ -395,15 +404,15 @@ class DrawingVisitor:
         if m == "get_text":
             return f"pf_label_get_text({a}, {r})"
         if m == "set_x":
-            return f"pf_label_set_x({a}, {r}, (int64_t)({av[0]}))"
+            return f"pf_label_set_x({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')})"
         if m == "set_y":
             return f"pf_label_set_y({a}, {r}, (double)({av[0]}))"
         if m == "set_xy":
-            return f"pf_label_set_xy({a}, {r}, (int64_t)({av[0]}), (double)({av[1]}))"
+            return f"pf_label_set_xy({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, (double)({av[1]}))"
         if m == "set_point":
             return f"pf_label_set_point({a}, {r}, {av[0]})"
         if m == "set_xloc":
-            return f"pf_label_set_xloc({a}, {r}, (int64_t)({av[0]}), {self._lower_xloc(raw[1])})"
+            return f"pf_label_set_xloc({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, {self._lower_xloc(raw[1])})"
         if m == "set_yloc":
             return f"pf_label_set_yloc({a}, {r}, {self._lower_yloc(raw[0])})"
         if m == "set_text":

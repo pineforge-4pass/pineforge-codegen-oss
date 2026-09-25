@@ -159,11 +159,12 @@ def test_runtime_length_reads_the_held_history_at_length_minus_one():
         "plot(x ? 1 : 0)"
     )
     x_line = _stmt(cpp, "x = (")
-    assert (
-        "_pf_lazy_src_clock_1.roc(current_bar_.close, _pf_lazy_src_clock_1.previous_source("
-        "(((int)(len)) >= 1 ? _pf_lazy_src_hist_1[((int)(len)) - 1] : na<double>()), "
-        "_pf_lazy_src_chart_1[(int)(len)], (int)(len), bar_index_))"
-    ) in x_line
+    assert "_pf_lazy_src_clock_1.roc(current_bar_.close, _pf_lazy_src_clock_1.previous_source(" in x_line
+    assert x_line.count("auto _pf_idx_v = (len)") >= 3
+    assert "_pf_lazy_src_hist_1[(" in x_line
+    assert ") - 1] : na<double>())" in x_line
+    assert "_pf_lazy_src_chart_1[" in x_line
+    assert ", bar_index_))" in x_line
     assert re.search(r"^    Series<double> _pf_lazy_src_hist_1;$", cpp, re.MULTILINE)
     assert re.search(r"^    Series<double> _pf_lazy_src_chart_1;$", cpp, re.MULTILINE)
 

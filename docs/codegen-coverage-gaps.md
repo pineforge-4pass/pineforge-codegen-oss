@@ -23,7 +23,7 @@ No additional gaps found beyond what Phase B closed (B1–B6).
 ### Audit method
 
 Ran `grep -n 'return "false"\|return "0"' pineforge_codegen/codegen/visit_call.py pineforge_codegen/codegen/visit_expr.py`
-and triaged each of the 36 matches against the analyzer's rejection
+and triaged each of the 34 matches against the analyzer's rejection
 tables (`HARD_REJECT_FUNC`, `HARD_REJECT_NAMESPACE`, `NOT_YET_FUNC`,
 `UNSUPPORTED_BARE_FUNCS`, `UNSUPPORTED_NAMESPACES`,
 `UNSUPPORTED_MEMBERS`, `UNSUPPORTED_NAMESPACE_VARS`,
@@ -77,54 +77,47 @@ silent-on-bug to loud-on-bug.
 
 No new follow-up work identified by this audit.
 
-## Residuals left open by the array-bounds guard (2026-07-25)
+## Array range and slice follow-up (2026-09-25)
 
-`array.insert`, the 3-argument `array.fill`, and `array.slice` now reject an
-out-of-range index instead of emitting raw STL iterator arithmetic (undefined
-behaviour). Three questions the bounds work deliberately does NOT settle:
+`lab tv` probes on `BINANCE:ETHUSDT.P`, 15 minutes, 2025-04-01 through
+2025-04-08 used the operation's result in each order signal. An earlier
+unobserved probe let TradingView eliminate the operation and was discarded.
 
-1. **`array.slice` shares storage with its source; codegen deep-copies.**
-   The Pine v6 reference says "Changing the elements in a slice directly
-   changes the elements in the original array, and vice versa", while both
-   lowerings construct a fresh `std::vector` from the iterator range. Any
-   write through a slice (or through the source while a slice is live) is
-   therefore lost. Closing this needs a view/alias type over the receiver's
-   storage, not an index check, so it is a separate and much larger change.
-   The extent of the aliasing is itself unsettled: the reference sentence
-   says "an object from the slice", which is unambiguous for arrays of
-   reference-like elements (UDT instances) but does NOT establish that a
-   primitive `array<float>` slice aliases element-for-element. Pin that
-   against TradingView before designing the view type — the answer decides
-   whether the fix is "arrays of UDTs only" or "all arrays".
+| Operation | TradingView evidence | PineForge behavior |
+|---|---|---|
+| Primitive `array<float>` slice, then write through slice and source | 32/32 entries signal `both-alias`; covered tape SHA-256 `fbd83309262bfd1a8a06e8f3cc82228fad1b1358b03b135b200246d5f4cfb7c0` | The same source run against the built engine signals `no-alias`. Both syntax forms emit a located warning in `transpile_full` / `transpile_json`. |
+| `array.fill(a, 9, 2, 1)` on `[1,2,3]` | 32/32 entries signal `123` (no-op); covered tape SHA-256 `83243e37dd66678e1b9127baac2ba42ef74815d31097c0c2095a08efffca575e` | Guarded no-op, without invalid STL iterator arithmetic. |
+| `array.slice(a, 2, 1)` | `request_error` RE10044, “Index 'from' should be less than index 'to'.” | Runtime error with the same message. |
+| Negative `index_from` or `index_to` in `fill` / `slice` | Four observed probes return `request_error` RE10045, index `-1` out of bounds for size 3. | Both endpoints reject before iterator arithmetic; existing guard was correct. |
 
-2. **Inverted ranges (`index_from > index_to`) are rejected, not clamped.**
-   No evidence pins TradingView's behaviour for `array.fill(id, v, 2, 1)` /
-   `array.slice(id, 2, 1)`. Rejecting is the fail-closed choice and the
-   3-argument `fill` range form has no current corpus exposure, but a
-   TradingView probe could show TV treats it as an empty range instead.
+The slice copy remains a semantic gap. A safe alias requires a collection view
+whose source storage survives slice lifetime and mutations, including source
+resizing and temporary receivers. The current `std::vector` representation is
+used throughout codegen, so this lane preserves the compiling lowering and
+warns at each slice call. The probe establishes that primitive elements alias
+in TradingView; the earlier “UDTs only” possibility is refuted.
 
-3. **Negative endpoints for `fill`/`slice` are rejected.** The reference
-   lists only `array.get`/`array.set`/`array.insert`/`array.remove` as
-   negative-indexing functions, so `fill`/`slice` follow `array.percentrank`
-   and reject. If TradingView in fact normalises them, this is an
-   over-rejection (a valid script fails to transpile), not a wrong result.
+## request.security symbol follow-up (2026-09-25)
 
-## Residual left open by the request.security rebind guard (2026-07-25)
+The support checker now indexes declarations, reads and rebinds by lexical
+binding for the security symbol argument. A local `sym` inside a function no
+longer taints an unrelated global `sym`; a rebind of the global inside an `if`
+still disqualifies it. A TradingView probe with the local rebind and a global
+chart-symbol request recorded 32/32 `chart-feed` entries (covered tape SHA-256
+`8a0492f71ffc489e45c3eb80907bf796658719e2ef7efa7c0df312e8eeb28917`).
 
-`_scalar_rebinds` is keyed by BARE NAME with no scope resolution, mirroring
-the existing `_scalar_defs`. A divergent `:=` rebind of a *local* named `sym`
-inside a user function therefore also disqualifies an unrelated *global*
-`sym` used as a `request.security` symbol. That direction is fail-closed
-(over-rejection, never a silent wrong-symbol run), but a scoped symbol table
-would be the exact fix. A 788-source differential shows the over-rejection
-costs nothing on the current corpus.
+A second TradingView probe chose `BINANCE:BTCUSDT.P` in the true ternary arm
+on an ETH chart and recorded 32/32 `alternate-feed` entries (covered tape
+SHA-256 `a9aa27e13b64260eba08cafec3e345ddc7e06f378f5c6b94e5f6955eb32abaf3`).
+The generated security evaluation has no alternate-symbol feed. The checker
+therefore tests *both* ternary arms, including arms reached through aliases,
+and warns when any path can select another symbol. It preserves previously
+accepted scripts and their current-symbol lowering; an unconditional alternate
+symbol remains rejected. A legacy bare-name admission that lexical resolution
+finds unsafe also remains accepted with a warning, preventing a new refusal
+before the supervisor's population sweep.
 
-**Still open — the ternary branch hole (KI-47(a)).** `_is_current_symbol_expr`
-still accepts `cond ? "EXCH:OTHER" : syminfo.tickerid` because EITHER branch
-resolving to the chart symbol is enough. Tightening it to require BOTH
-branches is correct in principle but rejects
-`data/standard/doriannnq-tjr-v4-strategy`, whose alternate branch is
-unreachable at its declared input configuration (`smtSym` defaults to `""`)
-and which grades Excellent at 44/44 / 100% match. Closing this needs the
-checker to see the effective input configuration, which it currently cannot
-(see the analysis in the R6 handoff). Held deliberately, not overlooked.
+The 314 public corpus strategies all still transpile, and their emitted C++
+hashes are unchanged. There is no public TU or public trade tape to regrade
+for this lane; the changed behavior is diagnostic or accepts a formerly
+over-rejected source.

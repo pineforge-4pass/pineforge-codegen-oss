@@ -4,11 +4,29 @@ from .lexer import Lexer
 from .parser import Parser
 from .analyzer import Analyzer
 from .codegen import CodeGen
-from .errors import CompileError, Level
+from .errors import CompileError, Level, Phase
 from .finite_ta_length import expand_finite_choice_extrema_lengths
+from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
 from .pragmas import extract_pf_trace_pragmas
 from .support_checker import check_support as _support_diagnostics
 from .support_checker import check_support_or_raise
+
+
+def _parse_bounded(pine_source: str, filename: str):
+    ensure_recursion_headroom()
+    check_source_size(pine_source, filename)
+    budget = TimeBudget(filename)
+    pragmas = extract_pf_trace_pragmas(
+        pine_source, filename=filename, budget=budget,
+    )
+    budget.check(phase=Phase.LEXER)
+    tokens = Lexer(pine_source, filename=filename, budget=budget).tokenize()
+    budget.check(phase=Phase.LEXER)
+    ast = Parser(tokens, source=pine_source, filename=filename,
+                 budget=budget).parse()
+    check_ast_depth(ast, filename)
+    budget.check(phase=Phase.PARSER)
+    return ast, pragmas, budget
 
 
 def transpile(pine_source: str, *, check_support: bool = True, filename: str = "<input>") -> str:
@@ -42,19 +60,23 @@ def transpile(pine_source: str, *, check_support: bool = True, filename: str = "
     Returns:
         Generated C++ source string.
     """
-    pragmas = extract_pf_trace_pragmas(pine_source)
-    tokens = Lexer(pine_source, filename=filename).tokenize()
-    ast = Parser(tokens, source=pine_source, filename=filename).parse()
+    ast, pragmas, budget = _parse_bounded(pine_source, filename)
     if check_support:
         check_support_or_raise(ast, filename=filename)
+    budget.check(phase=Phase.ANALYZER)
     ast = expand_finite_choice_extrema_lengths(ast)
-    ctx = Analyzer(ast, filename=filename).analyze()
+    check_ast_depth(ast, filename)
+    budget.check(phase=Phase.ANALYZER)
+    ctx = Analyzer(ast, filename=filename, budget=budget).analyze()
+    budget.check(phase=Phase.ANALYZER)
     # Attach after analysis: pragma expressions are not part of the
     # program body, so the analyzer never inspects them; the codegen
     # consumes them directly from the context to emit the on_bar tail
     # ``if (trace_enabled_) { trace(...); ... }`` block.
     ctx.pf_trace_pragmas = pragmas
-    return CodeGen(ctx).generate()
+    cpp = CodeGen(ctx, budget=budget).generate()
+    budget.check(phase=Phase.CODEGEN)
+    return cpp
 
 
 def transpile_full(pine_source: str, *, check_support: bool = True,
@@ -85,19 +107,22 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
         ``{"cpp": str, "inputs": list[dict], "strategyParams": dict,
         "diagnostics": list[Diagnostic]}``.
     """
-    pragmas = extract_pf_trace_pragmas(pine_source)
-    tokens = Lexer(pine_source, filename=filename).tokenize()
-    ast = Parser(tokens, source=pine_source, filename=filename).parse()
+    ast, pragmas, budget = _parse_bounded(pine_source, filename)
     support_diagnostics = []
     if check_support:
         support_diagnostics = _support_diagnostics(ast, filename=filename)
         if any(d.level == Level.ERROR for d in support_diagnostics):
             raise CompileError(support_diagnostics)
+    budget.check(phase=Phase.ANALYZER)
     ast = expand_finite_choice_extrema_lengths(ast)
-    ctx = Analyzer(ast, filename=filename).analyze()
+    check_ast_depth(ast, filename)
+    budget.check(phase=Phase.ANALYZER)
+    ctx = Analyzer(ast, filename=filename, budget=budget).analyze()
+    budget.check(phase=Phase.ANALYZER)
     ctx.pf_trace_pragmas = pragmas
-    gen = CodeGen(ctx)
+    gen = CodeGen(ctx, budget=budget)
     cpp = gen.generate()
+    budget.check(phase=Phase.CODEGEN)
     return {
         "cpp": cpp,
         "inputs": gen.extract_input_manifest(),

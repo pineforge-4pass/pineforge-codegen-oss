@@ -87,6 +87,7 @@ classes from ``..ast_nodes``.
 
 from __future__ import annotations
 
+from ..errors import Phase
 from ..ast_nodes import (
     ASTNode,
     BinOp,
@@ -103,6 +104,7 @@ from ..ast_nodes import (
     TupleLiteral,
     UnaryOp,
 )
+from .helpers import pine_index_int_cast
 from .tables import (
     ADJUSTMENT_MAP,
     BAR_BUILTINS,
@@ -194,6 +196,10 @@ class ExprVisitor:
     def _visit_expr(self, node: ASTNode | None) -> str:
         if node is None:
             return "/* null */"
+        if self._budget is not None:
+            self._budget_visit_count += 1
+            if self._budget_visit_count % 128 == 0:
+                self._budget.check(node.loc, Phase.CODEGEN)
         if isinstance(node, NumberLiteral):
             return str(node.value)
         if isinstance(node, StringLiteral):
@@ -213,10 +219,7 @@ class ExprVisitor:
         if isinstance(node, UnaryOp):
             return self._visit_unaryop(node)
         if isinstance(node, Ternary):
-            c = self._visit_expr(node.condition)
-            t = self._visit_expr(node.true_val)
-            f = self._visit_expr(node.false_val)
-            return f"(({c}) ? ({t}) : ({f}))"
+            return self._visit_ternary(node)
         if isinstance(node, FuncCall):
             return self._visit_func_call(node)
         if isinstance(node, Subscript):
@@ -240,9 +243,38 @@ class ExprVisitor:
             return f"std::make_tuple({elems})"
         return "/* unknown */"
 
+    # A ``?:`` chain continued in its false arms (``a ? x : b ? y : z``) of at
+    # least this many links is emitted without the per-link brackets: they add
+    # three bracket levels per link and clang stops at 256
+    # (``-fbracket-depth``).  C++'s conditional operator is right-associative,
+    # so ``a ? x : b ? y : z`` reads ``a ? x : (b ? y : z)``.  Shorter chains
+    # keep their historical spelling byte for byte.
+    _FLAT_TERNARY_CHAIN = 32
+
+    def _visit_ternary(self, node: Ternary) -> str:
+        links = [node]
+        while isinstance(links[-1].false_val, Ternary):
+            links.append(links[-1].false_val)
+        if len(links) < self._FLAT_TERNARY_CHAIN:
+            c = self._coerce_bool_expr(
+                self._visit_expr(node.condition), node.condition
+            )
+            t = self._visit_expr(node.true_val)
+            f = self._visit_expr(node.false_val)
+            return f"(({c}) ? ({t}) : ({f}))"
+        arms = []
+        for link in links:
+            c = self._coerce_bool_expr(
+                self._visit_expr(link.condition), link.condition
+            )
+            t = self._visit_expr(link.true_val)
+            arms.append(f"({c}) ? ({t}) : ")
+        return f"({''.join(arms)}({self._visit_expr(links[-1].false_val)}))"
+
     # ------------------------------------------------------------------
     # Target-typed RHS lowering (drawing handles are C++ structs, not doubles)
     # ------------------------------------------------------------------
+
     def _is_na_expr(self, node) -> bool:
         """True for a bare ``na`` (keyword NaLiteral or ``na`` identifier)."""
         return (isinstance(node, NaLiteral)
@@ -341,7 +373,7 @@ class ExprVisitor:
             if drawing_target is not None:
                 return f"{drawing_target}{{}}"
             if target_cpp_type in self._udt_defs:
-                return f"{target_cpp_type}{{}}"
+                return f"{self._safe_name(target_cpp_type)}{{}}"
             if self._is_nullable_collection_cpp_type(target_cpp_type):
                 # Maps and matrices use default construction for a typed
                 # ``na`` ID. Their ``*.new`` factories create a valid ID,
@@ -540,7 +572,7 @@ class ExprVisitor:
                 or mutable_collection
                 else "read"
             )
-            return f"{arena}.{access}({owner}).{node.member}"
+            return f"{arena}.{access}({owner}).{self._safe_name(node.member)}"
         if isinstance(node.object, Identifier):
             ns = node.object.name
             if ns == "strategy":
@@ -915,7 +947,10 @@ class ExprVisitor:
             if name in self._enum_defs:
                 members = self._enum_defs[name]
                 if node.member in members:
-                    return f"{name}_{node.member}"
+                    return (
+                        f"{self._safe_name(name)}_"
+                        f"{self._safe_name(node.member)}"
+                    )
 
         # Unknown member access — emit as string constant (e.g., enum values)
         obj = self._visit_expr(node.object)
@@ -1061,6 +1096,12 @@ class ExprVisitor:
         right = self._visit_expr(node.right)
         cpp_ops = {"and": "&&", "or": "||"}
         op = cpp_ops.get(node.op, node.op)
+        if node.op in ("and", "or"):
+            # Pine converts numeric operands to two-state booleans before
+            # applying short-circuit logic.  C++ treats NaN and INT_MIN as
+            # true, so both operands need the same na-aware truthiness rule.
+            left = self._coerce_bool_expr(left, node.left)
+            right = self._coerce_bool_expr(right, node.right)
         if node.op == "+":
             lt = self._infer_type(node.left)
             rt = self._infer_type(node.right)
@@ -1087,22 +1128,31 @@ class ExprVisitor:
     def _visit_unaryop(self, node: UnaryOp) -> str:
         operand = self._visit_expr(node.operand)
         if node.op == "not":
-            return f"!({operand})"
+            return f"!({self._coerce_bool_expr(operand, node.operand)})"
         return f"({node.op}{operand})"
 
     def _visit_subscript(self, node: Subscript) -> str:
         idx = self._visit_expr(node.index)
+        # Series::operator[] accepts C++ int. A Pine int can be backed by an
+        # int64_t timestamp slot; implicitly narrowing its na sentinel to int
+        # turns it into zero on arm64 and reads the current bar. Preserve the
+        # original value type before narrowing every dynamic series offset.
+        series_idx = (
+            idx if (isinstance(node.index, NumberLiteral)
+                    and isinstance(node.index.value, int))
+            else pine_index_int_cast(idx)
+        )
         if isinstance(node.object, Identifier):
             name = node.object.name
             # Function parameters that are series — src[N] → src[N]
             if name in self._current_func_series_params:
-                return f"{self._safe_name(name)}[{idx}]"
+                return f"{self._safe_name(name)}[{series_idx}]"
             # Function parameters are scalars — src[0] → src, src[N>0] → src
             if name in self._current_func_param_types:
                 return self._safe_name(name)
             if name in BAR_FIELDS or name in BAR_SERIES_PUSH:
                 # Index matches Pine: [0] current bar, [k] k bars ago (runtime Series deque).
-                return f"_s_{name}[{idx}]"
+                return f"_s_{name}[{series_idx}]"
             safe = self._safe_name(name)
             # Apply per-call-site / exact block-member remap before deciding
             # whether the current lexical binding is a Series.
@@ -1110,9 +1160,16 @@ class ExprVisitor:
                 safe = self._active_var_remap[safe]
             if self._binding_is_series(name, safe):
                 # Same Pine [k] semantics as Series in runtime/series.hpp
-                return f"{safe}[{idx}]"
+                return f"{safe}[{series_idx}]"
             spec = self._collection_spec_for_name(name)
             if spec is not None and spec.kind in ("array", "map"):
+                self._codegen_warning(
+                    node,
+                    f"{spec.kind} history indexing uses the current collection "
+                    "element in PineForge; the engine does not retain per-bar "
+                    "collection IDs, so this result can differ from TradingView "
+                    "and a missing index is not represented faithfully.",
+                )
                 return f"{self._collection_receiver_expr(name)}[{idx}]"
         # Handle strategy.* history access (e.g., strategy.position_size[1])
         if isinstance(node.object, MemberAccess):
@@ -1124,7 +1181,7 @@ class ExprVisitor:
                     series_name = f"_strat_{member}"
                     if series_name not in self._strategy_series_vars:
                         self._strategy_series_vars.add(series_name)
-                    return f"{series_name}[{idx}]"
+                    return f"{series_name}[{series_idx}]"
         # History reference applied directly to an inline call result, e.g.
         # ``ta.highest(high, 10)[1]`` or ``f()[2]``. In Pine the call yields a
         # series, so ``[k]`` reads its value k bars ago — but the call lowers to
@@ -1143,7 +1200,11 @@ class ExprVisitor:
             # previous chart bar in every run mode (``_lazy_edge_ta_hoist_plan``).
             hoisted_member = self._hoisted_hist_reads.get(id(node))
             if hoisted_member is not None:
-                return f"{hoisted_member}[(int)({idx})]"
+                idx_int = self._coerce_int_slot(idx, node.index, "int")
+                if (idx_int == idx
+                        and not self._emitted_value_is_double(node.index)):
+                    idx_int = pine_index_int_cast(idx)
+                return f"{hoisted_member}[{idx_int}]"
             inner = self._visit_expr(node.object)
             cpp_t = self._infer_type(node.object)
             if cpp_t not in ("double", "int", "int64_t", "bool"):
@@ -1174,6 +1235,10 @@ class ExprVisitor:
                 # established call-local history fallback below.
                 ta_mem = self._ta_member_name(ta_site)
                 precalc = f"_precalc_{ta_mem}"
+                idx_int = self._coerce_int_slot(idx, node.index, "int")
+                if (idx_int == idx
+                        and not self._emitted_value_is_double(node.index)):
+                    idx_int = pine_index_int_cast(idx)
                 return (
                     f"([&]() -> {cpp_t} {{ "
                     f"if (_use_precalc) {{ "
@@ -1195,14 +1260,18 @@ class ExprVisitor:
                     f"{cpp_t} _hv = ({inner}); "
                     f"if (history_advances_new_bar()) {member}.push(_hv); "
                     f"else {member}.update(_hv); "
-                    f"return {member}[(int)({idx})]; }}())"
+                    f"return {member}[{idx_int}]; }}())"
                 )
+            idx_int = self._coerce_int_slot(idx, node.index, "int")
+            if (idx_int == idx
+                    and not self._emitted_value_is_double(node.index)):
+                idx_int = pine_index_int_cast(idx)
             return (
                 f"([&]() -> {cpp_t} {{ "
                 f"{cpp_t} _hv = ({inner}); "
                 f"if (history_advances_new_bar()) {member}.push(_hv); "
                 f"else {member}.update(_hv); "
-                f"return {member}[(int)({idx})]; }}())"
+                f"return {member}[{idx_int}]; }}())"
             )
         obj = self._visit_expr(node.object)
         # If subscripting a non-series variable (e.g., function parameter),
@@ -1213,4 +1282,8 @@ class ExprVisitor:
                     and name not in self.ctx.series_vars
                     and name not in self._var_names):
                 return obj
-        return f"{obj}[{idx}]"
+        idx_int = self._coerce_int_slot(idx, node.index, "int")
+        if (idx_int == idx
+                and not self._emitted_value_is_double(node.index)):
+            idx_int = pine_index_int_cast(idx)
+        return f"{obj}[{idx_int}]"

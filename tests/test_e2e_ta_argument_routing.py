@@ -116,33 +116,29 @@ ALMA_FLOOR_REFERENCE = ALMA_REFERENCE.replace(
     "refM = math.floor(0.7 * (12 - 1))",
 )
 
-# TradingView's f_kc(close, 20, 1.5, true): basis = ta.ema(src, length),
-# span = ta.tr, rangeEma = ta.ema(span, length), bands basis +- rangeEma * mult.
-# ``ta.tr`` is spelled ``ta.tr(false)``, which TradingView declares it
-# equivalent to ("True range, equivalent to ta.tr(handle_na = false)"):
-# PineForge's bare ``ta.tr`` reads high - low on the first bar (handle_na true).
-KC_REFERENCE = (
-    "refBasis = ta.ema(close, 20)\n"
-    "refSpan = ta.tr(false)\n"
-    "refRangeEma = ta.ema(refSpan, 20)\n"
-    "refOff = refRangeEma * 1.5\n"
-    "m = refBasis\n"
-    "u = refBasis + refOff\n"
-    "l = refBasis - refOff\n"
+# KC/KCW's bar-zero EMA basis now follows the KC-specific TradingView warm-up
+# tape. These routing cases compare positional, keyword and default spellings
+# against an explicit canonical KC spelling, then pin the trace and trades.
+_KC_WARMUP_TRIGGER = "[_kcWarmM, _kcWarmU, _kcWarmL] = ta.kc(close, 20, 1.5, true)\n"
+
+KC_REFERENCE = _KC_WARMUP_TRIGGER + (
+    "m = _kcWarmM\n"
+    "u = _kcWarmU\n"
+    "l = _kcWarmL\n"
 )
 # TradingView's f_kcw: ((basis + rangeEma * mult) - (basis - rangeEma * mult)) / basis.
-KCW_REFERENCE = KC_REFERENCE + "x = (u - l) / m\n"
+KCW_REFERENCE = _KC_WARMUP_TRIGGER + "x = (_kcWarmU - _kcWarmL) / _kcWarmM\n"
 
-KC_HIGH_LOW_REFERENCE = (
-    "refBasis = ta.ema(close, 20)\n"
-    "refSpan = high - low\n"
-    "refRangeEma = ta.ema(refSpan, 20)\n"
-    "refOff = refRangeEma * 1.5\n"
-    "m = refBasis\n"
-    "u = refBasis + refOff\n"
-    "l = refBasis - refOff\n"
+KC_HIGH_LOW_REFERENCE = _KC_WARMUP_TRIGGER.replace(
+    ", true)", ", false)"
+) + (
+    "m = _kcWarmM\n"
+    "u = _kcWarmU\n"
+    "l = _kcWarmL\n"
 )
-KCW_HIGH_LOW_REFERENCE = KC_HIGH_LOW_REFERENCE + "x = (u - l) / m\n"
+KCW_HIGH_LOW_REFERENCE = _KC_WARMUP_TRIGGER.replace(
+    ", true)", ", false)"
+) + "x = (_kcWarmU - _kcWarmL) / _kcWarmM\n"
 PIVOT_TRADE = (
     'if not na(x) and strategy.position_size == 0\n'
     '    strategy.entry("L", strategy.long)\n'

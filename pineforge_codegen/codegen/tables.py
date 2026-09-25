@@ -16,7 +16,30 @@ consumers should never reach for them directly.
 
 from __future__ import annotations
 
+import re
+
 from ..symbols import PineType
+from .helpers import na_preserving_int_cast, pine_index_int_cast, pine_truth_cast
+
+
+_PROVEN_INT_ARG = re.compile(
+    r"^\s*(?:(?:[-+]?\d+)|get_input_int\(.*\)|pine_(?:bar_index|year|month|dayofmonth|dayofweek|hour|minute|second|weekofyear)\(.*\))\s*$"
+)
+
+
+def _matrix_int_arg(value: str) -> str:
+    """Keep old casts for typed integer matrix indices; guard other values."""
+    if _PROVEN_INT_ARG.fullmatch(value):
+        return f"(int)({value})"
+    return pine_index_int_cast(value)
+
+
+def _pine_bool_arg(value: str) -> str:
+    """Keep literal bool spellings; guard numeric/dynamic bool arguments."""
+    stripped = value.strip()
+    if stripped in {"true", "false"}:
+        return value
+    return pine_truth_cast(value)
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +331,7 @@ PINE_TYPE_TO_CPP = {
     PineType.INT: "int", PineType.FLOAT: "double", PineType.BOOL: "bool",
     PineType.STRING: "std::string", PineType.NA: "double",
     PineType.UNKNOWN: "double", PineType.VOID: "double",
-    PineType.COLOR: "int",
+    PineType.COLOR: "int64_t",
     # Drawing-objects-as-data: the value-view handle structs (see
     # drawing.hpp). Explicit-hint decls (``var line x``), UDT-method drawing
     # params, and ``_type_for_decl`` resolve through here.
@@ -541,15 +564,14 @@ def _checked_array_index_prelude(
     )
 
 
-def _checked_array_range_prelude() -> str:
+def _checked_array_range_prelude(*, reject_inverted: bool = True) -> str:
     """Validate the half-open ``[index_from, index_to)`` range of fill/slice.
 
     Both endpoints are checked with ``allow_size`` (``index_to`` is exclusive,
     so ``size`` is a legal endpoint) and without negative normalization
     (neither function appears in the Pine v6 reference's negative-indexing
-    set). An inverted range is rejected rather than silently treated as empty:
-    ``begin()+from > begin()+to`` is undefined behaviour in the STL forms this
-    replaces, and no evidence pins TradingView's behaviour there.
+    set). TradingView treats an inverted ``fill`` range as empty, but raises
+    for an inverted ``slice`` range. The caller selects that distinction.
     """
     return (
         _checked_array_index_prelude(
@@ -558,12 +580,11 @@ def _checked_array_range_prelude() -> str:
         + _checked_array_index_prelude(
             normalize_negative=False, allow_size=True, name="index_to"
         )
-        + "if(__pf_array_index_from>__pf_array_index_to) "
-        "pine_runtime_error(std::string(\"Index range \")+"
-        "std::to_string(__pf_array_index_from)+\"..\"+"
-        "std::to_string(__pf_array_index_to)+"
-        "\" is invalid. Array size is \"+"
-        "std::to_string(__pf_array_size_index_from)); "
+        + (
+            "if(__pf_array_index_from>__pf_array_index_to) "
+            "pine_runtime_error(\"Index 'from' should be less than index 'to'.\"); "
+            if reject_inverted else ""
+        )
     )
 
 
@@ -587,13 +608,14 @@ def _checked_array_insert(a: str, args: list[str]) -> str:
 
 def _checked_array_fill_range(a: str, args: list[str]) -> str:
     """``array.fill(id, value, index_from, index_to)`` — bounded range fill."""
-    check = _checked_array_range_prelude()
+    check = _checked_array_range_prelude(reject_inverted=False)
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_array_value){ "
         "return [&](auto&& __pf_raw_index_from_value){ "
         "return [&](auto&& __pf_raw_index_to_value){ "
         f"{check}"
+        "if(__pf_array_index_from<__pf_array_index_to) "
         "std::fill(__pf_array.begin()+(size_t)__pf_array_index_from, "
         "__pf_array.begin()+(size_t)__pf_array_index_to, __pf_array_value); "
         f"}}(({args[2]})); }}(({args[1]})); }}(({args[0]})); }}(({a}))"
@@ -743,28 +765,28 @@ ARRAY_METHODS = {
     "min":       lambda a, args: f"({a}.empty()?na<double>():*std::min_element({a}.begin(),{a}.end()))",
     "max":       lambda a, args: f"({a}.empty()?na<double>():*std::max_element({a}.begin(),{a}.end()))",
     "range":     lambda a, args: f"({a}.empty()?na<double>():*std::max_element({a}.begin(),{a}.end())-*std::min_element({a}.begin(),{a}.end()))",
-    "every":     lambda a, args: f"std::all_of({a}.begin(),{a}.end(),[](double v){{return v!=0.0;}})",
-    "some":      lambda a, args: f"std::any_of({a}.begin(),{a}.end(),[](double v){{return v!=0.0;}})",
+    "every":     lambda a, args: f"std::all_of({a}.begin(),{a}.end(),[](auto _pf_raw){{ using _pf_val_t=typename std::decay_t<decltype({a})>::value_type; _pf_val_t v=_pf_raw; if constexpr(std::is_same_v<_pf_val_t,bool>) return v; else return !is_na(v) && v!=0; }})",
+    "some":      lambda a, args: f"std::any_of({a}.begin(),{a}.end(),[](auto _pf_raw){{ using _pf_val_t=typename std::decay_t<decltype({a})>::value_type; _pf_val_t v=_pf_raw; if constexpr(std::is_same_v<_pf_val_t,bool>) return v; else return !is_na(v) && v!=0; }})",
     # stdev/variance honor the optional 2nd ``biased`` arg (Pine v6:
     # biased=true → population (default), false → sample / n-1).
     "stdev":     lambda a, args: (
         f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); "
-        f"double _d=({args[0]})?(double){a}.size():((double){a}.size()-1.0); "
+        f"double _d=({_pine_bool_arg(args[0])})?(double){a}.size():((double){a}.size()-1.0); "
         f"return _d>0?std::sqrt(s/_d):na<double>(); }}()"
         if args else
         f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); return std::sqrt(s/{a}.size()); }}()"
     ),
     "variance":  lambda a, args: (
         f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); "
-        f"double _d=({args[0]})?(double){a}.size():((double){a}.size()-1.0); "
+        f"double _d=({_pine_bool_arg(args[0])})?(double){a}.size():((double){a}.size()-1.0); "
         f"return _d>0?s/_d:na<double>(); }}()"
         if args else
         f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); return s/{a}.size(); }}()"
     ),
     "median":    lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); int n=c.size(); return n%2?c[n/2]:(c[n/2-1]+c[n/2])/2.0; }}()",
     "mode":      lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); std::unordered_map<double,int> m; for(auto v:{a})m[v]++; double best=0; int bc=0; for(auto&[v,c]:m)if(c>bc||(c==bc&&v<best)){{bc=c;best=v;}} return best; }}()",
-    "percentile_linear_interpolation": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); double k=({args[0]}/100.0)*c.size()-0.5; int i=std::max(0,(int)k); double f=k-i; if(i+1>=(int)c.size()) return c.back(); return c[i]*(1-f)+c[i+1]*f; }}()",
-    "percentile_nearest_rank": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); int r=(int)std::ceil(({args[0]}/100.0)*c.size()); return (double)c[std::min(r-1,(int)c.size()-1)]; }}()",
+    "percentile_linear_interpolation": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); double k=({args[0]}/100.0)*c.size()-0.5; if(!std::isfinite(k)) return na<double>(); if(k>=c.size()-1.0) return (double)c.back(); int i=k<=0.0?0:(int)k; double f=k-i; return c[i]*(1-f)+c[i+1]*f; }}()",
+    "percentile_nearest_rank": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); double p=({args[0]}); if(is_na(p)) return (double)c.front(); double rank=std::ceil((p/100.0)*c.size()); if(!std::isfinite(rank)) return na<double>(); int r=(int)std::clamp(rank,1.0,(double)c.size()); return (double)c[r-1]; }}()",
     "percentrank": _checked_array_percentrank,
     "abs":       lambda a, args: f"[&](){{ std::vector<double> r; for(auto v:{a})r.push_back(std::abs(v)); return r; }}()",
     "join":      lambda a, args: "[&](){{ std::string r; for(size_t i=0;i<{arr}.size();i++){{ if(i>0)r+={sep}; r+=std::to_string({arr}[i]); }} return r; }}()".format(arr=a, sep=args[0] if args else 'std::string(",")'),
@@ -832,7 +854,7 @@ def _matrix_add_row(m: str, args: list) -> str:
     if len(args) == 1:
         return f"{m}.add_row((int)({m}.rows()), {args[0]})"
     if len(args) == 2:
-        return f"{m}.add_row((int)({args[0]}), {args[1]})"
+        return f"{m}.add_row({_matrix_int_arg(args[0])}, {args[1]})"
     raise IndexError("matrix.add_row")
 
 
@@ -841,7 +863,7 @@ def _matrix_add_col(m: str, args: list) -> str:
     if len(args) == 1:
         return f"{m}.add_col((int)({m}.columns()), {args[0]})"
     if len(args) == 2:
-        return f"{m}.add_col((int)({args[0]}), {args[1]})"
+        return f"{m}.add_col({_matrix_int_arg(args[0])}, {args[1]})"
     raise IndexError("matrix.add_col")
 
 
@@ -899,28 +921,28 @@ MATRIX_NUMERIC_ONLY: frozenset[str] = frozenset({
 MATRIX_SORT_ALLOWED_GENERIC_ELEMS: frozenset[str] = frozenset({"int", "bool", "string"})
 
 MATRIX_METHODS = {
-    "get":       lambda m, args: f"{m}.get((int)({args[0]}), (int)({args[1]}))",
-    "set":       lambda m, args: f"{m}.set((int)({args[0]}), (int)({args[1]}), {args[2]})",
+    "get":       lambda m, args: f"{m}.get({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])})",
+    "set":       lambda m, args: f"{m}.set({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])}, {args[2]})",
     "fill":      lambda m, args: f"{m}.fill({args[0]})",
-    "row":       lambda m, args: f"{m}.row((int)({args[0]}))",
-    "col":       lambda m, args: f"{m}.col((int)({args[0]}))",
+    "row":       lambda m, args: f"{m}.row({_matrix_int_arg(args[0])})",
+    "col":       lambda m, args: f"{m}.col({_matrix_int_arg(args[0])})",
     "rows":      lambda m, args: f"(int){m}.rows()",
     "columns":   lambda m, args: f"(int){m}.columns()",
     "add_row":   _matrix_add_row,
     "add_col":   _matrix_add_col,
     # ``remove_row`` is void in C++; Pine may assign the result, so we wrap
     # it in a lambda that returns a sentinel double after the side effect.
-    "remove_row": lambda m, args: f"[&](){{ {m}.remove_row((int)({args[0]})); return 0.0; }}()",
-    "remove_col":lambda m, args: f"[&](){{ {m}.remove_col((int)({args[0]})); return 0.0; }}()",
-    "swap_rows": lambda m, args: f"{m}.swap_rows((int)({args[0]}), (int)({args[1]}))",
-    "swap_columns": lambda m, args: f"{m}.swap_columns((int)({args[0]}), (int)({args[1]}))",
+    "remove_row": lambda m, args: f"[&](){{ {m}.remove_row({_matrix_int_arg(args[0])}); return 0.0; }}()",
+    "remove_col":lambda m, args: f"[&](){{ {m}.remove_col({_matrix_int_arg(args[0])}); return 0.0; }}()",
+    "swap_rows": lambda m, args: f"{m}.swap_rows({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])})",
+    "swap_columns": lambda m, args: f"{m}.swap_columns({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])})",
     "copy":      lambda m, args: f"{m}.copy()",
-    "submatrix": lambda m, args: f"{m}.submatrix((int)({args[0]}), (int)({args[1]}), (int)({args[2]}), (int)({args[3]}))",
-    "reshape":   lambda m, args: f"{m}.reshape((int)({args[0]}), (int)({args[1]}))",
+    "submatrix": lambda m, args: f"{m}.submatrix({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])}, {_matrix_int_arg(args[2])}, {_matrix_int_arg(args[3])})",
+    "reshape":   lambda m, args: f"{m}.reshape({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])})",
     "reverse":   lambda m, args: f"{m}.reverse()",
     "transpose": lambda m, args: f"{m}.transpose()",
-    "sort":      lambda m, args: f"{m}.sort((int)({args[0]}), {args[1]} != \"descending\")" if len(args)>1 else f"{m}.sort((int)({args[0]}))",
-    "concat":    lambda m, args: f"{m}.concat({args[0]}, (bool)({args[1]}))" if len(args)>1 else f"{m}.concat({args[0]}, true)",
+    "sort":      lambda m, args: f"{m}.sort({_matrix_int_arg(args[0])}, {args[1]} != \"descending\")" if len(args)>1 else f"{m}.sort({_matrix_int_arg(args[0])})",
+    "concat":    lambda m, args: f"{m}.concat({args[0]}, {pine_truth_cast(args[1])})" if len(args)>1 else f"{m}.concat({args[0]}, true)",
     "avg":       lambda m, args: f"{m}.avg()",
     "min":       lambda m, args: f"{m}.min()",
     "max":       lambda m, args: f"{m}.max()",
@@ -928,7 +950,7 @@ MATRIX_METHODS = {
     "sum":       lambda m, args: f"{m}.sum()",
     "diff":      lambda m, args: f"{m}.diff({args[0]})",
     "mult":      lambda m, args: f"{m}.mult({args[0]})",
-    "pow":       lambda m, args: f"{m}.pow((int)({args[0]}))",
+    "pow":       lambda m, args: f"{m}.pow({_matrix_int_arg(args[0])})",
     "det":       lambda m, args: f"{m}.det()",
     "inv":       lambda m, args: f"{m}.inv()",
     "pinv":      lambda m, args: f"{m}.pinv()",
@@ -1024,7 +1046,7 @@ STR_FUNC_MAP = {
     "lower":       lambda args: f"[&](){{ std::string s={args[0]}; std::transform(s.begin(),s.end(),s.begin(),::tolower); return s; }}()",
     "upper":       lambda args: f"[&](){{ std::string s={args[0]}; std::transform(s.begin(),s.end(),s.begin(),::toupper); return s; }}()",
     "trim":        lambda args: f'[&](){{ std::string s={args[0]}; s.erase(0,s.find_first_not_of(" \\t\\n\\r")); s.erase(s.find_last_not_of(" \\t\\n\\r")+1); return s; }}()',
-    "repeat":      lambda args: f"[&](){{ std::string r; for(int i=0;i<(int)({args[1]});i++) r+={args[0]}; return r; }}()",
+    "repeat":      lambda args: f"[&](){{ std::string r; for(int i=0;i<{na_preserving_int_cast(args[1])};i++) r+={args[0]}; return r; }}()",
     "match":       lambda args: f'pine_str_match({args[0]}, {args[1]})',
     "split":       lambda args: f'pine_str_split({args[0]}, {args[1]})',
     "format":      None,  # handled separately

@@ -3,7 +3,7 @@ name: Pyodide Gate
 # Differential parity gate: the transpiler in real wasm32 Pyodide must match
 # native CPython on every corpus input (success + failure). Heavier than the
 # unit matrix (loads Pyodide), so: on demand, nightly, and on PRs that touch the
-# gate itself. It does NOT block releases yet — that wiring is Phase 3.
+# gate itself. Release and npm publish workflows also run the full gate.
 # `gate` is a required status check on main, so this workflow runs on EVERY
 # pull request and reports; the path filter lives in-job: when a PR touches no
 # gate-relevant path the heavy steps are skipped and the check is trivially
@@ -68,6 +68,10 @@ jobs:
       - name: Selftest (comparator catches divergences)
         if: steps.changes.outputs.relevant == 'true'
         run: npm run gate:selftest
+
+      - name: Audit Node dependencies (high and critical)
+        if: steps.changes.outputs.relevant == 'true'
+        run: npm audit --audit-level=high
 
       - name: Run differential gate (full corpus)
         if: steps.changes.outputs.relevant == 'true'

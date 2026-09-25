@@ -30,6 +30,7 @@ from ..analyzer import (
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from ..limits import TimeBudget
 from ..pine_spelling import (
     input_call_spans, pine_string_literal, spell_input_call, sub_identifiers,
 )
@@ -106,7 +107,7 @@ TA_TUPLE_RESULT_TYPES = {
 
 # CPP_RESERVED + the NamingHelper mixin are pulled in from helpers.py so the
 # small naming/walk utilities can be shared with future visitor mixins.
-from .helpers import CPP_RESERVED, NamingHelper
+from .helpers import CPP_RESERVED, NamingHelper, na_preserving_int_cast, pine_truth_cast
 from .constant_fold import fold_numeric_expression
 
 # TypeInferer mixin owns the ~15 type-spec / C++-type inference helpers
@@ -187,8 +188,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     because the chain shares the constructor constant folder.
     """
 
-    def __init__(self, ctx: AnalyzerContext) -> None:
+    def __init__(self, ctx: AnalyzerContext,
+                 budget: TimeBudget | None = None) -> None:
         self.ctx = ctx
+        self._budget = budget
+        self._budget_visit_count = 0
+        self._initialise_safe_names(ctx.ast)
         # Lexical Pine names remain in ``ctx.func_var_members``.  This overlay
         # carries exact class-member identities only for collision-qualified
         # ordinary FuncDefs (identity mappings for every other ordinary UDF).
@@ -1170,6 +1175,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         top_level_node_ids = {id(stmt) for stmt in self.ctx.ast.body}
         for node_id, meta in metadata_by_node.items():
             stmt, member_name, ptype, init_str, is_callable_scoped = meta
+            if self._budget is not None:
+                # Each declaration rescans every declaration.
+                self._budget.check(stmt.loc, Phase.CODEGEN)
             if not isinstance(stmt, VarDecl) or not (stmt.is_var or stmt.is_varip):
                 continue
             stmt_spec = type_specs_by_node.get(node_id)
@@ -3872,11 +3880,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # The two-phase order also permits self/nested UDT fields without
         # embedding a C++ type recursively by value.
         for type_name in self._udt_defs:
-            lines.append(f"struct {type_name} {{")
+            safe_type_name = self._safe_name(type_name)
+            lines.append(f"struct {safe_type_name} {{")
             lines.append("    int32_t __pf_id = -1;")
             lines.append("};")
             lines.append(
-                f"inline bool is_na(const {type_name}& _z) "
+                f"inline bool is_na(const {safe_type_name}& _z) "
                 "{ return _z.__pf_id < 0; }"
             )
             lines.append("")
@@ -4076,7 +4085,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if cpp_type == "int":
                     cpp_type = "int64_t"
                 default = self._default_for_spec(spec)
-                lines.append(f"    {cpp_type} {f.name} = {default};")
+                lines.append(f"    {cpp_type} {self._safe_name(f.name)} = {default};")
             lines.append("};")
             lines.append("")
 
@@ -4085,15 +4094,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 1c. Enum constants + string tables for str.tostring(enumVar)
         for enum_name, members in self._enum_defs.items():
+            safe_enum_name = self._safe_name(enum_name)
             for i, member in enumerate(members):
-                lines.append(f'const int {enum_name}_{member} = {i};')
+                lines.append(
+                    f'const int {safe_enum_name}_{self._safe_name(member)} = {i};'
+                )
             strs = self._enum_member_strings.get(enum_name)
             if strs and len(strs) == len(members):
                 parts = ", ".join(
                     f'std::string("{self._cpp_string_escape(s)}")' for s in strs
                 )
                 lines.append(
-                    f"static const std::string {enum_name}_str_values[] = {{{parts}}};"
+                    f"static const std::string {safe_enum_name}_str_values[] = {{{parts}}};"
                 )
             lines.append("")
 
@@ -4291,6 +4303,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if name in seen_var_members:
                 continue
             seen_var_members.add(name)
+            if self._budget is not None:
+                # _callable_var_udt_spec scans every declaration.
+                self._budget.check(phase=Phase.CODEGEN)
             safe = self._safe_name(name)
             callable_collection_spec = (
                 None
@@ -4398,7 +4413,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         udt_type = udt_name
                         break
             if udt_type:
-                lines.append(f"    {udt_type} {safe};")
+                lines.append(f"    {self._safe_name(udt_type)} {safe};")
                 continue
             cpp_type = PINE_TYPE_TO_CPP.get(ptype, "double")
             # Promote int->int64_t when init RHS is an int64-returning builtin
@@ -4501,10 +4516,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if _draw_cpp is not None:
                     lines.append(f"    {_draw_cpp} {safe} = {_draw_cpp}{{}};")
                 else:
-                    lines.append(f"    {udt_t} {safe} = {udt_t}{{}};")
+                    udt_cpp = self._safe_name(udt_t)
+                    lines.append(f"    {udt_cpp} {safe} = {udt_cpp}{{}};")
             else:
                 expr = self.ctx.global_expr_map.get(name) if hasattr(self.ctx, "global_expr_map") else None
-                if (
+                if self._global_color_hint(name):
+                    cpp_type = "int64_t"
+                elif self._global_bool_hint(name):
+                    cpp_type = "bool"
+                elif (
                     name in self._direct_program_tuple_binding_names
                     and ptype == PineType.BOOL
                 ):
@@ -4764,7 +4784,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return (
             (site.class_name == "_PFALMA" and position == 3)
             or (site.class_name in ("_PFKC", "_PFKCW") and position == 2)
+            or (site.class_name == "ta::TR" and position == 0)
+            or (site.class_name in ("ta::StdDev", "ta::Variance") and position == 1)
         )
+
+    @staticmethod
+    def _ta_ctor_bool_cpp(value: str) -> str:
+        """Pine truthiness for a runtime TA constructor flag."""
+        if value.strip() in {"true", "false"}:
+            return value
+        return pine_truth_cast(value)
 
     # An inline ``input.*()`` call inside a ctor-arg / derived-length spelling
     # is one leaf of the expression. It qualifies exactly when its bound
@@ -5221,7 +5250,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # integer length.
         had_math = "std::" in rewritten or bool(re.search(r"\btimeframe\b", expanded))
         if had_math:
-            return f"(int)({rewritten})"
+            return na_preserving_int_cast(rewritten)
         return rewritten
 
     def _lower_reset_expr_via_visitor(self, expanded: str) -> str | None:
@@ -5265,7 +5294,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # unwrapped, so simple sites stay byte-identical to the legacy output.
         if ("std::" in rendered or "(double)" in rendered
                 or "script_tf_" in rendered):
-            return f"(int)({rendered})"
+            return na_preserving_int_cast(rendered)
         return rendered
 
 
@@ -5280,14 +5309,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         input's default (or ``1``) under every override."""
         args: list[str] = []
         any_runtime = False
-        for a in site.ctor_args:
+        for arg_pos, a in enumerate(site.ctor_args):
             rt = self._runtime_ctor_arg_for_reset(a)
             if rt is not None:
-                args.append(rt)
+                rendered = rt
                 any_runtime = True
             else:
                 resolved = self._resolve_ta_ctor_arg(a)
-                args.append(resolved if self._is_compile_time_value(resolved) else "1")
+                rendered = resolved if self._is_compile_time_value(resolved) else "1"
+            if self._ta_ctor_arg_is_bool(site, arg_pos):
+                rendered = self._ta_ctor_bool_cpp(rendered)
+            args.append(rendered)
         return args, any_runtime
 
     def _collect_ta_runtime_resets(
@@ -5391,14 +5423,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                                       "over those for TA lengths."),
                             )
                         if rt is not None:
-                            runtime_args.append(rt)
+                            rendered = rt
                             any_runtime = True
                         else:
-                            runtime_args.append(
+                            rendered = (
                                 resolved
                                 if self._is_compile_time_value(resolved)
                                 else "1"
                             )
+                        if self._ta_ctor_arg_is_bool(site, arg_pos):
+                            rendered = self._ta_ctor_bool_cpp(rendered)
+                        runtime_args.append(rendered)
                     if any_runtime:
                         resets.append(
                             f"{variant['member_name']} = {site.class_name}({', '.join(runtime_args)});"

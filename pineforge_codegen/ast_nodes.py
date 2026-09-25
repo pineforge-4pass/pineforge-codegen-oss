@@ -26,6 +26,28 @@ class ASTNode:
     annotations: dict | None = field(default=None, compare=False)
 
 
+class ArgOrder:
+    """The written order of a call's positional and keyword arguments.
+
+    It holds the same nodes as the call's ``args`` and ``kwargs``.  It is not a
+    list, tuple or dict and has no ``__dict__``, so the generic AST walkers,
+    which descend into those, do not visit every argument a second time: the
+    second visit doubled the work at each nested call, and ``f(f(f(...)))``
+    cost 2**depth.
+    """
+
+    __slots__ = ("nodes",)
+
+    def __init__(self, nodes) -> None:
+        self.nodes = tuple(nodes)
+
+    def __iter__(self):
+        return iter(self.nodes)
+
+    def __len__(self) -> int:
+        return len(self.nodes)
+
+
 # ---------------------------------------------------------------------------
 # Top-level / structural nodes
 # ---------------------------------------------------------------------------
