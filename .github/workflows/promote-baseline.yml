@@ -93,7 +93,7 @@ jobs:
             *)         echo "repo=engine"  >> "$GITHUB_OUTPUT" ;;
           esac
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -153,7 +153,7 @@ jobs:
 
       - name: Checkout campaign tooling (pineforge-workflow)
         if: steps.ci.outputs.green == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ vars.WORKFLOW_REPO || 'pineforge-4pass/pineforge-workflow' }}
           ref: ${{ vars.WORKFLOW_REF || 'main' }}
