@@ -343,10 +343,13 @@ you delete or weaken the special case, the test will tell you.
 6. **`request.security` is strict.** Only `symbol`, `timeframe`,
   `expression`, `gaps`, `lookahead`, and `ignore_invalid_symbol` are
    allowed (`ignore_invalid_symbol` is accepted but inert — the symbol is
-   always the chart symbol, so no symbol can be invalid). Symbol must
-   resolve to the current chart symbol (`syminfo.tickerid` or
-   `syminfo.ticker`, incl. first-binding aliases and
-   `ticker.inherit/standard/heikinashi(<chart sym>)`). `gaps` and
+   always the chart symbol, so no symbol can be invalid). An unconditional
+   alternate symbol is rejected. Chart-symbol aliases resolve by lexical
+   binding, so a local rebind cannot taint an unrelated global. A ternary
+   symbol warns if either arm can select an alternate feed; its existing
+   chart-symbol lowering stays accepted to preserve working scripts. Safe
+   forms include `syminfo.tickerid`, `syminfo.ticker`, and
+   `ticker.inherit/standard/heikinashi(<chart sym>)`. `gaps` and
    `lookahead` must be the literal `barmerge.gaps_*` /
    `barmerge.lookahead_*` member access (codegen does not parse other
    shapes). `barmerge.lookahead_on` is ACCEPTED with a repaint WARNING —

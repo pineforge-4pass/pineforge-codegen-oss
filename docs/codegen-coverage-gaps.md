@@ -97,22 +97,27 @@ used throughout codegen, so this lane preserves the compiling lowering and
 warns at each slice call. The probe establishes that primitive elements alias
 in TradingView; the earlier “UDTs only” possibility is refuted.
 
-## Residual left open by the request.security rebind guard (2026-07-25)
+## request.security symbol follow-up (2026-09-25)
 
-`_scalar_rebinds` is keyed by BARE NAME with no scope resolution, mirroring
-the existing `_scalar_defs`. A divergent `:=` rebind of a *local* named `sym`
-inside a user function therefore also disqualifies an unrelated *global*
-`sym` used as a `request.security` symbol. That direction is fail-closed
-(over-rejection, never a silent wrong-symbol run), but a scoped symbol table
-would be the exact fix. A 788-source differential shows the over-rejection
-costs nothing on the current corpus.
+The support checker now indexes declarations, reads and rebinds by lexical
+binding for the security symbol argument. A local `sym` inside a function no
+longer taints an unrelated global `sym`; a rebind of the global inside an `if`
+still disqualifies it. A TradingView probe with the local rebind and a global
+chart-symbol request recorded 32/32 `chart-feed` entries (covered tape SHA-256
+`8a0492f71ffc489e45c3eb80907bf796658719e2ef7efa7c0df312e8eeb28917`).
 
-**Still open — the ternary branch hole (KI-47(a)).** `_is_current_symbol_expr`
-still accepts `cond ? "EXCH:OTHER" : syminfo.tickerid` because EITHER branch
-resolving to the chart symbol is enough. Tightening it to require BOTH
-branches is correct in principle but rejects
-`data/standard/doriannnq-tjr-v4-strategy`, whose alternate branch is
-unreachable at its declared input configuration (`smtSym` defaults to `""`)
-and which grades Excellent at 44/44 / 100% match. Closing this needs the
-checker to see the effective input configuration, which it currently cannot
-(see the analysis in the R6 handoff). Held deliberately, not overlooked.
+A second TradingView probe chose `BINANCE:BTCUSDT.P` in the true ternary arm
+on an ETH chart and recorded 32/32 `alternate-feed` entries (covered tape
+SHA-256 `a9aa27e13b64260eba08cafec3e345ddc7e06f378f5c6b94e5f6955eb32abaf3`).
+The generated security evaluation has no alternate-symbol feed. The checker
+therefore tests *both* ternary arms, including arms reached through aliases,
+and warns when any path can select another symbol. It preserves previously
+accepted scripts and their current-symbol lowering; an unconditional alternate
+symbol remains rejected. A legacy bare-name admission that lexical resolution
+finds unsafe also remains accepted with a warning, preventing a new refusal
+before the supervisor's population sweep.
+
+The 314 public corpus strategies all still transpile, and their emitted C++
+hashes are unchanged. There is no public TU or public trade tape to regrade
+for this lane; the changed behavior is diagnostic or accepts a formerly
+over-rejected source.
