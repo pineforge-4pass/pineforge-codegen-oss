@@ -27,6 +27,7 @@ _VERSION_RE = re.compile(
     r"(?:-(alpha|beta|rc)\.(0|[1-9][0-9]*))?"
 )
 _PEP440_PRE = {"alpha": "a", "beta": "b", "rc": "rc"}
+_PRE_RANK = {"alpha": 0, "beta": 1, "rc": 2}
 
 
 def _parse(version: str):
@@ -36,6 +37,13 @@ def _parse(version: str):
                          "X.Y.Z-{alpha,beta,rc}.N (for example 1.0.0-rc.1)")
     major, minor, patch, pre, num = m.groups()
     return int(major), int(minor), int(patch), pre, num
+
+
+def _key(version: str) -> tuple:
+    """Semver precedence: a release outranks every prerelease of its X.Y.Z."""
+    major, minor, patch, pre, num = _parse(version)
+    tail = (1, 0, 0) if pre is None else (0, _PRE_RANK[pre], int(num))
+    return (major, minor, patch) + tail
 
 
 def channels(version: str) -> Dict[str, str]:
@@ -54,7 +62,13 @@ def channels(version: str) -> Dict[str, str]:
 def next_version(current: str, bump: str, override: str) -> str:
     if override:
         new = override[1:] if override.startswith("v") else override
-        _parse(new)
+        major, _, _, pre, _ = _parse(new)
+        if pre is not None and major == 0:
+            raise ValueError(f"refusing prerelease {new}: the hub pairs prereleases only "
+                             "from 1.0.0 on (the first is 1.0.0-rc.1)")
+        # PyPI uploads are permanent: never publish at or below the current VERSION.
+        if _key(new) <= _key(current):
+            raise ValueError(f"override {new} is not above VERSION {current}")
         return new
     major, minor, patch, pre, _ = _parse(current)
     if pre is not None:

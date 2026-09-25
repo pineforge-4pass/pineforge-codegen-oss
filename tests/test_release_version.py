@@ -99,6 +99,24 @@ def test_override_sets_a_prerelease_or_its_release():
     assert rv.next_version("0.10.4", "patch", "v1.0.0-rc.1") == "1.0.0-rc.1"
 
 
+@pytest.mark.parametrize("current,override", [
+    ("1.0.0", "1.0.0-rc.3"),   # a prerelease of an already released version
+    ("1.0.0", "0.10.5"),       # a lower release
+    ("1.0.0-rc.2", "1.0.0-rc.1"),
+    ("1.0.0", "1.0.0"),        # PyPI would refuse the re-upload after tagging
+])
+def test_override_must_move_forward(current, override):
+    # PyPI uploads are permanent and npm/PyPI/GitHub would all go backwards.
+    with pytest.raises(ValueError, match="not above"):
+        rv.next_version(current, "patch", override)
+
+
+def test_0x_prereleases_are_refused():
+    # The hub pairs prereleases only from 1.0.0 on; a 0.x rc could never ship.
+    with pytest.raises(ValueError, match="1.0.0"):
+        rv.next_version("0.10.4", "patch", "0.11.0-rc.1")
+
+
 def test_bump_from_a_prerelease_needs_an_explicit_override():
     with pytest.raises(ValueError, match="override"):
         rv.next_version("1.0.0-rc.1", "patch", "")
@@ -124,6 +142,12 @@ def test_cli_channels_reads_one_version():
     proc, out = cli("channels", "1.0.0")
     assert proc.returncode == 0, proc.stderr
     assert (out["pypi"], out["npm_dist_tag"], out["prerelease"]) == ("1.0.0", "latest", "false")
+
+
+def test_cli_names_both_versions_for_a_backwards_override():
+    proc, out = cli("next", "--current=1.0.0", "--bump=patch", "--override=0.10.5")
+    assert (proc.returncode, out) == (1, {})
+    assert "0.10.5" in proc.stderr and "1.0.0" in proc.stderr
 
 
 def test_cli_fails_loud_without_outputs():
