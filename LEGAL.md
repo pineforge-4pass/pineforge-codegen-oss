@@ -17,7 +17,7 @@ A pure-Python PineScript v6 → C++ transpiler that emits source against the pub
 
 ## Third-party components
 
-The transpiler has **no runtime dependencies** (one function, `transpile()`). Development/test extras declared in `pyproject.toml` (`pytest`, etc.) are under their own upstream licenses. The opt-in compile checks invoke a C++ compiler against the separately-licensed Apache-2.0 engine headers; they skip cleanly without an engine checkout.
+The transpiler has **no runtime dependencies** (`transpile()` and `transpile_full()` are its supported Python entry points). Development/test extras declared in `pyproject.toml` (`pytest`, etc.) are under their own upstream licenses. The opt-in compile checks invoke a C++ compiler against the separately-licensed Apache-2.0 engine headers; they skip cleanly without an engine checkout.
 
 ## Trademarks and affiliation
 
@@ -25,7 +25,7 @@ The transpiler has **no runtime dependencies** (one function, `transpile()`). De
 
 ## Contributions
 
-Contributions are accepted under a Developer Certificate of Origin (`Signed-off-by`). Because this project is **dual-licensed** (source-available + a sold commercial license), material contributions require a Contributor License Agreement granting PineForge the right to include the contribution in the commercial license; otherwise it cannot be accepted. See `CONTRIBUTING` (or contact luis@4pass.com.tw) before opening a material PR.
+Contributions are accepted under a Developer Certificate of Origin (`Signed-off-by`). Because this project is **dual-licensed** (source-available + a sold commercial license), material contributions require a Contributor License Agreement granting PineForge the right to include the contribution in the commercial license; otherwise it cannot be accepted. See [CONTRIBUTING.md](CONTRIBUTING.md) (or contact luis@4pass.com.tw) before opening a material PR.
 
 ## No warranty
 

@@ -18,30 +18,21 @@ because "it's just a small change" is how the once-broken paths pinned
 in `test_regression_*` survived for so long.
 
 ```bash
-# 1. Full pytest suite WITH the engine env var. Without the env var
-#    the compile-only tests cleanly skip, which means every codegen
-#    change goes unverified at the C++ level. The env var is NOT
-#    optional for change verification — it is only optional for a
-#    quick "did I break a unit test" sanity loop during development.
+# 1. Full pytest suite WITH the paired engine headers, Eigen, generated
+#    version header and built runtime. Missing native inputs cause tests
+#    to skip, which leaves C++ behavior unverified. Explicit paths make
+#    coverage reproducible even if a sibling checkout is auto-detected.
 #    CRITICAL: Always rebuild the sibling pineforge-engine first if any
 #    C++ headers or source changed!
 export PINEFORGE_ENGINE_INCLUDE=../pineforge-engine/include
-# Eigen is not on a system include path on every machine; without it
-# every compile test skips even with a good engine include. Point this
-# at the tree CMake fetched if `Eigen/Dense` is not found by default:
+# Point Eigen at a system include tree or CMake's fetched source:
 export PINEFORGE_EIGEN_INCLUDE=../pineforge-engine/build/_deps/eigen-src
-# A built runtime unlocks the run-the-emitted-TU tests (they skip without
-# it); auto-detected from a build*/lib/ beside the engine checkout.
+# The generated version header, built runtime and corpus unlock their tests:
+export PINEFORGE_GENERATED_INCLUDE=../pineforge-engine/build/include
 export PINEFORGE_ENGINE_LIB=../pineforge-engine/build/lib/libpineforge.a
-pytest
-
-# Measured 2026-09-24: 3157 passed, 2 skipped, 0 failed (~25-40 min on 16
-# cores, depending on load; the nineteen tests/test_e2e_*.py modules build
-# and run their strategy libraries in ~9 min of it).
-#   Skip 1: test_parser.py:350, empty parameter set (pre-existing).
-#   Skip 2: test_codegen_golden.py:39, which needs the engine corpus at
-#           the sibling path and skips when the engine include is
-#           somewhere else.
+export PINEFORGE_ENGINE_CORPUS=../pineforge-engine/corpus
+python -m pytest -ra
+# Read the result and skip reasons; use --collect-only -q for today's count.
 ```
 
 ```bash
@@ -49,11 +40,8 @@ pytest
 #    runs this. Listed separately because it is the load-bearing
 #    invariant: every Pine v6 strategy in the engine's parity corpus
 #    must transpile + compile against the engine headers.)
-pytest tests/test_compile_corpus.py
-
-# Measured 2026-09-24: 314 passed in ~6-7 min (load average ~20-190)
-#   (312 corpus/validation probes at corpus gitlink 9182e3d, plus the 2
-#    parity anomalies).
+python -m pytest -ra tests/test_compile_corpus.py
+# Confirm that collection found the public corpus and no compile test skipped.
 ```
 
 If either check newly fails, fix it before doing anything else. Adding
@@ -62,23 +50,26 @@ silence a corpus failure is only acceptable when the failure represents
 an intentional, documented support drop — and even then, only with a
 matching one-line rationale next to the entry.
 
-The bare `pytest` (no env var) command remains useful during
-development for a sub-second feedback loop on the transpiler-only path,
-but it is **not sufficient** to validate a change. Always finish with
-the env-var run.
+A quick pytest run without a resolvable engine remains useful during
+development, but it is **not sufficient** to validate a change. Always
+finish with the engine-enabled run and inspect its skip reasons.
 
 ## What this is
 
 PineScript v6 → C++ transpiler that emits source linking against the
 `pineforge-engine` runtime (`<pineforge/engine.hpp>`, `<pineforge/ta.hpp>`,
-…). Public entry point is `pineforge_codegen.transpile(pine_source) -> str`.
+…). Public Python entry points are `pineforge_codegen.transpile()` and
+`pineforge_codegen.transpile_full()`; the Pyodide package ships the
+`gate/glue.py` JSON protocol. See `docs/PUBLIC_CONTRACT.md`.
 
 This is the **source-available** half of the PineForge stack (PolyForm
 Noncommercial — see `LICENSE`). The runtime half (`pineforge-engine`,
 Apache-2.0) lives in a sibling repo and is typically checked out at
-`../pineforge-engine`. Versions are aligned:
-`pineforge-codegen 0.X.Y` requires `pineforge-engine` at the matching ABI
-tag — see the version table in `README.md`.
+`../pineforge-engine`. A released codegen `X.Y.Z` pairs only with engine
+`vX.Y.Z`; prereleases match exactly. Use that release's generated headers and
+static library, and regenerate C++ and relink on every pair change. Equal
+`PF_ABI_VERSION` values are insufficient. Engine main currently uses the
+`engine_script_run_v19` C++ namespace; see `README.md` and `CONTRIBUTING.md`.
 
 ## Pipeline
 
@@ -186,8 +177,8 @@ tests/
 ├── test_compile_corpus.py          Parametrized over every
 │                                   corpus/<bucket>/<strategy>/strategy.pine
 │                                   from a sibling pineforge-engine
-│                                   checkout (314 items at corpus gitlink
-│                                   9182e3d, ~6-7 min).
+│                                   checkout; collection size follows
+│                                   the checked-out public corpus.
 ├── test_official_surface.py        Locks SUPPORTED_* and signatures.* to
 │                                   the Pine v6 official inventory
 │                                   (sourced from user-pinescript-docs MCP).
@@ -201,18 +192,18 @@ tests/
 
 ## Architectural invariants — do not break
 
-1. **Versioned in lockstep with the engine ABI.** Bumping
-  `pyproject.toml::version` requires a matching `pineforge-engine` tag
-   that exposes the C ABI shape we emit against. The transpiler does NOT
-   include any runtime artifact at install time — the consumer links
-   `libpineforge.a` themselves.
+1. **Exact engine release pairing.** Bumping `VERSION` requires the
+   matching `pineforge-engine` tag (`X.Y.Z` with `vX.Y.Z`; prereleases exactly).
+   Use that tag's generated headers and `libpineforge.a`; regenerate every
+   strategy TU and relink on a pair change. `PF_ABI_VERSION` equality alone is
+   insufficient. The transpiler does not ship a runtime artifact.
 2. **Pure-Python, zero runtime deps.** `pyproject.toml::dependencies = []`.
   Do not introduce a runtime dependency. `dev` extras are pytest only.
-3. **Tests never invoke a C++ compiler by default.** The compile-only
-  test harness (`tests/_compile.py`) is opt-in via
-   `PINEFORGE_ENGINE_INCLUDE`. Without that env var, every compile test
-   skips with a message naming the missing knob. Don't make compile
-   testing mandatory in CI without first plumbing the engine into CI.
+3. **Compile tests need an engine checkout and Eigen.** The harness
+   (`tests/_compile.py`) uses `PINEFORGE_ENGINE_INCLUDE` or a resolvable sibling
+   checkout. It skips when the engine or Eigen is absent; runtime tests also
+   need a built `libpineforge.a`. Do not make compile testing mandatory in CI
+   without first plumbing the paired engine into CI.
 4. `**SUPPORTED_*` whitelists must equal the Pine v6 official inventory**
   (modulo the `KNOWN_*_OMISSIONS` exception sets in
    `tests/test_official_surface.py`). Adding a Pine surface item to
@@ -221,7 +212,7 @@ tests/
    one-line rationale right next to the constant.
 5. **Every corpus strategy must transpile + compile.**
   `test_compile_corpus.py` parametrizes over every
-   `corpus/*/*/strategy.pine` file (314 items at corpus gitlink 9182e3d).
+   `corpus/*/*/strategy.pine` file in the checked-out public corpus.
    Per the "REQUIRED before claiming any change is done" block at the top
    of this file, this is a
    mandatory check on every change — not just changes to `analyzer/` or
@@ -576,38 +567,27 @@ See "REQUIRED before claiming any change is done" at the top of this
 file for the mandatory verification path. Recap:
 
 ```bash
-# Quick dev loop — pure transpiler, zero native deps. ~10 s.
-# Use during development for fast iteration. NOT sufficient to claim
-# a change is done — 844 compile and E2E tests skip in this mode.
-pytest
+# Quick feedback; native tests skip if no engine and Eigen are resolvable.
+python -m pytest -ra
 
-# REQUIRED before claiming any change is done. ~25-40 min.
+# Required release check with the matching engine source and build.
 export PINEFORGE_ENGINE_INCLUDE=/path/to/pineforge-engine/include
-pytest
+export PINEFORGE_EIGEN_INCLUDE=/path/to/eigen-headers
+export PINEFORGE_GENERATED_INCLUDE=/path/to/engine-build/include
+export PINEFORGE_ENGINE_LIB=/path/to/engine-build/lib/libpineforge.a
+export PINEFORGE_ENGINE_CORPUS=/path/to/pineforge-engine/corpus
+python -m pytest -ra
+python -m pytest -ra tests/test_compile_corpus.py
 
-# Subset shortcut — corpus sweep alone (~6-7 min) when iterating on a
-# change that you suspect specifically affects corpus coverage.
-pytest tests/test_compile_corpus.py
+# Ask pytest for the current collection size instead of relying on a fixed count.
+python -m pytest --collect-only -q
 ```
 
-Expected counts at HEAD:
-
-
-| Mode                                                    | passed | skipped | failed |
-| ------------------------------------------------------- | ------ | ------- | ------ |
-| With engine headers + Eigen + a built runtime           | 3157   | 2       | **0**  |
-| Without a resolvable compile environment                | 2002   | 844     | **0**  |
-
-Measured 2026-09-24. The 2 skips are `test_parser.py:350` (empty parameter
-set, pre-existing, unrelated) and `test_codegen_golden.py:39` (wants the
-engine corpus at the sibling path). The two modes do not sum to the same
-total: `test_compile_corpus.py` parametrizes over the corpus it can actually
-see, so it collects fewer items without one. Auto-detection:
-`tests/_compile.py` walks up to 8 directory levels looking for a
-`pineforge-engine/include` sibling — no env var needed when the engine repo is
-checked out at `../pineforge-engine` — but Eigen and the built runtime have no
-sibling fallback beyond `build*/`, so check the skip count, not just the
-failure count, before believing a green run covered the C++ level.
+The full suite includes the corpus sweep. The summary and skip reasons are
+more important than a frozen pass count: missing engine headers, Eigen,
+`libpineforge.a`, or corpus data can leave a green but incomplete run.
+`tests/_compile.py` can auto-detect a sibling engine checkout, but explicitly
+setting all paths makes the verification reproducible. See `CONTRIBUTING.md`.
 
 ## Conventions
 
@@ -638,14 +618,10 @@ matching entry in the per-namespace official set in
 - **Never delete a `test_regression_*` case** without first
 understanding which once-broken codepath it pins. The xfail->pass
 history is intentional.
-- **Always finish with `PINEFORGE_ENGINE_INCLUDE=... pytest`.** See the
-"REQUIRED before claiming any change is done" block at the top.
-A diff that passes the pure-transpiler tests but fails on 1 / 314
-corpus items (or one compile smoke) is still a regression.
-Don't report a change as done until the full engine-env run (3157 passed,
-measured 2026-09-24) is green.
-- **Don't update the version in `pyproject.toml`** without confirming
-the engine ABI tag listed in the README's version table actually
-exists upstream and exposes the symbols we emit.
+- **Always finish with the full engine-enabled `python -m pytest -ra`**
+  and the corpus gate shown at the top. A single corpus or compile-smoke
+  failure is a regression; inspect skips to confirm the C++ paths ran.
+- **Don't update `VERSION`** without confirming the exact matching engine tag
+  and its generated headers and static library are available.
 - **Don't introduce runtime dependencies.** Pure-Python is the install
 contract. Test extras (pytest) are the only allowed `[project.optional-dependencies]`.

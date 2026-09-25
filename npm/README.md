@@ -18,8 +18,6 @@ the package exists:
    `npm publish --access=public` (one time).
 3. On npmjs.com, configure the package's Trusted Publisher: GitHub Actions,
    repo `pineforge-4pass/pineforge-codegen-oss`, workflow `publish-pyodide.yml`.
-4. Thereafter releases publish via OIDC (no token): run `publish-pyodide.yml`
-   via **workflow_dispatch with `dry_run=false`**. NOTE: tag pushes currently run
-   a DRY-RUN only (a safe validation) — the sole real-publish path is dispatch +
-   `dry_run=false`. To switch to tag-driven releases later, change the publish
-   condition in the workflow.
+4. Thereafter a `v*` tag push publishes via OIDC after the dependency audit and
+   full parity gate pass. A manual `workflow_dispatch` defaults to a dry run;
+   `dry_run=false` is a separate real-publish path.

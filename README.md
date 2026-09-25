@@ -16,10 +16,14 @@ It is **source-available and free for personal trading** — research, backtest,
 and trade your own account with your own capital at no cost. See
 [License](#license) for the line between personal and commercial use.
 
-- **Pure Python, zero runtime dependencies** — one function, `transpile()`.
-- **Fails loud, never silent** — a support checker rejects Pine the engine can't
-  faithfully run *before* codegen, with a `file:line:col` error. You never get
-  silently-wrong C++.
+See the [changelog](CHANGELOG.md) for the planned 1.0 release notes and
+release-note policy.
+
+- **Pure Python, zero runtime dependencies** — `transpile()` and
+  `transpile_full()` are the supported Python entry points.
+- **Located diagnostics** — the support checker rejects unsupported Pine
+  before codegen, while `transpile_full()` returns warnings for supported
+  scripts with documented approximations.
 - First complete PineScript v6 → C++ transpiler with a real support checker (to
   our knowledge).
 
@@ -93,8 +97,29 @@ transpile(
 ```
 
 Returns the generated C++ source as a string. Raises
-`pineforge_codegen.errors.CompileError` on any unsupported construct or syntax
-error.
+`pineforge_codegen.errors.CompileError` on a rejected construct or syntax
+error. It does not return nonfatal warnings; use `transpile_full()` to inspect
+them.
+
+### The `transpile_full()` function
+
+```python
+transpile_full(
+    pine_source: str,
+    *,
+    check_support: bool = True,
+    filename: str = "<input>",
+) -> dict
+```
+
+Returns `{"cpp": str, "inputs": list[dict], "strategyParams": dict,
+"diagnostics": list[Diagnostic]}` on success. `inputs` is the input manifest;
+its `title` is the actual override key. `diagnostics` contains nonfatal
+warnings. A rejected script raises `CompileError` with its diagnostics. The
+Pyodide package ships `gate/glue.py`'s `transpile_json(source) -> str`, whose
+JSON success and error envelopes carry the same manifest and warnings. See the
+[1.0 public contract](docs/PUBLIC_CONTRACT.md) for the exact fields, severity
+values, and input key rules. There is no installed CLI or exit-code contract.
 
 ### Transpile a file to a `.cpp`
 
@@ -139,8 +164,9 @@ transpile(src, filename="my_strategy.pine")
 
 ### Skip the support checker
 
-`check_support=False` bypasses the gate (intended only for tests of legacy
-fixtures — it can produce C++ the engine won't accept):
+`check_support=False` on either Python function is **experimental**. It
+bypasses the gate and can produce C++ the engine will not accept or execute
+faithfully:
 
 ```python
 cpp = transpile(src, check_support=False)
@@ -166,7 +192,8 @@ cpp = transpile(pine)   # emitted on_bar tail records `rsi` each bar
 ### Advanced: run the pipeline stages directly
 
 `transpile()` is a thin wrapper over five passes. Drive them yourself to inspect
-tokens, the AST, or the analyzer context:
+tokens, the AST, or the analyzer context. These classes are outside the
+[1.0 public contract](docs/PUBLIC_CONTRACT.md):
 
 ```python
 from pineforge_codegen import (
@@ -202,6 +229,18 @@ The emitted `GeneratedStrategy` does not execute orders itself: its
 `strategy.*` calls go to the engine's Pine execution adapter, which it attaches
 in its constructor.
 
+## Engine pairing
+
+A released codegen `X.Y.Z` is supported only with engine tag `vX.Y.Z`, using
+that release's generated headers and static library. Prereleases match
+exactly: codegen `1.0.0-rc.1` requires engine `v1.0.0-rc.1`. On every pair
+change, regenerate the strategy C++ from Pine and relink it against that
+engine release's headers and `libpineforge.a`. `PF_ABI_VERSION` equality alone
+is insufficient; it does not guarantee the C++ source layout or behavior.
+Development branches can test paired in-progress commits, but they are not
+supported cross-version release pairs. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for the setup and checks.
+
 ## Compile & run against the engine
 
 The emitted C++ targets the C-ABI in `<pineforge/pineforge.h>`. To build and run
@@ -214,8 +253,8 @@ git clone https://github.com/pineforge-4pass/pineforge-engine.git
 
 Follow the engine's [`tutorial/`](https://github.com/pineforge-4pass/pineforge-engine/tree/main/tutorial)
 to build `libpineforge.a`, compile your transpiled `.cpp` into a strategy `.so`,
-feed it OHLCV, and read back the closed-trade list. The codegen version must
-target a matching engine ABI (see [`VERSION`](VERSION)).
+feed it OHLCV, and read back the closed-trade list. Use the exact
+[engine pair](#engine-pairing) for the codegen release.
 
 Generated strategies reset persistent Pine state before each new batch or stream
 warmup through the engine's script-run preparation hook. Input settings survive a
@@ -235,25 +274,14 @@ agents can transpile and backtest for you — see <https://www.pineforge.dev>.
 
 ## Running tests
 
-```bash
-pip install -e ".[dev]"
-pytest
-```
-
-The pure-transpiler suite is fast (< 1 s) and has no native dependencies — it
-checks token streams, parse trees, analyzer output, and canonical C++ strings
-without invoking a C++ compiler.
-
-Opt-in compile checks (`tests/test_compile_smoke.py`, `tests/test_compile_corpus.py`)
-run `g++ -fsyntax-only` on transpiled C++ against the engine headers. They
-auto-detect a sibling `../pineforge-engine` checkout, or set the path explicitly:
-
-```bash
-export PINEFORGE_ENGINE_INCLUDE=/path/to/pineforge-engine/include
-pytest
-```
-
-Without an engine checkout these tests skip cleanly, so CI stays green.
+The full release check needs matching engine headers, a generated
+`pineforge/version.h`, Eigen, the built runtime, and the public engine corpus.
+Run `python -m pytest -ra` and then
+`python -m pytest -ra tests/test_compile_corpus.py` with those paths set; check
+the skip reasons so compiler and runtime coverage actually ran. The full
+Pyodide parity gate and npm audit are also required. The exact setup and
+commands are in [CONTRIBUTING.md](CONTRIBUTING.md#required-checks); use
+`python -m pytest --collect-only -q` for the current collection count.
 
 ## License
 
@@ -295,7 +323,7 @@ engine headers and runtime; it is not cross-version C++ binary compatibility.
 Regenerate old cap-only generated C++ before using the new engine for Pine
 execution. Such old source may still compile but does not attach the priority
 rule, and metadata cannot silently restore it. Rebuild all modules against the
-new matching C++ layout (`engine_script_run_v4`); old fingerprint versions are
+new matching C++ layout (`engine_script_run_v19`); old fingerprint versions are
 not comparable. The extraction preserves Pine policy under explicit attachment;
 it does not implement the generic native child-activation scheduler or prove
 campaign neutrality. Compile-only corpus checks do not run Pine backtests.
