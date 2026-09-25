@@ -15,9 +15,10 @@ mixing this in (``CodeGen``) sets that attribute in its constructor.
 from __future__ import annotations
 
 from ..ast_nodes import (
-    Identifier, MemberAccess,
+    Identifier, MemberAccess, TypeDecl, EnumDecl, FuncDef, MethodDef,
     VarDecl, Assignment, TupleAssign, ForStmt, ForInStmt,
 )
+from ..limits import iter_ast_nodes
 
 
 # Integer C++ types an na-capable ``double`` expression may be narrowed into.
@@ -46,18 +47,110 @@ def na_preserving_int_cast(value_cpp: str, int_cpp_type: str = "int") -> str:
             f"({int_cpp_type})_pf_v; }}()")
 
 
-# C++ reserved names that conflict with PineScript identifiers when used
-# verbatim as variable names. Carried forward from the historic codegen.py
-# table; intentionally narrower than the full C++ keyword set because Pine
-# already reserves keywords like ``if``/``else``/``for``/``return`` so they
-# can never reach codegen as identifier strings. Lives here (not base.py)
-# so the mixin can read it without forcing an import cycle on ``base``.
-CPP_RESERVED = {
+# Preserve the historic spelling for names already escaped in released TUs.
+LEGACY_CPP_RESERVED = frozenset({
     "exp", "log", "abs", "max", "min", "and", "or", "not",
     "int", "float", "bool", "string", "short", "long", "new", "delete",
     "class", "struct", "return", "void", "auto", "const", "static",
     "prepare_script_run",
-}
+})
+
+# Every C++17 keyword and alternative operator token, plus the C++20
+# additions.  Pine reserves some of these itself, but the others are legal
+# Pine identifiers and must not reach a C++ declaration unchanged.
+CPP_KEYWORDS = frozenset("""
+    alignas alignof and and_eq asm auto bitand bitor bool break case catch
+    char char8_t char16_t char32_t class co_await co_return co_yield compl
+    concept const consteval constexpr constinit const_cast continue decltype
+    default delete do double dynamic_cast else enum explicit export extern
+    false float for friend goto if inline int long mutable namespace new
+    noexcept not not_eq nullptr operator or or_eq private protected public
+    register reinterpret_cast requires return short signed sizeof static
+    static_assert static_cast struct switch template this thread_local throw
+    true try typedef typeid typename union unsigned using virtual void
+    volatile wchar_t while xor xor_eq
+""".split())
+
+# C++20 contextual spellings can be identifiers in some contexts, but can
+# become special after future emitter changes or on newer compilers.
+CPP_CONTEXTUAL = frozenset({"final", "override", "import", "module"})
+
+# Macros visible through the standard and engine headers included by every
+# generated TU.  Their expansion in a member declaration is invalid C++.
+CPP_STANDARD_MACROS = frozenset("""
+    __LINE__ __FILE__ __DATE__ __TIME__ __TIMESTAMP__ __cplusplus
+    __STDC__ __STDC_HOSTED__ __STDC_VERSION__ __STDC_MB_MIGHT_NEQ_WC__
+    __STDC_UTF_16__ __STDC_UTF_32__
+    NULL EOF NAN INFINITY HUGE_VAL HUGE_VALF HUGE_VALL
+    stdin stdout stderr assert offsetof va_start va_end va_arg va_copy
+    EXIT_SUCCESS EXIT_FAILURE RAND_MAX MB_CUR_MAX EDOM ERANGE EILSEQ
+    CHAR_BIT CHAR_MIN CHAR_MAX SCHAR_MIN SCHAR_MAX UCHAR_MAX
+    SHRT_MIN SHRT_MAX USHRT_MAX INT_MIN INT_MAX UINT_MAX
+    LONG_MIN LONG_MAX ULONG_MAX LLONG_MIN LLONG_MAX ULLONG_MAX
+    INT8_MIN INT8_MAX UINT8_MAX INT16_MIN INT16_MAX UINT16_MAX
+    INT32_MIN INT32_MAX UINT32_MAX INT64_MIN INT64_MAX UINT64_MAX
+    INTPTR_MIN INTPTR_MAX UINTPTR_MAX PTRDIFF_MIN PTRDIFF_MAX
+    SIZE_MAX SIG_ATOMIC_MIN SIG_ATOMIC_MAX WCHAR_MIN WCHAR_MAX
+    WINT_MIN WINT_MAX INTMAX_MIN INTMAX_MAX UINTMAX_MAX
+    M_E M_PI M_LOG2E M_LOG10E M_LN2 M_LN10 M_PI_2 M_PI_4
+    M_1_PI M_2_PI M_2_SQRTPI M_SQRT2 M_SQRT1_2
+    PINEFORGE_HAS_NATIVE_LOWERING_V1 PINEFORGE_HAS_NATIVE_LIVE_V1
+    PINEFORGE_HAS_AUX_SECURITY_FEED_V1 PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1
+    PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1
+    PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1
+    PINEFORGE_NO_STRATEGY_DECLS PF_PINE_TIME_HAS_SESSION_DAY
+    PF_PINE_TIME_SESSION_DAY_ARGS PF_VWAP_HAS_SESSION_ANCHOR
+    PF_VWAP_SESSION_ANCHOR_ARGS PF_ALMA_HAS_FLOOR
+    PF_KC_HAS_USE_TRUE_RANGE PF_VWAP_HAS_ANCHOR_INPUT
+    PF_PIVOT_LEVELS_HAS_ANCHOR
+""".split())
+
+# Identifiers used by the emitter as class/type names, namespaces, and
+# generated or inherited methods.  A user member with one of these names can
+# hide a type/callee, or (GeneratedStrategy) conflict with the constructor.
+CPP_EMITTER_NAMES = frozenset("""
+    GeneratedStrategy BacktestEngine Bar Series PineArray PineMap PineMatrix
+    PineGenericMatrix PineStrategyConfig PineStrategyHost StrategyOverrides
+    SymInfo ReportC MagnifierDistribution ChartPoint Line Box Label Linefill
+    std pineforge ta math
+    on_bar on_source_bar prepare_script_run configure_pine_strategy
+    configure_security_evaluators snapshot_script_state restore_script_state
+    commit_script_state set_strategy_override set_input
+    set_magnifier_volume_weighted fill_report run precalculate
+    strategy_entry strategy_close strategy_close_all strategy_exit
+    strategy_exit_cancel_bracket strategy_cancel strategy_cancel_all strategy_order
+    pine_bar_index pine_last_bar_index prev_chart_close is_first_tick is_last_tick
+    history_advances_new_bar security_series_slot_is_new last_bar_dual_entry_path
+    live_position_size pending_order_count market_admission_journal
+    pine_time pine_time_close pine_time_tradingday pine_random
+    pine_runtime_error pine_enum_str_at pine_session_ismarket
+    pine_session_ispostmarket pine_session_ispremarket
+    tf_change tf_is_daily tf_is_intraday tf_is_monthly tf_is_seconds
+    tf_is_weekly tf_multiplier tf_to_seconds time_close timestamp main_period
+    round_to_mintick calc_qty
+    pf_noop
+    pf_line_new pf_line_new_pts pf_line_copy pf_line_delete
+    pf_line_get_price pf_line_get_x1 pf_line_get_x2 pf_line_get_y1 pf_line_get_y2
+    pf_line_set_first_point pf_line_set_second_point pf_line_set_x1 pf_line_set_x2
+    pf_line_set_xloc pf_line_set_xy1 pf_line_set_xy2 pf_line_set_y1 pf_line_set_y2
+    pf_label_new pf_label_new_pt pf_label_copy pf_label_delete
+    pf_label_get_text pf_label_get_x pf_label_get_y pf_label_set_point
+    pf_label_set_text pf_label_set_x pf_label_set_xloc pf_label_set_xy
+    pf_label_set_y pf_label_set_yloc
+    pf_box_new pf_box_new_pts pf_box_copy pf_box_delete
+    pf_box_get_bottom pf_box_get_left pf_box_get_right pf_box_get_top
+    pf_box_set_bottom pf_box_set_bottom_right_point pf_box_set_left
+    pf_box_set_lefttop pf_box_set_right pf_box_set_rightbottom pf_box_set_top
+    pf_box_set_top_left_point pf_box_set_xloc
+    pf_linefill_new pf_linefill_delete pf_linefill_get_line1 pf_linefill_get_line2
+    get_input_int get_input_float get_input_bool get_input_string
+    trace is_na na nz fixnan
+""".split())
+
+CPP_RESERVED = set(
+    LEGACY_CPP_RESERVED | CPP_KEYWORDS | CPP_CONTEXTUAL |
+    CPP_STANDARD_MACROS | CPP_EMITTER_NAMES
+)
 
 
 # Bare C++ identifiers that ``strategy.*`` (and a few other) read-only
@@ -107,10 +200,80 @@ class NamingHelper:
             .replace("\t", "\\t")
         )
 
+    def _initialise_safe_names(self, ast) -> None:
+        """Reserve all authored spellings before assigning escaped ones.
+
+        A fixed ``_name_`` escape can itself collide with an authored
+        ``_name_``.  Pre-allocating against the entire AST makes the mapping
+        stable and one-to-one regardless of emission order.
+        """
+        authored: set[str] = set()
+        bound: set[str] = set()
+        for node, _depth in iter_ast_nodes(ast):
+            for attr in ("name", "var", "member"):
+                value = getattr(node, attr, None)
+                if isinstance(value, str) and value:
+                    authored.add(value)
+            for attr in ("names", "vars", "params", "members"):
+                values = getattr(node, attr, None)
+                if isinstance(values, list):
+                    authored.update(value for value in values
+                                    if isinstance(value, str) and value)
+            if isinstance(node, TypeDecl):
+                authored.update(field.name for field in node.fields)
+                bound.add(node.name)
+                bound.update(field.name for field in node.fields)
+            elif isinstance(node, EnumDecl):
+                bound.add(node.name)
+                bound.update(node.members)
+            elif isinstance(node, VarDecl):
+                bound.add(node.name)
+            elif isinstance(node, TupleAssign):
+                bound.update(node.names)
+            elif isinstance(node, (FuncDef, MethodDef)):
+                bound.add(node.name)
+                bound.update(node.params)
+            elif isinstance(node, (ForStmt, ForInStmt)):
+                if node.var:
+                    bound.add(node.var)
+                if isinstance(getattr(node, "vars", None), list):
+                    bound.update(node.vars)
+        self._safe_name_map: dict[str, str] = {}
+        self._safe_name_occupied = authored
+        self._safe_name_bound = bound
+        for name in sorted(bound):
+            if name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES:
+                self._allocate_safe_name(name)
+
+    def _allocate_safe_name(self, name: str) -> str:
+        if name in LEGACY_CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES:
+            base = f"_{name}_"
+        else:
+            base = f"pf_safe_{name}"
+        occupied = getattr(self, "_safe_name_occupied", set())
+        candidate = base
+        suffix = 2
+        while (candidate in occupied or candidate in CPP_RESERVED
+               or candidate in BUILTIN_ACCESSOR_NAMES):
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        self._safe_name_map[name] = candidate
+        occupied.add(candidate)
+        return candidate
+
     def _safe_name(self, name: str) -> str:
-        """Rename identifiers that collide with C++ reserved words."""
+        """Rename Pine identifiers that collide with emitted C++ names."""
+        mapping = getattr(self, "_safe_name_map", None)
+        if mapping is not None and name in mapping:
+            return mapping[name]
+        if mapping is not None and name not in self._safe_name_bound:
+            return name
         if name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES:
-            return f"_{name}_"
+            if mapping is None:
+                return (f"_{name}_" if name in LEGACY_CPP_RESERVED
+                        or name in BUILTIN_ACCESSOR_NAMES
+                        else f"pf_safe_{name}")
+            return self._allocate_safe_name(name)
         return name
 
     def _func_safe_name(self, name: str) -> str:

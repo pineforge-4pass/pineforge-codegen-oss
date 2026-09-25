@@ -95,6 +95,7 @@ in `on_bar`.
 pineforge_codegen/
 ├── lexer.py / tokens.py            Token stream
 ├── parser.py / ast_nodes.py        Pine v6 AST
+├── limits.py                      Located source/complexity/time budgets
 ├── pragmas.py                      // @pf-trace extraction
 ├── signatures.py                   Pine v6 builtin signature registry
 │                                   (TA / math / str / strategy / input /
@@ -610,8 +611,17 @@ later compile error has context. Avoid emitting bare empty literals.
 - **Helper underscores.** Codegen-internal helpers in `codegen/tables.py`
 are underscore-prefixed (`_matrix_add_row`, `_merge_kwargs`); they
 are not part of the package's external surface.
-- **Reserved names.** `codegen/helpers.py::CPP_RESERVED` carries the C++
-keyword set; `_safe_name` rewrites Pine identifiers that collide.
+- **Reserved names.** `codegen/helpers.py::CPP_RESERVED` carries every C++17
+and C++20 keyword/operator alternative plus header macros and emitter names
+that can collide. `_safe_name` allocates distinct escapes against all authored
+spellings; UDT fields use the same mapping.
+- **Input limits.** `limits.py` sets 131,072 source characters, 256 tokens or
+4,096 characters per logical statement, 32 delimiter/block levels, 64 AST
+nodes of depth, 1,024 statements, and a cooperative 30-second guard. Every
+limit raises a located `CompileError`. Across the 314 public corpus scripts
+and 277 gate fixtures, maxima were 9,869 source characters, 64 tokens / 420
+characters per logical statement, depth 3 delimiters / 4 blocks / 10 AST
+nodes, and 140 statements (2026-09-25).
 
 ## Safety rules for AI agents working in this repo
 

@@ -73,6 +73,7 @@ classes from ``..ast_nodes``.
 
 from __future__ import annotations
 
+from ..errors import Phase
 from ..ast_nodes import (
     ASTNode,
     Assignment,
@@ -123,6 +124,10 @@ class StmtVisitor:
     # ------------------------------------------------------------------
 
     def _visit_stmt(self, node: ASTNode, lines: list[str], indent: int) -> None:
+        if self._budget is not None:
+            self._budget_visit_count += 1
+            if self._budget_visit_count % 128 == 0:
+                self._budget.check(node.loc, Phase.CODEGEN)
         pad = "    " * indent
 
         if isinstance(node, StrategyDecl):
@@ -1280,7 +1285,9 @@ class StmtVisitor:
                 and self._decl_binding_is_series(id(node), name)
             }
             if not series_names and not global_targets.intersection(node.names):
-                binding_names = ", ".join(node.names)
+                binding_names = ", ".join(
+                    self._safe_name(name) for name in node.names
+                )
                 lines.append(f"{pad}auto [{binding_names}] = {call_expr};")
                 return
 
@@ -1349,7 +1356,9 @@ class StmtVisitor:
                             f"{pad}{self._safe_name(name)} = {field_expr};"
                         )
                     else:
-                        lines.append(f"{pad}double {name} = {field_expr};")
+                        lines.append(
+                            f"{pad}double {self._safe_name(name)} = {field_expr};"
+                        )
             return
 
         # User-defined function returning a tuple: use C++17 structured bindings
@@ -1764,7 +1773,9 @@ class StmtVisitor:
                     f"{pad}    auto {value_cpp} = {map_token}.get({key_cpp});"
                 )
         elif node.vars:
-            bindings = ", ".join(node.vars)
+            bindings = ", ".join(
+                self._safe_name(name) for name in node.vars
+            )
             lines.append(f"{pad}for (auto [{bindings}] : {iterable}) {{")
         _blk_saved = self._push_block_var_remap(node)
         loop_binding_names = (

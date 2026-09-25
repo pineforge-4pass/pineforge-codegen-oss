@@ -40,9 +40,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .errors import CompileError
+from .errors import CompileError, SourceLocation
 from .lexer import Lexer
-from .parser import Parser
+from .limits import TimeBudget, check_ast_depth
+from .parser import ParseError, Parser
 
 
 # Anchored to start/end of line; lexical string spans are excluded below.
@@ -57,8 +58,9 @@ _PRAGMA_RE = re.compile(
 class _StringSpanLexer(Lexer):
     """Use the Pine lexer itself to locate lines inside string literals."""
 
-    def __init__(self, source: str) -> None:
-        super().__init__(source)
+    def __init__(self, source: str, filename: str = "<input>",
+                 budget: TimeBudget | None = None) -> None:
+        super().__init__(source, filename=filename, budget=budget)
         self.string_lines: set[int] = set()
 
     def _record_string_lines(self, start_line: int) -> None:
@@ -96,7 +98,8 @@ class PfTracePragma:
     line: int
 
 
-def extract_pf_trace_pragmas(source: str) -> list[PfTracePragma]:
+def extract_pf_trace_pragmas(source: str, *, filename: str = "<input>",
+                            budget: TimeBudget | None = None) -> list[PfTracePragma]:
     """Scan ``source`` for ``// @pf-trace`` line comments.
 
     Returns the pragmas in source order. The expression on the
@@ -119,7 +122,7 @@ def extract_pf_trace_pragmas(source: str) -> list[PfTracePragma]:
                   if (match := _PRAGMA_RE.match(raw)) is not None]
     if not candidates:
         return []
-    lexer = _StringSpanLexer(source)
+    lexer = _StringSpanLexer(source, filename=filename, budget=budget)
     try:
         lexer.tokenize()
     except CompileError:
@@ -137,8 +140,23 @@ def extract_pf_trace_pragmas(source: str) -> list[PfTracePragma]:
         # the expression body in isolation. ``Parser._parse_expression``
         # is the same entry the statement parser uses for RHS values,
         # so anything legal in ``x = <expr>`` is legal here.
-        tokens = Lexer(expr_source).tokenize()
-        expr_node = Parser(tokens, source=expr_source)._parse_expression()
+        try:
+            tokens = Lexer(expr_source, filename=filename, budget=budget).tokenize()
+            parser = Parser(tokens, source=expr_source, filename=filename,
+                            budget=budget)
+            try:
+                expr_node = parser._parse_expression()
+                parser._expect_statement_end()
+            except ParseError as error:
+                parser._raise_syntax_error(error)
+            check_ast_depth(expr_node, filename)
+        except CompileError as exc:
+            for diagnostic in exc.diagnostics:
+                loc = diagnostic.location
+                diagnostic.location = SourceLocation(
+                    filename, loc.line + lineno - 1, loc.col, loc.end_col,
+                )
+            raise CompileError(exc.diagnostics) from exc
         pragmas.append(
             PfTracePragma(
                 name=name,

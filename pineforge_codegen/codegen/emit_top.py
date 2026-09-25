@@ -764,7 +764,8 @@ class TopLevelEmitter:
                 for field in fields
                 if field.name not in self._udt_omitted_fields.get(type_name, set())
             ]
-            checkpoint_fields = [field.name for field in emitted_fields]
+            checkpoint_fields = [self._safe_name(field.name)
+                                 for field in emitted_fields]
             lines.append("template <>")
             lines.append(f"struct {checkpoint_traits}<{record_type}> {{")
             lines.append("    struct snapshot_type {")
@@ -1933,14 +1934,21 @@ class TopLevelEmitter:
         # without it the function would be emitted as returning ``double`` and
         # clang errors with "no viable conversion from T to double". Probe:
         # data/validation/udt-method-probe-20-udt-return-from-func.
+        return_udt_name = getattr(fi, "udt_return_type", None)
+        return_udt = bool(return_udt_name and return_udt_name in self._udt_defs)
         if fi.returns_tuple:
             # Infer actual tuple element types from function body's last expression
             tuple_types_list = self._infer_tuple_types(node, fi.tuple_element_count)
             ret_type = f"std::tuple<{', '.join(tuple_types_list)}>"
-        elif getattr(fi, "udt_return_type", None):
+        elif return_udt_name:
             # A function returning a drawing handle must emit the C++ handle
             # struct (Line/Box/Label/Linefill), not the unknown lowercase name.
-            ret_type = DRAWING_TYPE_TO_CPP.get(fi.udt_return_type, fi.udt_return_type)
+            ret_type = DRAWING_TYPE_TO_CPP.get(
+                return_udt_name,
+                self._safe_name(return_udt_name)
+                if return_udt
+                else return_udt_name,
+            )
         elif self._func_int_return_uses_wide_history(
             fi, call_site_idx=call_site_idx
         ):
@@ -1965,13 +1973,16 @@ class TopLevelEmitter:
             ret_type = self._type_spec_to_cpp(fi.return_type_spec)
         else:
             ret_type = PINE_TYPE_TO_CPP.get(fi.return_type, "double")
-        rhs_return_cpp_type = (
-            ret_type
-            if (self._is_nullable_collection_cpp_type(ret_type)
-                or ret_type in DRAWING_TYPE_TO_CPP.values()
-                or ret_type in self._udt_defs)
-            else None
-        )
+        if return_udt:
+            # Keep the authored UDT spelling here for target typing; the
+            # expression visitor converts it to the escaped C++ handle name
+            # at the point it emits ``T{}``.
+            rhs_return_cpp_type = return_udt_name
+        elif (self._is_nullable_collection_cpp_type(ret_type)
+              or ret_type in DRAWING_TYPE_TO_CPP.values()):
+            rhs_return_cpp_type = ret_type
+        else:
+            rhs_return_cpp_type = None
 
         # For per-call-site variants, suffix the function name and activate TA + var remapping
         func_name = (
@@ -2114,7 +2125,7 @@ class TopLevelEmitter:
                     # default (``Label _func_ret = Label{};``) — falling through
                     # to ``_default_for_type`` would emit ``0.0`` and clang would
                     # reject ``Label _func_ret = 0.0;``.
-                    if ret_type in self._udt_defs or ret_type in DRAWING_TYPE_TO_CPP.values():
+                    if return_udt or ret_type in DRAWING_TYPE_TO_CPP.values():
                         default_ret = f"{ret_type}{{}}"
                     else:
                         default_ret = self._default_for_type(ret_type)
@@ -2142,7 +2153,7 @@ class TopLevelEmitter:
                 default_vals = ", ".join(["0.0"] * fi.tuple_element_count)
                 lines.append(f"        return std::make_tuple({default_vals});")
             else:
-                if ret_type in self._udt_defs or ret_type in DRAWING_TYPE_TO_CPP.values():
+                if return_udt or ret_type in DRAWING_TYPE_TO_CPP.values():
                     default_ret = f"{ret_type}{{}}"
                 else:
                     default_ret = self._default_for_type(ret_type)

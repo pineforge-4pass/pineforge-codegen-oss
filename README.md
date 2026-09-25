@@ -97,9 +97,9 @@ transpile(
 ```
 
 Returns the generated C++ source as a string. Raises
-`pineforge_codegen.errors.CompileError` on a rejected construct or syntax
-error. It does not return nonfatal warnings; use `transpile_full()` to inspect
-them.
+`pineforge_codegen.errors.CompileError` on a rejected construct, syntax
+error, or input limit. It does not return nonfatal warnings; use
+`transpile_full()` to inspect them.
 
 ### The `transpile_full()` function
 
@@ -210,6 +210,27 @@ ctx     = Analyzer(ast, filename="strategy.pine").analyze()
 ctx.pf_trace_pragmas = pragmas
 cpp     = CodeGen(ctx).generate()
 ```
+
+## Limits
+
+Untrusted source has deterministic size and nesting limits. Exceeding one
+raises a `CompileError` with a Pine `file:line:col` location; it does not
+return partial C++. `check_support=False` does not bypass these limits.
+
+| Limit | Maximum | Largest in the 314 public corpus scripts and 277 gate fixtures |
+| --- | ---: | ---: |
+| Source size | 131,072 characters | 9,869 |
+| Logical statement size | 256 tokens or 4,096 characters | 64 tokens, 420 characters |
+| Parenthesis/bracket depth | 32 | 3 |
+| Indented block depth | 32 | 4 |
+| Parsed AST depth | 64 nodes | 10 |
+| Parsed statements | 1,024 | 140 |
+
+A logical statement includes a continued expression across lines. A
+cooperative 30-second elapsed-time guard also checks the lexer, parser,
+analyzer, code generator, and the boundaries between passes. It returns a
+located `CompileError` if a structurally valid input still takes too long.
+Numeric literals outside the generated C++ range also raise a located error.
 
 ## How it works
 

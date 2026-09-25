@@ -2159,7 +2159,7 @@ class CallVisitor:
                     elif (self._is_nullable_collection_cpp_type(f_cpp_type)
                           and val == "na<double>()"):
                         val = f"{f_cpp_type}{{}}"
-                    field_inits.append(f".{f.name} = {val}")
+                    field_inits.append(f".{self._safe_name(f.name)} = {val}")
             return self._emit_udt_new_expr(namespace, field_inits)
 
         # UDT copy: TypeName.copy(obj)

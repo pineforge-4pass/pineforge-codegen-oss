@@ -11,10 +11,14 @@ Rewritten parser (Tasks 5 & 6) that:
 
 from __future__ import annotations
 
+import math
 import re
 
 from .lexer import Token, TokenType
 from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from .limits import (
+    MAX_DELIMITER_DEPTH, MAX_STATEMENTS, TimeBudget, limit_error,
+)
 from .ast_nodes import (
     ASTNode,
     Program, StrategyDecl, ImportStmt,
@@ -53,11 +57,16 @@ COMPOUND_ASSIGN_OPS = {
 
 
 class Parser:
-    def __init__(self, tokens: list[Token], *, source: str = "", filename: str = "<input>") -> None:
+    def __init__(self, tokens: list[Token], *, source: str = "", filename: str = "<input>",
+                 budget: TimeBudget | None = None) -> None:
         self.tokens = tokens
         self.pos = 0
         self._source = source
         self._filename = filename
+        self._budget = budget
+        self._statement_count = 0
+        self._expression_depth = 0
+        self._prefix_depth = 0
 
     # ------------------------------------------------------------------
     # Helpers
@@ -88,6 +97,8 @@ class Parser:
     def _advance(self) -> Token:
         tok = self._current()
         self.pos += 1
+        if self._budget is not None and self.pos % 128 == 0:
+            self._budget.check(self._loc(tok), Phase.PARSER)
         return tok
 
     def _consume(self, tt: TokenType, msg: str = "") -> Token:
@@ -203,6 +214,12 @@ class Parser:
 
     def _parse_single_statement(self):
         cur = self._current()
+        self._statement_count += 1
+        if self._statement_count > MAX_STATEMENTS:
+            raise limit_error(
+                f"Statement count exceeds {MAX_STATEMENTS}.",
+                self._loc(cur), Phase.PARSER,
+            )
 
         # Control flow keywords
         if cur.type == TokenType.IF:
@@ -1040,12 +1057,24 @@ class Parser:
     }
 
     def _parse_expression(self):
-        # if/switch can be used as expressions (RHS of assignments)
-        if self._check(TokenType.IF):
-            return self._parse_if_expr()
-        if self._check(TokenType.SWITCH):
-            return self._parse_switch_expr()
-        return self._parse_ternary()
+        self._expression_depth += 1
+        # The first call parses the statement's expression, so only nested
+        # calls count against the authored nesting limit.
+        if self._expression_depth - 1 > MAX_DELIMITER_DEPTH:
+            self._expression_depth -= 1
+            raise limit_error(
+                f"Expression nesting depth exceeds {MAX_DELIMITER_DEPTH} levels.",
+                self._loc(self._current()), Phase.PARSER,
+            )
+        try:
+            # if/switch can be used as expressions (RHS of assignments)
+            if self._check(TokenType.IF):
+                return self._parse_if_expr()
+            if self._check(TokenType.SWITCH):
+                return self._parse_switch_expr()
+            return self._parse_ternary()
+        finally:
+            self._expression_depth -= 1
 
     def _parse_if_expr(self):
         """Parse if/else as an expression (returns IfStmt, codegen handles it)."""
@@ -1136,8 +1165,18 @@ class Parser:
     def _parse_not(self):
         if self._check(TokenType.NOT):
             start_tok = self._current()
+            self._prefix_depth += 1
+            if self._prefix_depth > MAX_DELIMITER_DEPTH:
+                self._prefix_depth -= 1
+                raise limit_error(
+                    f"Expression nesting depth exceeds {MAX_DELIMITER_DEPTH} levels.",
+                    self._loc(start_tok), Phase.PARSER,
+                )
             self._advance()
-            operand = self._parse_not()
+            try:
+                operand = self._parse_not()
+            finally:
+                self._prefix_depth -= 1
             node = UnaryOp(op="not", operand=operand)
             return self._set_loc(node, start_tok)
         return self._parse_comparison()
@@ -1181,14 +1220,34 @@ class Parser:
     def _parse_unary(self):
         if self._check(TokenType.MINUS):
             start_tok = self._current()
+            self._prefix_depth += 1
+            if self._prefix_depth > MAX_DELIMITER_DEPTH:
+                self._prefix_depth -= 1
+                raise limit_error(
+                    f"Expression nesting depth exceeds {MAX_DELIMITER_DEPTH} levels.",
+                    self._loc(start_tok), Phase.PARSER,
+                )
             self._advance()
-            operand = self._parse_unary()
+            try:
+                operand = self._parse_unary()
+            finally:
+                self._prefix_depth -= 1
             node = UnaryOp(op="-", operand=operand)
             return self._set_loc(node, start_tok)
         if self._check(TokenType.PLUS):
             start_tok = self._current()
+            self._prefix_depth += 1
+            if self._prefix_depth > MAX_DELIMITER_DEPTH:
+                self._prefix_depth -= 1
+                raise limit_error(
+                    f"Expression nesting depth exceeds {MAX_DELIMITER_DEPTH} levels.",
+                    self._loc(start_tok), Phase.PARSER,
+                )
             self._advance()
-            operand = self._parse_unary()
+            try:
+                operand = self._parse_unary()
+            finally:
+                self._prefix_depth -= 1
             node = UnaryOp(op="+", operand=operand)
             return self._set_loc(node, start_tok)
         return self._parse_postfix()
@@ -1324,10 +1383,20 @@ class Parser:
         # Number literal
         if cur.type == TokenType.NUMBER:
             self._advance()
-            if "." in cur.value or "e" in cur.value or "E" in cur.value:
-                val = float(cur.value)
-            else:
-                val = int(cur.value)
+            try:
+                if "." in cur.value or "e" in cur.value or "E" in cur.value:
+                    val = float(cur.value)
+                    out_of_range = not math.isfinite(val)
+                else:
+                    val = int(cur.value)
+                    out_of_range = val > (1 << 64) - 1
+            except (ValueError, OverflowError):
+                out_of_range = True
+            if out_of_range:
+                raise limit_error(
+                    "Numeric literal exceeds the generated C++ range.",
+                    self._loc(cur), Phase.PARSER,
+                )
             node = NumberLiteral(value=val)
             return self._set_loc(node, cur)
 

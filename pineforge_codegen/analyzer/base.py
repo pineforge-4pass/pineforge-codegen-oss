@@ -29,6 +29,7 @@ from ..symbols import (
     method_receiver_type_name,
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
+from ..limits import TimeBudget
 from ..method_binding import (
     BoundMethodArgs,
     MethodBindError,
@@ -124,9 +125,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     the package layout.
     """
 
-    def __init__(self, ast: Program, filename: str = "<stdin>") -> None:
+    def __init__(self, ast: Program, filename: str = "<stdin>",
+                 budget: TimeBudget | None = None) -> None:
         self._ast = ast
         self._filename = filename
+        self._budget = budget
+        self._budget_visit_count = 0
         self._method_signatures = inventory_method_signatures(ast)
         self._method_call_bindings: dict[
             tuple[int, str], BoundMethodArgs
@@ -3474,6 +3478,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         """Dispatch to the appropriate visitor and return the inferred type."""
         if node is None:
             return PineType.VOID
+        if self._budget is not None:
+            self._budget_visit_count += 1
+            if self._budget_visit_count % 128 == 0:
+                self._budget.check(node.loc, Phase.ANALYZER)
 
         method_name = f"_visit_{type(node).__name__}"
         # Convert CamelCase to snake_case for method lookup

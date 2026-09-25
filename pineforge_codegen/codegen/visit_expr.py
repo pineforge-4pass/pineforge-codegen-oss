@@ -87,6 +87,7 @@ classes from ``..ast_nodes``.
 
 from __future__ import annotations
 
+from ..errors import Phase
 from ..ast_nodes import (
     ASTNode,
     BinOp,
@@ -194,6 +195,10 @@ class ExprVisitor:
     def _visit_expr(self, node: ASTNode | None) -> str:
         if node is None:
             return "/* null */"
+        if self._budget is not None:
+            self._budget_visit_count += 1
+            if self._budget_visit_count % 128 == 0:
+                self._budget.check(node.loc, Phase.CODEGEN)
         if isinstance(node, NumberLiteral):
             return str(node.value)
         if isinstance(node, StringLiteral):
@@ -341,7 +346,7 @@ class ExprVisitor:
             if drawing_target is not None:
                 return f"{drawing_target}{{}}"
             if target_cpp_type in self._udt_defs:
-                return f"{target_cpp_type}{{}}"
+                return f"{self._safe_name(target_cpp_type)}{{}}"
             if self._is_nullable_collection_cpp_type(target_cpp_type):
                 # Maps and matrices use default construction for a typed
                 # ``na`` ID. Their ``*.new`` factories create a valid ID,
@@ -540,7 +545,7 @@ class ExprVisitor:
                 or mutable_collection
                 else "read"
             )
-            return f"{arena}.{access}({owner}).{node.member}"
+            return f"{arena}.{access}({owner}).{self._safe_name(node.member)}"
         if isinstance(node.object, Identifier):
             ns = node.object.name
             if ns == "strategy":
@@ -915,7 +920,10 @@ class ExprVisitor:
             if name in self._enum_defs:
                 members = self._enum_defs[name]
                 if node.member in members:
-                    return f"{name}_{node.member}"
+                    return (
+                        f"{self._safe_name(name)}_"
+                        f"{self._safe_name(node.member)}"
+                    )
 
         # Unknown member access — emit as string constant (e.g., enum values)
         obj = self._visit_expr(node.object)

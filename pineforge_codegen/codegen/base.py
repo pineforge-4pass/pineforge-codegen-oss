@@ -30,6 +30,7 @@ from ..analyzer import (
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from ..limits import TimeBudget
 from ..pine_spelling import (
     input_call_spans, pine_string_literal, spell_input_call, sub_identifiers,
 )
@@ -187,8 +188,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     because the chain shares the constructor constant folder.
     """
 
-    def __init__(self, ctx: AnalyzerContext) -> None:
+    def __init__(self, ctx: AnalyzerContext,
+                 budget: TimeBudget | None = None) -> None:
         self.ctx = ctx
+        self._budget = budget
+        self._budget_visit_count = 0
+        self._initialise_safe_names(ctx.ast)
         # Lexical Pine names remain in ``ctx.func_var_members``.  This overlay
         # carries exact class-member identities only for collision-qualified
         # ordinary FuncDefs (identity mappings for every other ordinary UDF).
@@ -3872,11 +3877,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # The two-phase order also permits self/nested UDT fields without
         # embedding a C++ type recursively by value.
         for type_name in self._udt_defs:
-            lines.append(f"struct {type_name} {{")
+            safe_type_name = self._safe_name(type_name)
+            lines.append(f"struct {safe_type_name} {{")
             lines.append("    int32_t __pf_id = -1;")
             lines.append("};")
             lines.append(
-                f"inline bool is_na(const {type_name}& _z) "
+                f"inline bool is_na(const {safe_type_name}& _z) "
                 "{ return _z.__pf_id < 0; }"
             )
             lines.append("")
@@ -4076,7 +4082,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if cpp_type == "int":
                     cpp_type = "int64_t"
                 default = self._default_for_spec(spec)
-                lines.append(f"    {cpp_type} {f.name} = {default};")
+                lines.append(f"    {cpp_type} {self._safe_name(f.name)} = {default};")
             lines.append("};")
             lines.append("")
 
@@ -4085,15 +4091,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 1c. Enum constants + string tables for str.tostring(enumVar)
         for enum_name, members in self._enum_defs.items():
+            safe_enum_name = self._safe_name(enum_name)
             for i, member in enumerate(members):
-                lines.append(f'const int {enum_name}_{member} = {i};')
+                lines.append(
+                    f'const int {safe_enum_name}_{self._safe_name(member)} = {i};'
+                )
             strs = self._enum_member_strings.get(enum_name)
             if strs and len(strs) == len(members):
                 parts = ", ".join(
                     f'std::string("{self._cpp_string_escape(s)}")' for s in strs
                 )
                 lines.append(
-                    f"static const std::string {enum_name}_str_values[] = {{{parts}}};"
+                    f"static const std::string {safe_enum_name}_str_values[] = {{{parts}}};"
                 )
             lines.append("")
 
@@ -4398,7 +4407,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         udt_type = udt_name
                         break
             if udt_type:
-                lines.append(f"    {udt_type} {safe};")
+                lines.append(f"    {self._safe_name(udt_type)} {safe};")
                 continue
             cpp_type = PINE_TYPE_TO_CPP.get(ptype, "double")
             # Promote int->int64_t when init RHS is an int64-returning builtin
@@ -4501,7 +4510,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if _draw_cpp is not None:
                     lines.append(f"    {_draw_cpp} {safe} = {_draw_cpp}{{}};")
                 else:
-                    lines.append(f"    {udt_t} {safe} = {udt_t}{{}};")
+                    udt_cpp = self._safe_name(udt_t)
+                    lines.append(f"    {udt_cpp} {safe} = {udt_cpp}{{}};")
             else:
                 expr = self.ctx.global_expr_map.get(name) if hasattr(self.ctx, "global_expr_map") else None
                 if (

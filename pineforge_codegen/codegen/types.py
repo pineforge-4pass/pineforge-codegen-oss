@@ -156,7 +156,8 @@ class TypeInferer:
             # of the old collapse to double / unknown-type-name.
             if spec.name in DRAWING_TYPE_TO_CPP:
                 return DRAWING_TYPE_TO_CPP[spec.name]
-            return spec.name if spec.name in self._udt_defs else "double"
+            return (self._safe_name(spec.name)
+                    if spec.name in self._udt_defs else "double")
         if spec.kind == "array":
             return f"std::vector<{self._type_spec_to_cpp(spec.element)}>"
         if spec.kind == "map":
@@ -184,7 +185,7 @@ class TypeInferer:
         """Generated arena specialization for one user-defined object type."""
         return (
             f"{getattr(self, '_udt_arena_template_cpp_name', '_PFUdtArena')}<"
-            f"{type_name}, "
+            f"{self._safe_name(type_name)}, "
             f"{self._udt_record_cpp_type(type_name)}>"
         )
 
@@ -273,7 +274,7 @@ class TypeInferer:
             # (Line{} = na handle), NOT the lowercase Pine name (line{}).
             if spec.name in DRAWING_TYPE_TO_CPP:
                 return f"{DRAWING_TYPE_TO_CPP[spec.name]}{{}}"
-            return f"{spec.name}{{}}"
+            return f"{self._safe_name(spec.name)}{{}}"
         cpp_type = self._type_spec_to_cpp(spec)
         if cpp_type.startswith("std::vector") or cpp_type.startswith("PineMap"):
             return f"{cpp_type}()"
