@@ -259,9 +259,9 @@ class TopLevelEmitter:
                 "    _PFKC(int length, double mult, bool use_true_range = true)"
                 " : impl_(length, mult, use_true_range) {}",
                 "    ta::KCResult compute(double src, double high, double low, double close)"
-                " { return impl_.compute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "    ta::KCResult recompute(double src, double high, double low, double close)"
-                " { return impl_.recompute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "};",
                 "#else",
                 "class _PFKC {",
@@ -269,9 +269,9 @@ class TopLevelEmitter:
                 "public:",
                 "    _PFKC(int length, double mult, bool = true) : impl_(length, mult) {}",
                 "    ta::KCResult compute(double src, double high, double low, double close)"
-                " { return impl_.compute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "    ta::KCResult recompute(double src, double high, double low, double close)"
-                " { return impl_.recompute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "};",
                 "#endif",
                 "",
@@ -286,9 +286,9 @@ class TopLevelEmitter:
                 "    _PFKCW(int length, double mult, bool use_true_range = true)"
                 " : impl_(length, mult, use_true_range) {}",
                 "    double compute(double src, double high, double low, double close)"
-                " { return impl_.compute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "    double recompute(double src, double high, double low, double close)"
-                " { return impl_.recompute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "};",
                 "#else",
                 "class _PFKCW {",
@@ -296,9 +296,9 @@ class TopLevelEmitter:
                 "public:",
                 "    _PFKCW(int length, double mult, bool = true) : impl_(length, mult) {}",
                 "    double compute(double src, double high, double low, double close)"
-                " { return impl_.compute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.compute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "    double recompute(double src, double high, double low, double close)"
-                " { return impl_.recompute(src, high, low, close); }",
+                " { bool _pf_prior = ta::ema_na_warmup_flag(); ta::ema_na_warmup_flag() = true; auto _pf_out = impl_.recompute(src, high, low, close); ta::ema_na_warmup_flag() = _pf_prior; return _pf_out; }",
                 "};",
                 "#endif",
                 "",

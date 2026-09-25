@@ -1,9 +1,9 @@
-"""KC's middle band is the EMA basis from the first chart bar.
+"""KC's middle band follows TradingView's warm-up EMA basis.
 
-The TradingView tape in ``/tmp/CG-NABOOL-scratch/tv-kc`` records both
-``ta.kc(...).middle`` and an independent ``ta.ema`` as finite at the same
-first-value bar.  This runtime witness keeps the paired engine/codegen path
-from regressing to the old all-bands-warm-up approximation.
+The TradingView tape in ``/tmp/CG-NABOOL-scratch/tv-kc`` records the KC middle
+as ``na`` on bar 0 and finite at the warm-up boundary.  The independent EMA
+remains a normal chart EMA; the generated KC shim applies the warm-up selector
+only to its internal EMA basis, preserving unrelated EMA behavior.
 """
 
 from __future__ import annotations
@@ -26,18 +26,29 @@ _DRIVER = r"""
 #include <cmath>
 #include <cstdio>
 int main() {
-    GeneratedStrategy s;
-    pineforge::Bar b{100.0, 101.0, 99.0, 100.0, 1.0, 1743466500000LL};
-    s.run(&b, 1);
-    std::printf("%d %.17g %.17g\n", std::isnan(s.mid), s.mid, s.ema);
+    pineforge::Bar bars[20];
+    for (int i = 0; i < 20; ++i) {
+        bars[i] = pineforge::Bar{100.0 + i, 101.0 + i, 99.0 + i,
+                                 100.0 + i, 1.0,
+                                 1743466500000LL + i * 900000};
+    }
+    GeneratedStrategy first;
+    first.run(bars, 1);
+    GeneratedStrategy warm;
+    warm.run(bars, 20);
+    std::printf("%d %d %d %d\n", std::isnan(first.mid), std::isnan(first.ema),
+                std::isnan(warm.mid), std::isnan(warm.ema));
 }
 """
 
 
-def test_kc_middle_matches_ema_on_bar_zero() -> None:
+def test_kc_middle_matches_ema_warmup() -> None:
     out = run_emitted_tu(
         transpile(_PINE), _DRIVER, opt="-O0", label="kc-middle-band"
     )
-    missing, middle, ema = out.strip().split()
-    assert missing == "0"
-    assert middle == ema
+    first_m, first_e, warm_m, warm_e = out.strip().split()
+    assert first_m == "1"
+    assert first_e == "0"
+    assert warm_m == "0"
+    assert warm_e == "0"
+    assert warm_m == warm_e
