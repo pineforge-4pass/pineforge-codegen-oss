@@ -319,6 +319,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Set of var/series member names that belong to user functions (need cloning)
         self._func_var_members_set: set[str] = set()
         self._precalc_loop_active: bool = False
+        # Nonzero while the expression visitor lowers a request.security
+        # payload (``_build_security_expr``): a chart-bar-only host fact such
+        # as ``session_ismarket_`` does not describe the security bar.
+        self._security_payload_depth: int = 0
         # Top-level lazy-edge TA sites hoisted to every-bar evaluation for the
         # statement currently being lowered: FuncCall id -> local name, and
         # Subscript id -> ``_hist_call_*`` member (see ``ta.py``).

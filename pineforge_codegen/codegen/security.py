@@ -3828,5 +3828,9 @@ class SecurityEmitter:
             )
             return f"(security_series_slot_is_new({sec_id}) ? {sec_name}.compute({compute_args}) : {sec_name}.recompute({compute_args}))"
 
-        result = self._visit_expr(expr_node)
+        self._security_payload_depth += 1
+        try:
+            result = self._visit_expr(expr_node)
+        finally:
+            self._security_payload_depth -= 1
         return self._rewrite_security_cpp(result, sec_id, security_mutable_names, helper_binding_stack)
