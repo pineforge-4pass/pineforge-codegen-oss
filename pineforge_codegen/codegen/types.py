@@ -42,7 +42,11 @@ from ..ast_nodes import (
     Subscript, Ternary, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
-from .helpers import NA_PRESERVING_INT_TYPES, na_preserving_int_cast
+from .helpers import (
+    NA_PRESERVING_INT_TYPES,
+    na_preserving_int_cast,
+    pine_truth_cast,
+)
 from .. import signatures as sigs
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
@@ -1817,6 +1821,7 @@ class TypeInferer:
         r"^\s*(?:\(\s*)*[-+]?(?:0[xX][0-9a-fA-F]+|\d+)(?:LL|ULL|L|U)?"
         r"(?:\s*\))*\s*$"
         r"|^na<int(?:64_t)?>\(\)$"
+        r"|^get_input_(?:int|time|color)\("
         r"|^\[&\]\(\)\{ double _pf_v = "
     )
 
@@ -2022,6 +2027,35 @@ class TypeInferer:
             return cpp_t if cpp_t in NA_PRESERVING_INT_TYPES else None
         return None
 
+    def _func_param_is_bool(self, fi, index: int,
+                            call_site_idx: int | None = None) -> bool:
+        """Whether one emitted user-function parameter is Pine ``bool``."""
+        node = getattr(fi, "node", None)
+        if node is None or index >= len(node.params or ()):
+            return False
+        declared = list(
+            getattr(self.ctx, "func_declared_param_type_specs", {}).get(
+                fi.name, ()
+            )
+        )
+        if index < len(declared) and declared[index] is not None:
+            spec = declared[index]
+            return spec.kind == "primitive" and spec.name == "bool"
+        variant = (
+            getattr(self.ctx, "func_callsite_param_types", {}).get(
+                (fi.name, call_site_idx), ()
+            )
+            if call_site_idx is not None
+            else ()
+        )
+        if index < len(variant):
+            return variant[index] == PineType.BOOL
+        specs = getattr(fi, "param_type_specs", []) or []
+        if index < len(specs) and specs[index] is not None:
+            spec = specs[index]
+            return spec.kind == "primitive" and spec.name == "bool"
+        return index < len(fi.param_types) and fi.param_types[index] == PineType.BOOL
+
     def _udt_field_int_cpp_type(self, target_node) -> str | None:
         """Integer C++ type of a UDT field write target, else ``None``.
 
@@ -2065,6 +2099,81 @@ class TypeInferer:
         if not value_is_double:
             return cpp_val
         return na_preserving_int_cast(cpp_val, target_cpp_type)
+
+    def _coerce_int_slot_with_cast(
+        self, cpp_val: str, node, target_cpp_type: str
+    ) -> str:
+        """Preserve an explicit integral cast when no Na conversion is needed.
+
+        A few public textual contracts intentionally show the destination cast
+        (drawing ABI coordinates and security history offsets).  Keep that
+        spelling for values already proven integral; double-valued expressions
+        still take `_coerce_int_slot`'s na-preserving lambda.
+        """
+        rendered = self._coerce_int_slot(cpp_val, node, target_cpp_type)
+        if (rendered == cpp_val
+                and (self._INTEGRAL_CPP_TEXT.match(cpp_val)
+                     or not self._emitted_value_is_double(node))):
+            return f"({target_cpp_type})({cpp_val})"
+        return rendered
+
+    def _coerce_bool_expr(self, cpp_val: str, node=None) -> str:
+        """Lower a Pine scalar used in a boolean context.
+
+        Pine treats ``na`` as false when a numeric expression is consumed by
+        ``if``, a ternary, ``and``/``or``, or a boolean parameter.  A C++
+        conversion does not: NaN and the integer ``na`` sentinel are both
+        truthy.  Keep compile-time literals and expressions already typed as
+        ``bool`` byte-identical; every other numeric scalar goes through the
+        one single-evaluation runtime helper.
+
+        The helper deliberately does not reject an unresolved shape.  The
+        analyzer has already admitted the expression, and preserving its
+        existing lowering with a warning is preferable to introducing a new
+        refusal for a population script.
+        """
+        # Text-only helper paths (notably security registration) do not carry
+        # an AST node from which to prove the scalar type.  Keep their
+        # established spelling; the typed chart/security visitors pass the
+        # original node and take the exact path below.
+        if node is None:
+            return cpp_val
+        if cpp_val.strip() in {"true", "false"}:
+            return cpp_val
+        if cpp_val.strip() in {
+            "is_first_tick()", "is_last_tick_", "barstate_islast_",
+            "tf_change(prev_bar_timestamp_, current_bar_.timestamp)",
+        }:
+            return cpp_val
+        if isinstance(node, FuncCall):
+            func_name, namespace = self._resolve_callee(node.callee)
+            if namespace == "timeframe" and func_name == "change":
+                return cpp_val
+            if namespace == "session":
+                return cpp_val
+        if (isinstance(node, MemberAccess)
+                and isinstance(node.object, Identifier)
+                and node.object.name in {
+                    "barstate", "chart", "session", "timeframe"
+                }
+                and self._infer_type(node) == "bool"):
+            return cpp_val
+        inferred = self._infer_type(node)
+        if inferred == "bool":
+            return cpp_val
+        if inferred not in {"double", "int", "int64_t"}:
+            # Non-numeric values cannot carry Pine's numeric na sentinel. The
+            # ordinary C++ conversion is the established fallback for handles
+            # and other engine values.
+            return cpp_val
+        if isinstance(node, (NumberLiteral, BoolLiteral, ColorLiteral)):
+            return cpp_val
+        if (isinstance(node, Identifier)
+                and node.name in self._known_vars
+                and node.name not in self._input_backed_vars
+                and not self._known_var_is_lexically_shadowed(node.name)):
+            return cpp_val
+        return pine_truth_cast(cpp_val)
 
     def _na_reassign_cpp_type(self, name: str) -> str | None:
         """Declared scalar C++ type of a ``:=`` reassignment target ``name``, so a

@@ -150,7 +150,7 @@ from ..method_binding import (
 )
 from .. import signatures as sigs
 from .drawing import ALL_DRAWING_METHODS
-from .helpers import na_preserving_int_cast
+from .helpers import color_alpha_cast, na_preserving_int_cast, pine_truth_cast
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_METHODS,
@@ -386,6 +386,12 @@ class CallVisitor:
             )
             for index, arg in enumerate(rest_nodes)
         ]
+        method_cs = self._callable_target_callsite_idx(method_info, node)
+        for index, arg in enumerate(rest_nodes, start=1):
+            if self._func_param_is_bool(method_info, index, method_cs):
+                rest_cpp[index - 1] = self._coerce_bool_expr(
+                    rest_cpp[index - 1], arg
+                )
 
         receiver_root = receiver_node
         while isinstance(receiver_root, MemberAccess):
@@ -1765,8 +1771,11 @@ class CallVisitor:
             and (node.args or node.kwargs)
         ):
             params = sigs.get_param_names(None, func_name)
-            args = _merge_kwargs(node.args, node.kwargs, params, self._visit_expr)
+            arg_nodes = _merge_kwargs(node.args, node.kwargs, params, lambda a: a)
+            args = [self._visit_expr(a) for a in arg_nodes]
+            ts_node = arg_nodes[0] if arg_nodes else None
             ts_arg = args[0] if args else "current_bar_.timestamp"
+            ts_arg = self._coerce_int_slot(ts_arg, ts_node, "int64_t")
             tz_arg = args[1] if len(args) > 1 else None
             field_expr = TIME_FIELD_EXPRS[func_name]
             if tz_arg is None:
@@ -1957,12 +1966,7 @@ class CallVisitor:
             # Pine v6 bools are two-state. Explicit bool(int/float) treats na
             # like false, while a raw C++ cast would make NaN truthy.
             x = self._visit_expr(node.args[0])
-            return (
-                f"[&](){{ auto _pf_v = ({x}); "
-                f"using _pf_t = std::decay_t<decltype(_pf_v)>; "
-                f"if constexpr (std::is_same_v<_pf_t, bool>) {{ return _pf_v; }} "
-                f"else {{ return is_na(_pf_v) ? false : (bool)_pf_v; }} }}()"
-            )
+            return pine_truth_cast(x)
         if func_name == "string" and namespace is None and node.args:
             # Pine string(x) cast — same emission as str.tostring(x), with
             # string passthrough and TV-style "true"/"false" for bools
@@ -2152,10 +2156,9 @@ class CallVisitor:
                         ),
                     )
                     if f_cpp_type == "int64_t":
-                        if "na<double>" in val:
-                            val = val.replace("na<double>()", "na<int64_t>()")
-                        else:
-                            val = f"(int64_t)({val})"
+                        val = self._coerce_int_slot(val, value_node, "int64_t")
+                        if val == "na<double>()":
+                            val = "na<int64_t>()"
                     elif (self._is_nullable_collection_cpp_type(f_cpp_type)
                           and val == "na<double>()"):
                         val = f"{f_cpp_type}{{}}"
@@ -2362,6 +2365,10 @@ class CallVisitor:
                 func_name, ordered_arg_nodes, all_args,
                 self.ctx.func_call_cs_map.get(id(node), (None, None))[1],
             )
+            self._coerce_bool_param_args(
+                func_name, ordered_arg_nodes, all_args,
+                self.ctx.func_call_cs_map.get(id(node), (None, None))[1],
+            )
         # Default args (parser does not store defaults): isInSession(sess, res = timeframe.period)
         if namespace is None and func_name in self._func_names:
             fi = self._func_info_map.get(func_name)
@@ -2425,6 +2432,18 @@ class CallVisitor:
             if int_cpp is None:
                 continue
             all_args[i] = self._coerce_int_slot(all_args[i], arg, int_cpp)
+
+    def _coerce_bool_param_args(self, func_name, arg_nodes, all_args,
+                                call_site_idx) -> None:
+        """Apply Pine's false-for-``na`` rule at bool UDF parameters."""
+        fi = self._func_info_map.get(func_name)
+        if not fi or not getattr(fi, "node", None) or not fi.node.params:
+            return
+        for i, arg in enumerate(arg_nodes):
+            if i >= len(all_args) or arg is None:
+                continue
+            if self._func_param_is_bool(fi, i, call_site_idx):
+                all_args[i] = self._coerce_bool_expr(all_args[i], arg)
 
     def _coerce_drawing_style_string_args(self, func_name, arg_nodes, all_args) -> None:
         """In-place coerce positional args bound to a ``std::string`` user-function
@@ -2516,7 +2535,13 @@ class CallVisitor:
         if func_name == "entry":
             p = self._resolve_func_args(node, "strategy.entry")
             entry_id = self._visit_expr(p.get("id")) if "id" in p else '""'
-            direction = self._visit_expr(p.get("direction")) if "direction" in p else "true"
+            direction_node = p.get("direction")
+            direction = (
+                self._coerce_bool_expr(
+                    self._visit_expr(direction_node), direction_node
+                )
+                if direction_node is not None else "true"
+            )
             stop = p.get("stop")
             limit = p.get("limit")
             qty = p.get("qty")
@@ -2547,14 +2572,26 @@ class CallVisitor:
             comment = self._visit_expr(p.get("comment")) if p.get("comment") is not None else '""'
             qty = self._visit_expr(p.get("qty")) if p.get("qty") is not None else "na<double>()"
             qty_pct = self._visit_expr(p.get("qty_percent")) if p.get("qty_percent") is not None else "na<double>()"
-            immediately = self._visit_expr(p.get("immediately")) if p.get("immediately") is not None else "false"
+            immediately_node = p.get("immediately")
+            immediately = (
+                self._coerce_bool_expr(
+                    self._visit_expr(immediately_node), immediately_node
+                )
+                if immediately_node is not None else "false"
+            )
             callsite = self._strategy_close_callsite_token(node)
             return f"strategy_close({close_id}, {comment}, {qty}, {qty_pct}, {immediately}, {callsite})"
 
         if func_name == "close_all":
             p = self._resolve_func_args(node, "strategy.close_all")
             comment = self._visit_expr(p.get("comment")) if p.get("comment") is not None else '""'
-            immediately = self._visit_expr(p.get("immediately")) if p.get("immediately") is not None else "false"
+            immediately_node = p.get("immediately")
+            immediately = (
+                self._coerce_bool_expr(
+                    self._visit_expr(immediately_node), immediately_node
+                )
+                if immediately_node is not None else "false"
+            )
             # The engine's ID-less strategy_close path closes the complete
             # position. Reuse it so close_all preserves the Pine order comment
             # and same-tick fill flag instead of silently discarding both.
@@ -2615,7 +2652,13 @@ class CallVisitor:
         if func_name == "order":
             p = self._resolve_func_args(node, "strategy.order")
             order_id = self._visit_expr(p.get("id")) if "id" in p else '""'
-            direction = self._visit_expr(p.get("direction")) if "direction" in p else "true"
+            direction_node = p.get("direction")
+            direction = (
+                self._coerce_bool_expr(
+                    self._visit_expr(direction_node), direction_node
+                )
+                if direction_node is not None else "true"
+            )
             qty = self._visit_expr(p.get("qty")) if "qty" in p else "0"
             limit_arg = self._visit_expr(p.get("limit")) if "limit" in p else "na<double>()"
             stop_arg = self._visit_expr(p.get("stop")) if "stop" in p else "na<double>()"
@@ -2695,7 +2738,8 @@ class CallVisitor:
                 base = self._coerce_int_slot(
                     args[0], node.args[0] if node.args else None, "int64_t",
                 )
-                return f'pine_color::new_color({base}, (int)({args[1]}))'
+                alpha = color_alpha_cast(args[1])
+                return f"pine_color::new_color({base}, {alpha})"
             return "0"
         if func_name in ("r", "g", "b", "t"):
             if args:
@@ -2703,9 +2747,28 @@ class CallVisitor:
             return "0"
         if func_name == "rgb":
             if len(args) >= 4:
-                return f"pine_color::new_color(((int64_t)({args[0]}) << 16 | (int64_t)({args[1]}) << 8 | (int64_t)({args[2]})), (int)({args[3]}))"
+                channels = [
+                    self._coerce_int_slot(args[i], node.args[i], "int64_t")
+                    for i in range(3)
+                ]
+                alpha = color_alpha_cast(args[3])
+                return (
+                    "pine_color::new_color(static_cast<int64_t>("
+                    f"(static_cast<uint64_t>({channels[0]}) & 0xFFULL) << 16 | "
+                    f"(static_cast<uint64_t>({channels[1]}) & 0xFFULL) << 8 | "
+                    f"(static_cast<uint64_t>({channels[2]}) & 0xFFULL)), {alpha})"
+                )
             elif len(args) >= 3:
-                return f"pine_color::new_color(((int64_t)({args[0]}) << 16 | (int64_t)({args[1]}) << 8 | (int64_t)({args[2]})), 0)"
+                channels = [
+                    self._coerce_int_slot(args[i], node.args[i], "int64_t")
+                    for i in range(3)
+                ]
+                return (
+                    "pine_color::new_color(static_cast<int64_t>("
+                    f"(static_cast<uint64_t>({channels[0]}) & 0xFFULL) << 16 | "
+                    f"(static_cast<uint64_t>({channels[1]}) & 0xFFULL) << 8 | "
+                    f"(static_cast<uint64_t>({channels[2]}) & 0xFFULL)), 0)"
+                )
             return "0"
         if func_name == "from_gradient":
             return "0"
@@ -2774,7 +2837,7 @@ class CallVisitor:
                 # spec). Out-of-range / negative occurrence → original string.
                 return (
                     f'[&](){{ std::string s={args[0]}; std::string t={args[1]}; '
-                    f'std::string r={args[2]}; int _occ=(int)({args[3]}); '
+                    f'std::string r={args[2]}; int _occ={self._coerce_int_slot(args[3], node.args[3], "int")}; '
                     f'if(t.empty()||_occ<0) return s; '
                     f'size_t p=0; int _i=0; '
                     f'while((p=s.find(t,p))!=std::string::npos){{ '

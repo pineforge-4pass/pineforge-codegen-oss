@@ -14,6 +14,8 @@ mixing this in (``CodeGen``) sets that attribute in its constructor.
 
 from __future__ import annotations
 
+import re
+
 from ..ast_nodes import (
     Identifier, MemberAccess, TypeDecl, EnumDecl, FuncDef, MethodDef,
     VarDecl, Assignment, TupleAssign, ForStmt, ForInStmt,
@@ -22,9 +24,12 @@ from ..limits import iter_ast_nodes
 
 
 # Integer C++ types an na-capable ``double`` expression may be narrowed into.
-# ``bool`` is deliberately absent: a boolean conversion is ``!= 0``, which is
-# defined for NaN, so it is a different (semantic, not undefined) problem.
+# ``bool`` has its own Pine truthiness lowering below: unlike a C++ cast, it
+# treats both the floating NaN and the integer ``na`` sentinel as false.
 NA_PRESERVING_INT_TYPES = ("int", "int64_t")
+_INT_LITERAL_TEXT = re.compile(
+    r"^\s*\(?(?:[-+]?\d+)(?:LL|ULL|L|U)?\)?\s*$"
+)
 
 
 def na_preserving_int_cast(value_cpp: str, int_cpp_type: str = "int") -> str:
@@ -42,9 +47,55 @@ def na_preserving_int_cast(value_cpp: str, int_cpp_type: str = "int") -> str:
     else truncates toward zero exactly as the implicit conversion did, so a
     non-``na`` result is bit-for-bit what it was before.
     """
+    # Integer literals are proven non-``na``. Keep the historical explicit
+    # cast for these tiny paths so a helper does not churn every matrix/color
+    # call that passes a literal index or channel.
+    if _INT_LITERAL_TEXT.fullmatch(value_cpp):
+        return f"({int_cpp_type})({value_cpp})"
     return (f"[&](){{ double _pf_v = (double)({value_cpp}); "
             f"return is_na(_pf_v) ? na<{int_cpp_type}>() : "
             f"({int_cpp_type})_pf_v; }}()")
+
+
+def pine_truth_cast(value_cpp: str) -> str:
+    """Convert one scalar expression using Pine's boolean truthiness.
+
+    Pine's boolean context is false for ``na``.  C++ differs for both numeric
+    sentinels: ``bool(NaN)`` is true and ``bool(INT_MIN)`` is true.  Keep the
+    expression single-evaluation and use ``if constexpr`` so the generated
+    lambda is valid for either a real ``bool`` or a numeric scalar.  The final
+    branch is intentionally a normal C++ conversion for a type that cannot
+    carry Pine ``na`` (for example an engine handle); callers only use this
+    helper at scalar boolean boundaries.
+    """
+    return (
+        f"[&](){{ auto _pf_bool_v = ({value_cpp}); "
+        f"using _pf_bool_t = std::decay_t<decltype(_pf_bool_v)>; "
+        f"if constexpr (std::is_same_v<_pf_bool_t, bool>) {{ "
+        f"return _pf_bool_v; }} "
+        f"else if constexpr (std::is_floating_point_v<_pf_bool_t> || "
+        f"std::is_integral_v<_pf_bool_t>) {{ "
+        f"return is_na(_pf_bool_v) ? false : (_pf_bool_v != 0); }} "
+        f"else {{ return static_cast<bool>(_pf_bool_v); }} }}()"
+    )
+
+
+def color_alpha_cast(value_cpp: str) -> str:
+    """Convert Pine transparency without feeding ``na<int>()`` to color.hpp.
+
+    The engine's color helper performs integer arithmetic on transparency;
+    passing the integer ``na`` sentinel there would overflow before the color
+    is built.  Pine's color value has no nullable engine representation, so a
+    missing transparency uses the established benign zero fallback while a
+    finite value keeps its truncating conversion.
+    """
+    return (
+        f"[&](){{ auto _pf_color_v = ({value_cpp}); "
+        f"using _pf_color_t = std::decay_t<decltype(_pf_color_v)>; "
+        f"if constexpr (std::is_same_v<_pf_color_t, bool>) "
+        f"return _pf_color_v ? 1 : 0; "
+        f"else return is_na(_pf_color_v) ? 0 : (int)_pf_color_v; }}()"
+    )
 
 
 # Preserve the historic spelling for names already escaped in released TUs.

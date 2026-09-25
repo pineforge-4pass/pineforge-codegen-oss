@@ -107,7 +107,7 @@ TA_TUPLE_RESULT_TYPES = {
 
 # CPP_RESERVED + the NamingHelper mixin are pulled in from helpers.py so the
 # small naming/walk utilities can be shared with future visitor mixins.
-from .helpers import CPP_RESERVED, NamingHelper
+from .helpers import CPP_RESERVED, NamingHelper, pine_truth_cast
 from .constant_fold import fold_numeric_expression
 
 # TypeInferer mixin owns the ~15 type-spec / C++-type inference helpers
@@ -4774,7 +4774,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return (
             (site.class_name == "_PFALMA" and position == 3)
             or (site.class_name in ("_PFKC", "_PFKCW") and position == 2)
+            or (site.class_name == "ta::TR" and position == 0)
+            or (site.class_name in ("ta::StdDev", "ta::Variance") and position == 1)
         )
+
+    @staticmethod
+    def _ta_ctor_bool_cpp(value: str) -> str:
+        """Pine truthiness for a runtime TA constructor flag."""
+        if value.strip() in {"true", "false"}:
+            return value
+        return pine_truth_cast(value)
 
     # An inline ``input.*()`` call inside a ctor-arg / derived-length spelling
     # is one leaf of the expression. It qualifies exactly when its bound
@@ -5290,14 +5299,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         input's default (or ``1``) under every override."""
         args: list[str] = []
         any_runtime = False
-        for a in site.ctor_args:
+        for arg_pos, a in enumerate(site.ctor_args):
             rt = self._runtime_ctor_arg_for_reset(a)
             if rt is not None:
-                args.append(rt)
+                rendered = rt
                 any_runtime = True
             else:
                 resolved = self._resolve_ta_ctor_arg(a)
-                args.append(resolved if self._is_compile_time_value(resolved) else "1")
+                rendered = resolved if self._is_compile_time_value(resolved) else "1"
+            if self._ta_ctor_arg_is_bool(site, arg_pos):
+                rendered = self._ta_ctor_bool_cpp(rendered)
+            args.append(rendered)
         return args, any_runtime
 
     def _collect_ta_runtime_resets(
@@ -5401,14 +5413,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                                       "over those for TA lengths."),
                             )
                         if rt is not None:
-                            runtime_args.append(rt)
+                            rendered = rt
                             any_runtime = True
                         else:
-                            runtime_args.append(
+                            rendered = (
                                 resolved
                                 if self._is_compile_time_value(resolved)
                                 else "1"
                             )
+                        if self._ta_ctor_arg_is_bool(site, arg_pos):
+                            rendered = self._ta_ctor_bool_cpp(rendered)
+                        runtime_args.append(rendered)
                     if any_runtime:
                         resets.append(
                             f"{variant['member_name']} = {site.class_name}({', '.join(runtime_args)});"

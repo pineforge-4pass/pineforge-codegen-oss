@@ -972,11 +972,14 @@ class TopLevelEmitter:
                 # Compile-time placeholder for the init list; the runtime reset
                 # (when the arg is input-derived) overwrites it on the first bar.
                 safe_resolved = []
-                for r in resolved:
+                for arg_pos, r in enumerate(resolved):
                     if self._is_compile_time_value(r):
-                        safe_resolved.append(r)
+                        rendered = r
                     else:
-                        safe_resolved.append("1")
+                        rendered = "1"
+                    if self._ta_ctor_arg_is_bool(site, arg_pos):
+                        rendered = self._ta_ctor_bool_cpp(rendered)
+                    safe_resolved.append(rendered)
                 init_parts.append(f"{site.member_name}({', '.join(safe_resolved)})")
         # Security evaluator TA ctor args (skip for user function call expressions)
         for info in self._security_eval_info:
@@ -992,10 +995,11 @@ class TopLevelEmitter:
                     )
                     resolved = [self._resolve_ta_ctor_arg(a) for a in ctor_args]
                     safe_resolved = []
-                    for r in resolved:
-                        safe_resolved.append(
-                            r if self._is_compile_time_value(r) else "1"
-                        )
+                    for arg_pos, r in enumerate(resolved):
+                        rendered = r if self._is_compile_time_value(r) else "1"
+                        if self._ta_ctor_arg_is_bool(site, arg_pos):
+                            rendered = self._ta_ctor_bool_cpp(rendered)
+                        safe_resolved.append(rendered)
                     init_parts.append(f"{variant['member_name']}({', '.join(safe_resolved)})")
 
         # Non-series var members with compile-time init (deduplicate by name)

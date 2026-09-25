@@ -1565,7 +1565,9 @@ class StmtVisitor:
     def _visit_if_body(self, node: IfStmt, lines: list[str], indent: int) -> None:
         pad = "    " * indent
 
-        cond = self._visit_expr(node.condition)
+        cond = self._coerce_bool_expr(
+            self._visit_expr(node.condition), node.condition
+        )
         lines.append(f"{pad}if ({cond}) {{")
         self._visit_block_statements(node.body, lines, indent + 1)
         lines.append(f"{pad}}}")
@@ -1828,7 +1830,9 @@ class StmtVisitor:
 
     def _visit_while(self, node: WhileStmt, lines: list[str], indent: int) -> None:
         pad = "    " * indent
-        cond = self._visit_expr(node.condition)
+        cond = self._coerce_bool_expr(
+            self._visit_expr(node.condition), node.condition
+        )
         lines.append(f"{pad}while ({cond}) {{")
         _blk_saved = self._push_block_var_remap(node)
         try:
@@ -1853,7 +1857,9 @@ class StmtVisitor:
         else:
             for i, (case_expr, case_body) in enumerate(node.cases):
                 prefix = "if" if i == 0 else "else if"
-                cond = self._visit_expr(case_expr)
+                cond = self._coerce_bool_expr(
+                    self._visit_expr(case_expr), case_expr
+                )
                 lines.append(f"{pad}{prefix} ({cond}) {{")
                 self._visit_block_statements(case_body, lines, indent + 1)
                 lines.append(f"{pad}}}")
@@ -1950,7 +1956,9 @@ class StmtVisitor:
             lines.append(f"{pad}}}")
 
         if isinstance(node, IfStmt):
-            cond = self._visit_expr(node.condition)
+            cond = self._coerce_bool_expr(
+                self._visit_expr(node.condition), node.condition
+            )
             lines.append(f"{pad}if ({cond}) {{")
             self._emit_block_with_assign(
                 node.body,
@@ -2006,7 +2014,9 @@ class StmtVisitor:
             else:
                 for i, (case_expr, case_body) in enumerate(node.cases):
                     prefix = "if" if i == 0 else "else if"
-                    cond = self._visit_expr(case_expr)
+                    cond = self._coerce_bool_expr(
+                        self._visit_expr(case_expr), case_expr
+                    )
                     lines.append(f"{pad}{prefix} ({cond}) {{")
                     self._emit_block_with_assign(
                         case_body,

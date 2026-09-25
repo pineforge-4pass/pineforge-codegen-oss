@@ -391,8 +391,14 @@ you delete or weaken the special case, the test will tell you.
    lowering. The check that keeps the class closed is the compiler:
    `tests/test_na_int_narrowing.py` compiles a per-site battery with
    `-Wfloat-conversion` and requires an empty diagnostic list.
-   Conversions to `bool` are out of scope — a boolean conversion is
-   `!= 0`, which is defined for NaN.
+   Numeric values entering a boolean context must use the Pine truthiness
+   helper: `na` is false, while C++ would treat both NaN and the integer
+   `na` sentinel as true. `types._coerce_bool_expr` covers `if` / `while` /
+   ternary / `and` / `or` and user-function or TA bool parameters;
+   compile-time literals and already-boolean values are proven non-`na` and
+   stay native. `tests/test_na_truthiness.py` pins the generated form and
+   runtime rows. The integer narrowing and truthiness batteries together are
+   the closed conversion-site check.
 10. **An inline `input.*()` call is one leaf of a TA length.** TA ctor
    args (and derived / user-function lengths) reach the codegen as Pine
    source spellings. `pine_spelling.py` keeps an inline input call whole

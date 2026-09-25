@@ -16,7 +16,30 @@ consumers should never reach for them directly.
 
 from __future__ import annotations
 
+import re
+
 from ..symbols import PineType
+from .helpers import na_preserving_int_cast, pine_truth_cast
+
+
+_PROVEN_INT_ARG = re.compile(
+    r"^\s*(?:[A-Za-z_]\w*|get_input_int\(.*\)|pine_(?:bar_index|year|month|dayofmonth|dayofweek|hour|minute|second|weekofyear)\(.*\))\s*$"
+)
+
+
+def _matrix_int_arg(value: str) -> str:
+    """Keep old casts for typed integer matrix indices; guard other values."""
+    if _PROVEN_INT_ARG.fullmatch(value):
+        return f"(int)({value})"
+    return na_preserving_int_cast(value)
+
+
+def _pine_bool_arg(value: str) -> str:
+    """Keep literal bool spellings; guard numeric/dynamic bool arguments."""
+    stripped = value.strip()
+    if stripped in {"true", "false"} or stripped.startswith("__pf_array_arg_"):
+        return value
+    return pine_truth_cast(value)
 
 
 # ---------------------------------------------------------------------------
@@ -742,28 +765,28 @@ ARRAY_METHODS = {
     "min":       lambda a, args: f"({a}.empty()?na<double>():*std::min_element({a}.begin(),{a}.end()))",
     "max":       lambda a, args: f"({a}.empty()?na<double>():*std::max_element({a}.begin(),{a}.end()))",
     "range":     lambda a, args: f"({a}.empty()?na<double>():*std::max_element({a}.begin(),{a}.end())-*std::min_element({a}.begin(),{a}.end()))",
-    "every":     lambda a, args: f"std::all_of({a}.begin(),{a}.end(),[](double v){{return v!=0.0;}})",
-    "some":      lambda a, args: f"std::any_of({a}.begin(),{a}.end(),[](double v){{return v!=0.0;}})",
+    "every":     lambda a, args: f"std::all_of({a}.begin(),{a}.end(),[](double v){{return !is_na(v) && v!=0.0;}})",
+    "some":      lambda a, args: f"std::any_of({a}.begin(),{a}.end(),[](double v){{return !is_na(v) && v!=0.0;}})",
     # stdev/variance honor the optional 2nd ``biased`` arg (Pine v6:
     # biased=true → population (default), false → sample / n-1).
     "stdev":     lambda a, args: (
         f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); "
-        f"double _d=({args[0]})?(double){a}.size():((double){a}.size()-1.0); "
+        f"double _d=({_pine_bool_arg(args[0])})?(double){a}.size():((double){a}.size()-1.0); "
         f"return _d>0?std::sqrt(s/_d):na<double>(); }}()"
         if args else
         f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); return std::sqrt(s/{a}.size()); }}()"
     ),
     "variance":  lambda a, args: (
         f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); "
-        f"double _d=({args[0]})?(double){a}.size():((double){a}.size()-1.0); "
+        f"double _d=({_pine_bool_arg(args[0])})?(double){a}.size():((double){a}.size()-1.0); "
         f"return _d>0?s/_d:na<double>(); }}()"
         if args else
         f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); return s/{a}.size(); }}()"
     ),
     "median":    lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); int n=c.size(); return n%2?c[n/2]:(c[n/2-1]+c[n/2])/2.0; }}()",
     "mode":      lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); std::unordered_map<double,int> m; for(auto v:{a})m[v]++; double best=0; int bc=0; for(auto&[v,c]:m)if(c>bc||(c==bc&&v<best)){{bc=c;best=v;}} return best; }}()",
-    "percentile_linear_interpolation": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); double k=({args[0]}/100.0)*c.size()-0.5; int i=std::max(0,(int)k); double f=k-i; if(i+1>=(int)c.size()) return c.back(); return c[i]*(1-f)+c[i+1]*f; }}()",
-    "percentile_nearest_rank": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); int r=(int)std::ceil(({args[0]}/100.0)*c.size()); return (double)c[std::min(r-1,(int)c.size()-1)]; }}()",
+    "percentile_linear_interpolation": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); double k=({args[0]}/100.0)*c.size()-0.5; int i=std::max(0,{na_preserving_int_cast('k')}); double f=k-i; if(i+1>=(int)c.size()) return c.back(); return c[i]*(1-f)+c[i+1]*f; }}()",
+    "percentile_nearest_rank": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); int r={na_preserving_int_cast(f'std::ceil(({args[0]}/100.0)*c.size())')}; return (double)c[std::min(r-1,(int)c.size()-1)]; }}()",
     "percentrank": _checked_array_percentrank,
     "abs":       lambda a, args: f"[&](){{ std::vector<double> r; for(auto v:{a})r.push_back(std::abs(v)); return r; }}()",
     "join":      lambda a, args: "[&](){{ std::string r; for(size_t i=0;i<{arr}.size();i++){{ if(i>0)r+={sep}; r+=std::to_string({arr}[i]); }} return r; }}()".format(arr=a, sep=args[0] if args else 'std::string(",")'),
@@ -831,7 +854,7 @@ def _matrix_add_row(m: str, args: list) -> str:
     if len(args) == 1:
         return f"{m}.add_row((int)({m}.rows()), {args[0]})"
     if len(args) == 2:
-        return f"{m}.add_row((int)({args[0]}), {args[1]})"
+        return f"{m}.add_row({_matrix_int_arg(args[0])}, {args[1]})"
     raise IndexError("matrix.add_row")
 
 
@@ -840,7 +863,7 @@ def _matrix_add_col(m: str, args: list) -> str:
     if len(args) == 1:
         return f"{m}.add_col((int)({m}.columns()), {args[0]})"
     if len(args) == 2:
-        return f"{m}.add_col((int)({args[0]}), {args[1]})"
+        return f"{m}.add_col({_matrix_int_arg(args[0])}, {args[1]})"
     raise IndexError("matrix.add_col")
 
 
@@ -898,28 +921,28 @@ MATRIX_NUMERIC_ONLY: frozenset[str] = frozenset({
 MATRIX_SORT_ALLOWED_GENERIC_ELEMS: frozenset[str] = frozenset({"int", "bool", "string"})
 
 MATRIX_METHODS = {
-    "get":       lambda m, args: f"{m}.get((int)({args[0]}), (int)({args[1]}))",
-    "set":       lambda m, args: f"{m}.set((int)({args[0]}), (int)({args[1]}), {args[2]})",
+    "get":       lambda m, args: f"{m}.get({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])})",
+    "set":       lambda m, args: f"{m}.set({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])}, {args[2]})",
     "fill":      lambda m, args: f"{m}.fill({args[0]})",
-    "row":       lambda m, args: f"{m}.row((int)({args[0]}))",
-    "col":       lambda m, args: f"{m}.col((int)({args[0]}))",
+    "row":       lambda m, args: f"{m}.row({_matrix_int_arg(args[0])})",
+    "col":       lambda m, args: f"{m}.col({_matrix_int_arg(args[0])})",
     "rows":      lambda m, args: f"(int){m}.rows()",
     "columns":   lambda m, args: f"(int){m}.columns()",
     "add_row":   _matrix_add_row,
     "add_col":   _matrix_add_col,
     # ``remove_row`` is void in C++; Pine may assign the result, so we wrap
     # it in a lambda that returns a sentinel double after the side effect.
-    "remove_row": lambda m, args: f"[&](){{ {m}.remove_row((int)({args[0]})); return 0.0; }}()",
-    "remove_col":lambda m, args: f"[&](){{ {m}.remove_col((int)({args[0]})); return 0.0; }}()",
-    "swap_rows": lambda m, args: f"{m}.swap_rows((int)({args[0]}), (int)({args[1]}))",
-    "swap_columns": lambda m, args: f"{m}.swap_columns((int)({args[0]}), (int)({args[1]}))",
+    "remove_row": lambda m, args: f"[&](){{ {m}.remove_row({_matrix_int_arg(args[0])}); return 0.0; }}()",
+    "remove_col":lambda m, args: f"[&](){{ {m}.remove_col({_matrix_int_arg(args[0])}); return 0.0; }}()",
+    "swap_rows": lambda m, args: f"{m}.swap_rows({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])})",
+    "swap_columns": lambda m, args: f"{m}.swap_columns({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])})",
     "copy":      lambda m, args: f"{m}.copy()",
-    "submatrix": lambda m, args: f"{m}.submatrix((int)({args[0]}), (int)({args[1]}), (int)({args[2]}), (int)({args[3]}))",
-    "reshape":   lambda m, args: f"{m}.reshape((int)({args[0]}), (int)({args[1]}))",
+    "submatrix": lambda m, args: f"{m}.submatrix({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])}, {_matrix_int_arg(args[2])}, {_matrix_int_arg(args[3])})",
+    "reshape":   lambda m, args: f"{m}.reshape({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])})",
     "reverse":   lambda m, args: f"{m}.reverse()",
     "transpose": lambda m, args: f"{m}.transpose()",
-    "sort":      lambda m, args: f"{m}.sort((int)({args[0]}), {args[1]} != \"descending\")" if len(args)>1 else f"{m}.sort((int)({args[0]}))",
-    "concat":    lambda m, args: f"{m}.concat({args[0]}, (bool)({args[1]}))" if len(args)>1 else f"{m}.concat({args[0]}, true)",
+    "sort":      lambda m, args: f"{m}.sort({_matrix_int_arg(args[0])}, {args[1]} != \"descending\")" if len(args)>1 else f"{m}.sort({_matrix_int_arg(args[0])})",
+    "concat":    lambda m, args: f"{m}.concat({args[0]}, {pine_truth_cast(args[1])})" if len(args)>1 else f"{m}.concat({args[0]}, true)",
     "avg":       lambda m, args: f"{m}.avg()",
     "min":       lambda m, args: f"{m}.min()",
     "max":       lambda m, args: f"{m}.max()",
@@ -927,7 +950,7 @@ MATRIX_METHODS = {
     "sum":       lambda m, args: f"{m}.sum()",
     "diff":      lambda m, args: f"{m}.diff({args[0]})",
     "mult":      lambda m, args: f"{m}.mult({args[0]})",
-    "pow":       lambda m, args: f"{m}.pow((int)({args[0]}))",
+    "pow":       lambda m, args: f"{m}.pow({_matrix_int_arg(args[0])})",
     "det":       lambda m, args: f"{m}.det()",
     "inv":       lambda m, args: f"{m}.inv()",
     "pinv":      lambda m, args: f"{m}.pinv()",
@@ -1023,7 +1046,7 @@ STR_FUNC_MAP = {
     "lower":       lambda args: f"[&](){{ std::string s={args[0]}; std::transform(s.begin(),s.end(),s.begin(),::tolower); return s; }}()",
     "upper":       lambda args: f"[&](){{ std::string s={args[0]}; std::transform(s.begin(),s.end(),s.begin(),::toupper); return s; }}()",
     "trim":        lambda args: f'[&](){{ std::string s={args[0]}; s.erase(0,s.find_first_not_of(" \\t\\n\\r")); s.erase(s.find_last_not_of(" \\t\\n\\r")+1); return s; }}()',
-    "repeat":      lambda args: f"[&](){{ std::string r; for(int i=0;i<(int)({args[1]});i++) r+={args[0]}; return r; }}()",
+    "repeat":      lambda args: f"[&](){{ std::string r; for(int i=0;i<{na_preserving_int_cast(args[1])};i++) r+={args[0]}; return r; }}()",
     "match":       lambda args: f'pine_str_match({args[0]}, {args[1]})',
     "split":       lambda args: f'pine_str_split({args[0]}, {args[1]})',
     "format":      None,  # handled separately

@@ -405,7 +405,7 @@ def test_bool_cast_numeric_na_is_false_not_cpp_nan_truthy():
         "plot(isUp ? close : open)\n"
     )
     assert "(bool)(na<double>())" not in cpp
-    assert "is_na(_pf_v) ? false : (bool)_pf_v" in cpp
+    assert "is_na(_pf_bool_v) ? false : (_pf_bool_v != 0)" in cpp
     assert "var bool" not in cpp
     assert "bool isUp" in cpp
     assert "bool fromClose" in cpp

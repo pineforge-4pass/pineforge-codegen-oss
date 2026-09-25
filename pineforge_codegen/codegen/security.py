@@ -1736,7 +1736,9 @@ class SecurityEmitter:
                     runtime_stack_local,
                     lines,
                 )
-                lines.append(f"{pad}if ({cond_cpp}) {{")
+                lines.append(
+                    f"{pad}if ({self._coerce_bool_expr(cond_cpp, stmt.condition)}) {{"
+                )
                 body_bindings = dict(active_bindings)
                 body_state = (
                     self._current_func_collection_specs,
@@ -2758,7 +2760,9 @@ class SecurityEmitter:
                 security_mutable_names=relevant_names,
                 emitted_lines=emitted_lines,
             )
-            lines.append(f"{pad}if ({cond_cpp}) {{")
+            lines.append(
+                f"{pad}if ({self._coerce_bool_expr(cond_cpp, node.condition)}) {{"
+            )
             lines.extend(body_lines)
             if else_lines:
                 lines.append(f"{pad}}} else {{")
@@ -3477,9 +3481,13 @@ class SecurityEmitter:
                         helper_binding_stack,
                         emitted_lines,
                     )
+                    index_cpp = self._coerce_int_slot_with_cast(
+                        index_cpp, expr_node.index, "int"
+                    )
                     return (
                         f"([&]() -> {cpp_t} {{ "
-                        f"int _hidx = (int)({index_cpp}); "
+                        f"int _hidx = {index_cpp}; "
+                        f"if (is_na(_hidx)) return na<{cpp_t}>(); "
                         f"return (_hidx <= 0) ? {current} : {hist}[_hidx - 1]; "
                         f"}}())"
                     )
@@ -3531,6 +3539,9 @@ class SecurityEmitter:
                     helper_binding_stack,
                     emitted_lines,
                 )
+                index_cpp = self._coerce_int_slot_with_cast(
+                    index_cpp, expr_node.index, "int"
+                )
                 inner = self._build_security_expr(
                     sec_id,
                     expr_node.object,
@@ -3544,7 +3555,8 @@ class SecurityEmitter:
                 return (
                     f"([&]() -> {cpp_t} {{ "
                     f"{cpp_t} _hv = ({inner}); "
-                    f"int _hidx = (int)({index_cpp}); "
+                    f"int _hidx = {index_cpp}; "
+                    f"if (is_na(_hidx)) return na<{cpp_t}>(); "
                     f"{cpp_t} _out = (_hidx <= 0) ? _hv : {hist}[_hidx - 1]; "
                     f"if (is_complete) {hist}.push(_hv); "
                     f"return _out; }}())"
@@ -3595,6 +3607,9 @@ class SecurityEmitter:
                         input_stack,
                         emitted_lines,
                     )
+                    index_cpp = self._coerce_int_slot_with_cast(
+                        index_cpp, expr_node.index, "int"
+                    )
                     result_key = (idx, sig)
                     if result_key not in ta_results:
                         self._codegen_error(
@@ -3619,7 +3634,7 @@ class SecurityEmitter:
                     hist = self._security_ta_hist_series_cpp(member_name)
                     return (
                         "([&]() -> double { "
-                        f"int _hidx = (int)({index_cpp}); "
+                        f"int _hidx = {index_cpp}; "
                         "if (is_na(_hidx) || _hidx < 0) return na<double>(); "
                         f"return (_hidx == 0) ? {current} : {hist}[_hidx - 1]; "
                         "}())"
@@ -3665,6 +3680,9 @@ class SecurityEmitter:
             )
             cpp_ops = {"and": "&&", "or": "||"}
             op = cpp_ops.get(expr_node.op, expr_node.op)
+            if expr_node.op in ("and", "or"):
+                left = self._coerce_bool_expr(left, expr_node.left)
+                right = self._coerce_bool_expr(right, expr_node.right)
             if expr_node.op == "%":
                 return f"std::fmod((double)({left}), (double)({right}))"
             # KI-71: honour Pine's falsy-on-na relational rule inside
@@ -3677,7 +3695,7 @@ class SecurityEmitter:
                 sec_id, expr_node.operand, ta_range, ta_results, resolving, security_mutable_names, helper_binding_stack, emitted_lines
             )
             if expr_node.op == "not":
-                return f"!({operand})"
+                return f"!({self._coerce_bool_expr(operand, expr_node.operand)})"
             return f"({expr_node.op}{operand})"
 
         if isinstance(expr_node, Ternary):
@@ -3690,6 +3708,7 @@ class SecurityEmitter:
             fv = self._build_security_expr(
                 sec_id, expr_node.false_val, ta_range, ta_results, resolving, security_mutable_names, helper_binding_stack, emitted_lines
             )
+            cond = self._coerce_bool_expr(cond, expr_node.condition)
             return f"(({cond}) ? ({tv}) : ({fv}))"
 
         if isinstance(expr_node, TupleLiteral):

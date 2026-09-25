@@ -218,7 +218,9 @@ class ExprVisitor:
         if isinstance(node, UnaryOp):
             return self._visit_unaryop(node)
         if isinstance(node, Ternary):
-            c = self._visit_expr(node.condition)
+            c = self._coerce_bool_expr(
+                self._visit_expr(node.condition), node.condition
+            )
             t = self._visit_expr(node.true_val)
             f = self._visit_expr(node.false_val)
             return f"(({c}) ? ({t}) : ({f}))"
@@ -1069,6 +1071,12 @@ class ExprVisitor:
         right = self._visit_expr(node.right)
         cpp_ops = {"and": "&&", "or": "||"}
         op = cpp_ops.get(node.op, node.op)
+        if node.op in ("and", "or"):
+            # Pine converts numeric operands to two-state booleans before
+            # applying short-circuit logic.  C++ treats NaN and INT_MIN as
+            # true, so both operands need the same na-aware truthiness rule.
+            left = self._coerce_bool_expr(left, node.left)
+            right = self._coerce_bool_expr(right, node.right)
         if node.op == "+":
             lt = self._infer_type(node.left)
             rt = self._infer_type(node.right)
@@ -1095,7 +1103,7 @@ class ExprVisitor:
     def _visit_unaryop(self, node: UnaryOp) -> str:
         operand = self._visit_expr(node.operand)
         if node.op == "not":
-            return f"!({operand})"
+            return f"!({self._coerce_bool_expr(operand, node.operand)})"
         return f"({node.op}{operand})"
 
     def _visit_subscript(self, node: Subscript) -> str:
@@ -1151,7 +1159,11 @@ class ExprVisitor:
             # previous chart bar in every run mode (``_lazy_edge_ta_hoist_plan``).
             hoisted_member = self._hoisted_hist_reads.get(id(node))
             if hoisted_member is not None:
-                return f"{hoisted_member}[(int)({idx})]"
+                idx_int = self._coerce_int_slot(idx, node.index, "int")
+                if (idx_int == idx
+                        and not self._emitted_value_is_double(node.index)):
+                    idx_int = f"(int)({idx})"
+                return f"{hoisted_member}[{idx_int}]"
             inner = self._visit_expr(node.object)
             cpp_t = self._infer_type(node.object)
             if cpp_t not in ("double", "int", "int64_t", "bool"):
@@ -1182,6 +1194,10 @@ class ExprVisitor:
                 # established call-local history fallback below.
                 ta_mem = self._ta_member_name(ta_site)
                 precalc = f"_precalc_{ta_mem}"
+                idx_int = self._coerce_int_slot(idx, node.index, "int")
+                if (idx_int == idx
+                        and not self._emitted_value_is_double(node.index)):
+                    idx_int = f"(int)({idx})"
                 return (
                     f"([&]() -> {cpp_t} {{ "
                     f"if (_use_precalc) {{ "
@@ -1203,14 +1219,18 @@ class ExprVisitor:
                     f"{cpp_t} _hv = ({inner}); "
                     f"if (history_advances_new_bar()) {member}.push(_hv); "
                     f"else {member}.update(_hv); "
-                    f"return {member}[(int)({idx})]; }}())"
+                    f"return {member}[{idx_int}]; }}())"
                 )
+            idx_int = self._coerce_int_slot(idx, node.index, "int")
+            if (idx_int == idx
+                    and not self._emitted_value_is_double(node.index)):
+                idx_int = f"(int)({idx})"
             return (
                 f"([&]() -> {cpp_t} {{ "
                 f"{cpp_t} _hv = ({inner}); "
                 f"if (history_advances_new_bar()) {member}.push(_hv); "
                 f"else {member}.update(_hv); "
-                f"return {member}[(int)({idx})]; }}())"
+                f"return {member}[{idx_int}]; }}())"
             )
         obj = self._visit_expr(node.object)
         # If subscripting a non-series variable (e.g., function parameter),
@@ -1221,4 +1241,8 @@ class ExprVisitor:
                     and name not in self.ctx.series_vars
                     and name not in self._var_names):
                 return obj
-        return f"{obj}[{idx}]"
+        idx_int = self._coerce_int_slot(idx, node.index, "int")
+        if (idx_int == idx
+                and not self._emitted_value_is_double(node.index)):
+            idx_int = f"(int)({idx})"
+        return f"{obj}[{idx_int}]"
