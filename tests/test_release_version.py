@@ -111,6 +111,16 @@ def test_override_must_move_forward(current, override):
         rv.next_version(current, "patch", override)
 
 
+@pytest.mark.parametrize("current,override", [
+    ("9.0.0", "10.0.0"),            # numeric, not string, order
+    ("1.0.0-rc.9", "1.0.0-rc.10"),
+    ("1.0.0-beta.2", "1.0.0-rc.1"),
+    ("1.0.0-rc.1", "1.0.0"),
+])
+def test_override_forward_by_semver_precedence(current, override):
+    assert rv.next_version(current, "patch", override) == override
+
+
 def test_0x_prereleases_are_refused():
     # The hub pairs prereleases only from 1.0.0 on; a 0.x rc could never ship.
     with pytest.raises(ValueError, match="1.0.0"):
