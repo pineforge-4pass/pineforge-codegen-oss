@@ -195,7 +195,7 @@ CPP_EMITTER_NAMES = frozenset("""
     live_position_size pending_order_count market_admission_journal
     pine_time pine_time_close pine_time_tradingday pine_random
     pine_runtime_error pine_enum_str_at pine_session_ismarket
-    pine_session_ispostmarket pine_session_ispremarket session_ismarket_
+    pine_session_ispostmarket pine_session_ispremarket _pf_session_ismarket
     script_tf_
     tf_change tf_is_daily tf_is_intraday tf_is_monthly tf_is_seconds
     tf_is_weekly tf_multiplier tf_to_seconds time_close timestamp main_period

@@ -109,6 +109,7 @@ TA_TUPLE_RESULT_TYPES = {
 # small naming/walk utilities can be shared with future visitor mixins.
 from .helpers import CPP_RESERVED, NamingHelper, na_preserving_int_cast, pine_truth_cast
 from .constant_fold import fold_numeric_expression
+from .session_market import SESSION_MARKET_CPP
 
 # TypeInferer mixin owns the ~15 type-spec / C++-type inference helpers
 # previously scattered across this module; see ``codegen/types.py``.
@@ -320,9 +321,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._func_var_members_set: set[str] = set()
         self._precalc_loop_active: bool = False
         # Nonzero while the expression visitor lowers a request.security
-        # payload (``_build_security_expr``): a chart-bar-only host fact such
-        # as ``session_ismarket_`` does not describe the security bar.
+        # payload (``_build_security_expr``): the session helper below reads
+        # the chart's timeframe, which does not describe the security bar.
         self._security_payload_depth: int = 0
+        # Set when a chart expression calls ``_pf_session_ismarket``; the
+        # helper is emitted before the class once the whole TU is lowered.
+        self._uses_session_market: bool = False
+        # session.* reads inside a request.security payload already warned.
+        self._warned_security_session_sites: set[int] = set()
         # Top-level lazy-edge TA sites hoisted to every-bar evaluation for the
         # statement currently being lowered: FuncCall id -> local name, and
         # Subscript id -> ``_hist_call_*`` member (see ``ta.py``).
@@ -4118,6 +4124,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # per-callsite instances are declared below inside GeneratedStrategy
         # and therefore join the automatic COOF checkpoint inventory.
         self._emit_lazy_source_clock_helper(lines)
+        # The chart-bar session helper, inserted here once the class is
+        # lowered and known to call it (codegen/session_market.py).
+        _session_market_at = len(lines)
 
         # 2. Open class
         lines.append("class GeneratedStrategy : public pineforge::source::PineStrategyHost {")
@@ -4724,6 +4733,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 13. extern "C" interface
         self._emit_extern_c(lines)
+
+        if self._uses_session_market:
+            lines[_session_market_at:_session_market_at] = [SESSION_MARKET_CPP]
 
         return "\n".join(lines)
 

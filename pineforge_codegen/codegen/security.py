@@ -31,6 +31,9 @@ attributes (all set by ``CodeGen.__init__`` unless noted):
   identity → index in ``ctx.ta_call_sites``.
 - ``self._func_names`` (``set[str]``): user-defined function names.
 - ``self._func_info_map`` (``dict[str, FuncInfo]``): name -> FuncInfo.
+- ``self._security_payload_depth`` (``int``): raised around the
+  ``_visit_expr`` fallback of ``_build_security_expr``; the expression
+  visitor keeps the session.* time-of-day predicates while it is nonzero.
 
 Sibling-mixin methods consumed via ``self``:
 

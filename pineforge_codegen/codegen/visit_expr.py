@@ -851,33 +851,45 @@ class ExprVisitor:
                     return 'std::string("regular")'
                 if node.member == "extended":
                     return 'std::string("extended")'
-                # session.is* predicates backed by engine session_ismarket_ etc.
-                # session.isfirstbar_regular / islastbar_regular are aliased to
-                # their non-_regular counterparts (engine has one session string;
-                # see session_time.hpp limitation comment).
+                # session.isfirstbar / islastbar read the kernel's session-day
+                # facts; session.isfirstbar_regular / islastbar_regular are
+                # aliased to their non-_regular counterparts (engine has one
+                # session string; see session_time.hpp limitation comment).
                 if node.member in ("ismarket", "ispremarket", "ispostmarket"):
-                    # session.ismarket is the kernel's in-session fact of the
-                    # script bar (NativeDecisionContext::in_session, read off
-                    # the session day the bar belongs to), which the host
-                    # stores as session_ismarket_ before every source
-                    # callback. The time-of-day predicates test each instant's
-                    # own weekday and window: ismarket missed the Sunday-evening
-                    # open of a ":23456" session and every "0000-2400" bar, and
-                    # ispremarket / ispostmarket held on in-market bars of an
-                    # overnight session, where TradingView's tapes flag every
-                    # bar in market and none in an extended session
+                    # A chart bar is in market when the engine's session
+                    # calendar holds its open time (codegen/session_market.py).
+                    # The time-of-day predicates test each instant's own
+                    # weekday and window: ismarket missed the Sunday-evening
+                    # open of a ":23456" session and every "0000-2400" bar,
+                    # and ispremarket / ispostmarket held on in-market bars of
+                    # an overnight session, where TradingView's tapes flag
+                    # every bar in market and none in an extended session
                     # (tests/test_e2e_session_ismarket.py). A bar in market is
                     # in neither extended session; off it, the windows decide.
-                    # A request.security payload runs on its own bars, which
-                    # carry no such fact, so it keeps the predicates at the
-                    # security bar's time. So does a batch of fewer than two
-                    # bars given no timeframe: the engine detects none
-                    # (script_tf_ stays empty) and presents no session facts.
-                    bar = "(syminfo_.session, syminfo_.timezone, current_bar_.timestamp)"
-                    predicate = f"pine_session_{node.member}{bar}"
+                    # A request.security payload runs on its own bars, whose
+                    # timeframe the helper does not know, so it keeps the
+                    # predicates at the security bar's time, with a warning.
+                    args = "(syminfo_.session, syminfo_.timezone, current_bar_.timestamp)"
+                    predicate = f"pine_session_{node.member}{args}"
                     if self._security_payload_depth:
+                        if id(node) not in self._warned_security_session_sites:
+                            self._warned_security_session_sites.add(id(node))
+                            extended = ("" if node.member == "ismarket" else
+                                        ", and an in-market bar of an overnight "
+                                        "session can read as pre- or post-market")
+                            self._codegen_warning(
+                                node,
+                                f"session.{node.member} inside request.security is "
+                                "the time-of-day predicate at the security bar's open "
+                                "time, which can differ from TradingView: it tests a "
+                                "session's day mask on that instant's own weekday and "
+                                f"does not read \"2400\"{extended}. On the chart the "
+                                "flag asks the engine's session calendar.",
+                            )
                         return predicate
-                    ismarket = f"(script_tf_.empty() ? pine_session_ismarket{bar} : session_ismarket_)"
+                    self._uses_session_market = True
+                    ismarket = ("_pf_session_ismarket(syminfo_.session, syminfo_.timezone, "
+                                "script_tf_, current_bar_.timestamp)")
                     if node.member == "ismarket":
                         return ismarket
                     return f"(!{ismarket} && {predicate})"
