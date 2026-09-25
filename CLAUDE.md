@@ -630,13 +630,23 @@ are not part of the package's external surface.
 and C++20 keyword/operator alternative plus header macros and emitter names
 that can collide. `_safe_name` allocates distinct escapes against all authored
 spellings; UDT fields use the same mapping.
-- **Input limits.** `limits.py` sets 131,072 source characters, 256 tokens or
-4,096 characters per logical statement, 32 delimiter/block levels, 64 AST
-nodes of depth, 1,024 statements, and a cooperative 30-second guard. Every
-limit raises a located `CompileError`. Across the 314 public corpus scripts
-and 277 gate fixtures, maxima were 9,869 source characters, 64 tokens / 420
-characters per logical statement, depth 3 delimiters / 4 blocks / 10 AST
-nodes, and 140 statements (2026-09-25).
+- **Input limits.** `limits.py` turns a crash or a hang into a located
+`CompileError`; where TradingView documents a limit, ours is at least as
+large. 5 MiB of source (TradingView's 5MB compilation request), 512 levels
+of nesting (brackets, blocks, prefix operators, `?:`/`else if` chains and
+syntax-tree depth; TradingView documents none) and a cooperative 120-second
+guard (its two-minute compile limit). There is no statement-count or
+statement-size budget: none guarded a crash, and TradingView counts compiled
+tokens. The parser bounds the tree it builds, operator chains included,
+because freeing a tree about 4,000 levels deep overflows Pyodide's stack
+(fatal); `ensure_recursion_headroom` raises Python's recursion limit to 40
+frames per level and never lowers it. A per-item loop whose body scans the
+whole script needs its own `self._budget.check` (the `var`-member scans in
+`codegen/base.py`), and `FuncCall.annotations["call_arg_order"]` is an
+`ArgOrder`, which the generic AST walkers do not enter: re-walking the
+aliased arguments cost 2**depth. Across the 325 public corpus sources and
+277 gate fixtures, maxima are 9,869 characters, nesting 10 and 0.03 s
+(2026-09-26).
 
 ## Safety rules for AI agents working in this repo
 

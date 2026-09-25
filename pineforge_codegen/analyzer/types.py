@@ -44,6 +44,7 @@ from ..ast_nodes import (
     MemberAccess, NaLiteral, NumberLiteral, StringLiteral, Subscript, Ternary,
     SwitchStmt, TupleLiteral, UnaryOp,
 )
+from ..errors import Phase
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 
 # Drawing-objects-as-data type names (spec §4.1). Defined locally — the
@@ -241,6 +242,13 @@ class TypeHelper:
     def _type_spec_from_expr(self, value: ASTNode | None) -> TypeSpec | None:
         if value is None:
             return None
+        budget = getattr(self, "_budget", None)
+        if budget is not None:
+            # A method chain re-infers each receiver more than once, so this
+            # recursion can outgrow the visitor checkpoints.
+            self._budget_visit_count += 1
+            if self._budget_visit_count % 128 == 0:
+                budget.check(value.loc, Phase.ANALYZER)
         if isinstance(value, NumberLiteral):
             return TypeSpec.primitive(
                 "float" if isinstance(value.value, float) else "int"

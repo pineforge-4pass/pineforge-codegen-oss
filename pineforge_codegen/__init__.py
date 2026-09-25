@@ -6,13 +6,14 @@ from .analyzer import Analyzer
 from .codegen import CodeGen
 from .errors import CompileError, Level, Phase
 from .finite_ta_length import expand_finite_choice_extrema_lengths
-from .limits import TimeBudget, check_ast_depth, check_source_size
+from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
 from .pragmas import extract_pf_trace_pragmas
 from .support_checker import check_support as _support_diagnostics
 from .support_checker import check_support_or_raise
 
 
 def _parse_bounded(pine_source: str, filename: str):
+    ensure_recursion_headroom()
     check_source_size(pine_source, filename)
     budget = TimeBudget(filename)
     pragmas = extract_pf_trace_pragmas(

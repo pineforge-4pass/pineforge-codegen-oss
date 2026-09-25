@@ -16,11 +16,9 @@ import re
 
 from .lexer import Token, TokenType
 from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
-from .limits import (
-    MAX_DELIMITER_DEPTH, MAX_STATEMENTS, TimeBudget, limit_error,
-)
+from .limits import MAX_NESTING_DEPTH, TimeBudget, limit_error, syntax_children
 from .ast_nodes import (
-    ASTNode,
+    ASTNode, ArgOrder,
     Program, StrategyDecl, ImportStmt,
     VarDecl, Assignment, TupleAssign,
     IfStmt, ForStmt, ForInStmt, WhileStmt, SwitchStmt, BreakStmt, ContinueStmt,
@@ -64,9 +62,11 @@ class Parser:
         self._source = source
         self._filename = filename
         self._budget = budget
-        self._statement_count = 0
-        self._expression_depth = 0
-        self._prefix_depth = 0
+        # Syntax levels around the parse position, and the depth of each
+        # operator/postfix chain subtree measured so far (held by id; the
+        # parser never discards a node it built, so ids stay unique).
+        self._depth = 0
+        self._subtree_depths: dict[int, tuple[ASTNode, int]] = {}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -132,6 +132,52 @@ class Parser:
         """Set loc on a node from a token and return the node."""
         node.loc = self._loc(tok)
         return node
+
+    # Nesting budget.  Recursive descent spends Python frames per level, and
+    # the tree it builds must stay shallow: freeing a tree some 4,000 levels
+    # deep overflows Pyodide's stack, fatally.
+
+    def _enter(self, tok: Token) -> None:
+        """Count one syntax level (a block, an ``else if``, a prefix operator
+        or a nested expression) before recursing into it."""
+        if self._depth >= MAX_NESTING_DEPTH:
+            raise limit_error(
+                f"Nesting depth exceeds {MAX_NESTING_DEPTH} levels.",
+                self._loc(tok), Phase.PARSER,
+            )
+        self._depth += 1
+
+    def _check_chain(self, node: ASTNode, tok: Token) -> ASTNode:
+        """Bound an operator or postfix chain, which grows without recursing."""
+        if self._subtree_depth(node) > MAX_NESTING_DEPTH:
+            raise limit_error(
+                f"AST nesting depth exceeds {MAX_NESTING_DEPTH} nodes.",
+                self._loc(tok), Phase.PARSER,
+            )
+        return node
+
+    def _subtree_depth(self, root: ASTNode) -> int:
+        """Depth of ``root``'s subtree, reusing the depths measured so far."""
+        known = self._subtree_depths
+        stack: list[tuple[ASTNode, bool]] = [(root, False)]
+        while stack:
+            node, expanded = stack.pop()
+            if id(node) in known:
+                continue
+            children = [
+                child for child in syntax_children(node)
+                if id(child) not in known
+            ]
+            if expanded or not children:
+                depth = 1 + max(
+                    (known[id(child)][1] for child in syntax_children(node)),
+                    default=0,
+                )
+                known[id(node)] = (node, depth)
+            else:
+                stack.append((node, True))
+                stack.extend((child, False) for child in children)
+        return known[id(root)][1]
 
     # ------------------------------------------------------------------
     # Top-level
@@ -214,12 +260,6 @@ class Parser:
 
     def _parse_single_statement(self):
         cur = self._current()
-        self._statement_count += 1
-        if self._statement_count > MAX_STATEMENTS:
-            raise limit_error(
-                f"Statement count exceeds {MAX_STATEMENTS}.",
-                self._loc(cur), Phase.PARSER,
-            )
 
         # Control flow keywords
         if cur.type == TokenType.IF:
@@ -585,6 +625,10 @@ class Parser:
         depth = 0
         i = self.pos
         while i < len(self.tokens):
+            # One look-ahead per ``.name<`` scans to the end of the line, so a
+            # long line of comparisons costs its length squared.
+            if self._budget is not None and (i - self.pos) % 1024 == 1023:
+                self._budget.check(self._loc(self.tokens[self.pos]), Phase.PARSER)
             tt = self.tokens[i].type
             if tt == TokenType.LT:
                 depth += 1
@@ -899,8 +943,13 @@ class Parser:
         if self._check(TokenType.ELSE):
             self._advance()
             if self._check(TokenType.IF):
-                # else if -> nested IfStmt in else_body
-                else_body = [self._parse_if_stmt()]
+                # else if -> nested IfStmt in else_body.  The ladder recurses
+                # once per branch at one indentation.
+                self._enter(self._current())
+                try:
+                    else_body = [self._parse_if_stmt()]
+                finally:
+                    self._depth -= 1
             else:
                 self._consume(TokenType.NEWLINE)
                 self._consume(TokenType.INDENT)
@@ -1017,6 +1066,13 @@ class Parser:
     # -- Block parsing --
 
     def _parse_block(self) -> list:
+        self._enter(self._current())
+        try:
+            return self._parse_block_statements()
+        finally:
+            self._depth -= 1
+
+    def _parse_block_statements(self) -> list:
         stmts: list = []
         self._skip_newlines()
         while not self._check(TokenType.DEDENT) and not self._at_end():
@@ -1057,15 +1113,7 @@ class Parser:
     }
 
     def _parse_expression(self):
-        self._expression_depth += 1
-        # The first call parses the statement's expression, so only nested
-        # calls count against the authored nesting limit.
-        if self._expression_depth - 1 > MAX_DELIMITER_DEPTH:
-            self._expression_depth -= 1
-            raise limit_error(
-                f"Expression nesting depth exceeds {MAX_DELIMITER_DEPTH} levels.",
-                self._loc(self._current()), Phase.PARSER,
-            )
+        self._enter(self._current())
         try:
             # if/switch can be used as expressions (RHS of assignments)
             if self._check(TokenType.IF):
@@ -1074,7 +1122,7 @@ class Parser:
                 return self._parse_switch_expr()
             return self._parse_ternary()
         finally:
-            self._expression_depth -= 1
+            self._depth -= 1
 
     def _parse_if_expr(self):
         """Parse if/else as an expression (returns IfStmt, codegen handles it)."""
@@ -1122,12 +1170,14 @@ class Parser:
                 right = self._parse_and()
                 left = BinOp(left=left, op="or", right=right)
                 self._set_loc(left, start_tok)
+                self._check_chain(left, start_tok)
             elif not in_continuation and self._try_line_continuation(TokenType.OR):
                 in_continuation = True
                 self._advance()  # consume OR
                 right = self._parse_and()
                 left = BinOp(left=left, op="or", right=right)
                 self._set_loc(left, start_tok)
+                self._check_chain(left, start_tok)
             else:
                 break
         if in_continuation:
@@ -1144,12 +1194,14 @@ class Parser:
                 right = self._parse_not()
                 left = BinOp(left=left, op="and", right=right)
                 self._set_loc(left, start_tok)
+                self._check_chain(left, start_tok)
             elif not in_continuation and self._try_line_continuation(TokenType.AND):
                 in_continuation = True
                 self._advance()  # consume AND
                 right = self._parse_not()
                 left = BinOp(left=left, op="and", right=right)
                 self._set_loc(left, start_tok)
+                self._check_chain(left, start_tok)
             else:
                 break
         if in_continuation:
@@ -1165,18 +1217,12 @@ class Parser:
     def _parse_not(self):
         if self._check(TokenType.NOT):
             start_tok = self._current()
-            self._prefix_depth += 1
-            if self._prefix_depth > MAX_DELIMITER_DEPTH:
-                self._prefix_depth -= 1
-                raise limit_error(
-                    f"Expression nesting depth exceeds {MAX_DELIMITER_DEPTH} levels.",
-                    self._loc(start_tok), Phase.PARSER,
-                )
+            self._enter(start_tok)
             self._advance()
             try:
                 operand = self._parse_not()
             finally:
-                self._prefix_depth -= 1
+                self._depth -= 1
             node = UnaryOp(op="not", operand=operand)
             return self._set_loc(node, start_tok)
         return self._parse_comparison()
@@ -1194,6 +1240,7 @@ class Parser:
             right = self._parse_addition()
             left = BinOp(left=left, op=op, right=right)
             self._set_loc(left, start_tok)
+            self._check_chain(left, start_tok)
         return left
 
     def _parse_addition(self):
@@ -1204,6 +1251,7 @@ class Parser:
             right = self._parse_multiplication()
             left = BinOp(left=left, op=op, right=right)
             self._set_loc(left, start_tok)
+            self._check_chain(left, start_tok)
         return left
 
     def _parse_multiplication(self):
@@ -1215,44 +1263,34 @@ class Parser:
             right = self._parse_unary()
             left = BinOp(left=left, op=op, right=right)
             self._set_loc(left, start_tok)
+            self._check_chain(left, start_tok)
         return left
 
     def _parse_unary(self):
         if self._check(TokenType.MINUS):
             start_tok = self._current()
-            self._prefix_depth += 1
-            if self._prefix_depth > MAX_DELIMITER_DEPTH:
-                self._prefix_depth -= 1
-                raise limit_error(
-                    f"Expression nesting depth exceeds {MAX_DELIMITER_DEPTH} levels.",
-                    self._loc(start_tok), Phase.PARSER,
-                )
+            self._enter(start_tok)
             self._advance()
             try:
                 operand = self._parse_unary()
             finally:
-                self._prefix_depth -= 1
+                self._depth -= 1
             node = UnaryOp(op="-", operand=operand)
             return self._set_loc(node, start_tok)
         if self._check(TokenType.PLUS):
             start_tok = self._current()
-            self._prefix_depth += 1
-            if self._prefix_depth > MAX_DELIMITER_DEPTH:
-                self._prefix_depth -= 1
-                raise limit_error(
-                    f"Expression nesting depth exceeds {MAX_DELIMITER_DEPTH} levels.",
-                    self._loc(start_tok), Phase.PARSER,
-                )
+            self._enter(start_tok)
             self._advance()
             try:
                 operand = self._parse_unary()
             finally:
-                self._prefix_depth -= 1
+                self._depth -= 1
             node = UnaryOp(op="+", operand=operand)
             return self._set_loc(node, start_tok)
         return self._parse_postfix()
 
     def _parse_postfix(self):
+        chain_tok = self._current()
         expr = self._parse_primary()
         while True:
             # Subscript: expr[index]
@@ -1291,6 +1329,7 @@ class Parser:
                 expr = self._parse_call_with_callee(expr)
             else:
                 break
+            self._check_chain(expr, chain_tok)
         return expr
 
     def _is_call_position(self, expr) -> bool:
@@ -1313,7 +1352,7 @@ class Parser:
         node.annotations = {"call_arg_order": call_arg_order}
         return self._set_loc(node, start_tok)
 
-    def _parse_call_args(self) -> tuple[list, dict, list]:
+    def _parse_call_args(self) -> tuple[list, dict, ArgOrder]:
         """Parse function call arguments and keyword arguments."""
         args: list = []
         kwargs: dict = {}
@@ -1354,7 +1393,7 @@ class Parser:
 
             self._match(TokenType.COMMA)
 
-        return args, kwargs, call_arg_order
+        return args, kwargs, ArgOrder(call_arg_order)
 
     # -- Primary expressions --
 

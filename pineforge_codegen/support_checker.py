@@ -527,6 +527,7 @@ class SupportChecker:
         # (below) as well as during the visit, so a rebind that lexically
         # FOLLOWS the request.security call cannot slip past.
         self._scalar_rebinds: dict[str, list[ASTNode]] = {}
+        self._scalar_rebind_ids: set[int] = set()
         # request.security needs lexical bindings rather than bare names: a
         # function-local `sym := ...` cannot change an unrelated global `sym`.
         # Indexed before the visit so rebinds after a security call count too.
@@ -571,9 +572,11 @@ class SupportChecker:
         target = node.target
         if not isinstance(target, Identifier) or node.value is None:
             return
-        recorded = self._scalar_rebinds.setdefault(target.name, [])
-        if not any(value is node.value for value in recorded):
-            recorded.append(node.value)
+        # A set, not a scan of the list: a name reassigned k times would
+        # otherwise cost k**2.
+        if id(node.value) not in self._scalar_rebind_ids:
+            self._scalar_rebind_ids.add(id(node.value))
+            self._scalar_rebinds.setdefault(target.name, []).append(node.value)
 
     def _collect_scalar_rebinds(self, node: ASTNode) -> None:
         """Pre-pass: collect every scalar rebind anywhere in the AST.

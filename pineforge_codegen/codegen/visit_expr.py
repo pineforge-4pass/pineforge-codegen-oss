@@ -219,12 +219,7 @@ class ExprVisitor:
         if isinstance(node, UnaryOp):
             return self._visit_unaryop(node)
         if isinstance(node, Ternary):
-            c = self._coerce_bool_expr(
-                self._visit_expr(node.condition), node.condition
-            )
-            t = self._visit_expr(node.true_val)
-            f = self._visit_expr(node.false_val)
-            return f"(({c}) ? ({t}) : ({f}))"
+            return self._visit_ternary(node)
         if isinstance(node, FuncCall):
             return self._visit_func_call(node)
         if isinstance(node, Subscript):
@@ -248,9 +243,38 @@ class ExprVisitor:
             return f"std::make_tuple({elems})"
         return "/* unknown */"
 
+    # A ``?:`` chain continued in its false arms (``a ? x : b ? y : z``) of at
+    # least this many links is emitted without the per-link brackets: they add
+    # three bracket levels per link and clang stops at 256
+    # (``-fbracket-depth``).  C++'s conditional operator is right-associative,
+    # so ``a ? x : b ? y : z`` reads ``a ? x : (b ? y : z)``.  Shorter chains
+    # keep their historical spelling byte for byte.
+    _FLAT_TERNARY_CHAIN = 32
+
+    def _visit_ternary(self, node: Ternary) -> str:
+        links = [node]
+        while isinstance(links[-1].false_val, Ternary):
+            links.append(links[-1].false_val)
+        if len(links) < self._FLAT_TERNARY_CHAIN:
+            c = self._coerce_bool_expr(
+                self._visit_expr(node.condition), node.condition
+            )
+            t = self._visit_expr(node.true_val)
+            f = self._visit_expr(node.false_val)
+            return f"(({c}) ? ({t}) : ({f}))"
+        arms = []
+        for link in links:
+            c = self._coerce_bool_expr(
+                self._visit_expr(link.condition), link.condition
+            )
+            t = self._visit_expr(link.true_val)
+            arms.append(f"({c}) ? ({t}) : ")
+        return f"({''.join(arms)}({self._visit_expr(links[-1].false_val)}))"
+
     # ------------------------------------------------------------------
     # Target-typed RHS lowering (drawing handles are C++ structs, not doubles)
     # ------------------------------------------------------------------
+
     def _is_na_expr(self, node) -> bool:
         """True for a bare ``na`` (keyword NaLiteral or ``na`` identifier)."""
         return (isinstance(node, NaLiteral)

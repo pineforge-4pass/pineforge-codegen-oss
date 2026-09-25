@@ -213,24 +213,27 @@ cpp     = CodeGen(ctx).generate()
 
 ## Limits
 
-Untrusted source has deterministic size and nesting limits. Exceeding one
-raises a `CompileError` with a Pine `file:line:col` location; it does not
-return partial C++. `check_support=False` does not bypass these limits.
+The limits turn a crash or a hang on untrusted source into a `CompileError`
+with a Pine `file:line:col` location. Where TradingView documents a limit,
+PineForge's is at least as large. Exceeding one does not return partial C++,
+and `check_support=False` does not bypass them.
 
-| Limit | Maximum | Largest in the 314 public corpus scripts and 277 gate fixtures |
-| --- | ---: | ---: |
-| Source size | 131,072 characters | 9,869 |
-| Logical statement size | 256 tokens or 4,096 characters | 64 tokens, 420 characters |
-| Parenthesis/bracket depth | 32 | 3 |
-| Indented block depth | 32 | 4 |
-| Parsed AST depth | 64 nodes | 10 |
-| Parsed statements | 1,024 | 140 |
+| Limit | Maximum | TradingView's documented limit | Largest in the 325 public corpus sources and 277 gate fixtures |
+| --- | ---: | --- | ---: |
+| Source size | 5,242,880 characters (5 MiB) | Compilation request of at most 5MB | 9,869 characters |
+| Nesting depth | 512 levels | None | 10 levels |
+| Transpilation time | 120 seconds | Two-minute compilation limit | 0.03 seconds |
 
-A logical statement includes a continued expression across lines. A
-cooperative 30-second elapsed-time guard also checks the lexer, parser,
-analyzer, code generator, and the boundaries between passes. It returns a
-located `CompileError` if a structurally valid input still takes too long.
-Numeric literals outside the generated C++ range also raise a located error.
+Nesting counts brackets, indented blocks, prefix operators, `?:` and
+`else if` chains, and the depth of the parsed syntax tree, in which an
+operator chain such as `a + b + c` takes one level per operator. It stops
+well before Pyodide's stack does, at about 2,000 levels. There is no
+statement-count or statement-size limit: TradingView measures a script in
+compiled tokens, not source lines. `transpile()` raises Python's recursion
+limit to 20,480 frames when it is lower, and never lowers it. The
+elapsed-time guard checks the lexer, parser, analyzer and code generator
+cooperatively. Numeric literals outside the generated C++ range also raise a
+located error.
 
 ## How it works
 

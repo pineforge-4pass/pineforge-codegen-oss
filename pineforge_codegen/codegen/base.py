@@ -1175,6 +1175,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         top_level_node_ids = {id(stmt) for stmt in self.ctx.ast.body}
         for node_id, meta in metadata_by_node.items():
             stmt, member_name, ptype, init_str, is_callable_scoped = meta
+            if self._budget is not None:
+                # Each declaration rescans every declaration.
+                self._budget.check(stmt.loc, Phase.CODEGEN)
             if not isinstance(stmt, VarDecl) or not (stmt.is_var or stmt.is_varip):
                 continue
             stmt_spec = type_specs_by_node.get(node_id)
@@ -4300,6 +4303,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if name in seen_var_members:
                 continue
             seen_var_members.add(name)
+            if self._budget is not None:
+                # _callable_var_udt_spec scans every declaration.
+                self._budget.check(phase=Phase.CODEGEN)
             safe = self._safe_name(name)
             callable_collection_spec = (
                 None

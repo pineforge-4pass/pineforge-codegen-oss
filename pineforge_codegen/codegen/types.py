@@ -41,6 +41,7 @@ from ..ast_nodes import (
     MemberAccess, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
     Subscript, Ternary, TupleLiteral, UnaryOp, VarDecl,
 )
+from ..errors import Phase
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .helpers import (
     NA_PRESERVING_INT_TYPES,
@@ -667,6 +668,13 @@ class TypeInferer:
 
         Returns ``None`` when the node's type cannot be narrowed beyond
         the runtime default (most callers fall back to ``double``)."""
+        budget = getattr(self, "_budget", None)
+        if budget is not None:
+            # A method chain re-infers each receiver more than once, so this
+            # recursion can outgrow the visitor checkpoints.
+            self._budget_visit_count += 1
+            if self._budget_visit_count % 128 == 0:
+                budget.check(getattr(node, "loc", None), Phase.CODEGEN)
         if isinstance(node, NumberLiteral):
             return TypeSpec.primitive("float" if isinstance(node.value, float) else "int")
         if isinstance(node, BoolLiteral):

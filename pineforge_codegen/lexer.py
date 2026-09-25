@@ -22,8 +22,7 @@ from pineforge_codegen.errors import (
     SourceLocation,
 )
 from pineforge_codegen.limits import (
-    MAX_BLOCK_DEPTH, MAX_DELIMITER_DEPTH, MAX_EXPRESSION_CHARS,
-    MAX_EXPRESSION_TOKENS, TimeBudget, check_source_size, limit_error,
+    MAX_NESTING_DEPTH, TimeBudget, check_source_size, limit_error,
 )
 
 
@@ -190,9 +189,6 @@ class Lexer:
         self._in_continuation = False  # True when current line is a continuation
         self._diagnostics: list[Diagnostic] = []
         self._budget = budget
-        self._logical_token_count = 0
-        self._logical_start_pos: int | None = None
-        self._token_start_pos = 0
 
     def _peek(self, offset: int = 0) -> str:
         idx = self.pos + offset
@@ -219,25 +215,6 @@ class Lexer:
     def _emit(self, tt: TokenType, value: str, line: int, col: int, end_col: int | None = None) -> None:
         if end_col is None:
             end_col = col + len(value)
-        if tt in (TokenType.NEWLINE, TokenType.INDENT, TokenType.DEDENT,
-                  TokenType.EOF_TOKEN):
-            self._logical_token_count = 0
-            self._logical_start_pos = None
-        else:
-            if self._logical_start_pos is None:
-                self._logical_start_pos = self._token_start_pos
-            self._logical_token_count += 1
-            loc = SourceLocation(self.filename, line, col, end_col)
-            if self._logical_token_count > MAX_EXPRESSION_TOKENS:
-                raise limit_error(
-                    f"Expression size exceeds {MAX_EXPRESSION_TOKENS} tokens "
-                    "in one logical statement.", loc, Phase.LEXER,
-                )
-            if self.pos - self._logical_start_pos > MAX_EXPRESSION_CHARS:
-                raise limit_error(
-                    f"Expression size exceeds {MAX_EXPRESSION_CHARS} characters "
-                    "in one logical statement.", loc, Phase.LEXER,
-                )
         self.tokens.append(Token(tt, value, line, col, end_col))
 
     def _emit_diagnostic(self, message: str, line: int, col: int, end_col: int, hint: str | None = None) -> None:
@@ -352,9 +329,9 @@ class Lexer:
             current_indent = self.indent_stack[-1]
             if indent_level > current_indent:
                 self.indent_stack.append(indent_level)
-                if len(self.indent_stack) - 1 > MAX_BLOCK_DEPTH:
+                if len(self.indent_stack) - 1 > MAX_NESTING_DEPTH:
                     raise limit_error(
-                        f"Block nesting depth exceeds {MAX_BLOCK_DEPTH} levels.",
+                        f"Block nesting depth exceeds {MAX_NESTING_DEPTH} levels.",
                         SourceLocation(self.filename, self.line, 1, 2), Phase.LEXER,
                     )
                 self._emit(TokenType.INDENT, "", self.line, 1)
@@ -442,7 +419,6 @@ class Lexer:
             self._advance()
 
     def _read_token(self) -> None:
-        self._token_start_pos = self.pos
         ch = self.source[self.pos]
         start_line = self.line
         start_col = self.col
@@ -532,9 +508,9 @@ class Lexer:
             tt = singles[ch]
             if tt in (TokenType.LPAREN, TokenType.LBRACKET):
                 self.paren_depth += 1
-                if self.paren_depth > MAX_DELIMITER_DEPTH:
+                if self.paren_depth > MAX_NESTING_DEPTH:
                     raise limit_error(
-                        f"Delimiter nesting depth exceeds {MAX_DELIMITER_DEPTH} levels.",
+                        f"Delimiter nesting depth exceeds {MAX_NESTING_DEPTH} levels.",
                         SourceLocation(self.filename, start_line, start_col,
                                        start_col + 1), Phase.LEXER,
                     )
