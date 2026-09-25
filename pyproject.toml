@@ -5,8 +5,8 @@ build-backend = "hatchling.build"
 [project]
 name = "pineforge-codegen"
 # Version sourced from /VERSION (single source of truth). Bumped by
-# .github/workflows/release.yml. Versioning lockstep with engine
-# ABI per README table.
+# .github/workflows/release.yml. Release tags pair exactly with the engine;
+# see README.md and CONTRIBUTING.md.
 dynamic = ["version"]
 description = "PineScript v6 to C++ transpiler that targets the pineforge-engine runtime."
 requires-python = ">=3.11"
@@ -18,7 +18,7 @@ license = { file = "LICENSE" }
 readme = "README.md"
 keywords = ["pinescript", "transpiler", "trading", "backtesting", "tradingview"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Financial and Insurance Industry",
     "License :: Free for non-commercial use",
     "Programming Language :: Python :: 3.11",
