@@ -1,14 +1,16 @@
 """KC's middle band follows TradingView's warm-up EMA basis.
 
-The TradingView tape in ``/tmp/CG-NABOOL-scratch/tv-kc`` records the KC middle
-as ``na`` on bar 0 and finite at the warm-up boundary.  The independent EMA
-remains a normal chart EMA; the generated KC shim applies the warm-up selector
-only to its internal EMA basis, preserving unrelated EMA behavior.
+The covered TradingView tape in ``/tmp/CG-NABOOL-scratch/tv-kc`` records both
+the KC middle and an independent EMA as ``na`` on bar 0, first finite at bar
+19. The generated KC shim applies that warm-up to its internal basis. The
+standalone engine EMA still has its historical finite bar-0 behavior; the
+driver below pins that limited scope, not TradingView parity for standalone
+EMA.
 """
 
 from __future__ import annotations
 
-from pineforge_codegen import transpile
+from pineforge_codegen import transpile, transpile_full
 
 from tests._compile import run_emitted_tu
 
@@ -42,7 +44,7 @@ int main() {
 """
 
 
-def test_kc_middle_matches_ema_warmup() -> None:
+def test_kc_middle_warms_without_changing_standalone_ema() -> None:
     out = run_emitted_tu(
         transpile(_PINE), _DRIVER, opt="-O0", label="kc-middle-band"
     )
@@ -52,3 +54,9 @@ def test_kc_middle_matches_ema_warmup() -> None:
     assert warm_m == "0"
     assert warm_e == "0"
     assert warm_m == warm_e
+
+
+def test_standalone_ema_warmup_gap_warns() -> None:
+    diagnostics = transpile_full(_PINE)["diagnostics"]
+    assert any("ta.ema initial warmup is approximated" in d.message
+               for d in diagnostics)

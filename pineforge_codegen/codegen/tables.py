@@ -19,11 +19,11 @@ from __future__ import annotations
 import re
 
 from ..symbols import PineType
-from .helpers import na_preserving_int_cast, pine_truth_cast
+from .helpers import na_preserving_int_cast, pine_index_int_cast, pine_truth_cast
 
 
 _PROVEN_INT_ARG = re.compile(
-    r"^\s*(?:[A-Za-z_]\w*|get_input_int\(.*\)|pine_(?:bar_index|year|month|dayofmonth|dayofweek|hour|minute|second|weekofyear)\(.*\))\s*$"
+    r"^\s*(?:(?:[-+]?\d+)|get_input_int\(.*\)|pine_(?:bar_index|year|month|dayofmonth|dayofweek|hour|minute|second|weekofyear)\(.*\))\s*$"
 )
 
 
@@ -31,13 +31,13 @@ def _matrix_int_arg(value: str) -> str:
     """Keep old casts for typed integer matrix indices; guard other values."""
     if _PROVEN_INT_ARG.fullmatch(value):
         return f"(int)({value})"
-    return na_preserving_int_cast(value)
+    return pine_index_int_cast(value)
 
 
 def _pine_bool_arg(value: str) -> str:
     """Keep literal bool spellings; guard numeric/dynamic bool arguments."""
     stripped = value.strip()
-    if stripped in {"true", "false"} or stripped.startswith("__pf_array_arg_"):
+    if stripped in {"true", "false"}:
         return value
     return pine_truth_cast(value)
 
@@ -331,7 +331,7 @@ PINE_TYPE_TO_CPP = {
     PineType.INT: "int", PineType.FLOAT: "double", PineType.BOOL: "bool",
     PineType.STRING: "std::string", PineType.NA: "double",
     PineType.UNKNOWN: "double", PineType.VOID: "double",
-    PineType.COLOR: "int",
+    PineType.COLOR: "int64_t",
     # Drawing-objects-as-data: the value-view handle structs (see
     # drawing.hpp). Explicit-hint decls (``var line x``), UDT-method drawing
     # params, and ``_type_for_decl`` resolve through here.
@@ -765,8 +765,8 @@ ARRAY_METHODS = {
     "min":       lambda a, args: f"({a}.empty()?na<double>():*std::min_element({a}.begin(),{a}.end()))",
     "max":       lambda a, args: f"({a}.empty()?na<double>():*std::max_element({a}.begin(),{a}.end()))",
     "range":     lambda a, args: f"({a}.empty()?na<double>():*std::max_element({a}.begin(),{a}.end())-*std::min_element({a}.begin(),{a}.end()))",
-    "every":     lambda a, args: f"std::all_of({a}.begin(),{a}.end(),[](double v){{return !is_na(v) && v!=0.0;}})",
-    "some":      lambda a, args: f"std::any_of({a}.begin(),{a}.end(),[](double v){{return !is_na(v) && v!=0.0;}})",
+    "every":     lambda a, args: f"std::all_of({a}.begin(),{a}.end(),[](auto _pf_raw){{ using _pf_val_t=typename std::decay_t<decltype({a})>::value_type; _pf_val_t v=_pf_raw; if constexpr(std::is_same_v<_pf_val_t,bool>) return v; else return !is_na(v) && v!=0; }})",
+    "some":      lambda a, args: f"std::any_of({a}.begin(),{a}.end(),[](auto _pf_raw){{ using _pf_val_t=typename std::decay_t<decltype({a})>::value_type; _pf_val_t v=_pf_raw; if constexpr(std::is_same_v<_pf_val_t,bool>) return v; else return !is_na(v) && v!=0; }})",
     # stdev/variance honor the optional 2nd ``biased`` arg (Pine v6:
     # biased=true → population (default), false → sample / n-1).
     "stdev":     lambda a, args: (
@@ -785,8 +785,8 @@ ARRAY_METHODS = {
     ),
     "median":    lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); int n=c.size(); return n%2?c[n/2]:(c[n/2-1]+c[n/2])/2.0; }}()",
     "mode":      lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); std::unordered_map<double,int> m; for(auto v:{a})m[v]++; double best=0; int bc=0; for(auto&[v,c]:m)if(c>bc||(c==bc&&v<best)){{bc=c;best=v;}} return best; }}()",
-    "percentile_linear_interpolation": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); double k=({args[0]}/100.0)*c.size()-0.5; int i=std::max(0,{na_preserving_int_cast('k')}); double f=k-i; if(i+1>=(int)c.size()) return c.back(); return c[i]*(1-f)+c[i+1]*f; }}()",
-    "percentile_nearest_rank": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); int r={na_preserving_int_cast(f'std::ceil(({args[0]}/100.0)*c.size())')}; return (double)c[std::min(r-1,(int)c.size()-1)]; }}()",
+    "percentile_linear_interpolation": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); double k=({args[0]}/100.0)*c.size()-0.5; if(!std::isfinite(k)) return na<double>(); if(k>=c.size()-1.0) return (double)c.back(); int i=k<=0.0?0:(int)k; double f=k-i; return c[i]*(1-f)+c[i+1]*f; }}()",
+    "percentile_nearest_rank": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); double p=({args[0]}); if(is_na(p)) return (double)c.front(); double rank=std::ceil((p/100.0)*c.size()); if(!std::isfinite(rank)) return na<double>(); int r=(int)std::clamp(rank,1.0,(double)c.size()); return (double)c[r-1]; }}()",
     "percentrank": _checked_array_percentrank,
     "abs":       lambda a, args: f"[&](){{ std::vector<double> r; for(auto v:{a})r.push_back(std::abs(v)); return r; }}()",
     "join":      lambda a, args: "[&](){{ std::string r; for(size_t i=0;i<{arr}.size();i++){{ if(i>0)r+={sep}; r+=std::to_string({arr}[i]); }} return r; }}()".format(arr=a, sep=args[0] if args else 'std::string(",")'),

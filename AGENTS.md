@@ -260,7 +260,9 @@ taxonomy:
 | Bare `ta.tr`                    | The variable equals `ta.tr(false)`: it is `na` when the previous close is `na`, including bar 0. The explicit `ta.tr(true)` and `ta.atr` paths retain their own first-bar behavior. TradingView's 2025-04-01 `c6-ta-tr-bar-zero` trade booked Signal `bare-na`; `tests/test_e2e_bare_ta_tr.py` compares the emitted bar traces and trades with `ta.tr(false)`. |
 | `ta.*` call arguments            | `_check_ta_arguments` binds every `ta.*` call to TradingView's signature (`signatures.TA_FUNCTIONS`: TradingView's parameter names, e.g. `series` for `ta.alma` / `bb` / `bbw` / `cmo` / `kc` / `kcw`, and required/optional split) and refuses what TradingView rejects: an unknown keyword, an argument too many, one given twice or a missing required one -- each used to be dropped, shifted into the next constructor slot or passed to a `compute()` that does not exist. `ta.vwap()` with no argument reads as the bare property, as it always has. |
 | `ta.*` TA1 arguments | The TA1 engine computes `ta.alma` `floor`, `ta.kc` / `ta.kcw` `useTrueRange`, explicit `ta.vwap` anchors, and `ta.pivot_point_levels` `anchor` / `developing` exactly. The generated TU selects those APIs with `PF_ALMA_HAS_FLOOR`, `PF_KC_HAS_USE_TRUE_RANGE`, `PF_VWAP_HAS_ANCHOR_INPUT`, and `PF_PIVOT_LEVELS_HAS_ANCHOR`; when a macro is absent, the shim falls back to the historical lowering. Only omitted-anchor VWAP keeps `ta::VWAP` / `ta::VWAPBands`; every explicit anchor, including `timeframe.change("1D"|"D")`, uses `ta::AnchoredVWAP` / `ta::AnchoredVWAPBands`. The pivot free function remains only for literal/aliased `anchor=true, developing=false`; every other spelling uses `ta::PivotPointLevels`. |
-| Chart EMA warmup | The generated `_PFKC` / `_PFKCW` shims scope the engine's EMA warmup selector around their internal EMA basis. KC/KCW middle is `na` until the Pine length is warm, including bar 0, without changing unrelated chart EMA call sites. The TradingView probe in `tests/test_kc_middle_band.py` pins KC middle against an independent EMA at bar 0 and the first finite bar. |
+| Chart EMA warmup | The generated `_PFKC` / `_PFKCW` shims scope the engine's EMA warmup selector around their internal EMA basis. KC/KCW middle is `na` until the Pine length is warm, including bar 0, without changing unrelated chart EMA call sites. A covered TradingView tape records both KC middle and an independent EMA as `na` on bar 0 and first finite at bar 19 (length 20). The standalone engine EMA remains finite on bar 0, so `ta.ema` warns about that warmup approximation; `tests/test_kc_middle_band.py` pins the limited scope and warning. |
+| Color na conversions | Packed colors use `int64_t` storage, including typed scalar, array and matrix paths, so their `na<int64_t>()` sentinel survives. `color.new` preserves an `na` base; `na` transparency becomes 100; an `na` `color.rgb` channel becomes zero. The covered TradingView color probes are pinned by `tests/test_na_truthiness.py`. |
+| Collection history warning | `array`/`map` `id[k]` still lowers to current collection element access because the engine has no per-bar collection ID history. Codegen warns on every such read and keeps the existing lowering; a missing index is not represented faithfully. |
 | syminfo na-gap warning           | `SUPPORTED_SYMINFO` = every `SYMINFO_MEMBER_MAP` key, but members whose emission is `na<T>()` or a `get_syminfo_metadata(...)` lookup (root/pricescale/minmove/mincontract/current_contract/expiration_date/isin/sector/industry + fundamentals/recommendations/target_price_*) form `_SYMINFO_SILENT_GAP_FIELDS` (derived from the emission table, so new na-accept fields can't drift out): every read WARNS that the value is na until a data feed injects it. |
 
 
@@ -283,8 +285,10 @@ you delete or weaken the special case, the test will tell you.
    cached, timezone-aware `pine_<field>(ts_ms, tz)` helpers
    (`session_time.hpp`): the variable form via `BAR_BUILTINS`
    (`pine_year(current_bar_.timestamp, syminfo_.timezone)` …), the
-   function form via `visit_call.py` (`pine_hour((int64_t)(ts), tz)`),
-   so the two forms agree. The two-arg form uses the explicit tz; the
+   function form via `visit_call.py` (a guarded `pine_hour(ts, tz)`),
+   so the two forms agree for present timestamps. A function-call `na`
+   timestamp uses epoch zero; `weekofyear(na)` returns 1, as covered
+   TradingView UTC and New York tapes show. The two-arg form uses the explicit tz; the
    one-arg form defaults to `syminfo_.timezone` (engine
    `SymInfo::timezone`, "UTC" by default). The old inline
    `setenv("TZ")+localtime_r` lambda (`tz_time_field_lambda`,
@@ -369,8 +373,9 @@ you delete or weaken the special case, the test will tell you.
    in Pine v6; both lack `direction`. `TRADE_ACCESSOR_METHODS` is kept
    as the union for back-compat but new code should prefer the side-
    specific constant.
-9. **No implicit `double` -> integer narrowing, ever.** A `double`
-  expression reaching an `int` / `int64_t` slot must go through
+9. **Preserve `na` at integer width boundaries.** A `double`
+  expression reaching an `int` / `int64_t` slot, or an integer crossing
+   between those widths, must go through
    `helpers.na_preserving_int_cast` (`is_na(_pf_v) ? na<int>() :
    (int)_pf_v`), applied by `types._coerce_int_slot`. An *implicit*
    narrowing of a NaN is undefined ([conv.fpint]) and the compilers
@@ -378,7 +383,10 @@ you delete or weaken the special case, the test will tell you.
    g++ x86-64 gives `INT_MIN` at `-O0`/`-O1` and 0 from `-O2`. The
    engine's contract (`include/pineforge/na.hpp`) is that an integer
    `na` IS `std::numeric_limits<T>::min()`, which is what `is_na(T)`
-   tests, so one bench slot booked 2412 trades built at `-O3` and 2411
+   tests. The cast helper checks the original numeric type before narrowing:
+   converting `na<int64_t>()` to `double` first loses its sentinel. Dynamic
+   history, matrix and lazy TA indices use `pine_index_int_cast` for the same
+   reason. One bench slot booked 2412 trades built at `-O3` and 2411
    (TradingView's count) at `-O1` from the same source. A plain
    `(int)x` cast does NOT fix this — it only silences the warning; the
    `is_na` test is what makes it defined. Where the value is needed is

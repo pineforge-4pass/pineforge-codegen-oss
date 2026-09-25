@@ -134,10 +134,13 @@ from __future__ import annotations
 
 from ..ast_nodes import (
     ASTNode,
+    BoolLiteral,
+    ColorLiteral,
     FuncCall,
     Identifier,
     MemberAccess,
     NaLiteral,
+    NumberLiteral,
     TupleLiteral,
     StringLiteral,
     VarDecl,
@@ -456,7 +459,11 @@ class CallVisitor:
             if cpp_type in ("double", "int", "int64_t", "bool", "std::string"):
                 return f"na<{cpp_type}>()"
             return self._default_for_spec(elem_spec)
-        return self._visit_expr(value_node)
+        rendered = self._visit_expr(value_node)
+        if (elem_spec is not None and elem_spec.kind == "primitive"
+                and elem_spec.name == "bool"):
+            return self._coerce_bool_expr(rendered, value_node)
+        return rendered
 
     def _array_method_args(
         self, method: str, arg_nodes: list, spec: TypeSpec | None,
@@ -492,6 +499,23 @@ class CallVisitor:
         if param_names is None:
             return list(node.args)
         return _merge_kwargs(node.args, node.kwargs, param_names, lambda arg: arg)
+
+    def _matrix_bool_value_args(
+        self, method: str, args: list[str], arg_nodes: list,
+        spec: TypeSpec | None,
+    ) -> list[str]:
+        """Apply Pine truthiness to values stored in ``matrix<bool>``."""
+        if (spec is None or spec.kind != "matrix"
+                or spec.element is None
+                or spec.element.kind != "primitive"
+                or spec.element.name != "bool"):
+            return args
+        value_index = {"set": 2, "fill": 0}.get(method)
+        if value_index is not None and value_index < len(args):
+            args[value_index] = self._coerce_bool_expr(
+                args[value_index], arg_nodes[value_index]
+            )
+        return args
 
     def _array_function_arg_nodes(self, method: str, node: FuncCall) -> list:
         """Merge ``array.method(id=..., ...)`` arguments in signature order."""
@@ -1332,12 +1356,16 @@ class CallVisitor:
                         arr = self._collection_receiver_expr(oname)
                         self._check_matrix_method_allowed(meth_raw, recv_spec, node)
                         param_names = MATRIX_METHOD_KWARGS.get(meth_raw)
-                        if param_names and node.kwargs:
-                            margs = _merge_kwargs(
-                                node.args, node.kwargs, param_names, self._visit_expr
-                            )
-                        else:
-                            margs = [self._visit_expr(a) for a in node.args]
+                        raw_args = (
+                            _merge_kwargs(node.args, node.kwargs, param_names, lambda a: a)
+                            if param_names and node.kwargs else list(node.args)
+                        )
+                        margs = self._matrix_bool_value_args(
+                            meth_raw,
+                            [self._visit_expr(a) for a in raw_args],
+                            raw_args,
+                            recv_spec,
+                        )
                         fn = MATRIX_METHODS[meth_raw]
                         try:
                             return fn(arr, margs)
@@ -1530,10 +1558,16 @@ class CallVisitor:
             arr = self._collection_receiver_expr(namespace)
             self._check_matrix_method_allowed(func_name, namespace_spec, node)
             param_names = MATRIX_METHOD_KWARGS.get(func_name)
-            if param_names and node.kwargs:
-                args = _merge_kwargs(node.args, node.kwargs, param_names, self._visit_expr)
-            else:
-                args = [self._visit_expr(a) for a in node.args]
+            raw_args = (
+                _merge_kwargs(node.args, node.kwargs, param_names, lambda a: a)
+                if param_names and node.kwargs else list(node.args)
+            )
+            args = self._matrix_bool_value_args(
+                func_name,
+                [self._visit_expr(a) for a in raw_args],
+                raw_args,
+                namespace_spec,
+            )
             fn = MATRIX_METHODS[func_name]
             try:
                 return fn(arr, args)
@@ -1582,7 +1616,11 @@ class CallVisitor:
                 target = getattr(self, "_array_ctor_target_name", None)
                 if target is not None:
                     spec = self._widen_array_spec_for_name(target, spec)
-                elems = ", ".join(self._visit_expr(a) for a in node.args)
+                elem_spec = spec.element
+                elems = ", ".join(
+                    self._array_init_value_expr(elem_spec, a)
+                    for a in node.args
+                )
                 return f"{self._type_spec_to_cpp(spec)}{{{elems}}}"
             # Method calls: array.method(arr, args...)
             if func_name in ARRAY_METHODS and (
@@ -1793,7 +1831,22 @@ class CallVisitor:
             # free of the per-call setenv+tzset churn (KI-35). field_expr is unused
             # now (the engine applies the Pine offsets internally).
             del field_expr
-            return f"pine_{func_name}((int64_t)({ts_arg}), {tz_arg})"
+            if func_name == "weekofyear":
+                # A covered TradingView tape reports week 1 for an na
+                # timestamp in both UTC and America/New_York; the engine's
+                # epoch-zero week helper returns 0 / 52 respectively.
+                return (
+                    f"([&](){{ int64_t _pf_calendar_ts = ({ts_arg}); "
+                    f"auto _pf_calendar_tz = ({tz_arg}); "
+                    f"if (is_na(_pf_calendar_ts)) return 1; "
+                    f"return pine_weekofyear(_pf_calendar_ts, "
+                    f"_pf_calendar_tz); }}())"
+                )
+            return (
+                f"([&](){{ int64_t _pf_calendar_ts = ({ts_arg}); "
+                f"return pine_{func_name}(is_na(_pf_calendar_ts) ? "
+                f"int64_t(0) : _pf_calendar_ts, {tz_arg}); }}())"
+            )
 
         # time(timeframe) or time(timeframe, session[, tz])
         #
@@ -2042,7 +2095,10 @@ class CallVisitor:
                     init = args_e[2] if len(args_e) > 2 else "0.0"
                     return f"PineMatrix::new_({rows}, {cols}, {init})"
                 cpp_t = self._type_spec_to_cpp(elem_spec)
-                init = args_e[2] if len(args_e) > 2 else self._default_for_spec(elem_spec)
+                init = (
+                    self._array_init_value_expr(elem_spec, node.args[2])
+                    if len(args_e) > 2 else self._default_for_spec(elem_spec)
+                )
                 return f"PineGenericMatrix<{cpp_t}>::new_({rows}, {cols}, {init})"
             if func_name in MATRIX_METHODS and node.args:
                 from ..ast_nodes import Identifier as _Ident
@@ -2062,10 +2118,16 @@ class CallVisitor:
                             self._check_matrix_method_allowed(func_name, recv_spec, node)
                 obj = self._visit_expr(node.args[0])
                 param_names = MATRIX_METHOD_KWARGS.get(func_name)
-                if param_names:
-                    rest = _merge_kwargs(node.args[1:], node.kwargs, param_names, self._visit_expr)
-                else:
-                    rest = [self._visit_expr(a) for a in node.args[1:]]
+                raw_rest = (
+                    _merge_kwargs(node.args[1:], node.kwargs, param_names, lambda a: a)
+                    if param_names else list(node.args[1:])
+                )
+                rest = self._matrix_bool_value_args(
+                    func_name,
+                    [self._visit_expr(a) for a in raw_rest],
+                    raw_rest,
+                    self._type_spec_from_expr(node.args[0]),
+                )
                 fn = MATRIX_METHODS[func_name]
                 try:
                     return fn(obj, rest)
@@ -2159,6 +2221,8 @@ class CallVisitor:
                         val = self._coerce_int_slot(val, value_node, "int64_t")
                         if val == "na<double>()":
                             val = "na<int64_t>()"
+                    elif f_cpp_type == "bool":
+                        val = self._coerce_bool_expr(val, value_node)
                     elif (self._is_nullable_collection_cpp_type(f_cpp_type)
                           and val == "na<double>()"):
                         val = f"{f_cpp_type}{{}}"
@@ -2739,7 +2803,24 @@ class CallVisitor:
                     args[0], node.args[0] if node.args else None, "int64_t",
                 )
                 alpha = color_alpha_cast(args[1])
-                return f"pine_color::new_color({base}, {alpha})"
+                base_node = node.args[0]
+                if (isinstance(base_node, ColorLiteral)
+                        or (isinstance(base_node, MemberAccess)
+                            and isinstance(base_node.object, Identifier)
+                            and base_node.object.name == "color")):
+                    # A literal color is never na; preserve the compact
+                    # historical spelling (including input.color defaults).
+                    return f"pine_color::new_color({base}, {alpha})"
+                # A color variable or ``na`` may carry the integer sentinel.
+                # Evaluate both authored arguments once, then preserve that
+                # sentinel instead of letting new_color mask it into a value.
+                return (
+                    f"[&]() -> int64_t {{ auto _pf_color_base = ({base}); "
+                    f"auto _pf_color_alpha = ({args[1]}); "
+                    f"if (is_na(_pf_color_base)) return na<int64_t>(); "
+                    f"return pine_color::new_color(_pf_color_base, "
+                    f"{color_alpha_cast('_pf_color_alpha')}); }}()"
+                )
             return "0"
         if func_name in ("r", "g", "b", "t"):
             if args:
@@ -2784,6 +2865,35 @@ class CallVisitor:
     def _visit_str_call(self, func_name: str, node) -> str:
         args = _merge_kwargs(node.args, node.kwargs,
                              sigs.get_param_names("str", func_name), self._visit_expr)
+        arg_nodes = _merge_kwargs(
+            node.args, node.kwargs,
+            sigs.get_param_names("str", func_name), lambda a: a,
+        )
+
+        if func_name == "repeat":
+            if len(args) < 2:
+                self._codegen_warning(
+                    node,
+                    "str.repeat is missing its count argument; PineForge "
+                    "emits an empty string for this invalid TradingView call.",
+                )
+                return 'std::string("")'
+            count_node = arg_nodes[1] if len(arg_nodes) > 1 else None
+            if (count_node is not None
+                    and not isinstance(count_node, (NumberLiteral, BoolLiteral))):
+                warned = getattr(self, "_warned_repeat_na_sites", None)
+                if warned is None:
+                    warned = self._warned_repeat_na_sites = set()
+                if id(node) not in warned:
+                    warned.add(id(node))
+                    self._codegen_warning(
+                        count_node,
+                        "str.repeat count can be na: PineForge returns an empty "
+                        "string for that value, while TradingView returns na "
+                        "string. The engine has no nullable string value.",
+                        hint="Check na(count) before calling str.repeat when "
+                             "the result affects strategy logic.",
+                    )
 
         if func_name == "tostring":
             # Pine: str.tostring(enumVar) → field title / IANA string, not the int index
@@ -2837,7 +2947,8 @@ class CallVisitor:
                 # spec). Out-of-range / negative occurrence → original string.
                 return (
                     f'[&](){{ std::string s={args[0]}; std::string t={args[1]}; '
-                    f'std::string r={args[2]}; int _occ={self._coerce_int_slot(args[3], node.args[3], "int")}; '
+                    f'std::string r={args[2]}; int _occ={self._coerce_int_slot(args[3], arg_nodes[3], "int")}; '
+                    f'if(is_na(_occ)) _occ=0; '
                     f'if(t.empty()||_occ<0) return s; '
                     f'size_t p=0; int _i=0; '
                     f'while((p=s.find(t,p))!=std::string::npos){{ '

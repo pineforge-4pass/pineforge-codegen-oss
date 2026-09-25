@@ -33,7 +33,7 @@ _INT_LITERAL_TEXT = re.compile(
 
 
 def na_preserving_int_cast(value_cpp: str, int_cpp_type: str = "int") -> str:
-    """Narrow a ``double`` expression to an integer type without losing ``na``.
+    """Narrow a numeric expression to an integer type without losing ``na``.
 
     An *implicit* ``double`` -> ``int`` conversion of a NaN is undefined
     behaviour ([conv.fpint]), and compilers disagree in practice: AppleClang
@@ -41,7 +41,8 @@ def na_preserving_int_cast(value_cpp: str, int_cpp_type: str = "int") -> str:
     ``INT_MIN`` at ``-O0``/``-O1`` and 0 from ``-O2``. The engine's contract
     (``include/pineforge/na.hpp``) is that an integer ``na`` *is*
     ``std::numeric_limits<T>::min()``, which is what ``is_na(T)`` tests, so
-    every such narrowing must be spelled out.
+    every such narrowing must be spelled out. Check the original value type:
+    converting an ``int64_t`` na sentinel to ``double`` first erases it.
 
     The value is evaluated exactly once. ``na`` in, ``na<T>()`` out; anything
     else truncates toward zero exactly as the implicit conversion did, so a
@@ -52,9 +53,28 @@ def na_preserving_int_cast(value_cpp: str, int_cpp_type: str = "int") -> str:
     # call that passes a literal index or channel.
     if _INT_LITERAL_TEXT.fullmatch(value_cpp):
         return f"({int_cpp_type})({value_cpp})"
-    return (f"[&](){{ double _pf_v = (double)({value_cpp}); "
+    return (f"[&](){{ auto _pf_v = ({value_cpp}); "
             f"return is_na(_pf_v) ? na<{int_cpp_type}>() : "
             f"({int_cpp_type})_pf_v; }}()")
+
+
+def pine_index_int_cast(value_cpp: str) -> str:
+    """Narrow a numeric index after checking its *original* na sentinel.
+
+    Table-driven matrix methods receive C++ text without the source AST.
+    Converting an integer sentinel to ``double`` first loses it (INT64_MIN is
+    finite as a double), so this helper retains the source C++ type until the
+    `is_na` check. Bool has no separate na state in Pine v6.
+    """
+    if _INT_LITERAL_TEXT.fullmatch(value_cpp):
+        return f"(int)({value_cpp})"
+    return (
+        f"([&](){{ auto _pf_idx_v = ({value_cpp}); "
+        f"using _pf_idx_t = std::decay_t<decltype(_pf_idx_v)>; "
+        f"if constexpr (std::is_same_v<_pf_idx_t, bool>) "
+        f"return (int)_pf_idx_v; "
+        f"else return is_na(_pf_idx_v) ? na<int>() : (int)_pf_idx_v; }}())"
+    )
 
 
 def pine_truth_cast(value_cpp: str) -> str:
@@ -85,16 +105,16 @@ def color_alpha_cast(value_cpp: str) -> str:
 
     The engine's color helper performs integer arithmetic on transparency;
     passing the integer ``na`` sentinel there would overflow before the color
-    is built.  Pine's color value has no nullable engine representation, so a
-    missing transparency uses the established benign zero fallback while a
-    finite value keeps its truncating conversion.
+    is built.  TradingView's ``color.new``/``color.rgb`` treat a missing
+    transparency as 100 (fully transparent); a finite value keeps its
+    truncating conversion.
     """
     return (
         f"[&](){{ auto _pf_color_v = ({value_cpp}); "
         f"using _pf_color_t = std::decay_t<decltype(_pf_color_v)>; "
         f"if constexpr (std::is_same_v<_pf_color_t, bool>) "
         f"return _pf_color_v ? 1 : 0; "
-        f"else return is_na(_pf_color_v) ? 0 : (int)_pf_color_v; }}()"
+        f"else return is_na(_pf_color_v) ? 100 : (int)_pf_color_v; }}()"
     )
 
 

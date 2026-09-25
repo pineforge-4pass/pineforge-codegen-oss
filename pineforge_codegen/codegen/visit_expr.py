@@ -104,6 +104,7 @@ from ..ast_nodes import (
     TupleLiteral,
     UnaryOp,
 )
+from .helpers import pine_index_int_cast
 from .tables import (
     ADJUSTMENT_MAP,
     BAR_BUILTINS,
@@ -1108,17 +1109,26 @@ class ExprVisitor:
 
     def _visit_subscript(self, node: Subscript) -> str:
         idx = self._visit_expr(node.index)
+        # Series::operator[] accepts C++ int. A Pine int can be backed by an
+        # int64_t timestamp slot; implicitly narrowing its na sentinel to int
+        # turns it into zero on arm64 and reads the current bar. Preserve the
+        # original value type before narrowing every dynamic series offset.
+        series_idx = (
+            idx if (isinstance(node.index, NumberLiteral)
+                    and isinstance(node.index.value, int))
+            else pine_index_int_cast(idx)
+        )
         if isinstance(node.object, Identifier):
             name = node.object.name
             # Function parameters that are series — src[N] → src[N]
             if name in self._current_func_series_params:
-                return f"{self._safe_name(name)}[{idx}]"
+                return f"{self._safe_name(name)}[{series_idx}]"
             # Function parameters are scalars — src[0] → src, src[N>0] → src
             if name in self._current_func_param_types:
                 return self._safe_name(name)
             if name in BAR_FIELDS or name in BAR_SERIES_PUSH:
                 # Index matches Pine: [0] current bar, [k] k bars ago (runtime Series deque).
-                return f"_s_{name}[{idx}]"
+                return f"_s_{name}[{series_idx}]"
             safe = self._safe_name(name)
             # Apply per-call-site / exact block-member remap before deciding
             # whether the current lexical binding is a Series.
@@ -1126,9 +1136,16 @@ class ExprVisitor:
                 safe = self._active_var_remap[safe]
             if self._binding_is_series(name, safe):
                 # Same Pine [k] semantics as Series in runtime/series.hpp
-                return f"{safe}[{idx}]"
+                return f"{safe}[{series_idx}]"
             spec = self._collection_spec_for_name(name)
             if spec is not None and spec.kind in ("array", "map"):
+                self._codegen_warning(
+                    node,
+                    f"{spec.kind} history indexing uses the current collection "
+                    "element in PineForge; the engine does not retain per-bar "
+                    "collection IDs, so this result can differ from TradingView "
+                    "and a missing index is not represented faithfully.",
+                )
                 return f"{self._collection_receiver_expr(name)}[{idx}]"
         # Handle strategy.* history access (e.g., strategy.position_size[1])
         if isinstance(node.object, MemberAccess):
@@ -1140,7 +1157,7 @@ class ExprVisitor:
                     series_name = f"_strat_{member}"
                     if series_name not in self._strategy_series_vars:
                         self._strategy_series_vars.add(series_name)
-                    return f"{series_name}[{idx}]"
+                    return f"{series_name}[{series_idx}]"
         # History reference applied directly to an inline call result, e.g.
         # ``ta.highest(high, 10)[1]`` or ``f()[2]``. In Pine the call yields a
         # series, so ``[k]`` reads its value k bars ago — but the call lowers to
@@ -1162,7 +1179,7 @@ class ExprVisitor:
                 idx_int = self._coerce_int_slot(idx, node.index, "int")
                 if (idx_int == idx
                         and not self._emitted_value_is_double(node.index)):
-                    idx_int = f"(int)({idx})"
+                    idx_int = pine_index_int_cast(idx)
                 return f"{hoisted_member}[{idx_int}]"
             inner = self._visit_expr(node.object)
             cpp_t = self._infer_type(node.object)
@@ -1197,7 +1214,7 @@ class ExprVisitor:
                 idx_int = self._coerce_int_slot(idx, node.index, "int")
                 if (idx_int == idx
                         and not self._emitted_value_is_double(node.index)):
-                    idx_int = f"(int)({idx})"
+                    idx_int = pine_index_int_cast(idx)
                 return (
                     f"([&]() -> {cpp_t} {{ "
                     f"if (_use_precalc) {{ "
@@ -1224,7 +1241,7 @@ class ExprVisitor:
             idx_int = self._coerce_int_slot(idx, node.index, "int")
             if (idx_int == idx
                     and not self._emitted_value_is_double(node.index)):
-                idx_int = f"(int)({idx})"
+                idx_int = pine_index_int_cast(idx)
             return (
                 f"([&]() -> {cpp_t} {{ "
                 f"{cpp_t} _hv = ({inner}); "
@@ -1244,5 +1261,5 @@ class ExprVisitor:
         idx_int = self._coerce_int_slot(idx, node.index, "int")
         if (idx_int == idx
                 and not self._emitted_value_is_double(node.index)):
-            idx_int = f"(int)({idx})"
+            idx_int = pine_index_int_cast(idx)
         return f"{obj}[{idx_int}]"

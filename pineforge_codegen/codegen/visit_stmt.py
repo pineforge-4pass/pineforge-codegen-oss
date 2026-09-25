@@ -681,7 +681,11 @@ class StmtVisitor:
                 if len(node.value.args) >= 2:
                     r = self._visit_expr(node.value.args[0])
                     c = self._visit_expr(node.value.args[1])
-                    v = self._visit_expr(node.value.args[2]) if len(node.value.args) > 2 else self._default_for_spec(elem_spec)
+                    v = (
+                        self._array_init_value_expr(elem_spec, node.value.args[2])
+                        if len(node.value.args) > 2
+                        else self._default_for_spec(elem_spec)
+                    )
                     init = f"{cpp_type}::new_({r}, {c}, {v})"
                 else:
                     init = f"{cpp_type}::new_(0, 0, {self._default_for_spec(elem_spec)})"
@@ -756,11 +760,23 @@ class StmtVisitor:
         site = self._get_ta_site(node.value)
         if site is not None:
             compute_args = self._ta_compute_args_for_site(site)
-            ret_type = "bool" if self._ta_name_from_site(site) in TA_RETURNS_BOOL else "double"
+            ret_type = (
+                self._type_for_decl(node)
+                if node.type_hint and not is_global_member
+                else "bool" if self._ta_name_from_site(site) in TA_RETURNS_BOOL
+                else "double"
+            )
             ta_name = self._ta_member_name(site)
             ta_expr = (
                 f"(history_advances_new_bar() ? {ta_name}.compute({compute_args}) "
                 f": {ta_name}.recompute({compute_args}))"
+            )
+            ta_expr = self._coerce_int_slot(
+                ta_expr,
+                node.value,
+                self._int_slot_cpp_type(
+                    node.name, None if is_global_member else ret_type
+                ),
             )
             if declaration_is_series:
                 self._emit_history_series_write(lines, pad, safe, ta_expr)

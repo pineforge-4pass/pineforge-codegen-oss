@@ -1462,6 +1462,16 @@ class SupportChecker:
             return
         if ns == "ta":
             self._check_ta_call(node, name)
+            if name == "ema":
+                self._warn(
+                    node,
+                    "ta.ema initial warmup is approximated: PineForge may "
+                    "return a finite value before TradingView does.",
+                    hint="A covered length-20 TradingView tape first returns "
+                         "a finite EMA at bar 19; standalone PineForge EMA "
+                         "is finite at bar 0. Its established lowering stays "
+                         "in place pending per-call-site population parity.",
+                )
         if ns == "math" and name not in SUPPORTED_MATH:
             self._err(node, f"math.{name}(...) is not implemented in PineForge runtime.")
             self._visit_children(node)

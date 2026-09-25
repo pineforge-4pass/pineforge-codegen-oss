@@ -377,7 +377,8 @@ def test_hour_two_arg_passes_tz():
     # rather than an inline setenv+tzset+localtime_r lambda — the per-call tzset
     # churn caused a macOS notifyd storm (KI-35).
     assert "America/New_York" in cpp
-    assert ('pine_hour((int64_t)(current_bar_.timestamp), '
+    assert 'int64_t _pf_calendar_ts = (current_bar_.timestamp);' in cpp
+    assert ('pine_hour(is_na(_pf_calendar_ts) ? int64_t(0) : _pf_calendar_ts, '
             'std::string("America/New_York"))') in cpp
 
 
@@ -399,7 +400,8 @@ def test_hour_one_arg_uses_syminfo_timezone():
     # The 1-arg form must thread syminfo_.timezone (exchange TZ) into the engine
     # helper pine_hour() per TV docs. The UTC fast path (tzset-free gmtime_r) now
     # lives inside pine_hour (session_time.cpp), not the generated code (KI-35).
-    assert ("pine_hour((int64_t)(current_bar_.timestamp), "
+    assert 'int64_t _pf_calendar_ts = (current_bar_.timestamp);' in cpp
+    assert ("pine_hour(is_na(_pf_calendar_ts) ? int64_t(0) : _pf_calendar_ts, "
             "syminfo_.timezone)") in cpp
     # The chart-display TZ slot must NOT leak into the bar-time call;
     # if it ever does, this test catches the regression.
@@ -417,7 +419,8 @@ def test_dayofweek_two_arg_passes_tz():
     )
     cpp = _generate(src)
     assert "Asia/Tokyo" in cpp
-    assert ('pine_dayofweek((int64_t)(current_bar_.timestamp), '
+    assert 'int64_t _pf_calendar_ts = (current_bar_.timestamp);' in cpp
+    assert ('pine_dayofweek(is_na(_pf_calendar_ts) ? int64_t(0) : _pf_calendar_ts, '
             'std::string("Asia/Tokyo"))') in cpp
 
 
@@ -432,7 +435,8 @@ def test_hour_two_arg_utc_literal_short_circuits():
     )
     cpp = _generate(src)
     assert '"UTC"' in cpp
-    assert ('pine_hour((int64_t)(current_bar_.timestamp), '
+    assert 'int64_t _pf_calendar_ts = (current_bar_.timestamp);' in cpp
+    assert ('pine_hour(is_na(_pf_calendar_ts) ? int64_t(0) : _pf_calendar_ts, '
             'std::string("UTC"))') in cpp
 
 

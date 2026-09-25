@@ -168,7 +168,7 @@ def test_all_primitive_element_types_emit_exact_udf_returns_and_compile():
         "double get_float(",
         "bool get_bool(",
         "std::string get_string(",
-        "int get_color(",
+        "int64_t get_color(",
     ):
         assert signature in cpp
     compile_cpp(cpp)
@@ -775,7 +775,7 @@ def test_temporary_builtin_array_producer_matrix(
         ("1.5", "double"),
         ("true", "bool"),
         ('"x"', "std::string"),
-        ("color.red", "int"),
+        ("color.red", "int64_t"),
     ),
 )
 def test_forward_local_identity_return_preserves_every_primitive_signature(

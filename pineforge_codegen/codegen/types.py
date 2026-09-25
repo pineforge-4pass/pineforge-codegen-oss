@@ -153,7 +153,7 @@ class TypeInferer:
         if spec.kind == "primitive":
             return {"float": "double", "int": "int", "int64": "int64_t",
                     "bool": "bool", "string": "std::string",
-                    "color": "int"}.get(spec.name or "float", "double")
+                    "color": "int64_t"}.get(spec.name or "float", "double")
         if spec.kind == "udt" and spec.name:
             # Drawing handle structs (P1): map BEFORE the _udt_defs check so
             # array<line> -> std::vector<Line> and scalar line -> Line instead
@@ -1397,7 +1397,7 @@ class TypeInferer:
             if spec.name == "bool":
                 return "bool"
             if spec.name == "color":
-                return "int"
+                return "int64_t"
             if spec.name == "float":
                 return "double"
 
@@ -1415,7 +1415,7 @@ class TypeInferer:
             if pine_type == PineType.BOOL:
                 return "bool"
             if pine_type == PineType.COLOR:
-                return "int"
+                return "int64_t"
             if pine_type == PineType.FLOAT:
                 return "double"
 
@@ -1427,7 +1427,7 @@ class TypeInferer:
             if spec.name == "bool":
                 return "bool"
             if spec.name == "color":
-                return "int"
+                return "int64_t"
             if spec.name == "float":
                 return "double"
         param_types = list(getattr(func_info, "param_types", ()) or ())
@@ -1437,7 +1437,7 @@ class TypeInferer:
         if pine_type == PineType.BOOL:
             return "bool"
         if pine_type == PineType.COLOR:
-            return "int"
+            return "int64_t"
         return "double"
 
     def _callsite_callable_return_pine_type(
@@ -1812,17 +1812,12 @@ class TypeInferer:
     # sizes, emitted as ``((int)trades_.size())``.
     _INTEGRAL_STRATEGY_MEMBERS = frozenset({"closedtrades", "opentrades"})
 
-    # Emitted text that is already an integer value: an integer literal, an
-    # integer ``na`` sentinel, or a value that has been through the
-    # na-preserving cast. Recognising these keeps the coercion idempotent and
-    # keeps int-valued constants (``display.*``, ``color.*``, enum members,
-    # …) out of it, whatever the Pine-facing inference says about them.
+    # Only an integer literal is width-independent. An integer ``na`` value,
+    # input read, or prior guarded cast can still lose its sentinel when it
+    # crosses into the other integer width, so those must be checked again.
     _INTEGRAL_CPP_TEXT = re.compile(
         r"^\s*(?:\(\s*)*[-+]?(?:0[xX][0-9a-fA-F]+|\d+)(?:LL|ULL|L|U)?"
         r"(?:\s*\))*\s*$"
-        r"|^na<int(?:64_t)?>\(\)$"
-        r"|^get_input_(?:int|time|color)\("
-        r"|^\[&\]\(\)\{ double _pf_v = "
     )
 
     def _emitted_value_is_double(self, node) -> bool:
@@ -1954,6 +1949,10 @@ class TypeInferer:
         for gname, gptype in self.ctx.global_var_decls:
             if gname != name:
                 continue
+            if self._global_color_hint(name):
+                return "int64_t"
+            if self._global_bool_hint(name):
+                return "bool"
             if (name in getattr(self, "_direct_program_tuple_binding_names", ())
                     and gptype == PineType.BOOL):
                 return "bool"
@@ -1962,6 +1961,24 @@ class TypeInferer:
                 return self._infer_type(expr)
             return PINE_TYPE_TO_CPP.get(gptype, "double")
         return None
+
+    def _global_color_hint(self, name: str) -> bool:
+        """A top-level ``color`` declaration must keep its 64-bit na sentinel."""
+        return any(
+            isinstance(stmt, VarDecl)
+            and stmt.name == name
+            and stmt.type_hint == "color"
+            for stmt in self.ctx.ast.body
+        )
+
+    def _global_bool_hint(self, name: str) -> bool:
+        """A top-level declared bool keeps its type when initialized by na."""
+        return any(
+            isinstance(stmt, VarDecl)
+            and stmt.name == name
+            and stmt.type_hint == "bool"
+            for stmt in self.ctx.ast.body
+        )
 
     def _int_slot_cpp_type(self, name: str | None,
                            declared: str | None = None) -> str | None:
@@ -1979,7 +1996,7 @@ class TypeInferer:
             if (resolved == "int" and name is not None
                     and self._is_int64_builtin_init(name)):
                 resolved = "int64_t"
-        return resolved if resolved in NA_PRESERVING_INT_TYPES else None
+        return resolved if resolved in (*NA_PRESERVING_INT_TYPES, "bool") else None
 
     def _func_param_int_cpp_type(self, fi, index: int,
                                  call_site_idx: int | None) -> str | None:
@@ -2016,7 +2033,7 @@ class TypeInferer:
         if (index >= len(declared) or declared[index] is None) and index < len(variant):
             return {
                 PineType.INT: "int64_t",
-                PineType.COLOR: "int",
+                PineType.COLOR: "int64_t",
             }.get(variant[index])
         specs = getattr(fi, "param_type_specs", []) or []
         if index < len(specs) and specs[index] is not None:
@@ -2075,30 +2092,48 @@ class TypeInferer:
         cpp_type = self._type_spec_to_cpp(spec)
         if cpp_type == "int":
             cpp_type = "int64_t"
-        return cpp_type if cpp_type in NA_PRESERVING_INT_TYPES else None
+        return cpp_type if cpp_type in (*NA_PRESERVING_INT_TYPES, "bool") else None
 
     def _coerce_int_slot(self, cpp_val: str, node, target_cpp_type: str | None,
                          *, value_is_double: bool | None = None) -> str:
         """Route a value into an ``int``/``int64_t`` slot without losing ``na``.
 
-        Returns ``cpp_val`` untouched unless the slot is an integer type AND
-        the emitted value is a ``double`` — i.e. exactly at the implicit
-        narrowings that are undefined for NaN. ``value_is_double`` overrides
-        the node-based judgement for emitters that build their own expression
-        text (loop bounds, compound-assignment right-hand sides).
+        A double NaN cannot be narrowed implicitly, and an integer na
+        sentinel cannot cross into the other integer width without losing
+        its sentinel. Same-width integral slots keep their established C++
+        spelling; width changes check the original source value first.
+        ``value_is_double`` overrides the AST judgement for emitters that
+        build their own expression text.
         """
+        if target_cpp_type == "bool":
+            return self._coerce_bool_expr(cpp_val, node)
         if target_cpp_type not in NA_PRESERVING_INT_TYPES:
             return cpp_val
-        if cpp_val == "na<double>()":
-            # A bare na needs no round trip through the NaN.
+        if cpp_val in {"na<double>()", "na<int>()", "na<int64_t>()"}:
+            # A bare na needs no round trip through the source width.
             return f"na<{target_cpp_type}>()"
         if self._INTEGRAL_CPP_TEXT.match(cpp_val):
             return cpp_val
+        if ((target_cpp_type == "int" and cpp_val.startswith("get_input_int("))
+                or (target_cpp_type == "int64_t"
+                    and cpp_val.startswith("get_input_int64("))):
+            # Engine ABI declarations return exactly these widths, and their
+            # integer na sentinel already matches the destination slot.
+            return cpp_val
         if value_is_double is None:
             value_is_double = self._emitted_value_is_double(node)
-        if not value_is_double:
+        if value_is_double:
+            return na_preserving_int_cast(cpp_val, target_cpp_type)
+        if node is None:
             return cpp_val
-        return na_preserving_int_cast(cpp_val, target_cpp_type)
+        source_cpp_type = self._infer_type(node)
+        if (isinstance(node, Identifier)
+                and self._is_int64_builtin_init(node.name)):
+            source_cpp_type = "int64_t"
+        if (source_cpp_type in NA_PRESERVING_INT_TYPES
+                and source_cpp_type != target_cpp_type):
+            return na_preserving_int_cast(cpp_val, target_cpp_type)
+        return cpp_val
 
     def _coerce_int_slot_with_cast(
         self, cpp_val: str, node, target_cpp_type: str
@@ -2138,7 +2173,7 @@ class TypeInferer:
         # original node and take the exact path below.
         if node is None:
             return cpp_val
-        if cpp_val.strip() in {"true", "false"}:
+        if cpp_val.strip() in {"true", "false", "na<bool>()"}:
             return cpp_val
         if cpp_val.strip() in {
             "is_first_tick()", "is_last_tick_", "barstate_islast_",
@@ -2217,7 +2252,11 @@ class TypeInferer:
         if cpp_type is None:
             for gname, gptype in self.ctx.global_var_decls:
                 if gname == name:
-                    cpp_type = PINE_TYPE_TO_CPP.get(gptype, "double")
+                    cpp_type = (
+                        "int64_t" if self._global_color_hint(name)
+                        else "bool" if self._global_bool_hint(name)
+                        else PINE_TYPE_TO_CPP.get(gptype, "double")
+                    )
                     break
         if cpp_type is None:
             return None
@@ -2358,6 +2397,12 @@ class TypeInferer:
         and ternaries / if / switch expressions. Returns the string
         ``"double"`` as the safe fallback when no narrower type can be
         determined."""
+        if isinstance(node, Subscript) and isinstance(node.object, Identifier):
+            name = node.object.name
+            if name in self.ctx.series_vars:
+                return self._series_type_for(name)
+            if name in self.ctx.series_bar_fields:
+                return "double"
         if isinstance(node, Subscript) and isinstance(node.object, FuncCall):
             # A callable-result history read keeps the callable's scalar
             # family. Collection subscripts follow separate element-type paths.
@@ -2366,6 +2411,8 @@ class TypeInferer:
             return "double" if isinstance(node.value, float) else "int"
         if isinstance(node, BoolLiteral):
             return "bool"
+        if isinstance(node, ColorLiteral):
+            return "int64_t"
         if isinstance(node, StringLiteral):
             return "std::string"
         if isinstance(node, NaLiteral):
@@ -2404,6 +2451,8 @@ class TypeInferer:
             return "double"
         if isinstance(node, FuncCall):
             func_name, namespace = self._resolve_callee(node.callee)
+            if namespace == "color":
+                return "int64_t" if func_name in {"new", "rgb", "from_gradient"} else "int"
             # Nested trade-accessor calls bypass the flat namespace signature
             # table.  Their textual metadata accessors return std::string from
             # the runtime, so hintless locals must not use the double fallback.
@@ -2525,6 +2574,8 @@ class TypeInferer:
             return "bool"
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
             ename = node.object.name
+            if ename == "color":
+                return "int64_t"
             if ename in self._enum_defs and node.member in self._enum_defs[ename]:
                 return "int"
             # format.* constants emit std::string literals (consumed by

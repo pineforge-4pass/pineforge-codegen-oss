@@ -260,7 +260,8 @@ def test_array_stdev_biased_arg():
     token = assignment.split("auto ", 1)[1].split("=", 1)[0]
     assert token.startswith("__pf_array_arg_")
     assert f"auto {token}=(false);" in assignment
-    assert f"_d=({token})?" in assignment
+    assert f"_pf_bool_v = ({token})" in assignment
+    assert "is_na(_pf_bool_v) ? false" in assignment
     assert assignment.index("(false)") < assignment.index("arr.empty()")
 
 

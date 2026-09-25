@@ -1900,7 +1900,7 @@ class TopLevelEmitter:
                     PineType.FLOAT: "double",
                     PineType.BOOL: "bool",
                     PineType.STRING: "std::string",
-                    PineType.COLOR: "int",
+                    PineType.COLOR: "int64_t",
                 }[variant_pt]
             elif i < len(getattr(fi, "param_type_specs", [])) and fi.param_type_specs[i] is not None:
                 # Precise per-param TypeSpec (declared hint or call-site inference):

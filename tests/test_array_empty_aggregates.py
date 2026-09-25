@@ -26,7 +26,7 @@ def _generate(body: str) -> str:
         ("array.median(values)", "std::sort"),
         ("array.mode(values)", "std::unordered_map"),
         ("array.percentile_linear_interpolation(values, 50)", "c.back()"),
-        ("array.percentile_nearest_rank(values, 50)", "c[std::min"),
+        ("array.percentile_nearest_rank(values, 50)", "c[r-1]"),
         ("array.percentrank(values, 0)", "double v=__pf_array"),
         ("array.covariance(values, peers)", "ma/=n"),
     ],

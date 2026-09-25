@@ -31,6 +31,7 @@ from ..ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, TypeDecl, TypeField, UnaryOp, VarDecl,
     WhileStmt,
 )
+from .helpers import pine_index_int_cast
 from .tables import (
     TA_CHART_PREV_CLOSE,
     TA_CHART_PREV_CLOSE_ARG,
@@ -586,7 +587,7 @@ class TaSiteHelper:
             )
             if (length_expr == length_raw
                     and not self._emitted_value_is_double(length_node)):
-                length_expr = f"(int)({length_raw})"
+                length_expr = pine_index_int_cast(length_raw)
             held = (
                 f"(({length_expr}) >= 1 ? {info['hist']}[({length_expr}) - 1] "
                 f": na<double>())"

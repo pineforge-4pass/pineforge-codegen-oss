@@ -107,7 +107,7 @@ TA_TUPLE_RESULT_TYPES = {
 
 # CPP_RESERVED + the NamingHelper mixin are pulled in from helpers.py so the
 # small naming/walk utilities can be shared with future visitor mixins.
-from .helpers import CPP_RESERVED, NamingHelper, pine_truth_cast
+from .helpers import CPP_RESERVED, NamingHelper, na_preserving_int_cast, pine_truth_cast
 from .constant_fold import fold_numeric_expression
 
 # TypeInferer mixin owns the ~15 type-spec / C++-type inference helpers
@@ -4514,7 +4514,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(f"    {udt_cpp} {safe} = {udt_cpp}{{}};")
             else:
                 expr = self.ctx.global_expr_map.get(name) if hasattr(self.ctx, "global_expr_map") else None
-                if (
+                if self._global_color_hint(name):
+                    cpp_type = "int64_t"
+                elif self._global_bool_hint(name):
+                    cpp_type = "bool"
+                elif (
                     name in self._direct_program_tuple_binding_names
                     and ptype == PineType.BOOL
                 ):
@@ -5240,7 +5244,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # integer length.
         had_math = "std::" in rewritten or bool(re.search(r"\btimeframe\b", expanded))
         if had_math:
-            return f"(int)({rewritten})"
+            return na_preserving_int_cast(rewritten)
         return rewritten
 
     def _lower_reset_expr_via_visitor(self, expanded: str) -> str | None:
@@ -5284,7 +5288,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # unwrapped, so simple sites stay byte-identical to the legacy output.
         if ("std::" in rendered or "(double)" in rendered
                 or "script_tf_" in rendered):
-            return f"(int)({rendered})"
+            return na_preserving_int_cast(rendered)
         return rendered
 
 
