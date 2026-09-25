@@ -541,15 +541,14 @@ def _checked_array_index_prelude(
     )
 
 
-def _checked_array_range_prelude() -> str:
+def _checked_array_range_prelude(*, reject_inverted: bool = True) -> str:
     """Validate the half-open ``[index_from, index_to)`` range of fill/slice.
 
     Both endpoints are checked with ``allow_size`` (``index_to`` is exclusive,
     so ``size`` is a legal endpoint) and without negative normalization
     (neither function appears in the Pine v6 reference's negative-indexing
-    set). An inverted range is rejected rather than silently treated as empty:
-    ``begin()+from > begin()+to`` is undefined behaviour in the STL forms this
-    replaces, and no evidence pins TradingView's behaviour there.
+    set). TradingView treats an inverted ``fill`` range as empty, but raises
+    for an inverted ``slice`` range. The caller selects that distinction.
     """
     return (
         _checked_array_index_prelude(
@@ -558,12 +557,11 @@ def _checked_array_range_prelude() -> str:
         + _checked_array_index_prelude(
             normalize_negative=False, allow_size=True, name="index_to"
         )
-        + "if(__pf_array_index_from>__pf_array_index_to) "
-        "pine_runtime_error(std::string(\"Index range \")+"
-        "std::to_string(__pf_array_index_from)+\"..\"+"
-        "std::to_string(__pf_array_index_to)+"
-        "\" is invalid. Array size is \"+"
-        "std::to_string(__pf_array_size_index_from)); "
+        + (
+            "if(__pf_array_index_from>__pf_array_index_to) "
+            "pine_runtime_error(\"Index 'from' should be less than index 'to'.\"); "
+            if reject_inverted else ""
+        )
     )
 
 
@@ -587,13 +585,14 @@ def _checked_array_insert(a: str, args: list[str]) -> str:
 
 def _checked_array_fill_range(a: str, args: list[str]) -> str:
     """``array.fill(id, value, index_from, index_to)`` — bounded range fill."""
-    check = _checked_array_range_prelude()
+    check = _checked_array_range_prelude(reject_inverted=False)
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_array_value){ "
         "return [&](auto&& __pf_raw_index_from_value){ "
         "return [&](auto&& __pf_raw_index_to_value){ "
         f"{check}"
+        "if(__pf_array_index_from<__pf_array_index_to) "
         "std::fill(__pf_array.begin()+(size_t)__pf_array_index_from, "
         "__pf_array.begin()+(size_t)__pf_array_index_to, __pf_array_value); "
         f"}}(({args[2]})); }}(({args[1]})); }}(({args[0]})); }}(({a}))"

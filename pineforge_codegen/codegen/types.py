@@ -1136,7 +1136,8 @@ class TypeInferer:
         )
 
     def _array_method_expr(
-        self, array_expr: str, method: str, args: list[str], spec: TypeSpec | None = None,
+        self, array_expr: str, method: str, args: list[str],
+        spec: TypeSpec | None = None, node: ASTNode | None = None,
     ) -> str:
         """Lower ``arr.method(...)`` to its C++ form, validating numeric requirements."""
         spec = spec or TypeSpec.array(TypeSpec.primitive("float"))
@@ -1145,6 +1146,21 @@ class TypeInferer:
         if method == "copy":
             lower_receiver = lambda recv: f"{arr_cpp_type}({recv})"
         elif method == "slice":
+            # TradingView aliases primitive source elements bidirectionally.
+            # Our std::vector lowering owns a copy; a true view needs a
+            # lifetime-safe collection representation across all array lanes.
+            # Keep the compiling lowering and surface the measured divergence.
+            warned = getattr(self, "_slice_alias_warned_nodes", set())
+            if node is None or id(node) not in warned:
+                self._codegen_warning(
+                    node,
+                    "array.slice returns a copy in PineForge; TradingView slices "
+                    "share source elements, so writes through either array can diverge.",
+                    hint="Avoid mutating a slice or its source while the slice is used.",
+                )
+                if node is not None:
+                    warned.add(id(node))
+                    self._slice_alias_warned_nodes = warned
             # Bounds-checked in the shared helper; the element type stays
             # caller-supplied so the typed lane keeps its own vector type.
             lower_receiver = lambda recv: checked_array_slice(

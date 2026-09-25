@@ -1165,7 +1165,7 @@ class CallVisitor:
                 recv = self._visit_expr(callee.object)
                 arg_nodes = self._array_method_arg_nodes(callee.member, node)
                 args = self._array_method_args(callee.member, arg_nodes, recv_spec)
-                return self._array_method_expr(recv, callee.member, args, recv_spec)
+                return self._array_method_expr(recv, callee.member, args, recv_spec, node)
 
         # chart.point.now/new/from_index/from_time/copy — REAL data (a ChartPoint
         # aggregate). Routed here BEFORE the obj.field.method receiver logic,
@@ -1221,7 +1221,7 @@ class CallVisitor:
                             recv,
                             meth,
                             self._array_method_args(meth, arg_nodes, recv_spec),
-                            recv_spec,
+                            recv_spec, node,
                         )
                     args = ", ".join(raw_args)
                     if meth == "delete":
@@ -1269,7 +1269,7 @@ class CallVisitor:
                             meth_raw, arg_nodes, param_spec
                         )
                         return self._array_method_expr(
-                            arr, meth_raw, margs, param_spec
+                            arr, meth_raw, margs, param_spec, node
                         )
                     if (
                         param_spec is not None
@@ -1317,7 +1317,7 @@ class CallVisitor:
                         margs = self._array_method_args(
                             meth_raw, arg_nodes, recv_spec
                         )
-                        return self._array_method_expr(arr, meth_raw, margs, recv_spec)
+                        return self._array_method_expr(arr, meth_raw, margs, recv_spec, node)
                     if (
                         recv_spec is not None
                         and recv_spec.kind == "matrix"
@@ -1548,7 +1548,7 @@ class CallVisitor:
             spec = namespace_spec
             arg_nodes = self._array_method_arg_nodes(func_name, node)
             args = self._array_method_args(func_name, arg_nodes, spec)
-            return self._array_method_expr(arr, func_name, args, spec)
+            return self._array_method_expr(arr, func_name, args, spec, node)
 
         # Array operations — emit proper C++ vector operations
         if namespace == "array":
@@ -1588,7 +1588,7 @@ class CallVisitor:
                 arr = self._visit_expr(all_nodes[0])
                 spec = self._type_spec_from_expr(all_nodes[0])
                 rest = self._array_method_args(func_name, all_nodes[1:], spec)
-                return self._array_method_expr(arr, func_name, rest, spec)
+                return self._array_method_expr(arr, func_name, rest, spec, node)
             return "0"
 
         # color.* calls

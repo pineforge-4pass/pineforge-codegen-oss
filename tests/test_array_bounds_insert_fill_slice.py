@@ -15,16 +15,15 @@ Bound semantics pinned here, from the Pine v6 reference:
   index is end-relative exactly as it is for ``get``/``set``/``remove``.
 * ``array.fill``/``array.slice`` take a half-open ``[index_from, index_to)``
   range — ``index_to`` is "one greater than the last index", so ``index_to ==
-  size`` is legal.  Neither is in the reference's negative-indexing set, so a
-  negative endpoint is rejected (the same stance ``array.percentrank`` already
-  takes).
+  size`` is legal. TradingView probes on 2026-09-25 pinned negative endpoints
+  as errors, inverted ``fill`` as a no-op, and inverted ``slice`` as an error.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile
+from pineforge_codegen import transpile, transpile_full
 from tests import _compile as compile_env
 from tests.test_array_checked_access import _compile_and_run
 
@@ -124,13 +123,16 @@ def test_range_methods_do_not_normalize_negative_endpoints(body: str, needle: st
     assert "__pf_raw_index_to<0?" not in stmt
 
 
-def test_range_methods_reject_inverted_ranges():
-    for body, needle in (
-        (SETUP + "array.fill(a, 1.0, 2, 1)", "std::fill"),
-        (SETUP + "b = array.slice(a, 2, 1)\nplot(array.size(b))", "__pf_array_index_to"),
-    ):
-        stmt = _statement(_generate(body), needle)
-        assert "__pf_array_index_from>__pf_array_index_to" in stmt
+def test_inverted_fill_is_guarded_noop_but_inverted_slice_errors():
+    fill = _statement(_generate(SETUP + "array.fill(a, 1.0, 2, 1)"), "std::fill")
+    assert "if(__pf_array_index_from<__pf_array_index_to) std::fill" in fill
+    assert "__pf_array_index_from>__pf_array_index_to" not in fill
+    sliced = _statement(
+        _generate(SETUP + "b = array.slice(a, 2, 1)\nplot(array.size(b))"),
+        "__pf_array_index_to",
+    )
+    assert "if(__pf_array_index_from>__pf_array_index_to)" in sliced
+    assert "Index 'from' should be less than index 'to'." in sliced
 
 
 def test_single_argument_fill_overload_is_unchanged():
@@ -184,6 +186,8 @@ array.fill(filled, 2.0, 1, 3)
 filled_sum = array.sum(filled)
 array.fill(filled, 9.0, 4, 4)
 filled_sum_after_empty_fill = array.sum(filled)
+array.fill(filled, 9.0, 3, 1)
+filled_sum_after_inverted_fill = array.sum(filled)
 sliced = array.slice(filled, 1, 4)
 sliced_size = array.size(sliced)
 sliced_sum = array.sum(sliced)
@@ -233,6 +237,7 @@ int main() {
               << strategy.values_at_4 << " "
               << strategy.filled_sum << " "
               << strategy.filled_sum_after_empty_fill << " "
+              << strategy.filled_sum_after_inverted_fill << " "
               << strategy.sliced_size << " "
               << strategy.sliced_sum << " "
               << strategy.empty_slice_size << "\n";
@@ -245,6 +250,7 @@ int main() {
         7.0,
         4.0,   # fill(2.0) over [1, 3) of a 4-element zero array
         4.0,   # empty fill over [4, 4) changes nothing
+        4.0,   # inverted fill over [3, 1) changes nothing (TradingView)
         3.0,   # slice [1, 4) of a 4-element array
         4.0,
         0.0,   # slice [4, 4) is empty, not out of bounds
@@ -270,8 +276,27 @@ int main() {
         "2\tIndex -4 is out of bounds. Array size is 3",
         "3\tIndex 4 is out of bounds. Array size is 3",
         "4\tIndex -1 is out of bounds. Array size is 3",
-        "5\tIndex range 2..1 is invalid. Array size is 3",
+        "5\t",
         "6\tIndex 4 is out of bounds. Array size is 3",
         "7\tIndex -1 is out of bounds. Array size is 3",
-        "8\tIndex range 2..1 is invalid. Array size is 3",
+        "8\tIndex 'from' should be less than index 'to'.",
     ]
+
+
+@pytest.mark.parametrize("body", [
+    "s = array.slice(a, 0, 2)",
+    "s = a.slice(0, 2)",
+    "array<int> s = array.slice(a, 0, 2)",
+])
+def test_slice_copy_has_located_alias_warning(body: str):
+    source = "//@version=6\nstrategy(\"T\")\na = array.from(1, 2, 3)\n" + body + "\n"
+    result = transpile_full(source)
+    warnings = [d for d in result["diagnostics"] if "array.slice returns a copy" in d.message]
+    assert len(warnings) == 1
+    assert warnings[0].location.line == 4
+    assert "share source elements" in warnings[0].message
+
+
+def test_array_copy_does_not_get_slice_alias_warning():
+    source = "//@version=6\nstrategy(\"T\")\na = array.from(1, 2, 3)\ns = array.copy(a)\n"
+    assert not [d for d in transpile_full(source)["diagnostics"] if "array.slice returns a copy" in d.message]
