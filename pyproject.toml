@@ -47,6 +47,21 @@ source = "regex"
 path = "VERSION"
 pattern = "^(?P<version>\\S+)"
 
+[tool.hatch.build.targets.sdist]
+# Keep builds from VCS-free release archives free of npm dependencies, gate
+# scratch files and generated payloads. The sdist can still build a wheel.
+only-include = [
+    "pineforge_codegen",
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LEGAL.md",
+    "LICENSE",
+    "VERSION",
+    "pyproject.toml",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["pineforge_codegen"]
 

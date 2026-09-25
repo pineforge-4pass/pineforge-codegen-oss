@@ -68,6 +68,9 @@ engine `v1.0.0`; `1.0.0-rc.1` supports only engine `v1.0.0-rc.1`.
 
 - Update the direct build-tool `tar` dependency past the reported advisories
   and require a high-severity npm audit in release and publish gates.
+- Limit the Python source archive to package code and release documents so a
+  VCS-free RC build cannot include installed Node dependencies or generated
+  gate payloads.
 - Document the supported Python and gate/glue JSON contract, exact engine
   pairing, contribution checks, and release-note policy. Classify the package
   as Production/Stable for the 1.0 release.
