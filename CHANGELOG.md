@@ -63,6 +63,34 @@ engine `v1.0.0`; `1.0.0-rc.1` supports only engine `v1.0.0-rc.1`.
   The paired TA1 engine handles ALMA `floor`, KC `useTrueRange`, explicit
   VWAP anchors, and pivot-level anchors/developing values
   ([#139](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/139)).
+- `na` follows Pine's rules wherever the generated C++ converts a value: it
+  is false in `if`, `?:`, `and`/`or` and boolean parameters, an integer
+  conversion of `na` stays `na`, and stored booleans and dynamic series
+  indices keep it. Keltner Channel middle bands are `na` until their length
+  is warm, as on TradingView. Standalone `ta.ema` warmup, collection history
+  and a nullable `str.repeat` result, which the engine cannot yet represent
+  exactly, now warn.
+- An inverted `array.fill` range leaves the array unchanged and an inverted
+  `array.slice` raises TradingView's runtime error, as on TradingView; every
+  `array.slice` warns that PineForge copies the slice where TradingView
+  aliases it. `request.security` resolves a chart-symbol name by lexical
+  scope, so a function-local rebind no longer blocks an unrelated global, and
+  a `?:` symbol that can select another feed warns.
+
+### Limits and generated names
+
+- Untrusted source that would crash or hang the transpiler raises a located
+  `CompileError`: source over 5 MiB (TradingView's 5MB compilation request),
+  nesting over 512 levels, or a transpilation over 120 seconds (TradingView's
+  compile limit). There is no statement-count limit. A 500-link `?:` chain, a
+  500-branch `else if` ladder and a 2,000-element `array.from` transpile and
+  compile; deeply nested calls no longer take exponential time.
+  `transpile()` raises Python's recursion limit to 20,480 frames when it is
+  lower. Numeric literals outside the C++ range raise a located error.
+- A Pine name that is a C++17/C++20 keyword, a standard macro or an engine
+  name (for example `namespace`, `NULL` or `Box`) compiles: the generated C++
+  spells it `pf_safe_<name>`, for variables, parameters, types, fields and
+  tuple or loop bindings alike.
 
 ### Packaging and documentation
 
