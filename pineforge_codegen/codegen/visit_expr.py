@@ -855,29 +855,32 @@ class ExprVisitor:
                 # session.isfirstbar_regular / islastbar_regular are aliased to
                 # their non-_regular counterparts (engine has one session string;
                 # see session_time.hpp limitation comment).
-                if node.member == "ismarket":
-                    # The kernel's in-session fact of the script bar
-                    # (NativeDecisionContext::in_session, read off the session
-                    # day the bar belongs to), which the host stores as
-                    # session_ismarket_ before every source callback. The
-                    # time-of-day predicate tests each instant's own weekday:
-                    # it missed the Sunday-evening open of a ":23456" session
-                    # and every "0000-2400" bar, where TradingView's tapes flag
-                    # every bar in market (tests/test_e2e_session_ismarket.py).
+                if node.member in ("ismarket", "ispremarket", "ispostmarket"):
+                    # session.ismarket is the kernel's in-session fact of the
+                    # script bar (NativeDecisionContext::in_session, read off
+                    # the session day the bar belongs to), which the host
+                    # stores as session_ismarket_ before every source
+                    # callback. The time-of-day predicates test each instant's
+                    # own weekday and window: ismarket missed the Sunday-evening
+                    # open of a ":23456" session and every "0000-2400" bar, and
+                    # ispremarket / ispostmarket held on in-market bars of an
+                    # overnight session, where TradingView's tapes flag every
+                    # bar in market and none in an extended session
+                    # (tests/test_e2e_session_ismarket.py). A bar in market is
+                    # in neither extended session; off it, the windows decide.
                     # A request.security payload runs on its own bars, which
-                    # carry no such fact, so it keeps the predicate at the
+                    # carry no such fact, so it keeps the predicates at the
                     # security bar's time. So does a batch of fewer than two
                     # bars given no timeframe: the engine detects none
                     # (script_tf_ stays empty) and presents no session facts.
-                    predicate = ("pine_session_ismarket(syminfo_.session, "
-                                 "syminfo_.timezone, current_bar_.timestamp)")
+                    bar = "(syminfo_.session, syminfo_.timezone, current_bar_.timestamp)"
+                    predicate = f"pine_session_{node.member}{bar}"
                     if self._security_payload_depth:
                         return predicate
-                    return f"(script_tf_.empty() ? {predicate} : session_ismarket_)"
-                if node.member == "ispremarket":
-                    return "pine_session_ispremarket(syminfo_.session, syminfo_.timezone, current_bar_.timestamp)"
-                if node.member == "ispostmarket":
-                    return "pine_session_ispostmarket(syminfo_.session, syminfo_.timezone, current_bar_.timestamp)"
+                    ismarket = f"(script_tf_.empty() ? pine_session_ismarket{bar} : session_ismarket_)"
+                    if node.member == "ismarket":
+                        return ismarket
+                    return f"(!{ismarket} && {predicate})"
                 if node.member in ("isfirstbar", "isfirstbar_regular"):
                     return "session_isfirstbar_"
                 if node.member in ("islastbar", "islastbar_regular"):
