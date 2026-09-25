@@ -2,7 +2,10 @@ name: Release
 
 # Manual release: bump VERSION, build the sdist + wheel, publish to PyPI via
 # Trusted Publishing (OIDC — no stored token), then commit + tag + create a
-# GitHub Release.
+# GitHub Release. VERSION is semver; scripts/release_version.py gives each
+# channel its spelling. A prerelease (override 1.0.0-rc.1) ships PyPI 1.0.0rc1,
+# tag v1.0.0-rc.1 as a GitHub prerelease, npm 1.0.0-rc.1 on dist-tag next
+# (publish-pyodide.yml) and tells the hub prerelease=true: never `latest`.
 
 on:
   workflow_dispatch:
@@ -14,7 +17,7 @@ on:
         default: patch
         options: [patch, minor, major]
       override:
-        description: "Optional explicit version (overrides bump). Leave blank to auto-bump."
+        description: "Optional explicit version, e.g. 1.0.0-rc.1 or 1.0.0 (overrides bump; required when VERSION is a prerelease). Leave blank to auto-bump."
         required: false
         type: string
         default: ""
@@ -64,27 +67,10 @@ jobs:
         run: |
           set -euo pipefail
           cur=$(tr -d '[:space:]' < VERSION)
-          if [ -n "$OVERRIDE" ]; then
-            new="$OVERRIDE"
-          else
-            IFS='.' read -r maj min pat <<< "$cur"
-            case "$BUMP" in
-              patch) pat=$((pat+1)) ;;
-              minor) min=$((min+1)); pat=0 ;;
-              major) maj=$((maj+1)); min=0; pat=0 ;;
-              *) echo "::error::bad bump '$BUMP'"; exit 1 ;;
-            esac
-            new="${maj}.${min}.${pat}"
-          fi
-          if ! [[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+].+)?$ ]]; then
-            echo "::error::computed '$new' not semver"; exit 1
-          fi
-          if [ "$new" = "$cur" ] && [ -z "$OVERRIDE" ]; then
-            echo "::error::version unchanged ($cur)"; exit 1
-          fi
-          echo "cur=$cur" >> "$GITHUB_OUTPUT"
-          echo "new=$new" >> "$GITHUB_OUTPUT"
-          echo "Release $cur -> $new"
+          # Emits cur, new and new's channel spellings: pypi, npm, npm_dist_tag,
+          # git_tag, prerelease. Fails on a VERSION or override without them.
+          python3 scripts/release_version.py next --current="$cur" --bump="$BUMP" --override="$OVERRIDE" \
+            | tee -a "$GITHUB_OUTPUT"
 
       - name: Write VERSION
         env:
@@ -115,10 +101,19 @@ jobs:
           npm run gate:full
 
       - name: Build sdist + wheel
+        env:
+          PYPI_VERSION: ${{ steps.ver.outputs.pypi }}
         run: |
+          set -euo pipefail
           python -m pip install --upgrade build
           python -m build
           ls -l dist/
+          # hatchling normalizes VERSION to PEP 440 (1.0.0-rc.1 builds 1.0.0rc1):
+          # the spelling PyPI serves and the hub probes.
+          test -f "dist/pineforge_codegen-${PYPI_VERSION}.tar.gz" \
+            || { echo "::error::no dist/pineforge_codegen-${PYPI_VERSION}.tar.gz"; exit 1; }
+          ls "dist/pineforge_codegen-${PYPI_VERSION}-"*.whl >/dev/null \
+            || { echo "::error::no wheel for ${PYPI_VERSION}"; exit 1; }
 
       # Publish to PyPI BEFORE the tag is pushed. The tag push triggers
       # publish-pyodide.yml (npm), so PyPI must land first — otherwise a PyPI
@@ -134,25 +129,33 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           NEW_VERSION: ${{ steps.ver.outputs.new }}
+          GIT_TAG: ${{ steps.ver.outputs.git_tag }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add VERSION
           git commit -m "release: v${NEW_VERSION}"
-          git tag "v${NEW_VERSION}"
+          git tag "${GIT_TAG}"
           git push origin HEAD --tags
 
       - name: Create GitHub Release
         if: ${{ !inputs.dry_run }}
         env:
           # Org disables write for the default Actions token; use the App token.
-          GH_TOKEN:    ${{ steps.app.outputs.token }}
-          NEW_VERSION: ${{ steps.ver.outputs.new }}
+          GH_TOKEN:     ${{ steps.app.outputs.token }}
+          GIT_TAG:      ${{ steps.ver.outputs.git_tag }}
+          PYPI_VERSION: ${{ steps.ver.outputs.pypi }}
+          PRERELEASE:   ${{ steps.ver.outputs.prerelease }}
         run: |
-          gh release create "v${NEW_VERSION}" \
-            --title "v${NEW_VERSION}" \
+          set -euo pipefail
+          # A prerelease is a GitHub prerelease and never "Latest".
+          channel=()
+          if [ "$PRERELEASE" = true ]; then channel=(--prerelease --latest=false); fi
+          gh release create "${GIT_TAG}" \
+            --title "${GIT_TAG}" \
             --generate-notes \
-            --notes "Install: \`pip install pineforge-codegen==${NEW_VERSION}\`" \
+            --notes "Install: \`pip install pineforge-codegen==${PYPI_VERSION}\`" \
+            ${channel[@]+"${channel[@]}"} \
             dist/*
 
       # Notify the pineforge-release hub: it bumps its CODEGEN_VERSION pin,
@@ -165,11 +168,14 @@ jobs:
         env:
           GH_TOKEN:    ${{ steps.app.outputs.token }}
           NEW_VERSION: ${{ steps.ver.outputs.new }}
+          PRERELEASE:  ${{ steps.ver.outputs.prerelease }}
           RUN_ID:      ${{ github.run_id }}
         run: |
           set -euo pipefail
+          # The hub pairs codegen X.Y.Z with engine vX.Y.Z (prerelease included).
           gh api repos/pineforge-4pass/pineforge-release/dispatches \
             -f event_type=codegen-release \
             -F "client_payload[version]=${NEW_VERSION}" \
+            -F "client_payload[prerelease]=${PRERELEASE}" \
             -F "client_payload[run_id]=${RUN_ID}"
-          echo "dispatched codegen-release -> pineforge-release (${NEW_VERSION})"
+          echo "dispatched codegen-release -> pineforge-release (${NEW_VERSION}, prerelease=${PRERELEASE})"
