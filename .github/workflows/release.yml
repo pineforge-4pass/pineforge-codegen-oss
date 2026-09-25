@@ -17,7 +17,7 @@ on:
         default: patch
         options: [patch, minor, major]
       override:
-        description: "Optional explicit version, e.g. 1.0.0-rc.1 or 1.0.0 (overrides bump; required when VERSION is a prerelease). Leave blank to auto-bump."
+        description: "Optional explicit version above VERSION, e.g. 1.0.0-rc.1 or 1.0.0 (overrides bump; required when VERSION is a prerelease). Leave blank to auto-bump."
         required: false
         type: string
         default: ""
@@ -148,6 +148,7 @@ jobs:
           PRERELEASE:   ${{ steps.ver.outputs.prerelease }}
         run: |
           set -euo pipefail
+          case "$PRERELEASE" in true|false) ;; *) echo "::error::no prerelease verdict ('${PRERELEASE}')"; exit 1 ;; esac
           # A prerelease is a GitHub prerelease and never "Latest".
           channel=()
           if [ "$PRERELEASE" = true ]; then channel=(--prerelease --latest=false); fi

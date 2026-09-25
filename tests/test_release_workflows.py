@@ -53,8 +53,17 @@ def test_hub_dispatch_carries_the_prerelease_flag():
     assert '-F "client_payload[prerelease]=${PRERELEASE}"' in body
 
 
-def test_npm_publish_uses_the_channel_dist_tag():
+def test_npm_publish_names_a_dist_tag_only_for_a_prerelease():
+    # An explicit --tag (even latest) bypasses npm's refusal to move latest to a
+    # lower version, so a stable publish keeps the plain command.
     assert "python3 scripts/release_version.py channels" in step(NPM, "Resolve npm dist-tag")
     body = step(NPM, "Publish")
     assert has_env(body, "DIST_TAG", "steps.channel.outputs.npm_dist_tag")
-    assert body.count('--tag "$DIST_TAG"') == 2  # the real publish and the dry run
+    assert 'if [ "$DIST_TAG" != latest ]; then tag=(--tag "$DIST_TAG"); fi' in body
+    assert body.count('${tag[@]+"${tag[@]}"}') == 2  # the real publish and the dry run
+    assert "--tag latest" not in body
+
+
+def test_github_release_flag_fails_closed():
+    body = step(RELEASE, "Create GitHub Release")
+    assert 'case "$PRERELEASE" in true|false) ;;' in body

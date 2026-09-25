@@ -81,10 +81,14 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           DIST_TAG: ${{ steps.channel.outputs.npm_dist_tag }}
         run: |
+          # Only a prerelease names its dist-tag (next): an explicit --tag, even
+          # latest, would bypass npm's refusal to move latest to a lower version.
+          tag=()
+          if [ "$DIST_TAG" != latest ]; then tag=(--tag "$DIST_TAG"); fi
           if [ "$EVENT" = "push" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ]; }; then
             echo "Publishing for real (--access=public, dist-tag ${DIST_TAG})"
-            npm publish --access=public --tag "$DIST_TAG"
+            npm publish --access=public ${tag[@]+"${tag[@]}"}
           else
             echo "DRY RUN (a v* tag push or dispatch with dry_run=false publishes for real)"
-            npm publish --dry-run --access=public --tag "$DIST_TAG"
+            npm publish --dry-run --access=public ${tag[@]+"${tag[@]}"}
           fi
