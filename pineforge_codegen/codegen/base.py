@@ -871,6 +871,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     _h = _hints[_i] if _i < len(_hints) else None
                     if _h and str(_h).replace(" ", "") in _SKIP_DECL_TYPES:
                         self._visual_drop_vars.add(_p)
+        # Build set of all member names (series vars, var members) for collision
+        # detection. It precedes the security metadata below: a timeframe
+        # computed by a user function (``tf = tfFromLabel(choice)``) renders
+        # that call through ``_func_safe_name`` at registration time.
+        self._all_member_names: set[str] = set()
+        for name in ctx.series_vars:
+            self._all_member_names.add(self._safe_name(name))
+        for name, _, _ in ctx.var_members:
+            self._all_member_names.add(self._safe_name(name))
         # Collect request.security metadata per call
         self._security_eval_info: list[dict] = []
         self._security_ta_variant_names: dict[tuple[int, int, tuple], str] = {}
@@ -950,12 +959,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "mutable_globals": list(item.get("mutable_globals", [])),
                 "is_lower_tf_array": bool(item.get("is_lower_tf_array", False)),
             })
-        # Build set of all member names (series vars, var members) for collision detection
-        self._all_member_names: set[str] = set()
-        for name in ctx.series_vars:
-            self._all_member_names.add(self._safe_name(name))
-        for name, _, _ in ctx.var_members:
-            self._all_member_names.add(self._safe_name(name))
         self._register_global_aggregate_member_types()
         self._uses_map = self._detect_map_usage()
         self._uses_matrix = self._detect_matrix_usage()
