@@ -39,7 +39,7 @@ from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, FuncDef,
     Identifier, IfStmt,
     MemberAccess, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
-    Subscript, Ternary, TupleLiteral, UnaryOp, VarDecl,
+    Subscript, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..errors import Phase
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
@@ -2675,6 +2675,16 @@ class TypeInferer:
                         local_types[stmt.name] = self._type_spec_to_cpp(spec)
                         continue
                 local_types[stmt.name] = self._infer_type(stmt.value)
+            elif (isinstance(stmt, TupleAssign)
+                    and isinstance(stmt.value, (IfStmt, SwitchStmt))):
+                for name, cpp_t in zip(
+                    stmt.names,
+                    self._infer_selection_tuple_types(
+                        stmt.value, len(stmt.names), local_types
+                    ),
+                ):
+                    if name != "_":
+                        local_types[name] = cpp_t
 
         last_stmt = func_node.body[-1]
         expr = None
@@ -2690,4 +2700,75 @@ class TypeInferer:
                 else:
                     result.append(self._infer_type(e))
             return result
+        if isinstance(last_stmt, (IfStmt, SwitchStmt)):
+            return self._infer_selection_tuple_types(
+                last_stmt, count, local_types
+            )
         return ["double"] * count
+
+    def _infer_selection_tuple_types(
+        self, node, count: int, local_types: dict[str, str] | None = None,
+    ) -> list[str]:
+        """C++ element types of a tuple-valued if/switch.
+
+        Each arm ends in a ``[a, b]`` literal, a tuple-returning user
+        function call or a nested selection (the analyzer's
+        ``_selection_tuple_shape``). Arms agreeing on a position keep that
+        type; numeric arms that differ widen to ``double``; any other
+        disagreement keeps the first arm's type.
+        """
+        local_types = local_types or {}
+        if isinstance(node, IfStmt):
+            arms = [node.body] + ([node.else_body] if node.else_body else [])
+        elif isinstance(node, SwitchStmt):
+            arms = [body for _case, body in node.cases]
+            if node.default_body:
+                arms.append(node.default_body)
+        else:
+            return ["double"] * count
+        per_arm: list[list[str]] = []
+        for body in arms:
+            if not body:
+                continue
+            terminal = body[-1]
+            expr = terminal.expr if isinstance(terminal, ExprStmt) else terminal
+            if isinstance(expr, TupleLiteral) and len(expr.elements) == count:
+                per_arm.append([
+                    local_types[e.name]
+                    if isinstance(e, Identifier) and e.name in local_types
+                    else self._infer_type(e)
+                    for e in expr.elements
+                ])
+            elif isinstance(expr, FuncCall) and isinstance(expr.callee, Identifier):
+                fi = self._func_info_map.get(expr.callee.name)
+                if (fi is not None and fi.node is not None
+                        and getattr(fi, "returns_tuple", False)
+                        and fi.tuple_element_count == count):
+                    per_arm.append(self._infer_tuple_types(fi.node, count))
+            elif isinstance(expr, (IfStmt, SwitchStmt)):
+                per_arm.append(
+                    self._infer_selection_tuple_types(expr, count, local_types)
+                )
+        if not per_arm:
+            return ["double"] * count
+        result: list[str] = []
+        for position in range(count):
+            found = [types[position] for types in per_arm]
+            if len(set(found)) == 1:
+                result.append(found[0])
+            elif set(found) <= {"double", "int", "int64_t"}:
+                result.append("double")
+            else:
+                result.append(found[0])
+        return result
+
+    def _tuple_default_expr(self, types: list[str]) -> str:
+        """``std::tuple<...>`` of na elements: a tuple selection no arm of
+        which runs yields na in every position."""
+        values = [
+            f"na<{cpp_t}>()"
+            if cpp_t in ("double", "int", "int64_t", "bool", "std::string")
+            else self._default_for_type(cpp_t)
+            for cpp_t in types
+        ]
+        return f"std::tuple<{', '.join(types)}>({', '.join(values)})"
