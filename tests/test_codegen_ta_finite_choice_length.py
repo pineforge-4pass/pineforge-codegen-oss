@@ -321,8 +321,7 @@ n = close > open ? a : b
 plot(x)
 """
 
-    # check_support=False reaches this lowering for varip; the ordinary public
-    # path rejects varip even earlier because batch mode has no intrabar ticks.
+    # ``varip`` shares ``var``'s declaration lowering and its refusal.
     with pytest.raises(CompileError, match="Unsupported TA constructor length"):
         transpile(src, check_support=False)
 

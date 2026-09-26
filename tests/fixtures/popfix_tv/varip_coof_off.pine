@@ -1,0 +1,18 @@
+//@version=6
+// varip vs var under calc_on_order_fills. d = varip counter - var counter
+// counts the executions a fill-triggered recalculation added: TradingView
+// rolls var back before each recalculation and leaves varip alone.
+strategy("PF varip coof off", overlay = true, calc_on_order_fills = false,
+     pyramiding = 1, initial_capital = 1000000,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     commission_value = 0, slippage = 0, process_orders_on_close = false)
+var int vCount = 0
+varip int vpCount = 0
+vCount += 1
+vpCount += 1
+tag = str.tostring(vpCount - vCount)
+inWindow = time >= timestamp("UTC", 2025, 4, 2, 0, 0)
+if inWindow and strategy.position_size == 0 and minute(time, "UTC") == 0 and hour(time, "UTC") % 4 == 0
+    strategy.entry("L", strategy.long, comment = "E" + tag)
+if strategy.position_size > 0
+    strategy.exit("XL", "L", profit = 400, loss = 400, comment = "X" + tag)

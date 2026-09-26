@@ -194,32 +194,12 @@ def test_library_declaration_rejected():
     _expect_error(src, "library() declarations are not supported")
 
 
-def test_varip_rejected_in_batch_backtests():
-    """Phase C: varip is now an error (was a warning).
-
-    Batch backtests have no intrabar tick semantics; silently demoting
-    varip to var produces wrong state accumulation. See
-    tests/test_support_checker_varip.py for the full rejection contract.
-    """
+def test_varip_accepted_in_batch_backtests():
+    """varip lowers as var outside the calc_on_order_fills rollback, as
+    TradingView's tapes show (tests/test_support_checker_varip.py,
+    tests/test_e2e_varip_coof.py): no error and no warning."""
     src = PRELUDE + "varip int ticks = 0\n"
-    errs = _errors(src)
-    assert any("varip" in d.message for d in errs), (
-        f"expected error containing 'varip', got {[d.message for d in errs]}"
-    )
-
-
-def test_varip_int_emits_error():
-    """varip int x = 0 must error (formerly warned)."""
-    src = PRELUDE + "varip int x = 0\n"
-    errs = _errors(src)
-    varip_errs = [d for d in errs if "varip" in d.message]
-    assert len(varip_errs) >= 1, (
-        f"expected at least one varip error, got {len(varip_errs)}: "
-        f"{[d.message for d in varip_errs]}"
-    )
-    assert "batch" in varip_errs[0].message, (
-        f"error should mention 'batch': {varip_errs[0].message}"
-    )
+    assert not [d for d in _check(src) if "varip" in d.message]
 
 
 def test_ticker_namespace_rejected():
