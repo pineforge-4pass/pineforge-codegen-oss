@@ -4325,7 +4325,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for _ta_idx, site in enumerate(self.ctx.ta_call_sites):
             if _ta_idx in self._dead_ta_indices:
                 continue
-            lines.append(f"    {site.class_name} {site.member_name};")
+            lines.append(f"    {self._ta_member_cpp_type(site)} {site.member_name};")
             if self._ta_site_uses_precalc(site):
                 vtype = self._ta_return_type(site)
                 lines.append(f"    std::vector<{vtype}> _precalc_{site.member_name};")
@@ -4353,7 +4353,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for idx, variants in (info.get("ta_variants") or {}).items():
                 site = self.ctx.ta_call_sites[idx]
                 for variant in variants:
-                    lines.append(f"    {site.class_name} {variant['member_name']};")
+                    lines.append(f"    {self._ta_member_cpp_type(site)} {variant['member_name']};")
 
         # 4. Series members for bar field history
         for field_name in sorted(self.ctx.series_bar_fields):
@@ -5414,6 +5414,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 continue
             if not site.ctor_args:
                 continue
+            if self._ta_dynamic_plan(site) is not None:
+                continue
             runtime_args, any_runtime = self._ta_run_ctor_args(site)
             if any_runtime:
                 resets.append(
@@ -5442,6 +5444,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     security_source_node is not None
                     and site.node is not security_source_node
                 ):
+                    continue
+                if self._ta_dynamic_plan(site) is not None:
                     continue
                 ctor_site = site
                 if sec_containing and sec_cs_idx is not None:

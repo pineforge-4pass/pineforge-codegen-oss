@@ -1,0 +1,18 @@
+//@version=6
+strategy("PF TADYN cg simple length", overlay=true, process_orders_on_close=true, margin_long=0, margin_short=0, initial_capital=1000000000, default_qty_type=strategy.fixed, default_qty_value=1)
+f(x) => na(x) ? "na" : str.tostring(x, "#.########")
+b = bar_index
+preset = input.string("Custom", "Preset", options=["Custom", "Fast", "Slow"])
+lenInput = input.int(14, "Length")
+// simple: syminfo metadata (0.01 on BINANCE:ETHUSDT.P) and an input-string ternary
+lenS = syminfo.mintick < 0.1 and syminfo.type == "crypto" ? 9 : lenInput
+lenP = preset == "Fast" ? 5 : preset == "Slow" ? 30 : lenInput
+r = ta.rsi(close, lenS)
+m = ta.rma(close, lenS)
+a = ta.atr(lenS)
+h = request.security(syminfo.tickerid, "60", ta.rsi(close, lenS))
+e = ta.ema(close, lenP)
+e14 = ta.ema(close, 14)
+if b < 300
+    s = str.tostring(b) + "|" + str.tostring(lenS) + "|" + str.tostring(lenP) + "|" + f(r) + "|" + f(m) + "|" + f(a) + "|" + f(h) + "|" + (e == e14 or (na(e) and na(e14)) ? "same" : "diff")
+    strategy.entry(s, b % 2 == 0 ? strategy.long : strategy.short)

@@ -1,0 +1,19 @@
+//@version=6
+strategy("PF TADYN cg simple window", overlay=true, process_orders_on_close=true, margin_long=0, margin_short=0, initial_capital=1000000000, default_qty_type=strategy.fixed, default_qty_value=1)
+f(x) => na(x) ? "na" : str.tostring(x, "#.########")
+b = bar_index
+simpleLen = syminfo.mintick > 0 ? 5 : 6
+seriesLen = b >= 0 ? 5 : 6
+m = b % 9
+float ls = na
+float lr = na
+float bs = na
+float br = na
+if m == 0 or m == 1
+    ls := ta.lowest(low, simpleLen)
+    lr := ta.lowest(low, seriesLen)
+    bs := ta.highestbars(high, simpleLen)
+    br := ta.highestbars(high, seriesLen)
+if b < 300
+    s = str.tostring(b) + "|" + (m <= 1 ? "x" : "-") + "|" + f(ls) + "|" + f(lr) + "|" + f(bs) + "|" + f(br)
+    strategy.entry(s, b % 2 == 0 ? strategy.long : strategy.short)

@@ -3127,6 +3127,14 @@ class SecurityEmitter:
                         site,
                         security_mutable_names,
                         helper_binding_stack,
+                    ) and self._ta_dynamic_plan(site) is not None:
+                        # The lowered length is read per call (a series one
+                        # through the rebound value): run after the rebinds.
+                        depends_on_mutables = True
+                    elif self._security_ta_ctor_depends_on_mutables(
+                        site,
+                        security_mutable_names,
+                        helper_binding_stack,
                     ):
                         self._codegen_error(
                             site.node or expr_node,

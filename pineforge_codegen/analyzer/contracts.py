@@ -51,6 +51,12 @@ class TACallSite:
     # owning callee's emitted clone body referencing undeclared members
     # (regression: quantbyboji-nq-hma-midday ``_ta_change_*_cs1``).
     owner_func: str | None = None
+    # The AST nodes ``ctor_args`` were spelled from, in the same order (the
+    # nodes of the textual call: a clone keeps its template's). Empty for the
+    # shim sites that build their ctor args another way. The series- and
+    # simple-length lowering renders a length the constructor cannot take
+    # from these at the call site.
+    ctor_nodes: list = field(default_factory=list)
 
 
 @dataclass

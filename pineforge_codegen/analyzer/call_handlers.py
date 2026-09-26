@@ -589,6 +589,7 @@ class CallHandlers:
 
         # Determine constructor args
         ctor_args: list[str] = []
+        ctor_nodes: list = []
         effective_multi_ctor = TA_MULTI_CTOR.copy()
         if func_name in ("pivothigh", "pivotlow") and len(all_args) == 3:
             effective_multi_ctor[func_name] = [1, 2]
@@ -599,10 +600,12 @@ class CallHandlers:
             for idx in effective_multi_ctor[func_name]:
                 if idx < len(all_args) and all_args[idx] is not None:
                     ctor_args.append(self._expr_to_str(all_args[idx]))
+                    ctor_nodes.append(all_args[idx])
         elif func_name in TA_PERIOD_ARG:
             idx = TA_PERIOD_ARG[func_name]
             if idx < len(all_args) and all_args[idx] is not None:
                 ctor_args.append(self._expr_to_str(all_args[idx]))
+                ctor_nodes.append(all_args[idx])
 
         # Determine compute args (all args that aren't ctor args)
         compute_args: list = []
@@ -631,6 +634,7 @@ class CallHandlers:
             node=node,
             is_static=is_static,
             owner_func=(self._enclosing_func_names[-1] if self._enclosing_func_names else None),
+            ctor_nodes=ctor_nodes,
         )
         self._ta_call_sites.append(site)
         self._ta_member_names.add(site.member_name)
@@ -1564,6 +1568,7 @@ class CallHandlers:
                         node=orig.node,
                         is_static=orig.is_static,
                         owner_func=func_name,
+                        ctor_nodes=orig.ctor_nodes[:],
                     )
                     selected_ta_indices[i] = len(self._ta_call_sites)
                     self._ta_call_sites.append(cloned)

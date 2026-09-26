@@ -123,6 +123,8 @@ class TopLevelEmitter:
         )
         lines.append('#include <pineforge/source/pine_strategy_host.hpp>')
         lines.append('#include <pineforge/ta.hpp>')
+        if self._ta_uses_dynamic_lengths():
+            lines.append('#include <pineforge/source/pine_ta_length.hpp>')
         lines.append('#include <pineforge/math.hpp>')
         lines.append('#include <pineforge/series.hpp>')
         lines.append('#include <pineforge/na.hpp>')
@@ -960,6 +962,10 @@ class TopLevelEmitter:
             # run and their ctor args (bare param names) can never be sized.
             if ta_idx in self._dead_ta_indices:
                 continue
+            if self._ta_dynamic_plan(site) is not None:
+                # A simple or series length is read on the bar
+                # (``_ta_dynamic_plan``): the member is default-constructed.
+                continue
             if site.ctor_args:
                 # If a ctor arg is neither a compile-time literal nor expandable
                 # to an input-backed runtime expression, the old code silently
@@ -1022,6 +1028,8 @@ class TopLevelEmitter:
             for idx, variants in (info.get("ta_variants") or {}).items():
                 site = self.ctx.ta_call_sites[idx]
                 if not site.ctor_args:
+                    continue
+                if self._ta_dynamic_plan(site) is not None:
                     continue
                 for variant in variants:
                     ctor_args, _ctor_arg_stability = self._security_ta_ctor_args_for_variant(

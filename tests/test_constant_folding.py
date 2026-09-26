@@ -102,13 +102,18 @@ def test_previously_unfolded_math_keeps_its_existing_fallback(expression: str) -
 def test_new_math_domain_does_not_disagree_with_runtime_rounding() -> None:
     # The old folder did not admit sqrt: its import rewrite failed. Adding it
     # here would newly fold round(sqrt(6.25)) to Python's 2, while runtime C++
-    # std::round computes 3. Retain the old rejection until semantics are pinned.
+    # std::round computes 3. The folder still declines it; the length is a
+    # simple one, so the call builds its SMA from the run-time C++ on its first
+    # execution (lane K-TA-DYNLEN) -- 3, as Pine's math.round rounds a tie
+    # up -- and it used to be refused instead.
     source = '''//@version=6
 strategy("keep existing math domain")
 value = ta.sma(close, math.round(math.sqrt(6.25)))
 '''
-    with pytest.raises(CompileError):
-        transpile(source)
+    cpp = transpile(source)
+    assert "ta::SMA(2)" not in cpp
+    assert "pineforge::source::FirstCallBound<ta::SMA>" in cpp
+    assert "std::round(std::sqrt(6.25))" in cpp
 
 
 @pytest.mark.parametrize("name", ["round", "math.round"])

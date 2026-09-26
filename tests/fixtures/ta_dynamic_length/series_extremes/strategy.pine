@@ -1,0 +1,26 @@
+//@version=6
+strategy("PF TADYN cg series extremes", overlay=true, process_orders_on_close=true, margin_long=0, margin_short=0, initial_capital=1000000000, default_qty_type=strategy.fixed, default_qty_value=1)
+f(x) => na(x) ? "na" : str.tostring(x, "#.########")
+b = bar_index
+// every bar: the length steps, alternates and cycles on known bars
+len = b < 20 ? 30 : b < 60 ? 5 : b < 100 ? 25 : b < 140 ? 3 : b < 200 ? (b % 2 == 0 ? 4 : 11) : b % 7 + 1
+lo = ta.lowest(low, len)
+hi = ta.highest(len)
+lob = ta.lowestbars(low, len)
+hib = ta.highestbars(high, len)
+// a streak since a cross, on the right of a lazy `and`
+coUp = ta.crossover(close, ta.sma(close, 9))
+bsUp = ta.barssince(coUp)
+validUp = not na(bsUp) and bsUp <= 6
+tUp = validUp and (ta.lowest(low, math.max(1, bsUp + 1)) <= close)
+// a sparse call first executed on bar 30, its length growing in each streak
+k = b - 30
+inS = k >= 0 and k % 12 < 8
+float g = na
+float gb = na
+if inS
+    g := ta.highest(high, k % 12 + 1)
+    gb := ta.highestbars(high, k % 12 + 1)
+if b < 300
+    s = str.tostring(b) + "|" + str.tostring(len) + "|" + f(lo) + "|" + f(hi) + "|" + f(lob) + "|" + f(hib) + "|" + (tUp ? "T" : "F") + "|" + f(g) + "|" + f(gb)
+    strategy.entry(s, b % 2 == 0 ? strategy.long : strategy.short)

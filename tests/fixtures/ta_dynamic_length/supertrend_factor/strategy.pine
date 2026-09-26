@@ -1,0 +1,23 @@
+//@version=6
+strategy("PF TADYN cg supertrend factor", overlay=true, process_orders_on_close=true, margin_long=0, margin_short=0, initial_capital=1000000000, default_qty_type=strategy.fixed, default_qty_value=1)
+f(x) => na(x) ? "na" : str.tostring(x, "#.########")
+b = bar_index
+tightMult = input.float(1.75, "Trending Multiplier (tight)")
+wideMult = input.float(4.5, "Choppy Multiplier (wide)")
+[diPlus, diMinus, adxVal] = ta.dmi(14, 14)
+var string regime = "NEUTRAL"
+if adxVal > 25
+    regime := "TRENDING"
+else if adxVal < 20
+    regime := "CHOPPY"
+var float effectiveMult = tightMult
+if regime == "TRENDING"
+    effectiveMult := tightMult
+else if regime == "CHOPPY"
+    effectiveMult := wideMult
+[stLine, stDir] = ta.supertrend(effectiveMult, 10)
+facA = b == 0 ? 2.0 : b < 5 ? 1.0 : b < 12 ? 6.0 : 4.0
+[stA, dirA] = ta.supertrend(facA, 10)
+if b < 300
+    s = str.tostring(b) + "|" + f(effectiveMult) + "|" + f(stLine) + "|" + f(stDir) + "|" + f(stA) + "|" + f(dirA)
+    strategy.entry(s, b % 2 == 0 ? strategy.long : strategy.short)
