@@ -17,6 +17,10 @@ and an integer parameter a written call feeds a wide value is wide, fixed
 point. TradingView's tape of the probe (``fixtures/krunerr_tv``) is replayed
 end to end: every entry id -- the switch, the ternary, the alias, the copy,
 the parameter and the returned ``t + 1`` -- equals TradingView's Signal.
+
+``str.tostring(chart.is_standard)`` rides along: the chart-type reads are
+Pine bools, and TradingView spells them "true" (the env-facts tape) where the
+codegen printed the numeric "1".
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ from tests._e2e import Build, closed_trades, derive_chart_feed, execute_all, ok,
 
 FIXTURES = Path(__file__).parent / "fixtures" / "krunerr_tv"
 # TradingView's range: 2025-04-01 00:00 UTC for two days (bar_index 3 is
-# 00:45 UTC, the bar the probe places its entries on).
+# 00:45 UTC, the bar both probes place their entries on).
 RANGE_MS = (1743465600000, 1743638400000)
 
 
@@ -54,6 +58,7 @@ def runs(tmp_path_factory):
                 out.write(line)
     outcomes = execute_all(engine, feed, base, {
         "int64": Build((FIXTURES / "int64_provenance.pine").read_text()),
+        "env": Build((FIXTURES / "env_facts.pine").read_text()),
     })
     return engine, feed, base, outcomes
 
@@ -70,6 +75,18 @@ def test_epoch_ints_read_like_the_tape(runs):
     engine_ids = sorted(t["entry_id"] for t in closed_trades(engine, base / "int64", feed))
     assert engine_ids == tape
     print("int64 provenance:", len(tape), "entry ids equal TradingView's Signals")
+
+
+def test_chart_type_reads_spell_true(runs):
+    engine, feed, base, outcomes = runs
+    ok(outcomes, "env")
+    # The other two entries spell the lane's syminfo (the harness runs the
+    # engine defaults); the chart-type entry depends on nothing else.
+    tape = [s for s in _entry_signals("env_facts_tv_trades.csv") if s.startswith("tf=")]
+    assert tape == ["tf=15|m=15|min=true|d=false|std=true"]
+    engine_ids = [t["entry_id"] for t in closed_trades(engine, base / "env", feed)
+                  if t["entry_id"].startswith("tf=")]
+    assert engine_ids == tape
 
 
 def test_every_wide_slot_is_declared_int64():

@@ -2684,6 +2684,14 @@ class TypeInferer:
                 if node.member == "multiplier":
                     return "int"
                 return "bool"
+            # chart.is_* are Pine bools (the emitter lowers them to C++
+            # ``true``/``false``): str.tostring(chart.is_standard) reads "true"
+            # on TradingView (lab tv pf-krunerr-env-facts, 2026-09-26), not the
+            # numeric "1".
+            if ename == "chart" and node.member in (
+                    "is_standard", "is_heikinashi", "is_kagi", "is_linebreak",
+                    "is_pnf", "is_range", "is_renko"):
+                return "bool"
             # syminfo.* type inference: look up in SYMINFO_MEMBER_MAP
             # and derive C++ type from the expression (na<T>() or function call).
             if ename == "syminfo":
