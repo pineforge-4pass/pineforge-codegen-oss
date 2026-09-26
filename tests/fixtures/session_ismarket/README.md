@@ -1,6 +1,7 @@
 # session.* TradingView tapes
 
-TradingView's own session flags on every bar of eight 60-minute charts. Each
+TradingView's own session flags on every bar of eight 60-minute charts and
+one daily chart. Each
 directory is one TradingView export (channel `ws-report-v1`, `rangeProof`
 covered), byte for byte: `strategy.pine`, `tv_trades.csv` (times at UTC+8,
 the exporters' rendering), `metrics.json`, and for a `lab tv` export
@@ -89,3 +90,22 @@ The extended chart's bars open on the hour, and TradingView flags each by its
 open time: the 09:00 bar, which holds the 09:30 open, is pre-market, and the
 16:00 bar is post-market. There isfirstbar / islastbar are the extended day's
 first and last bars and the `_regular` twins the regular day's.
+
+## `cgim-flags-xauusd-1d`: a daily chart (codegen lane CG-ISMARKET)
+
+The every-flag probe on OANDA:XAUUSD 1D, 2025-01-01 .. 04-01, exported with
+`lab tv` on 2026-09-26 00:09:26 (UTC), `--no-note`:
+
+```sh
+lab tv --pine session_flags_probe.pine --slug cgim-flags-xauusd-1d \
+  --symbol OANDA:XAUUSD --interval 1D --from 2025-01-01 --to 2025-04-01 \
+  --out <dir>/cgim-flags-xauusd-1d --no-note --json
+```
+
+| tape | chart | window | bars | flags | tv_trades.csv sha256 |
+|---|---|---|---|---|---|
+| `cgim-flags-xauusd-1d` | OANDA:XAUUSD 1D | 2025-01-01 .. 04-01 | 64 | all `M1P0Q0F1L1f1l1` | `a7ce0e8eb771a27f9a0a1f9fc9edba042927556e91856d6207d0b2f9faebc410` |
+
+TradingView stamps each daily bar at 17:00 America/New_York, the break of the
+`1800-1700` session, and flags it in market and as its session day's first and
+last bar: a daily bar holds whole session days.
