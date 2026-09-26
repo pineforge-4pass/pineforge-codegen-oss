@@ -4139,6 +4139,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             shape = self._selection_tuple_shape(node.value)
             if shape is not None:
                 element_types = shape[1]
+        if (not element_types
+                and isinstance(node.value, FuncCall)
+                and isinstance(node.value.callee, Identifier)
+                and self._func_returns_tuple.get(node.value.callee.name, False)):
+            # A user function's string elements bind as strings. Its other
+            # families keep the historical double storage of a call tuple.
+            element_types = tuple(
+                PineType.STRING if item == PineType.STRING else PineType.FLOAT
+                for item in self._func_tuple_element_types.get(
+                    node.value.callee.name, ()
+                )
+            )
 
         is_val_static = self._is_static_expression(node.value)
 
@@ -4153,10 +4165,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             )
             # Tuple bindings historically use double storage for every
             # numeric element, including integer literals. Preserve that
-            # contract while retaining the newly-authoritative bool family.
+            # contract while retaining the bool and string families: a string
+            # element read as a double compared by value (``a == b``) through
+            # a static_cast of a std::string.
             element_type = (
-                PineType.BOOL
-                if inferred_element_type == PineType.BOOL
+                inferred_element_type
+                if inferred_element_type in (PineType.BOOL, PineType.STRING)
                 else PineType.FLOAT
             )
 
