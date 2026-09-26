@@ -1097,7 +1097,15 @@ class SecurityEmitter:
     def _security_bar_hist_type(self, field: str) -> str:
         return SECURITY_BAR_FIELD_TYPES.get(field, "double")
 
-    def _security_bar_field_expr(self, field: str) -> str:
+    def _security_bar_field_expr(self, field: str, sec_id: int | None = None) -> str:
+        if field == "time_close" and sec_id is not None:
+            # The requested bar's close on the requested timeframe, as the
+            # chart's ``time_close()`` reads its own bar on the chart's.
+            return (
+                "pine_time_close(bar.timestamp, "
+                f"{self._security_timeframe_expr(sec_id)}, "
+                "syminfo_.session, syminfo_.timezone, script_tf_)"
+            )
         return SECURITY_BAR_FIELD_EXPRS.get(field, f"bar.{field}")
 
     @staticmethod
@@ -3022,7 +3030,7 @@ class SecurityEmitter:
         lines.append("        if (is_complete) {")
         for field in fields:
             lines.append(
-                f"            {self._security_ohlc_hist_series_cpp(sec_id, field)}.push({self._security_bar_field_expr(field)});"
+                f"            {self._security_ohlc_hist_series_cpp(sec_id, field)}.push({self._security_bar_field_expr(field, sec_id)});"
             )
         lines.append("        }")
 
@@ -3366,6 +3374,8 @@ class SecurityEmitter:
             }
             if expr_node.name in bar_fields:
                 return bar_fields[expr_node.name]
+            if expr_node.name == "time_close":
+                return self._security_bar_field_expr("time_close", sec_id)
 
             if expr_node.name in security_mutable_names:
                 info = self._global_mutable_infos.get(expr_node.name)
@@ -3460,7 +3470,7 @@ class SecurityEmitter:
                     )
                     if idx_lit is not None:
                         if idx_lit == 0:
-                            return self._security_bar_field_expr(field)
+                            return self._security_bar_field_expr(field, sec_id)
                         if idx_lit >= 1:
                             # lookahead_off: we evaluate when an HTF bar completes; `bar` is that
                             # bar. On the HTF series, high[0]/time[0] is the current
@@ -3476,7 +3486,7 @@ class SecurityEmitter:
                         )
                     hist = self._security_ohlc_hist_series_cpp(sec_id, field)
                     cpp_t = self._security_bar_hist_type(field)
-                    current = self._security_bar_field_expr(field)
+                    current = self._security_bar_field_expr(field, sec_id)
                     index_cpp = self._build_security_expr(
                         sec_id,
                         expr_node.index,

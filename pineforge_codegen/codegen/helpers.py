@@ -247,6 +247,9 @@ BUILTIN_ACCESSOR_NAMES = {
     "avg_winning_trade_percent", "avg_losing_trade_percent",
     "margin_liquidation_price", "open_profit", "current_equity",
     "open_trades_capital_held",
+    # The host's own ``time_close()``: a ``time_close[k]`` history Series
+    # member of that name would shadow the call its value is pushed from.
+    "time_close",
 }
 
 
@@ -310,6 +313,10 @@ class NamingHelper:
                     bound.add(node.var)
                 if isinstance(getattr(node, "vars", None), list):
                     bound.update(node.vars)
+        # A history-read builtin becomes a Series member of its own name.
+        ctx = getattr(self, "ctx", None)
+        if "time_close" in getattr(ctx, "series_vars", ()):
+            bound.add("time_close")
         self._safe_name_map: dict[str, str] = {}
         self._safe_name_occupied = authored
         self._safe_name_bound = bound
