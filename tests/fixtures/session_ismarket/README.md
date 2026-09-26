@@ -156,6 +156,29 @@ differs from the previous bar's flag on 7 extended-hours bars. The extended
 tape lacks one bar (2025-03-06 18:30 ET), which TradingView's data does not
 hold.
 
+### `cgs2-histfn-aapl-15-ext`: the flags read in functions
+
+A probe of functions on the same extended-hours chart and window, exported
+with the same exporter copy on 2026-09-26 10:48:47 (UTC): 639 bars,
+`tv_trades.csv` sha256
+`76c87e46868b768f80fcd46b55f794c7a90a2e9a993045aca264b01f0b724270`,
+`strategy.pine` sha256
+`4447e292cf1f5bfc850789290f5ca3b4b815feedede0c2ec20819dfd74b1b6cf`. Its
+Signal is the seven flags (`C`, as above) and one bit per read: `A`
+`post1()` = session.ispostmarket[1] called on every bar, `B` the same
+function at a second call site reached on odd bars, `Z` a function whose [1]
+read sits on the lazy side of an `and` reached on even bars and `K` one whose
+[1] read sits in a block run on every third bar, both called on every bar,
+`N` and `O` `newSession() => session.ismarket and not session.ismarket[1]` at
+two call sites.
+
+TradingView keeps each call site's history apart and reads it by the calls of
+the function, whatever operand or block holds the read: `B` is the flag on
+that call site's previous call, two bars back (7 bars differ from the
+previous bar's flag); `Z` and `K` are the previous call's flag, one bar back,
+not the flag the last time the read ran (12 and 13 bars differ); `N` and `O`
+both flag the 10 session opens.
+
 ## `cgs2-flags-*-15`: sessions with two windows (codegen lane CG-SESSION-2)
 
 The every-flag probe of `cgim-flags-*` above (the same `strategy.pine`, sha256

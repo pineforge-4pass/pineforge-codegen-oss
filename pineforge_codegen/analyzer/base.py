@@ -2568,12 +2568,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         owner_requirements.add(actual.name)
                         series_changed = True
 
-        # Codegen synthesizes a Series buffer for two expression shapes that
+        # Codegen synthesizes a Series buffer for three expression shapes that
         # do not appear in ``_func_series_vars`` themselves:
         #
         #   * a call result read through history, e.g. ``f()[1]``;
         #   * a scalar expression bridged into a UDF series parameter, e.g.
-        #     ``history(close + open)`` where ``history(src) => src[1]``.
+        #     ``history(close + open)`` where ``history(src) => src[1]``;
+        #   * a session.* flag read at an offset, e.g. ``session.ismarket[1]``,
+        #     whose history in a function is the calls' of its call site
+        #     (TradingView's tapes, tests/test_e2e_session_history.py).
         #
         # A buffer is mutable per-call-site state just like TA/fixnan.  Mark
         # its lexical owner stateful before the normal call-path closure so a
@@ -2637,6 +2640,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return False
             if (isinstance(node, Subscript)
                     and isinstance(node.object, FuncCall)):
+                return True
+            if (isinstance(node, Subscript)
+                    and isinstance(node.object, MemberAccess)
+                    and isinstance(node.object.object, Identifier)
+                    and node.object.object.name == "session"
+                    and node.object.member in sigs.SESSION_FLAG_MEMBERS):
                 return True
             if isinstance(node, FuncCall) and _needs_scalar_series_bridge(node):
                 return True

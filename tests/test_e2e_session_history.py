@@ -10,18 +10,25 @@ TradingView evaluated there: the seven flags (``C``), the same flags ``[1]``
 (``H``) and ``[2]`` (``T``), and single reads in other places of the script
 (``B`` in a block run on every third bar, ``U`` in a function called on odd
 bars, ``Z`` on the lazy side of an ``and``, ``K`` at an offset that changes by
-bar, ``D`` at ``[0]``, ``W`` at ``[64]``; see the README).
+bar, ``D`` at ``[0]``, ``W`` at ``[64]``; see the README). A third tape, of a
+probe of functions on the extended-hours chart (``cgs2-histfn-aapl-15-ext``),
+has one function at two call sites, reads on a lazy operand and in a block
+inside a function, and a ``newSession()`` idiom at two call sites.
 
 TradingView reads a flag's history by bars everywhere at the top level of the
 script, in a block and on a lazy operand too: ``H`` is the previous bar's
-``C`` on all 899 bars. Inside a function it reads the function's own calls:
-``U``, ``session.ispostmarket[1]`` in a function called on odd bars, is the
-flag on the previous call, two bars back, and differs from the previous bar's
-flag on 7 extended-hours bars. Codegen gives each flag read at the top level
-one Series pushed on every chart bar, and a read in a function body the
-synthetic history of its call site (``_hist_call_*``), like an operator
-expression's; in a ``request.security`` payload the read runs on the requested
-clock, one value per requested bar.
+``C`` on all 899 bars. Inside a function it reads the function's own calls,
+each call site apart: ``U``, ``session.ispostmarket[1]`` in a function called
+on odd bars, is the flag on the previous call, two bars back (7
+extended-hours bars differ from the previous bar's flag), a second call site
+of one function reads its own previous call, and a read on a lazy operand or
+in a block inside a function called on every bar is the previous call's flag
+too, not the previous time the read ran. Codegen gives each flag read at the
+top level one Series pushed on every chart bar; a function that reads a flag
+at an offset is emitted once per call site and pushes the flag at its entry,
+once per call; in a ``request.security`` expression the read runs on the
+requested clock, one value per requested bar, and one reached through a
+function or a variable there is refused, located at the read.
 
 The pre-lane build emitted ``<flag>[k]`` on a C++ bool and did not compile.
 Each tape is replayed end to end -- ``transpile_json``, the built runtime,
@@ -55,6 +62,7 @@ from tests._e2e import (
 FIXTURES = Path(__file__).parent / "fixtures" / "session_ismarket"
 TAPES = ("cgs2-hist-aapl-15-reg", "cgs2-hist-aapl-15-ext")
 EXTENDED = "cgs2-hist-aapl-15-ext"
+FUNCTIONS = "cgs2-histfn-aapl-15-ext"
 SESSION, TIMEZONE = "0930-1600", "America/New_York"
 # codegen before this lane: every session.*[k] read failed the C++ compile.
 LEGACY = "7a39cb3cfe18cfbd393a380babacdcbc3b62667f"
@@ -150,7 +158,8 @@ def _write_feed(stamps: list[int], path: Path) -> Path:
 
 
 def _replay_stamps(slug: str) -> list[int]:
-    stamps = [ts for ts, _ in read_tape(slug)]
+    tape = read_function_tape() if slug == FUNCTIONS else read_tape(slug)
+    stamps = [ts for ts, _ in tape]
     return stamps + [stamps[-1] + QUARTER]
 
 
@@ -186,14 +195,13 @@ strategy("session history on the requested clock", overlay=true)
 sm() => session.ismarket
 sp() => session.ispremarket
 sq() => session.ispostmarket
-pre1() => session.ispremarket[1]
 m1 = request.security(syminfo.tickerid, "60", session.ismarket[1])
 p1 = request.security(syminfo.tickerid, "60", session.ispremarket[1])
 q2 = request.security(syminfo.tickerid, "60", session.ispostmarket[2])
 m1_ref = request.security(syminfo.tickerid, "60", sm()[1])
 p1_ref = request.security(syminfo.tickerid, "60", sp()[1])
 q2_ref = request.security(syminfo.tickerid, "60", sq()[2])
-p1_fn = request.security(syminfo.tickerid, "60", pre1())
+first = request.security(syminfo.tickerid, "60", session.ispremarket[1] == false)
 if m1 or p1 or q2
     strategy.entry("L", strategy.long)
 // @pf-trace m1=m1
@@ -202,7 +210,7 @@ if m1 or p1 or q2
 // @pf-trace m1_ref=m1_ref
 // @pf-trace p1_ref=p1_ref
 // @pf-trace q2_ref=q2_ref
-// @pf-trace p1_fn=p1_fn
+// @pf-trace first=first
 '''
 
 
@@ -215,6 +223,8 @@ def replays(tmp_path_factory) -> dict[str, Replay | Exception]:
     jobs = {slug: ((FIXTURES / slug / "strategy.pine").read_text(encoding="utf-8") + TRACE,
                    _replay_stamps(slug), REPO_ROOT) for slug in TAPES}
     jobs["payload"] = (PAYLOAD_PROBE, _replay_stamps(EXTENDED), REPO_ROOT)
+    jobs[FUNCTIONS] = ((FIXTURES / FUNCTIONS / "strategy.pine").read_text(encoding="utf-8")
+                       + FUNCTION_TRACE, _replay_stamps(FUNCTIONS), REPO_ROOT)
     legacy = reference_codegen(LEGACY)
     if legacy is not None:
         jobs["legacy"] = (jobs[EXTENDED][0], jobs[EXTENDED][1], legacy)
@@ -265,6 +275,20 @@ def test_tapes_are_the_recorded_exports() -> None:
     assert sum(a != b for a, b in zip(by_bar, by_call)) == 7
     assert sum(v["c_ispremarket"] for v in ext) == 220
     assert sum(v["c_ispostmarket"] for v in ext) == 159
+    metrics = json.loads((FIXTURES / FUNCTIONS / "metrics.json").read_text())
+    assert hashlib.sha256((FIXTURES / FUNCTIONS / "tv_trades.csv").read_bytes()).hexdigest() \
+        == metrics["tvTradesCsvHash"]
+    assert hashlib.sha256((FIXTURES / FUNCTIONS / "strategy.pine").read_bytes()).hexdigest() \
+        == metrics["sourceArtifactHash"]
+    assert metrics["wsProvenance"]["rangeProof"] == "covered"
+    tape = read_function_tape()
+    assert len(tape) == metrics["trades"] == 639
+    values = [flags for _, flags in tape]
+    for name, want in function_rule([v["c"] for v in values]).items():
+        assert [v[name] for v in values] == want, name
+    by_bar = function_rule([v["c"] for v in values], by_calls=False)
+    assert {name: sum(a != b for a, b in zip(by_bar[name], [v[name] for v in values]))
+            for name in ("b", "z", "k")} == {"b": 7, "z": 12, "k": 13}
 
 
 @pytest.mark.parametrize("slug", TAPES)
@@ -312,9 +336,12 @@ def test_payload_history_runs_on_the_requested_clock(replays) -> None:
     for name in ("m1", "p1", "q2"):
         assert traced(replay, name) == traced(replay, f"{name}_ref"), name
         assert len(traced(replay, name)) == len(_replay_stamps(EXTENDED))
-    assert traced(replay, "p1_fn") == traced(replay, "p1_ref")
     assert any(traced(replay, "p1")) and not all(traced(replay, "p1"))
-    assert re.search(r"_sec\d+_expr_hist_\d+", replay.cpp)
+    assert re.search(r"Series<bool> _sec\d+_expr_hist_\d+", replay.cpp)
+    # Before the first requested bar the read is false, as a bool history is.
+    first = [rec["value"] for rec in replay.traces
+             if rec["name"] == "first" and rec["value"] == rec["value"]]
+    assert first[:1] == [1.0]
 
 
 def test_pre_lane_build_did_not_compile(replays) -> None:
@@ -322,7 +349,6 @@ def test_pre_lane_build_did_not_compile(replays) -> None:
         pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
     legacy = replays["legacy"]
     assert isinstance(legacy, Exception) and "compile failed" in str(legacy)
-    assert "subscripted value is not an array" in str(legacy)
 
 
 def _transpiled(tmp_path: Path, body: str) -> dict:
@@ -370,29 +396,133 @@ def test_top_level_reads_share_one_series_per_flag(tmp_path: Path) -> None:
         "_pf_session_hist_ispremarket[1]", body)
 
 
-def test_function_reads_the_calls_history(tmp_path: Path) -> None:
-    """Needs no engine: a read in a function body is its call site's own
-    history, pushed where the read runs, not the chart bar's Series."""
-    cpp = _transpiled(tmp_path, "post1() => session.ispostmarket[1]\n"
-                                "fn = bar_index % 2 == 1 ? post1() : false\n"
-                                'if fn\n    strategy.entry("L", strategy.long)\n')["cpp"]
+def test_function_reads_its_call_sites_calls(tmp_path: Path) -> None:
+    """Needs no engine: a function that reads a flag at an offset is emitted
+    once per call site, and each body pushes the flag into its own Series at
+    entry, once per call, before any read of it can be skipped."""
+    cpp = _transpiled(tmp_path, "post1() => bar_index % 2 == 0 and session.ispostmarket[1]\n"
+                                "a = post1()\n"
+                                "b = bar_index % 2 == 1 ? post1() : false\n"
+                                'if a or b\n    strategy.entry("L", strategy.long)\n')["cpp"]
     assert "_pf_session_hist_" not in cpp
-    assert re.search(r"Series<bool> _hist_call_\d+", cpp)
-    assert re.search(r"bool _hv = \(\(!_pf_session_market_\(.*\) && "
-                     r"pine_session_ispostmarket\(.*\)\)\); if \(history_advances_new_bar\(\)\) "
-                     r"_hist_call_\d+\.push\(_hv\)", cpp)
+    members = re.findall(r"Series<bool> (_session_call_\d+)", cpp)
+    assert len(members) == 2
+    bodies = re.findall(r"bool post1_cs(\d)\(\) \{\n(.*?)\n    \}", cpp, flags=re.S)
+    assert [index for index, _ in bodies] == ["0", "1"]
+    for (_, body), member in zip(bodies, members):
+        lines = body.strip().splitlines()
+        assert lines[0].strip().startswith(f"if (history_advances_new_bar()) {member}.push(")
+        assert lines[1].strip().startswith(f"else {member}.update(")
+        assert f"{member}[1]" in body
+
+
+def read_function_tape() -> list[tuple[int, dict]]:
+    """(the chart bar's open in UTC ms, TradingView's values) per Entry row of
+    the function probe: ``c`` the seven flags by name, then ``a b z k n o``."""
+    with (FIXTURES / FUNCTIONS / "tv_trades.csv").open(encoding="utf-8-sig") as fh:
+        rows = [row for row in csv.DictReader(fh) if row["Type"].startswith("Entry")]
+    tape = []
+    for row in rows:
+        signal = row["Signal"]
+        assert signal[0] == "C" and len(signal) == 20, signal
+        flags = {flag: signal[1 + i] == "1" for i, flag in enumerate(FLAGS)}
+        values = {"c": flags}
+        for pos, letter in zip(range(8, 20, 2), "ABZKNO"):
+            assert signal[pos] == letter and signal[pos + 1] in "01", signal
+            values[letter.lower()] = signal[pos + 1] == "1"
+        tape.append((_utc_ms(row["Date and time"], 8), values))
+    return sorted(tape, key=lambda bar: bar[0])
+
+
+def function_rule(flags: list[dict[str, bool]], by_calls: bool = True) -> dict[str, list[bool]]:
+    """What each read of the function probe returns from the flags per bar:
+    by the calls of its own call site (TradingView), or, ``by_calls=False``,
+    by bars for ``b`` and by the reads that ran for ``z`` and ``k``."""
+    n = len(flags)
+
+    def flag(name: str, i: int) -> bool:
+        return i >= 0 and flags[i][name]
+
+    post, pre, market = "ispostmarket", "ispremarket", "ismarket"
+    back = {"b": 2, "z": 1, "k": 1} if by_calls else {"b": 1, "z": 2, "k": 3}
+    return {
+        "a": [flag(post, i - 1) for i in range(n)],
+        "b": [i % 2 == 1 and flag(post, i - back["b"]) and (i >= 3 or not by_calls)
+              for i in range(n)],
+        "z": [i % 2 == 0 and flag(post, i - back["z"]) for i in range(n)],
+        "k": [i % 3 == 0 and flag(pre, i - back["k"]) for i in range(n)],
+        "n": [flag(market, i) and not flag(market, i - 1) for i in range(n)],
+        "o": [flag(market, i) and not flag(market, i - 1) for i in range(n)],
+    }
+
+
+FUNCTION_TRACE = "".join(f"\n// @pf-trace c_{flag}=session.{flag}" for flag in FLAGS) + "".join(
+    f"\n// @pf-trace {name}={name}" for name in "abzkno") + "\n"
+
+
+def test_function_reads_are_tradingviews(replays) -> None:
+    """The function probe replayed: every read is TradingView's on every bar,
+    by the calls of its own call site."""
+    replay = _ok(replays, FUNCTIONS)
+    tape = read_function_tape()
+    n = len(tape)
+    current = [{flag: v for flag, v in zip(FLAGS, bits)} for bits in zip(
+        *(traced(replay, f"c_{flag}")[:n] for flag in FLAGS))]
+    for flag in ("ismarket", "ispremarket", "ispostmarket"):
+        assert [c[flag] for c in current] == [v["c"][flag] for _, v in tape], flag
+    for name, want in function_rule(current).items():
+        got = traced(replay, name)[:n]
+        assert got == want, name
+        assert got == [v[name] for _, v in tape], name
+    print(f"session history in functions: {6 * n} reads on {n} bars == TradingView")
+
+
+REFUSED = {
+    "a function a request.security expression calls": (
+        "pre1() => session.ispremarket[1]\n"
+        'x = request.security(syminfo.tickerid, "60", pre1())\n', (3, 30)),
+    "a variable a request.security expression reads": (
+        "m = session.ismarket\n"
+        'x = request.security(syminfo.tickerid, "60", m[1])\n', (4, 48)),
+}
+
+
+@pytest.mark.parametrize("place", REFUSED)
+def test_unsupported_places_are_refused_at_the_read(place: str, tmp_path: Path) -> None:
+    """Needs no engine: a read that a request.security expression reaches
+    through a function or a variable has no history on the requested clock in
+    PineForge; it is refused at the read (the C++ did not compile before)."""
+    body, (line, col) = REFUSED[place]
+    pine = tmp_path / "strategy.pine"
+    pine.write_text('//@version=6\nstrategy("session history", overlay=true)\n' + body
+                    + 'if x\n    strategy.entry("L", strategy.long)\n', encoding="utf-8")
+    result = transpile_json(pine)
+    assert not result["ok"]
+    errors = [d for d in result["diagnostics"] if d["severity"] == "error"]
+    assert len(errors) == 1 and (errors[0]["line"], errors[0]["col"]) == (line, col), errors
+    assert "request.security" in errors[0]["message"], errors[0]["message"]
+
+
+def test_a_trace_can_read_a_flag_at_an_offset(tmp_path: Path) -> None:
+    """Needs no engine: a ``@pf-trace`` that is the only reader of a flag's
+    history gets the flag's Series too."""
+    cpp = _transpiled(tmp_path, 'if close > open\n    strategy.entry("L", strategy.long)\n'
+                                "// @pf-trace m1=session.ismarket[1]\n")["cpp"]
+    assert cpp.count("Series<bool> _pf_session_hist_ismarket") == 1
+    compile_cpp(cpp, label="trace-only session history")
 
 
 def test_every_flag_and_place_compiles(tmp_path: Path) -> None:
-    """Every flag at every offset shape, at the top level, in a function, in a
-    payload and in a function a payload calls: the TU compiles (it did not)."""
+    """Every flag at every offset shape, at the top level, in a function
+    called from two call sites and in a payload: the TU compiles (it did
+    not)."""
     reads = "\n".join(
         f"top_{flag} = session.{flag}[1] or session.{flag}[0] or session.{flag}[bar_index % 3]\n"
         f"fn_{flag}() => session.{flag}[2]\n"
         f"call_{flag} = fn_{flag}()\n"
-        f'sec_{flag} = request.security(syminfo.tickerid, "60", session.{flag}[1])\n'
-        f'secfn_{flag} = request.security(syminfo.tickerid, "60", fn_{flag}())'
+        f"call2_{flag} = bar_index % 2 == 0 ? fn_{flag}() : false\n"
+        f'sec_{flag} = request.security(syminfo.tickerid, "60", session.{flag}[1])'
         for flag in FLAGS)
-    uses = " or ".join(f"top_{f} or call_{f} or sec_{f} or secfn_{f}" for f in FLAGS)
+    uses = " or ".join(f"top_{f} or call_{f} or call2_{f} or sec_{f}" for f in FLAGS)
     result = _transpiled(tmp_path, reads + f"\nif {uses}\n    strategy.entry(\"L\", strategy.long)\n")
     compile_cpp(result["cpp"], label="session history everywhere")

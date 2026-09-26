@@ -21,8 +21,7 @@ from ..ast_nodes import (
     VarDecl, Assignment, TupleAssign, ForStmt, ForInStmt,
 )
 from ..limits import iter_ast_nodes
-from ..signatures import BUILTIN_VARIABLES
-from ..symbols import PineType
+from ..signatures import SESSION_FLAG_MEMBERS
 from .host_members import HOST_MEMBER_NAMES
 
 
@@ -221,14 +220,6 @@ CPP_EMITTER_NAMES = frozenset("""
     get_input_int get_input_float get_input_bool get_input_string
     trace is_na na nz fixnan
 """.split())
-
-# The session.* booleans (session.ismarket ... session.islastbar_regular): the
-# flags a script can read at a history offset, ``session.ismarket[1]``.
-SESSION_FLAG_MEMBERS = frozenset(
-    name.split(".", 1)[1] for name, ptype in BUILTIN_VARIABLES.items()
-    if name.startswith("session.") and ptype == PineType.BOOL
-)
-
 
 def session_history_member(flag: str) -> str:
     """The per-bar Series of a ``session.*`` flag the top level reads at an

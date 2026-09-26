@@ -2149,6 +2149,18 @@ class TopLevelEmitter:
 
         lines.append(f"    {ret_type} {func_name}({', '.join(param_strs)}) {{")
 
+        # A session.* flag the body reads at an offset: its history is this
+        # call site's calls, so push the flag once per call, before a lazy
+        # operand or a block can skip the read (TradingView's function tape,
+        # tests/test_e2e_session_history.py).
+        for flag in sorted(self._session_call_flags.get(fi.name, ())):
+            member = self._inline_history_member_by_key.get(
+                ("session_call", fi.name, flag, self._current_instance_name))
+            if member is not None:
+                value = self._visit_expr(MemberAccess(object=Identifier(name="session"),
+                                                      member=flag))
+                self._emit_history_series_write(lines, "        ", member, value)
+
         emitted_return = False
         if node.is_single_expr and node.body:
             expr = node.body[0].expr if isinstance(node.body[0], ExprStmt) else None

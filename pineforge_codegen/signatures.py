@@ -539,6 +539,13 @@ BUILTIN_VARIABLES: dict[str, PineType] = {
     "session.islastbar": B, "session.islastbar_regular": B,
 }
 
+# The session.* booleans (session.ismarket ... session.islastbar_regular): the
+# flags a script can read at a history offset, ``session.ismarket[1]``.
+SESSION_FLAG_MEMBERS = frozenset(
+    name.split(".", 1)[1] for name, ptype in BUILTIN_VARIABLES.items()
+    if name.startswith("session.") and ptype == B
+)
+
 # Strategy variables (read-only properties, not function calls)
 STRATEGY_VARIABLES: dict[str, PineType] = {
     "strategy.position_size": F,

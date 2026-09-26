@@ -1175,42 +1175,46 @@ class ExprVisitor:
             return f"!({self._coerce_bool_expr(operand, node.operand)})"
         return f"({node.op}{operand})"
 
-    def _visit_session_history(self, node: Subscript, idx: str, series_idx: str) -> str:
+    def _visit_session_history(self, node: Subscript, series_idx: str) -> str:
         """``session.<flag>[k]``: the value the flag had k bars ago at the top
         level of the script, k calls ago in a function body.
 
         TradingView's tapes (``tests/test_e2e_session_history.py``) read a
         top-level offset by bars, in a block and on a lazy operand too, and a
-        function body's by the function's calls. A top-level read indexes the
-        flag's Series, pushed on every chart bar (``_prescan_session_history``);
-        a function body's pushes its call site's own Series where it runs, like
-        an operator expression's history. A request.security payload builds
-        its reads on the requested clock (security.py).
+        function body's by the calls of its call site, whichever operand or
+        block holds the read. A top-level read indexes the flag's Series,
+        pushed on every chart bar (``_prescan_session_history``); a function
+        body's indexes its emitted call site's Series, pushed at the function's
+        entry (``_prepare_inline_history_members``). A request.security
+        expression that spells the read builds it on the requested clock
+        (security.py); one that reaches it through a function or a variable
+        has no such history here and is refused at the read.
         """
-        member = self._inline_history_member_by_key.get(
-            ("hist_call", id(node), self._current_instance_name))
-        if member is not None:
-            inner = self._visit_expr(node.object)
-            idx_int = self._coerce_int_slot(idx, node.index, "int")
-            if (idx_int == idx
-                    and not self._emitted_value_is_double(node.index)):
-                idx_int = pine_index_int_cast(idx)
-            return (
-                f"([&]() -> bool {{ "
-                f"bool _hv = ({inner}); "
-                f"if (history_advances_new_bar()) {member}.push(_hv); "
-                f"else {member}.update(_hv); "
-                f"return {member}[{idx_int}]; }}())"
-            )
         flag = node.object.member
-        if self._security_payload_depth or flag not in self._session_history_flags:
+        where = next((n for n in (node, node.index, node.object)
+                      if getattr(n, "loc", None) is not None), node)
+        if self._security_payload_depth:
             self._codegen_error(
-                node,
-                f"session.{flag}[...] is not supported here: PineForge keeps a "
-                "session flag's history for the chart's top level, a function "
-                "body and a request.security expression.",
+                where,
+                f"session.{flag}[...] cannot be read here: this request.security "
+                "expression reaches it through a function or a variable, and "
+                "PineForge keeps a session flag's history on the requested clock "
+                f"only where the expression reads session.{flag}[...] itself.",
             )
-        return f"{self._session_history_member(flag)}[{series_idx}]"
+        owner = self._session_call_owner.get(id(node))
+        if owner is not None:
+            member = self._inline_history_member_by_key.get(
+                ("session_call", owner, flag, self._current_instance_name))
+            if member is not None:
+                return f"{member}[{series_idx}]"
+        elif flag in self._session_history_flags:
+            return f"{self._session_history_member(flag)}[{series_idx}]"
+        self._codegen_error(
+            where,
+            f"session.{flag}[...] is not supported here: PineForge keeps a session "
+            "flag's history for the script's top level, a function body and a "
+            "request.security expression that reads it.",
+        )
 
     def _visit_subscript(self, node: Subscript) -> str:
         idx = self._visit_expr(node.index)
@@ -1264,7 +1268,7 @@ class ExprVisitor:
                         self._strategy_series_vars.add(series_name)
                     return f"{series_name}[{series_idx}]"
         if self._is_session_flag(node.object):
-            return self._visit_session_history(node, idx, series_idx)
+            return self._visit_session_history(node, series_idx)
         # History reference applied directly to an inline call result, e.g.
         # ``ta.highest(high, 10)[1]`` or ``f()[2]``. In Pine the call yields a
         # series, so ``[k]`` reads its value k bars ago — but the call lowers to

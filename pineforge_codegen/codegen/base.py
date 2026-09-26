@@ -768,6 +768,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # session.* flags read at an offset at the top level (their per-bar
         # Series): _prescan_session_history.
         self._session_history_flags: set[str] = set()
+        self._session_call_flags: dict[str, set[str]] = {}
+        self._session_call_owner: dict[int, str] = {}
         # Track global-scope non-var declarations (emitted as class members)
         self._global_member_vars: set[str] = set()
         for name, _ in ctx.global_var_decls:
@@ -3357,10 +3359,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """
         self._inline_history_members = []
         self._inline_history_member_by_key = {}
+        # session.* flags a function reads at an offset (owner -> flags) and
+        # the owner of each such read: one Series per flag and emitted call
+        # site, pushed at the function's entry (emit_top.py).
+        self._session_call_flags: dict[str, set[str]] = {}
+        self._session_call_owner: dict[int, str] = {}
         counters = {
             "hist_call": 0,
             "series_arg": 0,
             "udf_series_arg": 0,
+            "session_call": 0,
         }
 
         def walk_nodes(value):
@@ -3654,10 +3662,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 )
             elif (isinstance(node, Subscript)
                     and self._is_session_flag(node.object)):
-                # A function body's read is its call's history; a top-level
-                # read uses the flag's per-bar Series (_prescan_session_history).
+                # In a function body the flag's history is the calls' of its
+                # call site: one Series per flag and emitted variant (the
+                # analyzer clones the function per call site), pushed once
+                # per call at the function's entry. A top-level read uses the
+                # flag's per-bar Series (_prescan_session_history).
                 if owner is not None:
-                    register("hist_call", (id(node),), "bool", owner)
+                    flag = node.object.member
+                    self._session_call_owner[id(node)] = owner
+                    self._session_call_flags.setdefault(owner, set()).add(flag)
+                    register("session_call", (owner, flag), "bool", owner)
             elif (isinstance(node, Subscript)
                     and self._is_compound_history_object(node.object)):
                 register(
@@ -3793,10 +3807,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         inline call result. Numeric and bool expressions only: other families
         keep their established lowering. A ``session.*`` flag's C++ value
         cannot be indexed either: a request.security payload keeps its history
-        on the requested clock like an operator expression's (security.py), a
-        function body its call's (``_prepare_inline_history_members``), and a
-        top-level read reads the flag's per-bar Series
-        (``_prescan_session_history``).
+        on the requested clock like an operator expression's (security.py); a
+        function body reads its call site's per-call Series
+        (``_prepare_inline_history_members``) and a top-level read the flag's
+        per-bar Series (``_prescan_session_history``).
         """
         if self._is_session_flag(node):
             return True
@@ -3824,10 +3838,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         script, in a block and on a lazy operand as well, and by calls inside a
         function (``tests/test_e2e_session_history.py``): function bodies
         (``_prepare_inline_history_members``) and ``request.security`` payloads
-        (the requested clock, security.py) keep their own history instead.
+        (the requested clock, security.py) keep their own history instead. A
+        ``// @pf-trace`` expression is read at the top level.
         """
         flags: set[str] = set()
-        stack = list(self.ctx.ast.body)
+        stack = list(self.ctx.ast.body) + [
+            pragma.expr_node for pragma in (self.ctx.pf_trace_pragmas or [])
+            if getattr(pragma, "expr_node", None) is not None]
         while stack:
             node = stack.pop()
             if isinstance(node, (FuncDef, MethodDef)):

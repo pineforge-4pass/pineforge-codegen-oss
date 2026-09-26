@@ -1766,7 +1766,10 @@ class SecurityEmitter:
         self, sec_id: int, expr_node, lines: list[str], mbb_suffix: str
     ) -> None:
         for idx, node in enumerate(self._collect_security_expr_hist_subscripts(expr_node)):
-            cpp_t = self._infer_type(node.object)
+            # A session.* flag is a bool: its history reads false, not na,
+            # before the first requested bar.
+            cpp_t = ("bool" if self._is_session_flag(node.object)
+                     else self._infer_type(node.object))
             if cpp_t not in ("double", "int", "bool"):
                 cpp_t = "double"
             name = f"_sec{sec_id}_expr_hist_{idx}"
