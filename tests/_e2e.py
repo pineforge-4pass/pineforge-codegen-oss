@@ -161,6 +161,27 @@ def run_strategy(engine_root: Path, workdir: Path, feed: Path,
     return out.read_bytes(), records, proc.stderr
 
 
+_RUN_STRATEGY_MODULES: dict[Path, object] = {}
+
+
+def closed_trades(engine_root: Path, workdir: Path, feed: Path) -> list[dict]:
+    """The built strategy's closed trades from the engine runner's own report
+    (``run_strategy.Strategy.run``). ``engine_trades.csv`` carries no order
+    ids or comments; each report trade carries ``entry_id``, ``exit_id`` and
+    ``exit_comment`` beside its times (Unix ms) and prices."""
+    module = _RUN_STRATEGY_MODULES.get(engine_root)
+    if module is None:
+        scripts = engine_root / "scripts"
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        spec = importlib.util.spec_from_file_location(
+            "_pf_run_strategy", scripts / "run_strategy.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _RUN_STRATEGY_MODULES[engine_root] = module
+    return module.Strategy(workdir / "strategy.so").run(feed)["trades"]
+
+
 def trade_count(trades_csv: bytes) -> int:
     rows = csv.DictReader(trades_csv.decode().splitlines())
     return len({row["Trade #"] for row in rows})

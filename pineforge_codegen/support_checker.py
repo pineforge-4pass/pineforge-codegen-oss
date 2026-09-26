@@ -343,10 +343,17 @@ UNSUPPORTED_CONST_NAMESPACES: dict[str, str] = {
         "expression in PineForge."
     ),
     "alert": (
-        "is only valid as the freq argument of alert(...); it has no "
-        "runtime value as a free expression in PineForge."
+        "is not a Pine alert constant; only alert.freq_all, "
+        "alert.freq_once_per_bar and alert.freq_once_per_bar_close exist."
     ),
 }
+
+# ``alert.freq_*`` are const strings with a runtime value ("all",
+# "once_per_bar", "once_per_bar_close" on TradingView's own tape), so they
+# are ordinary values wherever they appear.
+ALERT_FREQ_MEMBERS = frozenset({
+    "freq_all", "freq_once_per_bar", "freq_once_per_bar_close",
+})
 
 # Namespaces whose variable members have no batch-mode data source.
 # These reads currently emit `std::string("<member>")` via the
@@ -1739,6 +1746,8 @@ class SupportChecker:
         if (
             self._const_arg_ctx_depth == 0
             and isinstance(node.object, Identifier)
+            and not (node.object.name == "alert"
+                     and node.member in ALERT_FREQ_MEMBERS)
             and self._reject_if_in(
                 UNSUPPORTED_CONST_NAMESPACES,
                 node.object.name,

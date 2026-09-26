@@ -107,6 +107,7 @@ from ..ast_nodes import (
 from .helpers import pine_index_int_cast
 from .tables import (
     ADJUSTMENT_MAP,
+    ALERT_FREQ_VALUES,
     BAR_BUILTINS,
     BAR_FIELDS,
     BAR_SERIES_PUSH,
@@ -575,6 +576,9 @@ class ExprVisitor:
             return f"{arena}.{access}({owner}).{self._safe_name(node.member)}"
         if isinstance(node.object, Identifier):
             ns = node.object.name
+            if ns == "alert" and node.member in ALERT_FREQ_VALUES:
+                # TradingView's const string values (its own tape spells them).
+                return f'std::string("{ALERT_FREQ_VALUES[node.member]}")'
             if ns == "strategy":
                 # Direction constants
                 if node.member == "long":

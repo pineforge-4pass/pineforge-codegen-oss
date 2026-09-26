@@ -6123,9 +6123,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if ns == "barstate":
                 return PineType.BOOL
 
-            # alert.* constants (freq_once_per_bar, freq_once_per_bar_close, etc.)
+            # alert.freq_* are const strings ("all", "once_per_bar",
+            # "once_per_bar_close"); any other alert.* member is refused by
+            # the support checker.
             if ns == "alert":
-                return PineType.INT
+                return PineType.STRING
 
             # position.* constants for tables (middle_right, top_left, etc.)
             if ns == "position":
