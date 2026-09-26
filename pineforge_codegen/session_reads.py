@@ -7,9 +7,11 @@ codegen skips with all its arguments (``plot``, ``alert``, the ``table.*``
 namespace, ...: codegen/tables.py ``SKIP_FUNC_NAMES`` / ``SKIP_NAMESPACES``,
 and ``max_bars_back``) or in a ``strategy.*`` parameter it drops
 (support_checker.py ``STRATEGY_UNSUPPORTED_PARAMS``, e.g. ``alert_message``).
-The analyzer and the codegen ask this module the same question, so a script
-whose reads are all dropped keeps the C++ it had before those reads were
-supported.
+The analyzer (which functions to emit once per call site) and the codegen
+(which reads get a Series) ask this module the same question. A read it
+counts that the codegen drops some other way costs an unused Series; one it
+leaves out that the codegen does emit finds no Series and is refused, never
+given shared state.
 """
 
 from __future__ import annotations

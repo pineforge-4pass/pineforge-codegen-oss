@@ -3367,7 +3367,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._session_call_flags: dict[str, set[str]] = {}
         self._session_call_owner: dict[int, str] = {}
         counters = {kind: 0 for kind in INLINE_HISTORY_KINDS}
-        # A generated member is numbered past a script name spelled like one.
+        # A per-call session Series is numbered past a script name spelled
+        # like one; the older kinds keep their numbering.
         authored_names = set(getattr(self, "_safe_name_occupied", ()))
 
         def walk_nodes(value):
@@ -3464,7 +3465,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return
             counters[kind] += 1
             member_name = f"_{kind}_{counters[kind]}"
-            while member_name in authored_names:
+            while kind == "session_call" and member_name in authored_names:
                 counters[kind] += 1
                 member_name = f"_{kind}_{counters[kind]}"
             self._inline_history_member_by_key[key] = member_name
@@ -3678,11 +3679,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # flag's per-bar Series (_prescan_session_history), and one
                 # written in a request.security expression the requested
                 # clock's (security.py).
-                if owner is not None and id(node) in emitted_function_reads:
-                    flag = node.object.member
+                if owner is not None and id(node) not in requested_node_ids:
                     self._session_call_owner[id(node)] = owner
-                    self._session_call_flags.setdefault(owner, set()).add(flag)
-                    register("session_call", (owner, flag), "bool", owner)
+                    if id(node) in emitted_function_reads:
+                        flag = node.object.member
+                        self._session_call_flags.setdefault(owner, set()).add(flag)
+                        register("session_call", (owner, flag), "bool", owner)
             elif (isinstance(node, Subscript)
                     and self._is_compound_history_object(node.object)):
                 register(

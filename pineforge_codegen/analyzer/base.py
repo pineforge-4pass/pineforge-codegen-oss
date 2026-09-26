@@ -287,6 +287,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # their established paths.
         self._func_var_storage_names: dict[str, dict[str, str]] = {}
         self._func_series_vars: dict[str, set] = {}   # func_name -> set[str]
+        self._session_history_unsafe: dict[str, str] = {}
         # Declaration-bound non-persistent history locals are distinct from
         # history parameters/global reads carried by ``func_series_vars``.
         # Codegen needs this exact subset when a raw spelling also belongs to
@@ -609,6 +610,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 for name, specs in self._func_param_type_specs.items()
             },
             func_security_clone_only=self._func_security_clone_only,
+            session_history_unsafe=self._session_history_unsafe,
             func_cs_ta_clone_names=self._func_cs_ta_clone_names,
             udt_defs=self._udt_fields,
             enum_defs=self._enum_defs,
@@ -2248,51 +2250,37 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         return out
 
-    def _refuse_session_history_without_call_site(
+    def _session_history_unsafe_functions(
             self, func_defs: dict, find_calls, known_func_names: set[str],
-            receiver_type_name, calls_by_parent: dict, requested_node_ids: set[int]) -> None:
-        """Refuse a ``session.*`` flag read at an offset in a function or
-        method whose calls PineForge cannot keep apart.
+            calls_by_parent: dict) -> dict[str, str]:
+        """The functions and methods that cannot keep a ``session.*`` flag's
+        history per call site, each with the reason (name -> why).
 
-        Such a read keeps its call site's history (codegen
-        ``_session_call_*``, the function emitted once per call site), which
-        three kinds of call do not have:
+        A read in a function keeps its call site's history: the function is
+        emitted once per call site (``_session_call_*``, codegen). Four kinds
+        of callable do not get that:
 
-        * a request.security expression's: the evaluator inlines the function
-          or calls its chart variant, on the requested clock. The functions
-          reached are those the expression calls, those they call, and those a
-          global variable's definition or a mutable global's statements call
-          when the expression reads it (a name a function binds itself is its
-          own);
-        * a method call on a receiver the analyzer cannot type (``mk().m()``):
-          it is not told apart from the method's other calls;
-        * a UDT field default's (``bool v = f()``), one call for every
-          ``Foo.new()``.
+        * a method: a call on a receiver the analyzer cannot type
+          (``mk().m()``, a loop variable) is not told apart from the method's
+          other calls;
+        * a function a method calls, once in the method's one body;
+        * a function a request.security expression evaluates: the evaluator
+          inlines it or calls its chart variant, on the requested clock. The
+          functions reached are those the expression calls, those they call,
+          and those a global variable's definition or a mutable global's
+          statements call when the expression reads it (a name a function
+          binds itself is its own);
+        * a function a UDT field default calls, once for every ``new()``.
 
-        Only reads the codegen emits count (session_reads.py). Every refused
-        read indexed a C++ bool before this lane and failed the compile.
+        Codegen refuses a ``session.<flag>[k]`` it emits in one of them; a read
+        it never emits (in ``plot()``, a dropped argument) refuses nothing.
+        Every such emitted read failed the C++ compile before this lane.
         """
-        reads_of = {
-            name: emitted_session_reads(func_def, requested_node_ids)
-            for name, func_def in func_defs.items()
-        }
-        readers = {name for name, reads in reads_of.items() if reads}
-        if not readers:
-            return
+        unsafe: dict[str, str] = {}
 
-        def refuse(names, why: str) -> None:
-            reads = [(r.loc.line, r.loc.col, name, r) for name in names
-                     for r in reads_of[name] if r.loc is not None]
-            if not reads:
-                return
-            _line, _col, name, read = min(reads, key=lambda r: (r[0], r[1], r[2]))
-            raise CompileError([Diagnostic(
-                level=Level.ERROR, phase=Phase.ANALYZER, location=read.loc,
-                message=(f"session.{read.object.member}[...] cannot be read in "
-                         f"{name.split('.')[-1]}(), {why}: PineForge keeps a session "
-                         "flag's history in a function by each of its call sites, "
-                         "and cannot tell this one apart."),
-            )])
+        def mark(names, why: str) -> None:
+            for name in sorted(names):
+                unsafe.setdefault(name, why)
 
         def closure(roots) -> set[str]:
             found, pending = set(), list(roots)
@@ -2317,6 +2305,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     names.update(n for n in [node.var, *(node.vars or [])] if n)
             return names
 
+        methods = {name for name in func_defs if "." in name}
+        mark(methods, "a method, whose calls PineForge cannot always tell apart")
+        mark(closure(callee for m in methods for callee, _call in calls_by_parent.get(m, [])),
+             "which a method calls")
+
         # A request.security expression's reach.
         pending: list[tuple[Any, str | None, frozenset[str]]] = [
             (sec.expression, getattr(sec, "containing_func", "") or None, frozenset())
@@ -2331,7 +2324,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if id(node) in seen_nodes:
                 continue
             seen_nodes.add(id(node))
-            self._budget.check(getattr(node, "loc", None), Phase.ANALYZER)
+            if self._budget is not None:
+                self._budget.check(getattr(node, "loc", None), Phase.ANALYZER)
             for callee, _call in find_calls(node, known_func_names, owner):
                 if callee not in reached and callee in func_defs:
                     reached.add(callee)
@@ -2349,46 +2343,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 elif name in self._global_expr_map:
                     followed.add(name)
                     pending.append((self._global_expr_map[name], None, frozenset()))
-        refuse(sorted(reached & readers),
-               "which a request.security expression evaluates on the requested clock")
+        mark(reached, "which a request.security expression evaluates on the requested clock")
 
-        # A method call on a receiver the analyzer cannot type.
-        methods = {name.split(".")[-1]: name for name in readers if "." in name}
-        if methods:
-            script_names: set[str] = set()
-            for node, _depth in iter_ast_nodes(self._ast):
-                script_names |= bound_in(node) if isinstance(node, (FuncDef, MethodDef)) else set()
-                if isinstance(node, VarDecl) and node.name:
-                    script_names.add(node.name)
-                elif isinstance(node, TupleAssign):
-                    script_names.update(node.names)
-            for stmt in self._ast.body:
-                owner = (stmt.name if isinstance(stmt, FuncDef)
-                         else f"{stmt.type_name}.{stmt.name}" if isinstance(stmt, MethodDef)
-                         else None)
-                for node, _depth in iter_ast_nodes(stmt):
-                    if not (isinstance(node, FuncCall) and isinstance(node.callee, MemberAccess)
-                            and node.callee.member in methods):
-                        continue
-                    recv = node.callee.object
-                    if isinstance(recv, Identifier) and recv.name not in script_names:
-                        continue  # a namespace (str.format), not a receiver
-                    if receiver_type_name(node, owner) is None:
-                        refuse([name for member, name in methods.items()
-                                if member == node.callee.member],
-                               "which is called on a receiver PineForge cannot type")
-
-        # A UDT field default's call, for types a script builds.
+        # A UDT field default's call, for the types a script builds.
         built = {node.callee.object.name for node, _depth in iter_ast_nodes(self._ast)
                  if isinstance(node, FuncCall) and isinstance(node.callee, MemberAccess)
                  and node.callee.member == "new" and isinstance(node.callee.object, Identifier)}
-        roots = [callee
-                 for stmt in self._ast.body
-                 if isinstance(stmt, TypeDecl) and stmt.name in built
-                 for field in stmt.fields if field.default is not None
-                 for callee, _call in find_calls(field.default, known_func_names, None)]
-        refuse(sorted(closure(roots) & readers),
-               "which a UDT field default calls once for every new()")
+        mark(closure(callee
+                     for stmt in self._ast.body
+                     if isinstance(stmt, TypeDecl) and stmt.name in built
+                     for field in stmt.fields if field.default is not None
+                     for callee, _call in find_calls(field.default, known_func_names, None)),
+             "which a UDT field default calls once for every new()")
+        return unsafe
 
     def _propagate_call_site_counts(self) -> None:
         """Propagate stateful UDF identity through complete call paths.
@@ -2419,10 +2386,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # Preserve call-node identity as well as the callee name: late clone
         # materialization needs the textual call's argument mapping to resolve
         # parameterized TA constructor lengths.
-        def _receiver_type_name(call: FuncCall, owner: str | None) -> str | None:
-            """The type name of a method call's receiver, or None when the
-            analyzer cannot type it."""
+        def _resolved_user_call_name(call: FuncCall, owner: str | None) -> str | None:
+            if isinstance(call.callee, Identifier):
+                return call.callee.name if call.callee.name in func_defs else None
+            if not isinstance(call.callee, MemberAccess):
+                return None
+
             recv = call.callee.object
+            method = call.callee.member
             receiver_type_name: str | None = None
             if isinstance(recv, Identifier):
                 owner_info = func_info_by_name.get(owner or "")
@@ -2455,16 +2426,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 receiver_type_name = method_receiver_type_name(spec)
             if receiver_type_name is None and isinstance(recv, Identifier):
                 receiver_type_name = self._udt_var_types.get(recv.name)
-            return receiver_type_name
-
-        def _resolved_user_call_name(call: FuncCall, owner: str | None) -> str | None:
-            if isinstance(call.callee, Identifier):
-                return call.callee.name if call.callee.name in func_defs else None
-            if not isinstance(call.callee, MemberAccess):
-                return None
-            receiver_type_name = _receiver_type_name(call, owner)
             key = (
-                f"{receiver_type_name}.{call.callee.member}"
+                f"{receiver_type_name}.{method}"
                 if receiver_type_name
                 else ""
             )
@@ -2812,9 +2775,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             name for name, func_def in func_defs.items()
             if emitted_session_reads(func_def, requested_node_ids)
         }
-        self._refuse_session_history_without_call_site(
-            func_defs, _find_calls, known_func_names, _receiver_type_name,
-            calls_by_parent, requested_node_ids)
+        self._session_history_unsafe = self._session_history_unsafe_functions(
+            func_defs, _find_calls, known_func_names, calls_by_parent)
 
         # request.security owns a separate evaluator context and already
         # materializes/remaps its embedded TA state per SecurityCallInfo.  Do

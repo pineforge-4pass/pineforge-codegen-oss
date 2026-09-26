@@ -1189,8 +1189,10 @@ class ExprVisitor:
         expression that reaches the read through its own operators builds it
         on the requested clock (security.py); one that reaches it through a
         call's argument or a variable has no such history here and is refused
-        at the read, and the analyzer refuses a read in a function such an
-        expression evaluates.
+        at the read. So is a read emitted in a function the analyzer lists in
+        ``session_history_unsafe`` (a method, or a function a method, a
+        request.security expression or a UDT field default reaches), and one
+        with no registered Series: never shared state.
         """
         flag = node.object.member
         where = next((n for n in (node, node.index, node.object)
@@ -1205,6 +1207,14 @@ class ExprVisitor:
             )
         owner = self._session_call_owner.get(id(node))
         if owner is not None:
+            why = (getattr(self.ctx, "session_history_unsafe", None) or {}).get(owner)
+            if why:
+                self._codegen_error(
+                    where,
+                    f"session.{flag}[...] cannot be read in {owner.split('.')[-1]}(), "
+                    f"{why}: PineForge keeps a session flag's history in a function by "
+                    "each of its call sites, and cannot tell this one apart.",
+                )
             member = self._inline_history_member_by_key.get(
                 ("session_call", owner, flag, self._current_instance_name))
             if member is not None:
