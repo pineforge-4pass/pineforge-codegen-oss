@@ -1196,7 +1196,7 @@ class ExprVisitor:
         the C++ (``_settle_session_reads``): a read in an argument the codegen
         renders and leaves out refuses nothing. A read in a function this
         analysis did not clone (``session_uncloned``) asks for its clones
-        instead, the first time.
+        instead.
         """
         flag = node.object.member
         where = next((n for n in (node, node.index, node.object)

@@ -10,7 +10,7 @@ and ``max_bars_back``) or in a ``strategy.*`` parameter it drops
 The analyzer (which functions may be emitted once per call site) and the
 codegen (which reads get a Series) ask this module the same question. The
 C++ decides which of those functions get clones: ``pineforge_codegen._generate``
-clones only the functions whose reads the first pass's C++ holds, so a read it
+clones only the functions whose reads a pass's C++ holds, so a read it
 counts that the codegen leaves out some other way (it renders the argument,
 then drops it: ``color.from_gradient``, a drawing's xloc) costs nothing, or an
 unused Series in a function cloned for another read. One it leaves out that

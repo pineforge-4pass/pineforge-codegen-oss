@@ -134,8 +134,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._budget = budget
         # The functions that may be emitted once per call site for their
         # session.<flag>[k] reads; None: every one that reads a flag at an
-        # offset (pineforge_codegen._generate passes none first, then the
-        # ones whose reads the C++ holds).
+        # offset (pineforge_codegen._generate passes none first, then each
+        # time adds the ones whose reads the C++ holds).
         self._session_clones = session_clones
         self._session_uncloned: frozenset[str] = frozenset()
         self._budget_visit_count = 0
@@ -619,7 +619,6 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             func_security_clone_only=self._func_security_clone_only,
             session_history_unsafe=self._session_history_unsafe,
             session_uncloned=self._session_uncloned,
-            session_clones_final=self._session_clones is None or bool(self._session_clones),
             func_cs_ta_clone_names=self._func_cs_ta_clone_names,
             udt_defs=self._udt_fields,
             enum_defs=self._enum_defs,

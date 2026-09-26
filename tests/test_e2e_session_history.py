@@ -716,7 +716,7 @@ STILL_COMPILE = {
         "x = f() and str.length(s) > 0\n"
         "// @pf-trace t=f()\n"),
     # A clone for the read would put a wrapper's int and float calls on one
-    # variant: the first pass fails, the second, without it, compiles.
+    # variant; the read is left out, so no clone is made.
     "a read in color.from_gradient in a function a wrapper calls with an int and a float": (
         "shade(v) =>\n"
         "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
@@ -816,6 +816,21 @@ def test_only_functions_whose_reads_the_cpp_holds_are_cloned(tmp_path: Path) -> 
     assert re.search(r"\bpost1_cs0\b", cpp) and re.search(r"\bpost1_cs1\b", cpp)
     assert not re.search(r"\bf\d+_cs\d+\b", cpp)
     compile_cpp(cpp, label="only emitted reads cloned")
+
+
+def test_a_read_reached_through_a_callers_clone_gets_clones_too(tmp_path: Path) -> None:
+    """Needs no engine: cloning a function for its read clones its callers per
+    call site, which can make a caller's own read reach the C++ (``x`` becomes
+    a float in one clone, so ``str.tostring`` keeps the format that holds the
+    read); that caller is then cloned for its read as well, not refused."""
+    cpp = _transpiled(tmp_path, "g() => session.ismarket[1]\n"
+                                "f(x) =>\n"
+                                '    s = str.tostring(x, session.ispremarket[1] ? "#" : "#.#")\n'
+                                '    g() and s != ""\n'
+                                "a = f(true)\nb = f(1.5)\n"
+                                'if a or b\n    strategy.entry("L", strategy.long)\n')["cpp"]
+    assert "_refused_session_read" not in cpp
+    compile_cpp(cpp, label="a read reached through a caller's clone")
 
 
 @pytest.mark.parametrize("place", KEPT)

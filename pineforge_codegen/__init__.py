@@ -32,15 +32,17 @@ def _parse_bounded(pine_source: str, filename: str, budget: TimeBudget | None = 
 def _generate(pine_source: str, check_support: bool, filename: str):
     """The pipeline, first without the per-call clones of functions that read
     a ``session.<flag>[k]``, as scripts compiled before such reads were
-    supported. When the C++ holds such a read, once more with exactly the
-    functions holding one cloned; a read in an argument the codegen leaves
+    supported; then again with the functions whose reads that C++ holds
+    cloned as well, until the C++ asks for no more (a clone can make a
+    caller's read reach the C++: its callers are cloned per call site, which
+    can retype their parameters). A read in an argument the codegen leaves
     out never costs a clone (the clones of a function called along a deep
     call tree grow with every path to it).
 
     Returns ``(codegen, ctx, cpp, support_diagnostics)``."""
     budget = None
     clones: frozenset[str] = frozenset()
-    for _pass in range(2):
+    while True:
         ast, pragmas, budget = _parse_bounded(pine_source, filename, budget)
         support_diagnostics = []
         if check_support:
@@ -65,11 +67,13 @@ def _generate(pine_source: str, check_support: bool, filename: str):
         needed = gen.session_functions_needing_clones
         if not needed:
             return gen, ctx, cpp, support_diagnostics
-        # The second analysis clones them; its codegen asks for no more (a
-        # read it cannot give a Series is refused).
-        clones = needed
+        # Only uncloned functions ask, so the set grows each time and the
+        # loop ends by the time every function that reads a flag at an
+        # offset is cloned.
+        if needed <= clones:
+            raise AssertionError("a cloned function asked for session clones again")
+        clones |= needed
         del ast, ctx, gen, cpp
-    raise AssertionError("the second analysis asked for more session clones")
 
 
 def transpile(pine_source: str, *, check_support: bool = True, filename: str = "<input>") -> str:
@@ -112,10 +116,10 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
     """Transpile like :func:`transpile`, plus the host-UI input manifest.
 
     Runs the pipeline (Lexer -> Parser -> support check -> Analyzer ->
-    CodeGen.generate) once, twice when the C++ holds a function's
-    ``session.<flag>[k]`` read (see ``_generate``), and returns the generated
-    C++ alongside the data the cloud Studio needs to auto-build a backtest
-    "override params" form:
+    CodeGen.generate) once, again while the C++ holds a
+    ``session.<flag>[k]`` read of a function not yet cloned for it (see
+    ``_generate``), and returns the generated C++ alongside the data the
+    cloud Studio needs to auto-build a backtest "override params" form:
 
     - ``cpp``: the generated C++ source (identical to :func:`transpile`).
     - ``inputs``: a list of ``InputDef`` dicts (one per top-level

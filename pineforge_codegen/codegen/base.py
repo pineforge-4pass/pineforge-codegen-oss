@@ -3867,8 +3867,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     def _settle_session_reads(self, cpp: str) -> None:
         """Refuse the ``session.<flag>[k]`` reads the C++ emits with no
         history, or, for a function this analysis did not clone
-        (``session_uncloned``, unless ``session_clones_final``), ask for its
-        clones (``session_functions_needing_clones``).
+        (``session_uncloned``), ask for its clones
+        (``session_functions_needing_clones``).
 
         Both follow the emitted code, not the rendered reads: a call can render
         an argument and leave it out of the C++ (``color.from_gradient``'s
@@ -3881,7 +3881,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         pattern = re.compile(r"(?<![\w.])(" + "|".join(map(
             re.escape, sorted(self._refused_session_reads, key=len, reverse=True))) + r")\b")
         emitted = set(pattern.findall(cpp_code_only(cpp)))
-        final = getattr(self.ctx, "session_clones_final", True)
         # One error per read, the refusal rendered first (a read can be
         # rendered on the chart and in a request.security evaluator).
         refused: dict[tuple[int, int], Diagnostic] = {}
@@ -3889,7 +3888,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for name, (_read, where, message, uncloned) in self._refused_session_reads.items():
             if name not in emitted:
                 continue
-            if uncloned is not None and not final:
+            if uncloned is not None:
                 needing.add(uncloned)
                 continue
             diagnostic = self._codegen_error_diagnostic(where, message)

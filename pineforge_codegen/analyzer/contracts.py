@@ -283,11 +283,9 @@ class AnalyzerContext:
     # refuses a session.<flag>[k] it emits in one of them.
     session_history_unsafe: dict = field(default_factory=dict)
     # Functions that read a flag at an offset this analysis did not clone:
-    # no per-call Series. Unless ``session_clones_final``, a read of theirs
-    # the C++ holds asks pineforge_codegen._generate to clone them; else it
-    # is refused.
+    # no per-call Series. A read of theirs the C++ holds asks
+    # pineforge_codegen._generate to clone them.
     session_uncloned: frozenset = frozenset()
-    session_clones_final: bool = True
     # (func_name, cs_idx) -> {orig_member_name: cloned_member_name}. Populated by
     # the analyzer ONLY for clones whose default ``{base}_cs{cs_idx}`` name would
     # collide with a clone minted through another enclosing function; lets codegen
