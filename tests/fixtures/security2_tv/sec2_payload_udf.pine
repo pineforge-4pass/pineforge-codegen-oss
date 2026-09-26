@@ -1,0 +1,19 @@
+//@version=6
+// User functions and TA calls under builtin calls in a request.security
+// payload: each must read the requested bar.
+strategy("PF sec2 payload udf", overlay = true)
+f() => close - open
+method g(float x) => x + open
+k(src) => nz(src[1]) + nz(f())
+a1 = request.security(syminfo.tickerid, "60", nz(f()))
+a2 = request.security(syminfo.tickerid, "60", math.abs(f()))
+a3 = request.security(syminfo.tickerid, "60", close.g())
+a4 = request.security(syminfo.tickerid, "60", nz(ta.sma(close, 3)))
+a5 = request.security(syminfo.tickerid, "60", k(close))
+a6 = request.security(syminfo.tickerid, "60", na(f()) ? -1.0 : f() * 2)
+s(x) => na(x) ? "na" : str.tostring(x)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(a1) + "|" + s(a2) + "|" + s(a3) + "|" + s(a4) + "|" + s(a5) + "|" + s(a6))

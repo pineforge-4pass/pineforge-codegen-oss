@@ -1,0 +1,18 @@
+//@version=6
+// A request.security helper returning a mixed [bool, float, int, bool] tuple,
+// with gaps off and on: gaps_on reads na on every chart bar that completes no
+// requested bar, which shows what a bool element holds then.
+strategy("PF sec2 mixed tuple", overlay = true)
+f_mix() =>
+    up = close > open
+    rng = high - low
+    [up, rng, time, rng > ta.sma(rng, 5)]
+[b1, r1, t1, w1] = request.security(syminfo.tickerid, "60", f_mix())
+[b2, r2, t2, w2] = request.security(syminfo.tickerid, "60", f_mix(), gaps = barmerge.gaps_on)
+s(x) => na(x) ? "na" : str.tostring(x)
+tb(x) => x ? "T" : "F"
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = tb(b1) + "|" + s(r1) + "|" + s(t1) + "|" + tb(w1) + "|" + tb(b2) + "|" + s(r2) + "|" + s(t2) + "|" + tb(w2))
