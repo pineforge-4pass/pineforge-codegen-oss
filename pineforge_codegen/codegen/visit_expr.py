@@ -1309,6 +1309,32 @@ class ExprVisitor:
                 f"else {member}.update(_hv); "
                 f"return {member}[{idx_int}]; }}())"
             )
+        # History on an operator expression (``(a > b)[1]``) reads the value
+        # the expression had k bars ago: its prepass-registered synthetic
+        # Series (``_is_compound_history_object``) is pushed once per
+        # evaluation, like the inline call results above.
+        compound_member = (
+            self._inline_history_member_by_key.get(
+                ("hist_call", id(node), self._current_instance_name)
+            )
+            if isinstance(node.object, (BinOp, UnaryOp, Ternary))
+            else None
+        )
+        if compound_member is not None:
+            cpp_t = self._infer_type(node.object)
+            if cpp_t in ("double", "int", "int64_t", "bool"):
+                inner = self._visit_expr(node.object)
+                idx_int = self._coerce_int_slot(idx, node.index, "int")
+                if (idx_int == idx
+                        and not self._emitted_value_is_double(node.index)):
+                    idx_int = pine_index_int_cast(idx)
+                return (
+                    f"([&]() -> {cpp_t} {{ "
+                    f"{cpp_t} _hv = ({inner}); "
+                    f"if (history_advances_new_bar()) {compound_member}.push(_hv); "
+                    f"else {compound_member}.update(_hv); "
+                    f"return {compound_member}[{idx_int}]; }}())"
+                )
         obj = self._visit_expr(node.object)
         # If subscripting a non-series variable (e.g., function parameter),
         # src[0] → src (current value), src[N>0] → src (can't access history)

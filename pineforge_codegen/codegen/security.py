@@ -1359,8 +1359,11 @@ class SecurityEmitter:
                 return
             if (
                 isinstance(n, Subscript)
-                and isinstance(n.object, FuncCall)
-                and self._get_ta_site(n.object) is None
+                and (
+                    (isinstance(n.object, FuncCall)
+                     and self._get_ta_site(n.object) is None)
+                    or self._is_compound_history_object(n.object)
+                )
             ):
                 add(n)
             if isinstance(n, (list, tuple)):
@@ -3526,8 +3529,13 @@ class SecurityEmitter:
                     resolving.remove(expr_node.object.name)
                     return resolved
             if (
-                isinstance(expr_node.object, FuncCall)
-                and self._get_ta_site(expr_node.object) is None
+                (isinstance(expr_node.object, FuncCall)
+                 and self._get_ta_site(expr_node.object) is None)
+                # ``(close > ta.ema(close, n))[1]``: history of an operator
+                # expression on the requested clock, one value per completed
+                # requested bar, like a helper call result.
+                or (self._is_compound_history_object(expr_node.object)
+                    and (sec_id, id(expr_node)) in self._security_expr_hist_by_node)
             ):
                 meta = self._security_expr_hist_by_node.get((sec_id, id(expr_node)))
                 hist = meta["name"] if meta else f"_sec{sec_id}_expr_hist_missing"
