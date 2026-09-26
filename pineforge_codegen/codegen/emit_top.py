@@ -1389,6 +1389,44 @@ class TopLevelEmitter:
             push_expr = self._STRAT_SERIES_PUSH.get(member, "0")
             self._emit_history_series_write(lines, "        ", svar, push_expr)
 
+        # b0. Evaluate static global inputs once, BEFORE the first-bar ``var``
+        #     latch below: a ``var`` array / matrix / map / UDT initializer
+        #     reads input members (``array.new_bool(gridLines, false)``); built
+        #     first, it read their zero and sized an empty array. TradingView
+        #     requires constant input defaults, so the inputs read nothing the
+        #     latch builds.
+        static_vars = []
+        for stmt in self.ctx.ast.body:
+            if isinstance(stmt, VarDecl):
+                is_input = isinstance(stmt.value, FuncCall) and self._is_input_call(stmt.value)
+                if is_input:
+                    func_name_i, namespace_i = self._resolve_callee(stmt.value.callee)
+                    is_static_global_input = (
+                        stmt.name in self._global_member_vars
+                        and not self._is_source_input(stmt.value)
+                        and stmt.name not in self._array_vars
+                        and stmt.name not in getattr(self, "_matrix_specs", {})
+                        and stmt.name not in getattr(self, "_map_vars", {})
+                        and not stmt.is_var
+                        and not stmt.is_varip
+                    )
+                    if is_static_global_input:
+                        safe = self._safe_name(stmt.name)
+                        default = self._get_input_default(stmt.value)
+                        default_cpp = self._visit_expr(default) if default is not None else "0"
+                        title = self._get_input_title(stmt.value, var_name=stmt.name)
+                        getter = self._input_type_to_getter(func_name_i, namespace_i)
+                        default_cpp = self._coerce_string_input_default(getter, default_cpp)
+                        cpp_val = f'{getter}({self._input_key_literal(title)}, {default_cpp})'
+                        static_vars.append(f"{safe} = {cpp_val};")
+
+        if static_vars:
+            lines.append("        if (!_inputs_initialized_) {")
+            for var_expr in static_vars:
+                lines.append(f"            {var_expr}")
+            lines.append("            _inputs_initialized_ = true;")
+            lines.append("        }")
+
         # b. Var init / carry-forward
         if self.ctx.var_members:
             lines.append("        if (!_var_initialized) {")
@@ -1556,39 +1594,6 @@ class TopLevelEmitter:
 
         # c. Push non-var series (they start fresh each bar with a push)
         # (actual push happens in visit_VarDecl when the decl is visited)
-
-        # c3. Evaluate static global inputs and variables once
-        static_vars = []
-        for stmt in self.ctx.ast.body:
-            if isinstance(stmt, VarDecl):
-                is_input = isinstance(stmt.value, FuncCall) and self._is_input_call(stmt.value)
-                if is_input:
-                    func_name_i, namespace_i = self._resolve_callee(stmt.value.callee)
-                    is_static_global_input = (
-                        stmt.name in self._global_member_vars
-                        and not self._is_source_input(stmt.value)
-                        and stmt.name not in self._array_vars
-                        and stmt.name not in getattr(self, "_matrix_specs", {})
-                        and stmt.name not in getattr(self, "_map_vars", {})
-                        and not stmt.is_var
-                        and not stmt.is_varip
-                    )
-                    if is_static_global_input:
-                        safe = self._safe_name(stmt.name)
-                        default = self._get_input_default(stmt.value)
-                        default_cpp = self._visit_expr(default) if default is not None else "0"
-                        title = self._get_input_title(stmt.value, var_name=stmt.name)
-                        getter = self._input_type_to_getter(func_name_i, namespace_i)
-                        default_cpp = self._coerce_string_input_default(getter, default_cpp)
-                        cpp_val = f'{getter}({self._input_key_literal(title)}, {default_cpp})'
-                        static_vars.append(f"{safe} = {cpp_val};")
-
-        if static_vars:
-            lines.append("        if (!_inputs_initialized_) {")
-            for var_expr in static_vars:
-                lines.append(f"            {var_expr}")
-            lines.append("            _inputs_initialized_ = true;")
-            lines.append("        }")
 
         # c2. First-bar TA resize: rebuild any TA object whose ctor args come
         # from input-backed variables so strategy_set_input() actually changes
