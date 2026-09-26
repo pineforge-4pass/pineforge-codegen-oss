@@ -199,6 +199,24 @@ RUNTIME_REGISTER_SECURITY_EVAL_FN = "register_security_eval"
 # higher-or-equal TF requests with a precise diagnostic.
 RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN = "register_security_lower_tf_eval"
 
+# TradingView's Pine v6 ``strategy()`` defaults for the three parameters whose
+# default it changed on 2026-09-24: an omitted ``initial_capital`` is 100000,
+# an omitted ``default_qty_type`` is ``strategy.percent_of_equity``, and an
+# omitted ``default_qty_value`` is 100 whatever the quantity type (100
+# contracts under ``strategy.fixed``, 100 of the account currency under
+# ``strategy.cash``). Pine v5 kept 1000000 / ``strategy.fixed`` / 1, which are
+# still the source host's own ``PineStrategyConfig`` defaults, so the
+# constructor declares these three whenever a script omits them (the analyzer
+# admits Pine v6 only). Every other ``strategy()`` parameter the lane probed --
+# currency, commission, slippage, margin, pyramiding, process_orders_on_close,
+# close_entries_rule, use_bar_magnifier -- kept its default, which stays the
+# host's. Pinned by TradingView tapes (``tests/fixtures/strategy_defaults``).
+PINE_V6_STRATEGY_DEFAULTS = {
+    "initial_capital": 100000.0,
+    "default_qty_type": "strategy.percent_of_equity",
+    "default_qty_value": 100.0,
+}
+
 
 # ---------------------------------------------------------------------------
 # TA dispatch tables

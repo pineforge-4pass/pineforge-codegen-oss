@@ -95,6 +95,7 @@ from .tables import (
     TA_CHART_PREV_CLOSE_ARG,
     DRAWING_TYPE_TO_CPP,
     PINE_TYPE_TO_CPP,
+    PINE_V6_STRATEGY_DEFAULTS,
     RUNTIME_REGISTER_SECURITY_EVAL_FN,
     RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN,
 )
@@ -1130,8 +1131,15 @@ class TopLevelEmitter:
         if sp.get("calc_on_order_fills") is True:
             ctor_body.append("        cfg.calc_on_order_fills = true;")
 
-        if "initial_capital" in sp and isinstance(sp["initial_capital"], (int, float)):
-            ctor_body.append(f"        cfg.initial_capital = {float(sp['initial_capital'])};")
+        # An omitted initial_capital / default_qty_type / default_qty_value is
+        # TradingView's Pine v6 default, not the host's (see
+        # PINE_V6_STRATEGY_DEFAULTS); a declared argument is emitted as before.
+        def declared_or_v6_default(key: str):
+            return sp[key] if key in sp else PINE_V6_STRATEGY_DEFAULTS[key]
+
+        initial_capital = declared_or_v6_default("initial_capital")
+        if isinstance(initial_capital, (int, float)):
+            ctor_body.append(f"        cfg.initial_capital = {float(initial_capital)};")
 
         # default_qty_type: strategy.fixed / strategy.percent_of_equity / strategy.cash
         qty_type_map = {
@@ -1139,14 +1147,15 @@ class TopLevelEmitter:
             "strategy.percent_of_equity": "QtyType::PERCENT_OF_EQUITY",
             "strategy.cash": "QtyType::CASH",
         }
-        qty_type = sp.get("default_qty_type")
+        qty_type = declared_or_v6_default("default_qty_type")
         if qty_type in qty_type_map:
             ctor_body.append(
                 f"        cfg.default_qty_type = static_cast<int>({qty_type_map[qty_type]});"
             )
 
-        if "default_qty_value" in sp and isinstance(sp["default_qty_value"], (int, float)):
-            ctor_body.append(f"        cfg.default_qty_value = {float(sp['default_qty_value'])};")
+        qty_value = declared_or_v6_default("default_qty_value")
+        if isinstance(qty_value, (int, float)):
+            ctor_body.append(f"        cfg.default_qty_value = {float(qty_value)};")
 
         if "pyramiding" in sp and isinstance(sp["pyramiding"], int):
             ctor_body.append(f"        cfg.pyramiding = {sp['pyramiding']};")

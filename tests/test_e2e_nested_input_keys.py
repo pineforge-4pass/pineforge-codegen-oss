@@ -39,7 +39,12 @@ from tests._e2e import (
 )
 
 
-HEADER = '//@version=6\nstrategy("e2e-c5-nested-input-keys", overlay=true)\n'
+# The sizing is declared so that the comparison with the PRE_C5 build below is
+# one of input keys alone: PRE_C5 left an omitted initial_capital /
+# default_qty_type / default_qty_value to the host's defaults, which are not
+# TradingView's Pine v6 defaults (lane TV-DEFAULTS, test_e2e_strategy_defaults).
+HEADER = ('//@version=6\nstrategy("e2e-c5-nested-input-keys", overlay=true, initial_capital=1000000, '
+          'default_qty_type=strategy.fixed, default_qty_value=1)\n')
 
 
 def _long_on_cross(a: str, b: str) -> str:

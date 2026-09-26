@@ -851,7 +851,13 @@ def test_scripts_without_a_read_keep_their_cpp(place: str, tmp_path: Path) -> No
     if legacy is None:
         pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
     pine = tmp_path / "strategy.pine"
-    pine.write_text('//@version=6\nstrategy("session history", overlay=true)\n' + KEPT[place]
+    # The sizing is declared so that the comparison is one of session reads
+    # alone: 7a39cb3 left an omitted initial_capital / default_qty_type /
+    # default_qty_value to the host's defaults, which are not TradingView's
+    # Pine v6 defaults (lane TV-DEFAULTS, test_e2e_strategy_defaults).
+    pine.write_text('//@version=6\nstrategy("session history", overlay=true, '
+                    'initial_capital=1000000, default_qty_type=strategy.fixed, '
+                    'default_qty_value=1)\n' + KEPT[place]
                     + 'if x\n    strategy.entry("L", strategy.long)\n', encoding="utf-8")
     now, before = transpile_json(pine), transpile_json(pine, legacy)
     assert now["ok"] and before["ok"], (now["diagnostics"], before["diagnostics"])

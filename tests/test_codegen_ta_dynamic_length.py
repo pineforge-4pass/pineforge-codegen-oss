@@ -350,8 +350,12 @@ def test_other_series_lengths_stay_refused(call: str) -> None:
         transpile(src)
 
 
+# The sizing is declared so that the comparison with 7a39cb3 is one of TA
+# lengths alone: that build left an omitted initial_capital /
+# default_qty_type / default_qty_value to the host's defaults, which are not
+# TradingView's Pine v6 defaults (lane TV-DEFAULTS, test_e2e_strategy_defaults).
 _CONSTANT_AND_INPUT = """//@version=6
-strategy("constant and input lengths")
+strategy("constant and input lengths", initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1)
 len = input.int(14, "Length")
 fast = len * 2 - 1
 up = ta.crossover(close, ta.sma(close, 9))
