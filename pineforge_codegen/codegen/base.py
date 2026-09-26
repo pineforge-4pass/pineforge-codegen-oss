@@ -32,7 +32,8 @@ from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from ..limits import TimeBudget
 from ..pine_spelling import (
-    input_call_spans, pine_string_literal, spell_input_call, sub_identifiers,
+    blank_string_literals, input_call_spans, pine_string_literal,
+    spell_input_call, sub_identifiers,
 )
 
 
@@ -3042,7 +3043,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     # tree: Pine grouping ``(a - b) / (c - d)`` degrades to ``a - b / c - d``
     # under C++ precedence. See ``_runtime_ctor_arg_for_reset`` (the string is
     # re-parsed and lowered through the expression visitor).
-    _ATOMIC_ARITH_NODES = (NumberLiteral, Identifier, MemberAccess, FuncCall)
+    _ATOMIC_ARITH_NODES = (NumberLiteral, StringLiteral, Identifier, MemberAccess, FuncCall)
 
     def _arith_operand_to_str(self, node, _udf_stack: frozenset = frozenset(),
                               _depth: int = 0) -> str | None:
@@ -3072,6 +3073,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if isinstance(v, float) and v == int(v):
                 return str(int(v))
             return str(v)
+        if isinstance(node, StringLiteral):
+            # ``len = mode == "Fast" ? 8 : 21``: a length chosen by comparing
+            # an input.string with its options.
+            return pine_string_literal(node.value)
         if isinstance(node, Identifier):
             return node.name
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
@@ -3190,7 +3195,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if expr_str is not None and self._expr_is_stable(node.value):
                 import re as _re
                 tokens = set(_re.findall(r"[A-Za-z_][A-Za-z_0-9]*",
-                                         self._inline_inputs_masked(expr_str)))
+                                         blank_string_literals(
+                                             self._inline_inputs_masked(expr_str))))
                 refs_input = self._refs_input(expr_str)
                 refs_derived = any(t in self._derived_input_expr for t in tokens)
                 # The stability classifier already proved this expression is a
@@ -4953,7 +4959,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if masked != expr:
             return True
         return any(t in self._input_backed_vars
-                   for t in re.findall(r"[A-Za-z_][A-Za-z_0-9]*", expr))
+                   for t in re.findall(r"[A-Za-z_][A-Za-z_0-9]*",
+                                       blank_string_literals(expr)))
 
     def _fold_inline_input_defaults(self, expr: str) -> str | None:
         """``expr`` const-folded with each inline input call read as its
@@ -5234,7 +5241,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # An inline input call is one leaf of the expression; its title string
         # and keyword names are not identifiers the gate below should judge.
-        tokens = set(ident_re.findall(self._inline_inputs_masked(expanded)))
+        tokens = set(ident_re.findall(
+            blank_string_literals(self._inline_inputs_masked(expanded))))
         if any(
             self._known_var_is_lexically_shadowed(name)
             for name in tokens
