@@ -247,6 +247,32 @@ def ok(outcomes: dict[str, Outcome], key: str) -> Outcome:
     return outcome
 
 
+def chart_feed_head(engine_root: Path, base: Path, bars: int) -> Path:
+    """The first ``bars`` bars of the corpus 15m chart feed, under ``base``."""
+    full_feed = derive_chart_feed(engine_root, base / "full_chart.csv")
+    feed = base / "chart.csv"
+    with full_feed.open() as inp, feed.open("w") as out:
+        for _, line in zip(range(bars + 1), inp):
+            out.write(line)
+    return feed
+
+
+def assert_same_runs(subject: Outcome, reference: Outcome) -> str:
+    """Fail unless ``subject`` traces bar for bar and trades byte for byte
+    like ``reference`` in every run (defaults and overrides); returns a
+    summary of the subject's runs."""
+    for tag in subject.trades:
+        if subject.traces:
+            compared, mismatched, first = per_bar_mismatches(
+                subject.traces[tag], reference.traces[tag], ("shape", "reference"))
+            assert compared > 0, f"[{tag}] no trace records"
+            assert mismatched == 0, f"[{tag}] {first}"
+        assert subject.trades[tag] == reference.trades[tag], (
+            f"[{tag}] shape {summary(subject.trades[tag])}, "
+            f"reference {summary(reference.trades[tag])}")
+    return "; ".join(f"{tag} {summary(blob)}" for tag, blob in subject.trades.items())
+
+
 def same(a: float, b: float) -> bool:
     return (math.isnan(a) and math.isnan(b)) or a == b
 
