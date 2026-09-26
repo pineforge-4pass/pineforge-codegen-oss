@@ -58,6 +58,7 @@ def runs(tmp_path_factory):
                 out.write(line)
     outcomes = execute_all(engine, feed, base, {
         "int64": Build((FIXTURES / "int64_provenance.pine").read_text()),
+        "cast": Build((FIXTURES / "int64_cast.pine").read_text()),
         "env": Build((FIXTURES / "env_facts.pine").read_text()),
     })
     return engine, feed, base, outcomes
@@ -75,6 +76,21 @@ def test_epoch_ints_read_like_the_tape(runs):
     engine_ids = sorted(t["entry_id"] for t in closed_trades(engine, base / "int64", feed))
     assert engine_ids == tape
     print("int64 provenance:", len(tape), "entry ids equal TradingView's Signals")
+
+
+def test_int_cast_of_an_epoch_keeps_it(runs):
+    # int(time), int(time_close), int(timestamp(...)) and int(t) over an int
+    # parameter fed time: Pine int holds the epoch, where the cast used to be
+    # a 32-bit (int) narrowing.
+    engine, feed, base, outcomes = runs
+    ok(outcomes, "cast")
+    tape = _entry_signals("int64_cast_tv_trades.csv")
+    assert tape == sorted([
+        "it=1743468300000|first=1743466500000",
+        "ts=1743468300000|fid=1743468300000",
+    ])
+    engine_ids = sorted(t["entry_id"] for t in closed_trades(engine, base / "cast", feed))
+    assert engine_ids == tape
 
 
 def test_chart_type_reads_spell_true(runs):

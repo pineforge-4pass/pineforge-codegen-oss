@@ -2087,8 +2087,16 @@ class CallVisitor:
         # Type cast functions: int(x), float(x), bool(x), string(x)
         if func_name == "int" and namespace is None and node.args:
             # Pine int(na) → na (int form). Evaluate once, propagate na via
-            # the engine's int sentinel instead of collapsing NaN to 0.
+            # the engine's int sentinel instead of collapsing NaN to 0. Pine
+            # int is 64-bit: int(time) keeps the epoch, so a wide argument
+            # (``_wide_int_provenance``) casts to int64_t.
             x = self._visit_expr(node.args[0])
+            owner = self._func_info_map.get(
+                getattr(self, "_active_func_name", "") or "")
+            if self._expr_returns_wide_int(
+                    node.args[0], owner, set(),
+                    getattr(self, "_active_call_site_idx", None)):
+                return na_preserving_int_cast(x, "int64_t")
             return na_preserving_int_cast(x)
         if func_name == "float" and namespace is None and node.args:
             return f"(double)({self._visit_expr(node.args[0])})"
