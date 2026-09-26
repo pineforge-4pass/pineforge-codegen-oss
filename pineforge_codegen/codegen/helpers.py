@@ -4,8 +4,8 @@ Mixin holding stateless / near-stateless name-mangling and AST-walk
 helpers used everywhere in the codegen. Lives here so the heavier
 visitor / emitter mixins can depend on it without owning its
 implementation. Keep this module free of imports from any other
-``codegen/*`` submodule so it stays at the bottom of the dependency
-graph.
+``codegen/*`` submodule (the generated data module ``host_members``
+aside) so it stays at the bottom of the dependency graph.
 
 Mixin contract: ``NamingHelper`` reads at most one piece of host state,
 ``self._all_member_names`` (used by ``_func_safe_name``). The class
@@ -23,6 +23,7 @@ from ..ast_nodes import (
 from ..limits import iter_ast_nodes
 from ..signatures import BUILTIN_VARIABLES
 from ..symbols import PineType
+from .host_members import HOST_MEMBER_NAMES
 
 
 # Integer C++ types an na-capable ``double`` expression may be narrowed into.
@@ -235,9 +236,14 @@ def session_history_member(flag: str) -> str:
     return f"_pf_session_hist_{flag}"
 
 
+# HOST_MEMBER_NAMES (codegen/host_members.py, derived by
+# scripts/gen_host_members.py from the emitter and the host header): the host
+# members the generated class reads or writes unqualified. A script identifier
+# with one of these names would hide the member (``session_isfirstbar_ =
+# close > open`` became the value of ``session.isfirstbar``).
 CPP_RESERVED = set(
     LEGACY_CPP_RESERVED | CPP_KEYWORDS | CPP_CONTEXTUAL |
-    CPP_STANDARD_MACROS | CPP_EMITTER_NAMES
+    CPP_STANDARD_MACROS | CPP_EMITTER_NAMES | HOST_MEMBER_NAMES
     | {session_history_member(flag) for flag in SESSION_FLAG_MEMBERS}
 )
 
