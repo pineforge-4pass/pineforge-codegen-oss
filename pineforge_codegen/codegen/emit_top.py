@@ -1333,17 +1333,18 @@ class TopLevelEmitter:
         #     members (base.py section 6) but — unlike user series vars (pushed at
         #     their assignment) and bar fields (pushed above) — have no push site,
         #     so ``[n]`` would read an unfed buffer (the na sentinel) on every bar.
-        #     Push each from its scalar lowering. A builtin whose lowering is a
-        #     self-referential call (e.g. ``time_close`` -> ``time_close()``) is
-        #     skipped — the call would resolve to the shadowing Series member.
+        #     Push each from its scalar lowering. ``time_close``'s Series
+        #     member is escaped (``_time_close_``) so its ``time_close()``
+        #     lowering still calls the host; a lowering that would call its
+        #     own member is skipped.
         from .tables import BAR_BUILTINS
         for _bname in sorted(self.ctx.series_vars):
             if _bname in self._var_names:
                 continue
             _bexpr = BAR_BUILTINS.get(_bname)
-            if _bexpr is None or _bexpr.strip().startswith(f"{_bname}("):
-                continue
             _bsafe = self._safe_name(_bname)
+            if _bexpr is None or _bexpr.strip().startswith(f"{_bsafe}("):
+                continue
             self._emit_history_series_write(lines, "        ", _bsafe, _bexpr)
 
         # a2. Push strategy series

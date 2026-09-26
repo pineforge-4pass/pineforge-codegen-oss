@@ -155,8 +155,12 @@ SECURITY_BAR_FIELD_TYPES = {
     "close": "double",
     "volume": "double",
     "time": "int64_t",
+    "time_close": "int64_t",
 }
-SECURITY_BAR_FIELDS = frozenset(SECURITY_BAR_FIELD_EXPRS)
+# ``time_close`` is the requested bar's close time, which depends on the
+# requested timeframe: the evaluator renders it (security.py
+# ``_security_bar_field_expr``) instead of a fixed ``bar.*`` read.
+SECURITY_BAR_FIELDS = frozenset(SECURITY_BAR_FIELD_EXPRS) | {"time_close"}
 
 # Backwards-compatible name for consumers that only need the OHLCV subset.
 SECURITY_OHLC_BAR_FIELDS = frozenset({"open", "high", "low", "close", "volume"})
