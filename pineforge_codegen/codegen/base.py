@@ -30,7 +30,7 @@ from ..analyzer import (
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
-from ..limits import TimeBudget
+from ..limits import TimeBudget, syntax_children
 from ..pine_spelling import (
     blank_string_literals, input_call_spans, pine_string_literal,
     spell_input_call, sub_identifiers,
@@ -108,7 +108,10 @@ TA_TUPLE_RESULT_TYPES = {
 
 # CPP_RESERVED + the NamingHelper mixin are pulled in from helpers.py so the
 # small naming/walk utilities can be shared with future visitor mixins.
-from .helpers import CPP_RESERVED, NamingHelper, na_preserving_int_cast, pine_truth_cast
+from .helpers import (
+    CPP_RESERVED, SESSION_FLAG_MEMBERS, NamingHelper, na_preserving_int_cast,
+    pine_truth_cast, session_history_member,
+)
 from .constant_fold import fold_numeric_expression
 from .session_market import SESSION_MARKET_CPP, SESSION_MARKET_MEMBER
 
@@ -762,6 +765,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 self._fixnan_site_map[id(_fsite.node)] = _fsite
         # Track strategy series vars (e.g., strategy.closedtrades[1])
         self._strategy_series_vars: set[str] = set()
+        # session.* flags read at an offset at the top level (their per-bar
+        # Series): _prescan_session_history.
+        self._session_history_flags: set[str] = set()
         # Track global-scope non-var declarations (emitted as class members)
         self._global_member_vars: set[str] = set()
         for name, _ in ctx.global_var_decls:
@@ -3647,6 +3653,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     "hist_call", (id(node),), self._infer_type(node.object), owner
                 )
             elif (isinstance(node, Subscript)
+                    and self._is_session_flag(node.object)):
+                # A function body's read is its call's history; a top-level
+                # read uses the flag's per-bar Series (_prescan_session_history).
+                if owner is not None:
+                    register("hist_call", (id(node),), "bool", owner)
+            elif (isinstance(node, Subscript)
                     and self._is_compound_history_object(node.object)):
                 register(
                     "hist_call", (id(node),), self._infer_type(node.object), owner
@@ -3772,16 +3784,66 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         )
 
     def _is_compound_history_object(self, node) -> bool:
-        """Whether ``node[k]`` is history on an operator expression.
+        """Whether ``node[k]`` is history on an operator expression or a
+        ``session.*`` flag.
 
         ``(a > b)[1]``, ``(x - y)[2]`` and ``(c ? p : q)[1]`` read the
         expression's value k bars ago; its C++ scalar cannot be indexed, so
         the subscript owns a synthetic ``_hist_call_*`` Series exactly like an
         inline call result. Numeric and bool expressions only: other families
-        keep their established lowering.
+        keep their established lowering. A ``session.*`` flag's C++ value
+        cannot be indexed either: a request.security payload keeps its history
+        on the requested clock like an operator expression's (security.py), a
+        function body its call's (``_prepare_inline_history_members``), and a
+        top-level read reads the flag's per-bar Series
+        (``_prescan_session_history``).
         """
+        if self._is_session_flag(node):
+            return True
         return (isinstance(node, (BinOp, UnaryOp, Ternary))
                 and self._infer_type(node) in ("double", "int", "int64_t", "bool"))
+
+    @staticmethod
+    def _is_session_flag(node) -> bool:
+        """Whether ``node`` is a ``session.*`` boolean (``session.ismarket``)."""
+        return (isinstance(node, MemberAccess)
+                and isinstance(node.object, Identifier)
+                and node.object.name == "session"
+                and node.member in SESSION_FLAG_MEMBERS)
+
+    @staticmethod
+    def _session_history_member(flag: str) -> str:
+        """The per-bar Series of a ``session.*`` flag read at the top level."""
+        return session_history_member(flag)
+
+    def _prescan_session_history(self) -> None:
+        """The ``session.*`` flags the script reads at an offset at its top
+        level, each of which gets one Series pushed on every chart bar.
+
+        TradingView reads a flag's history by bars at the top level of the
+        script, in a block and on a lazy operand as well, and by calls inside a
+        function (``tests/test_e2e_session_history.py``): function bodies
+        (``_prepare_inline_history_members``) and ``request.security`` payloads
+        (the requested clock, security.py) keep their own history instead.
+        """
+        flags: set[str] = set()
+        stack = list(self.ctx.ast.body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (FuncDef, MethodDef)):
+                continue
+            if isinstance(node, Subscript) and self._is_session_flag(node.object):
+                flags.add(node.object.member)
+            children = list(syntax_children(node))
+            if isinstance(node, FuncCall):
+                name, namespace = self._resolve_callee(node.callee)
+                if namespace == "request" and name in ("security", "security_lower_tf"):
+                    payload = [node.args[2]] if len(node.args) > 2 else []
+                    payload += [v for k, v in node.kwargs.items() if k == "expression"]
+                    children = [c for c in children
+                                if not any(c is p for p in payload)]
+            stack.extend(children)
+        self._session_history_flags = flags
 
     def _inline_history_member(self, kind: str, node: ASTNode,
                                arg_idx: int | None = None) -> str:
@@ -3949,6 +4011,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._prepare_udt_generated_names()
         # Pre-scan for strategy series vars
         self._prescan_strategy_series()
+        self._prescan_session_history()
         self._security_ohlc_hist_fields_by_sec: dict[int, set[str]] = {}
         # request.security TA call-sites read at a history offset (``ta.ema(...)[k>=1]``).
         # Maps sec_id -> set of TA call-site indices needing an HTF history Series.
@@ -4580,6 +4643,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 lines.append(f"    Series<int> {svar}{_mbb};")
             else:
                 lines.append(f"    Series<double> {svar}{_mbb};")
+
+        # 8. session.* flags read at an offset at the top level: one Series per
+        #    flag, pushed on every chart bar (emit_top.py).
+        for flag in sorted(self._session_history_flags):
+            lines.append(f"    Series<bool> {self._session_history_member(flag)}{_mbb};")
 
         # 8a. Synthetic temporary history.  Unlike the legacy function-local
         # static buffers, these members are value-copyable rollback state and

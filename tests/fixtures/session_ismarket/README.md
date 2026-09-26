@@ -109,3 +109,49 @@ lab tv --pine session_flags_probe.pine --slug cgim-flags-xauusd-1d \
 TradingView stamps each daily bar at 17:00 America/New_York, the break of the
 `1800-1700` session, and flags it in market and as its session day's first and
 last bar: a daily bar holds whole session days.
+
+## `cgs2-hist-aapl-15-*`: the flags read with a history offset (codegen lane CG-SESSION-2)
+
+One probe on NASDAQ:AAPL 15, 2025-03-03 .. 03-15 (US DST 03-09), without and
+with extended hours, exported on 2026-09-26 (UTC). Its Signal is three
+seven-bit groups in the flag order `M P Q F L f l` above -- `C` the flags on
+the bar, `H` the flags `[1]`, `T` the flags `[2]` -- then one bit each: `B`
+session.ispremarket[1] assigned in a block run on every third bar, `U`
+session.ispostmarket[1] read by a function called on odd bars, `Z`
+session.islastbar[1] on the lazy right side of an `and` reached on even bars,
+`K` session.isfirstbar[k] with k = 1 or 2 by bar, `D` session.ismarket[0], `W`
+session.ismarket[64]. The two `strategy.pine` files are one source.
+
+The regular tape is a `lab tv` export (`--no-note`: no campaign note):
+
+```sh
+lab tv --pine session_history_probe.pine --slug cgs2-hist-aapl-15-reg \
+  --symbol NASDAQ:AAPL --interval 15 --from 2025-03-03 --to 2025-03-15 \
+  --out <dir>/cgs2-hist-aapl-15-reg --no-note --json
+```
+
+`lab tv` asks TradingView for the regular session only, so the extended tape
+ran lane CG-ISMARKET's one-line copy of the WebSocket exporter (sha256
+`15d8afae63844c35481e94ba14000720a9e8f0f500d28c51bc2f8cb8189f4f06`, see
+`cgim-flags-aapl-60-*` above) with `CGIM_TV_SESSION=extended`; it writes no
+`meta.json`.
+
+```sh
+CGIM_TV_SESSION=extended node tv-ws-backtest-session.mjs --pine-dir <group> \
+  --write-into-dir --symbol NASDAQ:AAPL --interval 15 --from 2025-03-03 \
+  --to 2025-03-15 --concurrency 1
+```
+
+| tape | session | bars | tv_trades.csv sha256 | exported (UTC) |
+|---|---|---|---|---|
+| `cgs2-hist-aapl-15-reg` | regular | 260 | `d4f5ed467ea7ac82fc90e4c0e6cc125c70c47b11762e342d11f946e89cffc737` | 2026-09-26 09:25:49 |
+| `cgs2-hist-aapl-15-ext` | extended | 639 | `a6dcfe7eacbc5704c91eac765ab93e7115ceb49d16e5440e8a42e70a2d9952da` | 2026-09-26 09:26:24 |
+
+TradingView reads a flag's history by bars at the top level of a script: on
+all 899 bars `H` and `T` are the `C` of one and two bars back, `B`, `Z`, `K`,
+`D` and `W` the flag of the bar their offset names, and every read before the
+first bar is false. Inside a function it reads the function's calls: `U` is
+session.ispostmarket two bars back, on the function's previous call, which
+differs from the previous bar's flag on 7 extended-hours bars. The extended
+tape lacks one bar (2025-03-06 18:30 ET), which TradingView's data does not
+hold.

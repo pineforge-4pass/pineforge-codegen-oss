@@ -85,7 +85,7 @@ from __future__ import annotations
 import re
 
 from ..ast_nodes import (
-    ExprStmt, FuncCall, IfStmt, SwitchStmt, VarDecl,
+    ExprStmt, FuncCall, Identifier, IfStmt, MemberAccess, SwitchStmt, VarDecl,
 )
 from ..analyzer import FuncInfo
 from ..symbols import PineType, method_receiver_cpp_token
@@ -1400,6 +1400,15 @@ class TopLevelEmitter:
             member = svar.replace("_strat_", "")
             push_expr = self._STRAT_SERIES_PUSH.get(member, "0")
             self._emit_history_series_write(lines, "        ", svar, push_expr)
+
+        # a3. Push the session.* flags the top level reads at an offset: its
+        #     history is the chart bars', whether or not the read runs on this
+        #     bar (TradingView's tapes: tests/test_e2e_session_history.py).
+        for flag in sorted(self._session_history_flags):
+            value = self._visit_expr(MemberAccess(object=Identifier(name="session"),
+                                                  member=flag))
+            self._emit_history_series_write(
+                lines, "        ", self._session_history_member(flag), value)
 
         # b0. Evaluate static global inputs once, BEFORE the first-bar ``var``
         #     latch below: a ``var`` array / matrix / map / UDT initializer
