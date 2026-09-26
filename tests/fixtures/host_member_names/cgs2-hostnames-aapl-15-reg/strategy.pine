@@ -1,0 +1,30 @@
+// CG-SESSION-2: does TradingView accept script variables named like the
+// members PineForge's generated C++ reads on its engine host, and do the
+// built-ins keep their own values beside them? process_orders_on_close=true:
+// every bar reverses the position at its own close, so every trade's ENTRY is
+// one chart bar and the entry's Signal (its comment) carries, per pair, the
+// built-in the name used to hide and then the variable of that name:
+// "F" session.isfirstbar, session_isfirstbar_; "L" session.islastbar,
+// session_islastbar_; "B" barstate.isfirst, bar_index_; "M" minute(time),
+// "C" current_bar_; "Z" syminfo.timezone == "America/New_York", syminfo_.
+//@version=6
+strategy("CG-SESSION-2 host member names", overlay=true, initial_capital=1000000000,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=1,
+     commission_type=strategy.commission.percent, commission_value=0, slippage=0,
+     process_orders_on_close=true, margin_long=100, margin_short=100)
+
+bit(bool x) => x ? "1" : "0"
+session_isfirstbar_ = bar_index % 2 == 0
+session_islastbar_ = bar_index % 3 == 0
+bar_index_ = 7
+current_bar_ = bar_index % 4
+syminfo_ = 2.5
+flag = "F" + bit(session.isfirstbar) + bit(session_isfirstbar_)
+     + "L" + bit(session.islastbar) + bit(session_islastbar_)
+     + "B" + bit(barstate.isfirst) + str.tostring(bar_index_)
+     + "M" + str.tostring(minute(time)) + "C" + str.tostring(current_bar_)
+     + "Z" + bit(syminfo.timezone == "America/New_York") + str.tostring(syminfo_)
+if bar_index % 2 == 0
+    strategy.entry("L", strategy.long, comment=flag)
+else
+    strategy.entry("S", strategy.short, comment=flag)

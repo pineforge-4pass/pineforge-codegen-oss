@@ -12,14 +12,20 @@ variable, and ``time`` (``current_bar_.timestamp``) or ``syminfo.mintick``
 write, derived -- never written by hand -- by ``scripts/gen_host_members.py``
 from the emitter's string constants and clang's AST of the host header the
 emitted C++ includes; ``_safe_name`` renames a script identifier in it the way
-it renames one spelled like a C++ keyword. This module regenerates the set, and
-checks it against every host member a transpiled battery actually names.
+it renames one spelled like a C++ keyword. This module regenerates the set,
+checks it against every host member a transpiled battery actually names, and
+replays TradingView's tape of a probe using such names
+(``fixtures/host_member_names``).
 """
 
 from __future__ import annotations
 
+import csv
+import hashlib
 import importlib.util
+import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -28,8 +34,9 @@ import pytest
 from tests import _compile as compile_env
 from tests._e2e import (
     REPO_ROOT, Build, assert_same_runs, chart_feed_head, execute_all, ok,
-    skip_unless_e2e_env, transpile_json,
+    reference_codegen, skip_unless_e2e_env, transpile_json,
 )
+from tests.test_e2e_session_history import LEGACY, QUARTER, _replay, _utc_ms
 
 
 GENERATOR = REPO_ROOT / "scripts" / "gen_host_members.py"
@@ -257,3 +264,124 @@ def test_host_named_script_runs_like_its_reference(label: str, runs) -> None:
     one did not compile."""
     summary = assert_same_runs(ok(runs, f"{label}-host"), ok(runs, f"{label}-ref"))
     print(f"host member names, {label} probe: {summary} == neutral names")
+
+
+TAPE = Path(__file__).parent / "fixtures" / "host_member_names" / "cgs2-hostnames-aapl-15-reg"
+# The probe's Signal, pair by pair: the built-in a script variable named like
+# a host member used to hide, then that variable (strategy.pine's header).
+SIGNAL = re.compile(r"F([01])([01])L([01])([01])B([01])(\d+)M(\d+)C(\d+)Z([01])(.+)")
+TAPE_TRACE = {
+    "fb": "session.isfirstbar", "fbv": "session_isfirstbar_",
+    "lb": "session.islastbar", "lbv": "session_islastbar_",
+    "first": "barstate.isfirst", "biv": "bar_index_",
+    "minute": "minute(time)", "cbv": "current_bar_",
+    "tz": 'syminfo.timezone == "America/New_York"', "siv": "syminfo_",
+}
+# The names that kept the pre-lane build from compiling the probe.
+LOUD_IN_TAPE = {"current_bar_": "cb_v", "syminfo_": "si_v"}
+
+
+def read_host_tape() -> list[tuple[int, dict[str, float]]]:
+    """(the chart bar's open in UTC ms, TradingView's values by trace name)
+    per Entry row, in time order. The export renders times at UTC+8."""
+    with (TAPE / "tv_trades.csv").open(encoding="utf-8-sig") as fh:
+        rows = [row for row in csv.DictReader(fh) if row["Type"].startswith("Entry")]
+    return sorted(((_utc_ms(row["Date and time"], 8),
+                    dict(zip(TAPE_TRACE, map(float, SIGNAL.fullmatch(row["Signal"]).groups()))))
+                   for row in rows), key=lambda bar: bar[0])
+
+
+def _tape_probe(renames: dict[str, str] | None = None) -> str:
+    """The exported probe with a trace of every pair, a variable renamed per
+    ``renames``."""
+    source = (TAPE / "strategy.pine").read_text(encoding="utf-8") + "".join(
+        f"\n// @pf-trace {name}={expr}" for name, expr in TAPE_TRACE.items()) + "\n"
+    for old, new in (renames or {}).items():
+        source = re.sub(rf"\b{re.escape(old)}(?!\w)", new, source)
+    return source
+
+
+def test_tradingview_keeps_builtins_beside_host_named_variables() -> None:
+    """Needs no engine: the tape is its export byte for byte. TradingView
+    compiles the probe and, on its 260 NASDAQ:AAPL 15 bars, reads every
+    built-in beside the variable named like the host member PineForge read it
+    from: session.isfirstbar / islastbar flag the 10 session opens / closes,
+    barstate.isfirst the first bar, and each variable holds its own value."""
+    metrics = json.loads((TAPE / "metrics.json").read_text())
+    assert hashlib.sha256((TAPE / "tv_trades.csv").read_bytes()).hexdigest() \
+        == metrics["tvTradesCsvHash"]
+    assert hashlib.sha256((TAPE / "strategy.pine").read_bytes()).hexdigest() \
+        == metrics["sourceArtifactHash"]
+    assert metrics["wsProvenance"]["rangeProof"] == "covered"
+    tape = [values for _, values in read_host_tape()]
+    assert len(tape) == metrics["trades"] == 260
+
+    def column(name: str) -> list[float]:
+        return [values[name] for values in tape]
+
+    assert column("fbv") == [float(i % 2 == 0) for i in range(260)]
+    assert column("lbv") == [float(i % 3 == 0) for i in range(260)]
+    assert column("cbv") == [float(i % 4) for i in range(260)]
+    assert column("first") == [1.0] + [0.0] * 259
+    assert set(column("biv")) == {7.0} and set(column("siv")) == {2.5}
+    assert set(column("tz")) == {1.0}
+    assert sum(column("fb")) == sum(column("lb")) == 10
+    assert set(column("minute")) == {0.0, 15.0, 30.0, 45.0}
+
+
+@pytest.fixture(scope="module")
+def tape_replays(tmp_path_factory) -> dict:
+    """The probe replayed on the tape's bars, and with the pre-lane codegen
+    as exported and without its two loud names; an exception when a build
+    failed."""
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("host_member_names_tape")
+    stamps = [ts for ts, _ in read_host_tape()]
+    stamps.append(stamps[-1] + QUARTER)
+    jobs = {"now": (_tape_probe(), REPO_ROOT)}
+    legacy = reference_codegen(LEGACY)
+    if legacy is not None:
+        jobs["legacy"] = (_tape_probe(), legacy)
+        jobs["legacy-silent"] = (_tape_probe(LOUD_IN_TAPE), legacy)
+    results: dict = {}
+    for key, (source, codegen) in jobs.items():
+        try:
+            results[key] = _replay(engine, base / key, source, stamps, codegen)
+        except Exception as exc:  # judged by the test that needs it
+            results[key] = exc
+    return results
+
+
+def _tape_traced(replay, name: str) -> list[float]:
+    return [rec["value"] for rec in replay.traces if rec["name"] == name]
+
+
+def test_host_named_probe_reads_tradingviews_values(tape_replays) -> None:
+    """Every built-in and every host-named variable of the probe equals
+    TradingView's on all 260 bars."""
+    replay = tape_replays["now"]
+    if isinstance(replay, Exception):
+        pytest.fail(str(replay), pytrace=False)
+    tape = [values for _, values in read_host_tape()]
+    for name in TAPE_TRACE:
+        got = _tape_traced(replay, name)[:len(tape)]
+        want = [values[name] for values in tape]
+        assert got == want, (name, [i for i, (a, b) in enumerate(zip(got, want)) if a != b][:5])
+
+
+def test_pre_lane_build_read_the_variables(tape_replays) -> None:
+    """At 7a39cb3 the probe did not compile (``current_bar_`` and ``syminfo_``
+    hid the host's bar and symbol). Without those two names it compiled and
+    read session.isfirstbar, session.islastbar and barstate.isfirst from the
+    script's variables, off TradingView's values."""
+    if "legacy" not in tape_replays:
+        pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
+    legacy = tape_replays["legacy"]
+    assert isinstance(legacy, Exception) and "compile failed" in str(legacy)
+    silent = tape_replays["legacy-silent"]
+    if isinstance(silent, Exception):
+        pytest.fail(str(silent), pytrace=False)
+    tape = [values for _, values in read_host_tape()]
+    for builtin, variable in (("fb", "fbv"), ("lb", "lbv")):
+        assert _tape_traced(silent, builtin)[:len(tape)] == [v[variable] for v in tape], builtin
+    assert _tape_traced(silent, "first")[:len(tape)] == [0.0] * len(tape)

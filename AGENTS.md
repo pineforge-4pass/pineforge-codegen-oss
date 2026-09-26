@@ -657,8 +657,11 @@ used to become the value of `session.isfirstbar`, and one named
 `scripts/gen_host_members.py` derives it from clang's AST of the host header
 the emitted C++ includes and the identifiers the emitter's string constants
 spell, and `tests/test_host_member_names.py` regenerates it and checks it
-against every host member a transpiled battery names. Rerun the script after
-a lowering starts reading a host member or the engine's host changes.
+against every host member a transpiled battery names. TradingView accepts
+such names and keeps each built-in beside them: its NASDAQ:AAPL 15 tape
+`fixtures/host_member_names/cgs2-hostnames-aapl-15-reg` is replayed bar for
+bar. Rerun the script after a lowering starts reading a host member or the
+engine's host changes.
 - **Input limits.** `limits.py` turns a crash or a hang into a located
 `CompileError`; where TradingView documents a limit, ours is at least as
 large. 5 MiB of source (TradingView's 5MB compilation request), 512 levels
