@@ -155,3 +155,28 @@ session.ispostmarket two bars back, on the function's previous call, which
 differs from the previous bar's flag on 7 extended-hours bars. The extended
 tape lacks one bar (2025-03-06 18:30 ET), which TradingView's data does not
 hold.
+
+## `cgs2-flags-*-15`: sessions with two windows (codegen lane CG-SESSION-2)
+
+The every-flag probe of `cgim-flags-*` above (the same `strategy.pine`, sha256
+`78898de72eeff09ef33a75e40f94da2b8ec9fbc301264183ba048e2e5f130225`) on three
+15-minute charts whose regular session has two windows, 2025-03-03 .. 03-15,
+exported with `lab tv` on 2026-09-26 (UTC), `--no-note`:
+
+```sh
+lab tv --pine session_flags_probe.pine --slug <tape> --symbol <chart> \
+  --interval 15 --from 2025-03-03 --to 2025-03-15 --out <dir>/<tape> --no-note --json
+```
+
+| tape | chart | windows (exchange time) | bars | flags | tv_trades.csv sha256 | exported (UTC) |
+|---|---|---|---|---|---|---|
+| `cgs2-flags-tse7203-15` | TSE:7203 15 | 09:00-11:30, 12:30-15:30 Asia/Tokyo | 230 | all `M1P0Q0` | `d882fbe5d556d3c3fe5d2884adde2e28113a57c0b90d03072bf31185dca2ab9e` | 2026-09-26 09:27:40 |
+| `cgs2-flags-hkex700-15` | HKEX:700 15 | 09:30-12:00, 13:00-16:00 Asia/Hong_Kong | 220 | all `M1P0Q0` | `45dd27e0365a9d4e942a478b457e3eb741fe912b2dba819bae5d8ea2c5d9dd36` | 2026-09-26 09:28:07 |
+| `cgs2-flags-zc1-15` | CBOT:ZC1! 15 | 19:00-07:45, 08:30-13:20 America/Chicago | 710 | all `M1P0Q0` | `7a69b0f608ad98aa0055cf16fa201505792dfa1e7dbd2288cffc019a9f528e49` | 2026-09-26 09:28:16 |
+
+TradingView flags every bar of the three charts in market and none pre- or
+post-market: no bar opens between the windows or after the close, and these
+symbols have no extended session. Each session day's first bar opens at the
+first window's open (09:00, 09:30, 19:00) and its last in the last window
+(15:30, 15:45, 13:15). TSE:7203's last bar opens at 15:30, the published end
+of the afternoon window, and TradingView keeps it in the session.
