@@ -180,6 +180,9 @@ class SecurityCallInfo:
     # body (``self._active_call_site_idx``). None for an ordinary
     # (non-cloned) security call.
     callsite_idx: int | None = None
+    # A scalar payload of string type: the result is a ``std::string``
+    # holding na (empty) until the first requested value.
+    string_result: bool = False
 
 
 @dataclass

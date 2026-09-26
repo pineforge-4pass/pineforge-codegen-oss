@@ -2547,6 +2547,9 @@ class TypeInferer:
             func_name, namespace = self._resolve_callee(node.callee)
             if namespace == "color":
                 return "int64_t" if func_name in {"new", "rgb", "from_gradient"} else "int"
+            if (namespace == "request" and func_name == "security"
+                    and self._security_call_returns_string(node)):
+                return "std::string"
             # Nested trade-accessor calls bypass the flat namespace signature
             # table.  Their textual metadata accessors return std::string from
             # the runtime, so hintless locals must not use the double fallback.

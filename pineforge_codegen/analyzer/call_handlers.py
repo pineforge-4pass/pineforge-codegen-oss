@@ -685,8 +685,9 @@ class CallHandlers:
 
             # Track TA sites created by the expression
             ta_start = len(self._ta_call_sites)
+            expr_type = None
             if expr_node is not None:
-                self._visit(expr_node)
+                expr_type = self._visit(expr_node)
             ta_end = len(self._ta_call_sites)
             security_ta_range = (ta_start, ta_end) if ta_end > ta_start else None
 
@@ -769,6 +770,9 @@ class CallHandlers:
             containing_func = scope_name[5:] if scope_name.startswith("func_") else ""
             if returns_tuple and tuple_element_types:
                 self._tuple_element_types_by_node[id(node)] = tuple_element_types
+            # A string payload returns a string (TradingView's na string reads
+            # empty); every other scalar keeps the historical float result.
+            string_result = not returns_tuple and expr_type == PineType.STRING
             self._security_calls.append(SecurityCallInfo(
                 sec_id=sec_id,
                 timeframe=tf_node,
@@ -783,9 +787,10 @@ class CallHandlers:
                 depends_on_mutable_globals=bool(mutable_globals),
                 mutable_globals=mutable_globals,
                 containing_func=containing_func,
+                string_result=string_result,
             ))
 
-            return PineType.FLOAT
+            return PineType.STRING if string_result else PineType.FLOAT
 
         if func_name == "security_lower_tf":
             return self._handle_request_security_lower_tf(node)

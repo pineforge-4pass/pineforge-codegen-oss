@@ -303,15 +303,32 @@ out = request.security(syminfo.tickerid, "2", f(close))
         transpile(src)
 
 
-def test_non_scalar_helper_local_var_state_is_not_silently_numericized():
+def test_string_helper_local_var_state_keeps_string_storage():
+    # TradingView keeps a helper's string state per requested context
+    # (tests/test_e2e_security_helper_string_state.py replays its tape).
     src = """//@version=6
-strategy("string var reject")
+strategy("string var")
 f() =>
     var string state = "seed"
     state
 out = request.security(syminfo.tickerid, "2", f())
+plot(out == "seed" ? 1 : 0)
 """
-    with pytest.raises(CompileError, match="supports only int, float, and bool"):
+    cpp = transpile(src)
+    assert '_security_helper_series_str_["' in _eval_body(cpp, 0, None)
+    assert "std::string _req_sec_0 = na<std::string>();" in cpp
+    compile_env.compile_cpp(cpp, label="security-helper-string-var")
+
+
+def test_non_scalar_helper_local_var_state_is_not_silently_numericized():
+    src = """//@version=6
+strategy("array var reject")
+f() =>
+    var array<float> state = array.new<float>()
+    state.size()
+out = request.security(syminfo.tickerid, "2", f())
+"""
+    with pytest.raises(CompileError, match="supports only int, float, bool and string"):
         transpile(src)
 
 

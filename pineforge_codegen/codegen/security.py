@@ -470,6 +470,7 @@ class SecurityEmitter:
                 "is_lower_tf_array": bool(getattr(item, "is_lower_tf_array", False)),
                 "containing_func": getattr(item, "containing_func", "") or "",
                 "callsite_idx": getattr(item, "callsite_idx", None),
+                "string_result": bool(getattr(item, "string_result", False)),
             }
         return {
             "sec_id": item[0],
@@ -507,6 +508,22 @@ class SecurityEmitter:
                         fields[element] = names[index]
             self._security_ta_tuple_fields_cache = fields
         return fields.get(name)
+
+    def _security_call_returns_string(self, node: FuncCall) -> bool:
+        """Whether this ``request.security(...)`` call's payload is a string
+        (its registered call carries ``string_result``)."""
+        args = list(node.args)
+        for idx, name in enumerate(("symbol", "timeframe", "expression")):
+            if name in node.kwargs:
+                while len(args) <= idx:
+                    args.append(None)
+                args[idx] = node.kwargs[name]
+        expr_node = args[2] if len(args) > 2 else None
+        return expr_node is not None and any(
+            item.get("string_result")
+            for item in self._security_calls
+            if not item.get("is_lower_tf_array") and item["expr_node"] is expr_node
+        )
 
     def _security_state_name(self, sec_id: int, name: str) -> str:
         return f"_sec{sec_id}_{self._safe_name(name)}"
@@ -572,14 +589,15 @@ class SecurityEmitter:
                         continue
                     series_name = self._security_series_binding_target(bound)
                     if series_name is not None:
+                        ref = self._security_helper_series_ref(series_name)
                         result = sub(
                             rf"\b{re.escape(name)}\b(?=\s*\[)",
-                            f'_security_helper_series_["{series_name}"]',
+                            ref.replace("\\", "\\\\"),
                             result,
                         )
                         result = sub(
                             rf"\b{re.escape(name)}\b(?!\s*\[)",
-                            f'_security_helper_series_["{series_name}"][0]',
+                            f"{ref}[0]".replace("\\", "\\\\"),
                             result,
                         )
                     else:
@@ -1609,6 +1627,108 @@ class SecurityEmitter:
             return "false"
         return None
 
+    def _security_helper_series_ref(self, series_name: str) -> str:
+        """The map entry holding one helper series (string values in their
+        own map, every other scalar in the historical double map)."""
+        store = (
+            "_security_helper_series_str_"
+            if series_name in self._security_string_series
+            else "_security_helper_series_"
+        )
+        return f'{store}["{series_name}"]'
+
+    def _security_store_string_series(self, node, series_name: str) -> None:
+        """Keep a string helper series (and its ``var`` seed) in the string
+        map, which ``_security_needs_string_series`` declared."""
+        if not self._security_string_series_declared:
+            self._codegen_error(
+                node,
+                "Internal: request.security string helper state without its "
+                "declared series map",
+            )
+        self._security_string_series.update(
+            (series_name, f"{series_name}@var_seed")
+        )
+
+    def _security_needs_string_series(self) -> bool:
+        """Whether a helper a payload reaches holds string state: a ``var``
+        string or a string local read with history. Decided before the
+        members are declared, so the string map is emitted only then."""
+        seen: set[str] = set()
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+
+        def is_string_decl(stmt: VarDecl) -> bool:
+            # The emitter's own rule (``_type_for_decl``), read in the same
+            # class-scope context it runs in.
+            try:
+                return self._type_for_decl(stmt) == "std::string"
+            except Exception:
+                return stmt.type_hint == "string" or isinstance(stmt.value, StringLiteral)
+
+        def nodes(node):
+            if isinstance(node, ASTNode):
+                yield node
+                for name, value in vars(node).items():
+                    if name != "annotations":
+                        yield from nodes(value)
+            elif isinstance(node, (list, tuple)):
+                for item in node:
+                    yield from nodes(item)
+            elif isinstance(node, dict):
+                for item in node.values():
+                    yield from nodes(item)
+
+        def scan_expr(node) -> bool:
+            for child in nodes(node):
+                if isinstance(child, Identifier):
+                    # A payload re-evaluates the globals it reads (and the
+                    # statements rebinding a mutable one) on the requested bar.
+                    name_key = f"global:{child.name}"
+                    if name_key in seen:
+                        continue
+                    seen.add(name_key)
+                    info = self._global_mutable_infos.get(child.name)
+                    if info is not None:
+                        if any(scan_expr(stmt) for stmt in
+                               getattr(info, "source_stmts", []) or []):
+                            return True
+                    elif child.name in global_expr_map and scan_expr(
+                            global_expr_map[child.name]):
+                        return True
+                    continue
+                key = self._security_user_call_key(child)
+                if key is None or key in seen:
+                    continue
+                seen.add(key)
+                info = self._func_info_map.get(key)
+                if info is None or info.node is None:
+                    continue
+                series = set(self.ctx.func_series_vars.get(info.name, set()))
+                if scan_body(info.node.body, series):
+                    return True
+            return False
+
+        def scan_body(body, series: set[str]) -> bool:
+            for stmt in body or []:
+                if isinstance(stmt, VarDecl):
+                    if ((stmt.is_var or stmt.name in series)
+                            and is_string_decl(stmt)):
+                        return True
+                    if scan_expr(stmt.value):
+                        return True
+                elif isinstance(stmt, IfStmt):
+                    if (scan_expr(stmt.condition)
+                            or scan_body(stmt.body, series)
+                            or scan_body(stmt.else_body, series)):
+                        return True
+                elif scan_expr(stmt):
+                    return True
+            return False
+
+        return any(
+            scan_expr(item.get("expr_node")) for item in self._security_calls
+        )
+
     @staticmethod
     def _security_series_binding(series_name: str) -> str:
         return f"@series:{series_name}"
@@ -1681,7 +1801,7 @@ class SecurityEmitter:
         local_series_names = set(plan.get("local_series_names", ()))
 
         def _series_expr(binding_name: str, index_expr: str) -> str:
-            return f'_security_helper_series_["{binding_name}"][{index_expr}]'
+            return f"{self._security_helper_series_ref(binding_name)}[{index_expr}]"
 
         def emit_stmt(stmt: ASTNode, active_bindings: dict[str, str], indent: int) -> None:
             pad = "    " * indent
@@ -1717,13 +1837,19 @@ class SecurityEmitter:
                         lines,
                     )
                     active_bindings[stmt.name] = binding
-                    if is_persistent_var:
+                    cpp_type = None
+                    if is_persistent_var or self._security_string_series_declared:
                         cpp_type = self._type_for_decl(stmt)
-                        if cpp_type not in {"double", "int", "bool"}:
+                    if cpp_type == "std::string":
+                        self._security_store_string_series(stmt, series_name)
+                        if stmt.value is None or isinstance(stmt.value, NaLiteral):
+                            expr_cpp = "na<std::string>()"
+                    if is_persistent_var:
+                        if cpp_type not in {"double", "int", "bool", "std::string"}:
                             self._codegen_error(
                                 stmt,
-                                "request.security helper-local var state currently supports only int, float, and bool values",
-                                hint="Hoist collection, string, UDT, or drawing state outside request.security().",
+                                "request.security helper-local var state currently supports only int, float, bool and string values",
+                                hint="Hoist collection, UDT, or drawing state outside request.security().",
                             )
                         # A Pine ``var`` initializer runs once per helper call
                         # site in the requested context.  On a new requested
@@ -1736,32 +1862,27 @@ class SecurityEmitter:
                         # recomputations without adding another generated
                         # member/state family.
                         seed_name = f"{series_name}@var_seed"
-                        lines.append(f'{pad}if (_security_helper_series_["{series_name}"].size() == 0) {{')
-                        lines.append(f'{pad}    _security_helper_series_["{seed_name}"].push({expr_cpp});')
-                        lines.append(
-                            f'{pad}    _security_helper_series_["{series_name}"].push('
-                            f'_security_helper_series_["{seed_name}"][0]);'
-                        )
+                        ref = self._security_helper_series_ref(series_name)
+                        seed_ref = self._security_helper_series_ref(seed_name)
+                        lines.append(f'{pad}if ({ref}.size() == 0) {{')
+                        lines.append(f'{pad}    {seed_ref}.push({expr_cpp});')
+                        lines.append(f'{pad}    {ref}.push({seed_ref}[0]);')
                         lines.append(f'{pad}}} else if (security_series_slot_is_new({sec_id})) {{')
-                        lines.append(
-                            f'{pad}    _security_helper_series_["{series_name}"].push('
-                            f'_security_helper_series_["{series_name}"][0]);'
-                        )
+                        lines.append(f'{pad}    {ref}.push({ref}[0]);')
                         lines.append(f'{pad}}} else {{')
                         lines.append(
-                            f'{pad}    _security_helper_series_["{series_name}"].update('
-                            f'_security_helper_series_["{series_name}"].size() > 1 '
-                            f'? _security_helper_series_["{series_name}"][1] '
-                            f': _security_helper_series_["{seed_name}"][0]);'
+                            f'{pad}    {ref}.update({ref}.size() > 1 '
+                            f'? {ref}[1] : {seed_ref}[0]);'
                         )
                         lines.append(f'{pad}}}')
                     else:
-                        lines.append(f'{pad}if (_security_helper_series_["{series_name}"].size() == 0) {{')
-                        lines.append(f'{pad}    _security_helper_series_["{series_name}"].push({expr_cpp});')
+                        ref = self._security_helper_series_ref(series_name)
+                        lines.append(f'{pad}if ({ref}.size() == 0) {{')
+                        lines.append(f'{pad}    {ref}.push({expr_cpp});')
                         lines.append(f'{pad}}} else if (security_series_slot_is_new({sec_id})) {{')
-                        lines.append(f'{pad}    _security_helper_series_["{series_name}"].push({expr_cpp});')
+                        lines.append(f'{pad}    {ref}.push({expr_cpp});')
                         lines.append(f'{pad}}} else {{')
-                        lines.append(f'{pad}    _security_helper_series_["{series_name}"].update({expr_cpp});')
+                        lines.append(f'{pad}    {ref}.update({expr_cpp});')
                         lines.append(f'{pad}}}')
                     activate_decl()
                     return
@@ -1784,7 +1905,11 @@ class SecurityEmitter:
                         runtime_stack_local,
                         lines,
                     )
+                    if cpp_type == "std::string" and (
+                            stmt.value is None or isinstance(stmt.value, NaLiteral)):
+                        expr_cpp = "na<std::string>()"
                     active_bindings[stmt.name] = local_name
+                    self._security_local_cpp_types[local_name] = cpp_type
                     lines.append(f"{pad}{cpp_type} {local_name} = {expr_cpp};")
                 else:
                     expr_cpp = self._build_security_expr(
@@ -1826,12 +1951,20 @@ class SecurityEmitter:
                 )
                 series_name = self._security_series_binding_target(binding)
                 if series_name is not None:
+                    if series_name in self._security_string_series and isinstance(
+                            stmt.value, NaLiteral):
+                        expr_cpp = "na<std::string>()"
+                elif (self._security_local_cpp_types.get(binding) == "std::string"
+                      and isinstance(stmt.value, NaLiteral)):
+                    expr_cpp = "na<std::string>()"
+                if series_name is not None:
+                    ref = self._security_helper_series_ref(series_name)
                     if stmt.op == ":=":
-                        lines.append(f'{pad}_security_helper_series_["{series_name}"].update({expr_cpp});')
+                        lines.append(f'{pad}{ref}.update({expr_cpp});')
                     else:
                         op_char = stmt.op[0]
                         lines.append(
-                            f'{pad}_security_helper_series_["{series_name}"].update('
+                            f'{pad}{ref}.update('
                             f'{_series_expr(series_name, "0")} {op_char} {expr_cpp});'
                         )
                     return
@@ -3852,9 +3985,12 @@ class SecurityEmitter:
                 hist = self._security_ohlc_hist_fields_by_sec.get(sec_id, ())
                 ta_hist_names = self._security_ta_hist_series_names(sec_id)
                 expr_hist_names = self._security_expr_hist_series_names(sec_id)
+                na_cpp = (
+                    "na<std::string>()" if item.get("string_result") else "na<double>()"
+                )
                 if hist or ta_hist_names or expr_hist_names:
                     lines.append(f"            case {sec_id}:")
-                    lines.append(f"                _req_sec_{sec_id} = na<double>();")
+                    lines.append(f"                _req_sec_{sec_id} = {na_cpp};")
                     for field in sorted(hist):
                         lines.append(
                             f"                {self._security_ohlc_hist_series_cpp(sec_id, field)}.clear();"
@@ -3865,7 +4001,7 @@ class SecurityEmitter:
                         lines.append(f"                {name}.clear();")
                     lines.append("                break;")
                 else:
-                    lines.append(f"            case {sec_id}: _req_sec_{sec_id} = na<double>(); break;")
+                    lines.append(f"            case {sec_id}: _req_sec_{sec_id} = {na_cpp}; break;")
         lines.append("        }")
         lines.append("    }")
 
@@ -3902,7 +4038,7 @@ class SecurityEmitter:
                 if isinstance(bound, str):
                     series_name = self._security_series_binding_target(bound)
                     if series_name is not None:
-                        return f'_security_helper_series_["{series_name}"][0]'
+                        return f"{self._security_helper_series_ref(series_name)}[0]"
                     return bound
                 return self._build_security_expr(
                     sec_id,
@@ -4002,7 +4138,10 @@ class SecurityEmitter:
                                 helper_binding_stack,
                                 emitted_lines,
                             )
-                            return f'_security_helper_series_["{series_name}"][{index_cpp}]'
+                            return (
+                                f"{self._security_helper_series_ref(series_name)}"
+                                f"[{index_cpp}]"
+                            )
                         return bound
                     # Function parameters retain Pine's series identity. Apply
                     # history to the supported bound bar series and compose

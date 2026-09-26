@@ -339,6 +339,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Evaluators that keep every earlier build's lowering, decided while
         # a method's TA constructor arguments were lowered: sec_id -> reason.
         self._security_chart_evaluators: dict[int, tuple] = {}
+        # request.security helper series of string values (``var string``, a
+        # string local read with history) live in their own map; the member
+        # is declared when a payload's helper holds one.
+        self._security_string_series_declared: bool = False
+        self._security_string_series: set[str] = set()
+        # Each request.security evaluator local's C++ type (a string local
+        # takes ``na<std::string>()``).
+        self._security_local_cpp_types: dict[str, str] = {}
         # Set when a chart expression calls ``_pf_session_market_``; its type
         # and member are emitted once the whole TU is lowered.
         self._uses_session_market: bool = False
@@ -4303,7 +4311,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 self._security_ohlc_hist_fields_by_sec[sec_id] = (
                     self._collect_security_ohlc_hist_fields_for_call(item)
                 )
-                lines.append(f"    double _req_sec_{sec_id} = na<double>();")
+                if item.get("string_result"):
+                    lines.append(f"    std::string _req_sec_{sec_id} = na<std::string>();")
+                else:
+                    lines.append(f"    double _req_sec_{sec_id} = na<double>();")
             for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
                 ctype = self._security_bar_hist_type(field)
                 lines.append(
@@ -4318,6 +4329,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         if self._security_calls:
             lines.append('    std::unordered_map<std::string, Series<double>> _security_helper_series_;')
+            self._security_string_series_declared = self._security_needs_string_series()
+            if self._security_string_series_declared:
+                lines.append(
+                    '    std::unordered_map<std::string, Series<std::string>> '
+                    '_security_helper_series_str_;'
+                )
 
         # Security-local mutable global state for request.security
         for info in self._security_eval_info:
