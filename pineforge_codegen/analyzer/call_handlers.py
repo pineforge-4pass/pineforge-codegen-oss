@@ -70,6 +70,7 @@ from ..ast_nodes import (
     IfStmt, MemberAccess, NumberLiteral, StringLiteral, Subscript, SwitchStmt,
     Ternary, TupleLiteral, UnaryOp, VarDecl,
 )
+from ..method_binding import bind_function_defaults
 from ..symbols import PineType
 from .. import signatures as sigs
 from .. import tv_input_choices as tv_in
@@ -1378,6 +1379,9 @@ class CallHandlers:
                 and isinstance(node.callee, MemberAccess)
             ):
                 positional_args.insert(0, node.callee.object)
+        param_defaults = list(
+            (func_def.annotations or {}).get("param_defaults", ())
+        )
         for p_idx, param_name in enumerate(func_def.params):
             if p_idx < len(positional_args):
                 param_arg_map[param_name] = self._expr_to_str(
@@ -1386,6 +1390,13 @@ class CallHandlers:
             elif param_name in node.kwargs:
                 param_arg_map[param_name] = self._expr_to_str(
                     node.kwargs[param_name]
+                )
+            elif (method_info is None
+                    and p_idx < len(param_defaults)
+                    and param_defaults[p_idx] is not None):
+                # An omitted parameter reads its declared default.
+                param_arg_map[param_name] = self._expr_to_str(
+                    param_defaults[p_idx]
                 )
 
         if func_name in self._func_ta_ranges:
@@ -1631,6 +1642,17 @@ class CallHandlers:
             visited_types[id(arg)] = self._visit(arg)
         for arg in node.kwargs.values():
             visited_types[id(arg)] = self._visit(arg)
+        # An omitted parameter binds its declared default, as codegen passes it.
+        defaulted = bind_function_defaults(
+            func_def.params,
+            (func_def.annotations or {}).get("param_defaults", ()),
+            node,
+        )
+        if defaulted is not None:
+            bound_args = list(defaulted)
+            for arg in bound_args:
+                if id(arg) not in visited_types:
+                    visited_types[id(arg)] = self._visit(arg)
 
         param_types = [
             visited_types.get(id(arg), PineType.UNKNOWN)

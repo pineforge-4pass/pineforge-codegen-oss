@@ -148,6 +148,7 @@ from ..ast_nodes import (
 from ..symbols import TypeSpec, method_receiver_type_name
 from ..method_binding import (
     MethodBindError,
+    bind_function_defaults,
     bind_method_call,
     signature_from_callable,
 )
@@ -315,6 +316,20 @@ class CallVisitor:
         ):
             return receiver_spec, None
         return receiver_spec, method_info
+
+    def _user_call_args_with_defaults(self, func_name: str, node: FuncCall):
+        """A plain user-function call's arguments with omitted parameters
+        filled from their declared defaults (``bind_function_defaults``);
+        ``None`` when the established binding applies."""
+        fi = self._func_info_map.get(func_name)
+        if (fi is None or fi.node is None or not fi.node.params
+                or getattr(fi, "is_udt_method", False)):
+            return None
+        return bind_function_defaults(
+            fi.node.params,
+            (fi.node.annotations or {}).get("param_defaults", ()),
+            node,
+        )
 
     def _bind_typed_method_args(self, method_info, node: FuncCall):
         """Bind typed method arguments through the analyzer-shared rules."""
@@ -2405,7 +2420,20 @@ class CallVisitor:
             return self._visit_expr(arg_node)
 
         ordered_arg_nodes: list = []
-        if node.kwargs:
+        defaulted_arg_nodes = (
+            self._user_call_args_with_defaults(func_name, node)
+            if namespace is None and func_name in self._func_names
+            else None
+        )
+        if defaulted_arg_nodes is not None:
+            # Omitted parameters take their declared defaults, and keywords
+            # land on their own parameters past any omitted one.
+            ordered_arg_nodes = list(defaulted_arg_nodes)
+            all_args = [
+                _visit_arg_for_series(a, i)
+                for i, a in enumerate(defaulted_arg_nodes)
+            ]
+        elif node.kwargs:
             # Try to resolve kwargs using FuncInfo params for user-defined functions
             fi = self._func_info_map.get(func_name)
             if fi and fi.node and fi.node.params:
