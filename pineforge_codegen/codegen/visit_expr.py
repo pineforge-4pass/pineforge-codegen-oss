@@ -1241,7 +1241,7 @@ class ExprVisitor:
                 f"_refused_session_read_{len(self._refused_session_reads) + 1}",
                 self._session_names_used)
             self._refused_session_read_names[key] = name
-            self._refused_session_reads[name] = (where, message)
+            self._refused_session_reads[name] = (node, where, message)
         return name
 
     def _visit_subscript(self, node: Subscript) -> str:

@@ -44,15 +44,18 @@ from __future__ import annotations
 import concurrent.futures
 import csv
 import datetime as dt
+import gc
 import hashlib
 import json
 import os
 import re
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+from pineforge_codegen.ast_nodes import Identifier, MemberAccess, NumberLiteral, Subscript
 from tests._compile import compile_cpp
 from tests._e2e import (
     REPO_ROOT, build_strategy_library, reference_codegen, run_strategy,
@@ -712,6 +715,46 @@ STILL_COMPILE = {
         "    close > open\n"
         "x = f() and str.length(s) > 0\n"
         "// @pf-trace t=f()\n"),
+    # A clone for the read would put a wrapper's int and float calls on one
+    # variant: the first pass fails, the second, without it, compiles.
+    "a read in color.from_gradient in a function a wrapper calls with an int and a float": (
+        "shade(v) =>\n"
+        "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
+        "    v\n"
+        "wrap(y) => shade(y)\n"
+        "a = wrap(close)\n"
+        "b = wrap(time)\n"
+        "c = shade(high)\n"
+        "x = a > c and b > 0\n"),
+    "a read in a drawing's color in a function a wrapper calls with an int and a float": (
+        "f(v) =>\n"
+        "    label.new(bar_index, high, \"x\", color = session.ismarket[1] ? color.red : color.green)\n"
+        "    v\n"
+        "g(y) => f(y)\n"
+        "a = g(1)\n"
+        "b = g(1.5)\n"
+        "c = f(2)\n"
+        "x = a + b + c > 0\n"),
+    "a read in str.tostring's format and array.covariance's biased in a function a wrapper calls": (
+        "f(v) =>\n"
+        "    s = str.tostring(close > open, session.ispremarket[1] ? \"a\" : \"b\")\n"
+        "    aa = array.new<float>(3, 1.0)\n"
+        "    cv = aa.covariance(aa, session.ismarket[1])\n"
+        "    v\n"
+        "g(y) => f(y)\n"
+        "a = g(1)\n"
+        "b = g(1.5)\n"
+        "c = f(2)\n"
+        "x = a + b + c > 0\n"),
+    "a read in color.from_gradient in a function with a request.security a wrapper calls": (
+        "h(tf, v) =>\n"
+        "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
+        "    request.security(syminfo.tickerid, tf, close) + v\n"
+        "g(y) => h(\"60\", y)\n"
+        "a = g(1)\n"
+        "b = g(1.5)\n"
+        "c = h(\"240\", 2)\n"
+        "x = a + b + c > 0\n"),
     "a read in color.from_gradient in a function a default argument calls": (
         "h() =>\n"
         "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
@@ -763,6 +806,45 @@ def test_scripts_without_a_read_keep_their_cpp(place: str, tmp_path: Path) -> No
     assert now["ok"] and before["ok"], (now["diagnostics"], before["diagnostics"])
     assert now["cpp"] == before["cpp"]
     compile_cpp(now["cpp"], label=place)
+
+
+def _codegen_for(body: str):
+    from pineforge_codegen import _parse_bounded
+    from pineforge_codegen.analyzer import Analyzer
+    from pineforge_codegen.codegen import CodeGen
+
+    ast, pragmas, budget = _parse_bounded(
+        '//@version=6\nstrategy("session history", overlay=true)\n' + body, "<input>")
+    ctx = Analyzer(ast, budget=budget).analyze()
+    ctx.pf_trace_pragmas = pragmas
+    return CodeGen(ctx, budget=budget)
+
+
+def test_a_refused_read_never_takes_a_script_name() -> None:
+    """Needs no engine: a read refused where it renders stands in as a name
+    no script identifier spells, from the codegen's construction on (a
+    request.security timeframe renders there, before the prescans): a script
+    name in the C++ is never taken for a refused read it holds."""
+    gen = _codegen_for("_refused_session_read_1 = close > open\n"
+                       'if _refused_session_read_1\n    strategy.entry("L", strategy.long)\n')
+    read = Subscript(object=MemberAccess(object=Identifier(name="session"), member="ismarket"),
+                     index=NumberLiteral(value=1))
+    assert gen._refused_session_read(read, read, "refused") != "_refused_session_read_1"
+
+
+def test_a_refused_read_keeps_its_node() -> None:
+    """Needs no engine: the refused reads are keyed by node id, so each is
+    kept alive while the codegen runs, also one reported at its index (a
+    synthetic read, which has no location); a read freed during lowering
+    would hand its id, and its refusal, to the next node."""
+    gen = _codegen_for('if close > open\n    strategy.entry("L", strategy.long)\n')
+    read = Subscript(object=MemberAccess(object=Identifier(name="session"), member="ismarket"),
+                     index=NumberLiteral(value=1))
+    alive = weakref.ref(read)
+    gen._refused_session_read(read, read.index, "refused")
+    del read
+    gc.collect()
+    assert alive() is not None
 
 
 def test_a_trace_can_read_a_flag_at_an_offset(tmp_path: Path) -> None:

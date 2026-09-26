@@ -772,12 +772,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._session_call_flags: dict[str, set[str]] = {}
         self._session_call_owner: dict[int, str] = {}
         self._session_history_member_names: dict[str, str] = {}
-        # The names a rendered read may not take, and each read refused where
-        # it renders: its stand-in name, then the refusal, raised only if the
-        # C++ emits the stand-in (_settle_session_reads).
-        self._session_names_used: set[str] = set()
+        # The names a rendered read may not take (the script's own first: a
+        # request.security timeframe renders here, before the prescans), and
+        # each read refused where it renders: its stand-in name, then the
+        # read (kept alive, so its id stays its own), where to report it and
+        # why, raised only if the C++ emits the stand-in
+        # (_settle_session_reads).
+        self._session_names_used: set[str] = set(self._safe_name_occupied)
         self._refused_session_read_names: dict[tuple[int, str], str] = {}
-        self._refused_session_reads: dict[str, tuple[ASTNode, str]] = {}
+        self._refused_session_reads: dict[str, tuple[ASTNode, ASTNode, str]] = {}
         # Functions whose per-call Series the emitted C++ reads.
         self._session_emitted_owners: set[str] = set()
         # Track global-scope non-var declarations (emitted as class members)
@@ -3895,9 +3898,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # One error per read, the refusal rendered first (a read can be
         # rendered on the chart and in a request.security evaluator).
         refused: dict[tuple[int, int], Diagnostic] = {}
-        for name, (node, message) in self._refused_session_reads.items():
+        for name, (_read, where, message) in self._refused_session_reads.items():
             if name in emitted_refusals:
-                diagnostic = self._codegen_error_diagnostic(node, message)
+                diagnostic = self._codegen_error_diagnostic(where, message)
                 refused.setdefault(
                     (diagnostic.location.line, diagnostic.location.col), diagnostic)
         if refused:
@@ -3930,13 +3933,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         payloads.add(id(payload))
         flags = {read.object.member for root in roots
                  for read in emitted_session_reads(root, payloads)}
-        used = set(getattr(self, "_safe_name_occupied", ()))
+        used = self._session_names_used
         self._session_history_member_names = {
             flag: self._allocate_generated_cpp_name(f"_pf_session_hist_{flag}", used)
             for flag in sorted(flags)
         }
         self._session_history_flags = flags
-        self._session_names_used = used
 
     def _inline_history_member(self, kind: str, node: ASTNode,
                                arg_idx: int | None = None) -> str:

@@ -136,6 +136,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # never emitted (pineforge_codegen.transpile): not made stateful for
         # them.
         self._session_reads_dropped = frozenset(session_reads_dropped)
+        # The functions this analysis makes stateful for their session reads,
+        # set before a later step can fail on their clones.
+        self.session_history_functions: frozenset[str] = frozenset()
         self._budget_visit_count = 0
         self._method_signatures = inventory_method_signatures(ast)
         self._method_call_bindings: dict[
@@ -2769,12 +2772,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # nor does one whose reads a previous pass never emitted.
         self._session_history_unsafe = self._session_history_unsafe_functions(
             func_defs, _find_calls, known_func_names, calls_by_parent)
-        synthetic_history_stateful |= {
+        self.session_history_functions = frozenset(
             name for name, func_def in func_defs.items()
             if name not in self._session_history_unsafe
             and name not in self._session_reads_dropped
             and emitted_session_reads(func_def, requested_node_ids)
-        }
+        )
+        synthetic_history_stateful |= self.session_history_functions
 
         # request.security owns a separate evaluator context and already
         # materializes/remaps its embedded TA state per SecurityCallInfo.  Do

@@ -30,15 +30,18 @@ def _parse_bounded(pine_source: str, filename: str, budget: TimeBudget | None = 
 
 
 def _generate(pine_source: str, check_support: bool, filename: str):
-    """One pipeline pass, repeated once when the C++ reads none of a
-    function's ``session.<flag>[k]`` reads (they sit in arguments the codegen
-    leaves out): the second analysis leaves those functions unstateful, so a
-    script whose reads are all left out keeps the functions it compiled with
-    before.
+    """One pipeline pass, repeated once without the per-call clones of the
+    functions whose ``session.<flag>[k]`` reads the C++ does not hold (they
+    sit in arguments the codegen leaves out), so a script whose reads are all
+    left out keeps the functions it compiled with before: when the C++ reads
+    none of a function's reads, and when the first pass fails after cloning
+    functions for their reads (their clones can put two call sites' types on
+    one variant). A second pass that fails keeps the first one's error.
 
     Returns ``(codegen, ctx, cpp, support_diagnostics)``."""
     budget = None
     dropped: frozenset[str] = frozenset()
+    first_error: CompileError | None = None
     for second in (False, True):
         ast, pragmas, budget = _parse_bounded(pine_source, filename, budget)
         support_diagnostics = []
@@ -50,23 +53,33 @@ def _generate(pine_source: str, check_support: bool, filename: str):
         ast = expand_finite_choice_extrema_lengths(ast)
         check_ast_depth(ast, filename)
         budget.check(phase=Phase.ANALYZER)
-        ctx = Analyzer(ast, filename=filename, budget=budget,
-                       session_reads_dropped=dropped).analyze()
-        budget.check(phase=Phase.ANALYZER)
-        # Attach after analysis: pragma expressions are not part of the
-        # program body, so the analyzer never inspects them; the codegen
-        # consumes them directly from the context to emit the on_bar tail
-        # ``if (trace_enabled_) { trace(...); ... }`` block.
-        ctx.pf_trace_pragmas = pragmas
-        gen = CodeGen(ctx, budget=budget)
-        cpp = gen.generate()
-        budget.check(phase=Phase.CODEGEN)
+        analyzer = Analyzer(ast, filename=filename, budget=budget,
+                            session_reads_dropped=dropped)
+        try:
+            ctx = analyzer.analyze()
+            budget.check(phase=Phase.ANALYZER)
+            # Attach after analysis: pragma expressions are not part of the
+            # program body, so the analyzer never inspects them; the codegen
+            # consumes them directly from the context to emit the on_bar tail
+            # ``if (trace_enabled_) { trace(...); ... }`` block.
+            ctx.pf_trace_pragmas = pragmas
+            gen = CodeGen(ctx, budget=budget)
+            cpp = gen.generate()
+            budget.check(phase=Phase.CODEGEN)
+        except CompileError as error:
+            if first_error is not None:
+                raise first_error from None
+            if second or not analyzer.session_history_functions:
+                raise
+            first_error, dropped = error, analyzer.session_history_functions
+            del ast, analyzer
+            continue
         unemitted = gen.session_functions_without_emitted_reads()
         if second or not unemitted:
             return gen, ctx, cpp, support_diagnostics
         dropped = unemitted
         # The second pass parses again: let the first one's objects go.
-        del ast, ctx, gen, cpp
+        del ast, analyzer, ctx, gen, cpp
 
 
 def transpile(pine_source: str, *, check_support: bool = True, filename: str = "<input>") -> str:
@@ -109,10 +122,10 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
     """Transpile like :func:`transpile`, plus the host-UI input manifest.
 
     Runs the pipeline (Lexer -> Parser -> support check -> Analyzer ->
-    CodeGen.generate) once, twice when the C++ reads none of a function's
-    ``session.<flag>[k]`` reads, and returns the generated C++ alongside the
-    data the cloud Studio needs to auto-build a backtest "override params"
-    form:
+    CodeGen.generate) once, twice when its per-call clones for
+    ``session.<flag>[k]`` reads the C++ does not hold are dropped (see
+    ``_generate``), and returns the generated C++ alongside the data the
+    cloud Studio needs to auto-build a backtest "override params" form:
 
     - ``cpp``: the generated C++ source (identical to :func:`transpile`).
     - ``inputs``: a list of ``InputDef`` dicts (one per top-level
