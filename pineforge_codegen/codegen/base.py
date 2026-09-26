@@ -346,11 +346,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_string_series_declared: bool = False
         self._security_string_series: set[str] = set()
         # Each request.security evaluator local's C++ type (a string local
-        # takes ``na<std::string>()``).
+        # takes ``na<std::string>()``; the builder's ``/`` reads it).
         self._security_local_cpp_types: dict[str, str] = {}
         # C++ the security builder hands a synthetic name: a helper-local
         # history index lowered in its helper's scope.
         self._security_raw_cpp: dict[str, str] = {}
+        # Set while a request.security TA history index is lowered: an input
+        # it reads is its override-aware getter, since the evaluator can run
+        # before on_bar initializes the input members.
+        self._security_index_inputs: bool = False
         # Set when a chart expression calls ``_pf_session_market_``; its type
         # and member are emitted once the whole TU is lowered.
         self._uses_session_market: bool = False

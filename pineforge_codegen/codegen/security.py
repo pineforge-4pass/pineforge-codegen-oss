@@ -1038,6 +1038,122 @@ class SecurityEmitter:
             resolving | {id(node)},
         )
 
+    _SECURITY_STABLE_INT_MATH = frozenset({"round", "floor", "ceil"})
+    _SECURITY_STABLE_SAME_MATH = frozenset({"abs", "max", "min"})
+    _SECURITY_STABLE_FLOAT_MATH = frozenset({
+        "sqrt", "pow", "log", "log10", "exp", "avg", "sin", "cos", "tan",
+        "asin", "acos", "atan", "todegrees", "toradians", "round_to_mintick",
+        "sign",
+    })
+
+    def _security_stable_value_type(
+        self,
+        node,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+        depth: int = 0,
+    ) -> str | None:
+        """Pine type (``int``/``float``/``bool``/``string``) of a bar-invariant
+        request.security expression, else None.
+
+        Admits literals, ``input.*`` values, ``timeframe.multiplier``, and
+        math, casts, arithmetic, comparisons and ternaries over those, reached
+        through helper parameters and immutable globals by their lexical
+        binding -- a block local or loop variable sharing a global's name is
+        not the global. Mutable globals (``var``, reassigned) and the
+        containing function's parameters stay out, as in
+        ``_resolve_security_immutable_input_int``.
+        """
+        if node is None or depth > 64:
+            return None
+        nxt = depth + 1
+        if isinstance(node, NumberLiteral):
+            if isinstance(node.value, bool):
+                return None
+            return "float" if isinstance(node.value, float) else "int"
+        if isinstance(node, BoolLiteral):
+            return "bool"
+        if isinstance(node, StringLiteral):
+            return "string"
+        if isinstance(node, Identifier):
+            if not self._security_identifier_is_global_binding(node):
+                binding = self._security_lookup_helper_binding_context(
+                    node.name, helper_binding_stack
+                )
+                if binding is None or isinstance(binding[0], str):
+                    return None
+                return self._security_stable_value_type(binding[0], binding[1], nxt)
+            if node.name in self._global_mutable_infos:
+                return None
+            global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+            if node.name not in global_expr_map:
+                return None
+            return self._security_stable_value_type(global_expr_map[node.name], (), nxt)
+        if isinstance(node, MemberAccess):
+            if (isinstance(node.object, Identifier)
+                    and node.object.name == "timeframe"
+                    and node.member == "multiplier"):
+                return "int"
+            return None
+        if isinstance(node, UnaryOp):
+            operand = self._security_stable_value_type(node.operand, helper_binding_stack, nxt)
+            if node.op == "not":
+                return "bool" if operand == "bool" else None
+            return operand if operand in ("int", "float") else None
+        if isinstance(node, BinOp):
+            left = self._security_stable_value_type(node.left, helper_binding_stack, nxt)
+            right = self._security_stable_value_type(node.right, helper_binding_stack, nxt)
+            if left is None or right is None:
+                return None
+            if node.op in ("and", "or"):
+                return "bool" if left == right == "bool" else None
+            if node.op in ("==", "!=", "<", ">", "<=", ">="):
+                return "bool"
+            numeric = {left, right} <= {"int", "float"}
+            if node.op in ("+", "-", "*", "%") and numeric:
+                return "int" if left == right == "int" else "float"
+            if node.op == "/" and numeric:
+                return "float"
+            return None
+        if isinstance(node, Ternary):
+            if self._security_stable_value_type(
+                node.condition, helper_binding_stack, nxt
+            ) != "bool":
+                return None
+            arms = {
+                self._security_stable_value_type(node.true_val, helper_binding_stack, nxt),
+                self._security_stable_value_type(node.false_val, helper_binding_stack, nxt),
+            }
+            if None in arms:
+                return None
+            if len(arms) == 1:
+                return arms.pop()
+            return "float" if arms <= {"int", "float"} else None
+        if isinstance(node, FuncCall):
+            func_name, namespace = self._resolve_callee(node.callee)
+            if namespace == "input":
+                return {
+                    "int": "int", "float": "float", "bool": "bool",
+                    "string": "string", "timeframe": "string",
+                }.get(func_name)
+            args = [
+                self._security_stable_value_type(arg, helper_binding_stack, nxt)
+                for arg in node.args
+            ]
+            if node.kwargs or not args or None in args:
+                return None
+            if namespace is None and func_name in ("int", "float"):
+                return func_name if args[0] in ("int", "float") else None
+            if namespace == "math" and set(args) <= {"int", "float"}:
+                if func_name in self._SECURITY_STABLE_INT_MATH:
+                    # ``math.round(x, precision)`` is a float.
+                    return "int" if len(args) == 1 else "float"
+                if func_name in self._SECURITY_STABLE_SAME_MATH:
+                    return "int" if set(args) == {"int"} else "float"
+                if func_name in self._SECURITY_STABLE_FLOAT_MATH:
+                    return "float"
+            return None
+        return None
+
     def _compose_security_helper_history_subscript(
         self,
         bound,
@@ -3072,7 +3188,11 @@ class SecurityEmitter:
         # length and its evaluator on the chart (``_security_chart_evaluators``).
         in_method = any(getattr(frame, "method", False) for frame in helper_binding_stack)
         saved_flag = self._security_requested_calls
+        saved_index_inputs = self._security_index_inputs
         self._security_requested_calls = in_method
+        # evaluate_security resets the TA object before on_bar has read the
+        # inputs into their members: read each input through its getter.
+        self._security_index_inputs = True
         try:
             lowered = [
                 self._build_security_expr(
@@ -3119,6 +3239,7 @@ class SecurityEmitter:
             return ["1"] * len(arg_nodes), None
         finally:
             self._security_requested_calls = saved_flag
+            self._security_index_inputs = saved_index_inputs
         return lowered, stability
 
     def _security_ta_ctor_arg_is_stable(
@@ -4698,22 +4819,43 @@ class SecurityEmitter:
                     resolved_input = self._resolve_security_immutable_input_int(
                         expr_node.index, helper_binding_stack
                     )
+                    if (
+                        resolved_input is None
+                        and self._security_stable_value_type(
+                            expr_node.index, helper_binding_stack
+                        ) == "int"
+                    ):
+                        # A bar-invariant int over inputs (``n = math.round(
+                        # nMin / 15)``) reads the same history offset on every
+                        # requested bar; lowered in the requested context.
+                        resolved_input = (expr_node.index, helper_binding_stack)
                     if resolved_input is None:
                         self._codegen_error(
                             expr_node,
                             "request.security() TA history index must be a literal integer (e.g. ta.ema(close, 55)[1])",
+                            hint=(
+                                "An int computed from inputs and literals is admitted; "
+                                "a series index is not."
+                            ),
                         )
                     input_node, input_stack = resolved_input
-                    index_cpp = self._build_security_expr(
-                        sec_id,
-                        input_node,
-                        ta_range,
-                        ta_results,
-                        resolving,
-                        security_mutable_names,
-                        input_stack,
-                        emitted_lines,
-                    )
+                    # An evaluator can run before on_bar sets the input
+                    # members: read each input through its getter.
+                    saved_index_inputs = self._security_index_inputs
+                    self._security_index_inputs = True
+                    try:
+                        index_cpp = self._build_security_expr(
+                            sec_id,
+                            input_node,
+                            ta_range,
+                            ta_results,
+                            resolving,
+                            security_mutable_names,
+                            input_stack,
+                            emitted_lines,
+                        )
+                    finally:
+                        self._security_index_inputs = saved_index_inputs
                     index_cpp = self._coerce_int_slot_with_cast(
                         index_cpp, expr_node.index, "int"
                     )
@@ -4792,6 +4934,14 @@ class SecurityEmitter:
                 right = self._coerce_bool_expr(right, expr_node.right)
             if expr_node.op == "%":
                 return f"std::fmod((double)({left}), (double)({right}))"
+            # Pine v6 ``/`` yields a float on int operands too (the chart's
+            # ``_visit_binop``); C++ divides two ints as integers. A double
+            # operand already divides in floating point and keeps its spelling.
+            if expr_node.op == "/" and not any(
+                self._security_emits_double(side, helper_binding_stack)
+                for side in (expr_node.left, expr_node.right)
+            ):
+                return f"((double)({left}) / (double)({right}))"
             # KI-71: honour Pine's falsy-on-na relational rule inside
             # request.security expressions too (this builder is a second
             # relational emission site independent of _visit_binop).
@@ -5202,6 +5352,73 @@ class SecurityEmitter:
             stack.extend(v for k, v in vars(n).items() if k != "annotations")
         return False
 
+    def _security_emits_double(
+        self,
+        node,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+        depth: int = 0,
+    ) -> bool:
+        """``_emitted_value_is_double`` for a requested-context operand, read
+        the way the builder lowers it: a helper-bound name reads its
+        argument's (or evaluator local's) C++ type, an immutable global the
+        builder re-evaluates reads its value, and a user call it inlines reads
+        its final expression -- the chart's inference knows none of them (a
+        ``float g = 1`` global is re-emitted as ``1``)."""
+        if node is None or depth > 64:
+            return False
+        if isinstance(node, Identifier):
+            if not self._security_identifier_is_global_binding(node):
+                binding = self._security_lookup_helper_binding_context(
+                    node.name, helper_binding_stack
+                )
+                if binding is not None:
+                    bound, bound_stack = binding
+                    if isinstance(bound, str):
+                        series_name = self._security_series_binding_target(bound)
+                        if series_name is not None:
+                            return series_name not in self._security_string_series
+                        return self._security_local_cpp_types.get(bound) == "double"
+                    return self._security_emits_double(bound, bound_stack, depth + 1)
+            else:
+                global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+                if (node.name in global_expr_map
+                        and node.name not in self._global_mutable_infos):
+                    return self._security_emits_double(
+                        global_expr_map[node.name], (), depth + 1
+                    )
+        if isinstance(node, FuncCall) and self._security_user_call_key(node) is not None:
+            try:
+                plan = self._security_helper_call_plan(node, helper_binding_stack)
+            except CompileError:
+                return self._emitted_value_is_double(node)
+            final, stack = plan["expr"], plan["binding_stack"]
+            if plan["mode"] == "linear":
+                # The emitter declares each local with ``_type_for_decl``.
+                decls = {
+                    stmt.name: stmt for stmt in plan["body"] if isinstance(stmt, VarDecl)
+                }
+                if isinstance(final, Identifier):
+                    # A tuple element's local is ``auto``: not known double.
+                    return (final.name in decls
+                            and self._type_for_decl(decls[final.name]) == "double")
+                stack = stack + ({
+                    name: decl.value for name, decl in decls.items()
+                    if decl.value is not None
+                },)
+            return self._security_emits_double(final, stack, depth + 1)
+        if isinstance(node, BinOp):
+            if node.op in ("/", "%"):
+                return True
+            if node.op in ("+", "-", "*"):
+                return (self._security_emits_double(node.left, helper_binding_stack, depth + 1)
+                        or self._security_emits_double(node.right, helper_binding_stack, depth + 1))
+        if isinstance(node, UnaryOp) and node.op in ("-", "+"):
+            return self._security_emits_double(node.operand, helper_binding_stack, depth + 1)
+        if isinstance(node, Ternary):
+            return (self._security_emits_double(node.true_val, helper_binding_stack, depth + 1)
+                    or self._security_emits_double(node.false_val, helper_binding_stack, depth + 1))
+        return self._emitted_value_is_double(node)
+
     def _security_fallback_owns(
         self,
         node,
@@ -5218,7 +5435,15 @@ class SecurityEmitter:
         the chart's ``g[1]``), and ``timeframe.*`` (beside the chart's
         ``timeframe.in_seconds()``)."""
         if not self._security_requested_calls:
-            return False
+            # Every earlier build's lowering, but an input read while a TA
+            # history index or constructor argument is lowered keeps its
+            # getter: the evaluator can run before on_bar sets the members.
+            return (
+                self._security_index_inputs
+                and isinstance(node, Identifier)
+                and self._security_identifier_is_global_binding(node)
+                and node.name in self._input_backed_vars
+            )
         if self._get_ta_site(node) is not None:
             return True
         if isinstance(node, FuncCall):
@@ -5271,15 +5496,22 @@ class SecurityEmitter:
         node: Identifier,
         helper_binding_stack: tuple[dict[str, ASTNode], ...],
     ) -> bool:
-        """A name the builder resolves itself: a scalar helper binding and
-        the requested ``time_close``."""
+        """A name the builder resolves itself: a scalar helper binding, the
+        requested ``time_close``, and -- while a TA history index is lowered
+        -- an input, read through its getter."""
         if not self._security_identifier_is_global_binding(node):
             binding = self._security_lookup_helper_binding_context(
                 node.name, helper_binding_stack
             )
             if binding is not None:
                 return self._security_bound_is_scalar(*binding)
-        return node.name == "time_close"
+        if node.name == "time_close":
+            return True
+        return (
+            self._security_index_inputs
+            and self._security_identifier_is_global_binding(node)
+            and node.name in self._input_backed_vars
+        )
 
     def _security_fallback_delegate(self, node) -> str | None:
         """The builder's C++ for a node the expression visitor reached while
