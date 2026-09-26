@@ -2131,6 +2131,8 @@ class TopLevelEmitter:
                     # reject ``Label _func_ret = 0.0;``.
                     if return_udt or ret_type in DRAWING_TYPE_TO_CPP.values():
                         default_ret = f"{ret_type}{{}}"
+                    elif fi.returns_tuple:
+                        default_ret = self._tuple_default_expr(tuple_types_list)
                     else:
                         default_ret = self._default_for_type(ret_type)
                     lines.append(f"        {ret_type} _func_ret = {default_ret};")

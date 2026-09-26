@@ -1415,6 +1415,17 @@ class CallVisitor:
 
         # na(x) -> is_na(x)
         if func_name == "na" and namespace is None:
+            if (len(node.args) == 1 and not node.kwargs
+                    and self._infer_type(node.args[0]) == "std::string"):
+                # A string na is stored as the empty string (the engine's
+                # ``na<std::string>()``), which has no ``is_na`` overload.
+                self._codegen_warning(
+                    node,
+                    "na() of a string reads the empty string as na: PineForge "
+                    "stores a string na as \"\", so an authored empty string "
+                    "is na here, while TradingView tells the two apart.",
+                )
+                return f"({self._visit_expr(node.args[0])}).empty()"
             args = ", ".join(self._visit_expr(a) for a in node.args)
             return f"is_na({args})"
 

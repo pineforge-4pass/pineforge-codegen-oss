@@ -4065,10 +4065,80 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         return val_type
 
+    def _selection_tuple_shape(
+        self, node
+    ) -> tuple[int, tuple[PineType, ...]] | None:
+        """``(size, element types)`` of an if/switch whose every arm yields a
+        tuple: a ``[a, b]`` literal, a call of a tuple-returning user function,
+        or a nested selection of those. Pine types the selection as that
+        tuple; arms must agree on its size. ``None`` for any other shape.
+
+        Element types are the arms' common type per position (int and float
+        make float); a position the arms disagree on is left untyped.
+        """
+        if isinstance(node, IfStmt):
+            arms = [node.body] + ([node.else_body] if node.else_body else [])
+        elif isinstance(node, SwitchStmt):
+            arms = [body for _case, body in node.cases]
+            if node.default_body:
+                arms.append(node.default_body)
+        else:
+            return None
+        shapes: list[tuple[int, tuple[PineType, ...]]] = []
+        for body in arms:
+            if not body:
+                return None
+            terminal = body[-1]
+            expr = terminal.expr if isinstance(terminal, ExprStmt) else terminal
+            if isinstance(expr, TupleLiteral):
+                shapes.append((
+                    len(expr.elements),
+                    self._tuple_element_types_by_node.get(id(expr), ()),
+                ))
+            elif (isinstance(expr, FuncCall)
+                    and isinstance(expr.callee, Identifier)
+                    and self._func_returns_tuple.get(expr.callee.name, False)):
+                shapes.append((
+                    self._func_tuple_element_count.get(expr.callee.name, 0),
+                    self._func_tuple_element_types.get(expr.callee.name, ()),
+                ))
+            elif isinstance(expr, (IfStmt, SwitchStmt)):
+                nested = self._selection_tuple_shape(expr)
+                if nested is None:
+                    return None
+                shapes.append(nested)
+            else:
+                return None
+        sizes = {size for size, _types in shapes}
+        if len(sizes) != 1:
+            return None
+        size = sizes.pop()
+        if size < 2:
+            return None
+        if any(len(types) != size for _size, types in shapes):
+            return size, ()
+        element_types: list[PineType] = []
+        for position in range(size):
+            known = {
+                types[position] for _size, types in shapes
+                if types[position] not in (PineType.NA, PineType.UNKNOWN)
+            }
+            if len(known) == 1:
+                element_types.append(known.pop())
+            elif known and known <= {PineType.INT, PineType.FLOAT}:
+                element_types.append(PineType.FLOAT)
+            else:
+                return size, ()
+        return size, tuple(element_types)
+
     def _visit_TupleAssign(self, node: TupleAssign) -> PineType:
         val_type = self._visit(node.value)
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
         element_types = self._tuple_element_types_by_node.get(id(node.value), ())
+        if not element_types and isinstance(node.value, (IfStmt, SwitchStmt)):
+            shape = self._selection_tuple_shape(node.value)
+            if shape is not None:
+                element_types = shape[1]
 
         is_val_static = self._is_static_expression(node.value)
 
@@ -4272,12 +4342,23 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 tuple_node = last_stmt.expr
             elif isinstance(last_stmt, TupleLiteral):
                 tuple_node = last_stmt
+            selection_shape = (
+                self._selection_tuple_shape(last_stmt)
+                if isinstance(last_stmt, (IfStmt, SwitchStmt))
+                else None
+            )
             if tuple_node is not None:
                 self._func_returns_tuple[node.name] = True
                 self._func_tuple_element_count[node.name] = len(tuple_node.elements)
                 self._func_tuple_element_types[node.name] = (
                     self._tuple_element_types_by_node.get(id(tuple_node), ())
                 )
+            elif selection_shape is not None:
+                # ``f() => if c ... g() else [a, b]``: every arm yields a
+                # tuple of one size, so the function returns that tuple.
+                self._func_returns_tuple[node.name] = True
+                self._func_tuple_element_count[node.name] = selection_shape[0]
+                self._func_tuple_element_types[node.name] = selection_shape[1]
             elif (
                 isinstance(terminal_ret_expr, FuncCall)
                 and isinstance(terminal_ret_expr.callee, Identifier)

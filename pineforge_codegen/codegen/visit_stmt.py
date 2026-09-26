@@ -1377,6 +1377,23 @@ class StmtVisitor:
                         )
             return
 
+        # ``[a, b] = switch x ...`` / ``= if c ...``: every arm yields a tuple
+        # (the analyzer's ``_selection_tuple_shape``). Materialize the selected
+        # tuple, na in every position when no arm runs, then destructure it.
+        if isinstance(node.value, (IfStmt, SwitchStmt)):
+            types = self._infer_selection_tuple_types(
+                node.value, len(node.names)
+            )
+            tuple_t = f"std::tuple<{', '.join(types)}>"
+            temp = f"_tuple_result_{self._tuple_assign_counter}"
+            self._tuple_assign_counter += 1
+            lines.append(f"{pad}{tuple_t} {temp} = {self._tuple_default_expr(types)};")
+            self._visit_if_switch_expr(
+                node.value, temp, lines, len(pad) // 4, target_cpp_type=tuple_t
+            )
+            emit_call_tuple(temp)
+            return
+
         # User-defined function returning a tuple: use C++17 structured bindings
         if isinstance(node.value, FuncCall):
             func_name, namespace = self._resolve_callee(node.value.callee)
