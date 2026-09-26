@@ -426,8 +426,13 @@ class Parser:
             return False
         if cur.value in ("enum", "type", "strategy", "indicator", "na", "true", "false"):
             return False
-        # Skip past optional generic args after the type ident: IDENT [< ... >]
         i = base + 1
+        # A library type is qualified by its import alias: ``lib.Type x = ...``.
+        while (i + 1 < len(self.tokens)
+               and self.tokens[i].type == TokenType.DOT
+               and self.tokens[i + 1].type == TokenType.IDENT):
+            i += 2
+        # Skip past optional generic args after the type ident: IDENT [< ... >]
         if i < len(self.tokens) and self.tokens[i].type == TokenType.LT:
             depth = 1
             i += 1
@@ -440,6 +445,12 @@ class Parser:
                 elif tt in (TokenType.NEWLINE, TokenType.EOF_TOKEN):
                     return False
                 i += 1
+        # Postfix-array shorthand of a non-keyword type: ``color[] c = ...``,
+        # ``line[] ls = ...``. An empty ``[]`` cannot be a history subscript.
+        while (i + 1 < len(self.tokens)
+               and self.tokens[i].type == TokenType.LBRACKET
+               and self.tokens[i + 1].type == TokenType.RBRACKET):
+            i += 2
         # Now expect an IDENT (variable name).
         if i >= len(self.tokens) or self.tokens[i].type != TokenType.IDENT:
             return False
@@ -553,6 +564,10 @@ class Parser:
     def _parse_type_hint_string(self) -> str:
         """Parse primitive, UDT, array<T>, map<K,V>, or postfix-array (``T[]``) hints."""
         base = self._advance().value
+        # Library type qualified by its import alias: ``lib.Type``.
+        while self._check(TokenType.DOT) and self._peek().type == TokenType.IDENT:
+            self._advance()  # .
+            base = f"{base}.{self._advance().value}"
         if self._check(TokenType.LT):
             parts: list[str] = []
             depth = 0
@@ -665,6 +680,12 @@ class Parser:
             # be non-empty), so this is unambiguously ``array<T>``. Without
             # this branch the ``[]`` is left unconsumed, the name fails to
             # parse, and the whole declaration is silently dropped.
+            type_hint = self._parse_type_hint_string()
+        elif (self._current().type == TokenType.IDENT
+              and self._peek().type == TokenType.DOT
+              and self._is_ident_typed_var_decl()):
+            # Library type qualified by its import alias:
+            # ``var lib.Type name = ...``.
             type_hint = self._parse_type_hint_string()
 
         name_tok = self._consume(TokenType.IDENT)

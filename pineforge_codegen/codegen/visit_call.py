@@ -1615,6 +1615,18 @@ class CallVisitor:
                 spec = self._type_spec_from_expr(node) or TypeSpec.array(TypeSpec.primitive("float"))
                 target = getattr(self, "_array_ctor_target_name", None)
                 if target is not None:
+                    # The declaration's own element type wins over the
+                    # argument inference, which cannot see every scalar's
+                    # family (a ``color`` variable reads as float there):
+                    # ``color[] cs = array.from(c1, c2)`` declares
+                    # ``std::vector<int64_t>`` and must construct one.
+                    declared = self._collection_spec_for_name(target)
+                    if (declared is not None and declared.kind == "array"
+                            and declared.element is not None
+                            and declared.element.kind == "primitive"
+                            and spec.kind == "array"
+                            and declared.element != spec.element):
+                        spec = declared
                     spec = self._widen_array_spec_for_name(target, spec)
                 elem_spec = spec.element
                 elems = ", ".join(
