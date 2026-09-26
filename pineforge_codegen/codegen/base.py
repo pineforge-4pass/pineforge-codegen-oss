@@ -324,6 +324,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # payload (``_build_security_expr``): the session helper below reads
         # the chart's timeframe, which does not describe the security bar.
         self._security_payload_depth: int = 0
+        # The request.security builder's context while its expression visitor
+        # fallback lowers a payload node: a user call, TA site, helper-bound
+        # name or requested-bar history the visitor reaches under that node is
+        # handed back to the builder (``_security_fallback_delegate``).
+        self._security_fallback_frame: dict | None = None
+        # Whether the evaluator being emitted lowers its payload's user calls
+        # under builtin calls, and its typed methods, on the requested bar;
+        # whether it did, and the first thing it left on the chart's terms
+        # (``_emit_security_evaluator_requested``).
+        self._security_requested_calls: bool = True
+        self._security_requested_used: bool = False
+        self._security_chart_read: tuple | None = None
+        # Evaluators that keep every earlier build's lowering, decided while
+        # a method's TA constructor arguments were lowered: sec_id -> reason.
+        self._security_chart_evaluators: dict[int, tuple] = {}
         # Set when a chart expression calls ``_pf_session_market_``; its type
         # and member are emitted once the whole TU is lowered.
         self._uses_session_market: bool = False
@@ -909,7 +924,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     is_gaps_on = True
 
             expr_node = item["expr_node"]
-            inline_helper_ta_indices: set[int] = set()
+            inline_helper_ta_indices: set[tuple] = set()
             ta_binding_stacks = self._collect_security_ta_binding_stacks(
                 expr_node,
                 inline_ta_indices=inline_helper_ta_indices,
@@ -956,7 +971,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "ta_indices": sorted(ta_indices),
                 "ta_binding_stacks": ta_binding_stacks,
                 "ta_variants": ta_variants,
-                "inline_helper_ta_indices": sorted(inline_helper_ta_indices),
+                # (index, signature) of each TA variant computed inline.
+                "inline_helper_ta_indices": sorted(inline_helper_ta_indices, key=repr),
                 "depends_on_mutable_globals": item.get("depends_on_mutable_globals", False),
                 "mutable_globals": list(item.get("mutable_globals", [])),
                 "is_lower_tf_array": bool(item.get("is_lower_tf_array", False)),

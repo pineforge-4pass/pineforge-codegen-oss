@@ -57,9 +57,13 @@ def ensure_recursion_headroom() -> None:
 
 
 def limit_error(message: str, location: SourceLocation, phase: Phase) -> CompileError:
-    return CompileError([Diagnostic(
+    error = CompileError([Diagnostic(
         level=Level.ERROR, phase=phase, location=location, message=message,
     )])
+    # A limit is no refusal a caller may recover from by lowering the
+    # script another way (codegen/security.py re-raises it).
+    error.limit = True
+    return error
 
 
 def check_source_size(source: str, filename: str) -> None:

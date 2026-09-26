@@ -201,6 +201,10 @@ class ExprVisitor:
             self._budget_visit_count += 1
             if self._budget_visit_count % 128 == 0:
                 self._budget.check(node.loc, Phase.CODEGEN)
+        if self._security_fallback_frame is not None:
+            delegated = self._security_fallback_delegate(node)
+            if delegated is not None:
+                return delegated
         if isinstance(node, NumberLiteral):
             return str(node.value)
         if isinstance(node, StringLiteral):
