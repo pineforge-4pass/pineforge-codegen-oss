@@ -456,37 +456,51 @@ int main() {
     assert values == (3.0, 4.0, 3.0, 6.0)
 
 
-def test_security_tuple_helper_rejects_mixed_elements_before_codegen():
+def test_security_tuple_helper_types_mixed_elements_per_element():
+    # TradingView returns any mix of scalars; each element keeps its family
+    # (tests/test_e2e_security_helper_tuple_elements.py replays the tapes).
     src = """//@version=6
-strategy("mixed tuple reject")
+strategy("mixed tuple")
 f(float src) =>
     string tag = "value"
     [src, tag]
 [value, tag] = request.security(syminfo.tickerid, "2", f(close))
+plot(tag == "value" ? value : 0.0)
 """
-    with pytest.raises(
-        CompileError,
-        match=(
-            r"two or more numeric int/float elements or homogeneous bool "
-            r"elements; "
-            r"inferred 2 element\(s\) \[float, string\]"
-        ),
-    ):
-        transpile(src)
+    cpp = transpile(src)
+    assert re.search(r"std::tuple<double, std::string> _req_sec_0\s*=", cpp)
+    compile_env.compile_cpp(cpp, label="security-helper-float-string-tuple")
 
 
-def test_security_tuple_helper_rejects_mixed_numeric_bool_shape_honestly():
+def test_security_tuple_helper_types_mixed_numeric_bool_shape():
     src = """//@version=6
-strategy("mixed tuple reject")
+strategy("mixed tuple")
 f(float src) =>
     [src, src > 1.0, src + 2.0]
 [a, b, c] = request.security(syminfo.tickerid, "2", f(close))
+plot(b ? a : c)
+"""
+    cpp = transpile(src)
+    assert re.search(
+        r"std::tuple<double, bool, double> _req_sec_0 = "
+        r"std::tuple<double, bool, double>\{na<double>\(\), false, na<double>\(\)\};",
+        cpp,
+    )
+    compile_env.compile_cpp(cpp, label="security-helper-float-bool-tuple")
+
+
+def test_security_tuple_helper_rejects_non_scalar_elements_before_codegen():
+    src = """//@version=6
+strategy("non-scalar tuple reject")
+f(float src) =>
+    [src, color.red]
+[value, tone] = request.security(syminfo.tickerid, "2", f(close))
 """
     with pytest.raises(
         CompileError,
         match=(
-            r"two or more numeric int/float elements or homogeneous bool "
-            r"elements; inferred 3 element\(s\) \[float, bool, float\]"
+            r"two or more int, float, bool or string elements; "
+            r"inferred 2 element\(s\) \[float, color\]"
         ),
     ):
         transpile(src)

@@ -1252,6 +1252,14 @@ class StmtVisitor:
                         and len(tuple_types) == tuple_size
                         and all(item == PineType.BOOL for item in tuple_types)
                     )
+                    # A helper tuple mixing bool, string and numeric
+                    # elements (the analyzer admits nothing else).
+                    mixed_helper_tuple = (
+                        not isinstance(expr_node, TupleLiteral)
+                        and info.get("returns_tuple", False)
+                        and tuple_size >= 2
+                        and len(tuple_types) == tuple_size
+                    )
                     exact_direct_tuple = (
                         isinstance(expr_node, TupleLiteral)
                         and tuple_size >= 2
@@ -1277,6 +1285,7 @@ class StmtVisitor:
                     if (
                         numeric_tuple
                         or bool_tuple
+                        or mixed_helper_tuple
                         or exact_direct_tuple
                         or known_ta_tuple
                     ):

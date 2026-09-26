@@ -524,6 +524,22 @@ class SecurityEmitter:
             self._security_ta_tuple_fields_cache = fields
         return fields.get(name)
 
+    def _security_tuple_binding_names(self) -> frozenset[str]:
+        """Names a top-level ``[a, b] = request.security(...)`` binds."""
+        names = getattr(self, "_security_tuple_names_cache", None)
+        if names is None:
+            found: set[str] = set()
+            for stmt in self.ctx.ast.body:
+                if not (isinstance(stmt, TupleAssign)
+                        and isinstance(stmt.value, FuncCall)):
+                    continue
+                func_name, namespace = self._resolve_callee(stmt.value.callee)
+                if namespace == "request" and func_name == "security":
+                    found.update(name for name in stmt.names if name != "_")
+            names = frozenset(found)
+            self._security_tuple_names_cache = names
+        return names
+
     def _security_call_returns_string(self, node: FuncCall) -> bool:
         """Whether this ``request.security(...)`` call's payload is a string
         (its registered call carries ``string_result``)."""
@@ -655,6 +671,41 @@ class SecurityEmitter:
             )
             return bound, lexical_stack
         return None
+
+    def _security_index_reads_helper_local(
+        self,
+        index,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+    ) -> bool:
+        """Whether a history index reads a helper-local name. The linear
+        emitter binds a local to its C++ variable, so it lowers such an index
+        at run time even where the prepasses could fold the local's value
+        (``k = 0`` then ``src[k]``): they must declare the history it reads."""
+        stack = [(index, helper_binding_stack or ())]
+        for _ in range(4096):
+            if not stack:
+                return False
+            n, frames = stack.pop()
+            if isinstance(n, (list, tuple)):
+                stack.extend((child, frames) for child in n)
+                continue
+            if not isinstance(n, ASTNode):
+                continue
+            if (isinstance(n, Identifier)
+                    and not self._security_identifier_is_global_binding(n)):
+                for frame in reversed(frames):
+                    if n.name in frame:
+                        if not isinstance(frame, _SecurityHelperArgumentFrame):
+                            return True
+                        # An argument: read it in the caller's scope, where
+                        # it may be the caller's local (``f(close, k)``).
+                        if isinstance(frame[n.name], ASTNode):
+                            stack.append((frame[n.name], frame.caller_stack))
+                        break
+            stack.extend(
+                (v, frames) for k, v in vars(n).items() if k != "annotations"
+            )
+        return True
 
     def _literal_int_for_security_index(self, node) -> int | None:
         """Integer index for bar-field[n] inside request.security (must be literal)."""
@@ -1093,13 +1144,20 @@ class SecurityEmitter:
                     bound, bound_stack = binding
                     if not isinstance(bound, str):
                         local_index = n.index
-                        resolved_local_index = self._resolve_security_index_literal(
-                            n.index, bindings
+                        resolved_local_index = (
+                            None
+                            if self._security_index_reads_helper_local(n.index, bindings)
+                            else self._resolve_security_index_literal(n.index, bindings)
                         )
                         if resolved_local_index is not None:
                             local_index = NumberLiteral(
                                 value=resolved_local_index
                             )
+                        else:
+                            # Lowered in this helper's scope by the emitter
+                            # (``__pf_security_index_``): a dynamic read of the
+                            # bound series, never resolved in the caller's.
+                            local_index = Identifier(name="__pf_security_index_dynamic")
                         walk(
                             self._compose_security_helper_history_subscript(
                                 bound,
@@ -1259,41 +1317,58 @@ class SecurityEmitter:
         return SECURITY_BAR_FIELD_EXPRS.get(field, f"bar.{field}")
 
     @staticmethod
+    def _security_tuple_element_cpp_types(
+        tuple_size: int,
+        tuple_element_types: tuple[PineType, ...] = (),
+    ) -> list[str]:
+        """Per-element C++ storage of a helper tuple of arbitrary arity.
+
+        A bool element keeps a real ``bool`` so true/false semantics survive
+        the requested-context boundary, and a string element a
+        ``std::string``. Every numeric element, and one whose type was not
+        inferred, retains the established double-coercing representation.
+        """
+        if len(tuple_element_types) != tuple_size:
+            return ["double"] * max(0, tuple_size)
+        return [
+            "bool" if item == PineType.BOOL
+            else "std::string" if item == PineType.STRING
+            else "double"
+            for item in tuple_element_types
+        ]
+
+    @classmethod
     def _security_tuple_result_default(
+        cls,
         cpp_type: str,
         tuple_size: int,
         tuple_element_types: tuple[PineType, ...] = (),
     ) -> str:
-        is_bool_tuple = (
-            len(tuple_element_types) == tuple_size
-            and tuple_size > 0
-            and all(item == PineType.BOOL for item in tuple_element_types)
-        )
-        default_value = "false" if is_bool_tuple else "na<double>()"
+        # TradingView reads a bool element false and a numeric or string
+        # element na before the first requested value and on a gaps_on bar
+        # that completes none (tests/test_e2e_security_helper_tuple_elements.py).
+        defaults = {
+            "bool": "false",
+            "std::string": "na<std::string>()",
+        }
         vals = ", ".join(
-            default_value for _ in range(max(0, tuple_size))
+            defaults.get(element, "na<double>()")
+            for element in cls._security_tuple_element_cpp_types(
+                tuple_size, tuple_element_types
+            )
         )
         return f"{cpp_type}{{{vals}}}"
 
-    @staticmethod
+    @classmethod
     def _security_helper_tuple_cpp_type(
+        cls,
         tuple_size: int,
         tuple_element_types: tuple[PineType, ...] = (),
     ) -> str:
-        """C++ storage type for a supported helper tuple of arbitrary arity.
-
-        Numeric int/float families retain the established double-coercing
-        representation. Homogeneous bool families use real ``bool`` fields so
-        true/false semantics survive the requested-context boundary.
-        """
-        is_bool_tuple = (
-            len(tuple_element_types) == tuple_size
-            and tuple_size > 0
-            and all(item == PineType.BOOL for item in tuple_element_types)
-        )
-        element_cpp_type = "bool" if is_bool_tuple else "double"
+        """C++ storage type for a supported helper tuple of arbitrary arity
+        (``_security_tuple_element_cpp_types`` per element)."""
         return "std::tuple<" + ", ".join(
-            element_cpp_type for _ in range(max(0, tuple_size))
+            cls._security_tuple_element_cpp_types(tuple_size, tuple_element_types)
         ) + ">"
 
     def _collect_security_ta_hist_indices(self, node) -> set[int]:
@@ -4293,6 +4368,9 @@ class SecurityEmitter:
             helper_binding_stack = ()
 
         if isinstance(expr_node, Identifier):
+            raw_cpp = self._security_raw_cpp.get(expr_node.name)
+            if raw_cpp is not None:
+                return raw_cpp
             binding = None
             if not self._security_identifier_is_global_binding(expr_node):
                 binding = self._security_lookup_helper_binding_context(
@@ -4418,6 +4496,24 @@ class SecurityEmitter:
                     )
                     if resolved_local_index is not None:
                         local_index = NumberLiteral(value=resolved_local_index)
+                    else:
+                        # ``src[k]`` with ``k`` a helper local (``src[mHiAgo]``):
+                        # the index belongs to this helper's scope, not to the
+                        # caller scope the bound series is lowered in. Lower it
+                        # here and hand the C++ over by name, outside the
+                        # binding stack (whose shape keys the TA variants).
+                        index_name = f"__pf_security_index_{id(expr_node)}"
+                        self._security_raw_cpp[index_name] = self._build_security_expr(
+                            sec_id,
+                            expr_node.index,
+                            ta_range,
+                            ta_results,
+                            resolving,
+                            security_mutable_names,
+                            helper_binding_stack,
+                            emitted_lines,
+                        )
+                        local_index = Identifier(name=index_name)
                     composed = self._compose_security_helper_history_subscript(
                         bound,
                         local_index,

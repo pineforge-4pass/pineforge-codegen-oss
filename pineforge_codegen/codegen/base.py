@@ -347,6 +347,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Each request.security evaluator local's C++ type (a string local
         # takes ``na<std::string>()``).
         self._security_local_cpp_types: dict[str, str] = {}
+        # C++ the security builder hands a synthetic name: a helper-local
+        # history index lowered in its helper's scope.
+        self._security_raw_cpp: dict[str, str] = {}
         # Set when a chart expression calls ``_pf_session_market_``; its type
         # and member are emitted once the whole TU is lowered.
         self._uses_session_market: bool = False
@@ -4629,6 +4632,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     # coarse request.security call expression itself still
                     # reports FLOAT, so prefer that exact binding type here.
                     cpp_type = "bool"
+                elif (
+                    ptype == PineType.STRING
+                    and name in self._security_tuple_binding_names()
+                ):
+                    # A string element of a request.security helper tuple.
+                    cpp_type = "std::string"
                 else:
                     cpp_type = (
                         self._infer_type(expr)

@@ -68,7 +68,7 @@ from typing import Any
 from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier,
     IfStmt, MemberAccess, NumberLiteral, StringLiteral, Subscript, SwitchStmt,
-    Ternary, TupleLiteral, UnaryOp, VarDecl,
+    Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..method_binding import bind_function_defaults
 from ..symbols import PineType
@@ -80,6 +80,19 @@ from .tables import (
     TA_TUPLE_RETURNS, TA_TUPLE_ELEMENT_COUNTS, TA_COMPUTE_ARGS,
     TA_LENGTH_ONLY_DEFAULT_SOURCE,
 )
+
+
+# Element types a request.security helper tuple may carry (see
+# ``_handle_request_call``); an ``na`` element is stored as a double like every
+# numeric one. An element the definition leaves untyped is typed at the call
+# (``_security_callsite_tuple_types``) or refused.
+_SECURITY_TUPLE_ELEMENT_TYPES = frozenset({
+    PineType.INT, PineType.FLOAT, PineType.BOOL, PineType.STRING, PineType.NA,
+})
+_HINT_TYPES = {
+    "int": PineType.INT, "float": PineType.FLOAT, "bool": PineType.BOOL,
+    "string": PineType.STRING,
+}
 
 
 class CallHandlers:
@@ -660,6 +673,59 @@ class CallHandlers:
             return self._security_symbol_is_heikinashi(self._global_expr_map[node.name], _seen)
         return False
 
+    def _security_callsite_tuple_types(
+        self,
+        func_name: str,
+        call: FuncCall,
+        element_types: tuple[PineType, ...],
+    ) -> tuple[PineType, ...]:
+        """Type the elements a helper's definition leaves untyped from this
+        request.security call's arguments (``f(high, 10)``: ``src[k]`` is a
+        float), following the helper's top-level declarations. An element
+        still untyped keeps ``UNKNOWN`` and is refused."""
+        fdef = self._func_defs.get(func_name)
+        if fdef is None or not fdef.body:
+            return element_types
+        final = fdef.body[-1]
+        final = final.expr if isinstance(final, ExprStmt) else final
+        if not isinstance(final, TupleLiteral) or len(final.elements) != len(element_types):
+            return element_types
+
+        def arg_type(arg) -> PineType:
+            if isinstance(arg, Identifier):
+                if arg.name in BAR_FIELDS:
+                    return PineType.FLOAT
+                if arg.name == "time":
+                    return PineType.INT
+                sym = self._symbols.resolve(arg.name)
+                if sym is not None and sym.pine_type in _SECURITY_TUPLE_ELEMENT_TYPES:
+                    return sym.pine_type
+            return self._callsite_primitive_expr_type(arg, {})
+
+        env: dict[str, PineType] = {}
+        for index, param in enumerate(fdef.params):
+            arg = call.kwargs.get(param)
+            if arg is None and index < len(call.args):
+                arg = call.args[index]
+            env[param] = arg_type(arg) if arg is not None else PineType.UNKNOWN
+        for stmt in fdef.body[:-1]:
+            if isinstance(stmt, VarDecl):
+                env[stmt.name] = (
+                    _HINT_TYPES.get(stmt.type_hint, PineType.UNKNOWN)
+                    if stmt.type_hint
+                    else self._callsite_primitive_expr_type(stmt.value, env)
+                )
+            elif isinstance(stmt, TupleAssign):
+                env.update((name, PineType.UNKNOWN) for name in stmt.names)
+        refined = []
+        for known, element in zip(element_types, final.elements):
+            if known == PineType.UNKNOWN:
+                typed = self._callsite_primitive_expr_type(element, env)
+                if typed in (PineType.INT, PineType.FLOAT, PineType.BOOL, PineType.STRING):
+                    known = typed
+            refined.append(known)
+        return tuple(refined)
+
     def _handle_request_call(self, func_name: str, node: FuncCall) -> PineType:
         """Handle request.* function calls."""
         if func_name == "security":
@@ -714,26 +780,30 @@ class CallHandlers:
                     if self._func_returns_tuple.get(expr_func, False):
                         tuple_size = self._func_tuple_element_count.get(expr_func, 0)
                         tuple_types = self._func_tuple_element_types.get(expr_func, ())
-                        numeric_tuple = (
+                        if PineType.UNKNOWN in tuple_types:
+                            tuple_types = self._security_callsite_tuple_types(
+                                expr_func, expr_node, tuple_types
+                            )
+                        # TradingView returns a tuple of any mix of scalars. A
+                        # bool element keeps a bool slot, a string element a
+                        # string slot; every numeric element, and one whose type
+                        # is not inferred (``src[k]`` of a parameter), keeps the
+                        # double storage of the numeric family.
+                        scalar_tuple = (
                             tuple_size >= 2
                             and len(tuple_types) == tuple_size
                             and all(
-                                item in (PineType.INT, PineType.FLOAT)
+                                item in _SECURITY_TUPLE_ELEMENT_TYPES
                                 for item in tuple_types
                             )
                         )
-                        bool_tuple = (
-                            tuple_size >= 2
-                            and len(tuple_types) == tuple_size
-                            and all(item == PineType.BOOL for item in tuple_types)
-                        )
-                        if not (numeric_tuple or bool_tuple):
+                        if not scalar_tuple:
                             inferred_types = ", ".join(
                                 item.value for item in tuple_types
                             ) or "unknown"
                             self._error(
                                 "request.security tuple-return helpers support two or more "
-                                "numeric int/float elements or homogeneous bool elements; inferred "
+                                "int, float, bool or string elements; inferred "
                                 f"{tuple_size} element(s) [{inferred_types}]",
                                 expr_node.loc,
                             )

@@ -2048,6 +2048,9 @@ class TypeInferer:
             if (name in getattr(self, "_direct_program_tuple_binding_names", ())
                     and gptype == PineType.BOOL):
                 return "bool"
+            if (gptype == PineType.STRING
+                    and name in self._security_tuple_binding_names()):
+                return "std::string"
             expr = getattr(self.ctx, "global_expr_map", {}).get(name)
             if expr is not None:
                 return self._infer_type(expr)
