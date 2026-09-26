@@ -893,6 +893,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # Resolve the timeframe: a literal/const/global gives a static tf;
             # a function-parameter tf is resolved from the call sites (the
             # evaluator is a class method, so the param is not in scope there).
+            # A lower-timeframe request has no chart-timeframe fallback.
+            self._security_tf_lower = bool(item.get("is_lower_tf_array"))
             tf_str, tf_expr = self._resolve_security_tf(
                 tf_node, item.get("containing_func", ""))
 

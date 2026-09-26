@@ -53,3 +53,29 @@ not a version" or "Version number must be an integer value from range
 other than spaces, carriage returns, a comment prefix, `6.0`, `6;` and a
 non-ASCII digit) were exported after the first 28. The file's sha256 is recorded
 in the lane report.
+
+`tf_switch_no_arm.pine` (sha256 `c832cf08801cbab9bd956647aaf916625f34e650944bbec0510fdc8b3994ea00`)
+selects a `request.security` timeframe with a `switch` that has no default arm
+and matches no arm, so the switch yields `na`. Exported with `lab tv --no-note
+--slug pf-popfix-tfswitch-no-arm --symbol BINANCE:ETHUSDT.P --interval 15
+--from 2025-04-01 --to 2025-04-03` on 2026-09-26: `tf_switch_no_arm_tv_trades.csv`
+(41 trades, sha256 `cedd61aa508fa3b02afbb8442ea1c98e849c0a7045fd281cf1ea8ebed6f02c0e`).
+Every entry Signal reads `tf=na chart=true hour=false` and every exit Signal
+the requested close, the chart close and the hour close: the request read the
+chart's timeframe.
+
+`tf_switch_na_arm.pine` (sha256 `1fa24797d4ef46ba14d5a82bde5f0e7964aada3726a57f83f270a23ee63291eb`)
+is the same probe with an arm `"none" => na` that the selector matches.
+Exported the same way (`--slug pf-popfix-tfswitch-na-arm`) on 2026-09-26, its
+tape is byte-identical to `tf_switch_no_arm_tv_trades.csv` (sha256
+`cedd61aa508fa3b02afbb8442ea1c98e849c0a7045fd281cf1ea8ebed6f02c0e`), which
+serves both.
+
+`lowertf_no_arm.pine` (sha256 `18f36d36c7c86e2001df00418cc16e5338f29d2f1ea1bea7f703c4dc5a533780`)
+requests `request.security_lower_tf` with a timeframe `switch` that has no
+default arm and matches no arm. Exported with `--slug pf-popfix-lowertf-no-arm`
+(same symbol, interval and range) on 2026-09-26: `lowertf_no_arm_tv_trades.csv`
+(41 trades, sha256 `84f82b87fdccb72696d10ff79eccb7e67e95e14c12d3332b667f5ee2ea4ee63a`).
+Every entry Signal reads `n=1 chart=true` (one intrabar per chart bar, equal to
+the chart close) and every exit Signal the count, the last intrabar close and
+the chart close.
