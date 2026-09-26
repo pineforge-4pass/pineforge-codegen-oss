@@ -120,6 +120,19 @@ def color_alpha_cast(value_cpp: str) -> str:
     )
 
 
+# A comment or a string or character literal of the generated C++, which
+# spells no raw string literal and no digit separator.
+_CPP_COMMENT_OR_LITERAL = re.compile(
+    r"//[^\n]*|/\*.*?\*/|\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])*'", re.S
+)
+
+
+def cpp_code_only(cpp: str) -> str:
+    """``cpp`` with every comment and string or character literal replaced by
+    a space: what is left is code, which a script's string cannot spell."""
+    return _CPP_COMMENT_OR_LITERAL.sub(" ", cpp)
+
+
 # Preserve the historic spelling for names already escaped in released TUs.
 LEGACY_CPP_RESERVED = frozenset({
     "exp", "log", "abs", "max", "min", "and", "or", "not",

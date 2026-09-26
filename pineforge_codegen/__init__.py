@@ -30,15 +30,16 @@ def _parse_bounded(pine_source: str, filename: str, budget: TimeBudget | None = 
 
 
 def _generate(pine_source: str, check_support: bool, filename: str):
-    """One pipeline pass, repeated once when the codegen emitted none of a
-    function's ``session.<flag>[k]`` reads (they sit in arguments it drops):
-    the second analysis leaves those functions unstateful, so a script whose
-    reads are all dropped keeps the functions it compiled with before.
+    """One pipeline pass, repeated once when the C++ reads none of a
+    function's ``session.<flag>[k]`` reads (they sit in arguments the codegen
+    leaves out): the second analysis leaves those functions unstateful, so a
+    script whose reads are all left out keeps the functions it compiled with
+    before.
 
     Returns ``(codegen, ctx, cpp, support_diagnostics)``."""
     budget = None
     dropped: frozenset[str] = frozenset()
-    for _pass in range(2):
+    for second in (False, True):
         ast, pragmas, budget = _parse_bounded(pine_source, filename, budget)
         support_diagnostics = []
         if check_support:
@@ -61,10 +62,11 @@ def _generate(pine_source: str, check_support: bool, filename: str):
         cpp = gen.generate()
         budget.check(phase=Phase.CODEGEN)
         unemitted = gen.session_functions_without_emitted_reads()
-        if not unemitted or unemitted <= dropped:
-            break
-        dropped |= unemitted
-    return gen, ctx, cpp, support_diagnostics
+        if second or not unemitted:
+            return gen, ctx, cpp, support_diagnostics
+        dropped = unemitted
+        # The second pass parses again: let the first one's objects go.
+        del ast, ctx, gen, cpp
 
 
 def transpile(pine_source: str, *, check_support: bool = True, filename: str = "<input>") -> str:
@@ -106,9 +108,11 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
                    filename: str = "<input>") -> dict:
     """Transpile like :func:`transpile`, plus the host-UI input manifest.
 
-    Runs ONE pipeline pass (Lexer -> Parser -> support check -> Analyzer ->
-    CodeGen.generate) and returns the generated C++ alongside the data the
-    cloud Studio needs to auto-build a backtest "override params" form:
+    Runs the pipeline (Lexer -> Parser -> support check -> Analyzer ->
+    CodeGen.generate) once, twice when the C++ reads none of a function's
+    ``session.<flag>[k]`` reads, and returns the generated C++ alongside the
+    data the cloud Studio needs to auto-build a backtest "override params"
+    form:
 
     - ``cpp``: the generated C++ source (identical to :func:`transpile`).
     - ``inputs``: a list of ``InputDef`` dicts (one per top-level

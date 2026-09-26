@@ -111,7 +111,7 @@ TA_TUPLE_RESULT_TYPES = {
 # small naming/walk utilities can be shared with future visitor mixins.
 from .helpers import (
     CPP_RESERVED, INLINE_HISTORY_KINDS, SESSION_FLAG_MEMBERS, NamingHelper,
-    na_preserving_int_cast, pine_truth_cast,
+    cpp_code_only, na_preserving_int_cast, pine_truth_cast,
 )
 from .constant_fold import fold_numeric_expression
 from .session_market import SESSION_MARKET_CPP, SESSION_MARKET_MEMBER
@@ -772,7 +772,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._session_call_flags: dict[str, set[str]] = {}
         self._session_call_owner: dict[int, str] = {}
         self._session_history_member_names: dict[str, str] = {}
-        # Functions whose per-call Series a read was emitted into.
+        # The names a rendered read may not take, and each read refused where
+        # it renders: its stand-in name, then the refusal, raised only if the
+        # C++ emits the stand-in (_settle_session_reads).
+        self._session_names_used: set[str] = set()
+        self._refused_session_read_names: dict[tuple[int, str], str] = {}
+        self._refused_session_reads: dict[str, tuple[ASTNode, str]] = {}
+        # Functions whose per-call Series the emitted C++ reads.
         self._session_emitted_owners: set[str] = set()
         # Track global-scope non-var declarations (emitted as class members)
         self._global_member_vars: set[str] = set()
@@ -3261,19 +3267,19 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             message=message, hint=hint))
 
     def _codegen_error(self, node: ASTNode | None, message: str, hint: str | None = None) -> None:
+        raise CompileError([self._codegen_error_diagnostic(node, message, hint)])
+
+    def _codegen_error_diagnostic(self, node: ASTNode | None, message: str,
+                                  hint: str | None = None) -> Diagnostic:
         loc = node.loc if node is not None else None
         if loc is None:
             loc = SourceLocation(file=self.ctx.filename, line=1, col=1, end_col=1)
-        raise CompileError(
-            [
-                Diagnostic(
-                    level=Level.ERROR,
-                    phase=Phase.CODEGEN,
-                    location=loc,
-                    message=message,
-                    hint=hint,
-                )
-            ]
+        return Diagnostic(
+            level=Level.ERROR,
+            phase=Phase.CODEGEN,
+            location=loc,
+            message=message,
+            hint=hint,
         )
 
     def _ta_return_type(self, site: TACallSite) -> str:
@@ -3859,6 +3865,44 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         (pineforge_codegen.transpile)."""
         return frozenset(set(self._session_call_flags) - self._session_emitted_owners)
 
+    def _settle_session_reads(self, cpp: str) -> None:
+        """Refuse the ``session.<flag>[k]`` reads the C++ emits with no
+        history, and record the functions whose per-call Series it reads.
+
+        Both follow the emitted code, not the rendered reads: a call can render
+        an argument and leave it out of the C++ (``color.from_gradient``'s
+        arguments, a drawing's xloc), and a read there refuses nothing and
+        needs no Series. A refused read renders as a stand-in name
+        (``_refused_session_read``), which only that read can spell in code.
+        """
+        members = {
+            member: key[1]
+            for key, member in self._inline_history_member_by_key.items()
+            if key[0] == "session_call"
+        }
+        if not (members or self._refused_session_reads):
+            return
+        names = sorted({*members, *self._refused_session_reads}, key=len, reverse=True)
+        pattern = re.compile(
+            r"(?<![\w.])(" + "|".join(map(re.escape, names)) + r")\b(\s*\[)?")
+        emitted_refusals: set[str] = set()
+        for match in pattern.finditer(cpp_code_only(cpp)):
+            name, indexed = match.group(1), match.group(2)
+            if name in members and indexed:
+                self._session_emitted_owners.add(members[name])
+            elif name in self._refused_session_reads:
+                emitted_refusals.add(name)
+        # One error per read, the refusal rendered first (a read can be
+        # rendered on the chart and in a request.security evaluator).
+        refused: dict[tuple[int, int], Diagnostic] = {}
+        for name, (node, message) in self._refused_session_reads.items():
+            if name in emitted_refusals:
+                diagnostic = self._codegen_error_diagnostic(node, message)
+                refused.setdefault(
+                    (diagnostic.location.line, diagnostic.location.col), diagnostic)
+        if refused:
+            raise CompileError([refused[key] for key in sorted(refused)])
+
     def _prescan_session_history(self) -> None:
         """The ``session.*`` flags the script reads at an offset at its top
         level, each of which gets one Series pushed on every chart bar.
@@ -3892,6 +3936,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for flag in sorted(flags)
         }
         self._session_history_flags = flags
+        self._session_names_used = used
 
     def _inline_history_member(self, kind: str, node: ASTNode,
                                arg_idx: int | None = None) -> str:
@@ -4964,7 +5009,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.insert(_session_market_member_at, SESSION_MARKET_MEMBER)
             lines.insert(_session_market_at, SESSION_MARKET_CPP)
 
-        return "\n".join(lines)
+        cpp = "\n".join(lines)
+        self._settle_session_reads(cpp)
+        return cpp
 
     # ------------------------------------------------------------------
     # Top-level emitters (_emit_includes / _emit_constructor / _emit_on_bar

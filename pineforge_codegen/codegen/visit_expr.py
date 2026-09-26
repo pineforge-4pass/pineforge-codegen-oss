@@ -1192,14 +1192,16 @@ class ExprVisitor:
         at the read. So is a read emitted in a function the analyzer lists in
         ``session_history_unsafe`` (a method, or a function a method, a
         request.security expression or a UDT field default reaches), and one
-        with no registered Series: never shared state.
+        with no registered Series: never shared state. The refusal waits for
+        the C++ (``_settle_session_reads``): a read in an argument the codegen
+        renders and leaves out refuses nothing.
         """
         flag = node.object.member
         where = next((n for n in (node, node.index, node.object)
                       if getattr(n, "loc", None) is not None), node)
         if self._security_payload_depth:
-            self._codegen_error(
-                where,
+            return self._refused_session_read(
+                node, where,
                 f"session.{flag}[...] cannot be read here: PineForge keeps a session "
                 "flag's history on the requested clock only for a read the "
                 "request.security expression reaches through its own operators, "
@@ -1209,8 +1211,8 @@ class ExprVisitor:
         if owner is not None:
             why = (getattr(self.ctx, "session_history_unsafe", None) or {}).get(owner)
             if why:
-                self._codegen_error(
-                    where,
+                return self._refused_session_read(
+                    node, where,
                     f"session.{flag}[...] cannot be read in {owner.split('.')[-1]}(), "
                     f"{why}: PineForge keeps a session flag's history in a function by "
                     "each of its call sites, and cannot tell this one apart.",
@@ -1218,16 +1220,29 @@ class ExprVisitor:
             member = self._inline_history_member_by_key.get(
                 ("session_call", owner, flag, self._current_instance_name))
             if member is not None:
-                self._session_emitted_owners.add(owner)
                 return f"{member}[{series_idx}]"
         elif flag in self._session_history_flags:
             return f"{self._session_history_member(flag)}[{series_idx}]"
-        self._codegen_error(
-            where,
+        return self._refused_session_read(
+            node, where,
             f"session.{flag}[...] is not supported here: PineForge keeps a session "
             "flag's history for the script's top level, a function body and a "
             "request.security expression that reads it.",
         )
+
+    def _refused_session_read(self, node: Subscript, where, message: str) -> str:
+        """A stand-in for a ``session.<flag>[k]`` read PineForge keeps no
+        history for: a name only this read spells, the refusal raised if the
+        emitted code holds it (``_settle_session_reads``)."""
+        key = (id(node), message)
+        name = self._refused_session_read_names.get(key)
+        if name is None:
+            name = self._allocate_generated_cpp_name(
+                f"_refused_session_read_{len(self._refused_session_reads) + 1}",
+                self._session_names_used)
+            self._refused_session_read_names[key] = name
+            self._refused_session_reads[name] = (where, message)
+        return name
 
     def _visit_subscript(self, node: Subscript) -> str:
         idx = self._visit_expr(node.index)

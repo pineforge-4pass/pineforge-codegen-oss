@@ -9,9 +9,11 @@ and ``max_bars_back``) or in a ``strategy.*`` parameter it drops
 (support_checker.py ``STRATEGY_UNSUPPORTED_PARAMS``, e.g. ``alert_message``).
 The analyzer (which functions to emit once per call site) and the codegen
 (which reads get a Series) ask this module the same question. A read it
-counts that the codegen drops some other way costs an unused Series; one it
-leaves out that the codegen does emit finds no Series and is refused, never
-given shared state.
+counts that the codegen leaves out some other way (it renders the argument,
+then drops it: ``color.from_gradient``, a drawing's xloc) costs an unused
+Series, or a second analysis when the C++ reads none of a function's reads
+(``pineforge_codegen._generate``); one it leaves out that the codegen does
+emit finds no Series and is refused, never given shared state.
 """
 
 from __future__ import annotations

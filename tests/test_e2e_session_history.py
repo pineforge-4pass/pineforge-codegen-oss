@@ -497,10 +497,10 @@ REFUSED = {
     "a method a wrapper calls on the chart too": (
         "type Foo\n    float v = 1\n"
         "method m(Foo self) => session.ismarket[1] and self.v > 0\n"
-        "w(Foo o) => o.m()\n"
         "foo = Foo.new()\n"
-        "a = w(foo)\n"
-        'x = request.security(syminfo.tickerid, "60", w(foo))\n', (5, 39), "a method"),
+        "w() => foo.m()\n"
+        "a = w()\n"
+        'x = request.security(syminfo.tickerid, "60", w()) or a\n', (5, 39), "a method"),
     "an argument of a call in the expression": (
         'x = request.security(syminfo.tickerid, "60", nz(session.ismarket[1] ? 1.0 : na)) > 0\n',
         (3, 65), "request.security"),
@@ -621,6 +621,105 @@ STILL_COMPILE = {
         "    self.v > 0\n"
         "mk() => Foo.new()\n"
         "x = mk().m()\n"),
+    # The codegen renders these arguments, then leaves them out of the C++.
+    "a read in color.from_gradient in a method": (
+        "type Foo\n    float v = 1\n"
+        "method m(Foo self) =>\n"
+        "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
+        "    self.v > 0\n"
+        "foo = Foo.new()\n"
+        "x = foo.m()\n"),
+    "a read in color.new's one argument and color.from_gradient's colors in a method": (
+        "type Foo\n    float v = 1\n"
+        "method m(Foo self) =>\n"
+        "    c = color.new(session.ismarket[1] ? color.red : color.green)\n"
+        "    d = color.from_gradient(close, 0, 1, session.ispremarket[1] ? color.red : color.green, color.green)\n"
+        "    self.v > 0\n"
+        "foo = Foo.new()\n"
+        "x = foo.m()\n"),
+    "a read in a drawing's xloc or yloc in a method": (
+        "type Foo\n    float v = 1\n"
+        "var label lb = label.new(bar_index, high, \"x\")\n"
+        "var line ln = line.new(bar_index, low, bar_index, high)\n"
+        "var box bx = box.new(bar_index, high, bar_index, low)\n"
+        "method m(Foo self) =>\n"
+        "    lb.set_yloc(session.ismarket[1] ? yloc.abovebar : yloc.belowbar)\n"
+        "    label.set_xloc(lb, bar_index, session.ispremarket[1] ? xloc.bar_index : xloc.bar_time)\n"
+        "    ln.set_xloc(bar_index - 1, bar_index, session.ispostmarket[1] ? xloc.bar_index : xloc.bar_time)\n"
+        "    box.set_xloc(bx, bar_index - 1, bar_index, session.isfirstbar[1] ? xloc.bar_index : xloc.bar_time)\n"
+        "    self.v > 0\n"
+        "foo = Foo.new()\n"
+        "x = foo.m()\n"),
+    "a read in strategy.risk.allow_entry_in in a method": (
+        "type Foo\n    float v = 1\n"
+        "method m(Foo self) =>\n"
+        "    strategy.risk.allow_entry_in(session.ismarket[1] ? strategy.direction.long : strategy.direction.all)\n"
+        "    self.v > 0\n"
+        "foo = Foo.new()\n"
+        "x = foo.m()\n"),
+    "a read in array.covariance's biased and str.tostring's format in a method": (
+        "type Foo\n    float v = 1\n"
+        "method m(Foo self) =>\n"
+        "    aa = array.new<float>(3, 1.0)\n"
+        "    ab = array.new<float>(3, 2.0)\n"
+        "    cv = aa.covariance(ab, session.ismarket[1])\n"
+        "    sb = str.tostring(close > open, session.ispremarket[1] ? \"a\" : \"b\")\n"
+        "    ss = str.tostring(\"abc\", session.ispostmarket[1] ? \"a\" : \"b\")\n"
+        "    self.v > 0\n"
+        "foo = Foo.new()\n"
+        "x = foo.m()\n"),
+    "a read in color.from_gradient in a function a method calls": (
+        "type Foo\n    float v = 1\n"
+        "g() =>\n"
+        "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
+        "    close > open\n"
+        "method m(Foo self) => g() and self.v > 0\n"
+        "foo = Foo.new()\n"
+        "x = foo.m()\n"),
+    "a read in color.from_gradient in a function a request.security expression calls": (
+        "f() =>\n"
+        "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
+        "    close > open ? 1.0 : 0.0\n"
+        'x = request.security(syminfo.tickerid, "60", f()) > 0\n'),
+    "a read in color.from_gradient in a function a global calls, the global's name shadowed": (
+        "f() =>\n"
+        "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
+        "    close > open\n"
+        "a = f()\n"
+        "g(float a) => a * 2\n"
+        'x = a and request.security(syminfo.tickerid, "60", g(close)) > 0\n'),
+    "a read in color.from_gradient in a function a UDT field default calls": (
+        "f() =>\n"
+        "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
+        "    close > open\n"
+        "type Foo\n    bool v = f()\n"
+        "foo = Foo.new()\n"
+        "x = foo.v\n"),
+    "a read in color.from_gradient in a request.security expression": (
+        'c = request.security(syminfo.tickerid, "60", color.from_gradient('
+        "session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green))\n"
+        "x = close > open\n"),
+    "a read in color.from_gradient in a function a trace calls": (
+        "f() =>\n"
+        "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
+        "    close > open\n"
+        "x = f()\n"
+        "// @pf-trace t=f()\n"),
+    "a read in color.from_gradient in a function a trace calls, a string spelled like its Series": (
+        's = "_session_call_1[1]"\n'
+        "f() =>\n"
+        "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
+        "    close > open\n"
+        "x = f() and str.length(s) > 0\n"
+        "// @pf-trace t=f()\n"),
+    "a read in color.from_gradient in a function a default argument calls": (
+        "h() =>\n"
+        "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
+        "    close > open\n"
+        "f(float y, bool ok = h()) => ok ? y : 0.0\n"
+        "a = f(close)\n"
+        "b = f(open)\n"
+        "x = a > 0 and b > 0\n"),
 }
 KEPT = {
     "a script name spelled like a generated history member": (
@@ -632,10 +731,11 @@ KEPT = {
 @pytest.mark.parametrize("place", STILL_COMPILE)
 def test_reads_the_codegen_drops_refuse_nothing(place: str, tmp_path: Path) -> None:
     """A session read the codegen never emits (in a skipped call, a dropped
-    strategy parameter or a drawing's style argument) refuses nothing, even in
-    a method or a function a request.security expression calls: the script
-    transpiles and compiles, as it did before this lane (7a39cb3). Its C++ may
-    carry a Series for the read that nothing reads."""
+    strategy parameter, a drawing's style argument or an argument it renders
+    and leaves out) refuses nothing, even in a method or a function a
+    request.security expression calls: the script transpiles and compiles, as
+    it did before this lane (7a39cb3). Its C++ may carry a Series for the read
+    that nothing reads."""
     legacy = reference_codegen(LEGACY)
     if legacy is None:
         pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
@@ -645,6 +745,7 @@ def test_reads_the_codegen_drops_refuse_nothing(place: str, tmp_path: Path) -> N
                     + 'if x\n    strategy.entry("L", strategy.long)\n', encoding="utf-8")
     now, before = transpile_json(pine), transpile_json(pine, legacy)
     assert now["ok"] and before["ok"], (now["diagnostics"], before["diagnostics"])
+    compile_cpp(before["cpp"], label=f"{place} (7a39cb3)")
     compile_cpp(now["cpp"], label=place)
 
 
