@@ -877,18 +877,22 @@ class ExprVisitor:
                             extended = ("" if node.member == "ismarket" else
                                         ", and an in-market bar of an overnight "
                                         "session can read as pre- or post-market")
+                            constant = ("always true" if node.member == "ismarket"
+                                        else "always false")
                             self._codegen_warning(
                                 node,
-                                f"session.{node.member} inside request.security is "
-                                "the time-of-day predicate at the security bar's open "
-                                "time, which can differ from TradingView: it tests a "
-                                "session's day mask on that instant's own weekday and "
-                                f"does not read \"2400\"{extended}. On the chart the "
-                                "flag asks the engine's session calendar.",
+                                f"session.{node.member} inside request.security keeps "
+                                "the time-of-day predicate, which can differ from "
+                                "TradingView: on an intraday chart it tests the "
+                                "security bar's open time, a session's day mask on "
+                                "that instant's own weekday, and does not read "
+                                f"\"2400\"{extended}; on a D/W/M chart it is "
+                                f"{constant}. The chart's own session flags ask the "
+                                "engine's session calendar.",
                             )
                         return predicate
                     self._uses_session_market = True
-                    ismarket = ("_pf_session_ismarket(syminfo_.session, syminfo_.timezone, "
+                    ismarket = ("_pf_session_market_(syminfo_.session, syminfo_.timezone, "
                                 "script_tf_, current_bar_.timestamp)")
                     if node.member == "ismarket":
                         return ismarket

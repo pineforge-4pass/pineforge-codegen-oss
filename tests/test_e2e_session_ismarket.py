@@ -1,12 +1,14 @@
 """The session.* flags are TradingView's, as its tapes prove.
 
-TradingView's own session flags on every bar of eight 60-minute charts
-(``fixtures/session_ismarket``): CME_MINI:ES1! across both 2025 US DST
-switches and the Thanksgiving week, OANDA:EURUSD, OANDA:XAUUSD and
+TradingView's own session flags on every bar of eight 60-minute charts and
+one daily chart (``fixtures/session_ismarket``): CME_MINI:ES1! across both
+2025 US DST switches and the Thanksgiving week, OANDA:EURUSD, OANDA:XAUUSD and
 BINANCE:ETHUSDT.P (the engine lane H-MEASURE's session.ismarket tapes
 ``hm-g236-*`` and this lane's every-flag tapes ``cgim-flags-*`` of the same
-windows: all 1,138 bars in market, none in an extended session), and
-NASDAQ:AAPL with and without extended hours. Each probe reverses its position
+windows: all 1,138 bars in market, none in an extended session), NASDAQ:AAPL
+with and without extended hours, and OANDA:XAUUSD 1D, whose bars TradingView
+stamps at the 17:00 ET break and flags in market: a D/W/M bar holds whole
+session days. Each probe reverses its position
 at the close of every bar (``process_orders_on_close``), so each Entry row is
 one chart bar, dated at its open, and its Signal carries the flags TradingView
 evaluated there: ``M1`` in market, ``M0`` not, and so on (see the README).
@@ -28,9 +30,10 @@ this lane leaves as they are; the extended-hours tape pins where they differ.
 
 Each tape is replayed end to end -- ``transpile_json``, the built runtime,
 ``run_strategy.py`` with the session and timezone as runtime overrides -- on
-flat bars stamped at the tape's entry times, plus one bar an hour after the
-last: the flags are a function of the bars' times and the symbol's session
-and timezone only, and every tape's session day goes on past its window. The
+flat bars stamped at the tape's entry times, plus one bar a chart interval
+after the last: the flags are a function of the bars' times, the chart's
+timeframe and the symbol's session and timezone only, and every intraday
+tape's session day goes on past its window. The
 tape's own probe runs with a ``@pf-trace`` of every flag, under each session
 spelling H-MEASURE measured: the campaign's lane facts, the same sessions with
 TradingView's weekday mask, and a 24-hour day spelled ``0000-2400`` and
@@ -69,12 +72,13 @@ LEGACY = "b0ed4967b3b5ab7aea80fea3edc783b16b04b16e"
 CHARTS = ("es1-60-dst-mar", "es1-60-dst-nov", "es1-60-thanksgiving",
           "eurusd-60-dst-mar", "xauusd-60-dst-mar", "eth-60-24x7")
 TAPES = tuple(f"{kind}-{chart}" for kind in ("hm-g236", "cgim-flags") for chart in CHARTS) + (
-    "cgim-flags-aapl-60-ext", "cgim-flags-aapl-60-reg")
+    "cgim-flags-aapl-60-ext", "cgim-flags-aapl-60-reg", "cgim-flags-xauusd-1d")
 FLAGS = {"M": "ismarket", "P": "ispremarket", "Q": "ispostmarket",
          "F": "isfirstbar", "L": "islastbar",
          "f": "isfirstbar_regular", "l": "islastbar_regular"}
 TRACE = "".join(f"\n// @pf-trace {name}=session.{name}" for name in FLAGS.values()) + "\n"
 HOUR = 3_600_000
+INTERVAL_MS = {"60": HOUR, "1D": 24 * HOUR}
 
 
 @dataclass(frozen=True)
@@ -130,6 +134,9 @@ CASES = tuple(case for cases in (
     Case("cgim-flags-aapl-60-reg", "0930-1600", "America/New_York", {}),
     Case("cgim-flags-aapl-60-ext", "0930-1600", "America/New_York", {},
          engine={"F": 20, "L": 20, "l": 20}),
+    # A daily bar stamped at the 17:00 ET break, with and without the mask.
+    Case("cgim-flags-xauusd-1d", "1800-1700", "America/New_York", {}),
+    Case("cgim-flags-xauusd-1d", "1800-1700:23456", "America/New_York", {}),
 )
 # On the extended-hours chart TradingView's isfirstbar / islastbar are the
 # extended day's 04:00 and 19:00 bars and the _regular twins the regular
@@ -184,13 +191,18 @@ def _write_feed(stamps: list[int], path: Path) -> Path:
     return path
 
 
+def _interval(slug: str) -> str:
+    return json.loads((FIXTURES / slug / "metrics.json").read_text())["interval"]
+
+
 def _replay_stamps(slug: str) -> list[int]:
     stamps = [ts for ts, _ in read_tape(slug)]
-    return stamps + [stamps[-1] + HOUR]
+    return stamps + [stamps[-1] + INTERVAL_MS[_interval(slug)]]
 
 
 def _overrides(case: Case) -> dict:
-    return {"input_tf": "60", "script_tf": "60",
+    tf = _interval(case.slug)
+    return {"input_tf": tf, "script_tf": tf,
             "runtime_overrides": {"session": case.session, "timezone": case.timezone}}
 
 
@@ -283,7 +295,7 @@ def test_tapes_are_the_recorded_exports() -> None:
         assert metrics["wsProvenance"]["rangeProof"] == "covered", slug
         tape = read_tape(slug)
         assert len(tape) == metrics["trades"], slug
-        if "-aapl-" in slug:
+        if "-aapl-" in slug or slug.endswith("-1d"):
             continue
         assert all(flags["M"] and not flags.get("P") and not flags.get("Q")
                    for _, flags in tape), slug
@@ -298,6 +310,10 @@ def test_tapes_are_the_recorded_exports() -> None:
     assert by_hour["10:00"] == {"M1P0Q0F0L0f1l0"}
     assert by_hour["15:00"] == {"M1P0Q0F0L0f0l1"}
     assert by_hour["16:00"] == {"M0P0Q1F0L0f0l0"}   # shares the kernel's 15:30 interval
+    daily = read_tape("cgim-flags-xauusd-1d")
+    assert {dt.datetime.fromtimestamp(ts / 1000, zone).strftime("%H:%M") for ts, _ in daily} == {"17:00"}
+    assert all(all(flags[k] for k in "MFLfl") and not flags["P"] and not flags["Q"]
+               for _, flags in daily)
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.key)
@@ -309,7 +325,7 @@ def test_session_flags_are_tradingviews(case: Case, replays) -> None:
     assert not wrong, f"[{case.key}] bars where a flag is not TradingView's: {wrong}"
     # The probe entered on every bar TradingView held, at the same time.
     assert engine_entry_times(replay.trades[case.key]) == _replay_stamps(case.slug), case.key
-    assert "_pf_session_ismarket(" in replay.cpp
+    assert "_pf_session_market_(" in replay.cpp
     exact = "".join(letter for letter in misses if letter not in case.engine)
     pinned = {FLAGS[k]: v for k, v in case.engine.items()}
     print(f"session flags {case.key}: {exact} == TradingView on {len(read_tape(case.slug))} bars"
@@ -321,7 +337,7 @@ def test_legacy_predicates_missed_the_pinned_bars(case: Case, replays) -> None:
     if ("legacy", case.slug) not in replays:
         pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
     replay = replays[("legacy", case.slug)]
-    assert "_pf_session_ismarket(" not in replay.cpp
+    assert "_pf_session_market_(" not in replay.cpp
     misses = _misses(case, replay)
     assert ({letter: len(bars) for letter, bars in misses.items() if bars}
             == {**case.legacy, **case.engine}), case.key
@@ -403,16 +419,62 @@ def test_one_bar_without_timeframe_reads_the_calendar(one_bar) -> None:
 
 
 def test_pine_names_of_the_emitted_helpers_stay_distinct(tmp_path: Path) -> None:
-    """A script may name its own variables after the helper and the host
-    member the lowering calls: they are renamed, so the TU still compiles and
-    the input keeps its Pine name as its key."""
+    """A script may name its own variables after the member the lowering calls
+    and the host member it reads: they are renamed, so the TU still compiles
+    and the input keeps its Pine name as its key."""
     pine = tmp_path / "strategy.pine"
     pine.write_text('//@version=6\nstrategy("emitted names", overlay=true)\n'
-                    "_pf_session_ismarket = close > open\n"
+                    "_pf_session_market_ = close > open\n"
                     "script_tf_ = input.int(2)\n"
-                    "if session.ismarket and _pf_session_ismarket and script_tf_ > 0\n"
+                    "if session.ismarket and _pf_session_market_ and script_tf_ > 0\n"
                     '    strategy.entry("L", strategy.long)\n', encoding="utf-8")
     result = transpile_json(pine)
     assert result["ok"], result["diagnostics"]
     assert [entry["title"] for entry in result["inputs"]] == ["script_tf_"]
     compile_cpp(result["cpp"], label="emitted names")
+
+
+def _transpiled(tmp_path: Path, body: str) -> dict:
+    pine = tmp_path / "strategy.pine"
+    pine.write_text('//@version=6\nstrategy("session emission", overlay=true)\n' + body,
+                    encoding="utf-8")
+    result = transpile_json(pine)
+    assert result["ok"], result["diagnostics"]
+    return result
+
+
+def test_session_market_is_emitted_once_when_read(tmp_path: Path) -> None:
+    """Needs no engine: the calendar type precedes the strategy class once, the
+    strategy holds one cache outside its checkpointed script state, and a
+    script that reads no chart session flag gets neither."""
+    cpp = _transpiled(tmp_path, "f() => session.ispremarket\n"
+                                "if session.ismarket or f()\n"
+                                '    strategy.entry("L", strategy.long)\n')["cpp"]
+    assert cpp.count("struct _PFSessionMarket {") == 1
+    assert cpp.index("struct _PFSessionMarket {") < cpp.index("class GeneratedStrategy")
+    assert cpp.count("mutable _PFSessionMarket _pf_session_market_;") == 1
+    assert cpp.index("class GeneratedStrategy") < cpp.index("_pf_session_market_;")
+    assert not any("_pf_session_market_" in line and "_pf_script_state_checkpoint_" in line
+                   for line in cpp.splitlines())
+    assert cpp.count("_pf_session_market_(syminfo_.session, syminfo_.timezone, "
+                     "script_tf_, current_bar_.timestamp)") == 2
+    plain = _transpiled(tmp_path, 'if session.isfirstbar\n    strategy.entry("L", strategy.long)\n')
+    assert "_PFSessionMarket" not in plain["cpp"]
+
+
+def test_security_payload_session_read_warns_once_per_site(tmp_path: Path) -> None:
+    """Needs no engine: a payload keeps the time-of-day predicate at the
+    security bar's time and warns once for each session.* read, however many
+    payloads reach it."""
+    result = _transpiled(tmp_path,
+                         "f() => session.ismarket\n"
+                         'a = request.security(syminfo.tickerid, "240", f())\n'
+                         'b = request.security(syminfo.tickerid, "D", f())\n'
+                         "if a and b\n"
+                         '    strategy.entry("L", strategy.long)\n')
+    assert result["cpp"].count(
+        "pine_session_ismarket(syminfo_.session, syminfo_.timezone, bar.timestamp)") == 2
+    warned = [(d["line"], d["col"]) for d in result["diagnostics"]
+              if "inside request.security" in d["message"]]
+    assert warned == [(3, 16)]  # the `ismarket` of f's body, once for both payloads
+

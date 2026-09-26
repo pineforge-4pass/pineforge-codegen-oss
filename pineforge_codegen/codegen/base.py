@@ -109,7 +109,7 @@ TA_TUPLE_RESULT_TYPES = {
 # small naming/walk utilities can be shared with future visitor mixins.
 from .helpers import CPP_RESERVED, NamingHelper, na_preserving_int_cast, pine_truth_cast
 from .constant_fold import fold_numeric_expression
-from .session_market import SESSION_MARKET_CPP
+from .session_market import SESSION_MARKET_CPP, SESSION_MARKET_MEMBER
 
 # TypeInferer mixin owns the ~15 type-spec / C++-type inference helpers
 # previously scattered across this module; see ``codegen/types.py``.
@@ -324,8 +324,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # payload (``_build_security_expr``): the session helper below reads
         # the chart's timeframe, which does not describe the security bar.
         self._security_payload_depth: int = 0
-        # Set when a chart expression calls ``_pf_session_ismarket``; the
-        # helper is emitted before the class once the whole TU is lowered.
+        # Set when a chart expression calls ``_pf_session_market_``; its type
+        # and member are emitted once the whole TU is lowered.
         self._uses_session_market: bool = False
         # session.* reads inside a request.security payload already warned.
         self._warned_security_session_sites: set[int] = set()
@@ -4124,8 +4124,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # per-callsite instances are declared below inside GeneratedStrategy
         # and therefore join the automatic COOF checkpoint inventory.
         self._emit_lazy_source_clock_helper(lines)
-        # The chart-bar session helper, inserted here once the class is
-        # lowered and known to call it (codegen/session_market.py).
+        # The chart-bar session type, inserted here once the class is lowered
+        # and known to call it (codegen/session_market.py).
         _session_market_at = len(lines)
 
         # 2. Open class
@@ -4667,6 +4667,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         )
         self._emit_script_state_hooks(lines, _script_state_members)
         lines.append("")
+        # Its per-strategy cache, outside the checkpointed script state.
+        _session_market_member_at = len(lines)
 
         # 9. Constructor with TA initializer list
         self._emit_constructor(lines)
@@ -4735,7 +4737,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._emit_extern_c(lines)
 
         if self._uses_session_market:
-            lines[_session_market_at:_session_market_at] = [SESSION_MARKET_CPP]
+            lines.insert(_session_market_member_at, SESSION_MARKET_MEMBER)
+            lines.insert(_session_market_at, SESSION_MARKET_CPP)
 
         return "\n".join(lines)
 
