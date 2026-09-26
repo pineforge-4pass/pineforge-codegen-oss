@@ -772,6 +772,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._session_call_flags: dict[str, set[str]] = {}
         self._session_call_owner: dict[int, str] = {}
         self._session_history_member_names: dict[str, str] = {}
+        # Functions whose per-call Series a read was emitted into.
+        self._session_emitted_owners: set[str] = set()
         # Track global-scope non-var declarations (emitted as class members)
         self._global_member_vars: set[str] = set()
         for name, _ in ctx.global_var_decls:
@@ -3576,7 +3578,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             )
         self._requested_context_inline_node_ids = requested_node_ids
         # The session.* reads a function body emits, outside its own
-        # request.security expressions (session_reads.py).
+        # request.security expressions (session_reads.py); a callable that
+        # cannot keep its call sites apart, or whose reads a previous pass
+        # never emitted, gets no per-call Series (a read it emits is refused).
+        no_call_history = (
+            set(getattr(self.ctx, "session_history_unsafe", None) or {})
+            | set(getattr(self.ctx, "session_reads_dropped", None) or ())
+        )
         emitted_function_reads = {
             id(read)
             for fi in self.ctx.func_infos if fi.node is not None
@@ -3681,7 +3689,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # clock's (security.py).
                 if owner is not None and id(node) not in requested_node_ids:
                     self._session_call_owner[id(node)] = owner
-                    if id(node) in emitted_function_reads:
+                    if (id(node) in emitted_function_reads
+                            and owner not in no_call_history):
                         flag = node.object.member
                         self._session_call_flags.setdefault(owner, set()).add(flag)
                         register("session_call", (owner, flag), "bool", owner)
@@ -3842,6 +3851,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """The per-bar Series of a ``session.*`` flag read at the top level:
         ``_pf_session_hist_<flag>``, suffixed past a script name spelled so."""
         return self._session_history_member_names[flag]
+
+    def session_functions_without_emitted_reads(self) -> frozenset[str]:
+        """The functions given a per-call Series for a ``session.*`` read that
+        this generation never emitted (it sits in an argument the codegen
+        drops): a second analysis leaves them unstateful
+        (pineforge_codegen.transpile)."""
+        return frozenset(set(self._session_call_flags) - self._session_emitted_owners)
 
     def _prescan_session_history(self) -> None:
         """The ``session.*`` flags the script reads at an offset at its top

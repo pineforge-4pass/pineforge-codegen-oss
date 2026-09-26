@@ -127,10 +127,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     """
 
     def __init__(self, ast: Program, filename: str = "<stdin>",
-                 budget: TimeBudget | None = None) -> None:
+                 budget: TimeBudget | None = None,
+                 session_reads_dropped: frozenset[str] = frozenset()) -> None:
         self._ast = ast
         self._filename = filename
         self._budget = budget
+        # Functions whose session.<flag>[k] reads a previous codegen pass
+        # never emitted (pineforge_codegen.transpile): not made stateful for
+        # them.
+        self._session_reads_dropped = frozenset(session_reads_dropped)
         self._budget_visit_count = 0
         self._method_signatures = inventory_method_signatures(ast)
         self._method_call_bindings: dict[
@@ -611,6 +616,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             },
             func_security_clone_only=self._func_security_clone_only,
             session_history_unsafe=self._session_history_unsafe,
+            session_reads_dropped=self._session_reads_dropped,
             func_cs_ta_clone_names=self._func_cs_ta_clone_names,
             udt_defs=self._udt_fields,
             enum_defs=self._enum_defs,
@@ -2268,8 +2274,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
           inlines it or calls its chart variant, on the requested clock. The
           functions reached are those the expression calls, those they call,
           and those a global variable's definition or a mutable global's
-          statements call when the expression reads it (a name a function
-          binds itself is its own);
+          statements call when anything it reaches spells the global's name
+          (the evaluator follows a mutable global by name, so a function's
+          own binding of the name does not stop it);
         * a function a UDT field default calls, once for every ``new()``.
 
         Codegen refuses a ``session.<flag>[k]`` it emits in one of them; a read
@@ -2292,27 +2299,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 pending.extend(callee for callee, _call in calls_by_parent.get(name, []))
             return found
 
-        def bound_in(func_def) -> set[str]:
-            names = set(getattr(func_def, "params", []) or [])
-            for node, _depth in iter_ast_nodes(func_def):
-                if isinstance(node, VarDecl) and node.name:
-                    names.add(node.name)
-                elif isinstance(node, TupleAssign):
-                    names.update(node.names)
-                elif isinstance(node, ForStmt) and node.var:
-                    names.add(node.var)
-                elif isinstance(node, ForInStmt):
-                    names.update(n for n in [node.var, *(node.vars or [])] if n)
-            return names
-
         methods = {name for name in func_defs if "." in name}
         mark(methods, "a method, whose calls PineForge cannot always tell apart")
         mark(closure(callee for m in methods for callee, _call in calls_by_parent.get(m, [])),
              "which a method calls")
 
         # A request.security expression's reach.
-        pending: list[tuple[Any, str | None, frozenset[str]]] = [
-            (sec.expression, getattr(sec, "containing_func", "") or None, frozenset())
+        pending: list[tuple[Any, str | None]] = [
+            (sec.expression, getattr(sec, "containing_func", "") or None)
             for sec in getattr(self, "_security_calls", []) or []
             if getattr(sec, "expression", None) is not None
         ]
@@ -2320,7 +2314,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         seen_nodes: set[int] = set()
         followed: set[str] = set()
         while pending:
-            node, owner, local = pending.pop()
+            node, owner = pending.pop()
             if id(node) in seen_nodes:
                 continue
             seen_nodes.add(id(node))
@@ -2329,20 +2323,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             for callee, _call in find_calls(node, known_func_names, owner):
                 if callee not in reached and callee in func_defs:
                     reached.add(callee)
-                    pending.append((func_defs[callee], callee,
-                                    frozenset(bound_in(func_defs[callee]))))
+                    pending.append((func_defs[callee], callee))
             for child, _depth in iter_ast_nodes(node):
-                if (not isinstance(child, Identifier) or child.name in followed
-                        or child.name in local):
+                if not isinstance(child, Identifier) or child.name in followed:
                     continue
                 name = child.name
                 info = self._global_binding_infos.get(name)
                 if info is not None and (info.is_var or name in self._global_reassigned_names):
                     followed.add(name)
-                    pending.extend((stmt, None, frozenset()) for stmt in info.source_stmts)
+                    pending.extend((stmt, None) for stmt in info.source_stmts)
                 elif name in self._global_expr_map:
                     followed.add(name)
-                    pending.append((self._global_expr_map[name], None, frozenset()))
+                    pending.append((self._global_expr_map[name], None))
         mark(reached, "which a request.security expression evaluates on the requested clock")
 
         # A UDT field default's call, for the types a script builds.
@@ -2771,12 +2763,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             name for name, func_def in func_defs.items()
             if _has_synthetic_history_state(func_def)
         }
-        synthetic_history_stateful |= {
-            name for name, func_def in func_defs.items()
-            if emitted_session_reads(func_def, requested_node_ids)
-        }
+        # A plain function that reads a flag at an offset is emitted once per
+        # call site. A callable that cannot keep its call sites apart gets
+        # no clone for it (codegen refuses such a read where it emits one),
+        # nor does one whose reads a previous pass never emitted.
         self._session_history_unsafe = self._session_history_unsafe_functions(
             func_defs, _find_calls, known_func_names, calls_by_parent)
+        synthetic_history_stateful |= {
+            name for name, func_def in func_defs.items()
+            if name not in self._session_history_unsafe
+            and name not in self._session_reads_dropped
+            and emitted_session_reads(func_def, requested_node_ids)
+        }
 
         # request.security owns a separate evaluator context and already
         # materializes/remaps its embedded TA state per SecurityCallInfo.  Do

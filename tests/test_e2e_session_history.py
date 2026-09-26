@@ -516,6 +516,12 @@ REFUSED = {
         "foos = array.from(Foo.new())\n"
         "x = false\n"
         "for f in foos\n    x := f.m()\n", (5, 39), "a method"),
+    "a function a mutable global's statements call, the global's name shadowed": (
+        "f() => session.ismarket[3] ? 1.0 : 0.0\n"
+        "var float g = 0.0\n"
+        "g := nz(f())\n"
+        "h(float g) => g > open\n"
+        'x = request.security(syminfo.tickerid, "60", h(close)) or g > 0\n', (3, 24), "request.security"),
     "a function a method calls": (
         "type Foo\n    float v = 1\n"
         "f() => session.ismarket[1]\n"
@@ -592,6 +598,21 @@ STILL_COMPILE = {
         '    strategy.entry("L", strategy.long, alert_message = session.ismarket[1] ? "a" : "b")\n'
         "    close\n"
         "x = f() > 0\n"),
+    "a read in a drawing's color in a method called on typed and untyped receivers": (
+        "type Foo\n    float v = 1\n"
+        "method m(Foo self) =>\n"
+        "    line.new(bar_index - 1, low, bar_index, high, "
+        "color = session.ismarket[1] ? color.green : color.red)\n"
+        "    self.v > 0\n"
+        "mk() => Foo.new()\n"
+        "foo = Foo.new()\n"
+        "x = mk().m() or foo.m()\n"),
+    "a read in a drawing's color in a function a trace calls": (
+        "f() =>\n"
+        "    label.new(bar_index, high, \"x\", color = session.ismarket[1] ? color.green : color.red)\n"
+        "    close > open\n"
+        "x = f()\n"
+        "// @pf-trace t=f()\n"),
     "a read in a drawing's color in a method": (
         "type Foo\n    float v = 1\n"
         "method m(Foo self) =>\n"
@@ -641,19 +662,6 @@ def test_scripts_without_a_read_keep_their_cpp(place: str, tmp_path: Path) -> No
     assert now["ok"] and before["ok"], (now["diagnostics"], before["diagnostics"])
     assert now["cpp"] == before["cpp"]
     compile_cpp(now["cpp"], label=place)
-
-
-def test_a_local_name_is_not_the_global(tmp_path: Path) -> None:
-    """Needs no engine: a parameter or local of a function a request.security
-    expression calls is not the global of that name, whose definition calls
-    a function reading a flag's history; nothing is refused."""
-    result = _transpiled(tmp_path, "f() => session.ismarket[1]\n"
-                                   "a = f()\n"
-                                   "g(float a) => a * 2\n"
-                                   "h() =>\n    a = close\n    a * 3\n"
-                                   'x = request.security(syminfo.tickerid, "60", g(close) + h())\n'
-                                   'if a and x > 0\n    strategy.entry("L", strategy.long)\n')
-    compile_cpp(result["cpp"], label="shadowed global")
 
 
 def test_a_trace_can_read_a_flag_at_an_offset(tmp_path: Path) -> None:

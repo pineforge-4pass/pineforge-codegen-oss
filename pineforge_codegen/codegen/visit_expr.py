@@ -1218,6 +1218,7 @@ class ExprVisitor:
             member = self._inline_history_member_by_key.get(
                 ("session_call", owner, flag, self._current_instance_name))
             if member is not None:
+                self._session_emitted_owners.add(owner)
                 return f"{member}[{series_idx}]"
         elif flag in self._session_history_flags:
             return f"{self._session_history_member(flag)}[{series_idx}]"
