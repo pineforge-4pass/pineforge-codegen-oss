@@ -98,6 +98,15 @@ def tz_time_field_lambda(field_expr: str, ts_arg: str, tz_arg: str) -> str:
     )
 
 
+# ``alert.freq_*``: TradingView's ``const string`` values. A TradingView tape
+# spells them as order comments: "all", "once_per_bar", "once_per_bar_close".
+ALERT_FREQ_VALUES = {
+    "freq_all": "all",
+    "freq_once_per_bar": "once_per_bar",
+    "freq_once_per_bar_close": "once_per_bar_close",
+}
+
+
 BAR_BUILTINS = {
     "bar_index": "pine_bar_index()",
     "time": "current_bar_.timestamp",

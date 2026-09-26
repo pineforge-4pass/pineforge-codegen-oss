@@ -1,12 +1,15 @@
 """Loud-rejection sweep for constant-only namespaces (audit items A1-A3, A6).
 
 Constant-namespace members (plot.style_*, text.align_*, shape.*, barmerge.*,
-alert.freq_*, ...) are only legitimate as arguments to parse-and-skip visual
-calls, inside the strategy() declaration, or (barmerge.*) as request.security
-gaps/lookahead values. As FREE EXPRESSIONS they used to fall through codegen
-to ``std::string("<member>")`` while the analyzer typed them INT — a silent
+...) are only legitimate as arguments to parse-and-skip visual calls, inside
+the strategy() declaration, or (barmerge.*) as request.security gaps/lookahead
+values. As FREE EXPRESSIONS they used to fall through codegen to
+``std::string("<member>")`` while the analyzer typed them INT — a silent
 mismatch. They must now reject with a clear CompileError, while the
-argument-context uses keep transpiling.
+argument-context uses keep transpiling. ``alert.freq_*`` are the exception:
+TradingView gives them const string values ("all", "once_per_bar",
+"once_per_bar_close"; tests/test_e2e_alert_freq_values.py), so they are
+ordinary values.
 """
 import pytest
 
@@ -53,9 +56,9 @@ def test_barmerge_free_expression_rejected(expr):
         transpile(PRELUDE + f"x = {expr}\n")
 
 
-def test_alert_freq_free_expression_rejected():
-    with pytest.raises(CompileError, match="alert.freq_once_per_bar"):
-        transpile(PRELUDE + "x = alert.freq_once_per_bar\n")
+def test_alert_freq_free_expression_has_its_value():
+    cpp = transpile(PRELUDE + "x = alert.freq_once_per_bar\n")
+    assert 'std::string("once_per_bar")' in cpp
 
 
 @pytest.mark.parametrize("member", ["bg_color", "fg_color"])

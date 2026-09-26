@@ -50,6 +50,7 @@ from .helpers import (
 )
 from .. import signatures as sigs
 from .tables import (
+    ALERT_FREQ_VALUES,
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_METHODS,
     BAR_BUILTINS,
@@ -2589,6 +2590,8 @@ class TypeInferer:
             # format.* constants emit std::string literals (consumed by
             # pine_str_tostring); bare reads must declare std::string.
             if ename == "format":
+                return "std::string"
+            if ename == "alert" and node.member in ALERT_FREQ_VALUES:
                 return "std::string"
             if ename == "timeframe":
                 if node.member in ("period", "main_period"):

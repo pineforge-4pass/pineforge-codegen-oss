@@ -1,0 +1,13 @@
+//@version=6
+// Reads alert.freq_* as free expressions: each entry's comment (the tape's
+// Signal) spells the constants' runtime values.
+strategy("PF alert freq values", overlay = true, pyramiding = 1,
+     default_qty_type = strategy.fixed, default_qty_value = 1)
+fAll = alert.freq_all
+fBar = alert.freq_once_per_bar
+fClose = alert.freq_once_per_bar_close
+pick = hour(time, "UTC") % 3 == 0 ? fAll : hour(time, "UTC") % 3 == 1 ? fBar : fClose
+if strategy.position_size == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = str.tostring(fAll) + "|" + str.tostring(fBar) + "|" + str.tostring(fClose))
+if strategy.position_size > 0 and minute(time, "UTC") == 30
+    strategy.close("L", comment = "P" + str.tostring(pick) + "|" + str.tostring(pick == alert.freq_all))
