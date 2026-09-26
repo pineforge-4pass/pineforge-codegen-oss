@@ -4601,6 +4601,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         if expr is not None
                         else PINE_TYPE_TO_CPP.get(ptype, "double")
                     )
+                    # The var-member rule: a plain global an epoch reaches
+                    # (``_wide_int_provenance``) is stored in 64 bits too.
+                    if cpp_type == "int" and self._is_int64_builtin_init(name):
+                        cpp_type = "int64_t"
                 default = self._default_for_type(cpp_type)
                 lines.append(f"    {cpp_type} {safe} = {default};")
 

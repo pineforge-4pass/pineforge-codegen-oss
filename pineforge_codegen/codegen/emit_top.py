@@ -1951,7 +1951,8 @@ class TopLevelEmitter:
                 # a string -> ``std::string``. User UDT field mutation propagates
                 # through the arena even though the handle parameter is by value.
                 spec = fi.param_type_specs[i]
-                cpp_t = self._type_spec_to_cpp(spec)
+                cpp_t = self._wide_declared_int_param(
+                    fi, i, self._type_spec_to_cpp(spec))
                 if spec.kind == "udt":
                     self._udt_param_udt[p] = spec.name
                     self._udt_param_udt[self._safe_name(p)] = spec.name
@@ -1966,7 +1967,8 @@ class TopLevelEmitter:
                         cpp_t = f"{cpp_t}&"
             elif i < len(fi.param_types):
                 pt = fi.param_types[i]
-                cpp_t = PINE_TYPE_TO_CPP.get(pt, "double")
+                cpp_t = self._wide_declared_int_param(
+                    fi, i, PINE_TYPE_TO_CPP.get(pt, "double"))
             else:
                 cpp_t = "double"
             param_strs.append(f"{cpp_t} {self._safe_name(p)}")

@@ -38,7 +38,7 @@ import re
 from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, FuncDef,
     Identifier, IfStmt,
-    MemberAccess, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
+    MemberAccess, MethodDef, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
     Subscript, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..errors import Phase
@@ -1531,7 +1531,12 @@ class TypeInferer:
             node = getattr(owner_info, "node", None)
             if node is not None:
                 if expr.name in node.params:
-                    return False
+                    # A parameter is wide when a written call feeds it a wide
+                    # value (``_wide_int_provenance``).
+                    return (
+                        getattr(owner_info, "name", ""),
+                        node.params.index(expr.name),
+                    ) in self._wide_int_provenance()[1]
                 local_key = (
                     f"{getattr(owner_info, 'name', '')}:local:{expr.name}"
                 )
@@ -1563,7 +1568,10 @@ class TypeInferer:
                             call_site_idx,
                         ):
                             return True
-            return self._expr_is_int64_builtin(expr)
+            # A name some declaration or reassignment makes wide carries the
+            # epoch wherever it is read (``_wide_int_provenance``).
+            return (self._expr_is_int64_builtin(expr)
+                    or expr.name in self._wide_int_provenance()[0])
         if self._expr_is_int64_builtin(expr):
             return True
         if isinstance(expr, (BinOp, UnaryOp)) and self._literal_overflows_int32(expr):
@@ -1739,42 +1747,115 @@ class TypeInferer:
             return "int64_t"
         return cpp_type
 
-    def _int64_reassign_targets(self) -> set[str]:
-        """Names of vars that are reassigned (``:=``/``=``) anywhere in the AST
-        with an RHS that is a top-level int64-returning builtin. Cached on the
-        instance. Pine ``int`` collapses these to 32-bit, but the runtime stores
-        the epoch in 64 bits, so the member must be promoted to ``int64_t``."""
-        cached = getattr(self, "_int64_reassign_cache", None)
+    def _wide_int_provenance(self) -> tuple[set[str], set[tuple[str, int]]]:
+        """Names, and integer callable parameters, that carry an epoch.
+
+        A name is wide when its declaration or any ``:=``/``=`` gives it a
+        value ``_expr_returns_wide_int`` traces to a wide source; an integer
+        parameter (declared ``int``, or untyped) is wide when a written call
+        passes it one. A wide name or parameter is itself a wide source, so
+        the width travels through copies: ``int sel = switch k => E2`` over
+        ``const int E2 = timestamp(...)``, ``copy := first`` over
+        ``first := time``, and ``f(int t)`` called as ``f(time)``. Pine
+        ``int`` keeps the whole epoch in each (lab tv pf-krunerr-int64-probe1,
+        2026-09-26: 1743468300000 where 32-bit slots read -288422176); the
+        runtime stores it, and the na sentinel, in 64 bits, so each slot is
+        ``int64_t``. Iterated to a fixpoint and cached. Names are keyed by
+        spelling across scopes, as the reassignment scan before this one was:
+        a same-spelled narrow name widens with a wide one, which only drops a
+        narrowing.
+        """
+        cached = getattr(self, "_wide_int_provenance_cache", None)
         if cached is not None:
             return cached
-        targets: set[str] = set()
-        # Callable locals need their lexical owner so a reassignment through a
-        # wrapper/method returning wide history is recognized as well as a
-        # direct ``time[1]`` RHS.
+        names: set[str] = set()
+        params: set[tuple[str, int]] = set()
+        # Published before the scan: a lookup made while the fixpoint runs
+        # reads the sets as they grow instead of starting a second scan.
+        self._wide_int_provenance_cache = (names, params)
+        bindings: list = []
+        calls: list = []
+
+        def collect(node, owner) -> None:
+            if isinstance(node, VarDecl) and node.value is not None:
+                bindings.append((node.name, node.value, owner))
+            elif (isinstance(node, Assignment)
+                    and isinstance(node.target, Identifier)):
+                bindings.append((node.target.name, node.value, owner))
+            elif (isinstance(node, FuncCall)
+                    and isinstance(node.callee, Identifier)
+                    and node.callee.name in self._func_info_map):
+                calls.append((node, owner))
+
+        # Callable bodies resolve their locals and parameters against their
+        # lexical owner; everything outside them is global.
         for info in getattr(self.ctx, "func_infos", ()):
             node = getattr(info, "node", None)
             if node is None:
                 continue
             for child in self._walk_ast_list(node.body):
-                if (
-                    isinstance(child, Assignment)
-                    and isinstance(child.target, Identifier)
-                    and self._expr_returns_wide_int(
-                        child.value, info, set(), None
-                    )
-                ):
-                    targets.add(child.target.name)
+                collect(child, info)
         ast = getattr(self.ctx, "ast", None)
-        if ast is not None:
-            for node in self._walk_ast(ast):
-                if (isinstance(node, Assignment)
-                        and isinstance(node.target, Identifier)
-                        and self._expr_returns_wide_int(
-                            node.value, None, set(), None
-                        )):
-                    targets.add(node.target.name)
-        self._int64_reassign_cache = targets
-        return targets
+        for stmt in getattr(ast, "body", None) or ():
+            if isinstance(stmt, (FuncDef, MethodDef)):
+                continue
+            for child in self._walk_ast(stmt):
+                collect(child, None)
+
+        changed = True
+        while changed:
+            changed = False
+            for name, value, owner in bindings:
+                if name not in names and self._expr_returns_wide_int(
+                        value, owner, set(), None):
+                    names.add(name)
+                    changed = True
+            for call, owner in calls:
+                callee = self._func_info_map[call.callee.name]
+                callee_params = list(getattr(callee.node, "params", ()) or ())
+                bound = list(enumerate(call.args))
+                bound += [
+                    (callee_params.index(key), arg)
+                    for key, arg in call.kwargs.items()
+                    if key in callee_params
+                ]
+                for index, arg in bound:
+                    key = (callee.name, index)
+                    if (key not in params
+                            and self._param_is_integer_scalar(callee, index)
+                            and self._expr_returns_wide_int(
+                                arg, owner, set(), None)):
+                        params.add(key)
+                        changed = True
+        return names, params
+
+    def _param_is_integer_scalar(self, fi, index: int) -> bool:
+        """Whether parameter ``index`` of ``fi`` is a scalar integer slot:
+        declared ``int`` or untyped, not a history parameter (those are
+        ``Series<int64_t>`` already) and not a method receiver."""
+        node = getattr(fi, "node", None)
+        if node is None or index >= len(node.params or ()):
+            return False
+        if getattr(fi, "is_udt_method", False) and index == 0:
+            return False
+        if node.params[index] in self.ctx.func_series_vars.get(fi.name, set()):
+            return False
+        declared = list(
+            getattr(self.ctx, "func_declared_param_type_specs", {}).get(
+                fi.name, ()
+            )
+        )
+        spec = declared[index] if index < len(declared) else None
+        if spec is None:
+            return True
+        return spec.kind == "primitive" and spec.name == "int"
+
+    def _wide_declared_int_param(self, fi, index: int, cpp_type: str) -> str:
+        """``int64_t`` for a declared ``int`` parameter a call feeds an epoch
+        (``_wide_int_provenance``), else ``cpp_type`` unchanged."""
+        if cpp_type == "int" and (fi.name, index) in self._wide_int_provenance()[1]:
+            return "int64_t"
+        return cpp_type
 
     def _is_int64_builtin_init(self, name: str) -> bool:
         """True if ``name``'s initializer OR any ``:=``/``=`` reassignment has an
@@ -1784,7 +1865,9 @@ class TypeInferer:
         (and the full epoch-ms value, which overflows int32) in 64 bits, so
         storing into ``int`` silently corrupts both the value and na detection.
         A reassignment like ``var int entryTime = na`` then ``entryTime := time``
-        must promote even though the *initializer* alone is ``na``.
+        must promote even though the *initializer* alone is ``na``, and so
+        must every name a copy of such a value reaches
+        (``_wide_int_provenance``).
         """
         expr = (
             self.ctx.global_expr_map.get(name)
@@ -1792,7 +1875,7 @@ class TypeInferer:
         )
         if self._expr_is_int64_builtin(expr):
             return True
-        return name in self._int64_reassign_targets()
+        return name in self._wide_int_provenance()[0]
 
     # ------------------------------------------------------------------
     # na-preserving double -> int narrowing
@@ -2046,10 +2129,12 @@ class TypeInferer:
             }.get(variant[index])
         specs = getattr(fi, "param_type_specs", []) or []
         if index < len(specs) and specs[index] is not None:
-            cpp_t = self._type_spec_to_cpp(specs[index])
+            cpp_t = self._wide_declared_int_param(
+                fi, index, self._type_spec_to_cpp(specs[index]))
             return cpp_t if cpp_t in NA_PRESERVING_INT_TYPES else None
         if index < len(fi.param_types):
-            cpp_t = PINE_TYPE_TO_CPP.get(fi.param_types[index], "double")
+            cpp_t = self._wide_declared_int_param(
+                fi, index, PINE_TYPE_TO_CPP.get(fi.param_types[index], "double"))
             return cpp_t if cpp_t in NA_PRESERVING_INT_TYPES else None
         return None
 
