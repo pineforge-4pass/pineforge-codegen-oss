@@ -317,6 +317,42 @@ class CallVisitor:
             return receiver_spec, None
         return receiver_spec, method_info
 
+    def _check_time_bars_back(self, func_name: str, node: FuncCall) -> FuncCall:
+        """Refuse ``time()`` / ``time_close()`` reading another bar.
+
+        Pine v6's ``time(timeframe, session, bars_back, timeframe_bars_back)``
+        overloads take the bar offset where the timezone form has its string
+        (``time("", "", -1)`` is the next bar's open). The engine has no API
+        for another chart bar's time, above all a future one; the offset used
+        to be passed as the timezone, C++ that does not compile.
+        """
+        offsets = [node.kwargs[name] for name in ("bars_back", "timeframe_bars_back")
+                   if name in node.kwargs]
+        offsets += [arg for arg in node.args[2:]
+                    if self._infer_type(arg) in ("int", "int64_t", "double")]
+        for offset in offsets:
+            if isinstance(offset, NumberLiteral) and offset.value == 0:
+                continue
+            self._codegen_error(
+                node,
+                f"{func_name}() with bars_back / timeframe_bars_back is not "
+                "supported: the engine exposes no other chart bar's time, "
+                "including a future bar's.",
+                hint=f"Read a past bar's value with {func_name}(...)[k].",
+            )
+        if not offsets:
+            return node
+        # Every offset is a literal 0, the current bar: drop it.
+        positional = list(node.args)
+        while len(positional) > 2 and any(positional[-1] is o for o in offsets):
+            positional.pop()
+        return FuncCall(
+            callee=node.callee, args=positional,
+            kwargs={k: v for k, v in node.kwargs.items()
+                    if k not in ("bars_back", "timeframe_bars_back")},
+            loc=node.loc, annotations=node.annotations,
+        )
+
     def _user_call_args_with_defaults(self, func_name: str, node: FuncCall):
         """A plain user-function call's arguments with omitted parameters
         filled from their declared defaults (``bind_function_defaults``);
@@ -1913,6 +1949,9 @@ class CallVisitor:
         # to nothing against the base engine (legacy 5-arg call), so the same
         # generated.cpp builds in every lab-experiment cell.
         #
+        if (func_name in ("time", "time_close") and namespace is None
+                and (node.args or node.kwargs)):
+            node = self._check_time_bars_back(func_name, node)
         if func_name == "time" and namespace is None and (node.args or node.kwargs):
             args = _merge_kwargs(node.args, node.kwargs, sigs.get_param_names(None, "time"), self._visit_expr)
             tf_e = args[0] if len(args) > 0 else 'script_tf_'
