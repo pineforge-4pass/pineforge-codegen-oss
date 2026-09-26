@@ -4353,7 +4353,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for idx, variants in (info.get("ta_variants") or {}).items():
                 site = self.ctx.ta_call_sites[idx]
                 for variant in variants:
-                    lines.append(f"    {self._ta_member_cpp_type(site)} {variant['member_name']};")
+                    cpp_type = self._ta_security_member_cpp_type(info["sec_id"], site, variant)
+                    lines.append(f"    {cpp_type} {variant['member_name']};")
 
         # 4. Series members for bar field history
         for field_name in sorted(self.ctx.series_bar_fields):
@@ -5445,8 +5446,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     and site.node is not security_source_node
                 ):
                     continue
-                if self._ta_dynamic_plan(site) is not None:
-                    continue
                 ctor_site = site
                 if sec_containing and sec_cs_idx is not None:
                     remap = self._func_cs_ta_remap.get((sec_containing, sec_cs_idx))
@@ -5459,6 +5458,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if not ctor_site.ctor_args:
                     continue
                 for variant in variants:
+                    if self._ta_security_plan(
+                        info["sec_id"], site, variant.get("binding_stack", ())
+                    ) is not None:
+                        continue
                     ctor_args, ctor_arg_stability = self._security_ta_ctor_args_for_variant(
                         info["sec_id"],
                         site,

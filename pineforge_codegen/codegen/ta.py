@@ -23,6 +23,7 @@ Sibling-mixin methods consumed via ``self``:
 from __future__ import annotations
 
 import copy
+import re
 from typing import TYPE_CHECKING
 
 from ..ast_nodes import (
@@ -126,9 +127,10 @@ class TaSiteHelper:
         # In a user-function body emitted for one call site, the member is
         # that call site's clone: its own constructor arguments decide.
         site = self._ta_active_site(site)
-        if self._ta_dynamic_plan(site) is None:
+        plan = self._ta_dynamic_plan(site)
+        if plan is None:
             return args
-        return self._ta_dynamic_compute_args(site, args, self._visit_expr)
+        return self._ta_dynamic_compute_args(site, plan, args, self._visit_expr)
 
     def _ta_active_site(self, site: "TACallSite") -> "TACallSite":
         """The site whose member ``_ta_member_name`` resolves ``site`` to."""
@@ -138,11 +140,14 @@ class TaSiteHelper:
         name = remap.get(site.member_name)
         if not name or name == site.member_name:
             return site
+        return self._ta_site_by_member().get(name, site)
+
+    def _ta_site_by_member(self) -> dict:
         by_member = self.__dict__.get("_ta_site_by_member_cache")
         if by_member is None:
             by_member = {s.member_name: s for s in self.ctx.ta_call_sites}
             self.__dict__["_ta_site_by_member_cache"] = by_member
-        return by_member.get(name, site)
+        return by_member
 
     def _ta_compute_args_for_site_base(self, site: "TACallSite") -> str:
         """Build the C++ argument string for ``<member>.compute(...)`` of a TA site.
@@ -1032,16 +1037,19 @@ class TaSiteHelper:
         emitted_lines: list[str] | None = None,
     ) -> str:
         """``_security_ta_compute_args_for_site_base`` plus the per-call
-        arguments of a site whose length the constructor cannot take, a
-        series argument rendered in the requested context."""
+        arguments of a copy whose length the constructor cannot take
+        (``_ta_security_plan``), a series argument rendered in the requested
+        context."""
         args = self._security_ta_compute_args_for_site_base(
             sec_id, site, ta_results, security_mutable_names,
             helper_binding_stack, emitted_lines,
         )
-        if self._ta_dynamic_plan(site) is None:
+        plan = self._ta_security_plan(sec_id, site, helper_binding_stack)
+        if plan is None:
             return args
         return self._ta_dynamic_compute_args(
             site,
+            plan,
             args,
             lambda node: self._build_security_expr(
                 sec_id, node, None, ta_results,
@@ -1049,7 +1057,6 @@ class TaSiteHelper:
                 helper_binding_stack=helper_binding_stack,
                 emitted_lines=emitted_lines,
             ),
-            helper_binding_stack=helper_binding_stack,
         )
 
     def _security_ta_compute_args_for_site_base(
@@ -1280,8 +1287,21 @@ class TaSiteHelper:
         nodes = list(getattr(site, "ctor_nodes", None) or [])
         if len(nodes) != len(site.ctor_args):
             return {"kind": "refused", "refused": refused}
+        # A call outside every callable is spelled from its own nodes, whose
+        # identifiers carry the analyzer's scope. A callable's constructor
+        # arguments are its call site's spelling substituted into the body.
+        own_nodes = site.owner_func is None
+        simple = {
+            pos: (self._simple_ta_arg_cpp_node(nodes[pos], scoped=True)
+                  if own_nodes else self._simple_ta_arg_cpp(site.ctor_args[pos]))
+            for pos in refused
+        }
+        return self._ta_plan_for(site, refused, simple)
+
+    def _ta_plan_for(self, site: "TACallSite", refused: list, simple: dict) -> dict:
+        """The plan of a site whose ``refused`` constructor arguments have the
+        context-free C++ ``simple`` (None: series)."""
         family = self._ta_site_function(site)
-        simple = {pos: self._simple_ta_arg_cpp(site.ctor_args[pos]) for pos in refused}
         if family in self._TA_SERIES_EXTREME_CLASSES:
             kind = "first_call" if simple[refused[0]] is not None else "series_extreme"
         elif family == "supertrend":
@@ -1292,9 +1312,139 @@ class TaSiteHelper:
             return {"kind": "refused", "refused": refused}
         return {"kind": kind, "refused": refused, "simple": simple, "family": family}
 
-    def _ta_member_cpp_type(self, site: "TACallSite") -> str:
-        """The C++ type a site's member is declared with."""
-        plan = self._ta_dynamic_plan(site)
+    def _ta_security_plan(self, sec_id: int, site: "TACallSite",
+                          helper_binding_stack=None) -> dict | None:
+        """The lowering of the request.security copy of ``site`` that
+        ``sec_id`` evaluates through ``helper_binding_stack`` (the variant
+        key), or None (the constructor / runtime-reset path, whose guards
+        report a length they cannot take). A copy reached through a helper
+        call is planned from the arguments that call binds; a copy of a
+        callable's request.security cloned per call site, from that call
+        site's clone of the TA site."""
+        stack = tuple(helper_binding_stack or ())
+        key = (sec_id, id(site), self._security_binding_stack_signature(stack))
+        cache = self.__dict__.setdefault("_ta_security_plan_cache", {})
+        if key not in cache:
+            cache[key] = self._build_ta_security_plan(sec_id, site, stack)
+        return cache[key]
+
+    def _build_ta_security_plan(self, sec_id: int, site: "TACallSite",
+                                stack: tuple) -> dict | None:
+        if not stack:
+            ctor_site = self._security_ta_ctor_site(sec_id, site)
+            plan = self._ta_dynamic_plan(ctor_site)
+            if (plan is None and ctor_site is not site
+                    and self._ta_dynamic_plan(site) is not None):
+                # The constructor path sizes every copy from the first call
+                # site's arguments, which are not this call site's: build
+                # the constant-length class from this call site's.
+                plan = {"kind": "first_call", "refused": [], "simple": {},
+                        "family": self._ta_site_function(ctor_site)}
+            if plan is None:
+                return None
+            self._refuse_shared_security_ta_lengths(sec_id, site)
+            return {**plan, "site": ctor_site, "sec_id": sec_id}
+        if not site.ctor_args:
+            return None
+        nodes = self._security_ta_ctor_arg_nodes(site)
+        ctor_args, stability = self._security_ta_ctor_args_for_variant(sec_id, site, stack)
+        if stability is None or len(nodes) != len(ctor_args):
+            if self._ta_dynamic_plan(site) is not None:
+                self._codegen_error(
+                    site.node,
+                    f"Unsupported requested-context TA constructor for "
+                    f"{site.class_name}: PineForge cannot bind the helper "
+                    "call's arguments to its constructor arguments.",
+                    hint="Call the ta.* function directly inside request.security().",
+                )
+            return None
+        # The positions the runtime-reset path would refuse
+        # (``_collect_ta_runtime_resets``); none -> that path, unchanged.
+        refused = [
+            pos for pos, arg in enumerate(ctor_args)
+            if not self._is_compile_time_value(self._resolve_ta_ctor_arg(arg))
+            and self._runtime_ctor_arg_for_reset(arg) is None
+            and not stability[pos]
+        ]
+        if not refused:
+            return None
+        bound = [self._security_helper_bound_ast(node, stack) for node in nodes]
+        bound_simple = {
+            pos: self._simple_ta_arg_cpp_node(node, scoped=True)
+            for pos, node in enumerate(bound) if node is not None
+        }
+        plan = self._ta_plan_for(
+            site, refused, {pos: bound_simple.get(pos) for pos in refused})
+        if plan["kind"] == "refused":
+            return None
+        return {**plan, "site": site, "sec_id": sec_id, "bound_simple": bound_simple}
+
+    def _security_call_item(self, sec_id: int) -> dict:
+        for item in self._security_calls:
+            if item["sec_id"] == sec_id:
+                return item
+        return {}
+
+    def _security_ta_ctor_site(self, sec_id: int, site: "TACallSite") -> "TACallSite":
+        """The site whose constructor arguments the ``sec_id`` copy of
+        ``site`` takes: a callable's request.security cloned per call site
+        uses that call site's clone (``_collect_ta_runtime_resets`` does the
+        same)."""
+        item = self._security_call_item(sec_id)
+        containing = item.get("containing_func") or ""
+        cs_idx = item.get("callsite_idx")
+        if containing and cs_idx is not None:
+            remap = self._func_cs_ta_remap.get((containing, cs_idx)) or {}
+            name = remap.get(site.member_name)
+            if name and name != site.member_name:
+                return self._ta_site_by_member().get(name, site)
+        return site
+
+    def _refuse_shared_security_ta_lengths(self, sec_id: int, site: "TACallSite") -> None:
+        """A callable's request.security that is not cloned per call site is
+        one evaluator for every call: it can only take a length all the
+        calls spell the same."""
+        item = self._security_call_item(sec_id)
+        containing = item.get("containing_func") or ""
+        if not containing or item.get("callsite_idx") is not None:
+            return
+        dead = getattr(self, "_dead_ta_indices", set())
+        spellings = sorted({
+            ", ".join(other.ctor_args)
+            for index, other in enumerate(self.ctx.ta_call_sites)
+            if other.node is site.node and index not in dead
+        })
+        if len(spellings) > 1:
+            self._codegen_error(
+                site.node,
+                f"Unsupported TA constructor length for {site.class_name} "
+                f"inside request.security in '{containing}': its call sites "
+                f"pass different lengths ({' / '.join(spellings)}), and one "
+                "requested-context evaluator serves them all.",
+                hint=("Call request.security() at each call site, or pass "
+                      "the same length from every call."),
+            )
+
+    _TF_EXPR_ATOM = re.compile(r'"[^"\\]*"|\w+')
+
+    def _ta_payload_cpp(self, cpp: str, sec_id: int) -> str:
+        """``cpp`` (a length rendered for the chart) evaluated in the
+        request.security context ``sec_id``: ``timeframe.*`` reads that
+        context's timeframe, as ``_build_security_timeframe_member`` lowers
+        it for the rest of the payload."""
+        if "script_tf_" not in cpp:
+            return cpp
+        tf = self._security_timeframe_expr(sec_id)
+        if not self._TF_EXPR_ATOM.fullmatch(tf):
+            tf = f"({tf})"
+        # String literals are left alone.
+        parts = re.split(r'("(?:\\.|[^"\\])*")', cpp)
+        return "".join(
+            part if index % 2 else re.sub(r"\bscript_tf_\b", lambda _m: tf, part)
+            for index, part in enumerate(parts)
+        )
+
+    def _ta_plan_cpp_type(self, site: "TACallSite", plan: dict | None) -> str:
         if plan is None:
             return site.class_name
         if plan["kind"] == "series_extreme":
@@ -1303,14 +1453,33 @@ class TaSiteHelper:
             return "pineforge::source::PineSupertrend"
         return f"pineforge::source::FirstCallBound<{site.class_name}>"
 
+    def _ta_member_cpp_type(self, site: "TACallSite") -> str:
+        """The C++ type a site's member is declared with."""
+        return self._ta_plan_cpp_type(site, self._ta_dynamic_plan(site))
+
+    def _ta_security_member_cpp_type(self, sec_id: int, site: "TACallSite",
+                                     variant: dict) -> str:
+        """The C++ type of one request.security copy of a site."""
+        return self._ta_plan_cpp_type(
+            site, self._ta_security_plan(sec_id, site, variant.get("binding_stack", ())))
+
     def _ta_uses_dynamic_lengths(self) -> bool:
-        """Whether any live site takes the lowering above (the TU then
-        includes its engine header)."""
+        """Whether any live site or request.security copy takes the lowering
+        above (the TU then includes its engine header)."""
         dead = getattr(self, "_dead_ta_indices", set())
-        return any(
+        if any(
             self._ta_dynamic_plan(site) is not None
             for index, site in enumerate(self.ctx.ta_call_sites)
             if index not in dead
+        ):
+            return True
+        return any(
+            self._ta_security_plan(
+                info["sec_id"], self.ctx.ta_call_sites[idx],
+                variant.get("binding_stack", ())) is not None
+            for info in self._security_eval_info
+            for idx, variants in (info.get("ta_variants") or {}).items()
+            for variant in variants
         )
 
     def _ta_ctor_param(self, site: "TACallSite", position: int):
@@ -1336,55 +1505,52 @@ class TaSiteHelper:
         return widest.params[index]
 
     def _ta_dynamic_ctor_arg(self, site: "TACallSite", plan: dict, position: int,
-                             render_node, helper_binding_stack=None) -> str:
+                             render_node) -> str:
         """One constructor argument of a lowered site: a compile-time value, a
         runtime-reset expression, a context-free simple expression, or (a
-        series argument) the call site's own rendering. Reached through a
-        helper call inside a request.security payload, the argument is the
-        one that call binds (``ctor_args`` holds the first call site's)."""
-        if helper_binding_stack:
-            node = self._ta_bind_helper_node(site.ctor_nodes[position], helper_binding_stack)
-            value = self._simple_ta_arg_cpp_node(node)
+        series argument) the call site's own rendering. A request.security
+        copy reached through a helper call takes the argument that call
+        binds (``ctor_args`` holds the first call site's); any request.security
+        copy reads ``timeframe.*`` in its requested context."""
+        if "bound_simple" in plan:
+            value = plan["bound_simple"].get(position)
+        else:
+            arg = site.ctor_args[position]
+            # The live input first: a compile-time resolution of an input-backed
+            # argument is only its default (the constructor's placeholder).
+            value = self._runtime_ctor_arg_for_reset(arg)
             if value is None:
-                value = render_node(site.ctor_nodes[position])
-            if self._ta_ctor_arg_is_bool(site, position):
-                value = self._ta_ctor_bool_cpp(value)
-            return value
-        arg = site.ctor_args[position]
-        # The live input first: a compile-time resolution of an input-backed
-        # argument is only its default (the constructor's placeholder).
-        value = self._runtime_ctor_arg_for_reset(arg)
-        if value is None:
-            resolved = self._resolve_ta_ctor_arg(arg)
-            if self._is_compile_time_value(resolved):
-                value = resolved
-        if value is None:
-            value = plan["simple"].get(position)
+                resolved = self._resolve_ta_ctor_arg(arg)
+                if self._is_compile_time_value(resolved):
+                    value = resolved
+            if value is None:
+                value = plan["simple"].get(position)
         if value is None:
             value = render_node(site.ctor_nodes[position])
+        elif plan.get("sec_id") is not None:
+            value = self._ta_payload_cpp(value, plan["sec_id"])
         if self._ta_ctor_arg_is_bool(site, position):
             value = self._ta_ctor_bool_cpp(value)
         return value
 
-    def _ta_dynamic_compute_args(self, site: "TACallSite", base_args: str,
-                                 render_node, helper_binding_stack=None) -> str:
+    def _ta_dynamic_compute_args(self, site: "TACallSite", plan: dict, base_args: str,
+                                 render_node) -> str:
         """The ``compute()`` / ``recompute()`` arguments of a lowered site."""
-        plan = self._ta_dynamic_plan(site)
         kind = plan["kind"]
-        stack = helper_binding_stack
+        site = plan.get("site", site)
         if kind == "series_extreme":
-            length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node, stack)
+            length = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
             return f"{base_args}, pineforge::source::ta_number({length})"
         if kind == "supertrend":
-            factor = self._ta_dynamic_ctor_arg(site, plan, 0, render_node, stack)
-            period = self._ta_dynamic_ctor_arg(site, plan, 1, render_node, stack)
+            factor = self._ta_dynamic_ctor_arg(site, plan, 0, render_node)
+            period = self._ta_dynamic_ctor_arg(site, plan, 1, render_node)
             dynamic = (f"pineforge::source::ta_number({factor}), "
                        f"pineforge::source::ta_number({period})")
             return f"{dynamic}, {base_args}" if base_args else dynamic
         family = plan["family"]
         ctor = []
         for position in range(len(site.ctor_args)):
-            value = self._ta_dynamic_ctor_arg(site, plan, position, render_node, stack)
+            value = self._ta_dynamic_ctor_arg(site, plan, position, render_node)
             param = self._ta_ctor_param(site, position)
             if (position in plan["refused"] and param is not None
                     and param.pine_type == PineType.INT
@@ -1397,7 +1563,7 @@ class TaSiteHelper:
 
     def _simple_ta_top_level_decls(self) -> dict:
         """Top-level plain declarations read as simple values: declared once,
-        never reassigned, not ``var``/``varip``."""
+        never reassigned, not ``var``/``varip``, not declared ``series``."""
         cached = self.__dict__.get("_simple_ta_decls_cache")
         if cached is not None:
             return cached
@@ -1415,16 +1581,55 @@ class TaSiteHelper:
             name: decl for name, decl in decls.items()
             if counts.get(name) == 1 and name not in reassigned
             and not decl.is_var and not decl.is_varip and decl.value is not None
+            and (decl.annotations or {}).get("qualifier") != "series"
         }
         self.__dict__["_simple_ta_decls_cache"] = result
         return result
 
-    def _simple_ta_arg_ast(self, node, seen: frozenset = frozenset(), depth: int = 0):
+    def _ta_locally_declared_names(self) -> frozenset:
+        """Every name a block, loop or callable declares: a parameter, a loop
+        variable, a local."""
+        cached = self.__dict__.get("_ta_local_names_cache")
+        if cached is not None:
+            return cached
+        top_level = {id(stmt) for stmt in self.ctx.ast.body or []}
+        names: set[str] = set()
+        for node in self._walk_ast(self.ctx.ast):
+            if isinstance(node, (FuncDef, MethodDef)):
+                names.update(p for p in node.params if isinstance(p, str))
+            elif isinstance(node, VarDecl) and id(node) not in top_level:
+                names.add(node.name)
+            elif isinstance(node, TupleAssign) and id(node) not in top_level:
+                names.update(name for name in node.names if name)
+            elif isinstance(node, ForStmt) and node.var:
+                names.add(node.var)
+            elif isinstance(node, ForInStmt):
+                if node.var:
+                    names.add(node.var)
+                names.update(name for name in node.vars or [] if name)
+        result = frozenset(names)
+        self.__dict__["_ta_local_names_cache"] = result
+        return result
+
+    def _ta_identifier_reads_top_level(self, node: Identifier, scoped: bool) -> bool:
+        """Whether ``node`` reads the top-level binding of its name. A node of
+        the analysed program (``scoped``) answers from the scope the analyzer
+        resolved it in; a spelling re-parsed from ``ctor_args`` has none, so
+        its name must be one no block, loop or callable declares."""
+        if scoped:
+            scopes = getattr(self.ctx, "identifier_binding_scopes", {}) or {}
+            return scopes.get(id(node)) == "global"
+        return node.name not in self._ta_locally_declared_names()
+
+    def _simple_ta_arg_ast(self, node, seen: frozenset = frozenset(), depth: int = 0,
+                           scoped: bool = False):
         """A context-free copy of ``node`` whose leaves are literals, inputs,
         ``syminfo.*`` / ``timeframe.*`` metadata and ``math`` constants
         combined by operators, ternaries, casts and pure ``math.*`` /
         ``str.*`` calls, top-level simple declarations expanded in place --
-        a Pine simple value. None when any part may vary by bar."""
+        a Pine simple value. None when any part may vary by bar, or when an
+        identifier may be bound by a block, loop or callable rather than the
+        top-level declaration (``_ta_identifier_reads_top_level``)."""
         if node is None or depth > 64:
             return None
         if isinstance(node, (NumberLiteral, StringLiteral, BoolLiteral, NaLiteral)):
@@ -1433,12 +1638,15 @@ class TaSiteHelper:
             name = node.name
             if self._known_var_is_lexically_shadowed(name):
                 return None
+            if not self._ta_identifier_reads_top_level(node, scoped):
+                return None
             if name in self._input_backed_vars or name in self._known_vars:
                 return copy.deepcopy(node)
             decl = self._simple_ta_top_level_decls().get(name)
             if decl is None or name in seen:
                 return None
-            return self._simple_ta_arg_ast(decl.value, seen | {name}, depth + 1)
+            # The declaration's own nodes carry the analyzer's scope.
+            return self._simple_ta_arg_ast(decl.value, seen | {name}, depth + 1, True)
         if isinstance(node, MemberAccess):
             if not isinstance(node.object, Identifier):
                 return None
@@ -1449,22 +1657,22 @@ class TaSiteHelper:
                 return copy.deepcopy(node)
             return None
         if isinstance(node, BinOp):
-            left = self._simple_ta_arg_ast(node.left, seen, depth + 1)
-            right = self._simple_ta_arg_ast(node.right, seen, depth + 1)
+            left = self._simple_ta_arg_ast(node.left, seen, depth + 1, scoped)
+            right = self._simple_ta_arg_ast(node.right, seen, depth + 1, scoped)
             if left is None or right is None:
                 return None
             out = copy.copy(node)
             out.left, out.right = left, right
             return out
         if isinstance(node, UnaryOp):
-            operand = self._simple_ta_arg_ast(node.operand, seen, depth + 1)
+            operand = self._simple_ta_arg_ast(node.operand, seen, depth + 1, scoped)
             if operand is None:
                 return None
             out = copy.copy(node)
             out.operand = operand
             return out
         if isinstance(node, Ternary):
-            parts = [self._simple_ta_arg_ast(child, seen, depth + 1)
+            parts = [self._simple_ta_arg_ast(child, seen, depth + 1, scoped)
                      for child in (node.condition, node.true_val, node.false_val)]
             if any(part is None for part in parts):
                 return None
@@ -1483,8 +1691,8 @@ class TaSiteHelper:
             )
             if not pure:
                 return None
-            args = [self._simple_ta_arg_ast(arg, seen, depth + 1) for arg in node.args]
-            kwargs = {key: self._simple_ta_arg_ast(value, seen, depth + 1)
+            args = [self._simple_ta_arg_ast(arg, seen, depth + 1, scoped) for arg in node.args]
+            kwargs = {key: self._simple_ta_arg_ast(value, seen, depth + 1, scoped)
                       for key, value in (node.kwargs or {}).items()}
             if any(arg is None for arg in args) or any(v is None for v in kwargs.values()):
                 return None
@@ -1495,32 +1703,11 @@ class TaSiteHelper:
             return out
         return None
 
-    def _ta_bind_helper_node(self, node, helper_binding_stack):
-        """``node`` with the helper parameters of ``helper_binding_stack``
-        (innermost frame last) replaced by the argument nodes they bind."""
-        def bind(n, depth):
-            if isinstance(n, Identifier):
-                for index in range(depth - 1, -1, -1):
-                    frame = helper_binding_stack[index] or {}
-                    if n.name in frame:
-                        return bind(frame[n.name], index)
-                return copy.deepcopy(n)
-            if isinstance(n, (list, tuple)):
-                return type(n)(bind(child, depth) for child in n)
-            if isinstance(n, dict):
-                return {key: bind(value, depth) for key, value in n.items()}
-            if isinstance(n, ASTNode):
-                out = copy.copy(n)
-                for field_name, value in vars(n).items():
-                    if isinstance(value, (ASTNode, list, tuple, dict)):
-                        setattr(out, field_name, bind(value, depth))
-                return out
-            return n
-        return bind(node, len(helper_binding_stack))
-
-    def _simple_ta_arg_cpp_node(self, node) -> str | None:
-        """``_simple_ta_arg_cpp`` of an AST node (not cached)."""
-        expanded = self._simple_ta_arg_ast(node) if node is not None else None
+    def _simple_ta_arg_cpp_node(self, node, scoped: bool = False) -> str | None:
+        """``_simple_ta_arg_cpp`` of an AST node (not cached); ``scoped`` when
+        the node belongs to the analysed program
+        (``_ta_identifier_reads_top_level``)."""
+        expanded = self._simple_ta_arg_ast(node, scoped=scoped) if node is not None else None
         if expanded is None:
             return None
         previous = self._reset_input_getter_mode
@@ -1536,10 +1723,11 @@ class TaSiteHelper:
         return None
 
     def _simple_ta_arg_cpp(self, arg_str: str) -> str | None:
-        """The context-free C++ of a simple constructor argument (inputs read
-        through their override-aware getters, so it evaluates the same in
-        ``on_bar`` and in ``evaluate_security`` before either initialised
-        anything), or None when the argument is series."""
+        """The context-free C++ of a simple constructor argument spelled
+        ``arg_str`` (inputs read through their override-aware getters, so it
+        evaluates the same in ``on_bar`` and in ``evaluate_security`` before
+        either initialised anything), or None when the argument is series.
+        The spelling carries no scope: the answer depends on the text alone."""
         cache = self.__dict__.setdefault("_simple_ta_arg_cache", {})
         if arg_str in cache:
             return cache[arg_str]

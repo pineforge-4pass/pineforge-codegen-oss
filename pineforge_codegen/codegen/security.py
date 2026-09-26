@@ -2348,6 +2348,19 @@ class SecurityEmitter:
         from bypassing the ordinary TA-length guard just because an earlier
         call through the same source TA site used a safe length.
         """
+        resolved = self._security_helper_bound_ast(node, helper_binding_stack)
+        return resolved is not None and self._expr_is_stable(resolved)
+
+    def _security_helper_bound_ast(
+        self,
+        node: ASTNode,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+    ):
+        """``node`` with its helper parameters and locals replaced by the
+        argument ASTs ``helper_binding_stack`` binds them to, each resolved in
+        its own lexical stack; identifiers bound elsewhere (globals included)
+        are kept as authored. None for a shape outside literals, identifiers,
+        member reads, operators, ternaries and calls."""
         import dataclasses
 
         def resolve(
@@ -2427,8 +2440,7 @@ class SecurityEmitter:
             # stable TA lengths.  Fail closed instead of inventing a buffer size.
             return None
 
-        resolved = resolve(node, helper_binding_stack)
-        return resolved is not None and self._expr_is_stable(resolved)
+        return resolve(node, helper_binding_stack)
 
     def _security_ta_ctor_depends_on_mutables(
         self,
@@ -3127,7 +3139,9 @@ class SecurityEmitter:
                         site,
                         security_mutable_names,
                         helper_binding_stack,
-                    ) and self._ta_dynamic_plan(site) is not None:
+                    ) and self._ta_security_plan(
+                        sec_id, site, helper_binding_stack
+                    ) is not None:
                         # The lowered length is read per call (a series one
                         # through the rebound value): run after the rebinds.
                         depends_on_mutables = True

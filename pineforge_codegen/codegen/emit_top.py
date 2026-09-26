@@ -1029,9 +1029,13 @@ class TopLevelEmitter:
                 site = self.ctx.ta_call_sites[idx]
                 if not site.ctor_args:
                     continue
-                if self._ta_dynamic_plan(site) is not None:
-                    continue
                 for variant in variants:
+                    if self._ta_security_plan(
+                        info["sec_id"], site, variant.get("binding_stack", ())
+                    ) is not None:
+                        # Default-constructed: the length is read on the bar
+                        # (``_ta_security_plan``).
+                        continue
                     ctor_args, _ctor_arg_stability = self._security_ta_ctor_args_for_variant(
                         info["sec_id"],
                         site,

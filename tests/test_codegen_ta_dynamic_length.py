@@ -188,6 +188,145 @@ plot(a + b)
     compile_cpp(cpp, label="helper_bound_security")
 
 
+def _compute_line(cpp: str, member: str) -> str:
+    return next(line for line in cpp.splitlines()
+                if re.search(rf"\b{re.escape(member)}\.compute\(", line))
+
+
+def test_a_length_shadowed_in_a_block_reads_the_block() -> None:
+    # The if-block's ``n`` and the loop variable shadow the top-level simple
+    # ``n``: those calls read the series local; the top-level call reads the
+    # simple one.
+    src = """//@version=6
+strategy("shadowed lengths")
+n = syminfo.type == "crypto" ? 10 : 20
+top = ta.highest(high, n)
+float out = na
+if close > open
+    n = bar_index % 7 + 1
+    out := ta.highest(high, n)
+float acc = 0.0
+for n = 1 to 3
+    acc += ta.lowest(low, n)
+if out + acc > top
+    strategy.entry("L", strategy.long)
+"""
+    cpp = transpile(src)
+    [local] = _members(cpp, "pineforge::source::SeriesHighest")
+    [loop] = _members(cpp, "pineforge::source::SeriesLowest")
+    [top] = _members(cpp, "pineforge::source::FirstCallBound<ta::Highest>")
+    body = cpp.split("int n = ", 1)[1]
+    assert f"{local}.compute(current_bar_.high, pineforge::source::ta_number(n))" in body
+    assert re.search(r"for \(int n = [^\n]*\n[^\n]*" + re.escape(
+        f"{loop}.compute(current_bar_.low, pineforge::source::ta_number(n))"), cpp)
+    assert '"crypto"' in _compute_line(cpp, top)
+    compile_cpp(cpp, label="shadowed_lengths")
+
+
+def test_a_series_length_shadowed_in_a_block_keeps_the_refusal() -> None:
+    src = """//@version=6
+strategy("shadowed sma")
+n = syminfo.type == "crypto" ? 10 : 20
+float out = na
+if close > open
+    n = bar_index % 7 + 1
+    out := ta.sma(close, n)
+plot(out)
+"""
+    with pytest.raises(CompileError, match="Unsupported TA constructor length 'n'"):
+        transpile(src)
+
+
+def test_an_explicit_series_declaration_is_rewindowed() -> None:
+    # ``series int m`` of a simple value is series to TradingView: a sparse
+    # call re-windows, while ``simple int k`` reads the constant ring.
+    src = """//@version=6
+strategy("declared qualifiers")
+series int m = syminfo.type == "crypto" ? 4 : 8
+simple int k = syminfo.type == "crypto" ? 4 : 8
+float a = na
+float c = na
+if bar_index % 9 < 2
+    a := ta.lowest(low, m)
+    c := ta.lowest(low, k)
+plot(a + c)
+"""
+    cpp = transpile(src)
+    [series] = _members(cpp, "pineforge::source::SeriesLowest")
+    [simple] = _members(cpp, "pineforge::source::FirstCallBound<ta::Lowest>")
+    assert "ta_number(m)" in _compute_line(cpp, series)
+    assert '"crypto"' in _compute_line(cpp, simple)
+    compile_cpp(cpp, label="declared_qualifiers")
+
+
+@pytest.mark.parametrize("series_first", [False, True])
+def test_helper_bound_security_copies_are_planned_per_call(series_first: bool) -> None:
+    # One helper reached from two request.security payloads: each copy takes
+    # the lowering of the length its own call binds, in either call order.
+    calls = ['a = request.security(syminfo.tickerid, "60", f(lenA))',
+             'b = request.security(syminfo.tickerid, "240", f(bar_index % 5 + 1))']
+    if series_first:
+        calls.reverse()
+    src = ("//@version=6\nstrategy(\"helper copies\")\nf(n) => ta.highest(high, n)\n"
+           "lenA = syminfo.type == \"crypto\" ? 9 : 14\n" + "\n".join(calls) + "\nplot(a + b)\n")
+    cpp = transpile(src)
+    simple_sec, series_sec = (1, 0) if series_first else (0, 1)
+    assert _member_type(cpp, f"_sec{simple_sec}__ta_highest_1") == \
+        "pineforge::source::FirstCallBound<ta::Highest>"
+    assert _member_type(cpp, f"_sec{series_sec}__ta_highest_1") == \
+        "pineforge::source::SeriesHighest"
+    assert "pine_bar_index()" in _compute_line(cpp, f"_sec{series_sec}__ta_highest_1")
+    assert '"crypto"' in _compute_line(cpp, f"_sec{simple_sec}__ta_highest_1")
+    compile_cpp(cpp, label=f"helper_copies_{series_first}")
+
+
+def test_a_payload_length_reads_the_requested_timeframe() -> None:
+    # TradingView evaluates the payload in the requested context:
+    # timeframe.isdaily is true inside a "D" request on any chart.
+    src = """//@version=6
+strategy("payload timeframe")
+r = request.security(syminfo.tickerid, "D", ta.rsi(close, timeframe.isdaily and syminfo.type == "crypto" ? 9 : 14))
+plot(r)
+"""
+    cpp = transpile(src)
+    line = _compute_line(cpp, "_sec0__ta_rsi_1")
+    assert 'tf_is_daily("D")' in line and "script_tf_" not in line
+    compile_cpp(cpp, label="payload_timeframe")
+
+
+def test_a_callable_request_security_takes_each_call_sites_length() -> None:
+    # Cloned per call site (two timeframes): each copy its call's length.
+    src = """//@version=6
+strategy("callable copies")
+lenA = syminfo.type == "crypto" ? 9 : 14
+g(tf, len) => request.security(syminfo.tickerid, tf, ta.highest(high, len))
+a = g("60", lenA)
+b = g("240", syminfo.type == "crypto" ? 21 : 30)
+c = g("120", 7)
+plot(a + b + c)
+"""
+    cpp = transpile(src)
+    lines = {sec: _compute_line(cpp, f"_sec{sec}__ta_highest_1") for sec in range(3)}
+    assert "(9) : (14)" in lines[0]
+    assert "(21) : (30)" in lines[1]
+    assert "ta::Highest(7)" in lines[2]
+    compile_cpp(cpp, label="callable_copies")
+
+
+def test_one_evaluator_for_different_lengths_is_refused() -> None:
+    # Not cloned (one timeframe): a single evaluator cannot serve two lengths.
+    src = """//@version=6
+strategy("shared evaluator")
+lenA = syminfo.type == "crypto" ? 9 : 14
+g(len) => request.security(syminfo.tickerid, "60", ta.highest(high, len))
+a = g(lenA)
+b = g(bar_index % 5 + 1)
+plot(a + b)
+"""
+    with pytest.raises(CompileError, match="its call sites pass different lengths"):
+        transpile(src)
+
+
 @pytest.mark.parametrize("call", [
     "ta.sma(close, n)", "ta.wma(close, n)", "ta.stdev(close, n)",
     "ta.rsi(close, n)", "ta.ema(close, n)", "ta.atr(n)",

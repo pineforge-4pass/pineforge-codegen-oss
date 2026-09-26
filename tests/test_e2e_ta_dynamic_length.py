@@ -12,7 +12,10 @@ decides the answer (lab tv, lane K-TA-DYNLEN, 2026-09-26; the engine header
   (``pineforge::source::PineSupertrend``);
 * a simple length -- a syminfo preset, an input-string ternary -- answers
   exactly as the constant (``pineforge::source::FirstCallBound``), a sparse
-  window through the constant-length ring.
+  window through the constant-length ring;
+* a name a block shadows, or a value declared ``series``, is series; each
+  request.security copy is lowered from the length its own call passes, and
+  its ``timeframe.*`` reads the requested timeframe.
 
 Each fixture under ``fixtures/ta_dynamic_length/<probe>/`` is a ``lab tv
 --no-note`` export of the synthetic ``strategy.pine`` beside it on
@@ -34,7 +37,8 @@ from tests._e2e import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "ta_dynamic_length"
-PROBES = ("series_extremes", "supertrend_factor", "simple_length", "simple_window")
+PROBES = ("series_extremes", "supertrend_factor", "simple_length", "simple_window",
+          "scoping_copies")
 FIRST_BAR_MS = 1743465600000   # 2025-04-01 00:00 UTC, TradingView's bar 0
 BARS = 320
 
@@ -126,3 +130,16 @@ def test_simple_window_length_reads_the_constant_ring(runs):
     assert "pineforge::source::SeriesLowest " in cpp
     assert "pineforge::source::SeriesHighestBars " in cpp
     print(f"simple vs series window: {compared}/{compared} bars equal TradingView")
+
+
+def test_scopes_and_request_security_copies(runs):
+    # A length shadowed in a block, a simple value declared ``series``, one
+    # helper reached from two payloads (simple and series lengths),
+    # ``timeframe.*`` in a payload's length (the requested timeframe) and a
+    # callable's request.security cloned per call site: every column of every
+    # bar equals TradingView's.
+    cpp, compared = replay(runs, "scoping_copies")
+    assert "pineforge::source::SeriesHighest " in cpp
+    assert "pineforge::source::SeriesLowest " in cpp
+    assert 'tf_multiplier("60")' in cpp
+    print(f"scopes and request.security copies: {compared}/{compared} bars equal TradingView")

@@ -339,8 +339,15 @@ class Parser:
                 and self._peek(3).type != TokenType.EQUALS
             )
             if typed_after_qual or bare_after_qual:
+                qualifier = cur.value
                 self._advance()  # consume the qualifier prefix
-                return self._parse_single_statement()
+                stmt = self._parse_single_statement()
+                if isinstance(stmt, VarDecl):
+                    # Kept for the ta.* length lowering: an explicit
+                    # ``series`` makes TradingView re-window the call.
+                    stmt.annotations = {**(stmt.annotations or {}),
+                                        "qualifier": qualifier}
+                return stmt
 
         # Type-annotated declaration: float x = ..., int x = ...
         if cur.type in TYPE_KEYWORDS and self._peek().type == TokenType.IDENT:

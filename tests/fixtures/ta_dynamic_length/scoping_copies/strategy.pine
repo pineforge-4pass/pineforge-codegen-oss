@@ -1,0 +1,30 @@
+//@version=6
+strategy("PF TADYN cg scoping and request.security copies", overlay=true, process_orders_on_close=true, margin_long=0, margin_short=0, initial_capital=1000000000, default_qty_type=strategy.fixed, default_qty_value=1)
+f(x) => na(x) ? "na" : str.tostring(x, "#.########")
+b = bar_index
+// A block-local length shadows a top-level simple one (sparse call).
+n = syminfo.type == "crypto" ? 10 : 20
+float sh = na
+if b % 3 != 0
+    n = b % 7 + 1
+    sh := ta.highest(high, n)
+// A simple value declared series: the call is re-windowed (sparse call).
+series int m = syminfo.type == "crypto" ? 4 : 8
+float sq = na
+if b % 9 < 2
+    sq := ta.lowest(low, m)
+// One helper reached from two request.security payloads, a simple and a
+// series length.
+hi(len) => ta.highest(high, len)
+lenA = syminfo.type == "crypto" ? 5 : 9
+ha = request.security(syminfo.tickerid, "60", hi(lenA))
+hb = request.security(syminfo.tickerid, "60", hi(close > open ? 2 : 5))
+// timeframe.* in a payload's length reads the requested timeframe.
+rp = request.security(syminfo.tickerid, "60", ta.rsi(close, timeframe.multiplier == 60 and syminfo.type == "crypto" ? 6 : 14))
+// A callable's request.security cloned per call site (two timeframes).
+g(tf, len) => request.security(syminfo.tickerid, tf, ta.lowest(low, len))
+ga = g("30", lenA)
+gb = g("60", syminfo.type == "crypto" ? 3 : 7)
+if b < 320
+    s = str.tostring(b) + "|" + f(sh) + "|" + f(sq) + "|" + f(ha) + "|" + f(hb) + "|" + f(rp) + "|" + f(ga) + "|" + f(gb)
+    strategy.entry(s, b % 2 == 0 ? strategy.long : strategy.short)
