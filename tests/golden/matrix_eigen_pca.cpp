@@ -356,14 +356,14 @@ public:
     }
 
     void on_source_bar(const Bar& bar) override {
+        if (!_inputs_initialized_) {
+            length = get_input_int("Length", 14);
+            _inputs_initialized_ = true;
+        }
         if (!_var_initialized) {
             m = PineMatrix::new_(2, 2, 0.0);
             _var_initialized = true;
         } else {
-        }
-        if (!_inputs_initialized_) {
-            length = get_input_int("Length", 14);
-            _inputs_initialized_ = true;
         }
         if (!_ta_initialized_) {
             _ta_sma_1 = ta::SMA(get_input_int("Length", 14));
