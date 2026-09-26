@@ -82,6 +82,14 @@ from .tables import (
 )
 
 
+# Statements a multi-statement request.security helper may hold before its
+# final expression: declarations (``[a, b] = rhs`` too), assignments,
+# if-branches and a block's trailing value.
+_SECURITY_HELPER_STMTS = (VarDecl, Assignment, IfStmt, TupleAssign, ExprStmt)
+# The bare expression statements a helper body admits: a block's value.
+_SECURITY_BLOCK_VALUES = (Identifier, NumberLiteral, StringLiteral, BoolLiteral, NaLiteral)
+
+
 # C++ scalar types a request.security helper argument or method receiver may
 # have for the payload to inline the call.
 _SECURITY_SCALAR_CPP = frozenset({"double", "int", "int64_t", "bool", "std::string"})
@@ -105,6 +113,13 @@ _SECURITY_PURE_SESSION_MEMBERS = frozenset({
 _SECURITY_REQUESTED_NAMES = frozenset(
     name for name, cpp in BAR_BUILTINS.items() if "current_bar_" in cpp
 ) | {"open", "high", "low", "close", "volume"}
+
+
+def _security_tuple_binding(func_name: str, name: str) -> str:
+    """Opaque prepass binding of a name a helper's tuple declaration binds:
+    the prepasses only need to know the name is a local, the emitter binds
+    it to the element's C++ local."""
+    return f"@tuple:{func_name}:{name}"
 
 
 class _SecurityKeepChart(Exception):
@@ -1171,6 +1186,24 @@ class SecurityEmitter:
                                 else_bindings = dict(current)
                                 for child in stmt.else_body:
                                     walk_stmt(child, else_bindings)
+                                return
+                            if isinstance(stmt, TupleAssign):
+                                walk(stmt.value, local_stack)
+                                for name in stmt.names:
+                                    if name == "_":
+                                        continue
+                                    current[name] = (
+                                        self._security_series_binding(
+                                            f"{plan['func_info'].name}:{name}"
+                                        )
+                                        if name in local_series_names
+                                        else _security_tuple_binding(
+                                            plan["func_info"].name, name
+                                        )
+                                    )
+                                return
+                            if isinstance(stmt, ExprStmt):
+                                walk(stmt.expr, local_stack)
 
                         for stmt in plan["body"]:
                             walk_stmt(stmt, active)
@@ -1418,6 +1451,24 @@ class SecurityEmitter:
                                 else_bindings = dict(current)
                                 for child in stmt.else_body:
                                     walk_stmt(child, else_bindings)
+                                return
+                            if isinstance(stmt, TupleAssign):
+                                walk(stmt.value, local_stack)
+                                for name in stmt.names:
+                                    if name == "_":
+                                        continue
+                                    current[name] = (
+                                        self._security_series_binding(
+                                            f"{plan['func_info'].name}:{name}"
+                                        )
+                                        if name in local_series_names
+                                        else _security_tuple_binding(
+                                            plan["func_info"].name, name
+                                        )
+                                    )
+                                return
+                            if isinstance(stmt, ExprStmt):
+                                walk(stmt.expr, local_stack)
 
                         for stmt in plan["body"]:
                             walk_stmt(stmt, active)
@@ -1803,6 +1854,18 @@ class SecurityEmitter:
         def _series_expr(binding_name: str, index_expr: str) -> str:
             return f"{self._security_helper_series_ref(binding_name)}[{index_expr}]"
 
+        def emit_series_value(series_name: str, expr_cpp: str, pad: str) -> None:
+            """One requested bar's value of a helper local read with history:
+            pushed on a new requested bar, rewritten on a recomputation."""
+            ref = self._security_helper_series_ref(series_name)
+            lines.append(f'{pad}if ({ref}.size() == 0) {{')
+            lines.append(f'{pad}    {ref}.push({expr_cpp});')
+            lines.append(f'{pad}}} else if (security_series_slot_is_new({sec_id})) {{')
+            lines.append(f'{pad}    {ref}.push({expr_cpp});')
+            lines.append(f'{pad}}} else {{')
+            lines.append(f'{pad}    {ref}.update({expr_cpp});')
+            lines.append(f'{pad}}}')
+
         def emit_stmt(stmt: ASTNode, active_bindings: dict[str, str], indent: int) -> None:
             pad = "    " * indent
             runtime_stack_local = plan["binding_stack"] + (active_bindings,)
@@ -1876,14 +1939,7 @@ class SecurityEmitter:
                         )
                         lines.append(f'{pad}}}')
                     else:
-                        ref = self._security_helper_series_ref(series_name)
-                        lines.append(f'{pad}if ({ref}.size() == 0) {{')
-                        lines.append(f'{pad}    {ref}.push({expr_cpp});')
-                        lines.append(f'{pad}}} else if (security_series_slot_is_new({sec_id})) {{')
-                        lines.append(f'{pad}    {ref}.push({expr_cpp});')
-                        lines.append(f'{pad}}} else {{')
-                        lines.append(f'{pad}    {ref}.update({expr_cpp});')
-                        lines.append(f'{pad}}}')
+                        emit_series_value(series_name, expr_cpp, pad)
                     activate_decl()
                     return
 
@@ -2054,6 +2110,69 @@ class SecurityEmitter:
                             self._matrix_specs,
                         ) = else_state
                 lines.append(f"{pad}}}")
+                return
+
+            if isinstance(stmt, TupleAssign):
+                # ``[a, b] = rhs``: evaluate the tuple once in the requested
+                # context, then bind each named element to its own local (a
+                # TA tuple result's field, else the tuple's element).
+                value_cpp = self._build_security_expr(
+                    sec_id,
+                    stmt.value,
+                    None,
+                    ta_results,
+                    resolving,
+                    security_mutable_names,
+                    runtime_stack_local,
+                    lines,
+                )
+                temp = self._security_next_inline_name(
+                    sec_id, plan["func_info"].name, "tuple"
+                )
+                lines.append(f"{pad}auto {temp} = {value_cpp};")
+                fields = self._security_tuple_value_fields(
+                    stmt.value, runtime_stack_local
+                )
+                for idx, name in enumerate(stmt.names):
+                    if name == "_":
+                        continue
+                    element = (
+                        f"{temp}.{fields[idx]}"
+                        if fields is not None and idx < len(fields)
+                        else f"std::get<{idx}>({temp})"
+                    )
+                    if name in local_series_names:
+                        if self._security_tuple_element_is_string(
+                                stmt.value, idx, runtime_stack_local):
+                            self._codegen_error(
+                                stmt,
+                                "request.security helper tuple declaration: a string "
+                                "element read with history is not supported",
+                                hint="Declare the element with its own string variable.",
+                            )
+                        binding = self._security_series_binding(
+                            self._security_next_inline_name(
+                                sec_id, plan["func_info"].name, name
+                            )
+                        )
+                        emit_series_value(
+                            self._security_series_binding_target(binding),
+                            element,
+                            pad,
+                        )
+                        active_bindings[name] = binding
+                        continue
+                    local_name = self._security_next_inline_name(
+                        sec_id, plan["func_info"].name, name
+                    )
+                    lines.append(f"{pad}auto {local_name} = {element};")
+                    active_bindings[name] = local_name
+                return
+
+            if isinstance(stmt, ExprStmt) and isinstance(stmt.expr, _SECURITY_BLOCK_VALUES):
+                # A block's trailing value (``lastHigh := ph`` then
+                # ``lastHigh``): no effect to lower. A call statement stays
+                # refused below: it could mutate chart state.
                 return
 
             self._codegen_error(
@@ -2448,7 +2567,6 @@ class SecurityEmitter:
             SwitchStmt,
             BreakStmt,
             ContinueStmt,
-            TupleAssign,
         )
         for stmt in stmt_body:
             if isinstance(stmt, unsupported_control_flow):
@@ -2457,7 +2575,9 @@ class SecurityEmitter:
                     "request.security does not support multi-statement helpers with control flow",
                     hint="Inline a straight-line helper body or hoist the control-flow helper outside request.security().",
                 )
-            if not isinstance(stmt, (VarDecl, Assignment, IfStmt)):
+            if not isinstance(stmt, _SECURITY_HELPER_STMTS) or (
+                    isinstance(stmt, ExprStmt)
+                    and not isinstance(stmt.expr, _SECURITY_BLOCK_VALUES)):
                 self._codegen_error(
                     node,
                     "request.security multi-statement helpers may only use local declarations, assignments, and if-branches before the final expression",
@@ -2486,6 +2606,109 @@ class SecurityEmitter:
             "body": stmt_body,
             "local_series_names": local_series_names,
         }
+
+    def _security_tuple_value_fields(
+        self,
+        value,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+        depth: int = 0,
+    ) -> list[str] | None:
+        """Field names of the TA tuple result a helper's ``[a, b] = rhs``
+        destructures (``rhs`` a TA tuple call, directly or as the final
+        expression of a helper it calls); None for a ``std::tuple``."""
+        site = self._get_ta_site(value)
+        if site is not None:
+            return TA_TUPLE_FIELDS.get(self._ta_name_from_site(site))
+        if depth < 32 and self._security_user_call_key(value) is not None:
+            plan = self._security_helper_call_plan(value, helper_binding_stack)
+            return self._security_tuple_value_fields(
+                plan["expr"], plan["binding_stack"], depth + 1
+            )
+        return None
+
+    def _security_tuple_element_is_string(
+        self,
+        value,
+        index: int,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+        depth: int = 0,
+    ) -> bool:
+        """Whether element ``index`` of the tuple a helper destructures is a
+        string: the final tuple of the helper it calls (through a helper whose
+        final expression calls another), each element read through the
+        callee's parameters and top-level locals."""
+        if depth > 32 or self._get_ta_site(value) is not None:
+            return False
+        if self._security_user_call_key(value) is None:
+            return False
+        try:
+            plan = self._security_helper_call_plan(value, helper_binding_stack)
+        except CompileError:
+            return False
+        final = plan["expr"]
+        if self._security_user_call_key(final) is not None:
+            return self._security_tuple_element_is_string(
+                final, index, plan["binding_stack"], depth + 1
+            )
+        if isinstance(final, TupleLiteral) and index < len(final.elements):
+            return self._security_value_is_string(
+                final.elements[index], plan["binding_stack"], plan["body"], depth + 1
+            )
+        return False
+
+    def _security_value_is_string(
+        self,
+        node,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+        body: list,
+        depth: int = 0,
+    ) -> bool:
+        """Whether a helper's value is a string, read through its top-level
+        locals (``body``), its parameters' arguments and the helpers it
+        calls; anything else by the chart's inference."""
+        if node is None or depth > 64:
+            return False
+        nxt = depth + 1
+        if isinstance(node, StringLiteral):
+            return True
+        if isinstance(node, Identifier) and not self._security_identifier_is_global_binding(node):
+            for stmt in reversed(body or []):
+                if isinstance(stmt, VarDecl) and stmt.name == node.name:
+                    if stmt.type_hint:
+                        return stmt.type_hint == "string"
+                    return self._security_value_is_string(
+                        stmt.value, helper_binding_stack, body, nxt
+                    )
+            binding = self._security_lookup_helper_binding_context(
+                node.name, helper_binding_stack
+            )
+            if binding is not None:
+                bound, bound_stack = binding
+                if isinstance(bound, str):
+                    series_name = self._security_series_binding_target(bound)
+                    if series_name is not None:
+                        return series_name in self._security_string_series
+                    return self._security_local_cpp_types.get(bound) == "std::string"
+                return self._security_value_is_string(bound, bound_stack, (), nxt)
+        if isinstance(node, Ternary):
+            return any(
+                self._security_value_is_string(arm, helper_binding_stack, body, nxt)
+                for arm in (node.true_val, node.false_val)
+            )
+        if isinstance(node, BinOp) and node.op == "+":
+            return any(
+                self._security_value_is_string(side, helper_binding_stack, body, nxt)
+                for side in (node.left, node.right)
+            )
+        if self._security_user_call_key(node) is not None:
+            try:
+                plan = self._security_helper_call_plan(node, helper_binding_stack)
+            except CompileError:
+                return False
+            return self._security_value_is_string(
+                plan["expr"], plan["binding_stack"], plan["body"], nxt
+            )
+        return self._infer_type(node) == "std::string"
 
     def _validate_security_persistent_var_control_flow(self, expr_node) -> None:
         """Reject helper ``var`` state whose rollback would be conditional.
@@ -2645,7 +2868,12 @@ class SecurityEmitter:
                     linear_stack = plan["binding_stack"] + (local_ast_bindings,)
                     depends = False
                     for stmt in plan["body"][:-1]:
-                        value = stmt.value if isinstance(stmt, (VarDecl, Assignment)) else None
+                        if isinstance(stmt, (VarDecl, Assignment, TupleAssign)):
+                            value = stmt.value
+                        elif isinstance(stmt, ExprStmt):
+                            value = stmt.expr
+                        else:
+                            value = None
                         if value is not None and self._expr_depends_on_security_mutables(
                             value,
                             security_mutable_names,
@@ -2654,9 +2882,12 @@ class SecurityEmitter:
                         ):
                             depends = True
                             break
-                        target_name = (
-                            stmt.name if isinstance(stmt, VarDecl) else self._get_target_name(stmt.target)
-                        )
+                        if isinstance(stmt, VarDecl):
+                            target_name = stmt.name
+                        elif isinstance(stmt, Assignment):
+                            target_name = self._get_target_name(stmt.target)
+                        else:
+                            target_name = None
                         if target_name is not None and value is not None:
                             local_ast_bindings[target_name] = value
                     if not depends:
@@ -3112,6 +3343,40 @@ class SecurityEmitter:
                             else_bindings = dict(active_bindings)
                             for child in stmt.else_body:
                                 collect_stmt(child, else_bindings)
+                            return
+
+                        if isinstance(stmt, TupleAssign):
+                            self._collect_security_ta_binding_stacks(
+                                stmt.value,
+                                resolving,
+                                local_stack,
+                                collected,
+                                inline_ta_indices,
+                                True,
+                            )
+                            for name in stmt.names:
+                                if name == "_":
+                                    continue
+                                active_bindings[name] = (
+                                    self._security_series_binding(
+                                        f"{plan['func_info'].name}:{name}"
+                                    )
+                                    if name in local_series_names
+                                    else _security_tuple_binding(
+                                        plan["func_info"].name, name
+                                    )
+                                )
+                            return
+
+                        if isinstance(stmt, ExprStmt):
+                            self._collect_security_ta_binding_stacks(
+                                stmt.expr,
+                                resolving,
+                                local_stack,
+                                collected,
+                                inline_ta_indices,
+                                True,
+                            )
                             return
 
                     for stmt in plan["body"]:
