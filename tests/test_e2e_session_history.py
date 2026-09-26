@@ -830,6 +830,13 @@ def test_a_read_reached_through_a_callers_clone_gets_clones_too(tmp_path: Path) 
                                 "a = f(true)\nb = f(1.5)\n"
                                 'if a or b\n    strategy.entry("L", strategy.long)\n')["cpp"]
     assert "_refused_session_read" not in cpp
+    # Each call site's clone pushes its own Series; the float one reads it.
+    bodies = dict(re.findall(r"\n\s+\w+ (f_cs\d+)\([^)]*\) \{\n(.*?)\n    \}", cpp, re.S))
+    pushed = {name: re.findall(r"(_session_call_\d+)\.push\(", body) for name, body in bodies.items()}
+    assert sorted(bodies) == ["f_cs0", "f_cs1"], sorted(bodies)
+    assert all(len(series) == 1 for series in pushed.values()), pushed
+    assert pushed["f_cs0"] != pushed["f_cs1"]
+    assert f"{pushed['f_cs1'][0]}[" in bodies["f_cs1"]
     compile_cpp(cpp, label="a read reached through a caller's clone")
 
 
