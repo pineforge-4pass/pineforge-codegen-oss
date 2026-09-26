@@ -1869,6 +1869,30 @@ class SecurityEmitter:
             return "false"
         return None
 
+    def _security_local_value(
+        self,
+        expr_cpp: str,
+        value,
+        cpp_type: str | None,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...],
+    ) -> str:
+        """``expr_cpp`` as stored in an evaluator local of ``cpp_type``:
+        ``na`` spelled for that type, and a value narrowed to ``int`` or
+        ``bool`` without losing ``na`` (quirk 9), as the chart declares its
+        locals -- ``na<double>()`` in a ``bool`` is true, in an ``int``
+        undefined. The value is judged as the evaluator renders it: a helper
+        series or ``var`` state is a double whatever the chart's type."""
+        if cpp_type not in _SECURITY_SCALAR_CPP:
+            return expr_cpp
+        if value is None or isinstance(value, NaLiteral):
+            return f"na<{cpp_type}>()"
+        if cpp_type in ("int", "int64_t", "bool"):
+            return self._coerce_int_slot(
+                expr_cpp, value, cpp_type,
+                value_is_double=self._security_emits_double(value, helper_binding_stack),
+            )
+        return expr_cpp
+
     def _security_helper_series_ref(self, series_name: str) -> str:
         """The map entry holding one helper series (string values in their
         own map, every other scalar in the historical double map)."""
@@ -2152,9 +2176,9 @@ class SecurityEmitter:
                         runtime_stack_local,
                         lines,
                     )
-                    if cpp_type == "std::string" and (
-                            stmt.value is None or isinstance(stmt.value, NaLiteral)):
-                        expr_cpp = "na<std::string>()"
+                    expr_cpp = self._security_local_value(
+                        expr_cpp, stmt.value, cpp_type, runtime_stack_local
+                    )
                     active_bindings[stmt.name] = local_name
                     self._security_local_cpp_types[local_name] = cpp_type
                     lines.append(f"{pad}{cpp_type} {local_name} = {expr_cpp};")
@@ -2168,6 +2192,10 @@ class SecurityEmitter:
                         security_mutable_names,
                         runtime_stack_local,
                         lines,
+                    )
+                    expr_cpp = self._security_local_value(
+                        expr_cpp, stmt.value, self._security_local_cpp_types.get(local_name),
+                        runtime_stack_local,
                     )
                     lines.append(f"{pad}{local_name} = {expr_cpp};")
                 activate_decl()
@@ -2201,9 +2229,11 @@ class SecurityEmitter:
                     if series_name in self._security_string_series and isinstance(
                             stmt.value, NaLiteral):
                         expr_cpp = "na<std::string>()"
-                elif (self._security_local_cpp_types.get(binding) == "std::string"
-                      and isinstance(stmt.value, NaLiteral)):
-                    expr_cpp = "na<std::string>()"
+                elif stmt.op == ":=":
+                    expr_cpp = self._security_local_value(
+                        expr_cpp, stmt.value, self._security_local_cpp_types.get(binding),
+                        runtime_stack_local,
+                    )
                 if series_name is not None:
                     ref = self._security_helper_series_ref(series_name)
                     if stmt.op == ":=":
