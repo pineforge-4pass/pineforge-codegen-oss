@@ -3578,6 +3578,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 register(
                     "hist_call", (id(node),), self._infer_type(node.object), owner
                 )
+            elif (isinstance(node, Subscript)
+                    and self._is_compound_history_object(node.object)):
+                register(
+                    "hist_call", (id(node),), self._infer_type(node.object), owner
+                )
 
             if not isinstance(node, FuncCall):
                 continue
@@ -3697,6 +3702,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                             expected_cpp_type,
                             context,
                         )
+
+    def _is_compound_history_object(self, node) -> bool:
+        """Whether ``node[k]`` is history on an operator expression.
+
+        ``(a > b)[1]``, ``(x - y)[2]`` and ``(c ? p : q)[1]`` read the
+        expression's value k bars ago; its C++ scalar cannot be indexed, so
+        the subscript owns a synthetic ``_hist_call_*`` Series exactly like an
+        inline call result. Numeric and bool expressions only: other families
+        keep their established lowering.
+        """
+        return (isinstance(node, (BinOp, UnaryOp, Ternary))
+                and self._infer_type(node) in ("double", "int", "int64_t", "bool"))
 
     def _inline_history_member(self, kind: str, node: ASTNode,
                                arg_idx: int | None = None) -> str:
