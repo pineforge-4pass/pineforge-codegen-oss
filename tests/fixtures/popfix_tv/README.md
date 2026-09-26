@@ -38,3 +38,18 @@ the lane's evidence, not here).
 `alert.freq_once_per_bar_close` as values: its entry Signals spell
 `all|once_per_bar|once_per_bar_close`, its exit Signals the selected constant
 and whether it equals `alert.freq_all`.
+
+`version_directive_spellings.json` holds 46 synthetic probes, one strategy
+using v6-only syntax (an enum and a method; the t* and u* probes also read
+`timeframe.main_period`, which v5 lacks) under a different directive spelling,
+each exported with `lab tv --no-note --symbol BINANCE:ETHUSDT.P --interval 15
+--from 2025-04-01 --to 2025-04-03` on 2026-09-26, with TradingView's verdict:
+`v6` (23 trades, the tape's sha256), `v5`, `not a directive` (TradingView's
+compile error "Script could not be translated": without a directive the v6
+syntax does not compile; for `//\r@version=6` a syntax error at the `@` on
+line 2), or `invalid version` (the directive's value refused: "given value is
+not a version" or "Version number must be an integer value from range
+[1, 2]"). Each refused probe keeps TradingView's reason. The u* probes (blanks
+other than spaces, carriage returns, a comment prefix, `6.0`, `6;` and a
+non-ASCII digit) were exported after the first 28. The file's sha256 is recorded
+in the lane report.

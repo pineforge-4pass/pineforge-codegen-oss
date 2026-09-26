@@ -1,0 +1,396 @@
+[
+ {
+  "name": "s01-canonical",
+  "source": "//@version=6\nstrategy(\"PF vdir s01-canonical\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "47c6b36cc4a7b3b096d5a6a5a52084b2457cefe25cddfb47f8a0d92f11964a0b"
+  }
+ },
+ {
+  "name": "s02-one-space",
+  "source": "// @version=6\nstrategy(\"PF vdir s02-one-space\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "47c6b36cc4a7b3b096d5a6a5a52084b2457cefe25cddfb47f8a0d92f11964a0b"
+  }
+ },
+ {
+  "name": "s03-four-spaces",
+  "source": "//    @version=6\nstrategy(\"PF vdir s03-four-spaces\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "47c6b36cc4a7b3b096d5a6a5a52084b2457cefe25cddfb47f8a0d92f11964a0b"
+  }
+ },
+ {
+  "name": "s04-tab",
+  "source": "//\t@version=6\nstrategy(\"PF vdir s04-tab\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "47c6b36cc4a7b3b096d5a6a5a52084b2457cefe25cddfb47f8a0d92f11964a0b"
+  }
+ },
+ {
+  "name": "s05-spaces-around-eq",
+  "source": "//@version = 6\nstrategy(\"PF vdir s05-spaces-around-eq\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "47c6b36cc4a7b3b096d5a6a5a52084b2457cefe25cddfb47f8a0d92f11964a0b"
+  }
+ },
+ {
+  "name": "s06-space-after-eq",
+  "source": "//@version= 6\nstrategy(\"PF vdir s06-space-after-eq\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "47c6b36cc4a7b3b096d5a6a5a52084b2457cefe25cddfb47f8a0d92f11964a0b"
+  }
+ },
+ {
+  "name": "s07-space-before-eq",
+  "source": "//@version =6\nstrategy(\"PF vdir s07-space-before-eq\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "47c6b36cc4a7b3b096d5a6a5a52084b2457cefe25cddfb47f8a0d92f11964a0b"
+  }
+ },
+ {
+  "name": "s08-capital-v",
+  "source": "//@Version=6\nstrategy(\"PF vdir s08-capital-v\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "not a directive",
+   "reason": "Script could not be translated from: |B|enum Side"
+  }
+ },
+ {
+  "name": "s09-upper",
+  "source": "//@VERSION=6\nstrategy(\"PF vdir s09-upper\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "not a directive",
+   "reason": "Script could not be translated from: |B|enum Side"
+  }
+ },
+ {
+  "name": "s10-trailing-comment",
+  "source": "//@version=6 // note\nstrategy(\"PF vdir s10-trailing-comment\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "not a directive",
+   "reason": "Script could not be translated from: |B|enum Side"
+  }
+ },
+ {
+  "name": "s11-trailing-text",
+  "source": "//@version=6 draft\nstrategy(\"PF vdir s11-trailing-text\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "not a directive",
+   "reason": "Script could not be translated from: |B|enum Side"
+  }
+ },
+ {
+  "name": "s12-indented",
+  "source": "   //@version=6\nstrategy(\"PF vdir s12-indented\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "47c6b36cc4a7b3b096d5a6a5a52084b2457cefe25cddfb47f8a0d92f11964a0b"
+  }
+ },
+ {
+  "name": "s13-third-line",
+  "source": "// first comment\n// second comment\n//@version=6\nstrategy(\"PF vdir s13-third-line\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "47c6b36cc4a7b3b096d5a6a5a52084b2457cefe25cddfb47f8a0d92f11964a0b"
+  }
+ },
+ {
+  "name": "s14-after-code",
+  "source": "strategy(\"PF vdir s14-after-code\", overlay = true)\n//@version=6\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "47c6b36cc4a7b3b096d5a6a5a52084b2457cefe25cddfb47f8a0d92f11964a0b"
+  }
+ },
+ {
+  "name": "s15-leading-zero",
+  "source": "//@version=06\nstrategy(\"PF vdir s15-leading-zero\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "47c6b36cc4a7b3b096d5a6a5a52084b2457cefe25cddfb47f8a0d92f11964a0b"
+  }
+ },
+ {
+  "name": "s16-space-after-at",
+  "source": "//@ version=6\nstrategy(\"PF vdir s16-space-after-at\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "not a directive",
+   "reason": "Script could not be translated from: |B|enum Side"
+  }
+ },
+ {
+  "name": "s17-missing",
+  "source": "strategy(\"PF vdir s17-missing\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "not a directive",
+   "reason": "Script could not be translated from: |B|enum Side"
+  }
+ },
+ {
+  "name": "s18-in-string-only",
+  "source": "note = \"//@version=6\"\nstrategy(\"PF vdir s18-in-string-only\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "not a directive",
+   "reason": "Script could not be translated from: null"
+  }
+ },
+ {
+  "name": "s19-three-slashes",
+  "source": "///@version=6\nstrategy(\"PF vdir s19-three-slashes\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "not a directive",
+   "reason": "Script could not be translated from: |B|enum Side"
+  }
+ },
+ {
+  "name": "s20-space-then-tab",
+  "source": "// \t@version=6\nstrategy(\"PF vdir s20-space-then-tab\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = \"v6\")\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "47c6b36cc4a7b3b096d5a6a5a52084b2457cefe25cddfb47f8a0d92f11964a0b"
+  }
+ },
+ {
+  "name": "t01-last-line",
+  "source": "strategy(\"PF vdir t01-last-line\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n//@version=6\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "197a0a8751907c52f541c3420b9f8bc7101ebb7039173185ba7c9802f0f41488"
+  }
+ },
+ {
+  "name": "t02-trailing-spaces",
+  "source": "//@version=6   \nstrategy(\"PF vdir t02-trailing-spaces\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "197a0a8751907c52f541c3420b9f8bc7101ebb7039173185ba7c9802f0f41488"
+  }
+ },
+ {
+  "name": "t03-five-then-six",
+  "source": "//@version=5\n//@version=6\nstrategy(\"PF vdir t03-five-then-six\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v5",
+   "reason": "line 10: Undeclared identifier 'timeframe'"
+  }
+ },
+ {
+  "name": "t04-six-then-five",
+  "source": "//@version=6\n//@version=5\nstrategy(\"PF vdir t04-six-then-five\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "197a0a8751907c52f541c3420b9f8bc7101ebb7039173185ba7c9802f0f41488"
+  }
+ },
+ {
+  "name": "t05-inline-after-code",
+  "source": "strategy(\"PF vdir t05-inline-after-code\", overlay = true) //@version=6\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "not a directive",
+   "reason": "Script could not be translated from: |B|enum Side"
+  }
+ },
+ {
+  "name": "t06-mid-script",
+  "source": "strategy(\"PF vdir t06-mid-script\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\n//@version=6\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "197a0a8751907c52f541c3420b9f8bc7101ebb7039173185ba7c9802f0f41488"
+  }
+ },
+ {
+  "name": "t07-main-period-canonical",
+  "source": "//@version=6\nstrategy(\"PF vdir t07-main-period-canonical\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "197a0a8751907c52f541c3420b9f8bc7101ebb7039173185ba7c9802f0f41488"
+  }
+ },
+ {
+  "name": "t08-in-multiline-string",
+  "source": "strategy(\"PF vdir t08-in-multiline-string\", overlay = true)\nnote = \"\"\"\n//@version=6\n\"\"\"\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "197a0a8751907c52f541c3420b9f8bc7101ebb7039173185ba7c9802f0f41488"
+  }
+ },
+ {
+  "name": "u01-nbsp-after-slashes",
+  "source": "//\u00a0@version=6\nstrategy(\"PF vdir u01-nbsp-after-slashes\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "invalid version",
+   "reason": "Version number must be an integer value from range [1, 2] (passed \"6\")"
+  }
+ },
+ {
+  "name": "u02-nbsp-trailing",
+  "source": "//@version=6\u00a0\nstrategy(\"PF vdir u02-nbsp-trailing\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "invalid version",
+   "reason": "failed traslator url Q4yFVTje_PUWUfJzs: given value is not a version: 6\u00a0"
+  }
+ },
+ {
+  "name": "u03-vtab-trailing",
+  "source": "//@version=6\u000b\nstrategy(\"PF vdir u03-vtab-trailing\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "invalid version",
+   "reason": "failed traslator url flrU7lhA_PFhOvY2e: given value is not a version: 6\u000b"
+  }
+ },
+ {
+  "name": "u04-cr-space-trailing",
+  "source": "//@version=6\r \nstrategy(\"PF vdir u04-cr-space-trailing\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "197a0a8751907c52f541c3420b9f8bc7101ebb7039173185ba7c9802f0f41488"
+  }
+ },
+ {
+  "name": "u05-comment-prefix",
+  "source": "// x //@version=6\nstrategy(\"PF vdir u05-comment-prefix\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "not a directive",
+   "reason": "Script could not be translated from: |B|enum Side"
+  }
+ },
+ {
+  "name": "u06-formfeed-trailing",
+  "source": "//@version=6\f\nstrategy(\"PF vdir u06-formfeed-trailing\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "197a0a8751907c52f541c3420b9f8bc7101ebb7039173185ba7c9802f0f41488"
+  }
+ },
+ {
+  "name": "u07-ideographic-space-after-slashes",
+  "source": "//\u3000@version=6\nstrategy(\"PF vdir u07-ideographic-space-after-slashes\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "invalid version",
+   "reason": "Version number must be an integer value from range [1, 2] (passed \"6\")"
+  }
+ },
+ {
+  "name": "u08-arabic-indic-digit",
+  "source": "//@version=\u0666\nstrategy(\"PF vdir u08-arabic-indic-digit\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "invalid version",
+   "reason": "failed traslator url dvh9glaI_vtXyX5dB: given value is not a version: \u0666"
+  }
+ },
+ {
+  "name": "u09-formfeed-after-slashes",
+  "source": "//\f@version=6\nstrategy(\"PF vdir u09-formfeed-after-slashes\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "197a0a8751907c52f541c3420b9f8bc7101ebb7039173185ba7c9802f0f41488"
+  }
+ },
+ {
+  "name": "u10-formfeed-around-eq",
+  "source": "//@version\f=\f6\nstrategy(\"PF vdir u10-formfeed-around-eq\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "197a0a8751907c52f541c3420b9f8bc7101ebb7039173185ba7c9802f0f41488"
+  }
+ },
+ {
+  "name": "u11-cr-after-slashes",
+  "source": "//\r@version=6\nstrategy(\"PF vdir u11-cr-after-slashes\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "not a directive",
+   "reason": "no viable alternative at character {unexpectedToken} (line 2, column 1, CE10005)"
+  }
+ },
+ {
+  "name": "u12-crlf-directive-line",
+  "source": "//@version=6\r\nstrategy(\"PF vdir u12-crlf-directive-line\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "197a0a8751907c52f541c3420b9f8bc7101ebb7039173185ba7c9802f0f41488"
+  }
+ },
+ {
+  "name": "u13-cr-around-eq",
+  "source": "//@version\r=\r6\nstrategy(\"PF vdir u13-cr-around-eq\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "invalid version",
+   "reason": "failed traslator url thNm8TNs_9fphAKvR: given value is not a version: "
+  }
+ },
+ {
+  "name": "u14-cr-before-directive",
+  "source": "// header\r//@version=6\nstrategy(\"PF vdir u14-cr-before-directive\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "197a0a8751907c52f541c3420b9f8bc7101ebb7039173185ba7c9802f0f41488"
+  }
+ },
+ {
+  "name": "u15-decimal-version",
+  "source": "//@version=6.0\nstrategy(\"PF vdir u15-decimal-version\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "invalid version",
+   "reason": "failed traslator url bitHmbWE_5BcpvSj4: given value is not a version: 6.0"
+  }
+ },
+ {
+  "name": "u16-semicolon",
+  "source": "//@version=6;\nstrategy(\"PF vdir u16-semicolon\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "invalid version",
+   "reason": "failed traslator url u7JAhgvd_DEQ4l336: given value is not a version: 6;"
+  }
+ },
+ {
+  "name": "u17-formfeed-before-slashes",
+  "source": "\f//@version=6\nstrategy(\"PF vdir u17-formfeed-before-slashes\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "197a0a8751907c52f541c3420b9f8bc7101ebb7039173185ba7c9802f0f41488"
+  }
+ },
+ {
+  "name": "u18-tab-before-slashes",
+  "source": "\t//@version=6\nstrategy(\"PF vdir u18-tab-before-slashes\", overlay = true)\nenum Side\n    long\n    short\nmethod twice(float x) => x * 2\ns = close > open ? Side.long : Side.short\nif s == Side.long and close.twice() > 0 and minute(time, \"UTC\") == 0\n    strategy.entry(\"L\", strategy.long, comment = timeframe.main_period)\nif minute(time, \"UTC\") == 30\n    strategy.close(\"L\")\n",
+  "tradingview": {
+   "verdict": "v6",
+   "closed_trades": 23,
+   "tv_trades_sha256": "197a0a8751907c52f541c3420b9f8bc7101ebb7039173185ba7c9802f0f41488"
+  }
+ }
+]

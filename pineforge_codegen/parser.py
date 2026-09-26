@@ -37,6 +37,15 @@ class ParseError(Exception):
         self.token = token
 
 
+# ``//@version=N`` as TradingView reads it (tests/test_version_directive.py): the
+# whole line, spaces, tabs or form feeds allowed before ``//``, between ``//``
+# and ``@version``, around ``=`` and at the end, ASCII digits; a line ends at
+# ``\r\n``, ``\r`` or ``\n``.
+_VERSION_DIRECTIVE_RE = re.compile(
+    r"[ \t\f]*//[ \t\f]*@version[ \t\f]*=[ \t\f]*([0-9]+)[ \t\f]*"
+)
+_TRADINGVIEW_LINE_END_RE = re.compile(r"\r\n|\r|\n")
+
 # Type annotation keywords
 TYPE_KEYWORDS = {
     TokenType.TYPE_INT, TokenType.TYPE_FLOAT,
@@ -205,12 +214,23 @@ class Parser:
         return prog
 
     def _extract_version(self) -> int | None:
-        """Extract version number from //@version=N annotation in source."""
+        """The version of the script's ``//@version=N`` directive.
+
+        TradingView's rule (tests/test_version_directive.py, 46 probes): the
+        FIRST line holding nothing but ``//``, ``@version``, ``=`` and ASCII
+        digits, with optional spaces, tabs or form feeds around each, anywhere
+        in the script -- read line by line, where a carriage return ends a line
+        too, so such a line inside a multiline string counts as well. Case,
+        ``///``, a space after ``@``, trailing text, code before it on the line,
+        any other blank (vertical tab, no-break space) or a carriage return
+        inside it make it no directive.
+        """
         if not self._source:
             return None
-        m = re.search(r'//@version=(\d+)', self._source)
-        if m:
-            return int(m.group(1))
+        for line in _TRADINGVIEW_LINE_END_RE.split(self._source):
+            match = _VERSION_DIRECTIVE_RE.fullmatch(line)
+            if match is not None:
+                return int(match.group(1))
         return None
 
     def _raise_syntax_error(self, error: ParseError) -> None:
