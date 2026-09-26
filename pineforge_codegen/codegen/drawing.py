@@ -30,6 +30,17 @@ from .tables import (
 
 _MAP_VOID_METHODS = frozenset({"clear", "put_all"})
 
+# Builtin calls Pine types as void, each lowering to a void C++ statement. A
+# user function or selection arm ending in one returns no value, so it must be
+# emitted as a statement, never as ``return strategy_exit(...)``.
+_VOID_BUILTIN_CALLS = frozenset({
+    ("strategy", "entry"), ("strategy", "order"), ("strategy", "exit"),
+    ("strategy", "close"), ("strategy", "close_all"),
+    ("strategy", "cancel"), ("strategy", "cancel_all"),
+    ("log", "info"), ("log", "warning"), ("log", "error"),
+    ("runtime", "error"),
+})
+
 # ---------------------------------------------------------------------------
 # Canonical Pine v6 constructor param-name lists (positional order).
 # Only the GEOMETRY names are consumed downstream; every other (visual) name is
@@ -524,6 +535,16 @@ class DrawingVisitor:
             return False
 
         if self._drawing_call_is_void(node):
+            return True
+        receiver = node.callee.object
+        if (isinstance(receiver, Identifier)
+                and (receiver.name, method) in _VOID_BUILTIN_CALLS):
+            return True
+        if (isinstance(receiver, MemberAccess)
+                and isinstance(receiver.object, Identifier)
+                and receiver.object.name == "strategy"
+                and receiver.member == "risk"):
+            # strategy.risk.* setters are statements (see _visit_stmt).
             return True
         _fn, ns = self._resolve_callee(node.callee)
 
