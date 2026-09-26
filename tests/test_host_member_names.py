@@ -89,6 +89,19 @@ def test_committed_host_members_are_the_derived_set() -> None:
           f"reserved ({derived.host_class})")
 
 
+def test_identifier_scan_skips_comments_and_literals_only() -> None:
+    """Needs no engine or clang: the battery's scan drops comments and string
+    and character literals, and keeps code around a literal holding ``//`` or
+    ``/*``."""
+    gen = _generator()
+    names = gen.unqualified_identifiers(
+        'x = f(std::string("http://a"), bar_index_); // trades_\n'
+        'y = g("a/*b", \'/\', syminfo_.mintick); /* current_bar_ */ z = trace_enabled_;\n'
+        "#include <pineforge/source/pine_strategy_host.hpp>\n")
+    assert {"bar_index_", "syminfo_", "trace_enabled_", "x", "f", "y", "g", "z"} <= names
+    assert not names & {"trades_", "current_bar_", "mintick", "http", "pine_strategy_host"}
+
+
 def _battery() -> list[Path]:
     sources = sorted((REPO_ROOT / "tests" / "fixtures").rglob("*.pine"))
     sources += sorted((REPO_ROOT / "tests" / "gate-corpus" / "ok").glob("*.pine"))

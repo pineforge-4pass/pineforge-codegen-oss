@@ -1186,9 +1186,11 @@ class ExprVisitor:
         pushed on every chart bar (``_prescan_session_history``); a function
         body's indexes its emitted call site's Series, pushed at the function's
         entry (``_prepare_inline_history_members``). A request.security
-        expression that spells the read builds it on the requested clock
-        (security.py); one that reaches it through a function or a variable
-        has no such history here and is refused at the read.
+        expression that reaches the read through its own operators builds it
+        on the requested clock (security.py); one that reaches it through a
+        call's argument or a variable has no such history here and is refused
+        at the read, and the analyzer refuses a read in a function such an
+        expression evaluates.
         """
         flag = node.object.member
         where = next((n for n in (node, node.index, node.object)
@@ -1196,10 +1198,10 @@ class ExprVisitor:
         if self._security_payload_depth:
             self._codegen_error(
                 where,
-                f"session.{flag}[...] cannot be read here: this request.security "
-                "expression reaches it through a function or a variable, and "
-                "PineForge keeps a session flag's history on the requested clock "
-                f"only where the expression reads session.{flag}[...] itself.",
+                f"session.{flag}[...] cannot be read here: PineForge keeps a session "
+                "flag's history on the requested clock only for a read the "
+                "request.security expression reaches through its own operators, "
+                "not through a call's argument, a function or a variable.",
             )
         owner = self._session_call_owner.get(id(node))
         if owner is not None:

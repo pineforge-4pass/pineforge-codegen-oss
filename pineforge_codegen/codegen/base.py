@@ -109,8 +109,8 @@ TA_TUPLE_RESULT_TYPES = {
 # CPP_RESERVED + the NamingHelper mixin are pulled in from helpers.py so the
 # small naming/walk utilities can be shared with future visitor mixins.
 from .helpers import (
-    CPP_RESERVED, SESSION_FLAG_MEMBERS, NamingHelper, na_preserving_int_cast,
-    pine_truth_cast, session_history_member,
+    CPP_RESERVED, INLINE_HISTORY_KINDS, SESSION_FLAG_MEMBERS, NamingHelper,
+    na_preserving_int_cast, pine_truth_cast, session_history_member,
 )
 from .constant_fold import fold_numeric_expression
 from .session_market import SESSION_MARKET_CPP, SESSION_MARKET_MEMBER
@@ -3364,12 +3364,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # site, pushed at the function's entry (emit_top.py).
         self._session_call_flags: dict[str, set[str]] = {}
         self._session_call_owner: dict[int, str] = {}
-        counters = {
-            "hist_call": 0,
-            "series_arg": 0,
-            "udf_series_arg": 0,
-            "session_call": 0,
-        }
+        counters = {kind: 0 for kind in INLINE_HISTORY_KINDS}
 
         def walk_nodes(value):
             """Yield AST nodes in stable field order, including tuple elements.
@@ -3666,8 +3661,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # call site: one Series per flag and emitted variant (the
                 # analyzer clones the function per call site), pushed once
                 # per call at the function's entry. A top-level read uses the
-                # flag's per-bar Series (_prescan_session_history).
-                if owner is not None:
+                # flag's per-bar Series (_prescan_session_history), and one
+                # written in a request.security expression the requested
+                # clock's (security.py).
+                if owner is not None and id(node) not in requested_node_ids:
                     flag = node.object.member
                     self._session_call_owner[id(node)] = owner
                     self._session_call_flags.setdefault(owner, set()).add(flag)

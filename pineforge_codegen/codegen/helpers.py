@@ -221,6 +221,19 @@ CPP_EMITTER_NAMES = frozenset("""
     trace is_na na nz fixnan
 """.split())
 
+# The generated history members, ``_<kind>_<n>``
+# (codegen/base.py _prepare_inline_history_members): a script identifier
+# spelled like one (``_hist_call_1``) is renamed like a reserved name.
+INLINE_HISTORY_KINDS = ("hist_call", "series_arg", "udf_series_arg", "session_call")
+_INLINE_HISTORY_MEMBER = re.compile(
+    r"_(?:" + "|".join(INLINE_HISTORY_KINDS) + r")_\d+")
+
+
+def _is_reserved(name: str) -> bool:
+    return (name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES
+            or _INLINE_HISTORY_MEMBER.fullmatch(name) is not None)
+
+
 def session_history_member(flag: str) -> str:
     """The per-bar Series of a ``session.*`` flag the top level reads at an
     offset (codegen/base.py ``_prescan_session_history``)."""
@@ -335,7 +348,7 @@ class NamingHelper:
         self._safe_name_occupied = authored
         self._safe_name_bound = bound
         for name in sorted(bound):
-            if name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES:
+            if _is_reserved(name):
                 self._allocate_safe_name(name)
 
     def _allocate_safe_name(self, name: str) -> str:
@@ -346,8 +359,7 @@ class NamingHelper:
         occupied = getattr(self, "_safe_name_occupied", set())
         candidate = base
         suffix = 2
-        while (candidate in occupied or candidate in CPP_RESERVED
-               or candidate in BUILTIN_ACCESSOR_NAMES):
+        while candidate in occupied or _is_reserved(candidate):
             candidate = f"{base}_{suffix}"
             suffix += 1
         self._safe_name_map[name] = candidate
@@ -361,7 +373,7 @@ class NamingHelper:
             return mapping[name]
         if mapping is not None and name not in self._safe_name_bound:
             return name
-        if name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES:
+        if _is_reserved(name):
             if mapping is None:
                 return (f"_{name}_" if name in LEGACY_CPP_RESERVED
                         or name in BUILTIN_ACCESSOR_NAMES

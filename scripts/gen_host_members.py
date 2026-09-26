@@ -53,6 +53,9 @@ _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # ``this->x`` look the name up in the generated class first, as a bare name
 # does.
 _TOKEN = re.compile(r"(\.|::)?\s*\b([A-Za-z_][A-Za-z0-9_]*)")
+# C++ string and character literals and comments, in the order they start.
+_LEXEMES = re.compile(r'"(?:\\.|[^"\\\n])*"' + r"|'(?:\\.|[^'\\\n])*'"
+                      + r"|/\*.*?\*/|//[^\n]*", re.S)
 # codegen/helpers.py's reserved-name lists: names the emitter avoids, not
 # code it writes.
 _NAME_LISTS = {"LEGACY_CPP_RESERVED", "CPP_KEYWORDS", "CPP_CONTEXTUAL", "CPP_STANDARD_MACROS",
@@ -242,10 +245,9 @@ def unqualified_identifiers(cpp: str) -> set[str]:
     """The identifiers C++ source names without a ``.`` or ``::`` qualifier
     (``strat->run`` counts: it looks ``run`` up in the generated class), outside
     comments, string and character literals and preprocessor lines."""
-    text = re.sub(r"/\*.*?\*/", " ", cpp, flags=re.S)
-    text = re.sub(r"//[^\n]*", " ", text)
-    text = re.sub(r'"(?:\\.|[^"\\\n])*"', '""', text)
-    text = re.sub(r"'(?:\\.|[^'\\\n])*'", "''", text)
+    # One pass, so a literal holding "//" or "/*" is a literal and a comment
+    # holding a quote is a comment.
+    text = _LEXEMES.sub(lambda m: '""' if m.group(0)[0] in "\"'" else " ", cpp)
     text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
     return {m.group(2) for m in _TOKEN.finditer(text) if not m.group(1)}
 

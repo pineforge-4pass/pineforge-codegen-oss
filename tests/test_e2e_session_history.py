@@ -27,8 +27,9 @@ too, not the previous time the read ran. Codegen gives each flag read at the
 top level one Series pushed on every chart bar; a function that reads a flag
 at an offset is emitted once per call site and pushes the flag at its entry,
 once per call; in a ``request.security`` expression the read runs on the
-requested clock, one value per requested bar, and one reached through a
-function or a variable there is refused, located at the read.
+requested clock, one value per requested bar; one it reaches through a
+call's argument or a variable, and one in a function or method it evaluates,
+is refused, located at the read.
 
 The pre-lane build emitted ``<flag>[k]`` on a C++ bool and did not compile.
 Each tape is replayed end to end -- ``transpile_json``, the built runtime,
@@ -331,7 +332,8 @@ def test_history_reads_are_tradingviews(slug: str, replays) -> None:
 def test_payload_history_runs_on_the_requested_clock(replays) -> None:
     """In a request.security payload a flag's history is the requested
     bars': ``session.ismarket[1]`` equals ``sm()[1]`` with ``sm() =>
-    session.ismarket`` on every chart bar, and a function's read equals it."""
+    session.ismarket`` on every chart bar, and a read before the first
+    requested bar is false."""
     replay = _ok(replays, "payload")
     for name in ("m1", "p1", "q2"):
         assert traced(replay, name) == traced(replay, f"{name}_ref"), name
@@ -484,14 +486,34 @@ REFUSED = {
     "a variable a request.security expression reads": (
         "m = session.ismarket\n"
         'x = request.security(syminfo.tickerid, "60", m[1])\n', (4, 48)),
+    "a function called inside nz() in the expression": (
+        "f() => session.ispostmarket[1]\n"
+        "g() => nz(f() ? 1.0 : na)\n"
+        "a = g()\n"
+        'x = request.security(syminfo.tickerid, "60", g()) > 0\n', (3, 28)),
+    "a method of a float": (
+        "method post1(float self) => session.ispostmarket[1] and self > 0\n"
+        'x = request.security(syminfo.tickerid, "60", close.post1())\n', (3, 49)),
+    "a method a wrapper calls on the chart too": (
+        "type Foo\n    float v = 1\n"
+        "method m(Foo self) => session.ismarket[1] and self.v > 0\n"
+        "w(Foo o) => o.m()\n"
+        "foo = Foo.new()\n"
+        "a = w(foo)\n"
+        'x = request.security(syminfo.tickerid, "60", w(foo))\n', (5, 39)),
+    "an argument of a call in the expression": (
+        'x = request.security(syminfo.tickerid, "60", nz(session.ismarket[1] ? 1.0 : na)) > 0\n',
+        (3, 65)),
 }
 
 
 @pytest.mark.parametrize("place", REFUSED)
 def test_unsupported_places_are_refused_at_the_read(place: str, tmp_path: Path) -> None:
     """Needs no engine: a read that a request.security expression reaches
-    through a function or a variable has no history on the requested clock in
-    PineForge; it is refused at the read (the C++ did not compile before)."""
+    through a function, a method, a variable or a call's argument has no
+    history on the requested clock in PineForge; it is refused at the read,
+    whichever way the evaluator would reach the function (the C++ did not
+    compile before)."""
     body, (line, col) = REFUSED[place]
     pine = tmp_path / "strategy.pine"
     pine.write_text('//@version=6\nstrategy("session history", overlay=true)\n' + body
@@ -501,6 +523,32 @@ def test_unsupported_places_are_refused_at_the_read(place: str, tmp_path: Path) 
     errors = [d for d in result["diagnostics"] if d["severity"] == "error"]
     assert len(errors) == 1 and (errors[0]["line"], errors[0]["col"]) == (line, col), errors
     assert "request.security" in errors[0]["message"], errors[0]["message"]
+
+
+def test_a_payload_read_in_a_function_needs_no_call_history(tmp_path: Path) -> None:
+    """Needs no engine: a function whose only read is written in its own
+    request.security expression reads the requested clock's history; it keeps
+    no per-call Series."""
+    cpp = _transpiled(tmp_path, "f() => request.security(syminfo.tickerid, \"60\", session.ismarket[1])\n"
+                                "a = f()\nb = bar_index % 2 == 0 ? f() : false\n"
+                                'if a or b\n    strategy.entry("L", strategy.long)\n')["cpp"]
+    assert "_session_call_" not in cpp
+    assert re.search(r"Series<bool> _sec\d+_expr_hist_\d+", cpp)
+    compile_cpp(cpp, label="payload read in a function")
+
+
+def test_generated_member_names_stay_distinct(tmp_path: Path) -> None:
+    """Needs no engine: a script variable spelled like a generated history
+    member (``_session_call_1``, ``_hist_call_1``) is renamed, so the TU still
+    compiles (codegen used to stop on a duplicate member)."""
+    cpp = _transpiled(tmp_path, "_session_call_1 = close > open\n_hist_call_1 = 2.0\n"
+                                "post1() => session.ispostmarket[1]\n"
+                                "g() => (close > open)[1]\n"
+                                "a = post1()\nb = g()\n"
+                                "if a or b or _session_call_1 or _hist_call_1 > 1\n"
+                                '    strategy.entry("L", strategy.long)\n')["cpp"]
+    assert "pf_safe__session_call_1" in cpp and "pf_safe__hist_call_1" in cpp
+    compile_cpp(cpp, label="generated member names")
 
 
 def test_a_trace_can_read_a_flag_at_an_offset(tmp_path: Path) -> None:

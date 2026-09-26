@@ -29,7 +29,7 @@ from ..symbols import (
     method_receiver_type_name,
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
-from ..limits import TimeBudget
+from ..limits import TimeBudget, iter_ast_nodes
 from ..method_binding import (
     BoundMethodArgs,
     MethodBindError,
@@ -101,6 +101,16 @@ from .call_handlers import CallHandlers
 # ---------------------------------------------------------------------------
 # Analyzer
 # ---------------------------------------------------------------------------
+
+def _is_session_history(node) -> bool:
+    """Whether ``node`` is a ``session.*`` flag read at an offset
+    (``session.ismarket[1]``)."""
+    return (isinstance(node, Subscript)
+            and isinstance(node.object, MemberAccess)
+            and isinstance(node.object.object, Identifier)
+            and node.object.object.name == "session"
+            and node.object.member in sigs.SESSION_FLAG_MEMBERS)
+
 
 class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     """Semantic analysis pass over PineScript v6 AST.
@@ -2247,6 +2257,63 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         return out
 
+    def _refuse_session_history_on_requested_clock(
+            self, func_defs: dict, find_calls, known_func_names: set[str]) -> None:
+        """Refuse a ``session.*`` flag read at an offset in a function that a
+        request.security expression evaluates on the requested clock.
+
+        The evaluator inlines a function the expression calls, or calls the
+        chart's variant of one it reaches otherwise (inside ``nz(...)``, a
+        method, a wrapper). Either way the read would keep the chart calls'
+        history (``_session_call_*``), which that clock cannot share. The
+        functions reached: those the expression calls, those they call, and
+        those a global variable's definition or a mutable global's statements
+        call when the expression reads it. None of these reads compiled
+        before (a flag's history indexed a C++ bool), so refusing them breaks
+        no script.
+        """
+        pending: list[tuple[Any, str | None]] = [
+            (sec.expression, getattr(sec, "containing_func", "") or None)
+            for sec in getattr(self, "_security_calls", []) or []
+            if getattr(sec, "expression", None) is not None
+        ]
+        reached: set[str] = set()
+        followed: set[str] = set()
+        while pending:
+            node, owner = pending.pop()
+            for callee, _call in find_calls(node, known_func_names, owner):
+                if callee not in reached and callee in func_defs:
+                    reached.add(callee)
+                    pending.append((func_defs[callee], callee))
+            for child, _depth in iter_ast_nodes(node):
+                if not isinstance(child, Identifier) or child.name in followed:
+                    continue
+                name = child.name
+                info = self._global_binding_infos.get(name)
+                if info is not None and (info.is_var or name in self._global_reassigned_names):
+                    followed.add(name)
+                    pending.extend((stmt, None) for stmt in info.source_stmts)
+                elif name in self._global_expr_map:
+                    followed.add(name)
+                    pending.append((self._global_expr_map[name], None))
+        reads = [
+            (child.loc.line, child.loc.col, fname, child)
+            for fname in reached
+            for child, _depth in iter_ast_nodes(func_defs[fname])
+            if _is_session_history(child) and child.loc is not None
+        ]
+        if not reads:
+            return
+        _line, _col, fname, read = min(reads, key=lambda r: (r[0], r[1], r[2]))
+        flag = read.object.member
+        raise CompileError([Diagnostic(
+            level=Level.ERROR, phase=Phase.ANALYZER, location=read.loc,
+            message=(f"session.{flag}[...] cannot be read in {fname.split('.')[-1]}(), "
+                     "which a request.security expression evaluates on the requested "
+                     "clock: PineForge keeps a session flag's history in a function by "
+                     "the function's chart calls only."),
+        )])
+
     def _propagate_call_site_counts(self) -> None:
         """Propagate stateful UDF identity through complete call paths.
 
@@ -2616,6 +2683,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return True
             return False
 
+        # A read written in a request.security expression keeps the requested
+        # clock's history (codegen security.py), not its function's calls.
+        requested_node_ids = {
+            id(child)
+            for sec in getattr(self, "_security_calls", []) or []
+            if getattr(sec, "expression", None) is not None
+            for child, _depth in iter_ast_nodes(sec.expression)
+        }
+
         def _has_synthetic_history_state(
                 node, seen: set[int] | None = None) -> bool:
             if node is None:
@@ -2641,11 +2717,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if (isinstance(node, Subscript)
                     and isinstance(node.object, FuncCall)):
                 return True
-            if (isinstance(node, Subscript)
-                    and isinstance(node.object, MemberAccess)
-                    and isinstance(node.object.object, Identifier)
-                    and node.object.object.name == "session"
-                    and node.object.member in sigs.SESSION_FLAG_MEMBERS):
+            if (_is_session_history(node)
+                    and id(node) not in requested_node_ids):
                 return True
             if isinstance(node, FuncCall) and _needs_scalar_series_bridge(node):
                 return True
@@ -2658,6 +2731,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             name for name, func_def in func_defs.items()
             if _has_synthetic_history_state(func_def)
         }
+        self._refuse_session_history_on_requested_clock(
+            func_defs, _find_calls, known_func_names)
 
         # request.security owns a separate evaluator context and already
         # materializes/remaps its embedded TA state per SecurityCallInfo.  Do
