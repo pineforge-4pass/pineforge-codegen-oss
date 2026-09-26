@@ -13,8 +13,9 @@ member from the generated code. This script writes
   from clang's JSON AST of the ``#include`` lines the emitted C++ starts with;
 * the emitter: every identifier one of ``pineforge_codegen/codegen``'s string
   constants spells outside a ``.`` or ``::`` access, or two such constants
-  join (``"closed_trade_" + "profit"``); docstrings and the reserved-name
-  lists of ``codegen/helpers.py`` are names, not code the emitter writes;
+  join (``"closed_trade_" + "profit"``); docstrings, the reserved-name lists
+  of ``codegen/helpers.py``, dict keys and comparison operands are names the
+  emitter looks up or avoids, not code it writes;
 
 the set is their intersection. ``tests/test_host_member_names.py`` regenerates
 it and checks every host member a transpiled battery names against it.
@@ -150,8 +151,14 @@ def host_members(host_class: str, includes: tuple[str, ...], cxx: str,
             for base in record.get("bases", []):
                 spelled = base["type"].get("desugaredQualType") or base["type"]["qualType"]
                 pending.append(re.sub(r"<.*", "", spelled))
+            # clang's JSON dump gives a member no access of its own: the
+            # AccessSpecDecl before it does, and a class starts private.
+            access = "private" if record.get("tagUsed") == "class" else "public"
             for decl in record.get("inner", []):
-                if decl.get("isImplicit") or decl.get("access") == "private":
+                if decl.get("kind") == "AccessSpecDecl":
+                    access = decl.get("access", access)
+                    continue
+                if decl.get("isImplicit") or access == "private":
                     continue
                 kind, name = decl.get("kind"), decl.get("name")
                 if kind in _MEMBER_KINDS and name and _IDENT.fullmatch(name):
@@ -162,41 +169,53 @@ def host_members(host_class: str, includes: tuple[str, ...], cxx: str,
     return frozenset(names)
 
 
-def _not_code(tree: ast.Module) -> set[int]:
-    """The string constants that are not code the emitter writes: docstrings
-    and the reserved-name lists."""
-    ids = set()
+def _names(tree: ast.Module) -> tuple[set[int], set[int]]:
+    """The string constants that are not code the emitter writes: (docstrings
+    and the reserved-name lists; the Pine names it looks up or matches on, a
+    dict literal's keys and a comparison's operands -- ``func_name ==
+    "cancel"``, ``node.member in ("ismarket", ...)``). A matched name can
+    still end a spelling the emitter joins (``"pine_session_" + member``)."""
+    prose, matched = set(), set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             body = node.body
             if (body and isinstance(body[0], ast.Expr)
                     and isinstance(body[0].value, ast.Constant)
                     and isinstance(body[0].value.value, str)):
-                ids.add(id(body[0].value))
+                prose.add(id(body[0].value))
+        elif isinstance(node, ast.Dict):
+            matched.update(id(k) for k in node.keys if isinstance(k, ast.Constant))
+        elif isinstance(node, ast.Compare):
+            for operand in (node.left, *node.comparators):
+                items = (operand.elts if isinstance(operand, (ast.Tuple, ast.List, ast.Set))
+                         else [operand])
+                matched.update(id(i) for i in items if isinstance(i, ast.Constant))
     for stmt in tree.body:
         if (isinstance(stmt, ast.Assign)
                 and any(isinstance(t, ast.Name) and t.id in _NAME_LISTS for t in stmt.targets)):
-            ids.update(id(n) for n in ast.walk(stmt.value) if isinstance(n, ast.Constant))
-    return ids
+            prose.update(id(n) for n in ast.walk(stmt.value) if isinstance(n, ast.Constant))
+    return prose, matched
 
 
 def emitter_vocabulary(repo: Path) -> tuple[frozenset[str], frozenset[str]]:
     """(the identifiers the emitter's string constants spell unqualified,
-    the constants that are one identifier)."""
+    the constants that are one identifier, which a spelling can join)."""
     spelled: set[str] = set()
     whole: set[str] = set()
     for path in sorted((repo / EMITTER).rglob("*.py")):
         if path == repo / OUTPUT:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        skip = _not_code(tree)
+        prose, matched = _names(tree)
         for node in ast.walk(tree):
-            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                    and id(node) not in skip):
+            if (not isinstance(node, ast.Constant) or not isinstance(node.value, str)
+                    or id(node) in prose):
+                continue
+            if _IDENT.fullmatch(node.value):
+                whole.add(node.value)
+            if id(node) not in matched:
                 spelled.update(m.group(2) for m in _TOKEN.finditer(node.value)
                                if not m.group(1))
-                if _IDENT.fullmatch(node.value):
-                    whole.add(node.value)
     return frozenset(spelled), frozenset(whole)
 
 

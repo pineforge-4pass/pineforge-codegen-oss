@@ -75,6 +75,16 @@ def test_committed_host_members_are_the_derived_set() -> None:
     for name in ("session_isfirstbar_", "session_islastbar_", "syminfo_", "current_bar_",
                  "bar_index_", "trades_", "closed_trade_profit", "open_trade_max_drawdown"):
         assert name in derived.names, name
+    # A private member cannot be read by the generated class, and a Pine name
+    # the emitter only looks up or matches on (``str.replace``'s "replace",
+    # ``strategy.position_avg_price``'s member name) is not a spelling of
+    # generated code; one it joins into a call is (``"pine_session_" +
+    # member``).
+    for name in ("scheduler_prepare_script_run", "staged_configuration", "apply_overrides"):
+        assert name not in derived.host, name
+    for name in ("replace", "position_avg_price"):
+        assert name in derived.host and name not in derived.names, name
+    assert {"pine_session_ispremarket", "pine_session_ispostmarket"} <= derived.names
     print(f"{len(derived.names)} of the host's {len(derived.host)} accessible members "
           f"reserved ({derived.host_class})")
 
