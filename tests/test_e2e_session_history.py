@@ -482,28 +482,38 @@ def test_function_reads_are_tradingviews(replays) -> None:
 REFUSED = {
     "a function a request.security expression calls": (
         "pre1() => session.ispremarket[1]\n"
-        'x = request.security(syminfo.tickerid, "60", pre1())\n', (3, 30)),
+        'x = request.security(syminfo.tickerid, "60", pre1())\n', (3, 30), "request.security"),
     "a variable a request.security expression reads": (
         "m = session.ismarket\n"
-        'x = request.security(syminfo.tickerid, "60", m[1])\n', (4, 48)),
+        'x = request.security(syminfo.tickerid, "60", m[1])\n', (4, 48), "request.security"),
     "a function called inside nz() in the expression": (
         "f() => session.ispostmarket[1]\n"
         "g() => nz(f() ? 1.0 : na)\n"
         "a = g()\n"
-        'x = request.security(syminfo.tickerid, "60", g()) > 0\n', (3, 28)),
+        'x = request.security(syminfo.tickerid, "60", g()) > 0\n', (3, 28), "request.security"),
     "a method of a float": (
         "method post1(float self) => session.ispostmarket[1] and self > 0\n"
-        'x = request.security(syminfo.tickerid, "60", close.post1())\n', (3, 49)),
+        'x = request.security(syminfo.tickerid, "60", close.post1())\n', (3, 49), "request.security"),
     "a method a wrapper calls on the chart too": (
         "type Foo\n    float v = 1\n"
         "method m(Foo self) => session.ismarket[1] and self.v > 0\n"
         "w(Foo o) => o.m()\n"
         "foo = Foo.new()\n"
         "a = w(foo)\n"
-        'x = request.security(syminfo.tickerid, "60", w(foo))\n', (5, 39)),
+        'x = request.security(syminfo.tickerid, "60", w(foo))\n', (5, 39), "request.security"),
     "an argument of a call in the expression": (
         'x = request.security(syminfo.tickerid, "60", nz(session.ismarket[1] ? 1.0 : na)) > 0\n',
-        (3, 65)),
+        (3, 65), "request.security"),
+    "a method called on a receiver PineForge cannot type": (
+        "type Foo\n    float v = 1\n"
+        "method m(Foo self) => session.ismarket[1] and self.v > 0\n"
+        "mk() => Foo.new()\n"
+        "a = mk().m()\n"
+        "x = bar_index % 2 == 0 ? mk().m() : a\n", (5, 39), "cannot type"),
+    "a function a UDT field default calls": (
+        "f() => session.ismarket[1]\n"
+        "type Foo\n    bool v = f()\n"
+        "x = Foo.new().v\n", (3, 24), "field default"),
 }
 
 
@@ -514,7 +524,7 @@ def test_unsupported_places_are_refused_at_the_read(place: str, tmp_path: Path) 
     history on the requested clock in PineForge; it is refused at the read,
     whichever way the evaluator would reach the function (the C++ did not
     compile before)."""
-    body, (line, col) = REFUSED[place]
+    body, (line, col), reason = REFUSED[place]
     pine = tmp_path / "strategy.pine"
     pine.write_text('//@version=6\nstrategy("session history", overlay=true)\n' + body
                     + 'if x\n    strategy.entry("L", strategy.long)\n', encoding="utf-8")
@@ -522,7 +532,7 @@ def test_unsupported_places_are_refused_at_the_read(place: str, tmp_path: Path) 
     assert not result["ok"]
     errors = [d for d in result["diagnostics"] if d["severity"] == "error"]
     assert len(errors) == 1 and (errors[0]["line"], errors[0]["col"]) == (line, col), errors
-    assert "request.security" in errors[0]["message"], errors[0]["message"]
+    assert reason in errors[0]["message"], errors[0]["message"]
 
 
 def test_a_payload_read_in_a_function_needs_no_call_history(tmp_path: Path) -> None:
@@ -538,17 +548,72 @@ def test_a_payload_read_in_a_function_needs_no_call_history(tmp_path: Path) -> N
 
 
 def test_generated_member_names_stay_distinct(tmp_path: Path) -> None:
-    """Needs no engine: a script variable spelled like a generated history
-    member (``_session_call_1``, ``_hist_call_1``) is renamed, so the TU still
-    compiles (codegen used to stop on a duplicate member)."""
+    """Needs no engine: a generated history member is numbered past a
+    script name spelled like one (``_session_call_1``, ``_hist_call_1``), which
+    keeps its name, so the TU compiles (codegen used to stop on a duplicate
+    member)."""
     cpp = _transpiled(tmp_path, "_session_call_1 = close > open\n_hist_call_1 = 2.0\n"
                                 "post1() => session.ispostmarket[1]\n"
                                 "g() => (close > open)[1]\n"
                                 "a = post1()\nb = g()\n"
                                 "if a or b or _session_call_1 or _hist_call_1 > 1\n"
                                 '    strategy.entry("L", strategy.long)\n')["cpp"]
-    assert "pf_safe__session_call_1" in cpp and "pf_safe__hist_call_1" in cpp
+    assert "Series<bool> _session_call_2" in cpp and "Series<bool> _hist_call_2" in cpp
+    assert "_session_call_1 = " in cpp and "_hist_call_1 = " in cpp
+    assert "pf_safe__session_call_1" not in cpp and "pf_safe__hist_call_1" not in cpp
     compile_cpp(cpp, label="generated member names")
+
+
+KEPT = {
+    "a read in alert() of a method a request.security expression calls": (
+        "type Foo\n    float v = 1\n"
+        "method m(Foo self) =>\n"
+        '    alert(session.ismarket[1] ? "in" : "out")\n'
+        "    self.v\n"
+        "foo = Foo.new()\n"
+        'x = request.security(syminfo.tickerid, "60", foo.m()) > 0\n'),
+    "a read in plot() at the top level": (
+        "plot(session.ismarket[1] ? 1 : 0)\n"
+        "x = close > open\n"),
+    "a read in a strategy.entry alert_message in a function": (
+        "f() =>\n"
+        '    strategy.entry("L", strategy.long, alert_message = session.ismarket[1] ? "a" : "b")\n'
+        "    close\n"
+        "x = f() > 0\n"),
+    "a script name spelled like a generated history member": (
+        "_series_arg_1 = close > open\n_hist_call_1 = 2.0\n"
+        "x = _series_arg_1 and _hist_call_1 > 1\n"),
+}
+
+
+@pytest.mark.parametrize("place", KEPT)
+def test_scripts_that_compiled_keep_their_cpp(place: str, tmp_path: Path) -> None:
+    """A session read the codegen never emits (in a skipped call or a dropped
+    strategy parameter), or a name that only looks like a generated member,
+    leaves the C++ as it was before this lane (7a39cb3), and it compiles."""
+    legacy = reference_codegen(LEGACY)
+    if legacy is None:
+        pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
+    pine = tmp_path / "strategy.pine"
+    pine.write_text('//@version=6\nstrategy("session history", overlay=true)\n' + KEPT[place]
+                    + 'if x\n    strategy.entry("L", strategy.long)\n', encoding="utf-8")
+    now, before = transpile_json(pine), transpile_json(pine, legacy)
+    assert now["ok"] and before["ok"], (now["diagnostics"], before["diagnostics"])
+    assert now["cpp"] == before["cpp"]
+    compile_cpp(now["cpp"], label=place)
+
+
+def test_a_local_name_is_not_the_global(tmp_path: Path) -> None:
+    """Needs no engine: a parameter or local of a function a request.security
+    expression calls is not the global of that name, whose definition calls
+    a function reading a flag's history; nothing is refused."""
+    result = _transpiled(tmp_path, "f() => session.ismarket[1]\n"
+                                   "a = f()\n"
+                                   "g(float a) => a * 2\n"
+                                   "h() =>\n    a = close\n    a * 3\n"
+                                   'x = request.security(syminfo.tickerid, "60", g(close) + h())\n'
+                                   'if a and x > 0\n    strategy.entry("L", strategy.long)\n')
+    compile_cpp(result["cpp"], label="shadowed global")
 
 
 def test_a_trace_can_read_a_flag_at_an_offset(tmp_path: Path) -> None:

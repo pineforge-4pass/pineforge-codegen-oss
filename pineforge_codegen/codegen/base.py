@@ -30,7 +30,8 @@ from ..analyzer import (
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
-from ..limits import TimeBudget, syntax_children
+from ..limits import TimeBudget, iter_ast_nodes
+from ..session_reads import emitted_session_reads
 from ..pine_spelling import (
     blank_string_literals, input_call_spans, pine_string_literal,
     spell_input_call, sub_identifiers,
@@ -110,7 +111,7 @@ TA_TUPLE_RESULT_TYPES = {
 # small naming/walk utilities can be shared with future visitor mixins.
 from .helpers import (
     CPP_RESERVED, INLINE_HISTORY_KINDS, SESSION_FLAG_MEMBERS, NamingHelper,
-    na_preserving_int_cast, pine_truth_cast, session_history_member,
+    na_preserving_int_cast, pine_truth_cast,
 )
 from .constant_fold import fold_numeric_expression
 from .session_market import SESSION_MARKET_CPP, SESSION_MARKET_MEMBER
@@ -770,6 +771,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._session_history_flags: set[str] = set()
         self._session_call_flags: dict[str, set[str]] = {}
         self._session_call_owner: dict[int, str] = {}
+        self._session_history_member_names: dict[str, str] = {}
         # Track global-scope non-var declarations (emitted as class members)
         self._global_member_vars: set[str] = set()
         for name, _ in ctx.global_var_decls:
@@ -3365,6 +3367,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._session_call_flags: dict[str, set[str]] = {}
         self._session_call_owner: dict[int, str] = {}
         counters = {kind: 0 for kind in INLINE_HISTORY_KINDS}
+        # A generated member is numbered past a script name spelled like one.
+        authored_names = set(getattr(self, "_safe_name_occupied", ()))
 
         def walk_nodes(value):
             """Yield AST nodes in stable field order, including tuple elements.
@@ -3460,6 +3464,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return
             counters[kind] += 1
             member_name = f"_{kind}_{counters[kind]}"
+            while member_name in authored_names:
+                counters[kind] += 1
+                member_name = f"_{kind}_{counters[kind]}"
             self._inline_history_member_by_key[key] = member_name
             self._inline_history_members.append({
                 "kind": kind,
@@ -3567,6 +3574,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 id(child) for child in walk_nodes(expression)
             )
         self._requested_context_inline_node_ids = requested_node_ids
+        # The session.* reads a function body emits, outside its own
+        # request.security expressions (session_reads.py).
+        emitted_function_reads = {
+            id(read)
+            for fi in self.ctx.func_infos if fi.node is not None
+            for read in emitted_session_reads(fi.node, requested_node_ids)
+        }
 
         def emitted_context_for_call(
             fi,
@@ -3664,7 +3678,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # flag's per-bar Series (_prescan_session_history), and one
                 # written in a request.security expression the requested
                 # clock's (security.py).
-                if owner is not None and id(node) not in requested_node_ids:
+                if owner is not None and id(node) in emitted_function_reads:
                     flag = node.object.member
                     self._session_call_owner[id(node)] = owner
                     self._session_call_flags.setdefault(owner, set()).add(flag)
@@ -3822,10 +3836,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 and node.object.name == "session"
                 and node.member in SESSION_FLAG_MEMBERS)
 
-    @staticmethod
-    def _session_history_member(flag: str) -> str:
-        """The per-bar Series of a ``session.*`` flag read at the top level."""
-        return session_history_member(flag)
+    def _session_history_member(self, flag: str) -> str:
+        """The per-bar Series of a ``session.*`` flag read at the top level:
+        ``_pf_session_hist_<flag>``, suffixed past a script name spelled so."""
+        return self._session_history_member_names[flag]
 
     def _prescan_session_history(self) -> None:
         """The ``session.*`` flags the script reads at an offset at its top
@@ -3838,25 +3852,27 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         (the requested clock, security.py) keep their own history instead. A
         ``// @pf-trace`` expression is read at the top level.
         """
-        flags: set[str] = set()
-        stack = list(self.ctx.ast.body) + [
-            pragma.expr_node for pragma in (self.ctx.pf_trace_pragmas or [])
-            if getattr(pragma, "expr_node", None) is not None]
-        while stack:
-            node = stack.pop()
-            if isinstance(node, (FuncDef, MethodDef)):
-                continue
-            if isinstance(node, Subscript) and self._is_session_flag(node.object):
-                flags.add(node.object.member)
-            children = list(syntax_children(node))
-            if isinstance(node, FuncCall):
+        roots = [stmt for stmt in self.ctx.ast.body
+                 if not isinstance(stmt, (FuncDef, MethodDef))]
+        roots += [pragma.expr_node for pragma in (self.ctx.pf_trace_pragmas or [])
+                  if getattr(pragma, "expr_node", None) is not None]
+        payloads: set[int] = set()
+        for root in roots:
+            for node, _depth in iter_ast_nodes(root):
+                if not isinstance(node, FuncCall):
+                    continue
                 name, namespace = self._resolve_callee(node.callee)
                 if namespace == "request" and name in ("security", "security_lower_tf"):
-                    payload = [node.args[2]] if len(node.args) > 2 else []
-                    payload += [v for k, v in node.kwargs.items() if k == "expression"]
-                    children = [c for c in children
-                                if not any(c is p for p in payload)]
-            stack.extend(children)
+                    payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+                    if payload is not None:
+                        payloads.add(id(payload))
+        flags = {read.object.member for root in roots
+                 for read in emitted_session_reads(root, payloads)}
+        used = set(getattr(self, "_safe_name_occupied", ()))
+        self._session_history_member_names = {
+            flag: self._allocate_generated_cpp_name(f"_pf_session_hist_{flag}", used)
+            for flag in sorted(flags)
+        }
         self._session_history_flags = flags
 
     def _inline_history_member(self, kind: str, node: ASTNode,
