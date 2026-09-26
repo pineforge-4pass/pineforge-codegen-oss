@@ -755,6 +755,15 @@ STILL_COMPILE = {
         "b = g(1.5)\n"
         "c = h(\"240\", 2)\n"
         "x = a + b + c > 0\n"),
+    # Every function of a chain calls the next twice: a clone per call site
+    # would be 2**16 variants; the reads are left out, so none is made.
+    "a read in color.from_gradient in each function of a chain calling the next twice": (
+        "".join(
+            f"f{k}(v) =>\n"
+            "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
+            + ("    v * 2\n" if k == 14 else f"    f{k + 1}(v) + f{k + 1}(v + 1)\n")
+            for k in range(14, -1, -1))
+        + "x = f0(close) > f0(open)\n"),
     "a read in color.from_gradient in a function a default argument calls": (
         "h() =>\n"
         "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
@@ -790,6 +799,23 @@ def test_reads_the_codegen_drops_refuse_nothing(place: str, tmp_path: Path) -> N
     assert now["ok"] and before["ok"], (now["diagnostics"], before["diagnostics"])
     compile_cpp(before["cpp"], label=f"{place} (7a39cb3)")
     compile_cpp(now["cpp"], label=place)
+
+
+def test_only_functions_whose_reads_the_cpp_holds_are_cloned(tmp_path: Path) -> None:
+    """Needs no engine: a function whose read reaches the C++ is emitted once
+    per call site; a chain of functions whose reads are all left out keeps
+    one body each, however often it is called (no 2**16 variants)."""
+    chain = "".join(
+        f"f{k}(v) =>\n"
+        "    c = color.from_gradient(session.ismarket[1] ? 1.0 : 0.0, 0, 1, color.red, color.green)\n"
+        + ("    v * 2\n" if k == 14 else f"    f{k + 1}(v) + f{k + 1}(v + 1)\n")
+        for k in range(14, -1, -1))
+    cpp = _transpiled(tmp_path, chain + "post1() => session.ispostmarket[1]\n"
+                                "a = post1()\nb = bar_index % 2 == 0 ? post1() : false\n"
+                                'if a or b or f0(close) > f0(open)\n    strategy.entry("L", strategy.long)\n')["cpp"]
+    assert re.search(r"\bpost1_cs0\b", cpp) and re.search(r"\bpost1_cs1\b", cpp)
+    assert not re.search(r"\bf\d+_cs\d+\b", cpp)
+    compile_cpp(cpp, label="only emitted reads cloned")
 
 
 @pytest.mark.parametrize("place", KEPT)

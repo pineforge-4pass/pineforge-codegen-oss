@@ -128,17 +128,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     def __init__(self, ast: Program, filename: str = "<stdin>",
                  budget: TimeBudget | None = None,
-                 session_reads_dropped: frozenset[str] = frozenset()) -> None:
+                 session_clones: frozenset[str] | None = None) -> None:
         self._ast = ast
         self._filename = filename
         self._budget = budget
-        # Functions whose session.<flag>[k] reads a previous codegen pass
-        # never emitted (pineforge_codegen.transpile): not made stateful for
-        # them.
-        self._session_reads_dropped = frozenset(session_reads_dropped)
-        # The functions this analysis makes stateful for their session reads,
-        # set before a later step can fail on their clones.
-        self.session_history_functions: frozenset[str] = frozenset()
+        # The functions that may be emitted once per call site for their
+        # session.<flag>[k] reads; None: every one that reads a flag at an
+        # offset (pineforge_codegen._generate passes none first, then the
+        # ones whose reads the C++ holds).
+        self._session_clones = session_clones
+        self._session_uncloned: frozenset[str] = frozenset()
         self._budget_visit_count = 0
         self._method_signatures = inventory_method_signatures(ast)
         self._method_call_bindings: dict[
@@ -619,7 +618,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             },
             func_security_clone_only=self._func_security_clone_only,
             session_history_unsafe=self._session_history_unsafe,
-            session_reads_dropped=self._session_reads_dropped,
+            session_uncloned=self._session_uncloned,
+            session_clones_final=self._session_clones is None or bool(self._session_clones),
             func_cs_ta_clone_names=self._func_cs_ta_clone_names,
             udt_defs=self._udt_fields,
             enum_defs=self._enum_defs,
@@ -2767,18 +2767,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if _has_synthetic_history_state(func_def)
         }
         # A plain function that reads a flag at an offset is emitted once per
-        # call site. A callable that cannot keep its call sites apart gets
-        # no clone for it (codegen refuses such a read where it emits one),
-        # nor does one whose reads a previous pass never emitted.
+        # call site, if this analysis may clone it. A callable that cannot
+        # keep its call sites apart gets no clone for it (codegen refuses such
+        # a read where it emits one).
         self._session_history_unsafe = self._session_history_unsafe_functions(
             func_defs, _find_calls, known_func_names, calls_by_parent)
-        self.session_history_functions = frozenset(
+        session_readers = frozenset(
             name for name, func_def in func_defs.items()
             if name not in self._session_history_unsafe
-            and name not in self._session_reads_dropped
             and emitted_session_reads(func_def, requested_node_ids)
         )
-        synthetic_history_stateful |= self.session_history_functions
+        cloned = (session_readers if self._session_clones is None
+                  else session_readers & self._session_clones)
+        self._session_uncloned = session_readers - cloned
+        synthetic_history_stateful |= cloned
 
         # request.security owns a separate evaluator context and already
         # materializes/remaps its embedded TA state per SecurityCallInfo.  Do

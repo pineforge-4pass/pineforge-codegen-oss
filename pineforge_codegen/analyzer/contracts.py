@@ -282,9 +282,12 @@ class AnalyzerContext:
     # request.security expression or a UDT field default reaches. Codegen
     # refuses a session.<flag>[k] it emits in one of them.
     session_history_unsafe: dict = field(default_factory=dict)
-    # Functions whose session reads a previous codegen pass never emitted
-    # (pineforge_codegen.transpile): no per-call Series.
-    session_reads_dropped: frozenset = frozenset()
+    # Functions that read a flag at an offset this analysis did not clone:
+    # no per-call Series. Unless ``session_clones_final``, a read of theirs
+    # the C++ holds asks pineforge_codegen._generate to clone them; else it
+    # is refused.
+    session_uncloned: frozenset = frozenset()
+    session_clones_final: bool = True
     # (func_name, cs_idx) -> {orig_member_name: cloned_member_name}. Populated by
     # the analyzer ONLY for clones whose default ``{base}_cs{cs_idx}`` name would
     # collide with a clone minted through another enclosing function; lets codegen

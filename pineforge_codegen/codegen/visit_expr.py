@@ -1194,7 +1194,9 @@ class ExprVisitor:
         request.security expression or a UDT field default reaches), and one
         with no registered Series: never shared state. The refusal waits for
         the C++ (``_settle_session_reads``): a read in an argument the codegen
-        renders and leaves out refuses nothing.
+        renders and leaves out refuses nothing. A read in a function this
+        analysis did not clone (``session_uncloned``) asks for its clones
+        instead, the first time.
         """
         flag = node.object.member
         where = next((n for n in (node, node.index, node.object)
@@ -1223,16 +1225,20 @@ class ExprVisitor:
                 return f"{member}[{series_idx}]"
         elif flag in self._session_history_flags:
             return f"{self._session_history_member(flag)}[{series_idx}]"
+        uncloned = getattr(self.ctx, "session_uncloned", None) or ()
         return self._refused_session_read(
             node, where,
             f"session.{flag}[...] is not supported here: PineForge keeps a session "
             "flag's history for the script's top level, a function body and a "
             "request.security expression that reads it.",
+            owner if owner in uncloned else None,
         )
 
-    def _refused_session_read(self, node: Subscript, where, message: str) -> str:
+    def _refused_session_read(self, node: Subscript, where, message: str,
+                              uncloned: str | None = None) -> str:
         """A stand-in for a ``session.<flag>[k]`` read PineForge keeps no
-        history for: a name only this read spells, the refusal raised if the
+        history for: a name only this read spells, the refusal raised (or, in
+        the uncloned function ``uncloned``, its clones asked for) if the
         emitted code holds it (``_settle_session_reads``)."""
         key = (id(node), message)
         name = self._refused_session_read_names.get(key)
@@ -1241,7 +1247,7 @@ class ExprVisitor:
                 f"_refused_session_read_{len(self._refused_session_reads) + 1}",
                 self._session_names_used)
             self._refused_session_read_names[key] = name
-            self._refused_session_reads[name] = (node, where, message)
+            self._refused_session_reads[name] = (node, where, message, uncloned)
         return name
 
     def _visit_subscript(self, node: Subscript) -> str:

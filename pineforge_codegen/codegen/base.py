@@ -775,14 +775,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # The names a rendered read may not take (the script's own first: a
         # request.security timeframe renders here, before the prescans), and
         # each read refused where it renders: its stand-in name, then the
-        # read (kept alive, so its id stays its own), where to report it and
-        # why, raised only if the C++ emits the stand-in
-        # (_settle_session_reads).
+        # read (kept alive, so its id stays its own), where to report it, why,
+        # and the uncloned function it asks to clone, if any; raised or asked
+        # only if the C++ emits the stand-in (_settle_session_reads).
         self._session_names_used: set[str] = set(self._safe_name_occupied)
         self._refused_session_read_names: dict[tuple[int, str], str] = {}
-        self._refused_session_reads: dict[str, tuple[ASTNode, ASTNode, str]] = {}
-        # Functions whose per-call Series the emitted C++ reads.
-        self._session_emitted_owners: set[str] = set()
+        self._refused_session_reads: dict[
+            str, tuple[ASTNode, ASTNode, str, str | None]] = {}
+        # The uncloned functions whose reads the emitted C++ holds: another
+        # analysis clones them (pineforge_codegen._generate).
+        self.session_functions_needing_clones: frozenset[str] = frozenset()
         # Track global-scope non-var declarations (emitted as class members)
         self._global_member_vars: set[str] = set()
         for name, _ in ctx.global_var_decls:
@@ -3588,11 +3590,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._requested_context_inline_node_ids = requested_node_ids
         # The session.* reads a function body emits, outside its own
         # request.security expressions (session_reads.py); a callable that
-        # cannot keep its call sites apart, or whose reads a previous pass
-        # never emitted, gets no per-call Series (a read it emits is refused).
+        # cannot keep its call sites apart, or that this analysis did not
+        # clone, gets no per-call Series (a read it emits is refused, or asks
+        # for the clones).
         no_call_history = (
             set(getattr(self.ctx, "session_history_unsafe", None) or {})
-            | set(getattr(self.ctx, "session_reads_dropped", None) or ())
+            | set(getattr(self.ctx, "session_uncloned", None) or ())
         )
         emitted_function_reads = {
             id(read)
@@ -3861,50 +3864,40 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         ``_pf_session_hist_<flag>``, suffixed past a script name spelled so."""
         return self._session_history_member_names[flag]
 
-    def session_functions_without_emitted_reads(self) -> frozenset[str]:
-        """The functions given a per-call Series for a ``session.*`` read that
-        this generation never emitted (it sits in an argument the codegen
-        drops): a second analysis leaves them unstateful
-        (pineforge_codegen.transpile)."""
-        return frozenset(set(self._session_call_flags) - self._session_emitted_owners)
-
     def _settle_session_reads(self, cpp: str) -> None:
         """Refuse the ``session.<flag>[k]`` reads the C++ emits with no
-        history, and record the functions whose per-call Series it reads.
+        history, or, for a function this analysis did not clone
+        (``session_uncloned``, unless ``session_clones_final``), ask for its
+        clones (``session_functions_needing_clones``).
 
         Both follow the emitted code, not the rendered reads: a call can render
         an argument and leave it out of the C++ (``color.from_gradient``'s
         arguments, a drawing's xloc), and a read there refuses nothing and
-        needs no Series. A refused read renders as a stand-in name
+        needs no clone. Such a read renders as a stand-in name
         (``_refused_session_read``), which only that read can spell in code.
         """
-        members = {
-            member: key[1]
-            for key, member in self._inline_history_member_by_key.items()
-            if key[0] == "session_call"
-        }
-        if not (members or self._refused_session_reads):
+        if not self._refused_session_reads:
             return
-        names = sorted({*members, *self._refused_session_reads}, key=len, reverse=True)
-        pattern = re.compile(
-            r"(?<![\w.])(" + "|".join(map(re.escape, names)) + r")\b(\s*\[)?")
-        emitted_refusals: set[str] = set()
-        for match in pattern.finditer(cpp_code_only(cpp)):
-            name, indexed = match.group(1), match.group(2)
-            if name in members and indexed:
-                self._session_emitted_owners.add(members[name])
-            elif name in self._refused_session_reads:
-                emitted_refusals.add(name)
+        pattern = re.compile(r"(?<![\w.])(" + "|".join(map(
+            re.escape, sorted(self._refused_session_reads, key=len, reverse=True))) + r")\b")
+        emitted = set(pattern.findall(cpp_code_only(cpp)))
+        final = getattr(self.ctx, "session_clones_final", True)
         # One error per read, the refusal rendered first (a read can be
         # rendered on the chart and in a request.security evaluator).
         refused: dict[tuple[int, int], Diagnostic] = {}
-        for name, (_read, where, message) in self._refused_session_reads.items():
-            if name in emitted_refusals:
-                diagnostic = self._codegen_error_diagnostic(where, message)
-                refused.setdefault(
-                    (diagnostic.location.line, diagnostic.location.col), diagnostic)
+        needing: set[str] = set()
+        for name, (_read, where, message, uncloned) in self._refused_session_reads.items():
+            if name not in emitted:
+                continue
+            if uncloned is not None and not final:
+                needing.add(uncloned)
+                continue
+            diagnostic = self._codegen_error_diagnostic(where, message)
+            refused.setdefault(
+                (diagnostic.location.line, diagnostic.location.col), diagnostic)
         if refused:
             raise CompileError([refused[key] for key in sorted(refused)])
+        self.session_functions_needing_clones = frozenset(needing)
 
     def _prescan_session_history(self) -> None:
         """The ``session.*`` flags the script reads at an offset at its top

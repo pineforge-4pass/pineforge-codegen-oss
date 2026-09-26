@@ -7,13 +7,15 @@ codegen skips with all its arguments (``plot``, ``alert``, the ``table.*``
 namespace, ...: codegen/tables.py ``SKIP_FUNC_NAMES`` / ``SKIP_NAMESPACES``,
 and ``max_bars_back``) or in a ``strategy.*`` parameter it drops
 (support_checker.py ``STRATEGY_UNSUPPORTED_PARAMS``, e.g. ``alert_message``).
-The analyzer (which functions to emit once per call site) and the codegen
-(which reads get a Series) ask this module the same question. A read it
+The analyzer (which functions may be emitted once per call site) and the
+codegen (which reads get a Series) ask this module the same question. The
+C++ decides which of those functions get clones: ``pineforge_codegen._generate``
+clones only the functions whose reads the first pass's C++ holds, so a read it
 counts that the codegen leaves out some other way (it renders the argument,
-then drops it: ``color.from_gradient``, a drawing's xloc) costs an unused
-Series, or a second analysis when the C++ reads none of a function's reads
-(``pineforge_codegen._generate``); one it leaves out that the codegen does
-emit finds no Series and is refused, never given shared state.
+then drops it: ``color.from_gradient``, a drawing's xloc) costs nothing, or an
+unused Series in a function cloned for another read. One it leaves out that
+the codegen does emit finds no Series and is refused, never given shared
+state.
 """
 
 from __future__ import annotations
