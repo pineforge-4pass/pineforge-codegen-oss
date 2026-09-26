@@ -115,6 +115,13 @@ _SECURITY_REQUESTED_NAMES = frozenset(
 ) | {"open", "high", "low", "close", "volume"}
 
 
+# The signature under which ``inline_helper_ta_indices`` records a global's
+# TA site that a multi-statement helper reads: the evaluator's prologue
+# computes that site, but every earlier build computed it where the helper
+# was inlined (``_security_check_tuple_element_history``).
+_SECURITY_THROUGH_GLOBAL = "@through-global"
+
+
 def _security_tuple_binding(func_name: str, name: str) -> str:
     """Opaque prepass binding of a name a helper's tuple declaration binds:
     the prepasses only need to know the name is a local, the emitter binds
@@ -3454,6 +3461,10 @@ class SecurityEmitter:
                 resolving.discard(bind_key)
                 return collected
 
+            # A global's TA sites belong to the evaluator's prologue (or its
+            # rebinds), computed once however many helpers read the global:
+            # not to the helper that reads it.
+            through_global = _SECURITY_THROUGH_GLOBAL if inline_helper else False
             mutable_info = self._global_mutable_infos.get(expr_node.name)
             if mutable_info is not None and expr_node.name not in resolving:
                 resolving.add(expr_node.name)
@@ -3464,7 +3475,7 @@ class SecurityEmitter:
                         helper_binding_stack,
                         collected,
                         inline_ta_indices,
-                        inline_helper,
+                        through_global,
                     )
                 resolving.remove(expr_node.name)
                 return collected
@@ -3482,7 +3493,7 @@ class SecurityEmitter:
                     (),
                     collected,
                     inline_ta_indices,
-                    inline_helper,
+                    through_global,
                 )
                 resolving.remove(expr_node.name)
                 return collected
@@ -3629,7 +3640,9 @@ class SecurityEmitter:
                 if inline_helper and inline_ta_indices is not None:
                     # Per variant: the same TA site outside the helper is
                     # still computed once in the evaluator's prologue.
-                    inline_ta_indices.add((idx, current_sig))
+                    inline_ta_indices.add(
+                        (idx, current_sig if inline_helper is True else inline_helper)
+                    )
 
         def walk(value) -> None:
             if value is None:
@@ -5084,17 +5097,20 @@ class SecurityEmitter:
                 math_sig = self._security_binding_stack_signature(helper_binding_stack)
                 if math_idx is not None and (math_idx, math_sig) in ta_results:
                     return ta_results[(math_idx, math_sig)]
-            return self._build_security_math_call(
-                sec_id,
-                expr_node.callee.member,
-                expr_node,
-                ta_range,
-                ta_results,
-                resolving,
-                security_mutable_names,
-                helper_binding_stack,
-                emitted_lines,
-            )
+            if math_site is None:
+                return self._build_security_math_call(
+                    sec_id,
+                    expr_node.callee.member,
+                    expr_node,
+                    ta_range,
+                    ta_results,
+                    resolving,
+                    security_mutable_names,
+                    helper_binding_stack,
+                    emitted_lines,
+                )
+            # A reducer the prologue left to a multi-statement helper (math.sum)
+            # is computed where the helper is inlined, as any TA site below.
 
         site = self._get_ta_site(expr_node)
         if site:
