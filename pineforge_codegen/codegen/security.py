@@ -193,9 +193,17 @@ class SecurityEmitter:
         conditional expressions over setup-time-safe leaves such as
         ``script_tf_`` and direct input getters.
 
-        Only pure, single-expression arms with an explicit default are accepted
-        here.  Other shapes cannot be registered deterministically and produce
-        a clear codegen diagnostic.
+        Only pure, single-expression arms are accepted here.  Other shapes
+        cannot be registered deterministically and produce a clear codegen
+        diagnostic.  Without a default arm an unmatched switch yields ``na``,
+        with which TradingView's ``request.security`` reads the chart's
+        timeframe (tests/test_e2e_popfix_tf_switch_no_default.py replays its
+        tape): the fallback is ``script_tf_``, ``timeframe.period``'s value.
+        ``request.security_lower_tf`` reads the chart's timeframe too (one
+        intrabar per chart bar), which the engine's lower-timeframe request
+        rejects, so there the default arm stays required. An ``na`` arm is
+        refused: the switch itself would store it in the timeframe string as a
+        number.
         """
 
         def arm_value(body: list) -> str:
@@ -208,6 +216,25 @@ class SecurityEmitter:
                         "request.security call or rewrite it as pure switch arms."
                     ),
                 )
+            if isinstance(body[0].expr, NaLiteral):
+                if getattr(self, "_security_tf_lower", False):
+                    self._codegen_error(
+                        node,
+                        "request.security_lower_tf timeframe switch arm is na",
+                        hint=(
+                            "TradingView reads an na timeframe as the chart's, which "
+                            "the engine's lower-timeframe request rejects: spell a "
+                            "strictly finer timeframe."
+                        ),
+                    )
+                self._codegen_error(
+                    node,
+                    "request.security timeframe switch arm is na",
+                    hint=(
+                        "TradingView reads an na timeframe as the chart's: spell "
+                        "the arm timeframe.period."
+                    ),
+                )
             value = self._security_tf_runtime_expr(body[0].expr, resolving)
             if value is None:
                 self._codegen_error(
@@ -216,16 +243,20 @@ class SecurityEmitter:
                 )
             return value
 
-        if not node.default_body:
+        if node.default_body:
+            result = arm_value(node.default_body)
+        elif getattr(self, "_security_tf_lower", False):
             self._codegen_error(
                 node,
-                "request.security timeframe switch requires a default arm",
+                "request.security_lower_tf timeframe switch requires a default arm",
                 hint=(
-                    "An unmatched Pine switch yields na; add an explicit default "
-                    "timeframe so the evaluator can be registered deterministically."
+                    "When no arm matches, TradingView reads the chart's timeframe "
+                    "(one intrabar per chart bar); the engine's lower-timeframe "
+                    "request needs a strictly finer timeframe."
                 ),
             )
-        result = arm_value(node.default_body)
+        else:
+            result = "script_tf_"
 
         selector = None
         if node.expr is not None:

@@ -1,0 +1,15 @@
+//@version=6
+// A timeframe switch with no default arm whose selector matches no arm: the
+// switch yields na. Each order comment spells what request.security read with
+// that timeframe, beside the chart's own close and the 60m close.
+strategy("PF tf switch no arm", overlay = true)
+pick = input.string("none", "Pick")
+tf = switch pick
+    "1H" => "60"
+    "4H" => "240"
+reqClose = request.security(syminfo.tickerid, tf, close)
+hourClose = request.security(syminfo.tickerid, "60", close)
+if minute(time, "UTC") == 0 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, comment = "tf=" + (na(tf) ? "na" : tf) + " chart=" + str.tostring(reqClose == close) + " hour=" + str.tostring(reqClose == hourClose))
+if minute(time, "UTC") == 30
+    strategy.close("L", comment = str.tostring(reqClose) + "|" + str.tostring(close) + "|" + str.tostring(hourClose))
