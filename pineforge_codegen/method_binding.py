@@ -110,6 +110,39 @@ def _written_actuals(call: FuncCall) -> list[ASTNode]:
     return [node for _index, node in indexed]
 
 
+def bind_function_defaults(
+    param_names: list[str] | tuple[str, ...],
+    param_defaults: list[ASTNode | None] | tuple[ASTNode | None, ...],
+    call: FuncCall,
+) -> list[ASTNode] | None:
+    """Declaration-order arguments of a plain user-function call that omits
+    parameters with declared defaults: ``f(x, y = 2, z = 3)`` called as
+    ``f(1)`` or ``f(1, z = 5)`` binds ``[1, 2, 3]`` / ``[1, 2, 5]``.
+
+    ``None`` when the call writes every parameter (callers keep their
+    established binding) or omits one that has no default (TradingView
+    rejects that call).
+    """
+    names = list(param_names)
+    bound: list[ASTNode | None] = [None] * len(names)
+    for index, value in enumerate(call.args):
+        if index < len(bound):
+            bound[index] = value
+    for name, value in call.kwargs.items():
+        if name in names:
+            bound[names.index(name)] = value
+    if all(value is not None for value in bound):
+        return None
+    defaults = list(param_defaults)
+    for index, value in enumerate(bound):
+        if value is None:
+            default = defaults[index] if index < len(defaults) else None
+            if default is None:
+                return None
+            bound[index] = default
+    return bound
+
+
 def bind_method_call(
     signature: MethodSignature,
     call: FuncCall,

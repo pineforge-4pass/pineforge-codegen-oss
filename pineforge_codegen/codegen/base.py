@@ -1305,8 +1305,29 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # var-member metadata.  Record their exact source declaration type so
         # functions can resolve globals without consulting the analyzer's
         # legacy raw-name UDT registry (which later locals may overwrite).
-        for stmt in self.ctx.ast.body:
-            if not isinstance(stmt, VarDecl) or stmt.is_var or stmt.is_varip:
+        # A declaration in a top-level block (``if c`` / ``for``) is hoisted
+        # to the same class-member storage, so it is recorded too: its
+        # ``cond ? box.new(...) : na`` needs the handle type for the ``na``.
+        def top_level_scope_decls(stmts):
+            for stmt in stmts:
+                if isinstance(stmt, VarDecl):
+                    yield stmt
+                elif isinstance(stmt, IfStmt):
+                    yield from top_level_scope_decls(stmt.body)
+                    yield from top_level_scope_decls(stmt.else_body)
+                elif isinstance(stmt, (ForStmt, ForInStmt, WhileStmt)):
+                    yield from top_level_scope_decls(stmt.body)
+                elif isinstance(stmt, SwitchStmt):
+                    for _case, body in stmt.cases:
+                        yield from top_level_scope_decls(body)
+                    yield from top_level_scope_decls(stmt.default_body)
+
+        top_level_ids = {id(stmt) for stmt in self.ctx.ast.body}
+        for stmt in top_level_scope_decls(self.ctx.ast.body):
+            if stmt.is_var or stmt.is_varip:
+                continue
+            if (id(stmt) not in top_level_ids
+                    and stmt.name in self._global_drawing_cpp_types):
                 continue
             spec = (
                 self._type_spec_from_hint_name(stmt.type_hint)
@@ -3435,6 +3456,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return list(
                     self._bind_typed_method_args(method_info, call).args_by_param
                 )
+            if isinstance(call.callee, Identifier):
+                defaulted = self._user_call_args_with_defaults(
+                    call.callee.name, call
+                )
+                if defaulted is not None:
+                    return defaulted
             if call.kwargs:
                 return _merge_kwargs(call.args, call.kwargs, params, lambda arg: arg)
             return list(call.args)
