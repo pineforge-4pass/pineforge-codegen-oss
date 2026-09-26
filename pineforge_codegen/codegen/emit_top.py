@@ -512,6 +512,7 @@ class TopLevelEmitter:
         """
         members: list[str] = []
         seen: set[str] = set()
+        varip_members = self._varip_state_member_names()
         for line in declaration_lines:
             name = self._script_state_member_name(line)
             if name is None:
@@ -521,8 +522,43 @@ class TopLevelEmitter:
             if name in seen:
                 raise AssertionError(f"duplicate generated script-state member: {name}")
             seen.add(name)
+            if name in varip_members:
+                continue
             members.append(name)
         return members
+
+    def _varip_state_member_names(self) -> set[str]:
+        """Generated members holding ``varip`` state, with their first-run
+        initialization latches.
+
+        A historical bar executes the script once, so ``varip`` keeps its
+        value exactly like ``var``, except that a calc_on_order_fills
+        recalculation rolls ``var`` back to the bar's committed state and
+        leaves ``varip`` alone (TradingView tapes, COOF on/off and with the
+        bar magnifier). The rollback checkpoint therefore skips these members;
+        a new run still resets them (``prepare_script_run``).
+        """
+        names: set[str] = set()
+        metadata = getattr(self.ctx, "var_member_metadata_by_node", {}) or {}
+        for node_id, meta in metadata.items():
+            decl = meta[0]
+            if not (isinstance(decl, VarDecl) and decl.is_varip):
+                continue
+            base = self._safe_name(meta[1])
+            storages = {base}
+            for remap in self._func_cs_var_remap.values():
+                if base in remap:
+                    storages.add(remap[base])
+            for instance in self._fresh_instances:
+                clone = (instance.get("var_remap") or {}).get(base)
+                if clone is not None:
+                    storages.add(clone)
+            names |= storages
+            for storage in storages:
+                flag = self._runtime_var_init_flags.get((node_id, storage))
+                if flag is not None:
+                    names.add(flag)
+        return names
 
     def _emit_script_run_prepare(self, lines: list[str], declarations: list[str]) -> None:
         """Reset every declared script member, then prepare this run's cache.

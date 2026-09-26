@@ -905,10 +905,8 @@ produce() =>
 observed = blocked()
 '''
 
-    if storage == "varip":
-        with pytest.raises(CompileError, match="varip is not supported"):
-            transpile(source)
-        return
+    # ``varip`` lowers as ``var`` (outside the rollback checkpoint), so both
+    # persistent storages keep the same fail-closed boundary.
     cpp = transpile(source)
     assert "std::string blocked(" not in cpp
 

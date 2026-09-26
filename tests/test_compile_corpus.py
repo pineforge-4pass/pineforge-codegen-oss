@@ -109,7 +109,6 @@ KNOWN_TRANSPILE_FAILURES: set[str] = {
     # documents that codegen MUST raise. xfail keeps the probe exercised
     # without polluting the green-bar count; xpass surfaces a regression
     # where the rejection silently disappears.
-    "validation_varip/varip-reject-probe-01-varip-int",
     "validation_lower_tf/lower-tf-probe-04-tuple-element-reject",
 }
 KNOWN_COMPILE_FAILURES: set[str] = set()

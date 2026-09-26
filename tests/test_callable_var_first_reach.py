@@ -224,10 +224,9 @@ probe() =>
     first
 value = probe()
 '''
-    # Public batch backtests intentionally reject varip because they have no
-    # realtime ticks. Bypass only that support gate to pin the shared historical
-    # declaration-lowering predicate; this does not claim realtime varip parity.
-    cpp = transpile(source, check_support=declaration_kind == "var")
+    # ``varip`` shares ``var``'s historical declaration lowering; it only
+    # stays out of the calc_on_order_fills rollback checkpoint.
+    cpp = transpile(source)
     body = cpp[cpp.index("double probe_cs0("):]
     assert body.index("double seed =") < body.index("if (!this->_pf_var_init_first)")
     assert _compile_and_run(cpp + _matrix_driver(1)) == "20\n"
@@ -248,7 +247,7 @@ probe(bool active) =>
 left_value = probe(bar_index >= 1)
 right_value = probe(bar_index >= 2)
 '''
-    cpp = transpile(source, check_support=declaration_kind == "var")
+    cpp = transpile(source)
     assert _compile_and_run(cpp + _matrix_driver(2)) == "20 30\n"
 
 

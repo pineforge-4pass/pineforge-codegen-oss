@@ -1,53 +1,47 @@
-"""Phase C: varip declarations must be rejected, not warned.
+"""varip declarations pass the support checker.
 
-PineForge runs a bar-close batch engine — there are NO intrabar ticks.
-Pine's ``varip`` keyword is specified to mutate per tick within a bar; the
-PineForge codegen silently demotes it to ``var`` (bar-close-only update),
-producing wrong state accumulation when scripts rely on tick-level updates.
-
-Previously the support checker emitted a warning and let the codegen
-proceed. That made the silent-wrong-result bug invisible. This module
-pins the new contract: any ``varip`` declaration raises CompileError.
+Phase C refused ``varip`` because a batch backtest has no intrabar ticks and
+lowering it as ``var`` looked like a silent demotion. TradingView's own tapes
+show a historical bar executes the script once, so ``varip`` and ``var``
+agree there, except that a calc_on_order_fills recalculation rolls ``var``
+back and leaves ``varip`` alone. Codegen now lowers ``varip`` as ``var`` and
+keeps it out of that rollback (tests/test_e2e_varip_coof.py replays the
+tapes), so the checker accepts it without an error or a warning.
 """
-import pytest
-
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from pineforge_codegen.support_checker import SupportChecker
-from pineforge_codegen.errors import CompileError
 
 
-def _check(src: str) -> None:
+def _diagnostics(src: str) -> list:
     tokens = Lexer(src).tokenize()
     ast = Parser(tokens).parse()
-    SupportChecker(ast).check_or_raise()
+    return SupportChecker(ast).check()
 
 
-def test_varip_int_rejected():
+def test_varip_int_accepted():
     src = '''//@version=6
 strategy("t")
 varip int tick_counter = 0
 tick_counter := tick_counter + 1
 '''
-    with pytest.raises(CompileError, match=r"varip"):
-        _check(src)
+    assert not [d for d in _diagnostics(src) if "varip" in d.message]
 
 
-def test_varip_float_rejected():
+def test_varip_float_accepted():
     src = '''//@version=6
 strategy("t")
 varip float acc = 0.0
 acc := acc + close
 '''
-    with pytest.raises(CompileError, match=r"varip"):
-        _check(src)
+    assert not [d for d in _diagnostics(src) if "varip" in d.message]
 
 
 def test_var_int_still_allowed():
-    """Sanity: ``var`` (the bar-close-only variant) must still compile."""
+    """Sanity: ``var`` must still pass."""
     src = '''//@version=6
 strategy("t")
 var int counter = 0
 counter := counter + 1
 '''
-    _check(src)  # should NOT raise
+    assert not _diagnostics(src)
