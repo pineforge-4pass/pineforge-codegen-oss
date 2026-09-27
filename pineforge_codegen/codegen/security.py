@@ -64,6 +64,7 @@ tables and types come from ``codegen/tables.py``, ``..ast_nodes``,
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 from ..ast_nodes import (
@@ -78,6 +79,7 @@ from ..analyzer import (
 )
 from .. import signatures as sigs
 from ..errors import CompileError
+from ..security_contexts import UNREACHED_ANNOTATION
 from ..symbols import PineType, method_receiver_type_name
 from .tables import (
     BAR_BUILTINS, MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_BAR_FIELDS,
@@ -1237,6 +1239,47 @@ class SecurityEmitter:
         """
         scopes = getattr(self.ctx, "identifier_binding_scopes", {}) or {}
         return scopes.get(id(node)) == "global"
+
+    def _security_warn_unbound_param(self, node: Identifier) -> None:
+        """Warn once that a payload reads the history of a parameter of the
+        helper holding the request, which nothing binds in the evaluator (a
+        class method): it reads ``na``, or a global of the parameter's name.
+        ``security_contexts`` puts the argument in the parameter's place where
+        the requested bars recompute it; every other argument keeps this
+        lowering. A helper no top-level statement reaches never runs, and
+        does not warn."""
+        scopes = getattr(self.ctx, "identifier_binding_scopes", {}) or {}
+        scope = scopes.get(id(node))
+        if not isinstance(scope, str) or not scope.startswith("func_"):
+            return
+        func_info = self._func_info_map.get(scope[5:])
+        if (
+            func_info is None
+            or func_info.node is None
+            or node.name not in func_info.node.params
+            or (node.annotations or {}).get(UNREACHED_ANNOTATION)
+        ):
+            return
+        # A helper's copies (``h__pfctx1``) share the authored read: warn once.
+        helper = re.sub(r"__pfctx\d+$", "", scope[5:])
+        key = (helper, node.name, getattr(node.loc, "line", None), getattr(node.loc, "col", None))
+        warned = getattr(self, "_security_warned_params", None)
+        if warned is None:
+            warned = self._security_warned_params = set()
+        if key in warned:
+            return
+        warned.add(key)
+        # The C++ names the parameter: a global of that name is read instead.
+        is_global = node.name in (getattr(self.ctx, "global_expr_map", {}) or {}) or (
+            node.name in self._global_mutable_infos
+        )
+        reads = f"the global '{node.name}' instead" if is_global else "na"
+        self._codegen_warning(
+            node,
+            f"request.security payload reads the history of '{node.name}', a "
+            f"parameter of '{helper}' whose argument PineForge does not "
+            f"recompute on the requested bars: it reads {reads}",
+        )
 
     def _security_index_param_callsite_binding(self, node: Identifier):
         """Resolve one UDF parameter index from its call sites, conservatively.
@@ -5047,6 +5090,8 @@ class SecurityEmitter:
                     binding = self._security_lookup_helper_binding_context(
                         expr_node.object.name, helper_binding_stack
                     )
+                if binding is None:
+                    self._security_warn_unbound_param(expr_node.object)
                 if binding is not None:
                     bound, bound_stack = binding
                     if isinstance(bound, str):

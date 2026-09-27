@@ -29,6 +29,8 @@ a trade.
 | `xa_watchlist_plain` | `73968ddcaa90b019987a9388b517615779d26cc64573568473ca93de7e06e42a` | the `xa_watchlist` tape, byte for byte | 22 |
 | `xa_default_arm` | `30b7d529efeea58d5e39d2955adaf315a9570ace79bd821ac9a30a866a416907` | `6664b0fc13e8fe53b1b1c4026115a3e43d12ffb8e00cb116e51f64c0f7bceb23` | 265 |
 | `xa_switch_helper` | `063ace2a4dc75f2b61935ab881cee44dd623cb91ca156ca3fa945beaefdbf850` | `85b2fdb739bd437e769cbd452ac4345db9439b4d0e3864b767676ea00c86c53e` | 265 |
+| `xa_payload_param` | `ef228ab2cffe8566e11805c5ac365aec059fa846f8763c56695cd29552b907bd` | `64d6bc058b20b9c4ea6c82126a4473e7a786b5fe4083bbc775d034d4a1006c26` | 265 |
+| `xa_payload_bare` | `4d9ba4dabc306e639821eb29a5ffc33f134a4d898c18db0daac92efa8b030e81` | `22b20362d66b5103629cf6915edf39420fd21afec875bd034a6e6da1c4f35df2` | 265 |
 
 What each tape shows:
 
@@ -72,3 +74,17 @@ What each tape shows:
   `switch` on an input (`"SMA"` by default) over `ta.sma`, `ta.ema` and
   `ta.wma` of the requested RSI. Exit Signals: the 60-minute RSI and `ma`,
   four decimals.
+- `xa_payload_param`: payloads reading a parameter of the helper holding
+  the request. `nr(_s, _tf, _e) => request.security(_s, _tf, _e[1],
+  lookahead = barmerge.lookahead_on)` reached through `reso(_x, _use, _r)`
+  with the globals `fast = ta.sma(close, 3)` and `slow = ta.sma(close, 6)`
+  on `"60"`; `f(len) => request.security(syminfo.tickerid, "240",
+  ta.sma(close, len))` as `f(3)` and `f(6)`; `g(_e) => request.security(
+  syminfo.tickerid, "60", _e[1])` as `g(close)` and `g(open)`. Every call
+  reads its own argument on the requested bars. Exit Signals: `a`, `b`,
+  `c`, `d`, `e`, `o`, four decimals.
+- `xa_payload_bare`: payloads reading a helper parameter's value, not its
+  history: `h(_v) => request.security(syminfo.tickerid, "60", _v)` as
+  `h(hl2)` and `h(open)`, and `t(_s, len) => request.security(
+  syminfo.tickerid, "240", ta.sma(_s, len) - _s)` as `t(high, 3)` and
+  `t(low, 6)`. Exit Signals: `p`, `q`, `u`, `w`, four decimals.

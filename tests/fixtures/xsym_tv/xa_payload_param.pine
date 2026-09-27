@@ -1,0 +1,23 @@
+//@version=6
+// request.security payloads reading the parameters of the helper that holds
+// the request. Each exit comment spells what every call read on the bar the
+// close was sent.
+strategy("PF xa payload param", overlay = true)
+fast = ta.sma(close, 3)
+slow = ta.sma(close, 6)
+nr(_s, _tf, _e) => request.security(_s, _tf, _e[1], lookahead = barmerge.lookahead_on)
+reso(_x, _use, _r) => _use ? nr(syminfo.tickerid, _r, _x) : _x
+a = reso(fast, true, "60")
+b = reso(slow, true, "60")
+f(len) => request.security(syminfo.tickerid, "240", ta.sma(close, len))
+c = f(3)
+d = f(6)
+g(_e) => request.security(syminfo.tickerid, "60", _e[1])
+e = g(close)
+o = g(open)
+s(x) => na(x) ? "na" : str.tostring(x, "#.####")
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(a) + "|" + s(b) + "|" + s(c) + "|" + s(d) + "|" + s(e) + "|" + s(o))

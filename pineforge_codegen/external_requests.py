@@ -28,12 +28,12 @@ TradingView's value would not.
 from __future__ import annotations
 
 from .ast_nodes import (
-    ASTNode, ArgOrder, Assignment, BinOp, BoolLiteral, BreakStmt, ContinueStmt,
+    ASTNode, Assignment, BinOp, BoolLiteral, BreakStmt, ContinueStmt,
     ExprStmt, ForInStmt, ForStmt, FuncCall, FuncDef, Identifier, IfStmt,
     MemberAccess, MethodDef, NaLiteral, Program, StringLiteral, Subscript,
     SwitchStmt, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
 )
-from .security_contexts import ScriptIndex
+from .security_contexts import ScriptIndex, replace_nodes
 
 
 LOWERING_ANNOTATION = "pf_request_lowering"
@@ -519,44 +519,5 @@ def lower_no_data_requests(program: Program) -> Program:
                     node.annotations = {**(node.annotations or {}),
                                         UNPINNED_ANNOTATION: message}
     if swaps:
-        _replace(program, swaps)
+        replace_nodes(program, swaps)
     return program
-
-
-def _replace(root, swaps: dict[int, ASTNode]) -> None:
-    """Put ``swaps[id(node)]`` in the place of each such node (a call's
-    argument order too)."""
-    def fix(value):
-        if isinstance(value, ASTNode):
-            if id(value) in swaps:
-                return swaps[id(value)]
-            for key, item in list(vars(value).items()):
-                if key == "loc":
-                    continue
-                if key == "annotations":
-                    order = (item or {}).get("call_arg_order")
-                    if isinstance(order, ArgOrder) and any(id(n) in swaps for n in order):
-                        item["call_arg_order"] = ArgOrder(swaps.get(id(n), n) for n in order)
-                    continue
-                new = fix(item)
-                if new is not item:
-                    setattr(value, key, new)
-            return value
-        if isinstance(value, list):
-            for i, item in enumerate(value):
-                new = fix(item)
-                if new is not item:
-                    value[i] = new
-            return value
-        if isinstance(value, tuple):
-            items = tuple(fix(item) for item in value)
-            return items if any(a is not b for a, b in zip(items, value)) else value
-        if isinstance(value, dict):
-            for key, item in list(value.items()):
-                new = fix(item)
-                if new is not item:
-                    value[key] = new
-            return value
-        return value
-
-    fix(root)
