@@ -1,0 +1,35 @@
+//@version=6
+strategy("w8e-r4-fn-global-history", overlay=true, initial_capital=1000000000, default_qty_type=strategy.fixed, default_qty_value=1)
+var float gv = 0.0
+gv := bar_index
+float gn = bar_index * 1.0
+fv() => gv[1]
+fn() => gn[1]
+fb() => bar_index[1]
+fc() => close[1]
+T(h, m) => timestamp("UTC", 2025, 4, 1, h, m)
+var float dv = na
+var float dn = na
+var float db = na
+var float dc = na
+if time == T(10, 0) or time == T(12, 0)
+    dv := fv() - bar_index
+    dn := fn() - bar_index
+    db := fb() - bar_index
+    dc := fc() - close[1]
+if time == T(14, 0)
+    strategy.entry("DV", dv >= 0 ? strategy.long : strategy.short, qty=math.abs(dv) + 1)
+if time == T(14, 15)
+    strategy.close("DV")
+if time == T(14, 30)
+    strategy.entry("DN", dn >= 0 ? strategy.long : strategy.short, qty=math.abs(dn) + 1)
+if time == T(14, 45)
+    strategy.close("DN")
+if time == T(15, 0)
+    strategy.entry("DB", db >= 0 ? strategy.long : strategy.short, qty=math.abs(db) + 1)
+if time == T(15, 15)
+    strategy.close("DB")
+if time == T(15, 30)
+    strategy.entry("DC", dc >= 0 ? strategy.long : strategy.short, qty=math.abs(dc) + 1)
+if time == T(15, 45)
+    strategy.close("DC")

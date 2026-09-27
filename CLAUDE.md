@@ -619,6 +619,29 @@ you delete or weaken the special case, the test will tell you.
     (CE10156) and is refused. `tests/test_e2e_function_tail_value.py` replays
     seven TradingView tapes (`fixtures/w2_trio_tv/tail_*`) and compiles the
     handle shapes.
+18. **A script variable read through history in a function body reads its
+    call site's history.** TradingView builds the history of a series used
+    in a function through each call of it (`lab tv`, BINANCE:ETHUSDT.P 15,
+    `tests/fixtures/function_global_history`): in a plain UDF, `x[k]` on a
+    script variable (`var` or not) or on `bar_index` is `x` as that call site
+    saw it at its latest call at or before `k` bars ago -- one slot per chart
+    bar, `na` before the first call, the value at the call even when `x`
+    changes later in the bar or the function runs on every bar; each call
+    site, a nested one included, has its own. Chart built-ins (`close`,
+    `time`, `hl2`, ...) keep the chart's history. The analyzer records the
+    reads (`func_global_history_reads` / `_nodes`) and marks the function
+    stateful, so every call site gets its own body; each chart-executed body
+    owns an `_fn_global_hist_N` Series on the `udf_series_arg` clock (advanced
+    in the on_bar preamble, updated at the body's entry;
+    `tests/test_e2e_function_global_history.py`). UDT methods, string/color
+    variables and request.security-only bodies keep the chart's history. In a
+    callable body the clone var remap lists every callable's members for
+    nested-instance composition, so a read the analyzer resolved to a global,
+    a loop binder or a parameter is not renamed (`_call_site_var_name`):
+    renaming a script variable `src` to another callable's `src_cs1` read
+    `na`. A callable stateful only through this rule keeps its old shared
+    typing when two primitive types meet in one variant, with a WARNING
+    (`tests/test_function_global_history_clones.py`).
 
 ## How to add a new Pine v6 function
 

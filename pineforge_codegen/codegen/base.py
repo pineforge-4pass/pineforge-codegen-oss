@@ -3855,6 +3855,38 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                             context,
                         )
 
+        # A plain UDF reading a script variable (or bar_index) through history
+        # reads its call site's history of it, on the same chart clock as a
+        # history parameter: every chart-executed body owns one buffer per
+        # variable, updated when the body is entered. A body that is emitted
+        # once (never called) or only for a requested context keeps the
+        # chart's history.
+        global_reads = getattr(self.ctx, "func_global_history_reads", {}) or {}
+        for fi in self.ctx.func_infos:
+            names = global_reads.get(fi.name)
+            if not names or fi.node is None:
+                continue
+            for context in self._inline_history_contexts_for_owner(fi.name):
+                if (context is None or (fi.name, context)
+                        in self._requested_context_only_inline_contexts):
+                    continue
+                for name in names:
+                    register_one(
+                        "fn_global_hist",
+                        (id(fi.node), name),
+                        self._series_type_for(name),
+                        context,
+                    )
+
+    def _function_global_history_member(self, name: str) -> str | None:
+        """The emitted body's buffer of script variable ``name``, or None."""
+        fi = self._func_info_map.get(getattr(self, "_active_func_name", None))
+        if fi is None or fi.node is None or self._security_payload_depth:
+            return None
+        return self._inline_history_member_by_key.get(
+            ("fn_global_hist", id(fi.node), name, self._current_instance_name)
+        )
+
     def _is_compound_history_object(self, node) -> bool:
         """Whether ``node[k]`` is history on an operator expression or a
         ``session.*`` flag.

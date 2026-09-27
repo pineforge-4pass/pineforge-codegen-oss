@@ -1095,8 +1095,7 @@ class CallVisitor:
                     == expected_cpp_type
             ):
                 return safe
-            if self._active_var_remap and safe in self._active_var_remap:
-                safe = self._active_var_remap[safe]
+            safe = self._call_site_var_name(arg_node, safe)
             if (
                 not is_current_series_param
                 and self._binding_is_series(arg_name, safe)
@@ -2426,8 +2425,7 @@ class CallVisitor:
                             == expected_cpp_type
                     ):
                         return safe
-                    if self._active_var_remap and safe in self._active_var_remap:
-                        safe = self._active_var_remap[safe]
+                    safe = self._call_site_var_name(arg_node, safe)
                     if (
                         not is_current_series_param
                         and self._binding_is_series(aname, safe)

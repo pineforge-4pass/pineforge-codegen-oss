@@ -1,0 +1,16 @@
+{
+  "title": "w9-fn-history-model",
+  "slug": "w9-fn-history-model",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-27T17:31:53.715Z",
+  "chart": {
+    "symbol": "BINANCE:ETHUSDT.P",
+    "interval": "15",
+    "from": "2025-04-01",
+    "to": "2025-04-03"
+  },
+  "pine_sha256": "93fc0417bc75dc8ab379f585e377e8e8334ef339fc786433388376818f6602d1",
+  "tv_trades_sha256": "e3ec407cd47c1eba3602e43bb6eed0da1837645b2ba491897e01b845f7ef184c",
+  "tv_trades_rows": 14
+}

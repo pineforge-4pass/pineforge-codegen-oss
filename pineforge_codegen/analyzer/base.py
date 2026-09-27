@@ -295,6 +295,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_var_storage_names: dict[str, dict[str, str]] = {}
         self._func_series_vars: dict[str, set] = {}   # func_name -> set[str]
         self._session_history_unsafe: dict[str, str] = {}
+        # Plain UDF -> script variables (and ``bar_index``) its body reads
+        # through history, in source order; id(Subscript) -> (UDF, name, node)
+        # for each such read. See ``_note_function_global_history_read``.
+        self._func_global_history_reads: dict[str, list[str]] = {}
+        self._func_global_history_nodes: dict[int, tuple] = {}
+        self._global_history_only_stateful: set[str] = set()
+        self._global_history_typing_warned: set[tuple] = set()
         # Declaration-bound non-persistent history locals are distinct from
         # history parameters/global reads carried by ``func_series_vars``.
         # Codegen needs this exact subset when a raw spelling also belongs to
@@ -637,6 +644,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 for owner, names in self._func_var_storage_names.items()
             },
             func_series_vars=self._func_series_vars,
+            func_global_history_reads={
+                owner: list(names)
+                for owner, names in self._func_global_history_reads.items()
+            },
+            func_global_history_nodes=dict(self._func_global_history_nodes),
             nonpersistent_series_decl_names=set(
                 self._nonpersistent_series_decl_names
             ),
@@ -2800,8 +2812,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 )
 
         # Canonical direct-state predicate.  TA-only and fixnan-only helpers
-        # are just as stateful as functions carrying an explicit series/var.
-        stateful = (
+        # are just as stateful as functions carrying an explicit series/var,
+        # and so is a function reading a script variable through history: its
+        # call sites each own that history.
+        direct_state = (
             set(self._func_series_vars)
             | set(self._func_var_members)
             | set(self._func_ta_ranges)
@@ -2814,15 +2828,28 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # marker is intentionally separate from request.security evaluator
         # identity, so ordinary security calls remain shared unless the
         # dedicated timeframe-monomorphization pass clones them.
-        changed = True
-        while changed:
-            changed = False
-            for fname, calls in calls_by_parent.items():
-                if fname in stateful:
-                    continue
-                if any(sub in stateful for sub, _ in calls):
-                    stateful.add(fname)
-                    changed = True
+        def close_over_callers(seed: set[str]) -> set[str]:
+            closed = set(seed)
+            changed = True
+            while changed:
+                changed = False
+                for fname, calls in calls_by_parent.items():
+                    if fname in closed:
+                        continue
+                    if any(sub in closed for sub, _ in calls):
+                        closed.add(fname)
+                        changed = True
+            return closed
+
+        stateful = close_over_callers(
+            direct_state | set(self._func_global_history_reads)
+        )
+        # Callables stateful only through a script variable's history: before
+        # that rule they shared one body, so their call-site typing must not
+        # refuse a script that transpiled then (``merge_profile`` below).
+        self._global_history_only_stateful = (
+            stateful - close_over_callers(direct_state)
+        )
 
         # Direct fixnan-only functions and pure transitive wrappers own no
         # TA/series member that would trip the emitter's ordinary body-clone
@@ -3067,6 +3094,31 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     current[index] = candidate
                     changed = True
                 elif current[index] != candidate:
+                    if callee in self._global_history_only_stateful:
+                        # Its call sites shared one body before this callable
+                        # read a script variable's history; keep that body's
+                        # typing, the first type, rather than refuse a script
+                        # that transpiled then.
+                        warned = (callee, cs_idx, index)
+                        if warned not in self._global_history_typing_warned:
+                            self._global_history_typing_warned.add(warned)
+                            self._warn(
+                                "Untyped parameter '"
+                                + info.node.params[index]
+                                + "' of callable '"
+                                + callee
+                                + "' receives "
+                                + current[index].value
+                                + " and "
+                                + candidate.value
+                                + " through calls that share one written-call "
+                                + f"variant (cs{cs_idx}); PineForge types it "
+                                + current[index].value
+                                + ", so the other argument is converted. "
+                                + "Declare the parameter type to choose it.",
+                                call.loc,
+                            )
+                        continue
                     self._error(
                         "Cannot safely specialize untyped parameter '"
                         + info.node.params[index]
@@ -6156,8 +6208,39 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             self._func_series_history_nodes.setdefault(
                                 (func_name, name), node
                             )
+                        self._note_function_global_history_read(node, name, sym)
 
         return obj_type
+
+    def _note_function_global_history_read(
+            self, node: Subscript, name: str, sym) -> None:
+        """Record ``x[k]`` in a plain UDF body on a script variable.
+
+        TradingView builds the history of a series used inside a function
+        through each successive call of it: in ``f() => gv[1]``, ``gv[1]`` is
+        ``gv`` as that call site saw it on its latest call at or before the
+        previous bar, whether ``gv`` is ``var`` or not, and ``bar_index`` reads
+        the same way; the chart built-ins keep the chart's history
+        (tests/fixtures/function_global_history). Codegen gives every emitted
+        body of the function its own buffer, so the function needs one body
+        per call site, like any other stateful function.
+        """
+        if not self._enclosing_func_names or sym.scope != "global":
+            return
+        owner = self._enclosing_func_names[-1]
+        if not isinstance(self._func_defs.get(owner), FuncDef):
+            return
+        # A built-in other than bar_index is chart history.
+        if name != "bar_index" and getattr(sym, "_pf_decl_node_id", None) is None:
+            return
+        spec = getattr(sym, "type_spec", None)
+        if (sym.pine_type not in (PineType.INT, PineType.FLOAT, PineType.BOOL)
+                or (spec is not None and spec.kind != "primitive")):
+            return
+        reads = self._func_global_history_reads.setdefault(owner, [])
+        if name not in reads:
+            reads.append(name)
+        self._func_global_history_nodes[id(node)] = (owner, name, node)
 
     def _visit_Identifier(self, node: Identifier) -> PineType:
         # Some identifiers are namespace prefixes handled elsewhere
@@ -6404,6 +6487,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return PineType.FLOAT
 
             sym = self._symbols.resolve(ns)
+            # A field read's receiver is an identifier read like any other:
+            # codegen needs its binding scope (``_call_site_var_name``).
+            self._identifier_binding_scopes[id(node.object)] = (
+                getattr(sym, "scope", None) if sym is not None else None
+            )
             udt_name = None
             if sym is not None:
                 udt_name = sym.udt_type_name

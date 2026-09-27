@@ -306,7 +306,9 @@ CPP_EMITTER_NAMES = frozenset("""
 # The generated history members, ``_<kind>_<n>`` (codegen/base.py
 # _prepare_inline_history_members), numbered past any script name spelled
 # like one.
-INLINE_HISTORY_KINDS = ("hist_call", "series_arg", "udf_series_arg", "session_call")
+INLINE_HISTORY_KINDS = (
+    "hist_call", "series_arg", "udf_series_arg", "session_call", "fn_global_hist",
+)
 
 
 # HOST_MEMBER_NAMES (codegen/host_members.py, derived by

@@ -319,6 +319,12 @@ class AnalyzerContext:
     # global read remains lexical Pine, not the future local).
     func_var_storage_names: dict = field(default_factory=dict)
     func_series_vars: dict = field(default_factory=dict)
+    # Plain UDF -> script variables (and ``bar_index``) its body reads through
+    # history, in source order, and id(Subscript) -> (UDF, name, Subscript)
+    # per read. TradingView keeps that history per call site, so codegen gives
+    # each emitted body its own chart-clocked buffer of the variable.
+    func_global_history_reads: dict = field(default_factory=dict)
+    func_global_history_nodes: dict = field(default_factory=dict)
     # FuncDef owner -> declaration-bound non-persistent history-local names.
     # Parameters are deliberately excluded so a same-named qualified
     # persistent member does not manufacture a bogus raw/clone Series.

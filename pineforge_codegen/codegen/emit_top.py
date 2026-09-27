@@ -1367,10 +1367,12 @@ class TopLevelEmitter:
         # even when lazy control flow skips its written call on this bar.  Seed
         # the new slot with the prior current value (``na`` before first reach);
         # an executed call later in the bar updates this same slot with its
-        # scalar actual.  Typed-method ``series_arg`` bridges intentionally keep
-        # their existing execution-clock behavior.
+        # scalar actual.  A plain UDF's history of a script variable
+        # (``fn_global_hist``) is on the same clock.  Typed-method
+        # ``series_arg`` bridges intentionally keep their existing
+        # execution-clock behavior.
         for info in self._inline_history_members:
-            if info["kind"] != "udf_series_arg":
+            if info["kind"] not in ("udf_series_arg", "fn_global_hist"):
                 continue
             member = info["member_name"]
             lines.append(
@@ -2185,6 +2187,7 @@ class TopLevelEmitter:
         self._current_func_locals |= self._collect_binding_names(node.body)
 
         lines.append(f"    {ret_type} {func_name}({', '.join(param_strs)}) {{")
+        self._emit_function_global_history_updates(fi, lines)
 
         # A session.* flag the body reads at an offset: its history is this
         # call site's calls, so push the flag once per call, before a lazy
@@ -2356,6 +2359,33 @@ class TopLevelEmitter:
         self._active_fixnan_remap = {}
         self._active_call_site_idx = None
         self._current_instance_name = None
+
+    def _emit_function_global_history_updates(
+            self, fi: FuncInfo, lines: list[str]) -> None:
+        """Record, on entry, each script variable the body reads through history.
+
+        The on_bar preamble has already advanced the call site's buffer by one
+        chart slot, holding the previous value; this call replaces that slot
+        with the value the call sees, so ``x[k]`` reads the site's latest call
+        at or before ``k`` bars ago (``na`` before its first call).
+        """
+        names = self.ctx.func_global_history_reads.get(fi.name, ())
+        first_read = {}
+        for owner, name, subscript in self.ctx.func_global_history_nodes.values():
+            if owner == fi.name:
+                first_read.setdefault(name, subscript.object)
+        cpp_types = {
+            info["member_name"]: info["cpp_type"]
+            for info in self._inline_history_members
+        }
+        for name in names:
+            member = self._function_global_history_member(name)
+            if member is None:
+                continue
+            value = self._series_bridge_value_expr(
+                self._visit_expr(first_read[name]), cpp_types[member]
+            )
+            lines.append(f"        {member}.update({value});")
 
     def _has_precalculated_ta(self) -> bool:
         return any(

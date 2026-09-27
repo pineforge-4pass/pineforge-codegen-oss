@@ -467,10 +467,7 @@ class ExprVisitor:
             ):
                 return "(int64_t)pine_color::black"
         # Series var — read current value
-        safe = self._safe_name(name)
-        # Apply per-call-site var remap (for function-local vars)
-        if self._active_var_remap and safe in self._active_var_remap:
-            safe = self._active_var_remap[safe]
+        safe = self._call_site_var_name(node, self._safe_name(name))
         if self._binding_is_series(name, safe):
             return f"{safe}[0]"
         # Safety net: by here the name resolved to none of the builtins,
@@ -1028,9 +1025,9 @@ class ExprVisitor:
                 or name in self._current_func_locals
                 or name in self._udt_var_types
             ):
-                safe = self._safe_name(name)
-                if self._active_var_remap and safe in self._active_var_remap:
-                    safe = self._active_var_remap[safe]
+                safe = self._call_site_var_name(
+                    node.object, self._safe_name(name)
+                )
                 return f"{safe}.{node.member}"
             if name not in self.ctx.series_vars:
                 # Unknown identifier — likely an enum value
@@ -1265,6 +1262,28 @@ class ExprVisitor:
             self._refused_session_reads[name] = (node, where, message, uncloned)
         return name
 
+    def _call_site_var_name(self, node: Identifier, safe: str) -> str:
+        """``safe`` as this read names it under the active var remap.
+
+        In a callable body the clone remap lists every callable's history and
+        ``var`` members, for nested instances to compose, so it only renames a
+        local binding. A read the analyzer resolved to a script-scope binding
+        (also before a same-named local shadows it), a loop binder or a
+        parameter keeps its own name: renaming ``src`` to another callable's
+        ``src_cs1``, which nothing writes, read ``na``. Outside callables the
+        remap holds block-scoped renames only, which a top-level branch
+        binding resolved to the global scope still needs.
+        """
+        if not self._active_var_remap or safe not in self._active_var_remap:
+            return safe
+        if getattr(self, "_active_func_name", None) is not None and (
+            self.ctx.identifier_binding_scopes.get(id(node)) == "global"
+            or node.name in self._current_loop_vars
+            or node.name in self._current_func_param_types
+        ):
+            return safe
+        return self._active_var_remap[safe]
+
     def _visit_subscript(self, node: Subscript) -> str:
         idx = self._visit_expr(node.index)
         # Series::operator[] accepts C++ int. A Pine int can be backed by an
@@ -1278,6 +1297,12 @@ class ExprVisitor:
         )
         if isinstance(node.object, Identifier):
             name = node.object.name
+            # A script variable read through history in a plain UDF body: the
+            # call site's own history of it.
+            if id(node) in self.ctx.func_global_history_nodes:
+                member = self._function_global_history_member(name)
+                if member is not None:
+                    return f"{member}[{series_idx}]"
             # Function parameters that are series — src[N] → src[N]
             if name in self._current_func_series_params:
                 return f"{self._safe_name(name)}[{series_idx}]"
@@ -1287,11 +1312,9 @@ class ExprVisitor:
             if name in BAR_FIELDS or name in BAR_SERIES_PUSH:
                 # Index matches Pine: [0] current bar, [k] k bars ago (runtime Series deque).
                 return f"_s_{name}[{series_idx}]"
-            safe = self._safe_name(name)
             # Apply per-call-site / exact block-member remap before deciding
             # whether the current lexical binding is a Series.
-            if self._active_var_remap and safe in self._active_var_remap:
-                safe = self._active_var_remap[safe]
+            safe = self._call_site_var_name(node.object, self._safe_name(name))
             if self._binding_is_series(name, safe):
                 # Same Pine [k] semantics as Series in runtime/series.hpp
                 return f"{safe}[{series_idx}]"
