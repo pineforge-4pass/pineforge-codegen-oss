@@ -71,7 +71,8 @@ plot(v)
     body = _eval_bodies(cpp)
     assert re.search(
         r"int _sec0_f_\d+_k = \[&\]\(\)\{ auto _pf_v = \(std::round\(.*\)\); "
-        r"return is_na\(_pf_v\) \? na<int>\(\) : \(int\)_pf_v; \}\(\);",
+        r"if constexpr \(std::is_floating_point_v<decltype\(_pf_v\)>\) .*? "
+        r"else return is_na\(_pf_v\) \? na<int>\(\) : \(int\)_pf_v; \}\(\);",
         body,
     ), body
     compile_env.compile_cpp(cpp, label="security-helper-int-narrowing")
@@ -96,7 +97,8 @@ plot(v)
     assert re.search(
         r"int _sec0_mc_\d+_c2 = \[&\]\(\)\{ auto _pf_v = "
         r"\(_security_helper_series_\[\"[^\"]+\"\]\[0\]\); "
-        r"return is_na\(_pf_v\) \? na<int>\(\) : \(int\)_pf_v; \}\(\);",
+        r"if constexpr \(std::is_floating_point_v<decltype\(_pf_v\)>\) .*? "
+        r"else return is_na\(_pf_v\) \? na<int>\(\) : \(int\)_pf_v; \}\(\);",
         body,
     ), body
     compile_env.compile_cpp(cpp, label="security-helper-state-narrowing")

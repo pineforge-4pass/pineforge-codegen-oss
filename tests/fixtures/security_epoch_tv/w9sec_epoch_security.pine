@@ -1,0 +1,20 @@
+//@version=6
+// Pine int is 64-bit: an epoch a request.security reads keeps every bit in a
+// var int latch and in typed int parameters fed security-tuple elements.
+strategy("PF w9sec epoch int64 through request.security", overlay = true)
+f_get() => [time, time[1], time[2]]
+[t0, t1, t2] = request.security(syminfo.tickerid, "60", f_get(), lookahead = barmerge.lookahead_off)
+htf = request.security(syminfo.tickerid, "60", time, lookahead = barmerge.lookahead_off)
+var int last = 0
+var int changes = 0
+if htf != last
+    last := htf
+    changes += 1
+f_ok(int t) => not na(t)
+f_age(int t) => na(t) ? -1 : (time - t) / 60000
+s(x) => na(x) ? "na" : str.tostring(x)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(last) + "|" + s(changes) + "|" + (f_ok(t2) ? "ok" : "na") + "|" + s(f_age(t1)))

@@ -48,13 +48,24 @@ def na_preserving_int_cast(value_cpp: str, int_cpp_type: str = "int") -> str:
 
     The value is evaluated exactly once. ``na`` in, ``na<T>()`` out; anything
     else truncates toward zero exactly as the implicit conversion did, so a
-    non-``na`` result is bit-for-bit what it was before.
+    non-``na`` result is bit-for-bit what it was before. A floating value
+    outside ``int`` reads ``na<int>()`` too: its conversion is undefined, and
+    x86-64 (``cvttsd2si``: ``INT_MIN``, the ``na`` sentinel) and arm64
+    (``fcvtzs``: saturation) disagreed on an epoch a missed provenance
+    narrowed (W9-CG-EPOCH-INT64); ``na<int>()`` is the x86-64 answer, so
+    Linux runs keep their bits.
     """
     # Integer literals are proven non-``na``. Keep the historical explicit
     # cast for these tiny paths so a helper does not churn every matrix/color
     # call that passes a literal index or channel.
     if _INT_LITERAL_TEXT.fullmatch(value_cpp):
         return f"({int_cpp_type})({value_cpp})"
+    if int_cpp_type == "int":
+        return (f"[&](){{ auto _pf_v = ({value_cpp}); "
+                f"if constexpr (std::is_floating_point_v<decltype(_pf_v)>) "
+                f"return (_pf_v >= -2147483648.0 && _pf_v < 2147483648.0) "
+                f"? (int)_pf_v : na<int>(); "
+                f"else return is_na(_pf_v) ? na<int>() : (int)_pf_v; }}()")
     return (f"[&](){{ auto _pf_v = ({value_cpp}); "
             f"return is_na(_pf_v) ? na<{int_cpp_type}>() : "
             f"({int_cpp_type})_pf_v; }}()")

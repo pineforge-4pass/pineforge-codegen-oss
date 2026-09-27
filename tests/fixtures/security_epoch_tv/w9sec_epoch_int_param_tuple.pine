@@ -1,0 +1,13 @@
+//@version=6
+// W8D-NOTRADES witness B: a typed `int` parameter fed an epoch from a request.security
+// tuple, guarded by na() (drjproduction shape). Pine int is 64-bit: the guard passes.
+strategy("w8d epoch typed int param from security tuple", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1, initial_capital = 1000000)
+f_get() => [time, time[1]]
+[t0, t1] = request.security(syminfo.tickerid, "60", f_get(), lookahead = barmerge.lookahead_off)
+f_ok(int t) => not na(t)
+fast = ta.sma(close, 5)
+slow = ta.sma(close, 20)
+if f_ok(t1) and ta.crossover(fast, slow)
+    strategy.entry("L", strategy.long)
+if ta.crossunder(fast, slow)
+    strategy.close("L")

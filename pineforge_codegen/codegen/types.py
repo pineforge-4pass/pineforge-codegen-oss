@@ -1370,9 +1370,17 @@ class TypeInferer:
         # int64_t buffer: epoch-ms overflow int32 and the na sentinel would be
         # misdetected. ``_is_int64_builtin_init`` only matches user vars whose
         # init RHS is such a builtin, so also match the builtin name directly.
-        if name in INT64_BUILTINS or self._is_int64_builtin_init(name):
+        if name in INT64_BUILTINS:
             return "int64_t"
         sym = self.ctx.symbols.resolve(name)
+        # A float or bool an epoch reaches keeps its type: the analyzer types
+        # every request.security value float (a double holds an epoch
+        # exactly), and a name is keyed by spelling across scopes.
+        if self._is_int64_builtin_init(name) and (
+            sym is None
+            or sym.pine_type not in (PineType.FLOAT, PineType.BOOL, PineType.STRING)
+        ):
+            return "int64_t"
         if sym is not None:
             return PINE_TYPE_TO_CPP.get(sym.pine_type, "double")
         return "double"
@@ -1519,6 +1527,10 @@ class TypeInferer:
             terminal, func_info, seen, call_site_idx
         )
 
+    _NON_INTEGER_BINOPS = frozenset({
+        "/", "==", "!=", "<", ">", "<=", ">=", "and", "or",
+    })
+
     def _expr_returns_wide_int(
         self,
         expr,
@@ -1589,6 +1601,12 @@ class TypeInferer:
             return True
         if isinstance(expr, FuncCall):
             func_name, namespace = self._resolve_callee(expr.callee)
+            if namespace == "request" and func_name == "security":
+                # The requested bar's value of the payload keeps its
+                # provenance: ``request.security(t, "60", time)`` is an epoch.
+                return self._expr_returns_wide_int(
+                    self._security_payload_node(expr), owner_info, seen, call_site_idx
+                )
             if func_name in self._WIDE_ARRAY_ELEMENT_READS:
                 # An element read off a wide int array (``array.get(times, i)``
                 # / ``times.get(i)``) carries the epoch: the destination must
@@ -1666,6 +1684,10 @@ class TypeInferer:
                 )
             )
         if isinstance(expr, BinOp):
+            if expr.op in self._NON_INTEGER_BINOPS:
+                # Pine v6 ``/`` is a float and a comparison a bool: no
+                # integer slot holds them, whatever the operands carry.
+                return False
             return (
                 self._expr_returns_wide_int(
                     expr.left, owner_info, seen, call_site_idx
@@ -1675,6 +1697,8 @@ class TypeInferer:
                 )
             )
         if isinstance(expr, UnaryOp):
+            if expr.op == "not":
+                return False
             return self._expr_returns_wide_int(
                 expr.operand, owner_info, seen, call_site_idx
             )
@@ -1791,6 +1815,16 @@ class TypeInferer:
             elif (isinstance(node, Assignment)
                     and isinstance(node.target, Identifier)):
                 bindings.append((node.target.name, node.value, owner))
+            elif isinstance(node, TupleAssign):
+                # ``[t0, t1] = request.security(sym, tf, f())``: each name is
+                # bound to the element its tuple evaluates.
+                for index, name in enumerate(node.names):
+                    element = (
+                        self._tuple_element_value(node.value, index, owner)
+                        if name and name != "_" else None
+                    )
+                    if element is not None:
+                        bindings.append((name, *element))
             elif (isinstance(node, FuncCall)
                     and isinstance(node.callee, Identifier)
                     and node.callee.name in self._func_info_map):
@@ -1837,6 +1871,38 @@ class TypeInferer:
                         params.add(key)
                         changed = True
         return names, params
+
+    @staticmethod
+    def _security_payload_node(call: FuncCall):
+        """The expression argument of a ``request.security`` call."""
+        if len(call.args) > 2:
+            return call.args[2]
+        return call.kwargs.get("expression")
+
+    def _tuple_element_value(self, value, index: int, owner, depth: int = 0):
+        """``(expression, lexical owner)`` element ``index`` of a tuple value
+        evaluates: a tuple literal's element, through a ``request.security``
+        payload and a user function's final tuple; None otherwise."""
+        if depth > 32:
+            return None
+        if isinstance(value, TupleLiteral):
+            if index < len(value.elements):
+                return value.elements[index], owner
+            return None
+        if not isinstance(value, FuncCall):
+            return None
+        func_name, namespace = self._resolve_callee(value.callee)
+        if namespace == "request" and func_name == "security":
+            return self._tuple_element_value(
+                self._security_payload_node(value), index, owner, depth + 1)
+        info = self._func_info_map.get(func_name) if namespace is None else None
+        node = getattr(info, "node", None)
+        if node is None or not node.body:
+            return None
+        terminal = node.body[-1]
+        if isinstance(terminal, ExprStmt):
+            terminal = terminal.expr
+        return self._tuple_element_value(terminal, index, info, depth + 1)
 
     def _param_is_integer_scalar(self, fi, index: int) -> bool:
         """Whether parameter ``index`` of ``fi`` is a scalar integer slot:
