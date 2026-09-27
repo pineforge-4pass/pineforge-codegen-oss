@@ -980,7 +980,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for idx in sorted(ta_indices):
                 site = self.ctx.ta_call_sites[idx]
                 binding_map = ta_binding_stacks.get(idx) or {(): ()}
-                signatures = sorted(binding_map.keys(), key=repr)
+                signatures = sorted(
+                    binding_map.keys(),
+                    key=lambda sig: self._security_variant_order_key(sig, binding_map[sig]),
+                )
                 use_base_name = len(signatures) == 1
                 variants: list[dict] = []
                 for variant_idx, signature in enumerate(signatures):

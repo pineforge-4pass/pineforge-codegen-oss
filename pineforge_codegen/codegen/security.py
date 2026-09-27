@@ -6275,3 +6275,31 @@ class SecurityEmitter:
                     if info is not None and getattr(info, "node", None) is not None:
                         pending.extend(info.node.body)
         return False
+
+    def _security_variant_order_key(self, signature: tuple, binding_stack) -> tuple:
+        """The order of a TA site's requested-context variants (``_v0``,
+        ``_v1``, ...): where each argument binding's value is written in the
+        source, then the signature. The signature names a bound node by its
+        ``id()``, so ordering by its ``repr`` followed memory addresses, and
+        the same script could number its variants differently from run to
+        run or between CPython and Pyodide."""
+        frames = []
+        for idx, frame in enumerate(binding_stack or ()):
+            if idx == 0 or isinstance(frame, _SecurityHelperArgumentFrame):
+                items = []
+                for name, node in sorted(frame.items(), key=lambda item: item[0]):
+                    if isinstance(node, str):
+                        items.append((name, 0, 0, 0, node))
+                    else:
+                        loc = getattr(node, "loc", None)
+                        items.append((
+                            name,
+                            getattr(loc, "line", 0) or 0,
+                            getattr(loc, "col", 0) or 0,
+                            getattr(loc, "end_col", 0) or 0,
+                            type(node).__name__,
+                        ))
+                frames.append(("arguments", tuple(items)))
+            else:
+                frames.append(("locals", tuple(sorted(frame.keys()))))
+        return tuple(frames), repr(signature)
