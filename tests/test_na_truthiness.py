@@ -285,20 +285,24 @@ def test_repeat_with_na_count_warns_about_nullable_string_gap() -> None:
 
 
 def test_repeat_keyword_count_and_invalid_number_spelling() -> None:
+    # TradingView names the count `repeat` (lab tv probe pf-oi-kw-names).
     valid = transpile_full(
         '//@version=6\nstrategy("repeat keyword")\n'
-        's = str.repeat("x", count=int(na))\n'
+        's = str.repeat("x", repeat=int(na))\n'
     )
     assert any("str.repeat count can be na" in d.message
                for d in valid["diagnostics"])
-    # TradingView rejects `number=`. This was an uncaught IndexError in the
-    # visitor; keep the prior no-refusal contract with an explicit warning.
-    invalid = transpile_full(
-        '//@version=6\nstrategy("repeat invalid keyword")\n'
-        's = str.repeat("x", number=int(na))\n'
-    )
-    assert any("missing its count argument" in d.message
-               for d in invalid["diagnostics"])
+    # TradingView rejects `number=` and `count=` ("The str.repeat function
+    # does not have an argument with the name count", pf-oi-kw-repeat-count).
+    # `number=` was an uncaught IndexError in the visitor; keep the prior
+    # no-refusal contract with an explicit warning.
+    for keyword in ("number", "count"):
+        invalid = transpile_full(
+            '//@version=6\nstrategy("repeat invalid keyword")\n'
+            f's = str.repeat("x", {keyword}=int(na))\n'
+        )
+        assert any("missing its count argument" in d.message
+                   for d in invalid["diagnostics"])
 
 
 def test_collection_history_gap_warns_without_refusing() -> None:

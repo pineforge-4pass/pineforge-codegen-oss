@@ -107,6 +107,9 @@ pineforge_codegen/
 ├── lexer.py / tokens.py            Token stream
 ├── parser.py / ast_nodes.py        Pine v6 AST
 ├── limits.py                      Located source/complexity/time budgets
+├── builtin_keywords.py             nz / fixnan keyword arguments rewritten
+│                                   to their positions after the support
+│                                   check (TradingView's parameter order)
 ├── pragmas.py                      // @pf-trace extraction
 ├── external_requests.py            Requests with no data (other symbols,
 │                                   fundamentals): the trade slice that
@@ -621,7 +624,13 @@ you delete or weaken the special case, the test will tell you.
     is a warned visual-only stub that evaluates none of its arguments.
     `tests/test_e2e_argument_evaluation_once.py` runs every slot through a
     counting probe and replays the tape; `tests/test_e2e_fixnan_single_eval.py`
-    replays a TradingView ADX tape.
+    replays a TradingView ADX tape. Keyword arguments take TradingView's
+    names -- `nz(source, replacement)`, `fixnan(source)`, `str.repeat(source,
+    repeat, separator)` -- and TradingView evaluates them in parameter order
+    whatever order they are written in: the support checker binds `nz` and
+    `fixnan` to their signatures (`_check_builtin_arguments`, refusing what
+    TradingView refuses) and `builtin_keywords` rewrites them positionally
+    (`tests/test_e2e_builtin_keyword_names.py`).
 17. **A function's last statement is its value.** TradingView returns the
     value of a function's (or an if/switch arm's) last statement, whatever
     the statement: `x := e` and every `x op= e` yield x's new value (typed as

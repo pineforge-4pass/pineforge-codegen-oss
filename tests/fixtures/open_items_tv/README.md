@@ -59,3 +59,28 @@ TradingView's compiler, whose error `tests/test_tuple_literal_value.py` pins.
 | `tuple_literal_decl.pine` | `525dcf43a5ba98a680601dc2bddd5d38e47dbdc52426efaf647cd8fb17c00653` | `[a, b] = [close, open]`: "Syntax error at input "["", CE10156, line 5 column 10 |
 | `tuple_literal_var.pine` | `1096f167da1256aa6b3ea42772262a7cc537c68e1e972c3254ccb67b57097cc8` | `t = [close, open]`: the same error at line 5 column 5 |
 | `tuple_literal_ternary.pine` | `59b28e82ae9258ad2c36432b8717b6e69f38a15d83dedc9d23af14668690cf39` | `[a, b] = close > open ? [close, open] : [open, close]`: "Ternary operations cannot return tuples. Convert the expression into an `if` or `switch` conditional structure to return a tuple.", line 5 |
+
+## TradingView's keyword names
+
+| File | sha256 |
+|---|---|
+| `kw_names.pine` | `60328ed80923922e52d90a3d65dfef122f2046821e630ceda9c395713526d96a` |
+| `kw_names_tv_trades.csv` (7 trades, exported 2026-09-27) | `3c784cada0579524f811b84e1bfa061e4cf5a2c43bee92b459b53d9fdf6e31a7` |
+| `kw_order.pine` (slug `pf-oi-kw-order2`) | `82ea1fbaa0a7d37efbac7b839ee89e7871dd0b2a61f4f009efdd5a579b02be35` |
+| `kw_order_tv_trades.csv` (7 trades, exported 2026-09-27) | `14aa2486d7a17ef48af5b8453fd25a6736f7cf8d01e87ad19cc25b640d41a1f3` |
+
+`kw_names` calls `nz(x, replacement = -1.0)`, `nz(source = x)`, `nz(source =
+x, replacement = -2.0)`, `nz(replacement = -3.0, source = x)`, `fixnan(source
+= x)` and `fixnan(x)` with `x` na on every up bar, and `str.repeat(source =
+"ab", repeat = 3, separator = ",")`, `str.repeat("ab", repeat = 2)` and
+`str.repeat("xy", 2, separator = "-")`; each exit comment spells them. On an
+up bar TradingView reads -1, 0, -2, -3 and the last non-na close twice; the
+strings are `ab,ab,ab`, `abab` and `xy-xy`. `kw_order` has nz's arguments,
+written in either order, push 1 (source) and 2 (replacement) to an array:
+TradingView reads 12 both ways, parameter order. (A first export,
+`pf-oi-kw-order`, logged tags into strings; its replay tripped two other
+PineForge defects, a `var` string array's `array.join` typed as a number and
+a variable named `second` read as the built-in.) Two probes spelling
+TradingView's rejected names failed at its compiler, "The ... function does
+not have an argument with the name ...": `nz(x = x, y = -1.0)` /
+`fixnan(x = x)` and `str.repeat("ab", count = 2)`.

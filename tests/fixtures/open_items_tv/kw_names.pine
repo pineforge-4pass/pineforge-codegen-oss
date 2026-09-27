@@ -1,0 +1,21 @@
+//@version=6
+strategy("pf-open-items-kw-names", overlay = true)
+
+// nz, fixnan and str.repeat called with TradingView's keyword names. x is
+// na on every bar whose close is above its open.
+x = close > open ? na : close
+a = nz(x, replacement = -1.0)
+b = nz(source = x)
+c = nz(source = x, replacement = -2.0)
+d = nz(replacement = -3.0, source = x)
+e = fixnan(source = x)
+f = fixnan(x)
+g = str.repeat(source = "ab", repeat = 3, separator = ",")
+h = str.repeat("ab", repeat = 2)
+k = str.repeat("xy", 2, separator = "-")
+
+fmt(v) => str.tostring(v, "#.####")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = fmt(a) + "|" + fmt(b) + "|" + fmt(c) + "|" + fmt(d) + "|" + fmt(e) + "|" + fmt(f) + "|" + g + "|" + h + "|" + k + "|" + fmt(close))

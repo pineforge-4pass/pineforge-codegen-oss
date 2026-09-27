@@ -6,6 +6,7 @@ from .analyzer import Analyzer
 from .codegen import CodeGen
 from .errors import CompileError, Level, Phase
 from .external_requests import lower_no_data_requests
+from .builtin_keywords import bind_builtin_keywords
 from .finite_ta_length import expand_finite_choice_extrema_lengths
 from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
 from .pragmas import extract_pf_trace_pragmas
@@ -54,7 +55,7 @@ def _generate(pine_source: str, check_support: bool, filename: str):
         budget.check(phase=Phase.ANALYZER)
         ast = lower_no_data_requests(ast)
         ast = specialize_security_contexts(ast, filename=filename)
-        ast = expand_finite_choice_extrema_lengths(ast)
+        ast = bind_builtin_keywords(expand_finite_choice_extrema_lengths(ast))
         check_ast_depth(ast, filename)
         budget.check(phase=Phase.ANALYZER)
         ctx = Analyzer(ast, filename=filename, budget=budget,

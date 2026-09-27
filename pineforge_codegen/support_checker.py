@@ -48,6 +48,7 @@ from .ast_nodes import (
     TypeDecl, EnumDecl, MethodDef,
 )
 from .errors import SourceLocation, Diagnostic, CompileError, Level, Phase
+from .builtin_keywords import POSITIONAL_BUILTINS
 from .pine_spelling import expr_start
 from .external_requests import (
     LOWERING_ANNOTATION, NO_DATA_REQUEST_FUNCS, TradeSlice, spell_call,
@@ -1500,6 +1501,10 @@ class SupportChecker:
             self._err(node, f"{name}(...) is not implemented yet.", hint=NOT_YET_FUNC[name])
             self._visit_children(node)
             return
+        if (ns is None and name in POSITIONAL_BUILTINS
+                and not self._check_builtin_arguments(node, name)):
+            self._visit_children(node)
+            return
 
         # Bare cosmetic casts (e.g. `color(na)` -> default color). No backtest
         # effect; warn and let codegen emit a benign default color.
@@ -2201,6 +2206,32 @@ class SupportChecker:
             noun = "arguments" if len(missing) > 1 else "argument"
             return (0, len(missing)), f"is missing its {noun} {listed}", None
         return None
+
+    def _check_builtin_arguments(self, node: FuncCall, name: str) -> bool:
+        """Refuse an ``nz`` / ``fixnan`` call whose arguments bind to none of
+        TradingView's signatures -- ``nz(source)``, ``nz(source,
+        replacement)``, ``fixnan(source)`` -- as TradingView does ("The nz
+        function does not have an argument with the name x"). A call that
+        binds is rewritten positionally by ``builtin_keywords``; before, a
+        keyword crashed the codegen (IndexError) or was dropped. Returns True
+        when the arguments bind.
+        """
+        func = sigs.BUILTIN_FUNCTIONS[name]
+        problems = []
+        for sig in func.signatures:
+            problem = self._ta_binding_problem(sig, node)
+            if problem is None:
+                return True
+            problems.append((problem[0], -len(sig.params), problem[1], problem[2]))
+        _rank, _width, message, at = min(problems, key=lambda p: (p[0], p[1]))
+        spelled = " or ".join(
+            f"{name}({', '.join(p.name for p in sig.params)})" for sig in func.signatures)
+        self._err(
+            expr_start(at if at is not None else node),
+            f"{name} {message} (TradingView: {spelled}).",
+            hint="Use the parameters of TradingView's signature.",
+        )
+        return False
 
     def _check_ta_arguments(self, node: FuncCall, name: str) -> bool:
         """Refuse a ``ta.*`` call whose arguments bind to none of TradingView's

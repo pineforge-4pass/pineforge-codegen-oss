@@ -368,7 +368,7 @@ _str("replace_all", _sig([("source", S), ("target", S), ("replacement", S)], ret
 _str("lower",       _sig([("source", S)], ret=S))
 _str("upper",       _sig([("source", S)], ret=S))
 _str("trim",        _sig([("source", S)], ret=S))
-_str("repeat",      _sig([("source", S), ("count", I)], ret=S))
+_str("repeat",      _sig([("source", S), ("repeat", I), ("separator", S, "")], ret=S))
 _str("match",       _sig([("source", S), ("regex", S)], ret=S))
 _str("split",       _sig([("string", S), ("separator", S)], ret=S))  # returns array<string>
 
@@ -419,9 +419,9 @@ def _builtin(name: str, *sigs: FuncSig) -> None:
 
 _builtin("na",       _sig([("x", F)], ret=B))
 _builtin("nz",
-         _sig([("x", F)], ret=F),
-         _sig([("x", F), ("y", F)], ret=F))
-_builtin("fixnan",   _sig([("x", F)], ret=F))
+         _sig([("source", F)], ret=F),
+         _sig([("source", F), ("replacement", F)], ret=F))
+_builtin("fixnan",   _sig([("source", F)], ret=F))
 _builtin("timestamp",
          _sig([("year", I), ("month", I), ("day", I),
                ("hour", I, 0), ("minute", I, 0), ("second", I, 0)], ret=I))
