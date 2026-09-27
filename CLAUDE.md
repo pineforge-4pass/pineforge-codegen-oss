@@ -113,6 +113,9 @@ pineforge_codegen/
 │                                   to their positions after the support
 │                                   check (TradingView's parameter order)
 ├── pragmas.py                      // @pf-trace extraction
+├── library_modules.py              A Pine library source parsed as a
+│                                   module: its library() declaration,
+│                                   exports, own //@version, imports.
 ├── external_requests.py            Requests with no data (other symbols,
 │                                   fundamentals): the trade slice that
 │                                   lowers a display-only one to na.

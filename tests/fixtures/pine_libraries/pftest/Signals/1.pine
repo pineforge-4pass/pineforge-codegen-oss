@@ -1,0 +1,81 @@
+// SPDX-License-Identifier: Apache-2.0
+// Clean-room synthetic library for PineForge's library inliner tests
+// (lane XSYM-C). Not a published TradingView library. Each export exercises
+// one construct: string signals with na, private helpers and a private
+// constant, per-call-site state, locals and parameters that collide with
+// names a script uses, a type with a method, an enum, an exported constant,
+// a transitive import, and an export PineForge refuses, which only a script
+// that calls it reaches.
+
+//@version=6
+library("Signals", overlay = true)
+
+import pftest/Base/1 as base
+
+wicks() =>
+    rng = high - low
+    up = rng > 0 ? (high - math.max(open, close)) / rng : na
+    lo = rng > 0 ? (math.min(open, close) - low) / rng : na
+    [up, lo]
+
+dirAt(series int off) =>
+    close[off] > open[off] ? 1 : close[off] < open[off] ? -1 : 0
+
+secret = "s3"
+
+// @function "BUY", "SELL" or na.
+export pin(simple float frac = 0.6, simple bool strict = true) =>
+    [up, lo] = wicks()
+    bull = not na(lo) and lo >= frac and (not strict or up <= 0.2)
+    bear = not na(up) and up >= frac and (not strict or lo <= 0.2)
+    bull ? "BUY" : bear ? "SELL" : na
+
+// @function The bar's direction, `off` bars back.
+export dir(series int off = 0) => dirAt(off)
+
+// @function A tag built on the private constant.
+export tag(string side) => secret + ":" + side
+
+// @function A counter and an SMA of its own length: state per call site.
+export counter(simple int len) =>
+    var int n = 0
+    n += 1
+    [n, ta.sma(close, len)]
+
+// @function Locals named like a script's globals.
+export smooth(series float src, simple int len) =>
+    float filter = na
+    filter := nz(filter[1], src) + (src - nz(filter[1], src)) / len
+    trSmooth = 0.0
+    trSmooth := nz(trSmooth[1]) + filter
+    filter
+
+// @function Parameters named like built-in series.
+export span(series float high, series float low) => high - low
+
+// @type A bar's range.
+export type Bar2
+    float lo
+    float hi
+
+// @function The width of a range.
+export method width(Bar2 self) => self.hi - self.lo
+
+// @enum Sides.
+export enum Side
+    long = "Long"
+    short = "Short"
+
+export const float RATIO = 1.5
+
+// @function Through the imported library: twice times RATIO.
+export scaled(float x) => base.twice(x) * RATIO
+
+// @function A point of the imported library's type.
+export ptMid(float a, float b) => base.mid(base.Pt.new(a, b))
+
+// @function PineForge refuses request.seed: a script only reaches it by
+// calling it.
+export seeded() => request.seed("seed_x", "y", close)
+
+plot(pin() == "BUY" ? 1 : 0)
