@@ -5,9 +5,11 @@ onto data a run is given.
 ``earnings`` / ``dividends`` / ``splits`` / ``footprint`` read data the
 engine does not load itself: a probe's requests manifest pins it
 (``PINEFORGE_REQUESTS_ROOT``). A request of another symbol the support checker
-lowers onto that symbol's pinned feed (``FEED_LOWERING``) stays; its reads
-are marked like a deferred refusal's below, and stop the run only when the
-run began with no feed for it. ``TradeSlice`` follows such a request's value forward
+lowers onto that symbol's pinned feed (``FEED_LOWERING``), and a fundamentals
+request lowered onto the series recorded under its key (``RECORDED_LOWERING``,
+``recorded_key``), stay; their reads are marked like a deferred refusal's
+below, and stop the run only when the run began with no data for them.
+``TradeSlice`` follows such a request's value forward
 through the script: when it reaches display and alert sinks only -- the
 backward slice of every trade sink holds no part of it -- the request is
 lowered to ``na`` with a warning (``lower_no_data_requests``). Every other one
@@ -46,9 +48,33 @@ LOWERING_ANNOTATION = "pf_request_lowering"
 # The lowering of a request of another symbol that reads the feed a requests
 # manifest pins for it (``request.security``; the engine's instrument feeds).
 FEED_LOWERING = "feed"
+# The lowering of ``request.earnings`` / ``dividends`` / ``splits`` /
+# ``financial``: the series TradingView returned per chart bar, recorded under
+# its key (``recorded_key``) by the requests manifest.
+RECORDED_LOWERING = "recorded"
 # Lowerings whose data is looked up at run time: the request stays, and its
 # reads stop the run only where the data is missing.
-DATA_LOWERINGS = frozenset({FEED_LOWERING})
+DATA_LOWERINGS = frozenset({FEED_LOWERING, RECORDED_LOWERING})
+# On a recorded request once lowered: its key's parts but the symbol, which
+# stays the call's only argument (``lower_no_data_requests``).
+RECORDED_KEY_ANNOTATION = "pf_recorded_key"
+# Pine's field constants per recorded function, and each default; the
+# financial periods (the requests manifest's key grammar, workflow
+# campaign/src/probe-requests.mjs formatRecordedKey).
+RECORDED_FIELDS = {
+    "earnings": (("actual", "estimate", "standardized"), "actual"),
+    "dividends": (("gross", "net"), "gross"),
+    "splits": (("denominator", "numerator"), "denominator"),
+}
+FINANCIAL_PERIODS = ("FQ", "FY", "FH", "TTM")
+# Each recorded function's parameters, in order.
+_RECORDED_PARAMS = {
+    "earnings": ("ticker", "field", "gaps", "lookahead", "ignore_invalid_symbol", "currency"),
+    "dividends": ("ticker", "field", "gaps", "lookahead", "ignore_invalid_symbol", "currency"),
+    "splits": ("ticker", "field", "gaps", "lookahead", "ignore_invalid_symbol", "currency"),
+    "financial": ("symbol", "financial_id", "period", "gaps", "ignore_invalid_symbol",
+                  "currency"),
+}
 # On a node whose evaluation stops the run: the message it stops with, or,
 # for a request lowered onto pinned data, ``{"message": ..., "ref":
 # RequestRef}``: the run stops there only when no data is installed for the
@@ -100,6 +126,68 @@ def _call_name(node: FuncCall) -> tuple[str | None, str | None]:
             parts.append(obj.name)
             return ".".join(reversed(parts)), callee.member
     return None, None
+
+
+def recorded_key(request: FuncCall) -> tuple[dict | None, str | None]:
+    """``(parts, None)`` of a recorded request's key but its symbol --
+    ``{"fn", "symbol", "field", "period", "gaps", "lookahead"}``, the symbol
+    the argument node -- or ``(None, why)`` for a spelling no key names: a
+    field constant of another namespace or none, a financial id or period
+    that is not a literal of the grammar, a ``gaps``/``lookahead`` that is
+    not a ``barmerge`` constant, a ``currency`` (the tape records no
+    conversion)."""
+    ns, fn = _call_name(request)
+    if ns != "request" or fn not in _RECORDED_PARAMS:
+        return None, "it is no recorded request"
+    params = _RECORDED_PARAMS[fn]
+    if len(request.args) > len(params):
+        return None, "it has more arguments than the request takes"
+    args = dict(zip(params, request.args))
+    for name, value in request.kwargs.items():
+        if name not in params or name in args:
+            return None, f"its argument {name} is not one the key names"
+        args[name] = value
+    if "currency" in args:
+        return None, "it converts to a currency, which no recorded key names"
+    symbol = args.get(params[0])
+    if symbol is None:
+        return None, "it names no symbol"
+
+    def flag(name: str, kind: str) -> str | None:
+        value = args.get(name)
+        if value is None:
+            return "off"
+        if (isinstance(value, MemberAccess) and isinstance(value.object, Identifier)
+                and value.object.name == "barmerge"
+                and value.member in (f"{kind}_on", f"{kind}_off")):
+            return value.member.rsplit("_", 1)[1]
+        return None
+
+    gaps = flag("gaps", "gaps")
+    lookahead = flag("lookahead", "lookahead") if fn != "financial" else "off"
+    if gaps is None or lookahead is None:
+        return None, "its gaps and lookahead are barmerge constants"
+    if fn == "financial":
+        fid, period = args.get("financial_id"), args.get("period")
+        if not (isinstance(fid, StringLiteral) and fid.value[:1].isalpha()
+                and fid.value.replace("_", "").isalnum() and fid.value == fid.value.upper()):
+            return None, "its financial_id is a literal TradingView financial id"
+        if not (isinstance(period, StringLiteral) and period.value in FINANCIAL_PERIODS):
+            return None, f"its period is one of the literals {', '.join(FINANCIAL_PERIODS)}"
+        field_text, period_text = fid.value, period.value
+    else:
+        fields, default = RECORDED_FIELDS[fn]
+        value = args.get("field")
+        if value is None:
+            field_text = default
+        elif (isinstance(value, MemberAccess) and isinstance(value.object, Identifier)
+                and value.object.name == fn and value.member in fields):
+            field_text = value.member
+        else:
+            return None, f"its field is one of the {fn}.* constants"
+        period_text = "-"
+    return {"fn": fn, "symbol": symbol, "field": field_text, "period": period_text,
+            "gaps": gaps, "lookahead": lookahead}, None
 
 
 def footprint_column(request) -> str | None:
@@ -660,6 +748,14 @@ def lower_no_data_requests(program: Program) -> Program:
             request.annotations = {**(request.annotations or {}), REQUEST_REF_ANNOTATION: ref}
             _mark_reads(program, index, declarations, request, request,
                         {"message": unpinned_message(request), "ref": ref})
+            if request.annotations.get(LOWERING_ANNOTATION) == RECORDED_LOWERING:
+                # The key's other parts are constants: the call keeps its
+                # symbol, the one part the run computes.
+                parts, _ = recorded_key(request)
+                symbol = parts.pop("symbol")
+                request.args, request.kwargs = [symbol], {}
+                notes = {k: v for k, v in request.annotations.items() if k != "call_arg_order"}
+                request.annotations = {**notes, RECORDED_KEY_ANNOTATION: parts}
     if swaps:
         replace_nodes(program, swaps)
     return program

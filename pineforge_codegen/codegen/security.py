@@ -79,7 +79,9 @@ from ..analyzer import (
 )
 from .. import signatures as sigs
 from ..errors import CompileError
-from ..external_requests import FOOTPRINT_COLUMN_ANNOTATION, REQUEST_REF_ANNOTATION
+from ..external_requests import (
+    FOOTPRINT_COLUMN_ANNOTATION, RECORDED_KEY_ANNOTATION, REQUEST_REF_ANNOTATION,
+)
 from ..external_requests import _nodes as walk_request_nodes
 from ..security_contexts import UNREACHED_ANNOTATION
 from ..symbols import PineType, method_receiver_type_name
@@ -1868,10 +1870,25 @@ class SecurityEmitter:
                 if isinstance(node, FuncCall)
                 and REQUEST_REF_ANNOTATION in (node.annotations or {})}
         request = requests.get(id(ref))
+        if request is not None and RECORDED_KEY_ANNOTATION in (request.annotations or {}):
+            return f"_pf_recorded_missing({self._recorded_key_expr(request)})"
         item = self._security_call_for_request(request) if request is not None else None
         if item is None or not item.get("foreign"):
             return "true"
         return f"_pf_sec_missing_{item['sec_id']}"
+
+    def _recorded_key_expr(self, request) -> str:
+        """The run-time key of a recorded request: its constant parts around
+        its symbol string (``fn|symbol|field|period|gaps_*|lookahead_*``)."""
+        parts = request.annotations[RECORDED_KEY_ANNOTATION]
+        tail = (f"|{parts['field']}|{parts['period']}|gaps_{parts['gaps']}"
+                f"|lookahead_{parts['lookahead']}")
+        return (f'(std::string("{parts["fn"]}|") + {self._visit_expr(request.args[0])} + '
+                f'std::string("{tail}"))')
+
+    def _uses_recorded_requests(self) -> bool:
+        return any(RECORDED_KEY_ANNOTATION in (node.annotations or {})
+                   for node in walk_request_nodes(self.ctx.ast) if isinstance(node, FuncCall))
 
     def _security_footprint_column(self, sec_id: int) -> str | None:
         """The feed column another symbol's site reads when its whole

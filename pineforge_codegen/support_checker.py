@@ -52,7 +52,8 @@ from .builtin_keywords import POSITIONAL_BUILTINS
 from .pine_spelling import expr_start
 from .external_requests import (
     FEED_LOWERING, FOOTPRINT_COLUMN_ANNOTATION, LOWERING_ANNOTATION, NO_DATA_REQUEST_FUNCS,
-    FootprintValues, TradeSlice, footprint_column, spell_call,
+    RECORDED_LOWERING, FootprintValues, TradeSlice, footprint_column, recorded_key,
+    spell_call,
 )
 from .external_requests import _nodes as _walk_nodes
 from . import signatures as sigs
@@ -617,6 +618,8 @@ class SupportChecker:
         # request.footprint calls that are the whole expression of a request
         # of another symbol reading its feed (_lower_foreign_request).
         self._feed_footprints: set[int] = set()
+        # Inside a request.security call's arguments (its expression).
+        self._security_payload_depth: int = 0
         self._footprints: FootprintValues | bool | None = None
         # Built on the first request with no data: which values reach a trade.
         self._trade_slice: TradeSlice | None = None
@@ -1475,9 +1478,13 @@ class SupportChecker:
             return
 
         # A request PineForge has no data for: na when its value reaches
-        # display sinks only, else a deferred refusal.
+        # display sinks only, else its recorded series, or a deferred
+        # refusal when no key names it.
         if ns == "request" and name in NO_DATA_REQUEST_FUNCS:
-            self._lower_no_data_request(node, node, NO_DATA_REQUEST_FUNC[full])
+            if name == "footprint":
+                self._lower_no_data_request(node, node, NO_DATA_REQUEST_FUNC[full])
+            else:
+                self._lower_recorded_request(node, NO_DATA_REQUEST_FUNC[full])
             self._visit_request_arguments(node)
             return
 
@@ -1654,7 +1661,11 @@ class SupportChecker:
         # validated above by _check_request_security and consumed by codegen.
         if full == "request.security":
             self._check_request_security(node)
-            self._visit_children_const_ok(node)
+            self._security_payload_depth += 1
+            try:
+                self._visit_children_const_ok(node)
+            finally:
+                self._security_payload_depth -= 1
             return
         # request.security_lower_tf — analyzer/codegen handle parameter validation
         # and element-type rejection (UDT/color/string). Still validate the
@@ -2192,6 +2203,37 @@ class SupportChecker:
             hint=("PineForge runs the expression on that symbol's own bars (history, ta.* "
                   "and syminfo.* in its context) and merges them by time as TradingView "
                   "does; a symbol equal to the chart's reads the chart."),
+        )
+
+    def _lower_recorded_request(self, node: FuncCall, why: str) -> None:
+        """``request.earnings`` / ``dividends`` / ``splits`` / ``financial``.
+        Its value reaches display and alert sinks only: na, as before.
+        Otherwise it reads the series TradingView returned per chart bar,
+        which the probe's requests manifest records under the request's key
+        (``RECORDED_LOWERING``), its reads stopping the run when no series
+        is installed; a spelling no key names keeps the deferred refusal."""
+        if self._trade_slice is None:
+            self._trade_slice = TradeSlice(self._ast)
+        reason = self._trade_slice.reason(node)
+        parts, blocker = recorded_key(node) if reason is not None else (None, None)
+        if reason is not None and blocker is None and self._security_payload_depth:
+            blocker = "it is read outside a request.security expression"
+        if reason is None or blocker is not None:
+            self._lower_no_data_request(
+                node, node, why + (f" A recorded series is read when {blocker}." if blocker
+                                   else ""),
+                reason=reason)
+            return
+        node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: RECORDED_LOWERING}
+        key = (f"{parts['fn']}|<its symbol>|{parts['field']}|{parts['period']}|"
+               f"gaps_{parts['gaps']}|lookahead_{parts['lookahead']}")
+        self._warn(
+            node,
+            f"{spell_call(node)}: TradingView's values per chart bar, read from the series the "
+            f"requests manifest records under {key}; with none installed, the run stops "
+            "with an error where its value is read.",
+            hint=("PineForge replays the values TradingView returned on the chart's own bars "
+                  "(chart_open_ms,value): a bar the tape has no row for reads na."),
         )
 
     def _footprint_member(self, node: FuncCall) -> str | None:

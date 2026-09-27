@@ -172,9 +172,13 @@ def test_trade_relevant_request_of_another_symbol_reads_its_feed():
 
 
 def test_request_reassigned_or_inside_an_expression_stops_where_it_is_evaluated():
-    """No declaration holds its value alone: evaluating the request is its read."""
-    for body in ('x = request.financial(syminfo.tickerid, "FQ_X", "FQ")\nx := nz(x, 1)\n',
-                 'x = nz(request.financial(syminfo.tickerid, "FQ_X", "FQ"), 1)\n'):
+    """No declaration holds its value alone: evaluating the request is its
+    read. (A financial id no recorded key names -- a series here -- keeps
+    the deferred refusal; a literal one reads its recorded series,
+    tests/test_recorded_requests.py.)"""
+    fid = 'close > open ? "FQ_X" : "FQ_Y"'
+    for body in (f'x = request.financial(syminfo.tickerid, {fid}, "FQ")\nx := nz(x, 1)\n',
+                 f'x = nz(request.financial(syminfo.tickerid, {fid}, "FQ"), 1)\n'):
         cpp = transpile(HEAD + body + 'strategy.entry("L", strategy.long, qty = x)\n')
         assert cpp.count(PINNED) == 1
         assert f'{PINNED}")); return na<double>(); }}())' in cpp

@@ -1237,6 +1237,26 @@ class TopLevelEmitter:
         lines.append("        pineforge::source::PineStrategyHost::set_strategy_override(overrides);")
         lines.append("    }")
 
+        if self._uses_recorded_requests():
+            lines.extend([
+                "",
+                "#ifdef PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1",
+                "    // request.earnings / dividends / splits / financial: the series the requests",
+                "    // manifest records under the request's key, TradingView's value on the chart",
+                "    // bar opening at this bar's time (na where it has no row). A key nobody",
+                "    // installed reads na here, and the request's reads stop the run.",
+                "    double _pf_recorded(const std::string& key) const {",
+                "        return recorded_series_.count(key) != 0 ? recorded_series_value(key)",
+                "                                                : na<double>();",
+                "    }",
+                "    bool _pf_recorded_missing(const std::string& key) const {",
+                "        return recorded_series_.count(key) == 0;",
+                "    }",
+                "#else",
+                "    double _pf_recorded(const std::string&) const { return na<double>(); }",
+                "    bool _pf_recorded_missing(const std::string&) const { return true; }",
+                "#endif",
+            ])
         if self._security_eval_info:
             lines.append("")
             if any(info.get("foreign") for info in self._security_eval_info):

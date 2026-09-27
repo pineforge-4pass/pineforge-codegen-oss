@@ -182,10 +182,14 @@ KNOWN_REQUEST_OMISSIONS = frozenset({
     "currency_rate", "economic", "quandl", "seed",
 })
 
-# Requests PineForge has no data for (``external_requests``): accepted, and
-# lowered to na, only when their value reaches display and alert sinks alone;
-# refused when it can reach a trade. ``request.footprint`` (outside the
-# frozen inventory above) follows the same rule.
+# Requests whose data PineForge does not load itself (``external_requests``):
+# lowered to na when their value reaches display and alert sinks alone; when
+# it can reach a trade, they read the series TradingView returned per chart
+# bar, recorded by the requests manifest under the request's key, and a key no
+# series was installed for stops the run where it is read (a spelling no key
+# names keeps that deferred refusal). ``request.footprint`` (outside the
+# frozen inventory above) reads another symbol's feed column inside
+# request.security, and is a deferred refusal elsewhere.
 NO_DATA_REQUESTS = frozenset({"dividends", "earnings", "financial", "splits"})
 
 # footprint.* members of a request.footprint value, as TradingView's January
@@ -512,9 +516,11 @@ def test_no_data_request_reaching_display_only_is_lowered(call):
 
 
 @pytest.mark.parametrize("call", NO_DATA_CALLS)
-def test_no_data_request_reaching_a_trade_is_deferred(call):
-    """Its first read stops the run (external_requests)."""
+def test_no_data_request_reaching_a_trade_reads_its_recorded_series(call):
+    """It reads its recorded series; a read stops the run when none was
+    installed (external_requests)."""
     cpp = transpile(_pine(f'x = {call}\nif x > 0\n    strategy.entry("L", strategy.long)'))
+    assert "x = _pf_recorded(" in cpp
     assert "no data is pinned for this request, and its value was read" in cpp
 
 

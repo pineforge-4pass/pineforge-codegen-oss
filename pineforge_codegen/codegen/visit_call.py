@@ -145,6 +145,7 @@ from ..ast_nodes import (
     StringLiteral,
     VarDecl,
 )
+from ..external_requests import RECORDED_KEY_ANNOTATION
 from ..symbols import TypeSpec, method_receiver_type_name
 from ..method_binding import (
     MethodBindError,
@@ -1846,6 +1847,10 @@ class CallVisitor:
                     if item["expr_node"] is ltf_expr_node:
                         return f"_req_sec_lower_tf_{item['sec_id']}"
                 return "std::vector<double>{}"
+            # request.earnings / dividends / splits / financial reading the
+            # series recorded under their key (external_requests).
+            if RECORDED_KEY_ANNOTATION in (node.annotations or {}):
+                return f"_pf_recorded({self._recorded_key_expr(node)})"
             # All other request.* functions
             return "na<double>()"
 

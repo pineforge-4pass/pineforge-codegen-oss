@@ -173,8 +173,22 @@ def _expect_deferred(src: str, line: int | None = None, col: int | None = None) 
         assert (deferred[0].location.line, deferred[0].location.col) == (line, col)
 
 
-def test_request_financial_reaching_a_trade_is_deferred():
+def test_request_financial_reaching_a_trade_reads_its_recorded_series():
+    """Its value reaches a trade: it reads the series the requests manifest
+    records under its key (lane XSYM-E)."""
     src = PRELUDE + 'a = request.financial(syminfo.tickerid, "REVENUE", "FY")\n' + TRADES_ON_A
+    assert _errors(src) == []
+    assert [d.message for d in _warnings(src) if "records under" in d.message] == [
+        'request.financial(syminfo.tickerid, "REVENUE", ...) at line 3: TradingView\'s values '
+        "per chart bar, read from the series the requests manifest records under "
+        "financial|<its symbol>|REVENUE|FY|gaps_off|lookahead_off; with none installed, the "
+        "run stops with an error where its value is read."]
+
+
+def test_request_financial_of_no_recorded_key_is_deferred():
+    """A financial id no key names (an input) keeps the deferred refusal."""
+    src = (PRELUDE + 'fid = input.string("REVENUE", "Id")\n'
+           'a = request.financial(syminfo.tickerid, fid, "FY")\n' + TRADES_ON_A)
     _expect_deferred(src)
 
 
