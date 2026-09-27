@@ -715,6 +715,30 @@ you delete or weaken the special case, the test will tell you.
     `na`. A callable stateful only through this rule keeps its old shared
     typing when two primitive types meet in one variant, with a WARNING
     (`tests/test_function_global_history_clones.py`).
+19. **A binary operator evaluates its left operand first.** C++ leaves the
+    order of the operands of `+ - * / %` and of an overloaded operator
+    (`std::string`'s `+` and `==`, `std::fmod`) unspecified: AppleClang goes
+    left to right, GCC on x86-64 ran `std::string` `operator+`'s right operand
+    first. When one operand has an effect
+    (`visit_expr._expr_has_ordered_effect`: an array/map/matrix mutation, a
+    drawing, an order, a log line, an alert, `runtime.error`, or a user
+    function or method doing one or assigning a UDT field) and the other can
+    observe it (it is not `_binop_operand_is_order_free`: literals,
+    variables, and `str.*`/`math.*`/`color.*`/`ta.*`/`nz`/`na`/cast calls and
+    operators over them), `_left_operand_first` emits
+    `[&]{ auto __pf_binop_lhs_N = (<left>); return <op>; }()` (`bool` for a
+    bool operand: a `std::vector<bool>` element is a proxy), for
+    `_visit_binop` and the `request.security` builder alike. `&&`/`||` and
+    the relational wrappers already order their operands; every other binop
+    keeps its C++ (the 325 corpus, 277 gate and 1,430 population sources are
+    byte-identical). TradingView's K-RUNERR tape spells the left-first order
+    (`tests/test_e2e_krunerr_array_negative_index.py`);
+    `tests/test_binop_operand_order.py` pins the form and the values. A
+    call's arguments are ordered only where a lowering binds them:
+    `_ordered_user_call_expr` stages a user call with a map effect or a
+    temporary receiver, `helpers.evaluate_args_once` (quirk 16) binds the
+    arguments a template reads more than once, and the checked `array.*`
+    lowerings bind receiver, index and value in turn.
 
 ## How to add a new Pine v6 function
 

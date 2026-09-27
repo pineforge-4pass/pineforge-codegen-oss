@@ -6020,25 +6020,30 @@ class SecurityEmitter:
             right = self._build_security_expr(
                 sec_id, expr_node.right, ta_range, ta_results, resolving, security_mutable_names, helper_binding_stack, emitted_lines
             )
-            cpp_ops = {"and": "&&", "or": "||"}
-            op = cpp_ops.get(expr_node.op, expr_node.op)
-            if expr_node.op in ("and", "or"):
-                left = self._coerce_bool_expr(left, expr_node.left)
-                right = self._coerce_bool_expr(right, expr_node.right)
-            if expr_node.op == "%":
-                return f"std::fmod((double)({left}), (double)({right}))"
-            # Pine v6 ``/`` yields a float on int operands too (the chart's
-            # ``_visit_binop``); C++ divides two ints as integers. A double
-            # operand already divides in floating point and keeps its spelling.
-            if expr_node.op == "/" and not any(
-                self._security_emits_double(side, helper_binding_stack)
-                for side in (expr_node.left, expr_node.right)
-            ):
-                return f"((double)({left}) / (double)({right}))"
-            # KI-71: honour Pine's falsy-on-na relational rule inside
-            # request.security expressions too (this builder is a second
-            # relational emission site independent of _visit_binop).
-            return self._lower_relational(op, expr_node.left, expr_node.right, left, right)
+
+            def lower(left: str, right: str) -> str:
+                cpp_ops = {"and": "&&", "or": "||"}
+                op = cpp_ops.get(expr_node.op, expr_node.op)
+                if expr_node.op in ("and", "or"):
+                    left = self._coerce_bool_expr(left, expr_node.left)
+                    right = self._coerce_bool_expr(right, expr_node.right)
+                if expr_node.op == "%":
+                    return f"std::fmod((double)({left}), (double)({right}))"
+                # Pine v6 ``/`` yields a float on int operands too (the chart's
+                # ``_visit_binop``); C++ divides two ints as integers. A double
+                # operand already divides in floating point and keeps its spelling.
+                if expr_node.op == "/" and not any(
+                    self._security_emits_double(side, helper_binding_stack)
+                    for side in (expr_node.left, expr_node.right)
+                ):
+                    return f"((double)({left}) / (double)({right}))"
+                # KI-71: honour Pine's falsy-on-na relational rule inside
+                # request.security expressions too (this builder is a second
+                # relational emission site independent of _visit_binop).
+                return self._lower_relational(op, expr_node.left, expr_node.right, left, right)
+
+            # The left operand first, as on the chart (``_left_operand_first``).
+            return self._left_operand_first(expr_node, left, right, lower)
 
         if isinstance(expr_node, UnaryOp):
             operand = self._build_security_expr(
