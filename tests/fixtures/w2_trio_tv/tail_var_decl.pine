@@ -1,0 +1,12 @@
+//@version=6
+strategy("pf-w2-f04-var-decl-tail", overlay = true)
+
+// A function whose last statement is a var declaration.
+fVarDecl(float v) =>
+    var float first = v
+
+r = fVarDecl(close)
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = str.tostring(r, "#.####") + "|" + str.tostring(close, "#.####"))

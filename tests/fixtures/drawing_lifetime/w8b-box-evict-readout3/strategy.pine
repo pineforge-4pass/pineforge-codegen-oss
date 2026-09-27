@@ -1,0 +1,19 @@
+//@version=6
+strategy("W8B readout: first box after hundreds more on a 100-box chart", overlay=true, max_boxes_count=100, pyramiding=20, default_qty_type=strategy.fixed, default_qty_value=0.01)
+
+// Lane W8B-SIGSTATE-2. A (top 111) is drawn at 2025-04-08 00:00 UTC, then one
+// box every bar (top = its own bar_index) on a chart that keeps 100 boxes.
+// Each readout is an entry whose comment carries how many boxes were drawn
+// after A and A's top, read after 99, 100, 101, 150, 300, 600 and 1000 boxes.
+var box a = na
+var int n = 0
+start = timestamp("UTC", 2025, 4, 8, 0, 0)
+if time == start
+    a := box.new(bar_index, 111.0, bar_index + 1, 11.0)
+else if time > start
+    box.new(bar_index, bar_index, bar_index + 1, 1.0)
+    n += 1
+    if n == 99 or n == 100 or n == 101 or n == 150 or n == 300 or n == 600 or n == 1000
+        strategy.entry("R" + str.tostring(n), strategy.long, comment=str.tostring(n) + ":" + str.tostring(box.get_top(a)))
+if n == 1001
+    strategy.close_all(comment="cleanup")

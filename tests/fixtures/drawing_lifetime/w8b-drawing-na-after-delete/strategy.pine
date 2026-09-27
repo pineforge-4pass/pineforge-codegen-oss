@@ -1,0 +1,34 @@
+//@version=6
+strategy("W8B readout: na() of deleted and collected drawings", overlay=true, max_lines_count=5, max_boxes_count=5, pyramiding=20, default_qty_type=strategy.fixed, default_qty_value=0.01)
+
+// Lane W8B-SIGSTATE-2. On charts that keep five lines and five boxes: line D
+// and box B are deleted at 00:15 on 2025-04-08; line E and box C are kept only
+// in var arrays and collected once the sixth filler of their kind lands (one
+// filler line and one filler box per bar from 00:30). Each readout is an
+// entry whose comment carries na() of D, B, E and C (1 = na).
+t(h, m) => timestamp("UTC", 2025, 4, 8, h, m)
+var line d = na
+var box b = na
+var array<line> lines = array.new_line()
+var array<box> boxes = array.new_box()
+if time == t(0, 0)
+    d := line.new(bar_index, 333.0, bar_index + 1, 333.0)
+    b := box.new(bar_index, 333.0, bar_index + 1, 33.0)
+    array.push(lines, line.new(bar_index, 444.0, bar_index + 1, 444.0))
+    array.push(boxes, box.new(bar_index, 444.0, bar_index + 1, 44.0))
+if time == t(0, 15)
+    line.delete(d)
+    box.delete(b)
+if time >= t(0, 30) and time <= t(12, 0)
+    line.new(bar_index, 200.0, bar_index + 1, 200.0)
+    box.new(bar_index, 200.0, bar_index + 1, 100.0)
+f(bool x) => x ? "1" : "0"
+tag(string n) => n + ":" + f(na(d)) + f(na(b)) + f(na(array.get(lines, 0))) + f(na(array.get(boxes, 0)))
+if time == t(0, 0)
+    strategy.entry("R0", strategy.long, comment=tag("new"))
+if time == t(0, 15)
+    strategy.entry("R1", strategy.long, comment=tag("deleted"))
+if time == t(4, 0)
+    strategy.entry("R2", strategy.long, comment=tag("collected"))
+if time == t(13, 0)
+    strategy.close_all(comment="cleanup")

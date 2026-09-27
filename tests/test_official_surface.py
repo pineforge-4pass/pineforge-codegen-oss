@@ -45,6 +45,7 @@ from pineforge_codegen.support_checker import (
     SUPPORTED_LOG,
     HARD_REJECT_FUNC,
     HARD_REJECT_NAMESPACE,
+    NO_DATA_REQUEST_FUNC,
     CLOSED_TRADE_ACCESSOR_METHODS,
     OPEN_TRADE_ACCESSOR_METHODS,
 )
@@ -171,12 +172,17 @@ KNOWN_ARRAY_VISUAL_OMISSIONS = frozenset({
 # (see pineforge-engine docs/coverage.md "Typed (UDT) matrices" gap).
 KNOWN_MATRIX_OMISSIONS = frozenset({"median"})
 
-# All non-security request.* are intentionally rejected per coverage.md:
-# external aux data feeds are out of scope for offline backtests.
+# The other request.* read external aux data feeds, out of scope for offline
+# backtests per coverage.md: intentionally rejected.
 KNOWN_REQUEST_OMISSIONS = frozenset({
-    "currency_rate", "dividends", "earnings", "economic", "financial",
-    "quandl", "seed", "splits",
+    "currency_rate", "economic", "quandl", "seed",
 })
+
+# Requests PineForge has no data for (``external_requests``): accepted, and
+# lowered to na, only when their value reaches display and alert sinks alone;
+# refused when it can reach a trade. ``request.footprint`` (outside the
+# frozen inventory above) follows the same rule.
+NO_DATA_REQUESTS = frozenset({"dividends", "earnings", "financial", "splits"})
 
 # timeframe.from_seconds requires a runtime seconds_to_tf inverse mapping
 # that the engine does not currently expose; both layers omit it.
@@ -375,9 +381,8 @@ INTENTIONALLY_REJECTED = [
     # Neither side of trade accessors has 'direction' in Pine v6.
     'x = strategy.closedtrades.direction(0)',
     'x = strategy.opentrades.direction(0)',
-    # external request feeds.
-    'x = request.financial(syminfo.tickerid, "TOTAL_REVENUE", "FQ")',
-    'x = request.dividends(syminfo.tickerid, dividends.gross)',
+    # external request feeds PineForge has no ingestion path for.
+    'x = request.seed("seed_crypto_santiment", "BTC_SENTIMENT_POSITIVE_TOTAL", close)',
     # ticker.* construction is meaningless in PineForge.
     't = ticker.new(syminfo.prefix, syminfo.ticker)',
     # matrix.median has no runtime backing.
@@ -444,15 +449,43 @@ def test_no_max_bars_back_leaves_series_at_engine_default():
 # ---------------------------------------------------------------------------
 
 EXPECTED_HARD_REJECT_FUNCS = {
-    "request.financial", "request.dividends", "request.earnings",
-    "request.splits", "request.seed", "request.quandl",
-    "request.currency_rate",
+    "request.seed", "request.quandl", "request.currency_rate",
 }
 
 
 def test_hard_reject_func_table_covers_known_unsupported_calls():
     missing = EXPECTED_HARD_REJECT_FUNCS - set(HARD_REJECT_FUNC)
     assert not missing, f"HARD_REJECT_FUNC missing entries: {sorted(missing)}"
+
+
+def test_request_inventory_is_accounted_for():
+    assert OFFICIAL_REQUEST == (
+        {"security", "security_lower_tf"} | KNOWN_REQUEST_OMISSIONS | NO_DATA_REQUESTS)
+    assert set(NO_DATA_REQUEST_FUNC) == (
+        {f"request.{name}" for name in NO_DATA_REQUESTS} | {"request.footprint"})
+    assert not set(NO_DATA_REQUEST_FUNC) & set(HARD_REJECT_FUNC)
+
+
+NO_DATA_CALLS = [
+    'request.financial(syminfo.tickerid, "TOTAL_REVENUE", "FQ")',
+    'request.dividends(syminfo.tickerid, dividends.gross)',
+    'request.earnings(syminfo.tickerid, earnings.actual, barmerge.gaps_on)',
+    'request.splits(syminfo.tickerid, splits.denominator)',
+]
+
+
+@pytest.mark.parametrize("call", NO_DATA_CALLS)
+def test_no_data_request_reaching_display_only_is_lowered(call):
+    cpp = transpile(_pine(f'x = {call}\nplot(x)'))
+    assert "na<double>()" in cpp
+    assert "no data is pinned" not in cpp
+
+
+@pytest.mark.parametrize("call", NO_DATA_CALLS)
+def test_no_data_request_reaching_a_trade_is_deferred(call):
+    """Its first read stops the run (external_requests)."""
+    cpp = transpile(_pine(f'x = {call}\nif x > 0\n    strategy.entry("L", strategy.long)'))
+    assert "no data is pinned for this request, and its value was read" in cpp
 
 
 def test_hard_reject_namespace_covers_ticker():

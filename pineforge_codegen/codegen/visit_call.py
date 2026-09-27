@@ -154,7 +154,10 @@ from ..method_binding import (
 )
 from .. import signatures as sigs
 from .drawing import ALL_DRAWING_METHODS
-from .helpers import color_alpha_cast, na_preserving_int_cast, pine_truth_cast
+from .helpers import (
+    color_alpha_cast, cpp_is_plain_read, evaluate_args_once,
+    na_preserving_int_cast, pine_truth_cast,
+)
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_METHODS,
@@ -172,9 +175,11 @@ from .tables import (
     SKIP_FUNC_NAMES,
     SKIP_NAMESPACES,
     SKIP_VAR_TYPES,
+    STR_ARGS_READ_REPEATEDLY,
     STR_FUNC_MAP,
     TIME_FIELD_EXPRS,
     _math_minmax_na_expr,
+    _math_round_digits_expr,
     _merge_kwargs,
 )
 
@@ -457,6 +462,11 @@ class CallVisitor:
                 and receiver_spec.name not in self._udt_defs
             )
         )
+        # A temporary receiver is evaluated before the arguments in Pine. C++
+        # leaves the order of call arguments unspecified (GCC evaluates them
+        # right to left), so stage the call whenever an argument could observe
+        # the receiver's evaluation.
+        receiver_is_temporary = not isinstance(receiver_root, Identifier)
         return self._ordered_user_call_expr(
             fn_cpp,
             [receiver_node, *rest_nodes],
@@ -465,9 +475,15 @@ class CallVisitor:
                 receiver_node,
                 *binding.evaluation_order,
             ],
-            force_stage=(
+            force_stage=receiver_is_temporary and (
                 receiver_passes_by_reference
-                and not isinstance(receiver_root, Identifier)
+                or any(
+                    not isinstance(arg, (
+                        NumberLiteral, StringLiteral, BoolLiteral, NaLiteral,
+                        ColorLiteral,
+                    ))
+                    for arg in rest_nodes
+                )
             ),
         )
 
@@ -1090,8 +1106,7 @@ class CallVisitor:
                     == expected_cpp_type
             ):
                 return safe
-            if self._active_var_remap and safe in self._active_var_remap:
-                safe = self._active_var_remap[safe]
+            safe = self._call_site_var_name(arg_node, safe)
             if (
                 not is_current_series_param
                 and self._binding_is_series(arg_name, safe)
@@ -1464,7 +1479,7 @@ class CallVisitor:
 
         func_name, namespace = self._resolve_callee(callee)
 
-        # na(x) -> is_na(x)
+        # na(x) -> is_na(x); a drawing asks its arena (codegen/drawing.py).
         if func_name == "na" and namespace is None:
             if (len(node.args) == 1 and not node.kwargs
                     and self._infer_type(node.args[0]) == "std::string"):
@@ -1477,6 +1492,10 @@ class CallVisitor:
                     "is na here, while TradingView tells the two apart.",
                 )
                 return f"({self._visit_expr(node.args[0])}).empty()"
+            if len(node.args) == 1:
+                drawing = self._drawing_na_expr(node.args[0])
+                if drawing is not None:
+                    return drawing
             args = ", ".join(self._visit_expr(a) for a in node.args)
             return f"is_na({args})"
 
@@ -1493,10 +1512,17 @@ class CallVisitor:
         # lambda hoists x into a local `auto` so it is computed once and
         # both branches read the same value; `[&]` is safe here since the
         # lambda is called synchronously and discarded, never escaping.
+        # Pine evaluates the replacement y on every call too, na source or
+        # not, so a y that is more than a plain read is bound as well: in the
+        # ternary it ran only on the bars whose x was na, and a stateful call
+        # in it skipped every other bar.
         if func_name == "nz" and namespace is None:
             x = self._visit_expr(node.args[0])
             y = self._visit_expr(node.args[1]) if len(node.args) > 1 else "0.0"
-            return f"([&]{{ auto _nz_v = ({x}); return is_na(_nz_v) ? ({y}) : _nz_v; }}())"
+            if cpp_is_plain_read(y):
+                return f"([&]{{ auto _nz_v = ({x}); return is_na(_nz_v) ? ({y}) : _nz_v; }}())"
+            return (f"([&]{{ auto _nz_v = ({x}); auto _nz_y = ({y}); "
+                    f"return is_na(_nz_v) ? _nz_y : _nz_v; }}())")
 
         # fixnan(x) -> persistent state
         if func_name == "fixnan" and namespace is None:
@@ -2410,8 +2436,7 @@ class CallVisitor:
                             == expected_cpp_type
                     ):
                         return safe
-                    if self._active_var_remap and safe in self._active_var_remap:
-                        safe = self._active_var_remap[safe]
+                    safe = self._call_site_var_name(arg_node, safe)
                     if (
                         not is_current_series_param
                         and self._binding_is_series(aname, safe)
@@ -2663,8 +2688,15 @@ class CallVisitor:
         else:
             self._fixnan_counter += 1
             member = f"_prev_fixnan_{self._fixnan_counter}"
+        # x is evaluated exactly once, as in ``nz``: a stateful call in it
+        # (``fixnan(100 * ta.rma(plusDM, len) / tr)``, TradingView's DMI) used
+        # to run twice per bar, once for the is_na() test and once for the
+        # store, double-stepping the RMA.
         x = self._visit_expr(node.args[0])
-        return f"(is_na({x}) ? {member} : ({member} = {x}))"
+        return (
+            f"([&]{{ auto _fixnan_v = ({x}); "
+            f"return is_na(_fixnan_v) ? {member} : ({member} = _fixnan_v); }}())"
+        )
 
     @staticmethod
     def _strategy_close_callsite_token(node: FuncCall) -> str:
@@ -3021,7 +3053,10 @@ class CallVisitor:
 
         if func_name == "substring":
             if len(args) == 3:
-                return f"{args[0]}.substr({args[1]}, {args[2]} - {args[1]})"
+                # begin_pos is read twice: evaluate it once.
+                return evaluate_args_once(
+                    args, (1,), lambda a: f"{a[0]}.substr({a[1]}, {a[2]} - {a[1]})",
+                    "_pf_str_a")
             elif len(args) == 2:
                 return f"{args[0]}.substr({args[1]})"
             return 'std::string("")'
@@ -3054,11 +3089,17 @@ class CallVisitor:
                     f'p+=t.length(); _i++; }} return s; }}()'
                 )
             if len(args) >= 3:
-                return f'[&](){{ std::string s={args[0]}; auto p=s.find({args[1]}); if(p!=std::string::npos) s.replace(p,{args[1]}.length(),{args[2]}); return s; }}()'
+                # target is read twice: evaluate it once.
+                return evaluate_args_once(
+                    args, (1,),
+                    lambda a: f'[&](){{ std::string s={a[0]}; auto p=s.find({a[1]}); if(p!=std::string::npos) s.replace(p,{a[1]}.length(),{a[2]}); return s; }}()',
+                    "_pf_str_a")
             return 'std::string("")'
 
         if func_name in STR_FUNC_MAP and STR_FUNC_MAP[func_name] is not None:
-            return STR_FUNC_MAP[func_name](args)
+            return evaluate_args_once(
+                args, STR_ARGS_READ_REPEATEDLY.get(func_name, ()),
+                STR_FUNC_MAP[func_name], "_pf_str_a")
 
         return f'std::string("") /* unsupported: str.{func_name} */'
 
@@ -3066,7 +3107,7 @@ class CallVisitor:
         args = _merge_kwargs(node.args, node.kwargs, sigs.get_param_names("math", func_name), self._visit_expr)
         # Handle special cases first
         if func_name == "round" and len(args) == 2:
-            return f"(std::round({args[0]} * std::pow(10.0, {args[1]})) / std::pow(10.0, {args[1]}))"
+            return _math_round_digits_expr(args)
         if func_name == "round_to_mintick":
             # Engine method (engine.hpp): NaN- and mintick<=0-guarded,
             # unlike the previous inlined unguarded std::round.

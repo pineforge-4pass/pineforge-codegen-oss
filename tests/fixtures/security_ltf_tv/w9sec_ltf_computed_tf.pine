@@ -1,0 +1,22 @@
+//@version=6
+// A request.security_lower_tf timeframe computed on the first bar: one
+// declaration expression, and the same value reached through := reassignments.
+strategy("PF w9sec lower tf computed timeframe", overlay = true)
+string profile = input.string("Balanced", "Profile", options = ["Balanced", "Fine"])
+int chartSeconds = timeframe.in_seconds()
+string ltfDecl = str.tostring(int(math.max(1, math.floor(chartSeconds * 1.0 / 3) / 60)))
+int target = 3
+if profile == "Fine"
+    target := 15
+int lowerSeconds = int(math.floor(chartSeconds * 1.0 / target))
+lowerSeconds := math.max(60, lowerSeconds)
+lowerSeconds := math.min(chartSeconds, lowerSeconds)
+string ltf = str.tostring(int(math.max(1, lowerSeconds / 60)))
+array<float> a = request.security_lower_tf(syminfo.tickerid, ltfDecl, close)
+array<float> b = request.security_lower_tf(syminfo.tickerid, ltf, close)
+s(x) => na(x) ? "na" : str.tostring(x)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = ltfDecl + "|" + str.tostring(array.size(a)) + "|" + ltf + "|" + str.tostring(array.size(b)) + "|" + s(array.size(b) > 0 ? array.get(b, 0) : na))

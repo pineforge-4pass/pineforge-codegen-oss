@@ -1,0 +1,15 @@
+//@version=6
+// request.security payloads reading derived bar series history: each on the
+// requested clock, directly and under a builtin call.
+strategy("PF w9sec derived history payload", overlay = true)
+a = request.security(syminfo.tickerid, "60", hl2[1])
+b = request.security(syminfo.tickerid, "60", hlc3[2])
+c = request.security(syminfo.tickerid, "60", ohlc4[1])
+e = request.security(syminfo.tickerid, "60", nz(hl2[2]) + math.min(ohlc4[1], hlc3))
+f = request.security(syminfo.tickerid, "D", ohlc4[1])
+s(x) => na(x) ? "na" : str.tostring(x)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(a) + "|" + s(b) + "|" + s(c) + "|" + s(e) + "|" + s(f))

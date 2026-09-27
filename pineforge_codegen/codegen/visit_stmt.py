@@ -1624,7 +1624,8 @@ class StmtVisitor:
                 )
                 lines.append(f"{pad}}}")
 
-    def _visit_for(self, node: ForStmt, lines: list[str], indent: int) -> None:
+    def _visit_for(self, node: ForStmt, lines: list[str], indent: int,
+                   value_target: tuple[str, str | None] | None = None) -> None:
         pad = "    " * indent
         start = self._visit_expr(node.start)
         end = self._visit_expr(node.end)
@@ -1716,15 +1717,15 @@ class StmtVisitor:
             self._lexical_series_bindings[node.var] = False
             self._lexical_known_var_tombstones.add(node.var)
         try:
-            for s in node.body:
-                self._visit_stmt(s, lines, indent + 1)
+            self._emit_loop_body(node.body, lines, indent + 1, value_target)
         finally:
             self._pop_block_var_remap(_blk_saved)
         self._current_loop_vars = saved_loop
         self._current_loop_var_specs = saved_loop_specs
         lines.append(f"{pad}}}")
 
-    def _visit_for_in(self, node, lines: list[str], indent: int) -> None:
+    def _visit_for_in(self, node, lines: list[str], indent: int,
+                      value_target: tuple[str, str | None] | None = None) -> None:
         pad = "    " * indent
         iterable = self._visit_expr(node.iterable)
         saved_loop = self._current_loop_vars
@@ -1862,15 +1863,15 @@ class StmtVisitor:
                 self._lexical_series_bindings[name] = False
                 self._lexical_known_var_tombstones.add(name)
         try:
-            for s in node.body:
-                self._visit_stmt(s, lines, indent + 1)
+            self._emit_loop_body(node.body, lines, indent + 1, value_target)
         finally:
             self._pop_block_var_remap(_blk_saved)
         lines.append(f"{pad}}}")
         self._current_loop_vars = saved_loop
         self._current_loop_var_specs = saved_loop_specs
 
-    def _visit_while(self, node: WhileStmt, lines: list[str], indent: int) -> None:
+    def _visit_while(self, node: WhileStmt, lines: list[str], indent: int,
+                     value_target: tuple[str, str | None] | None = None) -> None:
         pad = "    " * indent
         cond = self._coerce_bool_expr(
             self._visit_expr(node.condition), node.condition
@@ -1878,11 +1879,191 @@ class StmtVisitor:
         lines.append(f"{pad}while ({cond}) {{")
         _blk_saved = self._push_block_var_remap(node)
         try:
-            for s in node.body:
-                self._visit_stmt(s, lines, indent + 1)
+            self._emit_loop_body(node.body, lines, indent + 1, value_target)
         finally:
             self._pop_block_var_remap(_blk_saved)
         lines.append(f"{pad}}}")
+
+    def _emit_loop_body(self, body: list, lines: list[str], indent: int,
+                        value_target: tuple[str, str | None] | None) -> None:
+        """A loop body; a loop used as a value assigns its last statement's
+        value to ``value_target`` (``(target, target_cpp_type)``)."""
+        if value_target is None:
+            for s in body:
+                self._visit_stmt(s, lines, indent)
+            return
+        target, target_cpp_type = value_target
+        value_cpp = self._block_value_cpp_type(body, target_cpp_type)
+        saved = getattr(self, "_loop_value_na", None)
+        # TradingView: an if without else (a switch without default) is na
+        # when no arm runs, so a loop whose body ends in one is na after an
+        # iteration that ran none (lab tv probe pf-w2-f04_if_tails).
+        self._loop_value_na = (
+            (target, self._na_value_for_type(value_cpp))
+            if value_cpp is not None else None
+        )
+        try:
+            self._emit_body_with_assign(
+                body, target, lines, indent, target_cpp_type=target_cpp_type,
+            )
+        finally:
+            self._loop_value_na = saved
+
+    def _emit_loop_with_assign(
+        self,
+        node,
+        target: str,
+        lines: list[str],
+        indent: int,
+        target_cpp_type: str | None = None,
+        reset: bool = True,
+    ) -> None:
+        """A loop that is a function's or an if/switch arm's last statement.
+
+        TradingView makes it the value its body's last statement produced on
+        the last iteration that reached that statement -- a ``break`` or
+        ``continue`` before it keeps the previous value -- and ``na`` when
+        none did (lab tv probes pf-w2-f04_loop_tail / f04_loop_edges).
+        """
+        visit = {
+            ForStmt: self._visit_for,
+            ForInStmt: self._visit_for_in,
+            WhileStmt: self._visit_while,
+        }[type(node)]
+        value_cpp = self._loop_value_cpp_type(node, target_cpp_type)
+        if value_cpp is None:
+            # No scalar or string value to leave (a drawing call, a void
+            # call, a handle): the loop is the plain statement it always was.
+            visit(node, lines, indent)
+            return
+        if reset:
+            pad = "    " * indent
+            lines.append(f"{pad}{target} = {self._na_value_for_type(value_cpp)};")
+        visit(node, lines, indent, value_target=(target, target_cpp_type))
+
+    def _loop_value_unmatched_na(self, target: str) -> str | None:
+        """The na a loop's value ``target`` takes when its last if/switch runs
+        no arm, or None outside a loop's value position."""
+        active = getattr(self, "_loop_value_na", None)
+        if active is not None and active[0] == target:
+            return active[1]
+        return None
+
+    def _na_value_for_type(self, cpp_type: str | None) -> str:
+        """``na`` of a value slot: a numeric or string na, else its default."""
+        if cpp_type is None:
+            return "na<double>()"
+        if cpp_type in ("double", "int", "int64_t", "std::string"):
+            return f"na<{cpp_type}>()"
+        return self._default_for_type(cpp_type)
+
+    _TAIL_SCALAR_CPP = ("double", "int", "int64_t", "bool")
+
+    def _tail_value_cpp_type(self, stmt) -> str | None:
+        """C++ type of the value a value-producing last statement leaves, or
+        None when it is a drawing, UDT or collection handle (or unknown).
+
+        Judged from the statement itself -- a declaration's type hint and
+        right-hand side, an assignment's target and right-hand side -- so the
+        answer does not depend on whether its local has been emitted yet.
+        """
+        if isinstance(stmt, ExprStmt):
+            parts, typed = [stmt.expr], stmt.expr
+        elif isinstance(stmt, VarDecl) and stmt.name:
+            parts, typed = [stmt.value], stmt.value
+            if stmt.type_hint:
+                spec = self._type_spec_from_hint_name(stmt.type_hint)
+                if spec is None or spec.kind != "primitive":
+                    return None
+                return self._type_spec_to_cpp(spec)
+        elif (isinstance(stmt, Assignment)
+                and isinstance(stmt.target, (Identifier, MemberAccess))):
+            parts, typed = [stmt.target, stmt.value], stmt.target
+        else:
+            return None
+        for part in parts:
+            if part is None:
+                return None
+            spec = self._type_spec_from_expr(part)
+            if spec is not None and spec.kind != "primitive":
+                return None
+        value_cpp = self._infer_type(typed)
+        if value_cpp in self._TAIL_SCALAR_CPP or value_cpp == "std::string":
+            return value_cpp
+        return None
+
+    def _tail_value_fits(self, stmt, slot_cpp_type: str | None) -> bool:
+        """Whether the value a last statement leaves fits the slot it feeds.
+
+        Only a scalar (numeric or bool) or a string is returned; a drawing,
+        UDT or collection handle keeps the statement-then-default lowering,
+        which is what every such tail compiled to before the value was
+        returned. ``slot_cpp_type`` None is a double or string slot.
+        """
+        value_cpp = self._tail_value_cpp_type(stmt)
+        if value_cpp is None:
+            return False
+        if slot_cpp_type is None:
+            return True
+        if slot_cpp_type in self._TAIL_SCALAR_CPP:
+            return value_cpp in self._TAIL_SCALAR_CPP
+        return slot_cpp_type == "std::string" == value_cpp
+
+    def _loop_value_cpp_type(self, node, slot_cpp_type: str | None) -> str | None:
+        """C++ type of the value a loop leaves, when its body's last statement
+        yields one that fits ``slot_cpp_type``; None otherwise."""
+        return self._block_value_cpp_type(
+            getattr(node, "body", None) or [], slot_cpp_type
+        )
+
+    def _block_value_cpp_type(self, body: list, slot_cpp_type: str | None) -> str | None:
+        """C++ type of the value a block's last statement yields into
+        ``slot_cpp_type`` (through nested loops and if/switch arms), or None
+        when it yields none that fits."""
+        if not body:
+            return None
+        last = body[-1]
+        if isinstance(last, (ForStmt, ForInStmt, WhileStmt)):
+            return self._block_value_cpp_type(last.body, slot_cpp_type)
+        if isinstance(last, IfStmt):
+            arms = [last.body] + ([last.else_body] if last.else_body else [])
+        elif isinstance(last, SwitchStmt):
+            arms = [body_ for _, body_ in last.cases] + (
+                [last.default_body] if last.default_body else [])
+        else:
+            arms = None
+        if arms is not None:
+            # Every arm must yield a fitting value of one type; a missing
+            # else/default arm is na on its path.
+            found = {self._block_value_cpp_type(arm, slot_cpp_type) for arm in arms}
+            return found.pop() if len(found) == 1 and None not in found else None
+        if self._statement_value_node(last) is None and not isinstance(last, ExprStmt):
+            return None
+        if isinstance(last, ExprStmt) and (
+                self._call_is_void(last.expr) or self._is_skip_expr(last.expr)):
+            return None
+        if not self._tail_value_fits(last, slot_cpp_type):
+            return None
+        return slot_cpp_type or self._tail_value_cpp_type(last)
+
+    @staticmethod
+    def _statement_value_node(stmt):
+        """The node whose value a value-producing statement leaves, or None.
+
+        TradingView makes the last statement of a function or an if/switch
+        arm its value: ``x := e`` and ``x += e`` (every compound operator)
+        yield the target's new value, ``obj.f := e`` the field's, and a
+        declaration ``[var] [T] x = e`` the declared variable's (lab tv probes
+        pf-w2-f04_tails / f04_decl_tail / f04_var_decl_tail).
+        """
+        if isinstance(stmt, Assignment) and isinstance(
+                stmt.target, (Identifier, MemberAccess)):
+            return stmt.target
+        if isinstance(stmt, VarDecl) and stmt.name:
+            node = Identifier(name=stmt.name)
+            node.loc = stmt.loc
+            return node
+        return None
 
     def _visit_switch(self, node: SwitchStmt, lines: list[str], indent: int) -> None:
         pad = "    " * indent
@@ -1970,6 +2151,26 @@ class StmtVisitor:
                         indent,
                         target_cpp_type=target_cpp_type,
                     )
+                elif (self._statement_value_node(stmt) is not None
+                        and self._tail_value_fits(stmt, target_cpp_type)):
+                    # ``y := v * 5`` / ``y += v`` / ``float y = v`` as the
+                    # value: run the statement, then read what it left.
+                    self._visit_stmt(stmt, lines, indent)
+                    value = self._statement_value_node(stmt)
+                    cpp = self._coerce_int_slot(
+                        self._visit_rhs_value(
+                            value, target_cpp_type=target_cpp_type,
+                        ),
+                        value,
+                        self._int_slot_cpp_type(None, target_cpp_type),
+                    )
+                    pad = "    " * indent
+                    lines.append(f"{pad}{target} = {cpp};")
+                elif isinstance(stmt, (ForStmt, ForInStmt, WhileStmt)):
+                    self._emit_loop_with_assign(
+                        stmt, target, lines, indent,
+                        target_cpp_type=target_cpp_type,
+                    )
                 else:
                     self._visit_stmt(stmt, lines, indent)
             else:
@@ -2036,6 +2237,10 @@ class StmtVisitor:
                 # non-var globals and reassignments: retaining the prior bar's
                 # map/matrix ID would turn the expression into implicit state.
                 emit_implicit_na_fallback()
+            elif self._loop_value_unmatched_na(target) is not None:
+                lines.append(f"{pad}else {{")
+                lines.append(f"{pad}    {target} = {self._loop_value_unmatched_na(target)};")
+                lines.append(f"{pad}}}")
         elif isinstance(node, SwitchStmt):
             if node.expr:
                 expr_var = f"__switch_val_{self._switch_counter}"
@@ -2094,3 +2299,11 @@ class StmtVisitor:
                     lines.append(
                         f"{pad}{target} = {target_cpp_type}{{}};"
                     )
+            elif self._loop_value_unmatched_na(target) is not None:
+                na_value = self._loop_value_unmatched_na(target)
+                if node.cases:
+                    lines.append(f"{pad}else {{")
+                    lines.append(f"{pad}    {target} = {na_value};")
+                    lines.append(f"{pad}}}")
+                else:
+                    lines.append(f"{pad}{target} = {na_value};")

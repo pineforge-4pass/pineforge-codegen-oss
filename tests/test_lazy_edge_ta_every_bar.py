@@ -473,11 +473,10 @@ def test_source_clock_families_are_not_hoisted_and_use_held_source_history():
         line = _stmt(cpp, f"{var} = (")
         assert (
             f"_pf_lazy_src_clock_{n}.{method}(current_bar_.close, "
-            f"_pf_lazy_src_clock_{n}.previous_source(_pf_lazy_src_hist_{n}[2], "
-            f"_pf_lazy_src_chart_{n}[3], 3, bar_index_))"
+            f"_pf_lazy_src_clock_{n}.previous_source(_pf_lazy_src_hist_{n}[2], 3))"
         ) in line
         assert f"Series<double> _pf_lazy_src_hist_{n}{{4}};" in cpp
-        assert f"Series<double> _pf_lazy_src_chart_{n}{{4}};" in cpp
+    assert "_pf_lazy_src_chart_" not in cpp
     assert "_precalc__ta_roc" not in cpp
     assert "_precalc__ta_change" not in cpp
     assert "_precalc__ta_mom" not in cpp

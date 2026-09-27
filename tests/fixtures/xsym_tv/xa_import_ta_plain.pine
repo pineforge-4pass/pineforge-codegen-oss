@@ -1,0 +1,11 @@
+//@version=6
+strategy("PF xa import ta", overlay = true)
+// xa_import_ta.pine with its import deleted.
+f = ta.sma(close, 9)
+hi = ta.highest(high, 21)
+r = ta.rsi(close, 14)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = str.tostring(f, "#.####") + "|" + str.tostring(hi) + "|" + str.tostring(r, "#.####") + "|" + str.tostring(ta.tr, "#.####"))

@@ -1,0 +1,46 @@
+//@version=6
+strategy("w8e-r5-fn-builtin-history", overlay=true, initial_capital=1000000000, default_qty_type=strategy.fixed, default_qty_value=1)
+fo() => open[1]
+fh() => high[1]
+fl() => low[1]
+fvol() => volume[1]
+ft() => time[1]
+fhl() => hl2[1]
+T(h, m) => timestamp("UTC", 2025, 4, 1, h, m)
+var float d_o = na
+var float d_h = na
+var float d_l = na
+var float d_v = na
+var float d_t = na
+var float d_hl = na
+if time == T(10, 0) or time == T(12, 0)
+    d_o := fo() - open[1]
+    d_h := fh() - high[1]
+    d_l := fl() - low[1]
+    d_v := fvol() - volume[1]
+    d_t := (ft() - time[1]) / 900000
+    d_hl := fhl() - hl2[1]
+if time == T(14, 0)
+    strategy.entry("DO", d_o >= 0 ? strategy.long : strategy.short, qty=math.abs(d_o) * 100 + 1)
+if time == T(14, 15)
+    strategy.close("DO")
+if time == T(14, 30)
+    strategy.entry("DH", d_h >= 0 ? strategy.long : strategy.short, qty=math.abs(d_h) * 100 + 1)
+if time == T(14, 45)
+    strategy.close("DH")
+if time == T(15, 0)
+    strategy.entry("DL", d_l >= 0 ? strategy.long : strategy.short, qty=math.abs(d_l) * 100 + 1)
+if time == T(15, 15)
+    strategy.close("DL")
+if time == T(15, 30)
+    strategy.entry("DV", d_v >= 0 ? strategy.long : strategy.short, qty=math.abs(d_v) / 1000 + 1)
+if time == T(15, 45)
+    strategy.close("DV")
+if time == T(16, 0)
+    strategy.entry("DT", d_t >= 0 ? strategy.long : strategy.short, qty=math.abs(d_t) + 1)
+if time == T(16, 15)
+    strategy.close("DT")
+if time == T(16, 30)
+    strategy.entry("DHL", d_hl >= 0 ? strategy.long : strategy.short, qty=math.abs(d_hl) * 100 + 1)
+if time == T(16, 45)
+    strategy.close("DHL")

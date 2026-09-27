@@ -21,7 +21,7 @@ def test_line_handle_in_loop_is_a_real_handle():
         "    array.push(a, ln)"
     )
     # The loop-local declares as a Line handle and the ctor lowers onto the arena.
-    assert "Line ln = pf_line_new(_pf_lines_," in cpp
+    assert "Line ln = _pf_collect_lines_(pf_line_new(_pf_lines_," in cpp
     # The array<line> is a std::vector<Line>; the handle pushes by value.
     assert "std::vector<Line>" in cpp
     assert "a.push_back(ln)" in cpp
@@ -36,6 +36,6 @@ def test_label_handle_in_loop_is_a_real_handle():
         "    lb = label.new(bar_index, high, 'x')\n"
         "    label.delete(lb)"
     )
-    assert "Label lb = pf_label_new(_pf_labels_," in cpp
+    assert "Label lb = _pf_collect_labels_(pf_label_new(_pf_labels_," in cpp
     # label.delete(lb) lowers onto the arena (NOT the generic _delete_ rewrite).
     assert "pf_label_delete(_pf_labels_, lb)" in cpp

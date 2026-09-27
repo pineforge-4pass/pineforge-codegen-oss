@@ -1,0 +1,16 @@
+{
+  "title": "w8e-r4-fn-global-history",
+  "slug": "r4-fn-global-history",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-27T15:34:06.523Z",
+  "chart": {
+    "symbol": "BINANCE:ETHUSDT.P",
+    "interval": "15",
+    "from": "2025-04-01",
+    "to": "2025-04-03"
+  },
+  "pine_sha256": "6756ac8fbc5464b26dba5a3e4d0dcacc82636685c6c65b4ba320a27192124614",
+  "tv_trades_sha256": "96be3d3fbf6ed865d0758dea6086e87ba48830a82486ceb69d9f1fe754417666",
+  "tv_trades_rows": 8
+}

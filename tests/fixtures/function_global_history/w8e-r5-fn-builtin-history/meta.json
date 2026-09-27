@@ -1,0 +1,16 @@
+{
+  "title": "w8e-r5-fn-builtin-history",
+  "slug": "r5-fn-builtin-history",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-27T16:20:56.643Z",
+  "chart": {
+    "symbol": "BINANCE:ETHUSDT.P",
+    "interval": "15",
+    "from": "2025-04-01",
+    "to": "2025-04-03"
+  },
+  "pine_sha256": "fb87ce356a0df86668aab654580413d8d2cdf9419a2ede8a289ac1448d04c6c4",
+  "tv_trades_sha256": "d6ded64b3de4b5d7be78bbc80df8ced2d13844f4258060ea511554ae54ceea16",
+  "tv_trades_rows": 12
+}

@@ -664,9 +664,13 @@ plot(b)
 
     # The top-level ``a = fixnan(close)`` reference MUST be _prev_fixnan_2,
     # NOT _prev_fixnan_1 (which belongs to f). The pre-fix bug aliased them.
-    top_level_refs = re.findall(
-        r"_prev_fixnan_(\d+)\s*=\s*current_bar_\.close", cpp
-    )
+    # fixnan binds its argument once, then stores the binding.
+    def stores(arg):
+        return re.findall(
+            r"auto _fixnan_v = \(" + arg + r"\); return is_na\(_fixnan_v\) \? "
+            r"_prev_fixnan_(\d+) : \(_prev_fixnan_\1 = _fixnan_v\)", cpp
+        )
+    top_level_refs = stores(r"current_bar_\.close")
     assert top_level_refs, "top-level fixnan(close) reference not found"
     assert top_level_refs == ["2"], (
         f"top-level fixnan(close) must reference _prev_fixnan_2 (its own "
@@ -677,7 +681,7 @@ plot(b)
 
     # Sanity: the function-owned fixnan (inside f's body) references
     # _prev_fixnan_1, distinct from the top-level _prev_fixnan_2.
-    func_refs = re.findall(r"_prev_fixnan_(\d+)\s*=\s*x", cpp)
+    func_refs = stores("x")
     assert func_refs == ["1"], (
         f"f's body fixnan must reference _prev_fixnan_1; got {func_refs}"
     )
@@ -1751,8 +1755,10 @@ plot(open_held)
     ))
     used = {}
     for name in ("inner_cs0", "inner_cs1"):
-        hits = set(_re.findall(r"(_prev_fixnan_\w+)\s*=\s*src",
-                               inner_bodies.get(name, "")))
+        hits = set(_re.findall(
+            r"auto _fixnan_v = \(src\); return is_na\(_fixnan_v\) \? "
+            r"(_prev_fixnan_\w+) : \(\1 = _fixnan_v\)",
+            inner_bodies.get(name, "")))
         assert hits, f"{name} does not update its own fixnan member: {inner_bodies}"
         used[name] = hits
     assert used["inner_cs0"].isdisjoint(used["inner_cs1"]), (

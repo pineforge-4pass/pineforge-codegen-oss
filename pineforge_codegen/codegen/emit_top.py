@@ -85,7 +85,8 @@ from __future__ import annotations
 import re
 
 from ..ast_nodes import (
-    ExprStmt, FuncCall, Identifier, IfStmt, MemberAccess, SwitchStmt, VarDecl,
+    ExprStmt, ForInStmt, ForStmt, FuncCall, Identifier, IfStmt, MemberAccess,
+    SwitchStmt, TupleAssign, TupleLiteral, VarDecl, WhileStmt,
 )
 from ..analyzer import FuncInfo
 from ..symbols import PineType, method_receiver_cpp_token
@@ -97,6 +98,7 @@ from .tables import (
     RUNTIME_REGISTER_SECURITY_EVAL_FN,
     RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN,
 )
+from .drawing import DRAWING_LIFETIME_CPP
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 
 
@@ -208,6 +210,8 @@ class TopLevelEmitter:
         lines.append("using namespace pineforge;")
         lines.append("")
         self._emit_ta_compat_shims(lines)
+        if getattr(self, "_uses_drawing", False):
+            lines.append(DRAWING_LIFETIME_CPP)
         if self._uses_tv_number_format:
             lines.append(TV_NUMBER_FORMAT_CPP)
             lines.append("")
@@ -1237,17 +1241,22 @@ class TopLevelEmitter:
             lines.append("")
             lines.append("    void configure_security_evaluators() override {")
             lines.append("        security_eval_states_.clear();")
+            lines.extend(self._security_tf_replay_prologue())
             for info in self._security_eval_info:
                 tf = info.get("tf")
                 tf_expr = info.get("tf_expr")
                 if tf:
                     tf_expr = f'"{tf}"'
-                elif not tf_expr:
-                    # No static tf and no resolvable runtime expression — fall
-                    # back to the chart timeframe so registration still compiles
-                    # (e.g. a request.security inside a dead-code UDF, or one
-                    # whose tf is a function param called with mixed timeframes).
+                elif tf == "" and not tf_expr:
+                    # An empty timeframe string is the chart's.
                     tf_expr = "input_tf_"
+                elif not tf_expr:
+                    # Every timeframe is resolved or refused
+                    # (``_resolve_security_tf``); none registers by default.
+                    self._codegen_error(
+                        info.get("tf_node"),
+                        "request.security timeframe was not resolved for registration",
+                    )
                 if tf_expr:
                     la = "true" if info["lookahead_on"] else "false"
                     go = "true" if info.get("gaps_on") else "false"
@@ -1325,8 +1334,6 @@ class TopLevelEmitter:
             for info in self._lazy_source_clock_by_node.values():
                 lines.append(f"            {info['clock']}.reset();")
                 lines.append(f"            {info['hist']}.clear();")
-                if info["chart"] is not None:
-                    lines.append(f"            {info['chart']}.clear();")
             lines.append("        }")
             for info in self._lazy_source_clock_by_node.values():
                 lines.append(f"        {info['clock']}.begin_bar(bar_index_);")
@@ -1336,13 +1343,6 @@ class TopLevelEmitter:
                     info["hist"],
                     f"{info['clock']}.bar_base_source",
                 )
-                if info["chart"] is not None:
-                    self._emit_history_series_write(
-                        lines,
-                        "        ",
-                        info["chart"],
-                        self._visit_expr(info["chart_source"]),
-                    )
 
         # reset_run_state() owns engine/broker state, while these generated
         # Series members belong to the strategy object. Clear all of them on
@@ -1362,10 +1362,12 @@ class TopLevelEmitter:
         # even when lazy control flow skips its written call on this bar.  Seed
         # the new slot with the prior current value (``na`` before first reach);
         # an executed call later in the bar updates this same slot with its
-        # scalar actual.  Typed-method ``series_arg`` bridges intentionally keep
-        # their existing execution-clock behavior.
+        # scalar actual.  A plain UDF's history of a script variable
+        # (``fn_global_hist``) is on the same clock.  Typed-method
+        # ``series_arg`` bridges intentionally keep their existing
+        # execution-clock behavior.
         for info in self._inline_history_members:
-            if info["kind"] != "udf_series_arg":
+            if info["kind"] not in ("udf_series_arg", "fn_global_hist"):
                 continue
             member = info["member_name"]
             lines.append(
@@ -1771,8 +1773,36 @@ class TopLevelEmitter:
         lines.append("        if (!s) return;")
         lines.append("        static_cast<GeneratedStrategy*>(s)->set_magnifier_volume_weighted(on != 0);")
         lines.append("    }")
+        if self._declares_bar_magnifier():
+            # TradingView runs a script that declares use_bar_magnifier = true
+            # on its bar magnifier; the host reads this export to run it on
+            # intrabars with the magnifier on (the run parameters are the
+            # host's: bar_magnifier, a finer input_tf and its feed).
+            lines.append("    int strategy_declares_bar_magnifier(void) {")
+            lines.append("        return 1;")
+            lines.append("    }")
         lines.append("}")
         lines.append("")
+
+    def _declares_bar_magnifier(self) -> bool:
+        """``strategy(use_bar_magnifier = true)``. The argument is a const
+        bool; one that is not a literal cannot be read here, so the TU does
+        not declare the magnifier and the codegen warns."""
+        from ..ast_nodes import BoolLiteral, StrategyDecl
+        for node in self._walk_ast(self.ctx.ast):
+            if not isinstance(node, StrategyDecl):
+                continue
+            value = node.kwargs.get("use_bar_magnifier")
+            if value is None or isinstance(value, BoolLiteral):
+                return value is not None and value.value is True
+            self._codegen_warning(
+                value,
+                "strategy(use_bar_magnifier=...) is not a literal bool: the "
+                "generated strategy does not declare the bar magnifier, so a host "
+                "runs it without one.",
+                hint="Write use_bar_magnifier = true or false.")
+            return False
+        return False
 
     def _emit_udt_method_cpp_name(self, fi: FuncInfo) -> str:
         """Stable C++ identifier for a typed instance method."""
@@ -2152,6 +2182,7 @@ class TopLevelEmitter:
         self._current_func_locals |= self._collect_binding_names(node.body)
 
         lines.append(f"    {ret_type} {func_name}({', '.join(param_strs)}) {{")
+        self._emit_function_global_history_updates(fi, lines)
 
         # A session.* flag the body reads at an offset: its history is this
         # call site's calls, so push the flag once per call, before a lazy
@@ -2230,6 +2261,57 @@ class TopLevelEmitter:
                     )
                     lines.append("        return _func_ret;")
                     emitted_return = True
+                elif (i == len(node.body) - 1 and isinstance(s, TupleAssign)
+                        and fi.returns_tuple and "_" not in s.names):
+                    # ``[p, q] = pair(v)`` last returns the declared tuple.
+                    self._visit_stmt(s, lines, indent=2)
+                    declared = TupleLiteral(
+                        elements=[Identifier(name=name) for name in s.names]
+                    )
+                    declared.loc = s.loc
+                    for element in declared.elements:
+                        element.loc = s.loc
+                    lines.append(
+                        f"        return {self._visit_rhs_value(declared, target_cpp_type=rhs_return_cpp_type)};"
+                    )
+                    emitted_return = True
+                elif (i == len(node.body) - 1
+                        and self._statement_value_node(s) is not None
+                        and self._tail_value_fits(s, ret_type)):
+                    # ``_f := expr`` / ``y += v`` / ``b = a * 3`` last: the
+                    # function returns the value the statement leaves. It
+                    # used to fall through to the default return, so
+                    # cs-lev-tradleware's Gaussian filter was always 0.0.
+                    self._visit_stmt(s, lines, indent=2)
+                    value = self._statement_value_node(s)
+                    ret_cpp = self._coerce_int_slot(
+                        self._visit_rhs_value(
+                            value, target_cpp_type=rhs_return_cpp_type
+                        ),
+                        value,
+                        self._int_slot_cpp_type(None, ret_type),
+                    )
+                    lines.append(f"        return {ret_cpp};")
+                    emitted_return = True
+                elif (i == len(node.body) - 1
+                        and isinstance(s, (ForStmt, ForInStmt, WhileStmt))
+                        and not fi.returns_tuple
+                        and self._loop_value_cpp_type(s, ret_type) is not None):
+                    # A loop last: its body's last value on the last iteration
+                    # that reached it, na when none did.
+                    lines.append(
+                        f"        {ret_type} _func_ret = {self._na_value_for_type(ret_type)};"
+                    )
+                    self._emit_loop_with_assign(
+                        s,
+                        "_func_ret",
+                        lines,
+                        indent=2,
+                        target_cpp_type=ret_type,
+                        reset=False,
+                    )
+                    lines.append("        return _func_ret;")
+                    emitted_return = True
                 else:
                     self._visit_stmt(s, lines, indent=2)
 
@@ -2272,6 +2354,33 @@ class TopLevelEmitter:
         self._active_fixnan_remap = {}
         self._active_call_site_idx = None
         self._current_instance_name = None
+
+    def _emit_function_global_history_updates(
+            self, fi: FuncInfo, lines: list[str]) -> None:
+        """Record, on entry, each script variable the body reads through history.
+
+        The on_bar preamble has already advanced the call site's buffer by one
+        chart slot, holding the previous value; this call replaces that slot
+        with the value the call sees, so ``x[k]`` reads the site's latest call
+        at or before ``k`` bars ago (``na`` before its first call).
+        """
+        names = self.ctx.func_global_history_reads.get(fi.name, ())
+        first_read = {}
+        for owner, name, subscript in self.ctx.func_global_history_nodes.values():
+            if owner == fi.name:
+                first_read.setdefault(name, subscript.object)
+        cpp_types = {
+            info["member_name"]: info["cpp_type"]
+            for info in self._inline_history_members
+        }
+        for name in names:
+            member = self._function_global_history_member(name)
+            if member is None:
+                continue
+            value = self._series_bridge_value_expr(
+                self._visit_expr(first_read[name]), cpp_types[member]
+            )
+            lines.append(f"        {member}.update({value});")
 
     def _has_precalculated_ta(self) -> bool:
         return any(

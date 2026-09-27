@@ -476,48 +476,6 @@ class TaSiteHelper:
         "ycelestine77/quantbyboji exact on main, 2026-09-04)"
     )
 
-    _LAZY_SOURCE_CLOCK_BAR_SOURCES = frozenset({
-        "open", "high", "low", "close", "volume", "hl2", "hlc3", "ohlc4", "hlcc4",
-    })
-
-    def _script_has_user_binding(self, name: str) -> bool:
-        cache = getattr(self, "_user_binding_names", None)
-        if cache is None:
-            cache = set()
-            ast = getattr(self.ctx, "ast", None)
-            for node in self._walk_ast(ast):
-                if isinstance(node, VarDecl):
-                    cache.add(node.name)
-                elif isinstance(node, TupleAssign):
-                    cache.update(node.names)
-                elif isinstance(node, ForStmt):
-                    cache.add(node.var)
-                elif isinstance(node, ForInStmt):
-                    if node.var:
-                        cache.add(node.var)
-                    cache.update(node.vars or ())
-                elif isinstance(node, FuncDef):
-                    cache.add(node.name)
-                    cache.update(node.params)
-            self._user_binding_names = cache
-        return name in cache
-
-    def _lazy_source_clock_chart_source(self, site: "TACallSite"):
-        """The unshadowed bar-builtin source node, or None.
-
-        Between two executions closer than ``length`` bars the pin does not
-        distinguish the held read from #64's eager chart ``source[length]``;
-        the eager read is kept where the source is a plain chart builtin.
-        """
-        source = site.compute_args[0] if site.compute_args else None
-        if (
-            isinstance(source, Identifier)
-            and source.name in self._LAZY_SOURCE_CLOCK_BAR_SOURCES
-            and not self._script_has_user_binding(source.name)
-        ):
-            return source
-        return None
-
     @staticmethod
     def _lazy_source_clock_length_node(node):
         kwargs = getattr(node, "kwargs", None) or {}
@@ -587,16 +545,9 @@ class TaSiteHelper:
         clocks: dict[int, dict] = {}
         routed = self._lazy_edge_ta_hoist_plan()["source_clock"]
         for index, (node_id, info) in enumerate(routed.items(), start=1):
-            chart_source = self._lazy_source_clock_chart_source(info["site"])
             clocks[node_id] = {
                 "clock": allocate(f"_pf_lazy_src_clock_{index}", reserved_members),
                 "hist": allocate(f"_pf_lazy_src_hist_{index}", reserved_members),
-                "chart": (
-                    allocate(f"_pf_lazy_src_chart_{index}", reserved_members)
-                    if chart_source is not None
-                    else None
-                ),
-                "chart_source": chart_source,
                 "site": info["site"],
                 "node": info["node"],
                 "length_literal": info["length_literal"],
@@ -609,11 +560,9 @@ class TaSiteHelper:
         source = self._visit_expr(site.compute_args[0])
         length_node = self._lazy_source_clock_length_node(node)
         literal = self._lazy_source_clock_length_literal(length_node)
-        chart = info["chart"]
         if literal is not None:
             length_expr = str(literal)
             held = f"{info['hist']}[{literal - 1}]" if literal >= 1 else "na<double>()"
-            eager = f"{chart}[{literal}]" if chart is not None else held
         else:
             length_raw = self._visit_expr(length_node)
             length_expr = self._coerce_int_slot(
@@ -626,11 +575,7 @@ class TaSiteHelper:
                 f"(({length_expr}) >= 1 ? {info['hist']}[({length_expr}) - 1] "
                 f": na<double>())"
             )
-            eager = f"{chart}[{length_expr}]" if chart is not None else held
-        previous = (
-            f"{info['clock']}.previous_source({held}, {eager}, {length_expr}, "
-            f"bar_index_)"
-        )
+        previous = f"{info['clock']}.previous_source({held}, {length_expr})"
         method = "roc" if self._ta_name_from_site(site) == "roc" else "change"
         return f"{info['clock']}.{method}({source}, {previous})"
 
@@ -648,10 +593,8 @@ class TaSiteHelper:
                 "// history is na before the first execution. The paired hist Series",
                 "// holds `bar_base_source` (the value committed by earlier bars) once",
                 "// per chart bar, so `hist[length - 1]` is the source at the most",
-                "// recent execution at or before bar-length. Between two executions",
-                "// closer than `length` bars the tapes do not distinguish that read",
-                "// from the eager chart `source[length]`, so the #64 eager read is",
-                "// kept there for chart-builtin sources.",
+                "// recent execution at or before bar-length, also when the previous",
+                "// execution is closer than `length` bars.",
                 f"struct {type_name} {{",
                 "    double committed_source = na<double>();",
                 "    int committed_bar = -1;",
@@ -677,12 +620,11 @@ class TaSiteHelper:
                 "        }",
                 "    }",
                 "",
-                "    double previous_source(double held, double eager, int length,",
-                "                           int bar) const {",
+                "    double previous_source(double held, int length) const {",
                 "        if (bar_base_bar < 0 || length < 1) {",
                 "            return na<double>();",
                 "        }",
-                "        return bar - bar_base_bar >= length ? held : eager;",
+                "        return held;",
                 "    }",
                 "",
                 "    double change(double source, double previous) {",

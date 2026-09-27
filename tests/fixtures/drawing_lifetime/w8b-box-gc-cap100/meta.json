@@ -1,0 +1,16 @@
+{
+  "title": "W8B readout: array-held boxes on a 100-box chart",
+  "slug": "w8b-box-gc-cap100",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-27T16:04:09.106Z",
+  "chart": {
+    "symbol": "BINANCE:ETHUSDT.P",
+    "interval": "15",
+    "from": "2025-04-01",
+    "to": "2025-05-01"
+  },
+  "pine_sha256": "364dcb3c2ea6e7775a0d23a84ec7af5590cf95b7170fb5e1e6d4af80b9f7c08e",
+  "tv_trades_sha256": "4761d022317d44aa405bf71e13a665845ff5365222a3e404e3d6ff28daf83538",
+  "tv_trades_rows": 62
+}

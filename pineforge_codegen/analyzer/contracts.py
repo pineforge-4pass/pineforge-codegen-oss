@@ -183,6 +183,14 @@ class SecurityCallInfo:
     # A scalar payload of string type: the result is a ``std::string``
     # holding na (empty) until the first requested value.
     string_result: bool = False
+    # The call's symbol argument (None when omitted).
+    symbol: Any = None
+    # ``timeframe`` and ``symbol`` hold the context
+    # ``security_contexts.specialize_security_contexts`` resolved through the
+    # helper call paths: expressions of globals, inputs and built-ins.
+    context_resolved: bool = False
+    # The call sits in a helper no top-level statement reaches: it never runs.
+    dead: bool = False
 
 
 @dataclass
@@ -319,6 +327,12 @@ class AnalyzerContext:
     # global read remains lexical Pine, not the future local).
     func_var_storage_names: dict = field(default_factory=dict)
     func_series_vars: dict = field(default_factory=dict)
+    # Plain UDF -> script variables (and ``bar_index``) its body reads through
+    # history, in source order, and id(Subscript) -> (UDF, name, Subscript)
+    # per read. TradingView keeps that history per call site, so codegen gives
+    # each emitted body its own chart-clocked buffer of the variable.
+    func_global_history_reads: dict = field(default_factory=dict)
+    func_global_history_nodes: dict = field(default_factory=dict)
     # FuncDef owner -> declaration-bound non-persistent history-local names.
     # Parameters are deliberately excluded so a same-named qualified
     # persistent member does not manufacture a bogus raw/clone Series.

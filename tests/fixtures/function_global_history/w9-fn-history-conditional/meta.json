@@ -1,0 +1,16 @@
+{
+  "title": "w9-fn-history-conditional",
+  "slug": "w9-fn-history-conditional",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-27T18:30:21.621Z",
+  "chart": {
+    "symbol": "BINANCE:ETHUSDT.P",
+    "interval": "15",
+    "from": "2025-04-01",
+    "to": "2025-04-03"
+  },
+  "pine_sha256": "26873408c6ae71469f8b3bfd574e7edc1ed384905b1bb546f2e9a9ae4058c0fc",
+  "tv_trades_sha256": "878d93629818a0b44f3a92e479e8e989869f190558fbdada32d41f9e27db0d63",
+  "tv_trades_rows": 10
+}

@@ -423,14 +423,16 @@ def test_each_ta_length_takes_its_lanes_lowering() -> None:
     compile_cpp(cpp, label="lane composition lengths")
 
 
-def test_a_shared_evaluator_refuses_different_input_choices() -> None:
-    # K-TA-DYNLEN's rule for a callable's one request.security evaluator
-    # also holds for CG-SECURITY-2's input.string choices: the constructor
-    # would size both calls from the first call site's.
-    src = HEAD + '''mode = input.string("Slow", "Mode", options=["Fast", "Slow"])
-g(len) => request.security(syminfo.tickerid, "60", ta.ema(close, len))
-a = g(mode == "Fast" ? 9 : 14)
-b = g(mode == "Fast" ? 21 : 30)
+def test_a_shared_evaluator_refuses_different_simple_lengths() -> None:
+    # K-TA-DYNLEN's rule for a callable's one request.security evaluator:
+    # the constructor would size both calls from the first call site's. An
+    # input.string choice (CG-SECURITY-2) no longer shares one: XSYM-A copies
+    # the request per value of a payload parameter it can lower, one
+    # evaluator per call path (tests/test_e2e_cgint3_compositions.py). A
+    # simple syminfo length is no such value and still shares it.
+    src = HEAD + '''g(len) => request.security(syminfo.tickerid, "60", ta.ema(close, len))
+a = g(syminfo.type == "crypto" ? 9 : 14)
+b = g(syminfo.type == "crypto" ? 21 : 30)
 if a > b
     strategy.entry("L", strategy.long)
 '''

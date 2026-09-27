@@ -1,0 +1,17 @@
+//@version=6
+// request.security payloads reading a source input: its value, its history
+// and a TA over it are evaluated on the requested bar.
+strategy("PF w9sec source input payload", overlay = true)
+src = input.source(ohlc4, "Source")
+v = request.security(syminfo.tickerid, "60", src)
+h1 = request.security(syminfo.tickerid, "60", src[1])
+h2 = request.security(syminfo.tickerid, "60", src[2])
+r = request.security(syminfo.tickerid, "60", ta.rsi(src, 3)[1])
+b = request.security(syminfo.tickerid, "60", nz(src[1]) - math.max(src, open))
+d = request.security(syminfo.tickerid, "D", src[1])
+s(x) => na(x) ? "na" : str.tostring(x)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(v) + "|" + s(h1) + "|" + s(h2) + "|" + s(r) + "|" + s(b) + "|" + s(d))

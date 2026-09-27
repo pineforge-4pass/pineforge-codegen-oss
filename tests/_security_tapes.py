@@ -26,13 +26,13 @@ START_MS = 1743465600000
 END_MS = 1744092000000
 
 
-def source(name: str) -> str:
-    return (FIXTURES / f"{name}.pine").read_text(encoding="utf-8")
+def source(name: str, fixtures: Path = FIXTURES) -> str:
+    return (fixtures / f"{name}.pine").read_text(encoding="utf-8")
 
 
-def tape_exits(name: str) -> dict[int, str]:
+def tape_exits(name: str, fixtures: Path = FIXTURES) -> dict[int, str]:
     """Exit instant (UTC ms) -> Signal of every trade on a probe's tape."""
-    with (FIXTURES / f"{name}_tv_trades.csv").open(encoding="utf-8-sig") as fh:
+    with (fixtures / f"{name}_tv_trades.csv").open(encoding="utf-8-sig") as fh:
         rows = list(csv.DictReader(fh))
     return {
         int(dt.datetime.strptime(row["Date and time"], "%Y-%m-%d %H:%M")

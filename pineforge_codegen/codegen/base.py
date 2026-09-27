@@ -937,6 +937,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Collect request.security metadata per call
         self._security_eval_info: list[dict] = []
         self._security_ta_variant_names: dict[tuple[int, int, tuple], str] = {}
+        # Reassigned globals a timeframe reads (``_security_tf_replay_prologue``).
+        self._security_tf_mutable_reads: set[str] = set()
         for item in self._security_calls:
             sec_id = item["sec_id"]
             tf_node = item["tf_node"]
@@ -949,8 +951,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # evaluator is a class method, so the param is not in scope there).
             # A lower-timeframe request has no chart-timeframe fallback.
             self._security_tf_lower = bool(item.get("is_lower_tf_array"))
-            tf_str, tf_expr = self._resolve_security_tf(
-                tf_node, item.get("containing_func", ""))
+            if item.get("dead"):
+                # A helper no top-level statement reaches: its evaluator is
+                # never read, registered on the chart timeframe.
+                tf_str, tf_expr = None, "input_tf_"
+            else:
+                tf_str, tf_expr = self._resolve_security_tf(
+                    tf_node, item.get("containing_func", ""))
 
             is_lookahead_on = False
             if lookahead_node is not None:
@@ -1467,10 +1474,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return
 
         func_bodies: dict[str, list] = {}
+        func_params: dict[str, set[str]] = {}
         for fi in ctx.func_infos:
             node = getattr(fi, "node", None)
             if node is not None and getattr(node, "body", None):
                 func_bodies.setdefault(fi.name, node.body)
+                func_params.setdefault(fi.name, set(getattr(node, "params", ()) or ()))
 
         # Pine forbids recursive callable execution. Most scalar-only cycles
         # never enter this state-instance pass (and some legacy dead-branch
@@ -1531,10 +1540,30 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return list(self._func_cs_ta_remap.get((fname, 0), {}).keys())
 
         def var_originals(fname: str) -> list[str]:
-            return [
+            names = [
                 self._safe_name(self._func_var_storage_name(fname, n))
                 for n, _, _ in ctx.func_var_members.get(fname, [])
             ]
+            # A history-read local (``float f = 0.0`` then ``f := ... f[1]``)
+            # is persistent Series state too. Without it a fresh instance
+            # kept writing the original member, so every call path it served
+            # shared one series (cs-lev's second f_pole path fed its nine
+            # true-range filters into the price filter's ``_f``).
+            # Same storage rule as the natural csN remap of the callee's own
+            # series vars (``orig_names`` above).
+            params = func_params.get(fname, set())
+            for sv in sorted(ctx.func_series_vars.get(fname, ())):
+                if sv in params:
+                    continue  # a history-read parameter is the caller's series
+                exact = self._func_var_storage_name(fname, sv)
+                storage = self._safe_name(
+                    exact
+                    if self._safe_name(exact) in self._series_var_member_names
+                    else sv
+                )
+                if storage not in names:
+                    names.append(storage)
+            return names
 
         def fixnan_originals(fname: str) -> list[str]:
             return list(self._func_cs_fixnan_remap.get((fname, 0), {}).keys())
@@ -3831,6 +3860,38 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                             context,
                         )
 
+        # A plain UDF reading a script variable (or bar_index) through history
+        # reads its call site's history of it, on the same chart clock as a
+        # history parameter: every chart-executed body owns one buffer per
+        # variable, updated when the body is entered. A body that is emitted
+        # once (never called) or only for a requested context keeps the
+        # chart's history.
+        global_reads = getattr(self.ctx, "func_global_history_reads", {}) or {}
+        for fi in self.ctx.func_infos:
+            names = global_reads.get(fi.name)
+            if not names or fi.node is None:
+                continue
+            for context in self._inline_history_contexts_for_owner(fi.name):
+                if (context is None or (fi.name, context)
+                        in self._requested_context_only_inline_contexts):
+                    continue
+                for name in names:
+                    register_one(
+                        "fn_global_hist",
+                        (id(fi.node), name),
+                        self._series_type_for(name),
+                        context,
+                    )
+
+    def _function_global_history_member(self, name: str) -> str | None:
+        """The emitted body's buffer of script variable ``name``, or None."""
+        fi = self._func_info_map.get(getattr(self, "_active_func_name", None))
+        if fi is None or fi.node is None or self._security_payload_depth:
+            return None
+        return self._inline_history_member_by_key.get(
+            ("fn_global_hist", id(fi.node), name, self._current_instance_name)
+        )
+
     def _is_compound_history_object(self, node) -> bool:
         """Whether ``node[k]`` is history on an operator expression or a
         ``session.*`` flag.
@@ -4100,6 +4161,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._prescan_strategy_series()
         self._prescan_session_history()
         self._security_ohlc_hist_fields_by_sec: dict[int, set[str]] = {}
+        # A source input's selected series read at a history offset in a
+        # payload: (key, default) -> (the input call, its history field).
+        self._security_source_hist_fields: dict[tuple[str, str], tuple] = {}
         # request.security TA call-sites read at a history offset (``ta.ema(...)[k>=1]``).
         # Maps sec_id -> set of TA call-site indices needing an HTF history Series.
         self._security_ta_hist_idx_by_sec: dict[int, set[int]] = {}
@@ -4542,8 +4606,6 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             literal = info["length_literal"]
             capacity = f"{{{literal + 1}}}" if literal is not None and literal >= 1 else ""
             lines.append(f"    Series<double> {info['hist']}{capacity};")
-            if info["chart"] is not None:
-                lines.append(f"    Series<double> {info['chart']}{capacity};")
 
         # Security evaluator TA members (cloned from expression dependencies)
         # Skip for user function call expressions — their TA deps are internal to the function
@@ -4559,6 +4621,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.append(f"    Series<double> _s_{field_name}{_mbb};")
 
         # 5. var/varip members (deduplicate by name)
+        # Sections 5-6 and 8c-8c2 declare the script's var/varip and
+        # history-read variables, whose drawing handles keep a drawing from
+        # the collection; 8b's plain non-var globals do not.
+        _variable_decls_start = len(lines)
         seen_var_members: set[str] = set()
         for name, ptype, init_str in self.ctx.var_members:
             if name in seen_var_members:
@@ -4714,6 +4780,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 cpp_type = self._series_type_for(name)
                 lines.append(f"    Series<{cpp_type}> {safe}{_mbb};")
 
+        _variable_decls = lines[_variable_decls_start:]
         # 7. Fixnan members
         for _fi_idx, site in enumerate(self.ctx.fixnan_sites):
             if _fi_idx in self._dead_fixnan_indices:
@@ -4818,6 +4885,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 default = self._default_for_type(cpp_type)
                 lines.append(f"    {cpp_type} {safe} = {default};")
 
+        _variable_decls_start = len(lines)
         # 8c. Cloned var/series members for per-call-site function variants
         #     Same pattern as TA member cloning: each call site gets its own copy
         emitted_clones: set[str] = set()
@@ -4843,6 +4911,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 orig_safe, fresh_safe, _mbb, lines, owner_func=owner_func
             )
 
+        _variable_decls = _variable_decls + lines[_variable_decls_start:]
+        self._drawing_pins = self._drawing_pin_members(_variable_decls)
+
         # 8c3. Fresh fixnan members for context-sensitive helper instances.
         #      Each fresh instance gets its OWN previous-value member so two
         #      call paths never share fixnan state (mirrors 8c2 for vars).
@@ -4855,14 +4926,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 8d. Drawing-objects-as-data arenas (gated on _uses_drawing so
         #     non-drawing strategies emit byte-identical C++). Each arena is a
-        #     per-strategy member, reset by prepare_script_run. Caps come from
-        #     the strategy() header max_*_count (default 50; linefill default 50).
+        #     per-strategy member, reset by prepare_script_run. The arenas never
+        #     evict: the generated collectors apply the strategy() header's
+        #     max_*_count the way TradingView does (default 50; see
+        #     DRAWING_LIFETIME_CPP), and linefills are never collected.
         if self._uses_drawing:
-            caps = self._drawing_caps or {}
-            lines.append(f"    DrawingArena<LineRec> _pf_lines_{{{caps.get('line', 50)}}};")
-            lines.append(f"    DrawingArena<BoxRec> _pf_boxes_{{{caps.get('box', 50)}}};")
-            lines.append(f"    DrawingArena<LabelRec> _pf_labels_{{{caps.get('label', 50)}}};")
-            lines.append(f"    DrawingArena<LinefillRec> _pf_linefills_{{{caps.get('linefill', 50)}}};")
+            lines.append("    DrawingArena<LineRec> _pf_lines_{_PF_DRAWING_UNBOUNDED};")
+            lines.append("    DrawingArena<BoxRec> _pf_boxes_{_PF_DRAWING_UNBOUNDED};")
+            lines.append("    DrawingArena<LabelRec> _pf_labels_{_PF_DRAWING_UNBOUNDED};")
+            lines.append("    DrawingArena<LinefillRec> _pf_linefills_{_PF_DRAWING_UNBOUNDED};")
 
         # 9. _var_initialized flag
         if self.ctx.var_members:
@@ -4938,6 +5010,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         lines.append("")
         self._emit_script_run_prepare(lines, _script_state_declarations)
         lines.append("")
+        if self._uses_drawing:
+            self._emit_drawing_collectors(lines)
+            lines.append("")
 
         # 10. User-defined functions (with per-call-site variants for functions
         #     containing TA calls OR series variables that need isolation)

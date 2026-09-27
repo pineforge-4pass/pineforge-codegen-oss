@@ -185,15 +185,16 @@ int main() {
     assert _compile_and_run(transpile(pine) + driver) == "1011101"
 
 
-def test_executions_closer_than_length_read_the_eager_chart_source():
-    """#64's regime the tapes do not distinguish: the previous execution is
-    2 bars back for length 3, so the previous source is the chart close[3]
-    (bar 3 = 106) rather than the held history (na: no execution at or before
-    bar 3)."""
+def test_executions_closer_than_length_read_the_held_source():
+    """The previous execution (bar 4) is 2 bars back for length 3: the previous
+    source is still the held history, the close of the latest execution at or
+    before bar 3 (bar 1 = 102), not the chart close[3] (bar 3 = 106), as
+    TradingView's w8a-lazy-mom-held tape shows
+    (tests/test_e2e_lazy_held_source.py)."""
     pine = """//@version=6
 strategy("lazy source clock close executions")
 var float lastRoc = na
-gate = bar_index == 4 or bar_index == 6
+gate = bar_index == 1 or bar_index == 4 or bar_index == 6
 v = gate ? ta.roc(close, 3) : na
 if not na(v)
     lastRoc := v
@@ -213,8 +214,8 @@ int main() {
     }
     GeneratedStrategy s;
     s.run(bars, 8);
-    std::cout << std::setprecision(10) << s.lastRoc << '\n';   // (112 - 106) / 106 * 100
+    std::cout << std::setprecision(10) << s.lastRoc << '\n';   // (112 - 102) / 102 * 100
     return 0;
 }
 """
-    assert _compile_and_run(transpile(pine) + driver) == "5.660377358"
+    assert _compile_and_run(transpile(pine) + driver) == "9.803921569"

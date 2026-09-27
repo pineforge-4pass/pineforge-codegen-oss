@@ -66,8 +66,17 @@ class StrategyDecl(ASTNode):
 
 @dataclass
 class ImportStmt(ASTNode):
-    """import <path> — parsed for error reporting."""
+    """``import <user>/<name>/<version> [as <alias>]``.
+
+    ``path`` is ``user/name/version``; ``user``, ``name``, ``version`` and
+    ``alias`` stay None when the line does not have that form, and ``path``
+    is then the line's tokens as written.
+    """
     path: str = ""
+    user: str | None = None
+    name: str | None = None
+    version: int | None = None
+    alias: str | None = None
 
 
 # ---------------------------------------------------------------------------

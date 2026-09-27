@@ -71,6 +71,7 @@ from ..ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..method_binding import bind_function_defaults
+from ..security_contexts import CONTEXT_ANNOTATION, DEAD_ANNOTATION
 from ..symbols import PineType
 from .. import signatures as sigs
 from .. import tv_input_choices as tv_in
@@ -829,10 +830,16 @@ class CallHandlers:
             lookahead_node = all_args[4] if len(all_args) > 4 else None
 
             mutable_globals = tuple(sorted(self._collect_security_mutable_globals(expr_node)))
+            # A helper request's symbol and timeframe, resolved through its
+            # call paths (``security_contexts``), register in its place.
+            notes = node.annotations or {}
+            context = notes.get(CONTEXT_ANNOTATION)
+            symbol_node = all_args[0] if all_args else None
+            if context is not None:
+                symbol_node, tf_node = context["symbol"], context["timeframe"]
             # Heikin-Ashi same-symbol read: request.security(ticker.heikinashi(
             # syminfo.tickerid), ...) (directly or via a global alias). The engine
             # applies the HA candle transform inside the security eval.
-            symbol_node = all_args[0] if all_args else None
             heikinashi = self._security_symbol_is_heikinashi(symbol_node)
             # Capture the user function (if any) whose body contains this call,
             # so the codegen can resolve a parameter ``tf`` via the call sites.
@@ -858,6 +865,9 @@ class CallHandlers:
                 mutable_globals=mutable_globals,
                 containing_func=containing_func,
                 string_result=string_result,
+                symbol=symbol_node,
+                context_resolved=context is not None,
+                dead=bool(notes.get(DEAD_ANNOTATION)),
             ))
 
             return PineType.STRING if string_result else PineType.FLOAT
@@ -964,9 +974,11 @@ class CallHandlers:
         sec_id = len(self._security_calls)
 
         mutable_globals = tuple(sorted(self._collect_security_mutable_globals(expr_node)))
+        notes = node.annotations or {}
+        context = notes.get(CONTEXT_ANNOTATION)
         self._security_calls.append(SecurityCallInfo(
             sec_id=sec_id,
-            timeframe=tf_node,
+            timeframe=context["timeframe"] if context is not None else tf_node,
             expression=expr_node,
             returns_tuple=False,
             tuple_size=0,
@@ -976,6 +988,8 @@ class CallHandlers:
             depends_on_mutable_globals=bool(mutable_globals),
             mutable_globals=mutable_globals,
             is_lower_tf_array=True,
+            context_resolved=context is not None,
+            dead=bool(notes.get(DEAD_ANNOTATION)),
         ))
 
         # ``request.security_lower_tf`` returns an array; the value-level

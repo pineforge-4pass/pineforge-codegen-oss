@@ -1,0 +1,40 @@
+{
+  "validationEligible": true,
+  "strategy": "w8b-box-gc-cap100",
+  "symbol": "BINANCE:ETHUSDT.P",
+  "interval": "15",
+  "from": "2025-04-01",
+  "to": "2025-05-01",
+  "deepBacktesting": true,
+  "trades": 31,
+  "tvTradesCsv": "tv_trades.csv",
+  "tapeChannel": "ws-report-v1",
+  "sourceCanonicalization": "pine-facade-v1",
+  "sourceArtifactHash": "364dcb3c2ea6e7775a0d23a84ec7af5590cf95b7170fb5e1e6d4af80b9f7c08e",
+  "tvTradesCsvHash": "4761d022317d44aa405bf71e13a665845ff5365222a3e404e3d6ff28daf83538",
+  "wsProvenance": {
+    "schemaVersion": 1,
+    "wsEndpoint": "wss://history-data.tradingview.com/socket.io/websocket?from=chart%2F&type=chart&auth=sessionid",
+    "authUser": "luisleo52655",
+    "accountType": "pro_premium_expert",
+    "pineId": "USER;3c3ee73838da415d9f6fb36ccd7cbe97",
+    "pineVersion": "0.89317",
+    "symbol": "BINANCE:ETHUSDT.P",
+    "interval": "15",
+    "requestedRange": {
+      "from": 1743465600000,
+      "to": 1746057600000
+    },
+    "returnedRange": {
+      "from": 1743465600000,
+      "to": 1746057600000
+    },
+    "rangeProof": "covered",
+    "rawFrameSha256": "a53fbe7d3881a4b0c243121c172f13ec889a299b6281201e84b32d77c40c6cd1",
+    "decodedReportSha256": "911c2ce8f688120884f913d2dbdb0830450021cd876a648fcaf08ee2ae95021d",
+    "closedTrades": 31,
+    "proves": "which compile bytecode and which from/to window were sent to TradingView, and the exact trades TradingView returned for it (re-derivable from rawFrameSha256)",
+    "doesNotProve": "chart activation or the displayed applied range (browser-only); CSV byte identity and priceExact are lab renderings, screen-only until a parity study"
+  },
+  "backtestedAt": "2026-09-27T16:04:09.105Z"
+}

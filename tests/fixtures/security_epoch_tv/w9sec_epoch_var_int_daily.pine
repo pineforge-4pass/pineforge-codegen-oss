@@ -1,0 +1,17 @@
+//@version=6
+// W8D-NOTRADES witness A2: a `var int` holding request.security(time) (job-2868 shape).
+// Pine int is 64-bit: `n` counts the 60m bars opened since the UTC day began,
+// so the entry is the 02:00 bar and the close the 05:00 bar of every day.
+strategy("w8d epoch var int from security time, daily count", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1, initial_capital = 1000000)
+var int last_htf_t = 0
+htf_t = request.security(syminfo.tickerid, "60", time, lookahead = barmerge.lookahead_off)
+var int n = 0
+if ta.change(time("D")) != 0
+    n := 0
+if htf_t != last_htf_t
+    last_htf_t := htf_t
+    n += 1
+if n == 3 and strategy.position_size == 0
+    strategy.entry("L", strategy.long)
+if n == 6 and strategy.position_size > 0
+    strategy.close("L")

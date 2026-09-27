@@ -1,0 +1,17 @@
+//@version=6
+// request.security payloads reading a helper parameter's value, not its
+// history. Each exit comment spells what every call read on the bar the
+// close was sent.
+strategy("PF xa payload bare", overlay = true)
+h(_v) => request.security(syminfo.tickerid, "60", _v)
+p = h(hl2)
+q = h(open)
+t(_s, len) => request.security(syminfo.tickerid, "240", ta.sma(_s, len) - _s)
+u = t(high, 3)
+w = t(low, 6)
+s(x) => na(x) ? "na" : str.tostring(x, "#.####")
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(p) + "|" + s(q) + "|" + s(u) + "|" + s(w))

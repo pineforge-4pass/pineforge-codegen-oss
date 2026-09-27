@@ -8,7 +8,11 @@ own analyzer/codegen/signatures modules so the checker cannot drift.
 Buckets:
 
 * HARD_REJECT_FUNC / HARD_REJECT_NAMESPACE - calls that have no PineForge
-  semantics at all (e.g. ``request.financial``, ``ticker.*``).
+  semantics at all (e.g. ``request.seed``, ``ticker.new``).
+* NO_DATA_REQUEST_FUNC - requests PineForge has no data for
+  (``request.financial``, ...): refused only when their value can reach a
+  trade; one that reaches display and alert sinks only is lowered to na
+  (``external_requests``). ``request.security`` on another symbol too.
 * DIVERGENT_VARS - built-in variables whose PineForge value diverges from
   TradingView. They are reported as WARNING (e.g. ``bar_index`` and
   ``last_bar_index`` depend on the fed data window, ``timenow`` is not
@@ -18,7 +22,8 @@ Buckets:
 * NOT_YET - calls the runtime could support but the transpiler does not yet
   emit (e.g. ``max_bars_back``, bare ``barssince``).
 * request.security - only ``symbol`` / ``timeframe`` / ``expression`` allowed,
-  symbol must be the current chart symbol.
+  symbol must be the current chart symbol (a helper parameter's through its
+  call sites), or the value must reach display and alert sinks only.
 * Declarations - only ``strategy(...)`` accepted; ``indicator(...)`` and
   ``library(...)`` rejected.
 * Unknown ``ta.X`` / ``math.X`` / ``str.X`` / ``input.X`` calls (codegen would
@@ -27,11 +32,12 @@ Buckets:
 
 from __future__ import annotations
 
+import re
 from typing import Callable
 
 from .ast_nodes import (
     ASTNode,
-    Program, StrategyDecl,
+    Program, StrategyDecl, ImportStmt, TypeField,
     VarDecl, Assignment, TupleAssign,
     IfStmt, ForStmt, ForInStmt, WhileStmt, SwitchStmt,
     FuncDef, ExprStmt,
@@ -43,6 +49,9 @@ from .ast_nodes import (
 )
 from .errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from .pine_spelling import expr_start
+from .external_requests import (
+    LOWERING_ANNOTATION, NO_DATA_REQUEST_FUNCS, TradeSlice, spell_call,
+)
 from . import signatures as sigs
 from .tv_input_choices import INPUT_SOURCE_SERIES_IDS
 from .analyzer import TA_CLASS_MAP
@@ -127,11 +136,20 @@ SUPPORTED_RUNTIME_FUNC: frozenset[str] = frozenset({"error"})
 # string statement that hides the typo from the strategy author.
 SUPPORTED_LOG: frozenset[str] = frozenset({"info", "warning", "error"})
 
-HARD_REJECT_FUNC: dict[str, str] = {
+# Requests PineForge has no data for (``external_requests``): refused only
+# when their value can reach a trade; one that reaches display and alert sinks
+# only is lowered to na with a warning. ``request.security`` on another
+# symbol follows the same rule.
+NO_DATA_REQUEST_FUNC: dict[str, str] = {
     "request.financial":         "External fundamentals data not available in PineForge.",
     "request.dividends":         "External corporate-action data not available in PineForge.",
     "request.earnings":          "External corporate-action data not available in PineForge.",
     "request.splits":            "External corporate-action data not available in PineForge.",
+    "request.footprint":         "Footprint (bid/ask volume) data not available in PineForge.",
+}
+assert set(NO_DATA_REQUEST_FUNC) == {f"request.{n}" for n in NO_DATA_REQUEST_FUNCS}
+
+HARD_REJECT_FUNC: dict[str, str] = {
     "request.seed":              "External seed data feeds not available in PineForge.",
     "request.quandl":            "External Quandl data not available in PineForge.",
     "request.currency_rate":     "Currency conversion data not available in PineForge.",
@@ -403,6 +421,68 @@ SECURITY_ADJUSTMENT_ALLOWED_VALUES: dict[str, frozenset[str]] = {
 # Identifiers/expressions that resolve to "this script's symbol".
 SECURITY_CURRENT_SYMBOL_NAMES: frozenset[str] = frozenset({"syminfo.tickerid", "syminfo.ticker"})
 
+# Built-in namespaces a library import may alias, with their built-in
+# members. TradingView's pine-facade compile of ``import TradingView/ta/7``
+# links no library (``metaInfo.usedLibs`` stays empty) when the script names
+# only built-in ``ta.*`` members, and links it for a library-only name such
+# as ``ta.dema`` (XSYM-DESIGN report 1.3): such an import is a no-op. Every
+# other import stays refused.
+BUILTIN_NAMESPACE_IMPORT_MEMBERS: dict[str, frozenset[str]] = {
+    "ta": frozenset(sigs.TA_FUNCTIONS) | TA_PROPERTY_VARIABLES,
+    "math": frozenset(sigs.MATH_FUNCTIONS) | frozenset(sigs.MATH_CONSTANTS),
+    "str": frozenset(sigs.STR_FUNCTIONS),
+}
+
+
+def import_spelling(node: ImportStmt) -> str:
+    """The import as the refusal names it: ``user/name/version [as alias]``."""
+    return f"{node.path} as {node.alias}" if node.alias else node.path
+
+
+def import_is_builtin_namespace_no_op(program: Program, node: ImportStmt) -> bool:
+    """``node`` imports a library under the name of a built-in namespace
+    (its alias, else its own name) and every member the script names through
+    that alias -- in a call, a read or a type -- is one of the namespace's
+    built-ins, so the library is never linked."""
+    alias = node.alias or node.name
+    members = BUILTIN_NAMESPACE_IMPORT_MEMBERS.get(alias or "")
+    if node.version is None or members is None:
+        return False
+    named = re.compile(rf"(?<![\w.]){re.escape(alias)}\.(\w+)")
+
+    def type_names(value) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, (list, tuple)):
+            return [item for item in value if isinstance(item, str)]
+        return []
+
+    stack: list = [program]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, (list, tuple)):
+            stack.extend(item)
+            continue
+        if isinstance(item, dict):
+            stack.extend(item.values())
+            continue
+        if not isinstance(item, (ASTNode, TypeField)):
+            continue
+        if (isinstance(item, MemberAccess) and isinstance(item.object, Identifier)
+                and item.object.name == alias and item.member not in members):
+            return False
+        hints = [getattr(item, "type_hint", None), getattr(item, "type_name", None)]
+        notes = getattr(item, "annotations", None) or {}
+        hints += [notes.get("param_type_hints"), notes.get("template_args")]
+        for hint in hints:
+            for text in type_names(hint):
+                if any(m not in members for m in named.findall(text)):
+                    return False
+        for key, value in vars(item).items():
+            if key not in ("loc", "annotations"):
+                stack.append(value)
+    return True
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -467,6 +547,9 @@ class SupportChecker:
         for member, emission in SYMINFO_MEMBER_MAP.items()
         if "na<" in emission or "get_syminfo_metadata" in emission
     )
+    # Silent-gap fields a run declares as a symbol fact (a lane fact through
+    # the syminfo metadata channel): na only when the run declares none.
+    _SYMINFO_RUN_FACT_FIELDS: frozenset[str] = frozenset({"mincontract"})
 
     def __init__(self, ast: Program, filename: str = "<input>") -> None:
         self._ast = ast
@@ -514,6 +597,11 @@ class SupportChecker:
         # request.security (barmerge.* gaps/lookahead values). While > 0 the
         # UNSUPPORTED_CONST_NAMESPACES rejection is suppressed.
         self._const_arg_ctx_depth: int = 0
+        # Inside the arguments of a request PineForge has no data for, whose
+        # field constants (``earnings.actual``) name what it would read.
+        self._request_field_ctx_depth: int = 0
+        # Built on the first request with no data: which values reach a trade.
+        self._trade_slice: TradeSlice | None = None
         # id()s of Identifier/MemberAccess nodes that are the *callee* of a
         # FuncCall. A divergent built-in NAME used as a call target (e.g. the
         # session-aware ``time_close("D")`` function, which is distinct from the
@@ -549,11 +637,18 @@ class SupportChecker:
         # -- so a constant argument read through a name is trusted only when
         # that name has exactly one binding and no scope can shadow it.
         self._binding_counts: dict[str, int] = {}
+        # User functions by node id, and every call of each by name, so a
+        # request.security symbol that is a helper parameter resolves through
+        # the arguments of the helper's calls.
+        self._user_func_defs: dict[int, FuncDef] = {}
+        self._user_func_calls: dict[str, list[FuncCall]] = {}
+        self._overloaded_user_funcs: set[str] = set()
 
     # -- Public API --
 
     def check(self) -> list[Diagnostic]:
         self._collect_user_definitions(self._ast)
+        self._collect_user_calls()
         self._collect_scalar_rebinds(self._ast)
         self._index_security_symbol_bindings()
         self._count_bindings(self._ast)
@@ -606,6 +701,31 @@ class SupportChecker:
                 for item in value.values():
                     if isinstance(item, ASTNode):
                         self._collect_scalar_rebinds(item)
+
+    def _collect_user_calls(self) -> None:
+        """Index the user functions and every call of each, anywhere."""
+        names: dict[str, int] = {}
+        for stmt in self._ast.body:
+            if isinstance(stmt, FuncDef):
+                self._user_func_defs[id(stmt)] = stmt
+                names[stmt.name] = names.get(stmt.name, 0) + 1
+        self._overloaded_user_funcs = {n for n, count in names.items() if count > 1}
+        stack: list = [self._ast]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, (list, tuple)):
+                stack.extend(item)
+                continue
+            if isinstance(item, dict):
+                stack.extend(item.values())
+                continue
+            if not isinstance(item, ASTNode):
+                continue
+            if (isinstance(item, FuncCall) and isinstance(item.callee, Identifier)
+                    and item.callee.name in names):
+                self._user_func_calls.setdefault(item.callee.name, []).append(item)
+            stack.extend(value for key, value in vars(item).items()
+                         if key not in ("loc", "annotations"))
 
     def _index_security_symbol_bindings(self) -> None:
         """Bind symbol reads and every ``:=`` to their lexical declaration.
@@ -1159,6 +1279,10 @@ class SupportChecker:
         # (e.g. scale=scale.right, format=format.price).
         self._visit_children_const_ok(node)
 
+    def _visit_ImportStmt(self, node: ImportStmt) -> None:
+        if not import_is_builtin_namespace_no_op(self._ast, node):
+            self._err(node, f"Import is not supported: '{import_spelling(node)}'")
+
     def _visit_VarDecl(self, node: VarDecl) -> None:
         if node.name and node.value is not None:
             self._scalar_defs.setdefault(node.name, node.value)
@@ -1192,6 +1316,21 @@ class SupportChecker:
         self._visit_children(node)
 
     def _visit_Assignment(self, node: Assignment) -> None:
+        if isinstance(node.target, TupleLiteral):
+            # ``[p, q] := f()`` reached the C++ as an assignment to a
+            # temporary tuple, a silent no-op. TradingView rejects it
+            # ("Syntax error at input ':='", CE10156): a tuple is declared
+            # with ``=`` only.
+            self._err(
+                node,
+                f"Tuple reassignment [..] {node.op} is not Pine syntax: "
+                "TradingView declares a tuple with '=' and has no tuple "
+                "reassignment.",
+                hint="Declare new names with [a, b] = f(), then reassign "
+                     "each variable on its own line.",
+            )
+            self._visit_children(node)
+            return
         # ``_scalar_defs`` records only the DECLARATION, so a later ``:=``
         # rebind used to be invisible to the request.security symbol check.
         # (``check`` also pre-collects these; recording here keeps the visit
@@ -1263,6 +1402,13 @@ class SupportChecker:
             return
 
         full = f"{ns}.{name}" if ns else name
+
+        # A request PineForge has no data for: na when its value reaches
+        # display sinks only, else a deferred refusal.
+        if ns == "request" and name in NO_DATA_REQUEST_FUNCS:
+            self._lower_no_data_request(node, node, NO_DATA_REQUEST_FUNC[full])
+            self._visit_request_arguments(node)
+            return
 
         # Hard rejects by full name.
         if full in HARD_REJECT_FUNC:
@@ -1721,13 +1867,15 @@ class SupportChecker:
             lambda k, v: f"{k[0]}.{k[1]}: {v}",
         ):
             return
-        # Namespace-wide variable rejections (e.g. dividends.*, earnings.*).
-        if isinstance(node.object, Identifier) and self._reject_if_in(
-            UNSUPPORTED_NAMESPACE_VARS,
-            node.object.name,
-            node,
-            lambda k, v: f"{k}.{node.member}: {v}",
-        ):
+        # Namespace-wide variable rejections (e.g. dividends.*, earnings.*),
+        # but for the field argument of the request that reads them.
+        if (isinstance(node.object, Identifier) and self._request_field_ctx_depth == 0
+                and self._reject_if_in(
+                    UNSUPPORTED_NAMESPACE_VARS,
+                    node.object.name,
+                    node,
+                    lambda k, v: f"{k}.{node.member}: {v}",
+                )):
             return
         # Constant-only namespace members (plot.style_*, text.align_*,
         # barmerge.*, alert.freq_*, ...) used as FREE EXPRESSIONS. Inside
@@ -1754,6 +1902,14 @@ class SupportChecker:
         if isinstance(node.object, Identifier) and node.object.name == "syminfo":
             if node.member not in SUPPORTED_SYMINFO:
                 self._err(node, f"syminfo.{node.member} is not implemented in PineForge runtime.")
+            elif node.member in self._SYMINFO_RUN_FACT_FIELDS:
+                # Read from the symbol fact the run declares; na without one.
+                self._warn(
+                    node,
+                    f"syminfo.{node.member} is na unless the run declares the "
+                    f"symbol's {node.member} (syminfo metadata "
+                    f"\"{node.member}\", a lane fact).",
+                )
             elif node.member in self._SYMINFO_SILENT_GAP_FIELDS:
                 # These fields silently return na in current PineForge. Warn on
                 # EVERY read — not just inside an if/ternary condition — because
@@ -1816,11 +1972,11 @@ class SupportChecker:
             scoped_safe = self._is_current_symbol_expr(symbol_node)
             legacy_safe = self._is_current_symbol_expr(symbol_node, legacy_names=True)
             if not scoped_safe and not legacy_safe:
-                self._err(
-                    symbol_node,
-                    "request.security symbol must reference the current chart symbol.",
-                    hint="Use syminfo.tickerid or syminfo.ticker; PineForge backtests do not load alternate symbols.",
-                )
+                # Another symbol: PineForge has no data for it.
+                self._lower_no_data_request(
+                    node, symbol_node,
+                    "PineForge backtests load the chart's symbol only "
+                    "(syminfo.tickerid, syminfo.ticker).")
             elif not scoped_safe or not self._is_current_symbol_expr(
                 symbol_node, require_all_paths=True
             ):
@@ -1886,6 +2042,40 @@ class SupportChecker:
         # implicitly; reject anything else loudly to surface the silent-
         # wrong-result bug. See SECURITY_ADJUSTMENT_ALLOWED_VALUES.
         self._check_security_adjustment_kwargs(node)
+
+    def _lower_no_data_request(self, node: FuncCall, at: ASTNode, why: str) -> None:
+        """A request PineForge has no data for: lowered to na, with a
+        warning, when its value reaches display and alert sinks only; else a
+        deferred refusal whose first read stops the run
+        (``external_requests``)."""
+        if self._trade_slice is None:
+            self._trade_slice = TradeSlice(self._ast)
+        reason = self._trade_slice.reason(node)
+        lowering = "inert" if reason is None else "unpinned"
+        node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: lowering}
+        if reason is None:
+            self._warn(
+                at,
+                f"{spell_call(node)}: value reaches only display/alert sinks; "
+                "lowered to na; trades are unaffected.",
+                hint=f"{why} The value it lowers to reaches alerts, plots and tables only.",
+            )
+        else:
+            self._warn(
+                at,
+                f"{spell_call(node)}: no data is pinned for this request; the run "
+                "stops with an error where its value is read.",
+                hint=f"{why} Its value can reach a trade: {reason}.",
+            )
+
+    def _visit_request_arguments(self, node: FuncCall) -> None:
+        """A no-data request's arguments: ``barmerge.*`` and its field
+        constants (``earnings.actual``) are what it reads."""
+        self._request_field_ctx_depth += 1
+        try:
+            self._visit_children_const_ok(node)
+        finally:
+            self._request_field_ctx_depth -= 1
 
     def _check_security_adjustment_kwargs(self, node: FuncCall) -> None:
         """Reject request.security adjustment kwargs that the engine drops."""
@@ -2145,6 +2335,10 @@ class SupportChecker:
                     for value in self._scalar_rebinds.get(node.name, ())
                 )
             binding = self._security_symbol_refs.get(id(node))
+            if (isinstance(binding, tuple) and binding[0] == "param"
+                    and binding not in _seen):
+                return self._param_is_current_symbol(
+                    binding, _seen | {binding}, require_all_paths)
             if binding is not None and binding not in _seen:
                 definition = self._security_symbol_defs.get(binding)
                 if definition is None:
@@ -2161,6 +2355,31 @@ class SupportChecker:
                     for value in self._security_symbol_rebinds.get(binding, ())
                 )
         return False
+
+    def _param_is_current_symbol(
+        self, binding: tuple, seen: frozenset, require_all_paths: bool,
+    ) -> bool:
+        """A helper parameter is the chart's symbol when the argument every
+        call of the helper binds to it is, read in the caller's scope --
+        through further helpers' parameters too. A helper nothing calls
+        never runs. A method's parameter, or an overloaded helper's, keeps
+        the refusal."""
+        _, func_id, name = binding
+        fdef = self._user_func_defs.get(func_id)
+        if fdef is None or fdef.name in self._overloaded_user_funcs:
+            return False
+        index = fdef.params.index(name)
+        defaults = (fdef.annotations or {}).get("param_defaults") or []
+        for call in self._user_func_calls.get(fdef.name, ()):
+            arg = call.kwargs.get(name)
+            if arg is None and index < len(call.args):
+                arg = call.args[index]
+            if arg is None and index < len(defaults):
+                arg = defaults[index]
+            if arg is None or not self._is_current_symbol_expr(
+                    arg, seen, require_all_paths=require_all_paths):
+                return False
+        return True
 
     # -- Pine timeframe-literal validation --
 

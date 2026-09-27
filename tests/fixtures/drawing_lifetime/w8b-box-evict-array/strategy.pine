@@ -1,0 +1,34 @@
+//@version=6
+strategy("W8B readout: array-held boxes max_boxes_count evicted", overlay=true, max_boxes_count=5, pyramiding=20, default_qty_type=strategy.fixed, default_qty_value=0.01)
+
+// Lane W8B-SIGSTATE-2. A (top 111) and B (top 222) are drawn at 00:00 and
+// 00:15 on 2025-04-08 and kept only in a var array, as a zone scanner keeps its
+// zones; A is also kept in a var box. From 00:30 one filler box is drawn every
+// bar on a chart that keeps five, so both leave the five newest by 01:30.
+// Every bar the script extends each array-held box (box.set_right). Each
+// readout is an entry whose comment carries both array elements' tops and the
+// var box's top.
+t(h, m) => timestamp("UTC", 2025, 4, 8, h, m)
+var array<box> zones = array.new_box()
+var box a = na
+if time == t(0, 0)
+    a := box.new(bar_index, 111.0, bar_index + 1, 11.0)
+    array.push(zones, a)
+if time == t(0, 15)
+    array.push(zones, box.new(bar_index, 222.0, bar_index + 1, 22.0))
+if time >= t(0, 30) and time <= t(12, 0)
+    box.new(bar_index, 200.0, bar_index + 1, 100.0)
+if array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0 by 1
+        box.set_right(array.get(zones, i), bar_index)
+tag(string n) => n + ":" + str.tostring(box.get_top(array.get(zones, 0))) + "/" + str.tostring(box.get_top(array.get(zones, 1))) + "/" + str.tostring(box.get_top(a))
+if time == t(1, 0)
+    strategy.entry("R0", strategy.long, comment=tag("live"))
+if time == t(1, 30)
+    strategy.entry("R1", strategy.long, comment=tag("plus1"))
+if time == t(3, 0)
+    strategy.entry("R7", strategy.long, comment=tag("plus7"))
+if time == t(11, 0)
+    strategy.entry("R39", strategy.long, comment=tag("plus39"))
+if time == t(13, 0)
+    strategy.close_all(comment="cleanup")

@@ -19,6 +19,7 @@ from pineforge_codegen.support_checker import (
     DIVERGENT_VARS,
     DIVERGENT_VARS_ERROR,
     NOT_YET_FUNC,
+    NO_DATA_REQUEST_FUNC,
     SECURITY_ALLOWED_PARAMS,
 )
 
@@ -156,9 +157,25 @@ def test_request_security_lower_tf_accepted():
     assert "_req_sec_lower_tf" in cpp
 
 
-def test_request_financial_rejected():
-    src = PRELUDE + 'a = request.financial(syminfo.tickerid, "REVENUE", "FY")\n'
-    _expect_error(src, "request.financial")
+# A request PineForge has no data for whose value can reach a trade is a
+# deferred refusal: accepted with a warning, its first read stops the run (an
+# unread one is lowered to na): tests/test_external_requests.py.
+TRADES_ON_A = 'if a > close\n    strategy.entry("L", strategy.long)\n'
+TRADES_ON_DATA = 'if data > close\n    strategy.entry("L", strategy.long)\n'
+DEFERRED = "no data is pinned for this request; the run stops with an error where its value is read."
+
+
+def _expect_deferred(src: str, line: int | None = None, col: int | None = None) -> None:
+    assert _errors(src) == [], [d.message for d in _errors(src)]
+    deferred = [d for d in _warnings(src) if d.message.endswith(DEFERRED)]
+    assert deferred, [d.message for d in _warnings(src)]
+    if line is not None:
+        assert (deferred[0].location.line, deferred[0].location.col) == (line, col)
+
+
+def test_request_financial_reaching_a_trade_is_deferred():
+    src = PRELUDE + 'a = request.financial(syminfo.tickerid, "REVENUE", "FY")\n' + TRADES_ON_A
+    _expect_deferred(src)
 
 
 def test_unknown_request_function_rejected():
@@ -351,9 +368,9 @@ def test_request_security_positional_currency_rejected():
     _expect_error(src, "Extra positional arguments")
 
 
-def test_request_security_alternate_symbol_rejected():
-    src = PRELUDE + 'a = request.security("BINANCE:BTCUSDT", "60", close)\n'
-    _expect_error(src, "current chart symbol")
+def test_request_security_alternate_symbol_is_deferred():
+    src = PRELUDE + 'a = request.security("BINANCE:BTCUSDT", "60", close)\n' + TRADES_ON_A
+    _expect_deferred(src)
 
 
 def test_request_security_syminfo_ticker_passes():
@@ -385,8 +402,9 @@ def _expect_error_at(src: str, needle: str, line: int, col: int) -> None:
     assert f"<input>:{line}:{col}" in located, located
 
 
-def test_request_security_reassigned_symbol_identifier_rejected():
-    """``var sym = syminfo.tickerid`` … ``sym := "EXCH:OTHER"`` must reject.
+def test_request_security_reassigned_symbol_identifier_is_deferred():
+    """``var sym = syminfo.tickerid`` … ``sym := "EXCH:OTHER"`` is another
+    symbol (a deferred refusal: no data is pinned for it).
 
     ``_scalar_defs`` only ever saw the DECLARATION, so the divergent ``:=``
     rebind used to transpile clean and run on the chart feed.
@@ -396,19 +414,21 @@ def test_request_security_reassigned_symbol_identifier_rejected():
         + 'var sym = syminfo.tickerid\n'
         + 'sym := "EXCH:OTHER"\n'
         + 'a = request.security(sym, "60", close)\n'
+        + TRADES_ON_A
     )
-    _expect_error_at(src, "current chart symbol", line=5, col=22)
+    _expect_deferred(src, line=5, col=22)
 
 
-def test_request_security_reassigned_symbol_after_call_rejected():
-    """A divergent rebind LATER in the source must reject too."""
+def test_request_security_reassigned_symbol_after_call_is_deferred():
+    """A divergent rebind LATER in the source is another symbol too."""
     src = (
         PRELUDE
         + 'var sym = syminfo.tickerid\n'
         + 'a = request.security(sym, "60", close)\n'
         + 'sym := "EXCH:OTHER"\n'
+        + TRADES_ON_A
     )
-    _expect_error(src, "current chart symbol")
+    _expect_deferred(src)
 
 
 def test_request_security_symbol_rebound_to_current_symbol_passes():
@@ -421,15 +441,16 @@ def test_request_security_symbol_rebound_to_current_symbol_passes():
     assert _errors(src) == []
 
 
-def test_request_security_symbol_compound_rebind_rejected():
+def test_request_security_symbol_compound_rebind_is_deferred():
     """A string-built symbol reaches the same rule through its RHS operand."""
     src = (
         PRELUDE
         + 'var sym = syminfo.tickerid\n'
         + 'sym += "X"\n'
         + 'a = request.security(sym, "60", close)\n'
+        + TRADES_ON_A
     )
-    _expect_error(src, "current chart symbol")
+    _expect_deferred(src)
 
 
 def test_request_security_local_shadow_rebind_does_not_taint_global():
@@ -471,15 +492,16 @@ def test_request_security_previously_accepted_unsafe_local_shadow_warns():
     assert len([d for d in _warnings(src) if "can select an alternate symbol" in d.message]) == 1
 
 
-def test_request_security_nested_rebind_of_global_still_rejected():
+def test_request_security_nested_rebind_of_global_is_deferred():
     src = (
         PRELUDE
         + 'sym = syminfo.tickerid\n'
         + 'if close > open\n'
         + '    sym := "EXCH:OTHER"\n'
         + 'data = request.security(sym, "D", close)\n'
+        + TRADES_ON_DATA
     )
-    _expect_error(src, "current chart symbol")
+    _expect_deferred(src)
 
 
 def test_request_security_mixed_ternary_warns_without_refusal():
@@ -835,19 +857,19 @@ def test_security_allowed_params_locked():
 
 
 def test_hard_reject_includes_external_request_feeds():
-    """request.financial / dividends / earnings / splits / seed / quandl / currency_rate
-    remain hard-rejected because PineForge has no auxiliary-data ingestion path.
-    request.security_lower_tf was removed from this list when lower-TF arrays landed."""
+    """request.seed / quandl / currency_rate remain hard-rejected because
+    PineForge has no auxiliary-data ingestion path; request.financial /
+    dividends / earnings / splits are refused only when their value can reach
+    a trade (NO_DATA_REQUEST_FUNC). request.security_lower_tf was removed
+    from this list when lower-TF arrays landed."""
     for fn in (
-        "request.financial",
-        "request.dividends",
-        "request.earnings",
-        "request.splits",
         "request.seed",
         "request.quandl",
         "request.currency_rate",
     ):
         assert fn in HARD_REJECT_FUNC, f"{fn} should remain hard-rejected"
+    for fn in ("request.financial", "request.dividends", "request.earnings", "request.splits"):
+        assert fn in NO_DATA_REQUEST_FUNC and fn not in HARD_REJECT_FUNC, fn
     assert "request.security_lower_tf" not in HARD_REJECT_FUNC, (
         "request.security_lower_tf is now supported; it should not be in HARD_REJECT_FUNC"
     )

@@ -1,0 +1,27 @@
+//@version=6
+strategy("W8B readout: boxes long after max_boxes_count evicted them", overlay=true, max_boxes_count=5, pyramiding=20, default_qty_type=strategy.fixed, default_qty_value=0.01)
+
+// Lane W8B-SIGSTATE-2. A (top 111) is drawn at 00:00 and B (top 222) at 00:15
+// on 2025-04-08; from 00:30 one filler box is drawn every bar until 12:00, on a
+// chart that keeps five boxes. Each readout is an entry whose comment carries
+// A's and B's tops, read 1, 4, 16 and 40 bars after A left the five newest.
+t(h, m) => timestamp("UTC", 2025, 4, 8, h, m)
+var box a = na
+var box b = na
+if time == t(0, 0)
+    a := box.new(bar_index, 111.0, bar_index + 1, 11.0)
+if time == t(0, 15)
+    b := box.new(bar_index, 222.0, bar_index + 1, 22.0)
+if time >= t(0, 30) and time <= t(12, 0)
+    box.new(bar_index, 200.0, bar_index + 1, 100.0)
+tag(string n) => n + ":" + str.tostring(box.get_top(a)) + "/" + str.tostring(box.get_top(b))
+if time == t(1, 30)
+    strategy.entry("R1", strategy.long, comment=tag("plus1"))
+if time == t(2, 15)
+    strategy.entry("R4", strategy.long, comment=tag("plus4"))
+if time == t(5, 15)
+    strategy.entry("R16", strategy.long, comment=tag("plus16"))
+if time == t(11, 15)
+    strategy.entry("R40", strategy.long, comment=tag("plus40"))
+if time == t(13, 0)
+    strategy.close_all(comment="cleanup")

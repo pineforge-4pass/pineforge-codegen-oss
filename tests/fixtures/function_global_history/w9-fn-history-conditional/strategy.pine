@@ -1,0 +1,62 @@
+//@version=6
+// SYNTHETIC probe (lane CG-W9-FN): does a call site's history of a script variable advance on a
+// call whose body skips the read? Calls at 10:00 (b = false), 11:00 and 12:00 (b = true), UTC.
+// Each case d is encoded as one trade: side = sign(d), qty = |d| + 1 (qty 1000 for na).
+//   H  fh(b) => b ? gv[1] : -1.0 (ternary arm);  I  if b: r := gv[1] (if block);  J  plain gv[1] (control)
+//   at 11:00: every call advances the history -> -4 (the 10:00 call), only reading calls -> na
+//   at 12:00: -4 either way (the 11:00 call)
+strategy("w9-fn-history-conditional", overlay=true, initial_capital=1000000000, default_qty_type=strategy.fixed, default_qty_value=1)
+T(h, m) => timestamp("UTC", 2025, 4, 1, h, m)
+isCall = time == T(10, 0) or time == T(11, 0) or time == T(12, 0)
+b = time != T(10, 0)
+
+var float gv = 0.0
+gv := bar_index
+
+fh(bool on) => on ? gv[1] : -1.0
+fi(bool on) =>
+    float r = -1.0
+    if on
+        r := gv[1]
+    r
+fj(bool on) => on ? 0.0 + gv[1] : gv[1]
+
+var float dH11 = na
+var float dH12 = na
+var float dI11 = na
+var float dI12 = na
+var float dJ11 = na
+if isCall
+    h = fh(b)
+    i = fi(b)
+    j = fj(b)
+    if time == T(11, 0)
+        dH11 := h - bar_index
+        dI11 := i - bar_index
+        dJ11 := j - bar_index
+    if time == T(12, 0)
+        dH12 := h - bar_index
+        dI12 := i - bar_index
+
+enc(float d) => na(d) ? 1000.0 : math.abs(d) + 1
+dir(float d) => na(d) or d >= 0 ? strategy.long : strategy.short
+if time == T(14, 0)
+    strategy.entry("H11", dir(dH11), qty=enc(dH11))
+if time == T(14, 15)
+    strategy.close("H11")
+if time == T(14, 30)
+    strategy.entry("H12", dir(dH12), qty=enc(dH12))
+if time == T(14, 45)
+    strategy.close("H12")
+if time == T(15, 0)
+    strategy.entry("I11", dir(dI11), qty=enc(dI11))
+if time == T(15, 15)
+    strategy.close("I11")
+if time == T(15, 30)
+    strategy.entry("I12", dir(dI12), qty=enc(dI12))
+if time == T(15, 45)
+    strategy.close("I12")
+if time == T(16, 0)
+    strategy.entry("J11", dir(dJ11), qty=enc(dJ11))
+if time == T(16, 15)
+    strategy.close("J11")

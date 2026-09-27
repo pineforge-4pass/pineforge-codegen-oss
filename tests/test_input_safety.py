@@ -277,7 +277,7 @@ def test_slow_passes_stop_at_the_time_budget(monkeypatch, shape: str) -> None:
 def test_existing_security_rejections_and_string_escaping_still_work() -> None:
     for body in (
         "import ../../private",
-        'x = request.security("NASDAQ:AAPL", "D", close)',
+        'x = request.security(syminfo.tickerid, "D", close, currency = currency.EUR)',
     ):
         with pytest.raises(CompileError) as caught:
             transpile(BASE + body + "\n", filename="security.pine")

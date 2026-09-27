@@ -16,9 +16,10 @@ This generalises the former ``_PFLazySaturatedROC3Clock`` (#64), which pinned
 the same clock for the literal ``ta.roc(close, 3)`` under a plain ``and`` RHS
 but fell back to the eager chart ``close[3]`` before the first execution and
 between executions closer than the length. The tapes' call 1 refutes the
-first fallback (na). The second regime is not distinguished by any tape, so
-the #64 eager chart read is kept there for chart-builtin sources (a paired
-``_pf_lazy_src_chart_N`` Series); other sources read the held history.
+first fallback (na). TradingView's ``w8a-lazy-mom-held`` tape refutes the
+second (``tests/test_e2e_lazy_held_source.py``): a ``ta.mom(close, 3)`` whose
+previous execution is one bar back and whose ``bar - 3`` was skipped reads the
+held ``close[4]``, so every source reads the held history.
 """
 
 from __future__ import annotations
@@ -52,13 +53,10 @@ def test_one_clock_and_held_history_per_callsite():
         r"^    Series<double> (_pf_lazy_src_hist_\d+)\{4\};$", cpp, re.MULTILINE
     )
     assert hists == ["_pf_lazy_src_hist_1", "_pf_lazy_src_hist_2"]
-    charts = re.findall(
-        r"^    Series<double> (_pf_lazy_src_chart_\d+)\{4\};$", cpp, re.MULTILINE
-    )
-    assert charts == ["_pf_lazy_src_chart_1", "_pf_lazy_src_chart_2"]
+    assert "_pf_lazy_src_chart_" not in cpp
     assert "std::vector<double> _precalc__ta_roc" not in cpp
-    assert "_pf_lazy_src_clock_1.roc(current_bar_.close, _pf_lazy_src_clock_1.previous_source(_pf_lazy_src_hist_1[2], _pf_lazy_src_chart_1[3], 3, bar_index_))" in _stmt(cpp, "longish = (")
-    assert "_pf_lazy_src_clock_2.roc(current_bar_.close, _pf_lazy_src_clock_2.previous_source(_pf_lazy_src_hist_2[2], _pf_lazy_src_chart_2[3], 3, bar_index_))" in _stmt(cpp, "shortish = (")
+    assert "_pf_lazy_src_clock_1.roc(current_bar_.close, _pf_lazy_src_clock_1.previous_source(_pf_lazy_src_hist_1[2], 3))" in _stmt(cpp, "longish = (")
+    assert "_pf_lazy_src_clock_2.roc(current_bar_.close, _pf_lazy_src_clock_2.previous_source(_pf_lazy_src_hist_2[2], 3))" in _stmt(cpp, "shortish = (")
 
 
 def test_clock_contract_hold_last_base_and_na_guards():
@@ -68,12 +66,12 @@ def test_clock_contract_hold_last_base_and_na_guards():
     assert "bar_base_source = committed_source;" in helper
     assert "bar_base_bar = committed_bar;" in helper
     assert "void begin_bar(int bar)" in helper
-    assert "double previous_source(double held, double eager, int length," in helper
-    # na before the first execution (tape call 1); held once the previous
-    # execution is at least ``length`` bars back; #64's eager chart read in
-    # between.
+    assert "double previous_source(double held, int length) const {" in helper
+    # na before the first execution (tape call 1); otherwise the held source,
+    # however close the previous execution is (w8a-lazy-mom-held).
     assert "if (bar_base_bar < 0 || length < 1) {" in helper
-    assert "return bar - bar_base_bar >= length ? held : eager;" in helper
+    assert "return held;" in helper
+    assert "eager" not in helper
     assert "double change(double source, double previous)" in helper
     assert "double roc(double source, double previous)" in helper
     assert helper.count("committed_source = source;") == 2
@@ -100,13 +98,12 @@ def test_on_bar_resets_then_records_the_held_source_before_statements():
     assert reset_guard in on_bar
     assert "_pf_lazy_src_clock_1.reset();" in on_bar
     assert "_pf_lazy_src_hist_1.clear();" in on_bar
-    assert "_pf_lazy_src_chart_1.clear();" in on_bar
+    assert "_pf_lazy_src_chart_" not in on_bar
     begin = "_pf_lazy_src_clock_1.begin_bar(bar_index_);"
     push = "if (history_advances_new_bar()) _pf_lazy_src_hist_1.push(_pf_lazy_src_clock_1.bar_base_source);"
     update = "else _pf_lazy_src_hist_1.update(_pf_lazy_src_clock_1.bar_base_source);"
-    chart_push = "if (history_advances_new_bar()) _pf_lazy_src_chart_1.push(current_bar_.close);"
     assert on_bar.index(reset_guard) < on_bar.index(begin) < on_bar.index(push) < on_bar.index(update)
-    assert on_bar.index(update) < on_bar.index(chart_push) < on_bar.index("x = (")
+    assert on_bar.index(update) < on_bar.index("x = (")
 
 
 def test_clock_and_history_members_are_automatically_checkpointed_for_coof():
@@ -114,7 +111,7 @@ def test_clock_and_history_members_are_automatically_checkpointed_for_coof():
         "x = close > open and ta.roc(close, 3) > 0",
         header=", calc_on_order_fills=true",
     )
-    for member in ("_pf_lazy_src_clock_1", "_pf_lazy_src_hist_1", "_pf_lazy_src_chart_1"):
+    for member in ("_pf_lazy_src_clock_1", "_pf_lazy_src_hist_1"):
         match = re.search(
             rf"decltype\(GeneratedStrategy::({member})\) _pf_value_(\d+);", cpp
         )
@@ -137,15 +134,15 @@ def test_change_mom_and_roc_route_in_every_top_level_lazy_position():
         "e = gate and ta.roc(source = close, length = 3) > 0\n"
         "plot((a or b or e) ? c + d : 0)"
     )
-    assert "_pf_lazy_src_clock_1.change(current_bar_.close, _pf_lazy_src_clock_1.previous_source(_pf_lazy_src_hist_1[2], _pf_lazy_src_chart_1[3], 3, bar_index_))" in _stmt(cpp, "a = (")
-    assert "_pf_lazy_src_clock_2.change(current_bar_.close, _pf_lazy_src_clock_2.previous_source(_pf_lazy_src_hist_2[1], _pf_lazy_src_chart_2[2], 2, bar_index_))" in _stmt(cpp, "b = (")
-    assert "_pf_lazy_src_clock_3.roc(current_bar_.close, _pf_lazy_src_clock_3.previous_source(_pf_lazy_src_hist_3[2], _pf_lazy_src_chart_3[3], 3, bar_index_))" in _stmt(cpp, "c = (")
+    assert "_pf_lazy_src_clock_1.change(current_bar_.close, _pf_lazy_src_clock_1.previous_source(_pf_lazy_src_hist_1[2], 3))" in _stmt(cpp, "a = (")
+    assert "_pf_lazy_src_clock_2.change(current_bar_.close, _pf_lazy_src_clock_2.previous_source(_pf_lazy_src_hist_2[1], 2))" in _stmt(cpp, "b = (")
+    assert "_pf_lazy_src_clock_3.roc(current_bar_.close, _pf_lazy_src_clock_3.previous_source(_pf_lazy_src_hist_3[2], 3))" in _stmt(cpp, "c = (")
     # ``ta.change(source)`` defaults to length 1: previous is the held value
     # as of the previous bar (== the previous execution's source).
-    assert "_pf_lazy_src_clock_4.change(current_bar_.close, _pf_lazy_src_clock_4.previous_source(_pf_lazy_src_hist_4[0], _pf_lazy_src_chart_4[1], 1, bar_index_))" in _stmt(cpp, "d = (")
+    assert "_pf_lazy_src_clock_4.change(current_bar_.close, _pf_lazy_src_clock_4.previous_source(_pf_lazy_src_hist_4[0], 1))" in _stmt(cpp, "d = (")
     assert "Series<double> _pf_lazy_src_hist_4{2};" in cpp
-    assert "Series<double> _pf_lazy_src_chart_4{2};" in cpp
-    assert "_pf_lazy_src_clock_5.roc(current_bar_.close, _pf_lazy_src_clock_5.previous_source(_pf_lazy_src_hist_5[2], _pf_lazy_src_chart_5[3], 3, bar_index_))" in _stmt(cpp, "e = (")
+    assert "_pf_lazy_src_chart_" not in cpp
+    assert "_pf_lazy_src_clock_5.roc(current_bar_.close, _pf_lazy_src_clock_5.previous_source(_pf_lazy_src_hist_5[2], 3))" in _stmt(cpp, "e = (")
     for family in ("change", "mom", "roc"):
         assert f"std::vector<double> _precalc__ta_{family}" not in cpp
     assert "_pf_every_bar_ta_" not in cpp
@@ -162,16 +159,15 @@ def test_runtime_length_reads_the_held_history_at_length_minus_one():
     assert "_pf_lazy_src_clock_1.roc(current_bar_.close, _pf_lazy_src_clock_1.previous_source(" in x_line
     assert x_line.count("auto _pf_idx_v = (len)") >= 3
     assert "_pf_lazy_src_hist_1[(" in x_line
-    assert ") - 1] : na<double>())" in x_line
-    assert "_pf_lazy_src_chart_1[" in x_line
-    assert ", bar_index_))" in x_line
+    assert ") - 1] : na<double>()), " in x_line
+    assert "_pf_lazy_src_chart_" not in cpp
+    assert "bar_index_" not in x_line
     assert re.search(r"^    Series<double> _pf_lazy_src_hist_1;$", cpp, re.MULTILINE)
-    assert re.search(r"^    Series<double> _pf_lazy_src_chart_1;$", cpp, re.MULTILINE)
 
 
 def test_shadowed_close_and_other_sources_route_too():
-    """A user-bound ``close`` and a computed source have no chart series: the
-    in-between regime reads the held history instead of the eager chart."""
+    """A user-bound ``close``, a chart built-in and a computed source all read
+    the held history."""
     cpp = _cpp(
         "float close = open\n"
         "gate = bar_index == 0 or bar_index == 5\n"
@@ -183,18 +179,16 @@ def test_shadowed_close_and_other_sources_route_too():
     )
     signal_line = _stmt(cpp, "signal = (")
     assert "_pf_lazy_src_clock_1.roc(" in signal_line
-    assert "_pf_lazy_src_clock_1.previous_source(_pf_lazy_src_hist_1[2], _pf_lazy_src_hist_1[2], 3, bar_index_)" in signal_line
-    assert "_pf_lazy_src_chart_1" not in cpp
+    assert "_pf_lazy_src_clock_1.previous_source(_pf_lazy_src_hist_1[2], 3)" in signal_line
+    assert "_pf_lazy_src_chart_" not in cpp
     other_line = _stmt(cpp, "other = (")
     assert (
         "_pf_lazy_src_clock_2.change(((current_bar_.high + current_bar_.low) / 2.0), "
-        "_pf_lazy_src_clock_2.previous_source(_pf_lazy_src_hist_2[1], _pf_lazy_src_chart_2[2], 2, bar_index_))"
+        "_pf_lazy_src_clock_2.previous_source(_pf_lazy_src_hist_2[1], 2))"
     ) in other_line
     assert "Series<double> _pf_lazy_src_hist_2{3};" in cpp
-    assert "Series<double> _pf_lazy_src_chart_2{3};" in cpp
     third_line = _stmt(cpp, "third = (")
-    assert "_pf_lazy_src_clock_3.change(rsiv, _pf_lazy_src_clock_3.previous_source(_pf_lazy_src_hist_3[2], _pf_lazy_src_hist_3[2], 3, bar_index_))" in third_line
-    assert "_pf_lazy_src_chart_3" not in cpp
+    assert "_pf_lazy_src_clock_3.change(rsiv, _pf_lazy_src_clock_3.previous_source(_pf_lazy_src_hist_3[2], 3))" in third_line
     assert "std::vector<double> _precalc__ta_roc" not in cpp
 
 
@@ -238,7 +232,6 @@ def test_generated_type_clock_and_history_names_avoid_pine_collisions():
         "    float value\n"
         "float _pf_lazy_src_clock_1 = 0.0\n"
         "float _pf_lazy_src_hist_1 = 0.0\n"
-        "float _pf_lazy_src_chart_1 = 0.0\n"
         "gate = close > open\n"
         "signal = gate and ta.roc(close, 3) > 0"
     )
@@ -246,10 +239,9 @@ def test_generated_type_clock_and_history_names_avoid_pine_collisions():
     assert "struct _PFLazySourceClock_2 {" in cpp
     assert "_PFLazySourceClock_2 _pf_lazy_src_clock_1_2;" in cpp
     assert "Series<double> _pf_lazy_src_hist_1_2{4};" in cpp
-    assert "Series<double> _pf_lazy_src_chart_1_2{4};" in cpp
     assert (
         "_pf_lazy_src_clock_1_2.roc(current_bar_.close, _pf_lazy_src_clock_1_2.previous_source("
-        "_pf_lazy_src_hist_1_2[2], _pf_lazy_src_chart_1_2[3], 3, bar_index_))"
+        "_pf_lazy_src_hist_1_2[2], 3))"
     ) in cpp
 
 
@@ -263,5 +255,5 @@ def test_generated_clock_name_avoids_emitted_udf_method_name():
     assert "_PFLazySourceClock _pf_lazy_src_clock_1_2;" in cpp
     assert (
         "_pf_lazy_src_clock_1_2.roc(current_bar_.close, _pf_lazy_src_clock_1_2.previous_source("
-        "_pf_lazy_src_hist_1[2], _pf_lazy_src_chart_1[3], 3, bar_index_))"
+        "_pf_lazy_src_hist_1[2], 3))"
     ) in cpp

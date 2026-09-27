@@ -1,0 +1,33 @@
+//@version=6
+strategy("W8B readout: deleted and collected lines", overlay=true, max_lines_count=5, pyramiding=20, default_qty_type=strategy.fixed, default_qty_value=0.01)
+
+// Lane W8B-SIGSTATE-2. On a chart that keeps five lines: D (y 333) is deleted
+// with line.delete at 00:15 on 2025-04-08; F (y 777) is deleted at 00:15 and
+// line.set_y2(F, 888) runs every bar from 00:30. E (y 444) is kept only in a
+// var array; from 00:30 one filler line is drawn every bar, so the collection
+// deletes E once the sixth filler lands. Each readout is an entry whose comment
+// carries D's y1/y2, F's y1/y2 and E's y1/y2.
+t(h, m) => timestamp("UTC", 2025, 4, 8, h, m)
+var line d = na
+var line f = na
+var array<line> keep = array.new_line()
+if time == t(0, 0)
+    d := line.new(bar_index, 333.0, bar_index + 1, 333.0)
+    f := line.new(bar_index, 777.0, bar_index + 1, 777.0)
+    array.push(keep, line.new(bar_index, 444.0, bar_index + 1, 444.0))
+if time == t(0, 15)
+    line.delete(d)
+    line.delete(f)
+if time >= t(0, 30)
+    line.set_y2(f, 888.0)
+if time >= t(0, 30) and time <= t(12, 0)
+    line.new(bar_index, 200.0, bar_index + 1, 200.0)
+tag(string n) => n + ":" + str.tostring(line.get_y1(d)) + "/" + str.tostring(line.get_y2(d)) + "|" + str.tostring(line.get_y1(f)) + "/" + str.tostring(line.get_y2(f)) + "|" + str.tostring(line.get_y1(array.get(keep, 0))) + "/" + str.tostring(line.get_y2(array.get(keep, 0)))
+if time == t(0, 15)
+    strategy.entry("R0", strategy.long, comment=tag("deleted"))
+if time == t(0, 45)
+    strategy.entry("R1", strategy.long, comment=tag("set1"))
+if time == t(4, 0)
+    strategy.entry("R3", strategy.long, comment=tag("set15"))
+if time == t(13, 0)
+    strategy.close_all(comment="cleanup")

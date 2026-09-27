@@ -88,7 +88,8 @@ def test_void_setter_as_last_udf_expr_does_not_assign_to_retval():
     # The void setter is emitted as a statement; the function does NOT assign
     # the void call to its return slot. The broken
     # ``_func_ret = pf_label_set_text(...)`` must NOT appear.
-    assert "pf_label_set_text(_pf_labels_, lb" in cpp
+    assert "_pf_drawing_set(pf_label_set_text, _pf_labels_, lb" in cpp
+    assert "= _pf_drawing_set" not in cpp
     assert "_func_ret = pf_label_set_text" not in cpp
     assert "= pf_label_set_text" not in cpp
 
@@ -183,13 +184,12 @@ def test_bar_index_history_series_is_pushed_from_offset_helper():
 
 
 def test_security_param_tf_mixed_with_non_literal_callsite_rejected():
-    # Two distinct literal tfs PLUS a third call site whose tf isn't a
-    # compile-time literal (a ternary the const-folder can't resolve) ->
-    # can't pin every clone to a concrete timeframe, so the original
-    # deterministic rejection still applies rather than guessing or silently
-    # dropping the non-literal site.
+    # Two distinct literal tfs PLUS a third call site whose tf reads the
+    # chart bar (a series ternary) -> its clone has no timeframe before the
+    # first bar, so the deterministic rejection still applies rather than
+    # registering a value computed from no bar.
     import pytest
-    with pytest.raises(Exception, match="multiple distinct literal timeframes"):
+    with pytest.raises(Exception, match="reads the chart bar"):
         _cpp(
             "f(tf) =>\n"
             "    request.security(syminfo.tickerid, tf, close)\n"
@@ -676,8 +676,7 @@ def test_counted_loop_dynamic_end_uses_outer_same_named_series():
     # na-preserving narrowing (see test_na_int_narrowing.py); what this test
     # pins is which ``i`` the lambda reads.
     assert (
-        "auto _for_end_eval_0 = [&]() { return [&](){ auto _pf_v = "
-        "((i[0])); return is_na(_pf_v) ? na<int>() : (int)_pf_v; }(); };"
+        "auto _for_end_eval_0 = [&]() { return [&](){ auto _pf_v = ((i[0])); "
     ) in cpp
     assert "int _for_end_0 = _for_end_eval_0();" in cpp
     assert "_for_end_0 = _for_end_eval_0()" in cpp
@@ -858,10 +857,7 @@ def test_nested_ta_below_and_rhs_keeps_inline_sma_and_clocks_outer_change():
     base_line = _stmt_line(cpp, "base = (")
     assert "_ta_sma_" in base_line and ".compute(current_bar_.close)" in base_line
     assert "_pf_lazy_src_clock_1.change(" in base_line
-    assert (
-        "previous_source(_pf_lazy_src_hist_1[0], _pf_lazy_src_hist_1[0], 1, bar_index_)"
-        in base_line
-    )
+    assert "previous_source(_pf_lazy_src_hist_1[0], 1)" in base_line
     assert "_ta_change_" not in base_line
     assert "_ta_mom_" in base_line
 
@@ -889,8 +885,7 @@ def test_ta_precalc_lazy_scope_routes_recursive_ema_only():
     assert "struct _PFLazySourceClock {" in cpp
     assert (
         "_pf_lazy_src_clock_1.roc(current_bar_.close, "
-        "_pf_lazy_src_clock_1.previous_source(_pf_lazy_src_hist_1[2], "
-        "_pf_lazy_src_chart_1[3], 3, bar_index_))"
+        "_pf_lazy_src_clock_1.previous_source(_pf_lazy_src_hist_1[2], 3))"
     ) in _stmt_line(cpp, "b = (")
     # No site reads its own history, so nothing is hoisted.
     assert "_pf_every_bar_ta_" not in cpp
@@ -1370,8 +1365,8 @@ def test_function_scoped_var_drawing_handle_per_clone_init():
     # cs0 inits topLine, cs1 inits topLine_cs1 — each with its own flag.
     assert "if (!this->_pf_var_init_topLine)" in cpp
     assert "if (!this->_pf_var_init_topLine_cs1)" in cpp
-    assert "topLine = pf_line_new(" in cpp
-    assert "topLine_cs1 = pf_line_new(" in cpp
+    assert "topLine = _pf_collect_lines_(pf_line_new(" in cpp
+    assert "topLine_cs1 = _pf_collect_lines_(pf_line_new(" in cpp
     assert "bool _pf_var_init_topLine = false;" in cpp
     assert "bool _pf_var_init_topLine_cs1 = false;" in cpp
 

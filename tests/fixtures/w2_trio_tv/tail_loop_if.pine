@@ -1,0 +1,48 @@
+//@version=6
+strategy("pf-w2-f04-loop-if-tails", overlay = true)
+
+// Loops whose body ends in an if without else, an else-if chain without a
+// final else, or a switch without a default arm, with and without an arm
+// running on the last iteration.
+fIfLast(float v) =>
+    float s = 0.0
+    for i = 1 to 3
+        if i < 3
+            s := s + v
+fIfLastTaken(float v) =>
+    float s = 0.0
+    for i = 1 to 3
+        if i > 1
+            s := s + v
+fElseIf(float v) =>
+    float s = 0.0
+    for i = 1 to 3
+        if i == 1
+            s := s + v
+        else if i == 2
+            s := s + 2 * v
+fSwitch(float v) =>
+    float s = 0.0
+    for i = 1 to 3
+        switch i
+            1 =>
+                s := s + v
+            3 =>
+                s := s + 3 * v
+fSwitchMiss(float v) =>
+    float s = 0.0
+    for i = 1 to 3
+        switch i
+            1 =>
+                s := s + v
+
+fmt(x) => str.tostring(x, "#.####")
+r1 = fIfLast(close)
+r2 = fIfLastTaken(close)
+r3 = fElseIf(close)
+r4 = fSwitch(close)
+r5 = fSwitchMiss(close)
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = fmt(r1) + "|" + fmt(r2) + "|" + fmt(r3) + "|" + fmt(r4) + "|" + fmt(r5) + "|" + fmt(close))

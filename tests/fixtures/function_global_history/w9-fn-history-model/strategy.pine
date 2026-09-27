@@ -1,0 +1,107 @@
+//@version=6
+// SYNTHETIC probe (lane CG-W9-FN): what a user function reads for x[k] when x is a
+// script-scope variable and the function is not called on every bar.
+// Each case d is encoded as one trade: side = sign(d), qty = |d| + 1.
+//   A  fk2() => gv[2], one call site at 10:00, 10:15, 12:00: per-call -8, chart-aligned hold-last -7, chart -2
+//   B1 fs() => gv[1], site 1 at 10:00, 12:00: per-site -8
+//   B2 fs() => gv[1], site 2 at 11:00, 12:00: per-site -4 (a shared history reads -4 at both)
+//   C  outer() => inner(), inner() => gv[1]; outer at 10:00, 12:00, inner also called every bar: -8
+//   D  fl() => gl[1] in a 3-iteration loop at 10:00, 12:00, gl := bar_index*10+i before each call;
+//      iteration 1 at 12:00 minus bar_index*10: per-execution 0, per-bar slot -78
+//   E  fm() => gm[1], gm := bar_index before the call, bar_index + 1000 after it: value at call -8,
+//      value at bar end 992, chart 999
+//   G  fe() => ge[1] called on every bar, ge := bar_index before, bar_index + 1000 after: at call -1, chart 999
+strategy("w9-fn-history-model", overlay=true, initial_capital=1000000000, default_qty_type=strategy.fixed, default_qty_value=1)
+T(h, m) => timestamp("UTC", 2025, 4, 1, h, m)
+isA = time == T(10, 0) or time == T(10, 15) or time == T(12, 0)
+is1 = time == T(10, 0) or time == T(12, 0)
+is2 = time == T(11, 0) or time == T(12, 0)
+at12 = time == T(12, 0)
+
+var float gv = 0.0
+gv := bar_index
+var float gl = 0.0
+var float gm = 0.0
+gm := bar_index
+var float ge = 0.0
+ge := bar_index
+
+fk2() => gv[2]
+fs() => gv[1]
+inner() => gv[1]
+outer() => inner()
+fl() => gl[1]
+fm() => gm[1]
+fe() => ge[1]
+
+var float dA = na
+var float dB1 = na
+var float dB2 = na
+var float dC = na
+var float dD = na
+var float dE = na
+var float dG = na
+
+always = inner()
+eNow = fe()
+if at12
+    dG := eNow - bar_index
+
+if isA
+    a = fk2()
+    if at12
+        dA := a - bar_index
+if is1
+    s1 = fs()
+    if at12
+        dB1 := s1 - bar_index
+if is2
+    s2 = fs()
+    if at12
+        dB2 := s2 - bar_index
+if is1
+    c = outer()
+    if at12
+        dC := c - bar_index
+if is1
+    for i = 0 to 2
+        gl := bar_index * 10 + i
+        l = fl()
+        if at12 and i == 1
+            dD := l - bar_index * 10
+if is1
+    e = fm()
+    if at12
+        dE := e - bar_index
+
+gm := bar_index + 1000
+ge := bar_index + 1000
+
+if time == T(14, 0)
+    strategy.entry("A", dA >= 0 ? strategy.long : strategy.short, qty=math.abs(dA) + 1)
+if time == T(14, 15)
+    strategy.close("A")
+if time == T(14, 30)
+    strategy.entry("B1", dB1 >= 0 ? strategy.long : strategy.short, qty=math.abs(dB1) + 1)
+if time == T(14, 45)
+    strategy.close("B1")
+if time == T(15, 0)
+    strategy.entry("B2", dB2 >= 0 ? strategy.long : strategy.short, qty=math.abs(dB2) + 1)
+if time == T(15, 15)
+    strategy.close("B2")
+if time == T(15, 30)
+    strategy.entry("C", dC >= 0 ? strategy.long : strategy.short, qty=math.abs(dC) + 1)
+if time == T(15, 45)
+    strategy.close("C")
+if time == T(16, 0)
+    strategy.entry("D", dD >= 0 ? strategy.long : strategy.short, qty=math.abs(dD) + 1)
+if time == T(16, 15)
+    strategy.close("D")
+if time == T(16, 30)
+    strategy.entry("E", dE >= 0 ? strategy.long : strategy.short, qty=math.abs(dE) + 1)
+if time == T(16, 45)
+    strategy.close("E")
+if time == T(17, 0)
+    strategy.entry("G", dG >= 0 ? strategy.long : strategy.short, qty=math.abs(dG) + 1)
+if time == T(17, 15)
+    strategy.close("G")

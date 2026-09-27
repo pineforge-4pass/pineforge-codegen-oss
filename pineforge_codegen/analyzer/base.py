@@ -30,6 +30,7 @@ from ..symbols import (
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes
+from ..security_contexts import context_key, reads_bar_series
 from ..session_reads import emitted_session_reads
 from ..method_binding import (
     BoundMethodArgs,
@@ -295,6 +296,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_var_storage_names: dict[str, dict[str, str]] = {}
         self._func_series_vars: dict[str, set] = {}   # func_name -> set[str]
         self._session_history_unsafe: dict[str, str] = {}
+        # Plain UDF -> script variables (and ``bar_index``) its body reads
+        # through history, in source order; id(Subscript) -> (UDF, name, node)
+        # for each such read. See ``_note_function_global_history_read``.
+        self._func_global_history_reads: dict[str, list[str]] = {}
+        self._func_global_history_nodes: dict[int, tuple] = {}
+        self._global_history_only_stateful: set[str] = set()
+        self._global_history_typing_warned: set[tuple] = set()
         # Declaration-bound non-persistent history locals are distinct from
         # history parameters/global reads carried by ``func_series_vars``.
         # Codegen needs this exact subset when a raw spelling also belongs to
@@ -637,6 +645,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 for owner, names in self._func_var_storage_names.items()
             },
             func_series_vars=self._func_series_vars,
+            func_global_history_reads={
+                owner: list(names)
+                for owner, names in self._func_global_history_reads.items()
+            },
+            func_global_history_nodes=dict(self._func_global_history_nodes),
             nonpersistent_series_decl_names=set(
                 self._nonpersistent_series_decl_names
             ),
@@ -2800,8 +2813,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 )
 
         # Canonical direct-state predicate.  TA-only and fixnan-only helpers
-        # are just as stateful as functions carrying an explicit series/var.
-        stateful = (
+        # are just as stateful as functions carrying an explicit series/var,
+        # and so is a function reading a script variable through history: its
+        # call sites each own that history.
+        direct_state = (
             set(self._func_series_vars)
             | set(self._func_var_members)
             | set(self._func_ta_ranges)
@@ -2814,15 +2829,28 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # marker is intentionally separate from request.security evaluator
         # identity, so ordinary security calls remain shared unless the
         # dedicated timeframe-monomorphization pass clones them.
-        changed = True
-        while changed:
-            changed = False
-            for fname, calls in calls_by_parent.items():
-                if fname in stateful:
-                    continue
-                if any(sub in stateful for sub, _ in calls):
-                    stateful.add(fname)
-                    changed = True
+        def close_over_callers(seed: set[str]) -> set[str]:
+            closed = set(seed)
+            changed = True
+            while changed:
+                changed = False
+                for fname, calls in calls_by_parent.items():
+                    if fname in closed:
+                        continue
+                    if any(sub in closed for sub, _ in calls):
+                        closed.add(fname)
+                        changed = True
+            return closed
+
+        stateful = close_over_callers(
+            direct_state | set(self._func_global_history_reads)
+        )
+        # Callables stateful only through a script variable's history: before
+        # that rule they shared one body, so their call-site typing must not
+        # refuse a script that transpiled then (``merge_profile`` below).
+        self._global_history_only_stateful = (
+            stateful - close_over_callers(direct_state)
+        )
 
         # Direct fixnan-only functions and pure transitive wrappers own no
         # TA/series member that would trip the emitter's ordinary body-clone
@@ -3067,6 +3095,31 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     current[index] = candidate
                     changed = True
                 elif current[index] != candidate:
+                    if callee in self._global_history_only_stateful:
+                        # Its call sites shared one body before this callable
+                        # read a script variable's history; keep that body's
+                        # typing, the first type, rather than refuse a script
+                        # that transpiled then.
+                        warned = (callee, cs_idx, index)
+                        if warned not in self._global_history_typing_warned:
+                            self._global_history_typing_warned.add(warned)
+                            self._warn(
+                                "Untyped parameter '"
+                                + info.node.params[index]
+                                + "' of callable '"
+                                + callee
+                                + "' receives "
+                                + current[index].value
+                                + " and "
+                                + candidate.value
+                                + " through calls that share one written-call "
+                                + f"variant (cs{cs_idx}); PineForge types it "
+                                + current[index].value
+                                + ", so the other argument is converted. "
+                                + "Declare the parameter type to choose it.",
+                                call.loc,
+                            )
+                        continue
                     self._error(
                         "Cannot safely specialize untyped parameter '"
                         + info.node.params[index]
@@ -3358,16 +3411,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         )
 
     # ------------------------------------------------------------------
-    # Mixed-callsite UDF timeframe-param security rejection.
+    # Per-call-site request.security contexts of a helper.
     #
-    # A ``request.security`` whose ``timeframe`` is a parameter of its
-    # containing UDF maps to ONE evaluator regardless of how many times the
-    # UDF is called. When the UDF is called from >= 2 sites with DISTINCT
-    # literal timeframes, a single evaluator cannot faithfully serve them
-    # all and the resolver would silently collapse onto the chart timeframe
-    # (``input_tf_``). Per-callsite evaluator specialization (cloning the
-    # evaluator + UDF) is the correct fix but is not wired in this iteration,
-    # so we reject deterministically instead of emitting wrong semantics.
+    # A ``request.security`` whose ``timeframe`` or ``symbol`` is a parameter
+    # of its containing UDF maps to ONE evaluator however often the UDF is
+    # called. When its call sites pass different contexts -- timeframes, or a
+    # Heikin-Ashi and a plain chart symbol -- one evaluator cannot serve them
+    # all: the request is cloned per call site (``callsite_idx``), each clone
+    # registered with its site's timeframe argument (a literal as a literal,
+    # anything else -- an input, a global -- as that expression, read at
+    # registration) and its site's symbol. A context reaching the helper
+    # through another helper's parameter or a local is resolved before the
+    # analyzer runs (``security_contexts``) and arrives here resolved.
     # ------------------------------------------------------------------
     def _check_mixed_callsite_security_tf(self) -> None:
         sec_calls = getattr(self, "_security_calls", None)
@@ -3383,16 +3438,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         cloned_any = False
         for sec in sec_calls:
             containing = getattr(sec, "containing_func", "") or ""
+            fdef = func_defs.get(containing) if containing else None
             tf_node = getattr(sec, "timeframe", None)
-            if not containing or not isinstance(tf_node, Identifier):
+            symbol_node = getattr(sec, "symbol", None)
+            if fdef is None or sec.context_resolved or sec.is_lower_tf_array:
                 new_calls.append(sec)
                 continue
-            param_name = tf_node.name
-            fdef = func_defs.get(containing)
-            if fdef is None or param_name not in fdef.params:
+            tf_param = (tf_node.name if isinstance(tf_node, Identifier)
+                        and tf_node.name in fdef.params else None)
+            symbol_param = (symbol_node.name if isinstance(symbol_node, Identifier)
+                            and symbol_node.name in fdef.params else None)
+            if tf_param is None and symbol_param is None:
                 new_calls.append(sec)
                 continue
-            pidx = fdef.params.index(param_name)
             calls = list(self._iter_user_func_calls(containing))
             if not calls:
                 new_calls.append(sec)  # dead code — evaluator result never read
@@ -3415,7 +3473,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # naming (which keys purely off func_call_cs_map, not
             # has_ta/has_series) picks the right ``_cs{N}`` variant.
             already_tracked = self._func_call_site_count.get(containing, 0) > 0
-            per_cs: list[tuple[int, str | None]] = []
+            # (cs_idx, context key, registered timeframe, heikinashi)
+            per_cs: list[tuple[int, tuple, object, bool]] = []
             for i, call in enumerate(calls):
                 if already_tracked:
                     cs_info = self._func_call_cs_map.get(id(call))
@@ -3425,31 +3484,43 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 else:
                     cs_idx = i
                     self._func_call_cs_map.setdefault(id(call), (containing, cs_idx))
-                arg = call.args[pidx] if pidx < len(call.args) else None
-                lit = self._callsite_tf_literal_value(arg)
-                per_cs.append((cs_idx, lit))
+                key: list = []
+                timeframe = tf_node
+                if tf_param is not None:
+                    pidx = fdef.params.index(tf_param)
+                    arg = call.args[pidx] if pidx < len(call.args) else None
+                    lit = self._callsite_tf_literal_value(arg)
+                    if lit is not None:
+                        key.append(("lit", lit))
+                        timeframe = StringLiteral(value=lit, loc=tf_node.loc)
+                    else:
+                        key.append(("expr", self._security_context_key(arg)))
+                        timeframe = arg
+                heikinashi = sec.heikinashi
+                if symbol_param is not None:
+                    sidx = fdef.params.index(symbol_param)
+                    arg = call.args[sidx] if sidx < len(call.args) else None
+                    heikinashi = arg is not None and self._security_symbol_is_heikinashi(arg)
+                    key.append(heikinashi)
+                per_cs.append((cs_idx, tuple(key), timeframe, heikinashi))
             if not per_cs:
                 new_calls.append(sec)  # dead code — evaluator result never read
                 continue
-            distinct_literals = {lit for _, lit in per_cs if lit is not None}
-            if len(distinct_literals) < 2:
-                new_calls.append(sec)  # single TF (or unresolved) — no cloning needed
+            if len({key for _, key, _, _ in per_cs}) < 2:
+                # One context on every call site: the helper's own request.
+                sec.heikinashi = per_cs[0][3]
+                new_calls.append(sec)
                 continue
-            if any(lit is None for _, lit in per_cs):
-                # Some call site's tf isn't a compile-time literal — can't
-                # pin every clone to a concrete timeframe. Keep the original
-                # deterministic rejection rather than guess.
+            # With a timeframe parameter, a key's first part is its timeframe.
+            series = tf_param and next(
+                (name for _, key, timeframe, _ in per_cs
+                 if key[0][0] == "expr" and (name := reads_bar_series(timeframe))), None)
+            if series is not None:
                 self._error(
-                    "request.security timeframe parameter '"
-                    + param_name
-                    + "' of function '"
-                    + containing
-                    + "' is called with multiple distinct literal timeframes ("
-                    + ", ".join(sorted(distinct_literals))
-                    + "). A single request.security evaluator cannot serve "
-                    "them all and would silently collapse onto the chart "
-                    "timeframe. Pass a single timeframe, or inline a separate "
-                    "request.security call at each call site.",
+                    "request.security timeframe parameter '" + str(tf_param)
+                    + "' of function '" + containing + "' is passed a timeframe "
+                    "that reads the chart bar ('" + series + "'): PineForge "
+                    "registers each call site's timeframe before the first bar.",
                     tf_node.loc,
                 )
                 new_calls.append(sec)
@@ -3463,16 +3534,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 # in turn while it does.
                 self._func_call_site_count[containing] = len(calls)
                 self._func_security_clone_only.add(containing)
-            # Clone: one SecurityCallInfo per call site, each pinned to that
-            # site's literal timeframe via a synthetic StringLiteral (so the
-            # existing literal-timeframe resolution path needs no changes)
-            # and given a fresh, currently-unused sec_id.
+            # Clone: one SecurityCallInfo per call site, each registered with
+            # its site's context and given a fresh, currently-unused sec_id.
             next_sec_id = max((s.sec_id for s in sec_calls), default=-1) + 1
             next_sec_id = max(next_sec_id, len(sec_calls) + len(new_calls))
-            for cs_idx, lit in sorted(per_cs):
+            for cs_idx, _key, timeframe, heikinashi in sorted(per_cs, key=lambda c: c[0]):
                 clone = SecurityCallInfo(
                     sec_id=next_sec_id,
-                    timeframe=StringLiteral(value=lit, loc=tf_node.loc),
+                    timeframe=timeframe,
                     expression=sec.expression,
                     returns_tuple=sec.returns_tuple,
                     tuple_size=sec.tuple_size,
@@ -3480,11 +3549,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     gaps=sec.gaps,
                     lookahead=sec.lookahead,
                     ta_range=sec.ta_range,
+                    heikinashi=heikinashi,
                     depends_on_mutable_globals=sec.depends_on_mutable_globals,
                     mutable_globals=sec.mutable_globals,
                     is_lower_tf_array=sec.is_lower_tf_array,
                     containing_func=sec.containing_func,
                     callsite_idx=cs_idx,
+                    string_result=sec.string_result,
+                    symbol=sec.symbol,
                 )
                 new_calls.append(clone)
                 next_sec_id += 1
@@ -3526,19 +3598,28 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         yield from _walk(self._ast)
 
     def _callsite_tf_literal_value(self, arg) -> str | None:
-        """Resolve a UDF call-site timeframe argument to a literal string
-        value when it is statically known: a string literal, or a known
-        constant / input-backed variable whose stored value is a string.
-        Returns None for anything that is not a compile-time string."""
+        """A UDF call-site timeframe argument's value when it is a string
+        literal, directly or through never-reassigned global aliases, else
+        None. An input's default is not its value: an override changes it."""
+        seen: set[str] = set()
+        while (isinstance(arg, Identifier) and arg.name not in seen
+               and arg.name not in self._global_reassigned_names):
+            seen.add(arg.name)
+            arg = self._global_expr_map.get(arg.name)
         if isinstance(arg, StringLiteral):
             return arg.value
-        if isinstance(arg, Identifier):
-            sym = self._symbols.resolve(arg.name)
-            if sym is not None and getattr(sym, "const_value", None) is not None:
-                val = sym.const_value
-                if isinstance(val, str):
-                    return val
         return None
+
+    def _security_context_key(self, arg):
+        """A call-site context argument, compared by what it spells after
+        following never-reassigned global aliases."""
+        seen: set[str] = set()
+        while (isinstance(arg, Identifier) and arg.name not in seen
+               and arg.name not in self._global_reassigned_names
+               and isinstance(self._global_expr_map.get(arg.name), Identifier)):
+            seen.add(arg.name)
+            arg = self._global_expr_map[arg.name]
+        return context_key(arg)
 
     def _is_static_expression(self, node: ASTNode | None) -> bool:
         if node is None:
@@ -3647,12 +3728,16 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         return PineType.VOID
 
     def _visit_ImportStmt(self, node: ImportStmt) -> PineType:
+        # Imported here: the support checker imports the analyzer package.
+        from ..support_checker import import_is_builtin_namespace_no_op, import_spelling
+        if import_is_builtin_namespace_no_op(self._ast, node):
+            return PineType.VOID
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
         diag = Diagnostic(
             level=Level.ERROR,
             phase=Phase.ANALYZER,
             location=loc,
-            message=f"Import is not supported: '{node.path}'",
+            message=f"Import is not supported: '{import_spelling(node)}'",
         )
         raise CompileError([diag])
 
@@ -4186,14 +4271,24 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     if hasattr(sym, "is_static_series"):
                         delattr(sym, "is_static_series")
         else:
-            self._visit(node.target)
+            target_type = self._visit(node.target)
             base_name = self._get_target_base_name(node.target)
             if base_name:
                 self._static_vars.discard(base_name)
                 sym = self._symbols.resolve(base_name)
                 if sym and hasattr(sym, "is_static_series"):
                     delattr(sym, "is_static_series")
+            # The statement's value is the target's new value, typed as the
+            # target: ``o.v += 1`` on a float field is a float.
+            if (isinstance(node.target, MemberAccess)
+                    and target_type not in (None, PineType.UNKNOWN, PineType.VOID)):
+                return target_type
 
+        if isinstance(node.target, Identifier):
+            target_sym = self._symbols.resolve(node.target.name)
+            if (target_sym is not None and target_sym.pine_type
+                    not in (PineType.UNKNOWN, PineType.VOID)):
+                return target_sym.pine_type
         return val_type
 
     def _selection_tuple_shape(
@@ -4357,6 +4452,32 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     # Function definition
     # ------------------------------------------------------------------
 
+    def _returns_tuple_call(self, value) -> bool:
+        """A call to a tuple-returning user function or ``ta.*`` function."""
+        if not isinstance(value, FuncCall):
+            return False
+        callee = value.callee
+        if isinstance(callee, Identifier):
+            return self._func_returns_tuple.get(callee.name, False)
+        return (isinstance(callee, MemberAccess)
+                and isinstance(callee.object, Identifier)
+                and callee.object.name == "ta"
+                and callee.member in TA_TUPLE_RETURNS)
+
+    def _statement_value_type(self, stmt, fallback: PineType) -> PineType:
+        """Type of the value a function's last statement leaves.
+
+        A trailing declaration ``[T] x = e`` returns ``x``, typed as the
+        variable (``float y = 4`` is a float); a trailing assignment types
+        itself as its target in ``_visit_Assignment``.
+        """
+        if not isinstance(stmt, VarDecl) or not stmt.name:
+            return fallback
+        sym = self._symbols.resolve(stmt.name)
+        if sym is None or sym.pine_type in (PineType.UNKNOWN, PineType.VOID):
+            return fallback
+        return sym.pine_type
+
     def _visit_FuncDef(self, node: FuncDef) -> PineType:
         # Store the function def for later analysis
         self._func_defs[node.name] = node
@@ -4404,6 +4525,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         try:
             for stmt in node.body:
                 body_type = self._visit(stmt)
+            if node.body:
+                body_type = self._statement_value_type(node.body[-1], body_type)
         finally:
             self._global_scope = old_global
             self._collection_scope_stack.pop()
@@ -4474,6 +4597,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             terminal_direct_return_spec,
         )
 
+        # ``[p, q] = pair(v)`` last returns that tuple: its element types are
+        # the declared names', resolvable only inside the function scope.
+        tuple_decl_types = ()
+        if (node.body and isinstance(node.body[-1], TupleAssign)
+                and "_" not in node.body[-1].names
+                and self._returns_tuple_call(node.body[-1].value)):
+            tuple_decl_types = tuple(
+                sym.pine_type if sym is not None else PineType.FLOAT
+                for sym in (self._symbols.resolve(name)
+                            for name in node.body[-1].names)
+            )
+
         self._symbols.exit_scope()
 
         # Detect if function returns a tuple (last stmt is TupleLiteral)
@@ -4498,6 +4633,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._func_tuple_element_types[node.name] = (
                     self._tuple_element_types_by_node.get(id(tuple_node), ())
                 )
+            elif tuple_decl_types:
+                self._func_returns_tuple[node.name] = True
+                self._func_tuple_element_count[node.name] = len(tuple_decl_types)
+                self._func_tuple_element_types[node.name] = tuple_decl_types
             elif selection_shape is not None:
                 # ``f() => if c ... g() else [a, b]``: every arm yields a
                 # tuple of one size, so the function returns that tuple.
@@ -4750,6 +4889,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         try:
             for stmt in node.body:
                 ret_type = self._visit(stmt)
+            if node.body:
+                ret_type = self._statement_value_type(node.body[-1], ret_type)
             if terminal_ret_expr is not None:
                 terminal_spec = self._type_spec_from_expr(terminal_ret_expr)
                 if terminal_spec is not None and terminal_spec.kind == "map":
@@ -6100,8 +6241,39 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             self._func_series_history_nodes.setdefault(
                                 (func_name, name), node
                             )
+                        self._note_function_global_history_read(node, name, sym)
 
         return obj_type
+
+    def _note_function_global_history_read(
+            self, node: Subscript, name: str, sym) -> None:
+        """Record ``x[k]`` in a plain UDF body on a script variable.
+
+        TradingView builds the history of a series used inside a function
+        through each successive call of it: in ``f() => gv[1]``, ``gv[1]`` is
+        ``gv`` as that call site saw it on its latest call at or before the
+        previous bar, whether ``gv`` is ``var`` or not, and ``bar_index`` reads
+        the same way; the chart built-ins keep the chart's history
+        (tests/fixtures/function_global_history). Codegen gives every emitted
+        body of the function its own buffer, so the function needs one body
+        per call site, like any other stateful function.
+        """
+        if not self._enclosing_func_names or sym.scope != "global":
+            return
+        owner = self._enclosing_func_names[-1]
+        if not isinstance(self._func_defs.get(owner), FuncDef):
+            return
+        # A built-in other than bar_index is chart history.
+        if name != "bar_index" and getattr(sym, "_pf_decl_node_id", None) is None:
+            return
+        spec = getattr(sym, "type_spec", None)
+        if (sym.pine_type not in (PineType.INT, PineType.FLOAT, PineType.BOOL)
+                or (spec is not None and spec.kind != "primitive")):
+            return
+        reads = self._func_global_history_reads.setdefault(owner, [])
+        if name not in reads:
+            reads.append(name)
+        self._func_global_history_nodes[id(node)] = (owner, name, node)
 
     def _visit_Identifier(self, node: Identifier) -> PineType:
         # Some identifiers are namespace prefixes handled elsewhere
@@ -6348,6 +6520,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return PineType.FLOAT
 
             sym = self._symbols.resolve(ns)
+            # A field read's receiver is an identifier read like any other:
+            # codegen needs its binding scope (``_call_site_var_name``).
+            self._identifier_binding_scopes[id(node.object)] = (
+                getattr(sym, "scope", None) if sym is not None else None
+            )
             udt_name = None
             if sym is not None:
                 udt_name = sym.udt_type_name

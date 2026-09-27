@@ -56,11 +56,11 @@ def test_line_getters_setters_delete_copy():
         "ln.delete()"
     )
     # getter return types drive the member decl; the arena call is the RHS.
-    assert "double y" in cpp and "pf_line_get_y2(_pf_lines_, ln)" in cpp
-    assert "int64_t x" in cpp and "pf_line_get_x1(_pf_lines_, ln)" in cpp
-    assert "pf_line_set_y2(_pf_lines_, ln, (double)(current_bar_.close))" in cpp
-    assert "pf_line_set_x2(_pf_lines_, ln, (int64_t)(pine_bar_index()))" in cpp
-    assert "Line c" in cpp and "pf_line_copy(_pf_lines_, ln)" in cpp
+    assert "double y" in cpp and "_pf_drawing_get(pf_line_get_y2, _pf_lines_, ln)" in cpp
+    assert "int64_t x" in cpp and "_pf_drawing_get(pf_line_get_x1, _pf_lines_, ln)" in cpp
+    assert "_pf_drawing_set(pf_line_set_y2, _pf_lines_, ln, (double)(current_bar_.close))" in cpp
+    assert "_pf_drawing_set(pf_line_set_x2, _pf_lines_, ln, (int64_t)(pine_bar_index()))" in cpp
+    assert "Line c" in cpp and "_pf_collect_lines_(pf_line_copy(_pf_lines_, ln))" in cpp
     assert "pf_line_delete(_pf_lines_, ln)" in cpp
 
 
@@ -77,9 +77,9 @@ def test_box_new_and_getters():
     )
     assert ("pf_box_new(_pf_boxes_, (int64_t)(pine_bar_index()), (double)(current_bar_.high), "
             "(int64_t)((pine_bar_index() + 5)), (double)(current_bar_.low), XLoc::bar_index)") in cpp
-    assert "double t" in cpp and "pf_box_get_top(_pf_boxes_, bx)" in cpp
-    assert "int64_t l" in cpp and "pf_box_get_left(_pf_boxes_, bx)" in cpp
-    assert "pf_box_set_bottom(_pf_boxes_, bx, (double)(current_bar_.low))" in cpp
+    assert "double t" in cpp and "_pf_drawing_get(pf_box_get_top, _pf_boxes_, bx)" in cpp
+    assert "int64_t l" in cpp and "_pf_drawing_get(pf_box_get_left, _pf_boxes_, bx)" in cpp
+    assert "_pf_drawing_set(pf_box_set_bottom, _pf_boxes_, bx, (double)(current_bar_.low))" in cpp
 
 
 # ---------------------------------------------------------------------------
@@ -95,9 +95,9 @@ def test_label_new_text_and_getters():
     )
     assert ('pf_label_new(_pf_labels_, (int64_t)(pine_bar_index()), (double)(current_bar_.close), '
             'std::string("hi"), XLoc::bar_index, YLoc::abovebar)') in cpp
-    assert 'pf_label_set_text(_pf_labels_, lb, std::string("bye"))' in cpp
-    assert "std::string s" in cpp and "pf_label_get_text(_pf_labels_, lb)" in cpp
-    assert "double yy" in cpp and "pf_label_get_y(_pf_labels_, lb)" in cpp
+    assert '_pf_drawing_set(pf_label_set_text, _pf_labels_, lb, std::string("bye"))' in cpp
+    assert "std::string s" in cpp and "_pf_drawing_get(pf_label_get_text, _pf_labels_, lb)" in cpp
+    assert "double yy" in cpp and "_pf_drawing_get(pf_label_get_y, _pf_labels_, lb)" in cpp
 
 
 # ---------------------------------------------------------------------------
@@ -117,11 +117,12 @@ def test_chart_point_and_line_pts_and_linefill():
     assert "pf_line_new_pts(_pf_lines_, p1, p2, XLoc::bar_index)" in cpp
     # linefill drops the color arg.
     assert "pf_linefill_new(_pf_linefills_, ln1, ln2)" in cpp
-    assert "Line g" in cpp and "pf_linefill_get_line1(_pf_linefills_, lf)" in cpp
+    assert "Line g" in cpp and "_pf_drawing_get(pf_linefill_get_line1, _pf_linefills_, lf)" in cpp
 
 
 # ---------------------------------------------------------------------------
-# arena caps from the strategy() header.
+# max_*_count from the strategy() header drives the collectors (the arenas
+# themselves never evict; tests/test_e2e_drawing_lifetime.py pins the rule).
 # ---------------------------------------------------------------------------
 def test_arena_caps_from_header():
     cpp = _cpp(
@@ -130,10 +131,13 @@ def test_arena_caps_from_header():
         'lb = label.new(bar_index, close, "x")',
         header="max_lines_count=300, max_boxes_count=100, max_labels_count=200",
     )
-    assert "DrawingArena<LineRec> _pf_lines_{300};" in cpp
-    assert "DrawingArena<BoxRec> _pf_boxes_{100};" in cpp
-    assert "DrawingArena<LabelRec> _pf_labels_{200};" in cpp
-    assert "DrawingArena<LinefillRec> _pf_linefills_{50};" in cpp
+    for arena, rec in (("_pf_lines_", "LineRec"), ("_pf_boxes_", "BoxRec"),
+                       ("_pf_labels_", "LabelRec"), ("_pf_linefills_", "LinefillRec")):
+        assert f"DrawingArena<{rec}> {arena}{{_PF_DRAWING_UNBOUNDED}};" in cpp
+    for arena, keep in (("_pf_lines_", 300), ("_pf_boxes_", 100), ("_pf_labels_", 200)):
+        assert f"if ((int)this->{arena}.order().size() >= {keep + 6}) {{" in cpp
+        assert f"_pf_collect_drawings(this->{arena}, {keep}, _pf_held," in cpp
+    assert "_pf_collect_drawings(this->_pf_linefills_" not in cpp
 
 
 def test_var_handle_na_default_no_ctor_init():
@@ -186,8 +190,8 @@ if not na(reverse) and not na(reassigned)
 '''
     cpp = transpile(src)
     assert "Label reverse =" in cpp
-    assert "(Label{}) : (pf_label_new" in cpp
-    assert "reassigned = ((cond) ? (pf_label_new" in cpp
+    assert "(Label{}) : (_pf_collect_labels_(pf_label_new" in cpp
+    assert "reassigned = ((cond) ? (_pf_collect_labels_(pf_label_new" in cpp
     assert ": (Label{}))" in cpp
     assert "double reverse =" not in cpp
     skip_if_no_compile_env()
@@ -224,7 +228,7 @@ if not na(globalLabel)
 '''
     cpp = transpile(src)
     assert "Label makeLabel(" in cpp
-    assert "return ((cond) ? (pf_label_new" in cpp
+    assert "return ((cond) ? (_pf_collect_labels_(pf_label_new" in cpp
     assert ": (Label{}));" in cpp
     assert "globalLabel = ((cond) ? (makeLabel()) : (Label{}));" in cpp
     cond_pos = cpp.index("cond = ([&]{")
@@ -232,7 +236,7 @@ if not na(globalLabel)
     init_end = cpp.index("_pf_var_init_globalLabel = true;", init_pos)
     init_block = cpp[init_pos:init_end]
     assert cond_pos < init_pos
-    assert "globalLabel = ((cond) ? (pf_label_new" in init_block
+    assert "globalLabel = ((cond) ? (_pf_collect_labels_(pf_label_new" in init_block
     assert 'std::string("initial")' in init_block
     skip_if_no_compile_env()
     compile_cpp(cpp, label="drawing-ternary-return-global")
@@ -273,7 +277,7 @@ if not na(globalLine)
 '''
     cpp = transpile(src)
     body = cpp.split("Line update(Line& h) {", 1)[1].split("    }", 1)[0]
-    assert "h = ((cond) ? (pf_line_new" in body
+    assert "h = ((cond) ? (_pf_collect_lines_(pf_line_new" in body
     assert ": (Line{}));" in body
     assert "na<double>()" not in body
     skip_if_no_compile_env()
@@ -294,7 +298,7 @@ if not na(result)
 '''
     cpp = transpile(src)
     body = cpp.split("Line make_cs0() {", 1)[1].split("    }", 1)[0]
-    assert "h = ((cond) ? (pf_line_new" in body
+    assert "h = ((cond) ? (_pf_collect_lines_(pf_line_new" in body
     assert ": (Line{}));" in body
     assert "na<double>()" not in body
     skip_if_no_compile_env()
@@ -315,7 +319,7 @@ result = make()
     cond_pos = body.index("bool cond =")
     guard_pos = body.index("if (!this->_pf_var_init_h) {")
     assert cond_pos < guard_pos
-    assert "h = ((cond) ? (pf_line_new" in body
+    assert "h = ((cond) ? (_pf_collect_lines_(pf_line_new" in body
     skip_if_no_compile_env()
     compile_cpp(cpp, label="drawing-function-declaration-init")
 
@@ -473,7 +477,7 @@ result = make()
     for index, src in enumerate(sources):
         cpp = transpile(src)
         body = cpp.split("Label make() {", 1)[1].split("    }", 1)[0]
-        assert "Label x = ((cond) ? (pf_label_new" in body
+        assert "Label x = ((cond) ? (_pf_collect_labels_(pf_label_new" in body
         assert ": (Label{}));" in body
         assert "Line{}" not in body
         skip_if_no_compile_env()
@@ -494,7 +498,7 @@ if not cond
     assert "Label x__blk1;" in cpp
     assert "double x__blk1" not in cpp
     assert "_pf_var_init_x__blk1" in cpp
-    assert "x__blk1 = pf_label_new" in cpp
+    assert "x__blk1 = _pf_collect_labels_(pf_label_new" in cpp
     skip_if_no_compile_env()
     compile_cpp(cpp, label="drawing-sibling-persistent-members")
 
@@ -514,7 +518,7 @@ if not cond
     assert "Series<Label> x__blk1;" in cpp
     assert "Series<Line> x;" not in cpp
     assert "prior = x__blk1[1];" in cpp
-    assert "x__blk1.update(pf_label_new" in cpp
+    assert "x__blk1.update(_pf_collect_labels_(pf_label_new" in cpp
     skip_if_no_compile_env()
     compile_cpp(cpp, label="drawing-sibling-exact-series")
 
@@ -532,9 +536,9 @@ v = f()
 '''
     cpp = transpile(src)
     body = cpp.split("double f() {", 1)[1].split("    }", 1)[0]
-    assert "x = ((cond) ? (pf_line_new" in body
+    assert "x = ((cond) ? (_pf_collect_lines_(pf_line_new" in body
     assert ": (Line{}));" in body
-    assert "Label x = ((cond) ? (pf_label_new" in body
+    assert "Label x = ((cond) ? (_pf_collect_labels_(pf_label_new" in body
     assert ": (Label{}));" in body
     skip_if_no_compile_env()
     compile_cpp(cpp, label="drawing-source-order-shadow")
@@ -587,7 +591,7 @@ value = f()
     assert "    Line x = Line{};" in cpp
     assert "    double _pfv_1_x__f = na<double>();" in cpp
     assert "_pfv_1_x__f = 1.0;" in cpp
-    assert "x = pf_line_new(" in cpp
+    assert "x = _pf_collect_lines_(pf_line_new(" in cpp
     skip_if_no_compile_env()
     compile_cpp(cpp, label="drawing-global-persistent-scalar-isolation")
 
@@ -608,7 +612,7 @@ v = f()
     cpp = transpile(src)
     body = cpp.split("double f_cs0() {", 1)[1].split("return 0.0;", 1)[0]
     assert "double h = current_bar_.close;" in body
-    assert "h = ((cond) ? (pf_line_new" in body
+    assert "h = ((cond) ? (_pf_collect_lines_(pf_line_new" in body
     assert ": (Line{}));" in body
     assert "na<double>()" not in body
     skip_if_no_compile_env()
@@ -631,7 +635,7 @@ if not na(x[1])
     init_end = cpp.index("_pf_var_init_x = true;", init_pos)
     init_block = cpp[init_pos:init_end]
     assert cond_pos < init_pos
-    assert "x.update(((cond) ? (pf_label_new" in init_block
+    assert "x.update(((cond) ? (_pf_collect_labels_(pf_label_new" in init_block
     assert ": (Label{})));" in init_block
     assert "x.push(cond ? label.new" not in cpp
     skip_if_no_compile_env()
@@ -655,8 +659,8 @@ b = make()
     assert "Series<double> h" not in cpp
     assert "Line make_cs0()" in cpp
     assert "Line make_cs1()" in cpp
-    assert "h.update(((cond) ? (pf_line_new" in cpp
-    assert "h_cs1.update(((cond) ? (pf_line_new" in cpp
+    assert "h.update(((cond) ? (_pf_collect_lines_(pf_line_new" in cpp
+    assert "h_cs1.update(((cond) ? (_pf_collect_lines_(pf_line_new" in cpp
     skip_if_no_compile_env()
     compile_cpp(cpp, label="drawing-function-history-clones")
 
@@ -681,7 +685,7 @@ c = g_get(30, cond)
     assert "Series<Line> l__ni1;" in cpp
     assert "bool _pf_var_init_l__ni1 = false;" in cpp
     assert "if (!this->_pf_var_init_l__ni1)" in cpp
-    assert "l__ni1.update(((cond) ? (pf_line_new" in cpp
+    assert "l__ni1.update(((cond) ? (_pf_collect_lines_(pf_line_new" in cpp
     assert "l__ni1.push(l__ni1[0])" in cpp
     assert "l__ni1.update(l__ni1[0])" in cpp
     skip_if_no_compile_env()

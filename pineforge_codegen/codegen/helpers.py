@@ -48,16 +48,81 @@ def na_preserving_int_cast(value_cpp: str, int_cpp_type: str = "int") -> str:
 
     The value is evaluated exactly once. ``na`` in, ``na<T>()`` out; anything
     else truncates toward zero exactly as the implicit conversion did, so a
-    non-``na`` result is bit-for-bit what it was before.
+    non-``na`` result is bit-for-bit what it was before. A floating value
+    outside ``int`` reads ``na<int>()`` too: its conversion is undefined, and
+    x86-64 (``cvttsd2si``: ``INT_MIN``, the ``na`` sentinel) and arm64
+    (``fcvtzs``: saturation) disagreed on an epoch a missed provenance
+    narrowed (W9-CG-EPOCH-INT64); ``na<int>()`` is the x86-64 answer, so
+    Linux runs keep their bits.
     """
     # Integer literals are proven non-``na``. Keep the historical explicit
     # cast for these tiny paths so a helper does not churn every matrix/color
     # call that passes a literal index or channel.
     if _INT_LITERAL_TEXT.fullmatch(value_cpp):
         return f"({int_cpp_type})({value_cpp})"
+    if int_cpp_type == "int":
+        return (f"[&](){{ auto _pf_v = ({value_cpp}); "
+                f"if constexpr (std::is_floating_point_v<decltype(_pf_v)>) "
+                f"return (_pf_v >= -2147483648.0 && _pf_v < 2147483648.0) "
+                f"? (int)_pf_v : na<int>(); "
+                f"else return is_na(_pf_v) ? na<int>() : (int)_pf_v; }}()")
     return (f"[&](){{ auto _pf_v = ({value_cpp}); "
             f"return is_na(_pf_v) ? na<{int_cpp_type}>() : "
             f"({int_cpp_type})_pf_v; }}()")
+
+
+# C++ whose evaluation cannot be observed, so reading it twice -- or once per
+# loop iteration -- is harmless: a literal, a name or member chain (a history
+# read of it at a literal offset included), an na.
+_PLAIN_READ_CPP = re.compile(
+    r"[A-Za-z_]\w*(?:(?:\.|->)[A-Za-z_]\w*)*(?:\[\d+\])?"
+    r"|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
+    r'|std::string\("(?:[^"\\]|\\.)*"\)'
+    r"|na<[\w:]+>\(\)"
+)
+
+
+def _strip_outer_parens(text: str) -> str:
+    text = text.strip()
+    while text.startswith("(") and text.endswith(")"):
+        depth = 0
+        for i, ch in enumerate(text):
+            depth += ch == "("
+            depth -= ch == ")"
+            if depth == 0 and i < len(text) - 1:
+                return text  # the first "(" closes before the end: "(a) + (b)"
+        text = text[1:-1].strip()
+    return text
+
+
+def cpp_is_plain_read(value_cpp: str) -> bool:
+    """True when evaluating ``value_cpp`` more than once cannot be observed."""
+    return _PLAIN_READ_CPP.fullmatch(_strip_outer_parens(value_cpp)) is not None
+
+
+def evaluate_args_once(args: list[str], indices, render, token: str) -> str:
+    """``render(args)`` with every argument evaluated once, left to right.
+
+    Pine evaluates each call argument exactly once. A lowering template that
+    reads an argument twice, or once per loop iteration, re-runs that
+    argument's C++, so a stateful call in it (a ``ta.*`` compute(), a user
+    function with state) runs more than once per execution. Every argument
+    in ``indices`` that is not a plain read is bound once to a lambda local,
+    together with every earlier argument that is not, so the left-to-right
+    order holds; the template then reads the bindings. A call whose
+    ``indices`` arguments are all plain reads renders exactly as before.
+    """
+    need = [i for i in indices if i < len(args) and not cpp_is_plain_read(args[i])]
+    if not need:
+        return render(list(args))
+    bound = list(args)
+    decls = []
+    for i in range(max(need) + 1):
+        if cpp_is_plain_read(args[i]):
+            continue
+        decls.append(f"auto&& {token}{i} = ({args[i]});")
+        bound[i] = f"{token}{i}"
+    return f"([&]() {{ {' '.join(decls)} return {render(bound)}; }}())"
 
 
 def pine_index_int_cast(value_cpp: str) -> str:
@@ -202,7 +267,8 @@ CPP_EMITTER_NAMES = frozenset("""
     on_bar on_source_bar prepare_script_run configure_pine_strategy
     configure_security_evaluators snapshot_script_state restore_script_state
     commit_script_state set_strategy_override set_input
-    set_magnifier_volume_weighted fill_report run precalculate
+    set_magnifier_volume_weighted strategy_declares_bar_magnifier fill_report run
+    precalculate
     strategy_entry strategy_close strategy_close_all strategy_exit
     strategy_exit_cancel_bracket strategy_cancel strategy_cancel_all strategy_order
     pine_bar_index pine_last_bar_index prev_chart_close is_first_tick is_last_tick
@@ -230,6 +296,9 @@ CPP_EMITTER_NAMES = frozenset("""
     pf_box_set_lefttop pf_box_set_right pf_box_set_rightbottom pf_box_set_top
     pf_box_set_top_left_point pf_box_set_xloc
     pf_linefill_new pf_linefill_delete pf_linefill_get_line1 pf_linefill_get_line2
+    _PF_DRAWING_UNBOUNDED _PFDrawingArg _pf_drawing_get _pf_drawing_set
+    _pf_drawing_na _pf_collect_drawings _pf_collect_lines_ _pf_collect_boxes_
+    _pf_collect_labels_ _pf_new _pf_held
     get_input_int get_input_float get_input_bool get_input_string
     trace is_na na nz fixnan
 """.split())
@@ -237,7 +306,9 @@ CPP_EMITTER_NAMES = frozenset("""
 # The generated history members, ``_<kind>_<n>`` (codegen/base.py
 # _prepare_inline_history_members), numbered past any script name spelled
 # like one.
-INLINE_HISTORY_KINDS = ("hist_call", "series_arg", "udf_series_arg", "session_call")
+INLINE_HISTORY_KINDS = (
+    "hist_call", "series_arg", "udf_series_arg", "session_call", "fn_global_hist",
+)
 
 
 # HOST_MEMBER_NAMES (codegen/host_members.py, derived by

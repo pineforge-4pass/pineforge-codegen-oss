@@ -27,7 +27,7 @@ plot(m.price)
     # The struct now declares a real Label handle member.
     assert "Label tag" in cpp
     # The field write lowers onto the arena, NOT a dropped placeholder.
-    assert "_pf_udt_Marker.get(m).tag = pf_label_new(_pf_labels_," in cpp
+    assert "_pf_udt_Marker.get(m).tag = _pf_collect_labels_(pf_label_new(_pf_labels_," in cpp
     # The field read is a plain handle copy (real member access survives).
     assert "_pf_udt_Marker.get(m).tag" in cpp
 
@@ -46,7 +46,7 @@ plot(s.p1)
 '''
     cpp = transpile(src)
     assert "Line ln" in cpp
-    assert "_pf_udt_Segment.get(s).ln = pf_line_new(_pf_lines_," in cpp
+    assert "_pf_udt_Segment.get(s).ln = _pf_collect_lines_(pf_line_new(_pf_lines_," in cpp
 
 
 def test_udt_box_field_read_is_real():
