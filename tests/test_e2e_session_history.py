@@ -27,9 +27,10 @@ too, not the previous time the read ran. Codegen gives each flag read at the
 top level one Series pushed on every chart bar; a function that reads a flag
 at an offset is emitted once per call site and pushes the flag at its entry,
 once per call; in a ``request.security`` expression the read runs on the
-requested clock, one value per requested bar; one it reaches through a
-call's argument or a variable, and one in a function or method it evaluates,
-is refused, located at the read.
+requested clock, one value per requested bar, and so does a builtin's
+argument the payload builder lowers there; one it reaches through a variable
+(or a call's argument on the chart's terms), and one in a function or method it
+evaluates, is refused, located at the read.
 
 The pre-lane build emitted ``<flag>[k]`` on a C++ bool and did not compile.
 Each tape is replayed end to end -- ``transpile_json``, the built runtime,
@@ -504,9 +505,10 @@ REFUSED = {
         "w() => foo.m()\n"
         "a = w()\n"
         'x = request.security(syminfo.tickerid, "60", w()) or a\n', (5, 39), "a method"),
-    "an argument of a call in the expression": (
-        'x = request.security(syminfo.tickerid, "60", nz(session.ismarket[1] ? 1.0 : na)) > 0\n',
-        (3, 65), "request.security"),
+    # A builtin call's argument (``nz(session.ismarket[1] ? 1.0 : na)``) is no
+    # longer here: CG-SECURITY-2's payload builder lowers the history under a
+    # builtin on the requested clock, the Series this lane gives a direct read
+    # (tests/test_e2e_lane_compositions.py pins it against that read).
     "a method called on a receiver PineForge cannot type": (
         "type Foo\n    float v = 1\n"
         "method m(Foo self) => session.ismarket[1] and self.v > 0\n"
@@ -541,8 +543,9 @@ REFUSED = {
 @pytest.mark.parametrize("place", REFUSED)
 def test_unsupported_places_are_refused_at_the_read(place: str, tmp_path: Path) -> None:
     """Needs no engine: a read that a request.security expression reaches
-    through a function, a method, a variable or a call's argument has no
-    history on the requested clock in PineForge; it is refused at the read,
+    through a function, a method, a variable or a call's argument it keeps on
+    the chart's terms has no history on the requested clock in PineForge; it
+    is refused at the read,
     whichever way the evaluator would reach the function (the C++ did not
     compile before)."""
     body, (line, col), reason = REFUSED[place]

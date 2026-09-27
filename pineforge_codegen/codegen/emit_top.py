@@ -976,8 +976,12 @@ class TopLevelEmitter:
                 # reset overwrites the placeholder before the first compute.
                 for arg_pos, a in enumerate(site.ctor_args):
                     r = self._resolve_ta_ctor_arg(a)
+                    # An argument ``_ta_arg_takes_plan`` sends to the lowering
+                    # of ``_ta_dynamic_plan`` that it cannot spell is refused
+                    # here, as before string literals were spelled.
                     if (not self._is_compile_time_value(r)
-                            and self._runtime_ctor_arg_for_reset(a) is None):
+                            and (self._runtime_ctor_arg_for_reset(a) is None
+                                 or self._ta_arg_takes_plan(site, arg_pos, a))):
                         # A TA source reached through request.security can have
                         # several helper-bound constructor variants. Validate
                         # only variants of this exact source node before the

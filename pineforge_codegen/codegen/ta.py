@@ -33,6 +33,7 @@ from ..ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, TypeDecl, TypeField, UnaryOp, VarDecl,
     WhileStmt,
 )
+from ..pine_spelling import blank_string_literals
 from ..symbols import PineType
 from .helpers import pine_index_int_cast
 from .tables import (
@@ -1211,8 +1212,8 @@ class TaSiteHelper:
     # 2026-09-26; the engine header pineforge/source/pine_ta_length.hpp states
     # every rule with its tape):
     #
-    # * simple (fixed for the run -- a syminfo preset, an input-string ternary,
-    #   str.* over those): TradingView answers exactly the constant-length call
+    # * simple (fixed for the run -- a syminfo preset, str.* over one):
+    #   TradingView answers exactly the constant-length call
     #   (the ring of a sparse ta.lowest included). Lowered onto
     #   ``pineforge::source::FirstCallBound<class>``, built from the call's
     #   first execution; a length goes through ``simple_ta_length`` (0, a
@@ -1228,7 +1229,10 @@ class TaSiteHelper:
     # so those only ever carry a simple one here. A series length for the
     # other window functions (ta.sma, ta.wma, ...) keeps the refusal.
     # Constant- and input-length sites never reach this path: their C++ is
-    # unchanged.
+    # unchanged. An input.string choice of a length (``mode == "A" ? 5 : 10``)
+    # is an input length since CG-SECURITY-2 spells string literals; the other
+    # arguments those literals bring to the constructor stay here
+    # (``_ta_arg_takes_plan``).
 
     _TA_SERIES_EXTREME_CLASSES = {
         "highest": "pineforge::source::SeriesHighest",
@@ -1274,13 +1278,89 @@ class TaSiteHelper:
             return plan
         return None
 
+    # A string literal in a length's spelling, and the names a length may read
+    # beside input-backed ones and still be a choice between inputs' options.
+    _TA_STRING_LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'')
+    _TA_INPUT_CHOICE_NAMES = frozenset({
+        "and", "or", "not", "true", "false", "na", "int", "float", "bool",
+        "string", "input", "math",
+    })
+
+    def _ta_length_literal_facts(self, arg: str, inline: bool = True) -> tuple[bool, bool]:
+        """Whether the constructor argument ``arg`` reaches the constructor
+        only because string literals are spelled -- a derived name whose value
+        holds a literal (it went untracked), or, when ``inline``, a literal
+        naming something written in ``arg`` itself (the reset path's
+        identifier scans read it as a name) -- and whether it then reads
+        anything beside inputs, literals and ``math.*``.
+
+        CG-SECURITY-2 spells those literals so that a length chosen by
+        comparing an ``input.string`` with its options is input-derived and
+        keeps its constructor. Any other argument they bring to the
+        constructor -- a ``syminfo.*`` or ``timeframe.*`` comparison,
+        ``str.*`` over one -- stays with this module's lowering, as before
+        (the reset path reads ``timeframe.*`` on the chart's timeframe in a
+        request.security copy, where TradingView reads the requested one)."""
+        newly = False
+        names: set[str] = set()
+        pending, seen = [(arg, inline)], set()
+        while pending:
+            raw, literal_counts = pending.pop()
+            text = self._inline_inputs_masked(raw)
+            if literal_counts and any(re.search(r"[A-Za-z_]", lit[1:-1])
+                                      for lit in self._TA_STRING_LITERAL.findall(text)):
+                newly = True
+            for name in re.findall(r"[A-Za-z_][A-Za-z_0-9]*", blank_string_literals(text)):
+                derived = self._derived_input_expr.get(name)
+                if derived is None or self._known_var_is_lexically_shadowed(name):
+                    names.add(name)
+                elif name not in seen:
+                    seen.add(name)
+                    if self._TA_STRING_LITERAL.search(self._inline_inputs_masked(derived)):
+                        newly = True
+                    pending.append((derived, True))
+        if not newly:
+            return False, False
+        allowed = (self._TA_INPUT_CHOICE_NAMES | self._input_backed_vars
+                   | set(self._MATH_MEMBER_CPP))
+        outside = {
+            name for name in names - allowed
+            if name not in self._known_vars or self._known_var_is_lexically_shadowed(name)
+        }
+        return True, bool(outside)
+
+    def _ta_arg_takes_plan(self, site: "TACallSite", position: int, arg: str,
+                           inline: bool = True) -> bool:
+        """A constructor argument the constructor path takes only because
+        string literals are spelled, that this module lowers instead
+        (``_ta_length_literal_facts``): anything beside an input.string
+        choice, and an input.string choice of a parameter that is not known
+        to be an int -- a float, or one ``_ta_ctor_param`` does not know (a
+        VWAP band multiplier, ``math.sum``'s length) -- since the runtime
+        reset casts its expression to a length."""
+        newly, outside = self._ta_length_literal_facts(arg, inline)
+        if not newly:
+            return False
+        if outside:
+            return True
+        param = self._ta_ctor_param(site, position)
+        return param is None or param.pine_type != PineType.INT
+
+    def _ta_bound_arg_takes_plan(self, site: "TACallSite", position: int, node) -> bool:
+        """``_ta_arg_takes_plan`` of a helper-bound argument's AST. A literal
+        written in the helper call itself always reached the constructor
+        (its AST is stable); only a derived name's counts."""
+        spelled = self._arith_expr_to_str(node) if node is not None else None
+        return spelled is not None and self._ta_arg_takes_plan(site, position, spelled, inline=False)
+
     def _build_ta_dynamic_plan(self, site: "TACallSite") -> dict | None:
         if not site.ctor_args:
             return None
         refused = [
             pos for pos, arg in enumerate(site.ctor_args)
             if not self._is_compile_time_value(self._resolve_ta_ctor_arg(arg))
-            and self._runtime_ctor_arg_for_reset(arg) is None
+            and (self._runtime_ctor_arg_for_reset(arg) is None
+                 or self._ta_arg_takes_plan(site, pos, arg))
         ]
         if not refused:
             return None
@@ -1341,6 +1421,18 @@ class TaSiteHelper:
                 plan = {"kind": "first_call", "refused": [], "simple": {},
                         "family": self._ta_site_function(ctor_site)}
             if plan is None:
+                # An input.string choice keeps the constructor, which sizes a
+                # callable's one evaluator from its first call site's
+                # arguments: refuse call sites passing different ones, as the
+                # lowering above does (``_ta_length_literal_facts``).
+                dead = getattr(self, "_dead_ta_indices", set())
+                if any(
+                    self._ta_length_literal_facts(arg)[0]
+                    for index, other in enumerate(self.ctx.ta_call_sites)
+                    if other.node is site.node and index not in dead
+                    for arg in other.ctor_args
+                ):
+                    self._refuse_shared_security_ta_lengths(sec_id, site)
                 return None
             self._refuse_shared_security_ta_lengths(sec_id, site)
             return {**plan, "site": ctor_site, "sec_id": sec_id}
@@ -1358,17 +1450,19 @@ class TaSiteHelper:
                     hint="Call the ta.* function directly inside request.security().",
                 )
             return None
+        bound = [self._security_helper_bound_ast(node, stack) for node in nodes]
         # The positions the runtime-reset path would refuse
         # (``_collect_ta_runtime_resets``); none -> that path, unchanged.
+        # ``ctor_args`` are rendered C++ here: the bound argument's Pine
+        # spelling decides ``_ta_bound_arg_takes_plan``.
         refused = [
             pos for pos, arg in enumerate(ctor_args)
             if not self._is_compile_time_value(self._resolve_ta_ctor_arg(arg))
-            and self._runtime_ctor_arg_for_reset(arg) is None
-            and not stability[pos]
+            and ((self._runtime_ctor_arg_for_reset(arg) is None and not stability[pos])
+                 or self._ta_bound_arg_takes_plan(site, pos, bound[pos]))
         ]
         if not refused:
             return None
-        bound = [self._security_helper_bound_ast(node, stack) for node in nodes]
         bound_simple = {
             pos: self._simple_ta_arg_cpp_node(node, scoped=True)
             for pos, node in enumerate(bound) if node is not None
@@ -1376,6 +1470,22 @@ class TaSiteHelper:
         plan = self._ta_plan_for(
             site, refused, {pos: bound_simple.get(pos) for pos in refused})
         if plan["kind"] == "refused":
+            forced = [pos for pos in plan["refused"]
+                      if stability[pos] or self._runtime_ctor_arg_for_reset(ctor_args[pos]) is not None]
+            if forced:
+                # An argument the constructor path takes only because string
+                # literals are spelled (``_ta_bound_arg_takes_plan``) that this
+                # lowering cannot spell either: refused, as before.
+                pos = forced[0]
+                self._codegen_error(
+                    site.node,
+                    f"Unsupported requested-context TA constructor "
+                    f"{'flag' if self._ta_ctor_arg_is_bool(site, pos) else 'length'} "
+                    f"'{ctor_args[pos]}' for {site.class_name}: the "
+                    "helper-bound expression is not a stable per-run scalar.",
+                    hint=("Use a literal, an input.*() value, timeframe.* metadata, "
+                          "or arithmetic over those for TA lengths."),
+                )
             return None
         return {**plan, "site": site, "sec_id": sec_id, "bound_simple": bound_simple}
 
@@ -1514,6 +1624,13 @@ class TaSiteHelper:
         copy reads ``timeframe.*`` in its requested context."""
         if "bound_simple" in plan:
             value = plan["bound_simple"].get(position)
+        elif position in plan.get("refused", ()):
+            # A refused position takes its context-free spelling, else (a
+            # series one) the call site's rendering: never the reset path's
+            # reading, which one ``_ta_arg_takes_plan`` sends here would
+            # have cast to an int length, on the chart's timeframe, at the
+            # end of the bar.
+            value = plan["simple"].get(position)
         else:
             arg = site.ctor_args[position]
             # The live input first: a compile-time resolution of an input-backed
@@ -1640,7 +1757,13 @@ class TaSiteHelper:
                 return None
             if not self._ta_identifier_reads_top_level(node, scoped):
                 return None
-            if name in self._input_backed_vars or name in self._known_vars:
+            # A derived name tracked only since string literals are spelled
+            # (``_ta_length_literal_facts``) is expanded from its declaration,
+            # as before, not read from the chart's member.
+            literal_derived = (name in self._derived_input_expr
+                               and self._ta_length_literal_facts(name, inline=False)[0])
+            if not literal_derived and (name in self._input_backed_vars
+                                        or name in self._known_vars):
                 return copy.deepcopy(node)
             decl = self._simple_ta_top_level_decls().get(name)
             if decl is None or name in seen:

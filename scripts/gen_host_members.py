@@ -14,8 +14,9 @@ member from the generated code. This script writes
 * the emitter: every identifier one of ``pineforge_codegen/codegen``'s string
   constants spells outside a ``.`` or ``::`` access, or two such constants
   join (``"closed_trade_" + "profit"``); docstrings, the reserved-name lists
-  of ``codegen/helpers.py``, dict keys and comparison operands are names the
-  emitter looks up or avoids, not code it writes;
+  of ``codegen/helpers.py``, dict keys, a named constant set's elements and
+  comparison operands are names the emitter looks up or avoids, not code it
+  writes;
 
 the set is their intersection. ``tests/test_host_member_names.py`` regenerates
 it and checks every host member a transpiled battery names against it.
@@ -60,6 +61,8 @@ _LEXEMES = re.compile(r'"(?:\\.|[^"\\\n])*"' + r"|'(?:\\.|[^'\\\n])*'"
 # code it writes.
 _NAME_LISTS = {"LEGACY_CPP_RESERVED", "CPP_KEYWORDS", "CPP_CONTEXTUAL", "CPP_STANDARD_MACROS",
                "CPP_EMITTER_NAMES", "BUILTIN_ACCESSOR_NAMES"}
+# A module or class constant's name (``_SIMPLE_STR_FUNCS``).
+_CONSTANT_NAME = re.compile(r"_*[A-Z][A-Z0-9_]*")
 _MEMBER_KINDS = {
     "FieldDecl", "VarDecl", "CXXMethodDecl", "FunctionTemplateDecl", "TypedefDecl",
     "TypeAliasDecl", "TypeAliasTemplateDecl", "CXXRecordDecl", "ClassTemplateDecl",
@@ -175,9 +178,10 @@ def host_members(host_class: str, includes: tuple[str, ...], cxx: str,
 def _names(tree: ast.Module) -> tuple[set[int], set[int]]:
     """The string constants that are not code the emitter writes: (docstrings
     and the reserved-name lists; the Pine names it looks up or matches on, a
-    dict literal's keys and a comparison's operands -- ``func_name ==
-    "cancel"``, ``node.member in ("ismarket", ...)``). A matched name can
-    still end a spelling the emitter joins (``"pine_session_" + member``)."""
+    dict literal's keys, the elements of a set a constant names and a
+    comparison's operands -- ``func_name == "cancel"``, ``node.member in
+    ("ismarket", ...)``). A matched name can still end a spelling the emitter
+    joins (``"pine_session_" + member``)."""
     prose, matched = set(), set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -188,6 +192,19 @@ def _names(tree: ast.Module) -> tuple[set[int], set[int]]:
                 prose.add(id(body[0].value))
         elif isinstance(node, ast.Dict):
             matched.update(id(k) for k in node.keys if isinstance(k, ast.Constant))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            # A set literal a constant is named by (``_SIMPLE_STR_FUNCS =
+            # frozenset({...})``) is looked up, never written out in order:
+            # its names are matched on (``"replace"``).
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = node.value
+            if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                    and value.func.id in ("frozenset", "set") and len(value.args) == 1):
+                value = value.args[0]
+            if (isinstance(value, ast.Set)
+                    and any(isinstance(t, ast.Name) and _CONSTANT_NAME.fullmatch(t.id)
+                            for t in targets)):
+                matched.update(id(e) for e in value.elts if isinstance(e, ast.Constant))
         elif isinstance(node, ast.Compare):
             for operand in (node.left, *node.comparators):
                 items = (operand.elts if isinstance(operand, (ast.Tuple, ast.List, ast.Set))

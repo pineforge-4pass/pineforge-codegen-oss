@@ -92,13 +92,22 @@ lo = ta.lowest(low, len)
 plot(r + e + m + a + adx + mc + w + s + lo)
 """
     cpp = transpile(src)
-    for cls in ("ta::RSI", "ta::EMA", "ta::RMA", "ta::ATR", "ta::DMI", "ta::MACD",
+    for cls in ("ta::RSI", "ta::RMA", "ta::ATR", "ta::DMI", "ta::MACD",
                 "ta::WMA", "ta::SMA", "ta::Lowest"):
         assert _members(cpp, f"pineforge::source::FirstCallBound<{cls}>"), cls
+    # ``lenP`` alone is an input.string choice: input-derived, so its EMA keeps
+    # the constructor and the runtime reset re-reads the input (the
+    # request.security helpers row; tests/test_e2e_lane_compositions.py).
+    [ema] = _members(cpp, "ta::EMA")
+    assert re.search(rf"^\s*{ema} = ta::EMA\(.*get_input_string\(\"Preset\"", cpp, re.M)
     # The factory spells the length context-free: the input through its
     # override-aware getter, syminfo through the engine's record.
     assert 'simple_ta_length(' in cpp and '"rsi", "length")' in cpp
-    assert '"dmi", "diLength")' in cpp and '"dmi", "adxSmoothing")' in cpp
+    assert '"dmi", "diLength")' in cpp
+    # adxSmoothing is ``lenP``, the input.string choice: the factory reads it
+    # as the constructor's reset does, next to the simple diLength.
+    dmi = next(line for line in cpp.splitlines() if "_ta_dmi_" in line and ".compute(" in line)
+    assert '"dmi", "adxSmoothing")' not in dmi and 'get_input_string("Preset"' in dmi
     assert 'get_input_string("Preset"' in cpp and "syminfo_.ticker" in cpp
     # A simple window length reads the constant-length ring, not the series
     # classes.

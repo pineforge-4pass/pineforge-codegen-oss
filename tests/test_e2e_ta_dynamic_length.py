@@ -10,9 +10,10 @@ decides the answer (lab tv, lane K-TA-DYNLEN, 2026-09-26; the engine header
   ta.lowestbars re-windows every call (``pineforge::source::Series*``);
 * ta.supertrend reads its factor once, on its first execution
   (``pineforge::source::PineSupertrend``);
-* a simple length -- a syminfo preset, an input-string ternary -- answers
-  exactly as the constant (``pineforge::source::FirstCallBound``), a sparse
-  window through the constant-length ring;
+* a simple length -- a syminfo preset -- answers exactly as the constant
+  (``pineforge::source::FirstCallBound``), a sparse window through the
+  constant-length ring; an input-string ternary is input-derived and keeps
+  its constructor (the request.security helpers row), with the same answer;
 * a name a block shadows, or a value declared ``series``, is series; each
   request.security copy is lowered from the length its own call passes, and
   its ``timeframe.*`` reads the requested timeframe.
@@ -114,8 +115,13 @@ def test_supertrend_reads_its_first_factor(runs):
 
 def test_simple_length_is_the_constant(runs):
     cpp, compared = replay(runs, "simple_length")
-    for cls in ("ta::RSI", "ta::EMA", "ta::RMA", "ta::ATR"):
+    for cls in ("ta::RSI", "ta::RMA", "ta::ATR"):
         assert f"pineforge::source::FirstCallBound<{cls}> " in cpp, cls
+    # ``lenP`` is an input.string choice: input-derived, its EMA keeps the
+    # constructor and is reset from the input (the request.security helpers
+    # row), with the same trades.
+    assert "pineforge::source::FirstCallBound<ta::EMA> " not in cpp
+    assert "= ta::EMA(" in cpp
     # The request.security payload builds its own from the context-free
     # spelling of the length (inputs through their override-aware getters).
     assert "_sec0__ta_rsi_" in cpp and "simple_ta_length(" in cpp
