@@ -29,9 +29,8 @@ time-of-day predicates such as
 each instant's own weekday and window: it reads every Sunday-evening open of a
 ``:23456`` session and every bar of ``0000-2400`` as out of market.
 session.isfirstbar / islastbar read the kernel's session-day facts, which the
-engine widens to the chart's day on an extended-hours chart; codegen reads the
-same pair for their ``_regular`` twins, which there are the regular day's
-(pinned, see ``EXTENDED``).
+engine widens to the chart's day on an extended-hours chart, and their
+``_regular`` twins the regular day's facts (see ``EXTENDED``).
 
 Each tape is replayed end to end -- ``transpile_json``, the built runtime,
 ``run_strategy.py`` with the session and timezone as runtime overrides -- on
@@ -59,6 +58,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -132,8 +132,7 @@ CASES = tuple(case for cases in (
     # NASDAQ:AAPL's regular session, whose extended hours TradingView reads as
     # the 04:00-09:30 pre-market and 16:00-20:00 post-market windows.
     Case("cgim-flags-aapl-60-reg", "0930-1600", "America/New_York", {}),
-    Case("cgim-flags-aapl-60-ext", "0930-1600", "America/New_York", {"f": 20, "l": 20},
-         pinned={"f": 20, "l": 20}),
+    Case("cgim-flags-aapl-60-ext", "0930-1600", "America/New_York", {"f": 20, "l": 20}),
     # A daily bar stamped at the 17:00 ET break, with and without the mask.
     Case("cgim-flags-xauusd-1d", "1800-1700", "America/New_York", {}),
     Case("cgim-flags-xauusd-1d", "1800-1700:23456", "America/New_York", {}),
@@ -142,9 +141,10 @@ CASES = tuple(case for cases in (
 # extended day's 04:00 and 19:00 bars and the _regular twins the regular
 # day's 10:00 and 15:00 bars. The engine's session_isfirstbar_ /
 # session_islastbar_ are the chart's day and its session_isfirstbar_regular_ /
-# session_islastbar_regular_ the regular day (lane K-SESSION-WINDOWS); both
-# builds read the chart's pair for the _regular spellings too, so
-# isfirstbar_regular and islastbar_regular land on 04:00 and 19:00.
+# session_islastbar_regular_ the regular day (lane K-SESSION-WINDOWS), which
+# codegen reads for the _regular spellings; the pre-lane build read the
+# chart's pair for them, so its isfirstbar_regular and islastbar_regular land
+# on 04:00 and 19:00.
 EXTENDED = "cgim-flags-aapl-60-ext"
 SECURITY_CASE = next(case for case in CASES if case.key == "cgim-flags-es1-60-dst-mar@1700-1600:23456")
 SECURITY_TRACE = "".join(
@@ -360,6 +360,8 @@ def test_session_flags_are_tradingviews(case: Case, replays) -> None:
     # The probe entered on every bar TradingView held, at the same time.
     assert engine_entry_times(replay.trades[case.key]) == _replay_stamps(case.slug), case.key
     assert "_pf_session_market_(" in replay.cpp
+    assert ("session_isfirstbar_regular_" in replay.cpp
+            and "session_islastbar_regular_" in replay.cpp), case.key
     exact = "".join(letter for letter in misses if letter not in case.pinned)
     pinned = {FLAGS[k]: v for k, v in case.pinned.items()}
     print(f"session flags {case.key}: {exact} == TradingView on {len(read_tape(case.slug))} bars"
@@ -493,6 +495,24 @@ def test_session_market_is_emitted_once_when_read(tmp_path: Path) -> None:
                      "script_tf_, current_bar_.timestamp)") == 2
     plain = _transpiled(tmp_path, 'if session.isfirstbar\n    strategy.entry("L", strategy.long)\n')
     assert "_PFSessionMarket" not in plain["cpp"]
+
+
+def test_regular_flags_read_the_regular_day(tmp_path: Path) -> None:
+    """Needs no engine: session.isfirstbar_regular / islastbar_regular read
+    the host's regular-day facts and session.isfirstbar / islastbar the
+    chart day's, on the bar and at an offset (the flag's Series takes the
+    same member)."""
+    cpp = _transpiled(tmp_path, "a = session.isfirstbar_regular and not session.islastbar_regular[1]\n"
+                                "b = session.isfirstbar or session.islastbar\n"
+                                "if a or b\n"
+                                '    strategy.entry("L", strategy.long)\n')["cpp"]
+
+    def reads(member: str) -> int:
+        return len(re.findall(rf"(?<![\w.]){member}(?!\w)", cpp))
+
+    assert reads("session_isfirstbar_regular_") == 1
+    assert reads("session_isfirstbar_") == 1 and reads("session_islastbar_") == 1
+    assert "_pf_session_hist_islastbar_regular.update(session_islastbar_regular_)" in cpp
 
 
 def test_security_payload_session_read_warns_once_per_site(tmp_path: Path) -> None:

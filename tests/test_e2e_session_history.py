@@ -82,12 +82,12 @@ TRACE = "".join(
 ) + ("\n// @pf-trace b=blk\n// @pf-trace u=fn\n// @pf-trace z=lz"
      "\n// @pf-trace k=session.isfirstbar[k]\n// @pf-trace d=session.ismarket[0]"
      "\n// @pf-trace w=session.ismarket[64]\n")
-# On the extended-hours chart the engine's session_isfirstbar_ /
-# session_islastbar_ are the chart's day, the 04:00 and 19:45 bars, as
-# TradingView's isfirstbar / islastbar (lane K-SESSION-WINDOWS); codegen reads
-# them for the _regular spellings too, where TradingView's are the regular
-# day's 09:30 and 15:45 bars. The history reads carry them.
-PINNED = {EXTENDED: {"isfirstbar_regular": 20, "islastbar_regular": 20}}
+# Flags off TradingView's on a tape, which the history reads carry: none. On
+# the extended-hours chart the engine's session_isfirstbar_ /
+# session_islastbar_ are the chart's day, the 04:00 and 19:45 bars, and its
+# session_isfirstbar_regular_ / session_islastbar_regular_ the regular day's
+# 09:30 and 15:45 bars (lane K-SESSION-WINDOWS), as TradingView's.
+PINNED: dict[str, dict[str, int]] = {}
 QUARTER = 15 * 60_000
 
 
@@ -315,8 +315,7 @@ def test_history_reads_are_the_earlier_values(slug: str, replays) -> None:
 @pytest.mark.parametrize("slug", TAPES)
 def test_history_reads_are_tradingviews(slug: str, replays) -> None:
     """Each read equals TradingView's on every bar, except where the flag it
-    reads already differs from TradingView on the bar it reads (the _regular
-    flags on the extended-hours chart, pinned)."""
+    reads already differs from TradingView on the bar it reads (``PINNED``)."""
     replay = _ok(replays, slug)
     tape = read_tape(slug)
     n = len(tape)

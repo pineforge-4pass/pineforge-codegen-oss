@@ -12,9 +12,10 @@ symbols have no extended session.
 Replayed under those sessions, every flag PineForge computes is TradingView's
 on every bar of HKEX:700 and CBOT:ZC1!. On TSE:7203 TradingView keeps the bar
 that opens at 15:30 in the session, which the published 15:30 end leaves out:
-the calendar puts it out of market and the post-market window holds it
-(pinned), and it is the last bar of the chart's session day, as the engine
-reads it; a session ending at 15:45 gives TradingView's flags on every bar.
+the calendar puts it out of market and the post-market window holds it, and
+the regular day's last bar is the 15:15 one (pinned); the chart's day, which
+the post-market bar widens, ends on it as TradingView's does. A session
+ending at 15:45 gives TradingView's flags on every bar.
 
 The pre- and post-market windows are the engine's (``session_in_premarket``
 and ``session_in_postmarket`` in src/session_time.cpp, which the emitted
@@ -62,7 +63,7 @@ class Case:
 
 
 CASES = (
-    Case("cgs2-flags-tse7203-15", "0900-1130,1230-1530", {"M": 10, "Q": 10}),
+    Case("cgs2-flags-tse7203-15", "0900-1130,1230-1530", {"M": 10, "Q": 10, "l": 20}),
     Case("cgs2-flags-tse7203-15", "0900-1130,1230-1545"),
     Case("cgs2-flags-hkex700-15", "0930-1200,1300-1600"),
     Case("cgs2-flags-zc1-15", "1900-0745,0830-1320"),
@@ -140,7 +141,7 @@ def test_multi_window_charts_are_tradingviews(case: Case, engine: Path, tmp_path
             misses[letter] = missed
     assert misses == case.pinned, case.key
     print(f"session windows {case.key}: every flag == TradingView on {len(tape)} bars"
-          + (f" but {case.pinned} (the 15:30 bar)" if case.pinned else ""))
+          + (f" but {case.pinned} (the 15:30 bar and the one before)" if case.pinned else ""))
 
 
 def _day(timezone: str) -> list[int]:

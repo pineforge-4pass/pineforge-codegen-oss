@@ -859,10 +859,12 @@ class ExprVisitor:
                     return 'std::string("regular")'
                 if node.member == "extended":
                     return 'std::string("extended")'
-                # session.isfirstbar / islastbar read the kernel's session-day
-                # facts; session.isfirstbar_regular / islastbar_regular are
-                # aliased to their non-_regular counterparts (engine has one
-                # session string; see session_time.hpp limitation comment).
+                # session.isfirstbar / islastbar mark the chart's session day,
+                # which the engine widens by the pre- and post-market bars an
+                # extended-hours chart holds, and session.isfirstbar_regular /
+                # islastbar_regular the regular session's day: the host's
+                # session_is*bar_ and session_is*bar_regular_ facts
+                # (tests/test_e2e_session_ismarket.py).
                 if node.member in ("ismarket", "ispremarket", "ispostmarket"):
                     # A chart bar is in market when the engine's session
                     # calendar holds its open time (codegen/session_market.py).
@@ -905,10 +907,14 @@ class ExprVisitor:
                     if node.member == "ismarket":
                         return ismarket
                     return f"(!{ismarket} && {predicate})"
-                if node.member in ("isfirstbar", "isfirstbar_regular"):
+                if node.member == "isfirstbar":
                     return "session_isfirstbar_"
-                if node.member in ("islastbar", "islastbar_regular"):
+                if node.member == "islastbar":
                     return "session_islastbar_"
+                if node.member == "isfirstbar_regular":
+                    return "session_isfirstbar_regular_"
+                if node.member == "islastbar_regular":
+                    return "session_islastbar_regular_"
                 return "false"
             if ns == "syminfo":
                 _syminfo = SYMINFO_MEMBER_MAP.get(node.member)
