@@ -385,17 +385,15 @@ def test_top_level_reads_share_one_series_per_flag(tmp_path: Path) -> None:
     assert "_pf_session_hist_ismarket" not in cpp
     pushes = [line.strip() for line in cpp.splitlines()
               if "_pf_session_hist_" in line and (".push(" in line or ".update(" in line)]
+    premarket = ("(!(script_tf_.empty() ? _pf_session_market_(syminfo_.session, "
+                 "syminfo_.timezone, script_tf_, current_bar_.timestamp) : session_ismarket_) "
+                 "&& pine_session_ispremarket(syminfo_.session, syminfo_.timezone, "
+                 "current_bar_.timestamp))")
     assert pushes == [
         "if (history_advances_new_bar()) _pf_session_hist_isfirstbar.push(session_isfirstbar_);",
         "else _pf_session_hist_isfirstbar.update(session_isfirstbar_);",
-        "if (history_advances_new_bar()) _pf_session_hist_ispremarket.push("
-        "(!_pf_session_market_(syminfo_.session, syminfo_.timezone, script_tf_, "
-        "current_bar_.timestamp) && pine_session_ispremarket(syminfo_.session, "
-        "syminfo_.timezone, current_bar_.timestamp)));",
-        "else _pf_session_hist_ispremarket.update((!_pf_session_market_(syminfo_.session, "
-        "syminfo_.timezone, script_tf_, current_bar_.timestamp) && "
-        "pine_session_ispremarket(syminfo_.session, syminfo_.timezone, "
-        "current_bar_.timestamp)));",
+        f"if (history_advances_new_bar()) _pf_session_hist_ispremarket.push({premarket});",
+        f"else _pf_session_hist_ispremarket.update({premarket});",
     ]
     assert "_pf_session_hist_ispremarket[1]" in cpp
     assert "_pf_session_hist_ispremarket[2]" in cpp

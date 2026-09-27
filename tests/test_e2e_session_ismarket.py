@@ -440,9 +440,12 @@ def one_bar(tmp_path_factory) -> dict[str, tuple[bytes, list[dict]]]:
 
 def test_one_bar_without_timeframe_reads_the_calendar(one_bar) -> None:
     """The calendar needs no timeframe: the Sunday-evening open of a ":23456"
-    session is in market on a one-bar run too (the ES1! tapes' first bar)."""
+    session is in market on a one-bar run too (the ES1! tapes' first bar).
+    The kernel presents no session-day facts to such a run (isfirstbar reads
+    false), so a run without a timeframe keeps the calendar's answer."""
     trades, records = one_bar["current"]
     assert traced(records, "ismarket") == [(SUNDAY_OPEN, True)]
+    assert traced(records, "isfirstbar") == [(SUNDAY_OPEN, False)]
     assert engine_entry_times(trades) == [SUNDAY_OPEN]
     if "legacy" not in one_bar:
         pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
@@ -460,12 +463,15 @@ def test_pine_names_of_the_emitted_helpers_stay_distinct(tmp_path: Path) -> None
     pine = tmp_path / "strategy.pine"
     pine.write_text('//@version=6\nstrategy("emitted names", overlay=true)\n'
                     "_pf_session_market_ = close > open\n"
+                    "session_ismarket_ = high > low\n"
                     "script_tf_ = input.int(2)\n"
-                    "if session.ismarket and _pf_session_market_ and script_tf_ > 0\n"
+                    "if session.ismarket and _pf_session_market_ and session_ismarket_ "
+                    "and script_tf_ > 0\n"
                     '    strategy.entry("L", strategy.long)\n', encoding="utf-8")
     result = transpile_json(pine)
     assert result["ok"], result["diagnostics"]
     assert [entry["title"] for entry in result["inputs"]] == ["script_tf_"]
+    assert "pf_safe_session_ismarket_" in result["cpp"]
     compile_cpp(result["cpp"], label="emitted names")
 
 
@@ -479,7 +485,9 @@ def _transpiled(tmp_path: Path, body: str) -> dict:
 
 
 def test_session_market_is_emitted_once_when_read(tmp_path: Path) -> None:
-    """Needs no engine: the calendar type precedes the strategy class once, the
+    """Needs no engine: a chart's session.ismarket reads the kernel's
+    in-session fact, and the session calendar only when the run has no
+    timeframe; the calendar type precedes the strategy class once, the
     strategy holds one cache outside its checkpointed script state, and a
     script that reads no chart session flag gets neither."""
     cpp = _transpiled(tmp_path, "f() => session.ispremarket\n"
@@ -493,6 +501,9 @@ def test_session_market_is_emitted_once_when_read(tmp_path: Path) -> None:
                    for line in cpp.splitlines())
     assert cpp.count("_pf_session_market_(syminfo_.session, syminfo_.timezone, "
                      "script_tf_, current_bar_.timestamp)") == 2
+    assert cpp.count("(script_tf_.empty() ? _pf_session_market_(syminfo_.session, "
+                     "syminfo_.timezone, script_tf_, current_bar_.timestamp) "
+                     ": session_ismarket_)") == 2
     plain = _transpiled(tmp_path, 'if session.isfirstbar\n    strategy.entry("L", strategy.long)\n')
     assert "_PFSessionMarket" not in plain["cpp"]
 

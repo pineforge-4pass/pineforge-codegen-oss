@@ -126,6 +126,7 @@ HOST_MEMBER_NAMES = frozenset({
     "session_isfirstbar_regular_",
     "session_islastbar_",
     "session_islastbar_regular_",
+    "session_ismarket_",
     "set_input",
     "set_magnifier_volume_weighted",
     "set_pine_risk_direction",

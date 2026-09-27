@@ -1,21 +1,27 @@
-"""C++ emitted for a chart bar's session.ismarket.
+"""C++ emitted for a chart bar's session.ismarket when the run has no
+timeframe.
 
 TradingView flags a bar by its own open time: on an extended-hours
 NASDAQ:AAPL 60 chart the 09:00 bar, which holds the 09:30 open, is
 pre-market and the 16:00 bar post-market. It reads a session's day mask per
 session day, so an overnight session's Sunday-evening open belongs to
 Monday's, and a ``0000-2400`` day is in market throughout; a D/W/M bar holds
-whole session days (``tests/test_e2e_session_ismarket.py`` replays the tapes).
+whole session days, and a bar that opens in a break and holds the reopen is
+in market (``tests/test_e2e_session_ismarket.py`` and
+``tests/test_e2e_session_windows.py`` replay the tapes).
 
-The engine's session calendar answers that instant: ``native_calendar``'s
-session day at the bar's open, on the calendar the kernel builds for the run
-from the same session and timezone (the adapter reads an empty session as
-``24x7`` and an empty timezone as ``UTC``), resolved once per session day and
-read as the kernel reads it (a day the calendar cannot resolve is out of
-session). The time-of-day predicate ``pine_session_*`` tests the instant's own
-weekday and does not parse ``2400``; the kernel's per-bar fact
-``session_ismarket_`` asks the bar's grid interval, which a 16:00 bar after a
-09:30-16:00 session shares with 15:30.
+The kernel's per-bar fact ``session_ismarket_`` gives all of that: it reads a
+bar at its interval's first eligible instant, which is the bar's open unless
+the bar opens in a break, and it is what a chart's session.ismarket reads. A
+run whose timeframe the engine cannot detect (one bar, none given; its
+``script_tf_`` is empty) gets no session-day facts, and there the lowering
+asks the engine's session calendar instead: ``native_calendar``'s session day
+at the bar's open, on the calendar the kernel builds for the run from the same
+session and timezone (the adapter reads an empty session as ``24x7`` and an
+empty timezone as ``UTC``), resolved once per session day and read as the
+kernel reads it (a day the calendar cannot resolve is out of session). The
+time-of-day predicate ``pine_session_*`` tests the instant's own weekday and
+does not parse ``2400``.
 
 ``SESSION_MARKET_CPP`` precedes the strategy class; each strategy holds one
 ``SESSION_MARKET_MEMBER`` after its checkpointed script state (a cache of an

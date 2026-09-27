@@ -81,7 +81,7 @@ def test_committed_host_members_are_the_derived_set() -> None:
     assert (REPO_ROOT / "pineforge_codegen" / "codegen" / "host_members.py").read_text() \
         == gen.render(derived)
     for name in ("session_isfirstbar_", "session_islastbar_", "session_isfirstbar_regular_",
-                 "session_islastbar_regular_", "syminfo_", "current_bar_",
+                 "session_islastbar_regular_", "session_ismarket_", "syminfo_", "current_bar_",
                  "bar_index_", "trades_", "closed_trade_profit", "open_trade_max_drawdown"):
         assert name in derived.names, name
     # A private member cannot be read by the generated class, and a Pine name
@@ -188,6 +188,7 @@ strategy("host member names", overlay=true, process_orders_on_close=true)
 {lb} = not {fb}
 {fbr} = high > low
 {lbr} = not {fbr}
+{mk} = close < open
 {bi} = 7
 {bl} = true
 {lt} = false
@@ -203,6 +204,7 @@ if session.isfirstbar_regular and session.islastbar_regular
 // @pf-trace lb=session.islastbar
 // @pf-trace fbr=session.isfirstbar_regular
 // @pf-trace lbr=session.islastbar_regular
+// @pf-trace mk=session.ismarket
 // @pf-trace first=barstate.isfirst
 // @pf-trace last=barstate.islast
 // @pf-trace conf=barstate.isconfirmed
@@ -210,10 +212,11 @@ if session.isfirstbar_regular and session.islastbar_regular
 // @pf-trace lbt=last_bar_time
 // @pf-trace own={fb} ? 1 : 0
 // @pf-trace own2={bi} + {ic} + {lbt} + ({bl} ? 1 : 0) + ({lt} ? 1 : 0) + ({lb} ? 1 : 0)
-// @pf-trace own3=({fbr} ? 1 : 0) + ({lbr} ? 2 : 0)
+// @pf-trace own3=({fbr} ? 1 : 0) + ({lbr} ? 2 : 0) + ({mk} ? 4 : 0)
 '''
 SILENT_NAMES = {"fb": "session_isfirstbar_", "lb": "session_islastbar_",
                 "fbr": "session_isfirstbar_regular_", "lbr": "session_islastbar_regular_",
+                "mk": "session_ismarket_",
                 "bi": "bar_index_",
                 "bl": "barstate_islast_", "lt": "is_last_tick_", "ic": "initial_capital_",
                 "lbt": "last_bar_time_"}
