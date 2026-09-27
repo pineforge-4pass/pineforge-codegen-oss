@@ -145,11 +145,10 @@ def _tape(name: str) -> list[dict]:
 
 # Fields 22 and 23 are the right side of an ``and`` whose left side is false
 # and an untaken ``?:`` arm: lazy on both, so negative, by each run's own bar
-# count. Field 24 counts color.from_gradient's first argument: PineForge
-# lowers that visual-only builtin to a default color and warns, so it
-# evaluates none of its arguments (support_checker.COSMETIC_COLOR_FUNC).
+# count. Field 24 counts color.from_gradient's first argument, which
+# TradingView evaluates once per bar although the colour is visual only;
+# PineForge evaluates it too (test_e2e_from_gradient_arguments.py).
 LAZY_FIELDS = (22, 23)
-COSMETIC_FIELD = 24
 
 
 def test_the_tradingview_count_tape_replays(tmp_path_factory):
@@ -169,7 +168,7 @@ def test_the_tradingview_count_tape_replays(tmp_path_factory):
         assert twin is not None and twin["exit_time"] == trade["exit"][0], trade
         got = twin["exit_comment"].split("|")
         assert len(got) == len(want)
-        for field in (*LAZY_FIELDS, COSMETIC_FIELD):
+        for field in LAZY_FIELDS:
             assert int(got[field - 1]) < 0, (field, got)
             got[field - 1] = want[field - 1]
         assert all(int(want[field - 1]) < 0 for field in LAZY_FIELDS), want

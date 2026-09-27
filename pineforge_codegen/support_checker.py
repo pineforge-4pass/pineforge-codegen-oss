@@ -126,8 +126,9 @@ _VISUAL_CONTAINER_TYPES: frozenset[str] = _DRAWING_TYPE_NAMES | frozenset({"tabl
 SUPPORTED_COLOR_CONST: frozenset[str] = frozenset(COLOR_CONST_MAP)
 SUPPORTED_COLOR_FUNC: frozenset[str] = frozenset({"new", "rgb", "r", "g", "b", "t"})
 # Cosmetic color builders with no backtest-logic effect. Warned (not rejected);
-# codegen emits a benign default color (0 = na color). color.from_gradient is a
-# charting/plot helper that only tints visual output.
+# codegen evaluates the arguments (their side effects and history are
+# TradingView's) and emits a benign default color (0 = na color).
+# color.from_gradient is a charting/plot helper that only tints visual output.
 COSMETIC_COLOR_FUNC: frozenset[str] = frozenset({"from_gradient"})
 SUPPORTED_TIMEFRAME_FUNC: frozenset[str] = frozenset({"change", "in_seconds"})
 SUPPORTED_RUNTIME_FUNC: frozenset[str] = frozenset({"error"})
@@ -1703,7 +1704,8 @@ class SupportChecker:
             self._warn(
                 node,
                 f"color.{name}(...) has no effect in PineForge backtests "
-                f"(visual only); it emits a default color.",
+                f"(visual only); it evaluates its arguments and emits a "
+                f"default color.",
             )
             self._visit_children(node)
             return

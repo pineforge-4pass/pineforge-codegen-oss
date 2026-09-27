@@ -136,3 +136,17 @@ variant without the collision because this one did not compile).
 float series `k` beside an int function `k`, and an int series `m` beside a
 float function `m` defined after it; each exit comment spells what the three
 functions keeping them returned, `k(close)`, `g(m(close))` and the close.
+
+## color.from_gradient's arguments
+
+| File | sha256 |
+|---|---|
+| `from_gradient_args.pine` | `184cfe38626841b1e2b2472269315db8153f6c341b81123fb5ca1e1b51a0f063` |
+| `from_gradient_args_tv_trades.csv` (7 trades, exported 2026-09-27) | `8f5b4d06db8755f85648f53adf549be9d81e007082e1d7295110e12a9dadf612` |
+
+Counting probes sit in color.from_gradient's value, bottom and top slots, by
+position and by keyword, and a helper keeping a series (`s := nz(s[1]) +
+v`, stored into an array) is its value. Each exit comment spells every
+probe's count minus `bar_index + 1` and the stored series minus `bar_index
++ 1`: 0 each on TradingView, which evaluates every argument once per bar
+although the colour only tints the chart.

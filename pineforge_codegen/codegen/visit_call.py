@@ -2924,8 +2924,50 @@ class CallVisitor:
             f"have rejected. Add a handler above or extend STRATEGY_FUNCTIONS."
         )
 
+    # TradingView's parameter order of color.from_gradient.
+    _FROM_GRADIENT_PARAMS = (
+        "value", "bottom_value", "top_value", "bottom_color", "top_color",
+    )
+
+    # Builtins whose call has no state and no side effect.
+    _PURE_CALL_NAMESPACES = frozenset({"color", "math", "str"})
+    _PURE_CALLS = frozenset({"na", "nz", "int", "float", "bool", "string"})
+
+    def _may_have_effects(self, node) -> bool:
+        """Whether evaluating ``node`` can change anything or keep state: it
+        calls a user function, a ``ta.*`` / ``request.*`` builtin, an
+        array or map method, ... -- anything but a pure builtin."""
+        for sub in self._walk_ast(node):
+            if isinstance(sub, FuncCall):
+                func_name, namespace = self._resolve_callee(sub.callee)
+                if namespace in self._PURE_CALL_NAMESPACES:
+                    continue
+                if namespace is None and func_name in self._PURE_CALLS \
+                        and func_name not in self._func_names:
+                    continue
+                return True
+        return False
+
     def _visit_color_call(self, func_name: str, node) -> str:
         """Emit color.* calls as integer representations."""
+        if func_name == "from_gradient":
+            # Visual only: the colour it picks reaches no order, so the call
+            # yields the na colour. Its arguments still run once each, in
+            # parameter order, as on TradingView -- a stateful call in one
+            # (a user function keeping a series, a ta.* compute(), a counter)
+            # advances on every bar (lab tv probe pf-oi-from-gradient-args).
+            arguments = _merge_kwargs(node.args, node.kwargs,
+                                      list(self._FROM_GRADIENT_PARAMS), lambda a: a)
+            effects = []
+            for argument in arguments:
+                cpp = self._visit_expr(argument)
+                if self._may_have_effects(argument) and not cpp_is_plain_read(cpp):
+                    effects.append(cpp)
+            if not effects:
+                return "0"
+            return ("([&]() -> int64_t { "
+                    + " ".join(f"(void)({cpp});" for cpp in effects)
+                    + " return 0; }())")
         args = [self._visit_expr(a) for a in node.args]
         if func_name == "new":
             if len(args) >= 2:
@@ -2980,8 +3022,6 @@ class CallVisitor:
                     f"(static_cast<uint64_t>({channels[1]}) & 0xFFULL) << 8 | "
                     f"(static_cast<uint64_t>({channels[2]}) & 0xFFULL)), 0)"
                 )
-            return "0"
-        if func_name == "from_gradient":
             return "0"
         return "0"
 

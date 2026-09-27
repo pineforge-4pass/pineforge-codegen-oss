@@ -624,8 +624,10 @@ you delete or weaken the special case, the test will tell you.
     `ARRAY_ARGS_READ_REPEATEDLY` (`codegen/tables.py`) list the table-driven
     slots (`math.round`, `str.substring` and `str.replace` bind where they
     lower); add one when a template reads an argument more than once.
-    `color.from_gradient`
-    is a warned visual-only stub that evaluates none of its arguments.
+    `color.from_gradient` is a warned visual-only stub yielding the na
+    colour that still evaluates, once each in parameter order, every
+    argument that can have an effect (`_may_have_effects`: any call but a
+    pure builtin; `tests/test_e2e_from_gradient_arguments.py`).
     `tests/test_e2e_argument_evaluation_once.py` runs every slot through a
     counting probe and replays the tape; `tests/test_e2e_fixnan_single_eval.py`
     replays a TradingView ADX tape. Keyword arguments take TradingView's

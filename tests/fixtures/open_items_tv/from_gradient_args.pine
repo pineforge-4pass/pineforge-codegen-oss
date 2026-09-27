@@ -1,0 +1,27 @@
+//@version=6
+strategy("pf-open-items-from-gradient-args", overlay = true)
+
+// color.from_gradient's arguments with side effects and history: counting
+// probes in each slot (positional and by keyword), a helper keeping a
+// series, and a ta.* call. Every exit comment spells cnt[k] - (bar_index +
+// 1) per probe (0: the argument ran once on every bar), the helper's series
+// as it last stored it, and ta.sma read beside its twin outside the call.
+var cnt = array.new_int(5, 0)
+var hs = array.new_float(1, 0.0)
+bump(int k, float v) =>
+    array.set(cnt, k, array.get(cnt, k) + 1)
+    v
+hist(float v) =>
+    float s = 0.0
+    s := nz(s[1]) + v
+    array.set(hs, 0, s)
+    s
+c1 = color.from_gradient(bump(0, close), bump(1, low), bump(2, high), color.red, color.green)
+c2 = color.from_gradient(value = bump(3, close), bottom_value = bump(4, low), top_value = high, bottom_color = color.red, top_color = color.green)
+c3 = color.from_gradient(hist(1.0), 0, 100, color.red, color.blue)
+
+d(int k) => str.tostring(array.get(cnt, k) - (bar_index + 1))
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = d(0) + "|" + d(1) + "|" + d(2) + "|" + d(3) + "|" + d(4) + "|" + str.tostring(array.get(hs, 0) - (bar_index + 1)) + "|" + str.tostring(bar_index))
