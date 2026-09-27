@@ -60,3 +60,9 @@ def exit_misses(engine: Path, workdir: Path, feed: Path, trades: list[dict]) -> 
         if got != trade["exit"]:
             misses.append(f"tape {trade['exit']}, engine {got}")
     return misses
+
+
+def exits_by_time(name: str) -> dict[int, str]:
+    """Exit instant (UTC ms) -> Signal of every trade on a tape; for the
+    request.security probes, replayed by ``tests._security_tapes.replay``."""
+    return {trade["exit"][0]: trade["exit"][1] for trade in tape(name)}

@@ -150,3 +150,21 @@ v`, stored into an array) is its value. Each exit comment spells every
 probe's count minus `bar_index + 1` and the stored series minus `bar_index
 + 1`: 0 each on TradingView, which evaluates every argument once per bar
 although the colour only tints the chart.
+
+## A global under a builtin call in a request.security payload
+
+This probe follows the CG-SECURITY-2 convention (`tests/fixtures/security2_tv/
+README.md`): exported with `--from 2025-04-01 --to 2025-04-08`, it enters on
+the bars at minute 0 and 30 and closes on the bars at minute 15 and 45, and
+TradingView books 265 of the closes.
+
+| File | sha256 |
+|---|---|
+| `sec_global_builtin.pine` | `6df1312fc813fd3105833fc1ab06d3e4387ea82a2c96f5e88e2f7c456ffb0839` |
+| `sec_global_builtin_tv_trades.csv` (265 trades, exported 2026-09-27) | `ad910faad8e22a183943463898bb31a0e583ba4778675b2ee6cd2056144fe92b` |
+
+Each close spells, requested on "60": `nz(s)` with `s = close - open`,
+`nz(g)` with `g = ta.sma(close, 3)`, `nz(s, -1.0) + 1`, `math.max(nz(s),
+0.0)`, `nz(s) + nz(f())` with `f() => close * 2`, and the bare `s`.
+TradingView evaluates each global on the requested bar: the first field
+equals the last on every close.

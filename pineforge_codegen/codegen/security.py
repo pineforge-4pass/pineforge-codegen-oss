@@ -5636,6 +5636,7 @@ class SecurityEmitter:
         self._security_check_tuple_element_history(expr_node, sec_id, helper_binding_stack)
         chart: set[int] = set()
         if self._security_requested_calls:
+            self._security_warn_global_history(expr_node, helper_binding_stack, sec_id)
             chart_read = self._security_root_chart_read(
                 expr_node, helper_binding_stack, sec_id, security_mutable_names
             )
@@ -5997,7 +5998,8 @@ class SecurityEmitter:
         if isinstance(node, FuncCall):
             return self._security_call_inlinable(node)
         if isinstance(node, Identifier):
-            return self._security_fallback_owns_name(node, helper_binding_stack)
+            return (self._security_fallback_owns_name(node, helper_binding_stack)
+                    or self._security_fallback_owns_global(node))
         if isinstance(node, Subscript):
             obj = node.object
             if isinstance(obj, Identifier):
@@ -6109,3 +6111,53 @@ class SecurityEmitter:
                 out.add(id(n))
                 stack.extend(v for k, v in vars(n).items() if k != "annotations")
         return out
+
+    def _security_fallback_owns_global(self, node: Identifier) -> bool:
+        """A global the builder spells on the requested bar under a builtin
+        call (``nz(s)``) as it spells the bare payload global: one the
+        expression map holds (declared once, not ``var``), not replayed
+        state, not a per-run value (an input or constant reads the same on
+        either bar). The visitor used to render it from the chart's member,
+        silently (P6 of lane CG-SECURITY-2). Its history (``nz(s[1])``) stays
+        the visitor's, and a payload that reads it beside a name the builder
+        owns falls back whole (``_emit_security_evaluator_requested``)."""
+        if not self._security_identifier_is_global_binding(node):
+            return False
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        return (
+            node.name in global_expr_map
+            and node.name not in self._global_mutable_infos
+            and node.name not in _SECURITY_REQUESTED_NAMES
+            and not self._expr_is_stable(node)
+        )
+
+    def _security_warn_global_history(
+        self,
+        root,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...],
+        sec_id: int,
+    ) -> None:
+        """Warn where an argument of a builtin call in a payload reads a
+        global's history (``nz(s[1])``): the visitor renders it from the
+        chart's series, while TradingView evaluates it on the requested bar,
+        and the builder keeps no requested history of a global's expression.
+        The global's value is the builder's (``_security_fallback_owns_global``)."""
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        warned = getattr(self, "_security_warned_global_history", None)
+        if warned is None:
+            warned = self._security_warned_global_history = set()
+        for n in self._walk_ast(root):
+            if (n is not root
+                    and isinstance(n, Subscript) and isinstance(n.object, Identifier)
+                    and self._security_identifier_is_global_binding(n.object)
+                    and n.object.name in global_expr_map
+                    and n.object.name not in self._global_mutable_infos
+                    and not self._security_fallback_owns(n, helper_binding_stack, sec_id)
+                    and id(n) not in warned):
+                warned.add(id(n))
+                self._codegen_warning(
+                    n,
+                    f"request.security payload reads the history of '{n.object.name}' "
+                    "under a builtin call on the chart's bar; TradingView evaluates "
+                    "it on the requested bar.",
+                )
