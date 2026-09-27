@@ -263,21 +263,38 @@ class ExprVisitor:
         links = [node]
         while isinstance(links[-1].false_val, Ternary):
             links.append(links[-1].false_val)
+        string_na = self._ternary_string_na(links)
         if len(links) < self._FLAT_TERNARY_CHAIN:
             c = self._coerce_bool_expr(
                 self._visit_expr(node.condition), node.condition
             )
-            t = self._visit_expr(node.true_val)
-            f = self._visit_expr(node.false_val)
+            t = self._ternary_arm(node.true_val, string_na)
+            f = self._ternary_arm(node.false_val, string_na)
             return f"(({c}) ? ({t}) : ({f}))"
         arms = []
         for link in links:
             c = self._coerce_bool_expr(
                 self._visit_expr(link.condition), link.condition
             )
-            t = self._visit_expr(link.true_val)
+            t = self._ternary_arm(link.true_val, string_na)
             arms.append(f"({c}) ? ({t}) : ")
-        return f"({''.join(arms)}({self._visit_expr(links[-1].false_val)}))"
+        return f"({''.join(arms)}({self._ternary_arm(links[-1].false_val, string_na)}))"
+
+    def _ternary_string_na(self, links: list[Ternary]) -> bool:
+        """A ``?:`` chain whose every value arm but a bare ``na`` is a
+        string: its ``na`` arm is the string na (``cond ? "BUY" : na``, as
+        libraries return a signal). It used to emit ``na<double>()`` beside a
+        ``std::string``, which does not compile."""
+        arms = [link.true_val for link in links] + [links[-1].false_val]
+        values = [arm for arm in arms if not self._is_na_expr(arm)]
+        if len(values) == len(arms) or not values:
+            return False
+        return all(self._infer_type(arm) == "std::string" for arm in values)
+
+    def _ternary_arm(self, arm, string_na: bool) -> str:
+        if string_na and self._is_na_expr(arm):
+            return "na<std::string>()"
+        return self._visit_expr(arm)
 
     # ------------------------------------------------------------------
     # Target-typed RHS lowering (drawing handles are C++ structs, not doubles)
