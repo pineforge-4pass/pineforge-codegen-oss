@@ -584,6 +584,27 @@ you delete or weaken the special case, the test will tell you.
     `tests/test_e2e_argument_evaluation_once.py` runs every slot through a
     counting probe and replays the tape; `tests/test_e2e_fixnan_single_eval.py`
     replays a TradingView ADX tape.
+17. **A function's last statement is its value.** TradingView returns the
+    value of a function's (or an if/switch arm's) last statement, whatever
+    the statement: `x := e` and every `x op= e` yield x's new value (typed as
+    x: `analyzer._statement_value_type`), `obj.f := e` the field's, a
+    declaration `[var] [T] x = e` the variable, a tuple declaration
+    `[p, q] = f()` the tuple, and a `for` / `for ... in` / `while` loop the
+    value its body's last statement produced on the last iteration that
+    reached it (`na` when none did; an if without else or a switch without
+    default ending the body is `na` after an iteration that ran no arm).
+    `emit_top`'s function emitter and `visit_stmt._emit_body_with_assign`
+    handle each through `_statement_value_node` / `_emit_loop_with_assign`,
+    and return only a scalar or string value that fits the slot
+    (`_tail_value_fits`, judged from the statement, not its emitted local):
+    a drawing, UDT or collection handle keeps the statement-then-default
+    lowering it always compiled to. Any other last statement falls through
+    to the default return, and so does a function ending in an if without
+    else whose arm does not run (0.0, where TradingView returns `na`: open).
+    A tuple reassignment `[p, q] := f()` is a TradingView syntax error
+    (CE10156) and is refused. `tests/test_e2e_function_tail_value.py` replays
+    seven TradingView tapes (`fixtures/w2_trio_tv/tail_*`) and compiles the
+    handle shapes.
 
 ## How to add a new Pine v6 function
 

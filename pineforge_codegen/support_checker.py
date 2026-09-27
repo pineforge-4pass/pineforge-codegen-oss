@@ -1192,6 +1192,21 @@ class SupportChecker:
         self._visit_children(node)
 
     def _visit_Assignment(self, node: Assignment) -> None:
+        if isinstance(node.target, TupleLiteral):
+            # ``[p, q] := f()`` reached the C++ as an assignment to a
+            # temporary tuple, a silent no-op. TradingView rejects it
+            # ("Syntax error at input ':='", CE10156): a tuple is declared
+            # with ``=`` only.
+            self._err(
+                node,
+                f"Tuple reassignment [..] {node.op} is not Pine syntax: "
+                "TradingView declares a tuple with '=' and has no tuple "
+                "reassignment.",
+                hint="Declare new names with [a, b] = f(), then reassign "
+                     "each variable on its own line.",
+            )
+            self._visit_children(node)
+            return
         # ``_scalar_defs`` records only the DECLARATION, so a later ``:=``
         # rebind used to be invisible to the request.security symbol check.
         # (``check`` also pre-collects these; recording here keeps the visit

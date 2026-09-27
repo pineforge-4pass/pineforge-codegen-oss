@@ -85,7 +85,8 @@ from __future__ import annotations
 import re
 
 from ..ast_nodes import (
-    ExprStmt, FuncCall, Identifier, IfStmt, MemberAccess, SwitchStmt, VarDecl,
+    ExprStmt, ForInStmt, ForStmt, FuncCall, Identifier, IfStmt, MemberAccess,
+    SwitchStmt, TupleAssign, TupleLiteral, VarDecl, WhileStmt,
 )
 from ..analyzer import FuncInfo
 from ..symbols import PineType, method_receiver_cpp_token
@@ -2227,6 +2228,57 @@ class TopLevelEmitter:
                             if rhs_return_cpp_type is not None
                             else self._int_slot_cpp_type(None, ret_type)
                         ),
+                    )
+                    lines.append("        return _func_ret;")
+                    emitted_return = True
+                elif (i == len(node.body) - 1 and isinstance(s, TupleAssign)
+                        and fi.returns_tuple and "_" not in s.names):
+                    # ``[p, q] = pair(v)`` last returns the declared tuple.
+                    self._visit_stmt(s, lines, indent=2)
+                    declared = TupleLiteral(
+                        elements=[Identifier(name=name) for name in s.names]
+                    )
+                    declared.loc = s.loc
+                    for element in declared.elements:
+                        element.loc = s.loc
+                    lines.append(
+                        f"        return {self._visit_rhs_value(declared, target_cpp_type=rhs_return_cpp_type)};"
+                    )
+                    emitted_return = True
+                elif (i == len(node.body) - 1
+                        and self._statement_value_node(s) is not None
+                        and self._tail_value_fits(s, ret_type)):
+                    # ``_f := expr`` / ``y += v`` / ``b = a * 3`` last: the
+                    # function returns the value the statement leaves. It
+                    # used to fall through to the default return, so
+                    # cs-lev-tradleware's Gaussian filter was always 0.0.
+                    self._visit_stmt(s, lines, indent=2)
+                    value = self._statement_value_node(s)
+                    ret_cpp = self._coerce_int_slot(
+                        self._visit_rhs_value(
+                            value, target_cpp_type=rhs_return_cpp_type
+                        ),
+                        value,
+                        self._int_slot_cpp_type(None, ret_type),
+                    )
+                    lines.append(f"        return {ret_cpp};")
+                    emitted_return = True
+                elif (i == len(node.body) - 1
+                        and isinstance(s, (ForStmt, ForInStmt, WhileStmt))
+                        and not fi.returns_tuple
+                        and self._loop_value_cpp_type(s, ret_type) is not None):
+                    # A loop last: its body's last value on the last iteration
+                    # that reached it, na when none did.
+                    lines.append(
+                        f"        {ret_type} _func_ret = {self._na_value_for_type(ret_type)};"
+                    )
+                    self._emit_loop_with_assign(
+                        s,
+                        "_func_ret",
+                        lines,
+                        indent=2,
+                        target_cpp_type=ret_type,
+                        reset=False,
                     )
                     lines.append("        return _func_ret;")
                     emitted_return = True

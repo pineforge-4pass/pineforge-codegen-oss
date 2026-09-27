@@ -4186,14 +4186,24 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     if hasattr(sym, "is_static_series"):
                         delattr(sym, "is_static_series")
         else:
-            self._visit(node.target)
+            target_type = self._visit(node.target)
             base_name = self._get_target_base_name(node.target)
             if base_name:
                 self._static_vars.discard(base_name)
                 sym = self._symbols.resolve(base_name)
                 if sym and hasattr(sym, "is_static_series"):
                     delattr(sym, "is_static_series")
+            # The statement's value is the target's new value, typed as the
+            # target: ``o.v += 1`` on a float field is a float.
+            if (isinstance(node.target, MemberAccess)
+                    and target_type not in (None, PineType.UNKNOWN, PineType.VOID)):
+                return target_type
 
+        if isinstance(node.target, Identifier):
+            target_sym = self._symbols.resolve(node.target.name)
+            if (target_sym is not None and target_sym.pine_type
+                    not in (PineType.UNKNOWN, PineType.VOID)):
+                return target_sym.pine_type
         return val_type
 
     def _selection_tuple_shape(
@@ -4357,6 +4367,32 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     # Function definition
     # ------------------------------------------------------------------
 
+    def _returns_tuple_call(self, value) -> bool:
+        """A call to a tuple-returning user function or ``ta.*`` function."""
+        if not isinstance(value, FuncCall):
+            return False
+        callee = value.callee
+        if isinstance(callee, Identifier):
+            return self._func_returns_tuple.get(callee.name, False)
+        return (isinstance(callee, MemberAccess)
+                and isinstance(callee.object, Identifier)
+                and callee.object.name == "ta"
+                and callee.member in TA_TUPLE_RETURNS)
+
+    def _statement_value_type(self, stmt, fallback: PineType) -> PineType:
+        """Type of the value a function's last statement leaves.
+
+        A trailing declaration ``[T] x = e`` returns ``x``, typed as the
+        variable (``float y = 4`` is a float); a trailing assignment types
+        itself as its target in ``_visit_Assignment``.
+        """
+        if not isinstance(stmt, VarDecl) or not stmt.name:
+            return fallback
+        sym = self._symbols.resolve(stmt.name)
+        if sym is None or sym.pine_type in (PineType.UNKNOWN, PineType.VOID):
+            return fallback
+        return sym.pine_type
+
     def _visit_FuncDef(self, node: FuncDef) -> PineType:
         # Store the function def for later analysis
         self._func_defs[node.name] = node
@@ -4404,6 +4440,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         try:
             for stmt in node.body:
                 body_type = self._visit(stmt)
+            if node.body:
+                body_type = self._statement_value_type(node.body[-1], body_type)
         finally:
             self._global_scope = old_global
             self._collection_scope_stack.pop()
@@ -4474,6 +4512,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             terminal_direct_return_spec,
         )
 
+        # ``[p, q] = pair(v)`` last returns that tuple: its element types are
+        # the declared names', resolvable only inside the function scope.
+        tuple_decl_types = ()
+        if (node.body and isinstance(node.body[-1], TupleAssign)
+                and "_" not in node.body[-1].names
+                and self._returns_tuple_call(node.body[-1].value)):
+            tuple_decl_types = tuple(
+                sym.pine_type if sym is not None else PineType.FLOAT
+                for sym in (self._symbols.resolve(name)
+                            for name in node.body[-1].names)
+            )
+
         self._symbols.exit_scope()
 
         # Detect if function returns a tuple (last stmt is TupleLiteral)
@@ -4498,6 +4548,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 self._func_tuple_element_types[node.name] = (
                     self._tuple_element_types_by_node.get(id(tuple_node), ())
                 )
+            elif tuple_decl_types:
+                self._func_returns_tuple[node.name] = True
+                self._func_tuple_element_count[node.name] = len(tuple_decl_types)
+                self._func_tuple_element_types[node.name] = tuple_decl_types
             elif selection_shape is not None:
                 # ``f() => if c ... g() else [a, b]``: every arm yields a
                 # tuple of one size, so the function returns that tuple.
@@ -4750,6 +4804,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         try:
             for stmt in node.body:
                 ret_type = self._visit(stmt)
+            if node.body:
+                ret_type = self._statement_value_type(node.body[-1], ret_type)
             if terminal_ret_expr is not None:
                 terminal_spec = self._type_spec_from_expr(terminal_ret_expr)
                 if terminal_spec is not None and terminal_spec.kind == "map":

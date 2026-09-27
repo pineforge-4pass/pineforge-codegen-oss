@@ -1,0 +1,72 @@
+//@version=6
+strategy("pf-w2-f04-reassign-tails", overlay = true)
+
+// Every function ends in a reassignment; the exit comment spells what each
+// returned on the exit bar (one trade every six hours).
+fReassign(float v) =>
+    float y = 0.0
+    y := v * 2
+fAdd(float v) =>
+    float y = 1.0
+    y += v
+fSub(float v) =>
+    float y = 1.0
+    y -= v
+fMul(float v) =>
+    float y = 3.0
+    y *= v
+fDiv(float v) =>
+    float y = v
+    y /= 4
+fMod(int v) =>
+    int y = v
+    y %= 7
+fHist(float v) =>
+    float f = 0.0
+    f := 0.5 * nz(f[1]) + v
+type Acc
+    float x = 0.0
+fMember(Acc a, float v) =>
+    a.x := v + 3
+fMemberAdd(Acc a, float v) =>
+    a.x += v
+fIfArm(float v) =>
+    float y = 0.0
+    if v > 0
+        y := v * 5
+    else
+        y := -1.0
+fSwitchArm(int k) =>
+    float y = 0.0
+    switch k
+        0 =>
+            y := 10.0
+        1 =>
+            y := 20.0
+        =>
+            y := 30.0
+
+var Acc acc = Acc.new()
+var Acc acc2 = Acc.new()
+var float g = 0.0
+r1 = fReassign(close)
+r2 = fAdd(close)
+r3 = fSub(close)
+r4 = fMul(close)
+r5 = fDiv(close)
+r6 = fMod(hour(time, "UTC") + 20)
+r7 = fHist(close)
+r8 = fMember(acc, close)
+r9 = fMemberAdd(acc2, 1.0)
+r10 = fIfArm(close - open)
+r11 = fSwitchArm(hour(time, "UTC") % 3)
+r12 = if close > open
+    g := close
+else
+    g := -open
+
+fmt(x) => str.tostring(x, "#.####")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = fmt(r1) + "|" + fmt(r2) + "|" + fmt(r3) + "|" + fmt(r4) + "|" + fmt(r5) + "|" + fmt(r6) + "|" + fmt(r7) + "|" + fmt(r8) + "|" + fmt(r10) + "|" + fmt(r11) + "|" + fmt(r12) + "|" + fmt(close) + "|" + fmt(open))

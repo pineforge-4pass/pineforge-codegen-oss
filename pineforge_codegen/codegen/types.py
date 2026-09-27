@@ -2815,6 +2815,14 @@ class TypeInferer:
             return self._infer_selection_tuple_types(
                 last_stmt, count, local_types
             )
+        if (isinstance(last_stmt, TupleAssign)
+                and isinstance(last_stmt.value, FuncCall)
+                and isinstance(last_stmt.value.callee, Identifier)):
+            # ``[p, q] = pair(v)`` last: the names are the callee's elements.
+            callee = self._func_info_map.get(last_stmt.value.callee.name)
+            callee_node = getattr(callee, "node", None)
+            if isinstance(callee_node, FuncDef) and callee_node is not func_node:
+                return self._infer_tuple_types(callee_node, count)
         return ["double"] * count
 
     def _infer_selection_tuple_types(

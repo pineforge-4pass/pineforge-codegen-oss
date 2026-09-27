@@ -1,0 +1,13 @@
+//@version=6
+strategy("pf-w2-f04-tuple-decl-tail", overlay = true)
+
+pair(float v) => [v, v * 2]
+// A function whose last statement declares a tuple.
+fTupleTail(float v) =>
+    [p, q] = pair(v)
+
+[a, b] = fTupleTail(close)
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = str.tostring(a, "#.####") + "|" + str.tostring(b, "#.####"))

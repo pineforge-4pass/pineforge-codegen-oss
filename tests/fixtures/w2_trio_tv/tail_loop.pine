@@ -1,0 +1,27 @@
+//@version=6
+strategy("pf-w2-f04-loop-tail", overlay = true)
+
+// Functions whose last statement is a loop.
+fFor(float v) =>
+    float s = 0.0
+    for i = 1 to 3
+        s := s + v * i
+fWhile(float v) =>
+    float s = 0.0
+    int i = 0
+    while i < 3
+        i += 1
+        s := s + v * i
+fForEmpty(float v) =>
+    float s = 7.0
+    for i = 1 to 0
+        s := s + v
+
+r1 = fFor(close)
+r2 = fWhile(close)
+r3 = fForEmpty(close)
+f(x) => str.tostring(x, "#.####")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = f(r1) + "|" + f(r2) + "|" + f(r3) + "|" + f(close))

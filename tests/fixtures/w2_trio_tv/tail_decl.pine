@@ -1,0 +1,13 @@
+//@version=6
+strategy("pf-w2-f04-decl-tail", overlay = true)
+
+// A function whose last statement declares a variable.
+fDecl(float v) =>
+    float a = v + 1
+    b = a * 3
+
+r = fDecl(close)
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = str.tostring(r, "#.####") + "|" + str.tostring(close, "#.####"))
