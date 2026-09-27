@@ -5428,6 +5428,16 @@ class SecurityEmitter:
             cond = self._coerce_bool_expr(cond, expr_node.condition)
             return f"(({cond}) ? ({tv}) : ({fv}))"
 
+        if isinstance(expr_node, SwitchStmt):
+            # A helper local holding a switch (``ma = switch maType``): the
+            # arm its selector takes, as a ternary chain, which evaluates no
+            # other arm (TradingView's switch does not either). It used to
+            # render as ``/* unknown */``, which did not compile.
+            return self._build_security_expr(
+                sec_id, self._security_switch_as_ternary(expr_node), ta_range, ta_results,
+                resolving, security_mutable_names, helper_binding_stack, emitted_lines,
+            )
+
         if isinstance(expr_node, TupleLiteral):
             # A tuple returned by a user helper must lower every element in the
             # requested context.  Falling through to the ordinary expression
@@ -5679,6 +5689,28 @@ class SecurityEmitter:
         chart's terms (``_emit_security_evaluator_requested``)."""
         if self._security_requested_calls and self._security_chart_read is None:
             self._security_chart_read = (getattr(node, "loc", None), reason)
+
+    def _security_switch_as_ternary(self, node: SwitchStmt):
+        """``node``'s value as nested ternaries: each case's arm when its
+        value equals the selector (or its condition holds, with no
+        selector), else the default arm, else ``na``. Every arm must be one
+        expression."""
+        def arm(body: list):
+            if len(body) != 1 or not isinstance(body[0], ExprStmt):
+                self._codegen_error(
+                    node,
+                    "request.security helper switch arms must each be one expression",
+                    hint="Compute a multi-statement arm in its own helper, or on the chart.",
+                )
+            return body[0].expr
+
+        value = arm(node.default_body) if node.default_body else NaLiteral(loc=node.loc)
+        for case_expr, body in reversed(node.cases):
+            condition = (case_expr if node.expr is None else
+                         BinOp(left=node.expr, op="==", right=case_expr, loc=case_expr.loc))
+            value = Ternary(condition=condition, true_val=arm(body), false_val=value,
+                            loc=node.loc)
+        return value
 
     def _security_render_fallback(self, expr_node, args: tuple, chart: set[int]) -> str:
         """``expr_node`` rendered by the expression visitor, handing back to

@@ -1,0 +1,20 @@
+//@version=6
+// A request.security helper holding a switch-valued local chosen by an
+// input: the requested bar computes the arm the input takes. Each exit
+// comment spells what the call read on the bar the close was sent.
+strategy("PF xa switch helper", overlay = true)
+maType = input.string("SMA", "MA", options = ["SMA", "EMA", "WMA"])
+sig() =>
+    r = ta.rsi(close, 14)
+    ma = switch maType
+        "SMA" => ta.sma(r, 5)
+        "EMA" => ta.ema(r, 5)
+        => ta.wma(r, 5)
+    [r, ma]
+[r60, m60] = request.security(syminfo.tickerid, "60", sig())
+s(x) => na(x) ? "na" : str.tostring(x, "#.####")
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(r60) + "|" + s(m60))

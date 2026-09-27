@@ -28,6 +28,7 @@ a trade.
 | `xa_watchlist` | `4c895a319d7d833533e81db47c34003d11e262e6b6b10ca56a6e88985989dc90` | `c0d9e5e69c71f20db434521cf44e65ca4af179c8cf49718692753a8bb8634780` | 22 |
 | `xa_watchlist_plain` | `73968ddcaa90b019987a9388b517615779d26cc64573568473ca93de7e06e42a` | the `xa_watchlist` tape, byte for byte | 22 |
 | `xa_default_arm` | `30b7d529efeea58d5e39d2955adaf315a9570ace79bd821ac9a30a866a416907` | `6664b0fc13e8fe53b1b1c4026115a3e43d12ffb8e00cb116e51f64c0f7bceb23` | 265 |
+| `xa_switch_helper` | `063ace2a4dc75f2b61935ab881cee44dd623cb91ca156ca3fa945beaefdbf850` | `85b2fdb739bd437e769cbd452ac4345db9439b4d0e3864b767676ea00c86c53e` | 265 |
 
 What each tape shows:
 
@@ -67,3 +68,7 @@ What each tape shows:
   helper that stops the script with `runtime.error`. TradingView books 265
   closes: it never evaluates an arm its selector does not take. Exit Signal:
   the bars since the last `"Session"` start.
+- `xa_switch_helper`: a `request.security` helper whose local `ma` holds a
+  `switch` on an input (`"SMA"` by default) over `ta.sma`, `ta.ema` and
+  `ta.wma` of the requested RSI. Exit Signals: the 60-minute RSI and `ma`,
+  four decimals.
