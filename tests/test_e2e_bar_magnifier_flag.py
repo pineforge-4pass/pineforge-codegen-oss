@@ -42,8 +42,9 @@ from tests._e2e import (
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "bar_magnifier"
-# codegen before this lane (cg/tvdefaults d7e095f).
-BASE = "d7e095fd7733303f8102c6f27d4c9ab12d631b8a"
+# codegen before this lane: main at the CGINT3 integration base, which
+# exports no magnifier declaration, as the lane base (cg/tvdefaults d7e095f).
+BASE = "fdcdcbb908b9ea6bdbb135802a7e2aed6a7ec3de"
 TAPES = {"mi-fx-eth-15": True, "w9mag-fx-eth-15-off": False}  # tape -> declares
 BUILDS = ("lane", "base")
 TAPE_UTC_OFFSET_HOURS = 8

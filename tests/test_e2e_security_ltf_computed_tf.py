@@ -31,7 +31,7 @@ from tests._security_tapes import END_MS, START_MS, mismatches, source, tape_exi
 
 FIXTURES = Path(__file__).parent / "fixtures" / "security_ltf_tv"
 NAME = "w9sec_ltf_computed_tf"
-PRE_LANE = "4e5d482"  # cg/security2, this lane's base
+PRE_LANE = "fdcdcbb"  # main at the CGINT3 integration base (cg/security2 4e5d482 in it)
 
 
 def _aux_1m_feed(engine: Path, base: Path) -> Path:

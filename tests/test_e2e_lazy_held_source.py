@@ -34,8 +34,9 @@ from tests._e2e import (
 
 
 TAPE = Path(__file__).parent / "fixtures" / "lazy_held_source" / "w8a-lazy-mom-held"
-# cg/tvdefaults, the lane's base: the eager chart read between close executions.
-LEGACY = "d7e095fd7733303f8102c6f27d4c9ab12d631b8a"
+# Main at the CGINT3 integration base, as the lane's base (cg/tvdefaults
+# d7e095f): the eager chart read between close executions.
+LEGACY = "fdcdcbb908b9ea6bdbb135802a7e2aed6a7ec3de"
 
 HEADER = '//@version=6\nstrategy("e2e-w9-lazy-held", overlay=true)\n'
 TRACES = "// @pf-trace m=m\n// @pf-trace ch=ch\n// @pf-trace r=r\n// @pf-trace c=c\n"

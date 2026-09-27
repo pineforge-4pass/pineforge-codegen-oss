@@ -51,8 +51,9 @@ from tests._e2e import (
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "drawing_lifetime"
-# codegen before this lane (cg/tvdefaults d7e095f).
-BASE = "d7e095fd7733303f8102c6f27d4c9ab12d631b8a"
+# codegen before this lane: main at the CGINT3 integration base, whose
+# drawing lowering is the lane base's (cg/tvdefaults d7e095f).
+BASE = "fdcdcbb908b9ea6bdbb135802a7e2aed6a7ec3de"
 QTY_STEP = 0.0001  # TradingView's BINANCE:ETHUSDT.P quantity step
 TAPE_UTC_OFFSET_HOURS = 8
 BAR_MS = 15 * 60 * 1000

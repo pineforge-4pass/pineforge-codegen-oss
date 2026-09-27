@@ -42,8 +42,9 @@ from tests._e2e import (
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "function_global_history"
-# cg/tvdefaults, the lane's base: a function read the chart's history.
-LEGACY = "d7e095fd7733303f8102c6f27d4c9ab12d631b8a"
+# Main at the CGINT3 integration base, as the lane's base (cg/tvdefaults
+# d7e095f): a function read the chart's history.
+LEGACY = "fdcdcbb908b9ea6bdbb135802a7e2aed6a7ec3de"
 # TradingView's BINANCE:ETHUSDT.P quantity step.
 QTY_STEP = 0.0001
 TAPE_UTC_OFFSET_HOURS = 8
