@@ -27,11 +27,12 @@ Buckets:
 
 from __future__ import annotations
 
+import re
 from typing import Callable
 
 from .ast_nodes import (
     ASTNode,
-    Program, StrategyDecl,
+    Program, StrategyDecl, ImportStmt, TypeField,
     VarDecl, Assignment, TupleAssign,
     IfStmt, ForStmt, ForInStmt, WhileStmt, SwitchStmt,
     FuncDef, ExprStmt,
@@ -402,6 +403,68 @@ SECURITY_ADJUSTMENT_ALLOWED_VALUES: dict[str, frozenset[str]] = {
 }
 # Identifiers/expressions that resolve to "this script's symbol".
 SECURITY_CURRENT_SYMBOL_NAMES: frozenset[str] = frozenset({"syminfo.tickerid", "syminfo.ticker"})
+
+# Built-in namespaces a library import may alias, with their built-in
+# members. TradingView's pine-facade compile of ``import TradingView/ta/7``
+# links no library (``metaInfo.usedLibs`` stays empty) when the script names
+# only built-in ``ta.*`` members, and links it for a library-only name such
+# as ``ta.dema`` (XSYM-DESIGN report 1.3): such an import is a no-op. Every
+# other import stays refused.
+BUILTIN_NAMESPACE_IMPORT_MEMBERS: dict[str, frozenset[str]] = {
+    "ta": frozenset(sigs.TA_FUNCTIONS) | TA_PROPERTY_VARIABLES,
+    "math": frozenset(sigs.MATH_FUNCTIONS) | frozenset(sigs.MATH_CONSTANTS),
+    "str": frozenset(sigs.STR_FUNCTIONS),
+}
+
+
+def import_spelling(node: ImportStmt) -> str:
+    """The import as the refusal names it: ``user/name/version [as alias]``."""
+    return f"{node.path} as {node.alias}" if node.alias else node.path
+
+
+def import_is_builtin_namespace_no_op(program: Program, node: ImportStmt) -> bool:
+    """``node`` imports a library under the name of a built-in namespace
+    (its alias, else its own name) and every member the script names through
+    that alias -- in a call, a read or a type -- is one of the namespace's
+    built-ins, so the library is never linked."""
+    alias = node.alias or node.name
+    members = BUILTIN_NAMESPACE_IMPORT_MEMBERS.get(alias or "")
+    if node.version is None or members is None:
+        return False
+    named = re.compile(rf"(?<![\w.]){re.escape(alias)}\.(\w+)")
+
+    def type_names(value) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, (list, tuple)):
+            return [item for item in value if isinstance(item, str)]
+        return []
+
+    stack: list = [program]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, (list, tuple)):
+            stack.extend(item)
+            continue
+        if isinstance(item, dict):
+            stack.extend(item.values())
+            continue
+        if not isinstance(item, (ASTNode, TypeField)):
+            continue
+        if (isinstance(item, MemberAccess) and isinstance(item.object, Identifier)
+                and item.object.name == alias and item.member not in members):
+            return False
+        hints = [getattr(item, "type_hint", None), getattr(item, "type_name", None)]
+        notes = getattr(item, "annotations", None) or {}
+        hints += [notes.get("param_type_hints"), notes.get("template_args")]
+        for hint in hints:
+            for text in type_names(hint):
+                if any(m not in members for m in named.findall(text)):
+                    return False
+        for key, value in vars(item).items():
+            if key not in ("loc", "annotations"):
+                stack.append(value)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1161,6 +1224,10 @@ class SupportChecker:
         # strategy(...) kwargs legitimately carry constant-namespace members
         # (e.g. scale=scale.right, format=format.price).
         self._visit_children_const_ok(node)
+
+    def _visit_ImportStmt(self, node: ImportStmt) -> None:
+        if not import_is_builtin_namespace_no_op(self._ast, node):
+            self._err(node, f"Import is not supported: '{import_spelling(node)}'")
 
     def _visit_VarDecl(self, node: VarDecl) -> None:
         if node.name and node.value is not None:

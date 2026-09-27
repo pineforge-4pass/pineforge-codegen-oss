@@ -529,17 +529,30 @@ class Parser:
         return self._set_loc(node, start_tok)
 
     def _parse_import_stmt(self) -> ImportStmt:
-        """Parse: import path/to/library/version"""
+        """Parse: import <user>/<name>/<version> [as <alias>]"""
         start_tok = self._current()
         self._consume(TokenType.IMPORT)
-        # Consume the rest of the line as the import path
-        parts: list[str] = []
+        # Consume the rest of the line; any other spelling keeps it as
+        # written in ``path`` for the refusal.
+        tokens = []
         while (not self._at_end()
                and not self._check(TokenType.NEWLINE)
                and not self._check(TokenType.EOF_TOKEN)):
-            parts.append(self._advance().value)
-        path = "".join(parts)
-        node = ImportStmt(path=path)
+            tokens.append(self._advance())
+        values = [tok.value for tok in tokens]
+        node = ImportStmt(path="".join(values))
+
+        def word(index: int) -> bool:
+            return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", values[index]))
+
+        if (len(tokens) in (5, 7) and word(0) and word(2)
+                and values[1] == values[3] == "/"
+                and tokens[4].type == TokenType.NUMBER and values[4].isdigit()
+                and (len(tokens) == 5 or (values[5] == "as" and word(6)))):
+            node.user, node.name, node.version = values[0], values[2], int(values[4])
+            node.path = f"{node.user}/{node.name}/{node.version}"
+            if len(tokens) == 7:
+                node.alias = values[6]
         return self._set_loc(node, start_tok)
 
     def _parse_var_decl(self) -> VarDecl | list:
