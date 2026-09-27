@@ -462,6 +462,11 @@ class CallVisitor:
                 and receiver_spec.name not in self._udt_defs
             )
         )
+        # A temporary receiver is evaluated before the arguments in Pine. C++
+        # leaves the order of call arguments unspecified (GCC evaluates them
+        # right to left), so stage the call whenever an argument could observe
+        # the receiver's evaluation.
+        receiver_is_temporary = not isinstance(receiver_root, Identifier)
         return self._ordered_user_call_expr(
             fn_cpp,
             [receiver_node, *rest_nodes],
@@ -470,9 +475,15 @@ class CallVisitor:
                 receiver_node,
                 *binding.evaluation_order,
             ],
-            force_stage=(
+            force_stage=receiver_is_temporary and (
                 receiver_passes_by_reference
-                and not isinstance(receiver_root, Identifier)
+                or any(
+                    not isinstance(arg, (
+                        NumberLiteral, StringLiteral, BoolLiteral, NaLiteral,
+                        ColorLiteral,
+                    ))
+                    for arg in rest_nodes
+                )
             ),
         )
 

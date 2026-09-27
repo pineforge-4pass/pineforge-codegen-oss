@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from hashlib import sha256
 
 import pytest
@@ -226,7 +227,16 @@ def test_temporary_udt_handle_receiver_is_evaluated_once_and_compiles() -> None:
     )
     assert "_udt_H_get(_pf_udt_H.create(_PFUdtRecord_H{" in direct
     assert direct.count("_pf_udt_H.create(") == 1
-    assert "_udt_H_apply(_pf_udt_H.create(_PFUdtRecord_H{" in ordered
+    # C++ leaves the evaluation order of call arguments unspecified (GCC on
+    # Linux evaluates next_value(order) first): the temporary receiver is
+    # bound by the outer lambda, so the method argument is evaluated after it.
+    assert re.search(
+        r"\[&\]\(auto&& (__pf_call_arg_\d+)\)->decltype\(auto\)\{ return "
+        r"\[&\]\(auto&& (__pf_call_arg_\d+)\)->decltype\(auto\)\{ return "
+        r"_udt_H_apply\(\1, \2\); \}\(\(next_value\(order\)\)\); \}\(\("
+        r"_pf_udt_H\.create\(_PFUdtRecord_H\{",
+        ordered,
+    )
     assert ordered.count("_pf_udt_H.create(") == 1
     assert ordered.count("receiver_map(order, root)") == 1
     assert ordered.count("next_value(order)") == 1
