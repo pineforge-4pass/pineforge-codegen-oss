@@ -1403,14 +1403,10 @@ class SupportChecker:
 
         full = f"{ns}.{name}" if ns else name
 
-        # A request PineForge has no data for is refused only when its value
-        # can reach a trade.
+        # A request PineForge has no data for: na when its value reaches
+        # display sinks only, else a deferred refusal.
         if ns == "request" and name in NO_DATA_REQUEST_FUNCS:
-            reason = self._lower_if_trade_inert(node)
-            if reason is not None:
-                self._err(node, f"{full}(...) is not supported.",
-                          hint=f"{NO_DATA_REQUEST_FUNC[full]} Its value can reach "
-                               f"a trade: {reason}.")
+            self._lower_no_data_request(node, node, NO_DATA_REQUEST_FUNC[full])
             self._visit_request_arguments(node)
             return
 
@@ -1975,20 +1971,15 @@ class SupportChecker:
         if symbol_node is not None:
             scoped_safe = self._is_current_symbol_expr(symbol_node)
             legacy_safe = self._is_current_symbol_expr(symbol_node, legacy_names=True)
-            reason = lowered = None
             if not scoped_safe and not legacy_safe:
-                reason = self._lower_if_trade_inert(node)
-                lowered = reason is None
-            if reason is not None:
-                self._err(
-                    symbol_node,
-                    "request.security symbol must reference the current chart symbol.",
-                    hint="Use syminfo.tickerid or syminfo.ticker; PineForge backtests do not "
-                         f"load alternate symbols, and this value can reach a trade: {reason}.",
-                )
-            elif not lowered and (not scoped_safe or not self._is_current_symbol_expr(
+                # Another symbol: PineForge has no data for it.
+                self._lower_no_data_request(
+                    node, symbol_node,
+                    "PineForge backtests load the chart's symbol only "
+                    "(syminfo.tickerid, syminfo.ticker).")
+            elif not scoped_safe or not self._is_current_symbol_expr(
                 symbol_node, require_all_paths=True
-            )):
+            ):
                 self._warn(
                     symbol_node,
                     "request.security symbol can select an alternate symbol, but "
@@ -2052,23 +2043,30 @@ class SupportChecker:
         # wrong-result bug. See SECURITY_ADJUSTMENT_ALLOWED_VALUES.
         self._check_security_adjustment_kwargs(node)
 
-    def _lower_if_trade_inert(self, node: FuncCall) -> str | None:
-        """Lower a request PineForge has no data for to na, with a warning,
-        when its value reaches display and alert sinks only; else the use
-        through which it can reach a trade."""
+    def _lower_no_data_request(self, node: FuncCall, at: ASTNode, why: str) -> None:
+        """A request PineForge has no data for: lowered to na, with a
+        warning, when its value reaches display and alert sinks only; else a
+        deferred refusal whose first read stops the run
+        (``external_requests``)."""
         if self._trade_slice is None:
             self._trade_slice = TradeSlice(self._ast)
         reason = self._trade_slice.reason(node)
+        lowering = "inert" if reason is None else "unpinned"
+        node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: lowering}
         if reason is None:
-            node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: "inert"}
             self._warn(
-                node,
+                at,
                 f"{spell_call(node)}: value reaches only display/alert sinks; "
                 "lowered to na; trades are unaffected.",
-                hint="PineForge has no data for this request; the value it lowers to "
-                     "reaches alerts, plots and tables only.",
+                hint=f"{why} The value it lowers to reaches alerts, plots and tables only.",
             )
-        return reason
+        else:
+            self._warn(
+                at,
+                f"{spell_call(node)}: no data is pinned for this request; the run "
+                "stops with an error where its value is read.",
+                hint=f"{why} Its value can reach a trade: {reason}.",
+            )
 
     def _visit_request_arguments(self, node: FuncCall) -> None:
         """A no-data request's arguments: ``barmerge.*`` and its field

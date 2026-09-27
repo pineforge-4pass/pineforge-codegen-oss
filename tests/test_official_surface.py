@@ -381,11 +381,8 @@ INTENTIONALLY_REJECTED = [
     # Neither side of trade accessors has 'direction' in Pine v6.
     'x = strategy.closedtrades.direction(0)',
     'x = strategy.opentrades.direction(0)',
-    # external request feeds whose value reaches a trade.
-    'x = request.financial(syminfo.tickerid, "TOTAL_REVENUE", "FQ")\n'
-    'if x > 0\n    strategy.entry("L", strategy.long)',
-    'x = request.dividends(syminfo.tickerid, dividends.gross)\n'
-    'strategy.entry("L", strategy.long, qty = nz(x, 1))',
+    # external request feeds PineForge has no ingestion path for.
+    'x = request.seed("seed_crypto_santiment", "BTC_SENTIMENT_POSITIVE_TOTAL", close)',
     # ticker.* construction is meaningless in PineForge.
     't = ticker.new(syminfo.prefix, syminfo.ticker)',
     # matrix.median has no runtime backing.
@@ -469,15 +466,26 @@ def test_request_inventory_is_accounted_for():
     assert not set(NO_DATA_REQUEST_FUNC) & set(HARD_REJECT_FUNC)
 
 
-@pytest.mark.parametrize("call", [
+NO_DATA_CALLS = [
     'request.financial(syminfo.tickerid, "TOTAL_REVENUE", "FQ")',
     'request.dividends(syminfo.tickerid, dividends.gross)',
     'request.earnings(syminfo.tickerid, earnings.actual, barmerge.gaps_on)',
     'request.splits(syminfo.tickerid, splits.denominator)',
-])
+]
+
+
+@pytest.mark.parametrize("call", NO_DATA_CALLS)
 def test_no_data_request_reaching_display_only_is_lowered(call):
     cpp = transpile(_pine(f'x = {call}\nplot(x)'))
     assert "na<double>()" in cpp
+    assert "no data is pinned" not in cpp
+
+
+@pytest.mark.parametrize("call", NO_DATA_CALLS)
+def test_no_data_request_reaching_a_trade_is_deferred(call):
+    """Its first read stops the run (external_requests)."""
+    cpp = transpile(_pine(f'x = {call}\nif x > 0\n    strategy.entry("L", strategy.long)'))
+    assert "no data is pinned for this request, and its value was read" in cpp
 
 
 def test_hard_reject_namespace_covers_ticker():

@@ -1,0 +1,24 @@
+//@version=6
+// A switch on an input reads request values only in its non-default arms,
+// like a VWAP anchor choice: with the default "Session" the other arms are
+// never evaluated. The "Boom" arm stops the script if it ever runs.
+strategy("PF xa default arm", overlay = true)
+anchor = input.string("Session", "Anchor", options = ["Session", "Earnings", "Dividends", "Boom"])
+e = request.earnings(syminfo.tickerid, earnings.actual, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol = true)
+dv = request.dividends(syminfo.tickerid, dividends.gross, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol = true)
+boom() =>
+    runtime.error("a non-default arm was evaluated")
+    true
+isNew = switch anchor
+    "Earnings" => not na(e)
+    "Dividends" => not na(dv)
+    "Boom" => boom()
+    "Session" => timeframe.change("D")
+    => false
+var int n = 0
+n := isNew ? 1 : n + 1
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = str.tostring(n))

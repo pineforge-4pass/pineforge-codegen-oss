@@ -157,15 +157,25 @@ def test_request_security_lower_tf_accepted():
     assert "_req_sec_lower_tf" in cpp
 
 
-# A request PineForge has no data for is refused when its value can reach a
-# trade (an unread one is lowered to na: tests/test_external_requests.py).
+# A request PineForge has no data for whose value can reach a trade is a
+# deferred refusal: accepted with a warning, its first read stops the run (an
+# unread one is lowered to na): tests/test_external_requests.py.
 TRADES_ON_A = 'if a > close\n    strategy.entry("L", strategy.long)\n'
 TRADES_ON_DATA = 'if data > close\n    strategy.entry("L", strategy.long)\n'
+DEFERRED = "no data is pinned for this request; the run stops with an error where its value is read."
 
 
-def test_request_financial_rejected():
+def _expect_deferred(src: str, line: int | None = None, col: int | None = None) -> None:
+    assert _errors(src) == [], [d.message for d in _errors(src)]
+    deferred = [d for d in _warnings(src) if d.message.endswith(DEFERRED)]
+    assert deferred, [d.message for d in _warnings(src)]
+    if line is not None:
+        assert (deferred[0].location.line, deferred[0].location.col) == (line, col)
+
+
+def test_request_financial_reaching_a_trade_is_deferred():
     src = PRELUDE + 'a = request.financial(syminfo.tickerid, "REVENUE", "FY")\n' + TRADES_ON_A
-    _expect_error(src, "request.financial")
+    _expect_deferred(src)
 
 
 def test_unknown_request_function_rejected():
@@ -358,9 +368,9 @@ def test_request_security_positional_currency_rejected():
     _expect_error(src, "Extra positional arguments")
 
 
-def test_request_security_alternate_symbol_rejected():
+def test_request_security_alternate_symbol_is_deferred():
     src = PRELUDE + 'a = request.security("BINANCE:BTCUSDT", "60", close)\n' + TRADES_ON_A
-    _expect_error(src, "current chart symbol")
+    _expect_deferred(src)
 
 
 def test_request_security_syminfo_ticker_passes():
@@ -392,8 +402,9 @@ def _expect_error_at(src: str, needle: str, line: int, col: int) -> None:
     assert f"<input>:{line}:{col}" in located, located
 
 
-def test_request_security_reassigned_symbol_identifier_rejected():
-    """``var sym = syminfo.tickerid`` … ``sym := "EXCH:OTHER"`` must reject.
+def test_request_security_reassigned_symbol_identifier_is_deferred():
+    """``var sym = syminfo.tickerid`` … ``sym := "EXCH:OTHER"`` is another
+    symbol (a deferred refusal: no data is pinned for it).
 
     ``_scalar_defs`` only ever saw the DECLARATION, so the divergent ``:=``
     rebind used to transpile clean and run on the chart feed.
@@ -405,11 +416,11 @@ def test_request_security_reassigned_symbol_identifier_rejected():
         + 'a = request.security(sym, "60", close)\n'
         + TRADES_ON_A
     )
-    _expect_error_at(src, "current chart symbol", line=5, col=22)
+    _expect_deferred(src, line=5, col=22)
 
 
-def test_request_security_reassigned_symbol_after_call_rejected():
-    """A divergent rebind LATER in the source must reject too."""
+def test_request_security_reassigned_symbol_after_call_is_deferred():
+    """A divergent rebind LATER in the source is another symbol too."""
     src = (
         PRELUDE
         + 'var sym = syminfo.tickerid\n'
@@ -417,7 +428,7 @@ def test_request_security_reassigned_symbol_after_call_rejected():
         + 'sym := "EXCH:OTHER"\n'
         + TRADES_ON_A
     )
-    _expect_error(src, "current chart symbol")
+    _expect_deferred(src)
 
 
 def test_request_security_symbol_rebound_to_current_symbol_passes():
@@ -430,7 +441,7 @@ def test_request_security_symbol_rebound_to_current_symbol_passes():
     assert _errors(src) == []
 
 
-def test_request_security_symbol_compound_rebind_rejected():
+def test_request_security_symbol_compound_rebind_is_deferred():
     """A string-built symbol reaches the same rule through its RHS operand."""
     src = (
         PRELUDE
@@ -439,7 +450,7 @@ def test_request_security_symbol_compound_rebind_rejected():
         + 'a = request.security(sym, "60", close)\n'
         + TRADES_ON_A
     )
-    _expect_error(src, "current chart symbol")
+    _expect_deferred(src)
 
 
 def test_request_security_local_shadow_rebind_does_not_taint_global():
@@ -481,7 +492,7 @@ def test_request_security_previously_accepted_unsafe_local_shadow_warns():
     assert len([d for d in _warnings(src) if "can select an alternate symbol" in d.message]) == 1
 
 
-def test_request_security_nested_rebind_of_global_still_rejected():
+def test_request_security_nested_rebind_of_global_is_deferred():
     src = (
         PRELUDE
         + 'sym = syminfo.tickerid\n'
@@ -490,7 +501,7 @@ def test_request_security_nested_rebind_of_global_still_rejected():
         + 'data = request.security(sym, "D", close)\n'
         + TRADES_ON_DATA
     )
-    _expect_error(src, "current chart symbol")
+    _expect_deferred(src)
 
 
 def test_request_security_mixed_ternary_warns_without_refusal():

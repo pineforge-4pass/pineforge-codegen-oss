@@ -2,12 +2,14 @@
 
 ``request.security`` on another symbol and ``request.financial`` /
 ``earnings`` / ``dividends`` / ``splits`` / ``footprint`` read data the
-engine does not load. A script is refused for one only when its value could
-change a trade: ``TradeSlice`` follows the request's value forward through the
-script and proves it reaches display and alert sinks only -- the backward
-slice of every trade sink holds no part of it. Such a request is lowered to
-``na`` (``lower_no_data_requests``) with a warning; the support checker keeps
-the refusal for every other one.
+engine does not load. ``TradeSlice`` follows such a request's value forward
+through the script: when it reaches display and alert sinks only -- the
+backward slice of every trade sink holds no part of it -- the request is
+lowered to ``na`` with a warning (``lower_no_data_requests``). Every other one
+is a deferred refusal: it lowers to a value whose first READ stops the run
+with an error naming the request, since no data is pinned for it. Binding it
+is no read: ``e = request.earnings(...)`` stops the run only where ``e`` is
+read, so a script reading it only in a branch it never takes runs.
 
 The slice is conservative. Trade sinks are the order calls (``strategy.*``
 that places, closes or cancels, ``strategy.risk.*``) and ``runtime.error``. A
@@ -35,6 +37,8 @@ from .security_contexts import ScriptIndex
 
 
 LOWERING_ANNOTATION = "pf_request_lowering"
+# On a node whose evaluation stops the run: the message it stops with.
+UNPINNED_ANNOTATION = "pf_request_unpinned"
 # request.* calls whose data PineForge never has.
 NO_DATA_REQUEST_FUNCS = frozenset({"financial", "earnings", "dividends", "splits", "footprint"})
 
@@ -464,11 +468,21 @@ def _kind(expr, local: dict, depth: int = 0) -> str:
     return "float"
 
 
+def unpinned_message(node: FuncCall) -> str:
+    """What the run stops with when it reads a request with no data."""
+    return f"{spell_call(node)}: no data is pinned for this request, and its value was read"
+
+
 def lower_no_data_requests(program: Program) -> Program:
     """Replace each request the support checker lowered
-    (``annotations[LOWERING_ANNOTATION]``) by its ``na``."""
+    (``annotations[LOWERING_ANNOTATION]``) by its ``na``: an inert one's
+    plainly, and an unpinned one's so that its first read stops the run.
+    When the request is the whole value of a declaration whose names are
+    never reassigned, those names' reads stop it; otherwise evaluating the
+    request does."""
     funcs = {s.name: s for s in program.body if isinstance(s, FuncDef)}
     swaps: dict[int, ASTNode] = {}
+    unpinned: list[FuncCall] = []
     for node in _nodes(program):
         lowering = (node.annotations or {}).get(LOWERING_ANNOTATION)
         if lowering is None or not isinstance(node, FuncCall):
@@ -477,6 +491,33 @@ def lower_no_data_requests(program: Program) -> Program:
             node.args[2] if len(node.args) > 2 else node.kwargs.get("expression"))
         swaps[id(node)] = (_na_like(payload, funcs) if payload is not None
                            else NaLiteral(loc=node.loc))
+        if lowering == "unpinned":
+            unpinned.append(node)
+    if unpinned:
+        index = ScriptIndex(program)
+        declarations = {id(stmt.value): stmt for stmt in _nodes(program)
+                        if isinstance(stmt, (VarDecl, TupleAssign))}
+        for request in unpinned:
+            message = unpinned_message(request)
+            stmt = declarations.get(id(request))
+            names = ([stmt.name] if isinstance(stmt, VarDecl) else
+                     list(stmt.names) if isinstance(stmt, TupleAssign) else [])
+            bindings = {index.decl_binding.get((id(stmt), name)) for name in names} - {None}
+            if stmt is None or not bindings or bindings & index.reassigned:
+                lowered = swaps[id(request)]
+                lowered.annotations = {**(lowered.annotations or {}),
+                                       UNPINNED_ANNOTATION: message}
+                continue
+            for node in _nodes(program):
+                if isinstance(node, Subscript) and isinstance(node.object, Identifier):
+                    reads = node.object
+                elif isinstance(node, Identifier):
+                    reads = node
+                else:
+                    continue
+                if index.refs.get(id(reads)) in bindings:
+                    node.annotations = {**(node.annotations or {}),
+                                        UNPINNED_ANNOTATION: message}
     if swaps:
         _replace(program, swaps)
     return program

@@ -88,6 +88,7 @@ classes from ``..ast_nodes``.
 from __future__ import annotations
 
 from ..errors import Phase
+from ..external_requests import UNPINNED_ANNOTATION
 from ..ast_nodes import (
     ASTNode,
     BinOp,
@@ -201,6 +202,8 @@ class ExprVisitor:
             self._budget_visit_count += 1
             if self._budget_visit_count % 128 == 0:
                 self._budget.check(node.loc, Phase.CODEGEN)
+        if node.annotations and UNPINNED_ANNOTATION in node.annotations:
+            return self._unpinned_read(node)
         if self._security_fallback_frame is not None:
             delegated = self._security_fallback_delegate(node)
             if delegated is not None:
@@ -412,6 +415,20 @@ class ExprVisitor:
                 f"(({condition}) ? ({true_value}) : ({false_value}))"
             )
         return self._visit_expr(value_node)
+
+    def _unpinned_read(self, node: ASTNode) -> str:
+        """A read of a request no data is pinned for
+        (``external_requests``): the run stops with the request named, and
+        the value the expression would have is only there for its type."""
+        notes = node.annotations
+        message = notes[UNPINNED_ANNOTATION]
+        node.annotations = {k: v for k, v in notes.items() if k != UNPINNED_ANNOTATION}
+        try:
+            value = self._visit_expr(node)
+        finally:
+            node.annotations = notes
+        return (f'([&]() {{ pine_runtime_error(std::string("{self._cpp_string_escape(message)}")); '
+                f"return {value}; }}())")
 
     def _visit_ident(self, node: Identifier) -> str:
         name = node.name

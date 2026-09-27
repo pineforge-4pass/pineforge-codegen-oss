@@ -27,6 +27,7 @@ a trade.
 | `xa_nested_tf` | `8e4d22fb09244a1d0d59c2261c79a47db956a12378e5383303b266c10b01a047` | `1d9062c25c02b58e9e6403bff4360ed79bb9be8375b2d4518f52287b3cc4c83e` | 265 |
 | `xa_watchlist` | `4c895a319d7d833533e81db47c34003d11e262e6b6b10ca56a6e88985989dc90` | `c0d9e5e69c71f20db434521cf44e65ca4af179c8cf49718692753a8bb8634780` | 22 |
 | `xa_watchlist_plain` | `73968ddcaa90b019987a9388b517615779d26cc64573568473ca93de7e06e42a` | the `xa_watchlist` tape, byte for byte | 22 |
+| `xa_default_arm` | `30b7d529efeea58d5e39d2955adaf315a9570ace79bd821ac9a30a866a416907` | `6664b0fc13e8fe53b1b1c4026115a3e43d12ffb8e00cb116e51f64c0f7bceb23` | 265 |
 
 What each tape shows:
 
@@ -61,3 +62,8 @@ What each tape shows:
   `b1cd05f0bc7ee1dec26ca03a1a65fd5dc31ed0d12bb211ca221ca2e206418075`, 20
   trades; kept outside this repository). These probes send no comments: the
   replay compares trade times and prices.
+- `xa_default_arm`: a `switch` on an input, default `"Session"`, whose other
+  arms read `request.earnings` and `request.dividends` values or call a
+  helper that stops the script with `runtime.error`. TradingView books 265
+  closes: it never evaluates an arm its selector does not take. Exit Signal:
+  the bars since the last `"Session"` start.

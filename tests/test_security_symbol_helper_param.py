@@ -32,7 +32,7 @@ from tests._security_tapes import mismatches, replay, source, tape_exits
 
 XSYM_TV = Path(__file__).parent / "fixtures" / "xsym_tv"
 PRELUDE = '//@version=6\nstrategy("T")\n'
-CURRENT = "request.security symbol must reference the current chart symbol."
+DEFERRED = "no data is pinned for this request; the run stops with an error where its value is read."
 ALTERNATE = "request.security symbol can select an alternate symbol"
 
 
@@ -77,11 +77,12 @@ def test_chart_symbol_through_helpers_is_accepted(body):
     'method pull(P self, string s) => request.security(s, "60", close)\n'
     'p = P.new(1.0)\nb = p.pull(syminfo.tickerid)\n',
 ])
-def test_alternate_symbol_through_helpers_stays_refused(body):
-    # The value reaches a trade (one that does not is lowered to na:
-    # tests/test_external_requests.py).
+def test_alternate_symbol_through_helpers_is_another_symbol(body):
+    # Another symbol has no data: a value that reaches a trade is a deferred
+    # refusal, its first read stopping the run (tests/test_external_requests.py).
     src = PRELUDE + body + 'if b > close\n    strategy.entry("L", strategy.long)\n'
-    assert CURRENT in _messages(src, Level.ERROR)
+    assert _messages(src, Level.ERROR) == []
+    assert any(m.endswith(DEFERRED) for m in _messages(src, Level.WARNING))
 
 
 def test_alternate_branch_through_a_helper_warns():

@@ -170,6 +170,7 @@ class ScriptIndex:
         # its name's reads resolve to in its block.
         self.decl_binding: dict[tuple, tuple] = {}
         self.unstable: set[tuple] = set()  # reassigned, var or varip
+        self.reassigned: set[tuple] = set()
         # FuncCall id -> the callable whose body holds it (None: top level).
         self.owner: dict[int, str | None] = {}
         self.calls: dict[str, list[FuncCall]] = {name: [] for name in self.funcs}
@@ -233,6 +234,7 @@ class ScriptIndex:
                     binding = resolve(node.target.name, scopes)
                     if binding is not None:
                         self.unstable.add(binding)
+                        self.reassigned.add(binding)
             if isinstance(node, (FuncDef, MethodDef)):
                 name = node.name if isinstance(node, FuncDef) else None
                 params = {p: ("param", node.name, p) for p in node.params}

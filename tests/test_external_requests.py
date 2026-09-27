@@ -132,12 +132,34 @@ def test_lowered_helper_tuple_keeps_its_element_types():
     compile_cpp(cpp, label="lowered-helper-tuple")
 
 
-def test_trade_relevant_request_keeps_its_refusal():
-    with pytest.raises(CompileError) as err:
-        transpile(HEAD + WATCH + 'if other > close\n    strategy.entry("L", strategy.long)\n')
-    (diag,) = [d for d in err.value.diagnostics if d.level.name == "ERROR"]
-    assert diag.message == "request.security symbol must reference the current chart symbol."
-    assert "this value can reach a trade: it reaches strategy.entry(...)" in diag.hint
+PINNED = "no data is pinned for this request, and its value was read"
+
+
+def test_trade_relevant_request_is_a_deferred_refusal():
+    """A value that can reach a trade is a deferred refusal: binding it is no
+    read, and each read stops the run with the request named."""
+    result = transpile_full(HEAD + WATCH + 'if other > close\n    strategy.entry("L", strategy.long)\n'
+                            + 'if other[1] > open\n    strategy.close("L")\n')
+    (warning,) = [d for d in result["diagnostics"] if "no data is pinned" in d.message]
+    assert warning.message == (
+        'request.security("BINANCE:BTCUSDT", timeframe.period, ...) at line 3: no data is '
+        "pinned for this request; the run stops with an error where its value is read.")
+    assert "it reaches strategy.entry(...)" in warning.hint
+    cpp = result["cpp"]
+    message = 'request.security(\\"BINANCE:BTCUSDT\\", timeframe.period, ...) at line 3: ' + PINNED
+    # Two reads -- ``other`` and ``other[1]`` -- and no registration.
+    assert cpp.count(f'pine_runtime_error(std::string("{message}"))') == 2
+    assert "return other[0]; }())" in cpp and "return other[1]; }())" in cpp
+    assert "register_security_eval" not in cpp
+
+
+def test_request_reassigned_or_inside_an_expression_stops_where_it_is_evaluated():
+    """No declaration holds its value alone: evaluating the request is its read."""
+    for body in ('x = request.financial(syminfo.tickerid, "FQ_X", "FQ")\nx := nz(x, 1)\n',
+                 'x = nz(request.financial(syminfo.tickerid, "FQ_X", "FQ"), 1)\n'):
+        cpp = transpile(HEAD + body + 'strategy.entry("L", strategy.long, qty = x)\n')
+        assert cpp.count(PINNED) == 1
+        assert f'{PINNED}")); return na<double>(); }}())' in cpp
 
 
 def _tape_trades(name: str) -> list[tuple[int, int, float, float]]:
@@ -175,3 +197,26 @@ def test_watchlist_trades_like_the_strategy_without_it(tmp_path_factory):
     assert len(tape) == 22
     missed = [t for t in tape if engine_trades.get(t[:2]) != pytest.approx(t[2:])]
     assert not missed, missed[:5]
+
+
+def test_request_read_only_in_an_arm_never_taken_runs(tmp_path_factory):
+    """TradingView never evaluates a switch arm its selector does not take:
+    with the default "Session" its ``xa_default_arm`` tape books 265 closes
+    although the "Boom" arm stops the script. PineForge reproduces every exit
+    Signal; overriding the selector to the arm reading request.earnings stops
+    the run with the request named, and to "Boom" with its runtime.error."""
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("xsym_default_arm")
+    from tests._security_tapes import mismatches, replay, tape_exits
+    exits = replay(engine, base, {"probe": Build(source("xa_default_arm", XSYM_TV))})
+    tape = tape_exits("xa_default_arm", XSYM_TV)
+    assert len(tape) == 265
+    missed = mismatches(tape, exits["probe"])
+    assert not missed, "\n".join(missed[:10])
+    feed = base / "tape_chart.csv"
+    with pytest.raises(RuntimeError, match=(
+            r"request\.earnings\(syminfo\.tickerid, earnings\.actual, \.\.\.\) at line 7: "
+            "no data is pinned for this request, and its value was read")):
+        closed_trades(engine, base / "probe", feed, {"Anchor": "Earnings"})
+    with pytest.raises(RuntimeError, match="a non-default arm was evaluated"):
+        closed_trades(engine, base / "probe", feed, {"Anchor": "Boom"})
