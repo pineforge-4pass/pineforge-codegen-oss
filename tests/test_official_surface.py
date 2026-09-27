@@ -27,6 +27,8 @@ accidental.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from pineforge_codegen import transpile, signatures as sigs
@@ -185,6 +187,15 @@ KNOWN_REQUEST_OMISSIONS = frozenset({
 # refused when it can reach a trade. ``request.footprint`` (outside the
 # frozen inventory above) follows the same rule.
 NO_DATA_REQUESTS = frozenset({"dividends", "earnings", "financial", "splits"})
+
+# footprint.* members of a request.footprint value, as TradingView's January
+# 2026 release note ("footprint" and "volume_row" types) names them. PineForge
+# reads delta() only -- the fp_delta_<ticks>_<va> column of another symbol's
+# pinned feed (external_requests.read_footprint_deltas); every other member is
+# refused by name.
+OFFICIAL_FOOTPRINT = frozenset({"buy_volume", "delta", "poc", "sell_volume", "vah", "val"})
+SUPPORTED_FOOTPRINT = frozenset({"delta"})
+KNOWN_FOOTPRINT_OMISSIONS = frozenset({"buy_volume", "poc", "sell_volume", "vah", "val"})
 
 # timeframe.from_seconds requires a runtime seconds_to_tf inverse mapping
 # that the engine does not currently expose; both layers omit it.
@@ -471,6 +482,18 @@ def test_request_inventory_is_accounted_for():
     assert set(NO_DATA_REQUEST_FUNC) == (
         {f"request.{name}" for name in NO_DATA_REQUESTS} | {"request.footprint"})
     assert not set(NO_DATA_REQUEST_FUNC) & set(HARD_REJECT_FUNC)
+
+
+def test_footprint_members_are_accounted_for():
+    assert OFFICIAL_FOOTPRINT == SUPPORTED_FOOTPRINT | KNOWN_FOOTPRINT_OMISSIONS
+    head = ('footprint fp = request.security("PF:A", "15", request.footprint(100, 70))\n')
+    trade = 'if d > 0\n    strategy.entry("L", strategy.long)'
+    for member in SUPPORTED_FOOTPRINT:
+        transpile(_pine(head + f'd = fp.{member}()\n' + trade))
+        transpile(_pine(head + f'd = footprint.{member}(fp)\n' + trade))
+    for member in KNOWN_FOOTPRINT_OMISSIONS:
+        with pytest.raises(CompileError, match=re.escape(f"footprint.{member}(...) is not supported.")):
+            transpile(_pine(head + f'd = fp.{member}()\n' + trade))
 
 
 NO_DATA_CALLS = [

@@ -1302,10 +1302,12 @@ class TopLevelEmitter:
             "            && facts->second.canonical == syminfo_.tickerid;",
             "    }",
             "    // Otherwise it reads the feed installed for (symbol, timeframe), in the",
-            "    // engine's timeframe spelling (\"D\" is \"1D\"), or the symbol's facts say it",
-            "    // is invalid (na under ignore_invalid_symbol, a stopped run without it).",
+            "    // engine's timeframe spelling (\"D\" is \"1D\"), holding the named",
+            "    // column it reads (a footprint's), or the symbol's facts say it is",
+            "    // invalid (na under ignore_invalid_symbol, a stopped run without it).",
             "    bool _pf_symbol_data_installed(const std::string& symbol,",
-            "                                   const std::string& timeframe) const {",
+            "                                   const std::string& timeframe,",
+            "                                   const char* column = nullptr) const {",
             "        const auto facts = symbol_facts_.find(symbol);",
             "        if (facts != symbol_facts_.end() && facts->second.valid && !*facts->second.valid)",
             "            return true;",
@@ -1313,7 +1315,11 @@ class TopLevelEmitter:
             "        if (tf.size() == 1 && (tf[0] == 'D' || tf[0] == 'W' || tf[0] == 'M' || tf[0] == 'S'))",
             "            tf = \"1\" + tf;",
             "        for (const auto& feed : symbol_feeds_) {",
-            "            if (feed.instrument == symbol && feed.tf == tf) return true;",
+            "            if (feed.instrument != symbol || feed.tf != tf) continue;",
+            "            if (column == nullptr) return true;",
+            "            for (const auto& named : feed.columns) {",
+            "                if (named.name == column) return true;",
+            "            }",
             "        }",
             "        return false;",
             "    }",
@@ -1326,8 +1332,17 @@ class TopLevelEmitter:
             "        _PFForeignEmaSeeding(const _PFForeignEmaSeeding&) = delete;",
             "        _PFForeignEmaSeeding& operator=(const _PFForeignEmaSeeding&) = delete;",
             "    };",
-            "#endif",
         ])
+        if any(self._security_footprint_column(info["sec_id"]) for info in self._security_eval_info):
+            lines.extend([
+                "    // A footprint's delta: the named column of the requested bar.",
+                "    double _pf_symbol_column(int sec_id, const char* name) const {",
+                "        return security_column_value(sec_id, name);",
+                "    }",
+                "#else",
+                "    double _pf_symbol_column(int, const char*) const { return na<double>(); }",
+            ])
+        lines.append("#endif")
 
     def _emit_foreign_security_registration(
             self, info: dict, tf_expr: str, la: str, go: str, lines: list[str]) -> None:
@@ -1338,6 +1353,8 @@ class TopLevelEmitter:
         (``_pf_sec_missing_N``), never reading the chart instead."""
         sec_id = info["sec_id"]
         symbol = self._security_tf_runtime_expr(info["symbol_node"])
+        column = self._security_footprint_column(sec_id)
+        column = f', "{column}"' if column else ""
         ignore_node = info.get("ignore_invalid_node")
         if ignore_node is None:
             ignore = "false"
@@ -1352,7 +1369,7 @@ class TopLevelEmitter:
             "            if (_pf_symbol_is_chart(_pf_symbol)) {",
             f"                {RUNTIME_REGISTER_SECURITY_EVAL_FN}({sec_id}, {tf_expr}, input_tf_, {la}, {go});",
             f"                _pf_sec_missing_{sec_id} = false;",
-            f"            }} else if (_pf_symbol_data_installed(_pf_symbol, {tf_expr})) {{",
+            f"            }} else if (_pf_symbol_data_installed(_pf_symbol, {tf_expr}{column})) {{",
             f"                {RUNTIME_REGISTER_SECURITY_EVAL_FN}({sec_id}, _pf_symbol, {tf_expr}, "
             f"input_tf_, {la}, {go}, {ignore});",
             f"                _pf_sec_missing_{sec_id} = false;",

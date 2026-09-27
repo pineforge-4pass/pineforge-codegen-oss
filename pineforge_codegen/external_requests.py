@@ -35,7 +35,7 @@ from __future__ import annotations
 from .ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, BreakStmt, ContinueStmt,
     ExprStmt, ForInStmt, ForStmt, FuncCall, FuncDef, Identifier, IfStmt,
-    MemberAccess, MethodDef, NaLiteral, Program, StringLiteral, Subscript,
+    MemberAccess, MethodDef, NaLiteral, NumberLiteral, Program, StringLiteral, Subscript,
     SwitchStmt, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
 )
 from .errors import Diagnostic, Level, Phase, SourceLocation
@@ -55,6 +55,9 @@ DATA_LOWERINGS = frozenset({FEED_LOWERING})
 # request that carries the same ref (``REQUEST_REF_ANNOTATION``).
 UNPINNED_ANNOTATION = "pf_request_unpinned"
 REQUEST_REF_ANNOTATION = "pf_request_ref"
+# On a ``request.footprint`` that is the whole expression of a request of
+# another symbol reading its feed: the feed column its delta is read from.
+FOOTPRINT_COLUMN_ANNOTATION = "pf_footprint_column"
 
 
 class RequestRef:
@@ -97,6 +100,101 @@ def _call_name(node: FuncCall) -> tuple[str | None, str | None]:
             parts.append(obj.name)
             return ".".join(reversed(parts)), callee.member
     return None, None
+
+
+def footprint_column(request) -> str | None:
+    """``fp_delta_<ticks>_<va>``: the feed column a ``request.footprint``
+    call with literal ticks per row and value-area percent reads its delta
+    from (the requests manifest's column names), else None."""
+    if not (isinstance(request, FuncCall) and _call_name(request) == ("request", "footprint")):
+        return None
+    ticks = request.args[0] if request.args else request.kwargs.get("ticks_per_row")
+    va = (request.args[1] if len(request.args) > 1 else request.kwargs.get("va_percent",
+                                                                            NumberLiteral(value=70)))
+    values = []
+    for arg in (ticks, va):
+        if not (isinstance(arg, NumberLiteral) and float(arg.value).is_integer()
+                and int(arg.value) > 0):
+            return None
+        values.append(int(arg.value))
+    return f"fp_delta_{values[0]}_{values[1]}"
+
+
+def _footprint_payload(request) -> FuncCall | None:
+    """The ``request.footprint`` call that is ``request``'s whole
+    expression (``request.security(sym, tf, request.footprint(100, 70))``)."""
+    if isinstance(request, FuncCall) and _call_name(request) == ("request", "security"):
+        payload = request.args[2] if len(request.args) > 2 else request.kwargs.get("expression")
+        if isinstance(payload, FuncCall) and _call_name(payload) == ("request", "footprint"):
+            return payload
+    return None
+
+
+class FootprintValues:
+    """The script's footprint values: declarations typed ``footprint`` or
+    holding a ``request.footprint`` (inside a ``request.security`` or not),
+    as ``ScriptIndex`` bindings. PineForge reads a footprint's ``delta()``
+    only, so a footprint value is its delta."""
+
+    def __init__(self, index: ScriptIndex) -> None:
+        self.index = index
+        self.bindings = {
+            binding for key, binding in index.decl_binding.items()
+            if isinstance((decl := index.decls.get(binding)), VarDecl)
+            and (str(decl.type_hint or "").strip() == "footprint"
+                 or self.is_request(decl.value))}
+
+    @staticmethod
+    def is_request(expr) -> bool:
+        return (isinstance(expr, FuncCall) and _call_name(expr) == ("request", "footprint")
+                or _footprint_payload(expr) is not None)
+
+    def holds(self, expr) -> bool:
+        """``expr`` is a footprint value."""
+        if isinstance(expr, Identifier):
+            return self.index.refs.get(id(expr)) in self.bindings
+        return self.is_request(expr)
+
+    def member(self, call: FuncCall) -> tuple[str, ASTNode | None, bool] | None:
+        """``(member, footprint, only argument)`` of ``fp.member(...)`` or
+        ``footprint.member(fp, ...)``, else None; the flag says the footprint
+        is the call's only argument."""
+        callee = call.callee
+        if not isinstance(callee, MemberAccess):
+            return None
+        arity = len(call.args) + len(call.kwargs)
+        if (isinstance(callee.object, Identifier) and callee.object.name == "footprint"
+                and id(callee.object) not in self.index.refs):
+            first = call.args[0] if call.args else call.kwargs.get("id")
+            if first is None or not self.holds(first):
+                return None
+            return callee.member, first, arity == 1
+        if self.holds(callee.object):
+            return callee.member, callee.object, arity == 0
+        return None
+
+
+def read_footprint_deltas(program: Program) -> None:
+    """``fp.delta()`` and ``footprint.delta(fp)`` read the footprint's
+    delta, which is the value a footprint lowers to: each becomes ``fp``, and
+    a declaration typed ``footprint`` a float. The support checker refuses
+    every other footprint member."""
+    if not any((isinstance(n, Identifier) and n.name == "footprint")
+               or (isinstance(n, MemberAccess) and n.member == "footprint")
+               or (isinstance(n, VarDecl) and str(n.type_hint or "").strip() == "footprint")
+               for n in _nodes(program)):
+        return  # most scripts name no footprint: index none for them
+    values = FootprintValues(ScriptIndex(program))
+    swaps: dict[int, ASTNode] = {}
+    for node in _nodes(program):
+        if isinstance(node, FuncCall):
+            read = values.member(node)
+            if read is not None and read[0] == "delta" and read[2]:
+                swaps[id(node)] = read[1]
+        elif isinstance(node, VarDecl) and str(node.type_hint or "").strip() == "footprint":
+            node.type_hint = "float"
+    if swaps:
+        replace_nodes(program, swaps)
 
 
 def no_data_request(node) -> str | None:
@@ -535,6 +633,7 @@ def lower_no_data_requests(program: Program) -> Program:
     request does. A request lowered onto pinned data (``DATA_LOWERINGS``)
     stays, and the same reads stop the run only when its data is missing
     when the run begins."""
+    read_footprint_deltas(program)
     funcs = {s.name: s for s in program.body if isinstance(s, FuncDef)}
     swaps: dict[int, ASTNode] = {}
     unpinned: list[FuncCall] = []

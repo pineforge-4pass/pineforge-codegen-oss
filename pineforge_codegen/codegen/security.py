@@ -79,7 +79,7 @@ from ..analyzer import (
 )
 from .. import signatures as sigs
 from ..errors import CompileError
-from ..external_requests import REQUEST_REF_ANNOTATION
+from ..external_requests import FOOTPRINT_COLUMN_ANNOTATION, REQUEST_REF_ANNOTATION
 from ..external_requests import _nodes as walk_request_nodes
 from ..security_contexts import UNREACHED_ANNOTATION
 from ..symbols import PineType, method_receiver_type_name
@@ -1872,6 +1872,15 @@ class SecurityEmitter:
         if item is None or not item.get("foreign"):
             return "true"
         return f"_pf_sec_missing_{item['sec_id']}"
+
+    def _security_footprint_column(self, sec_id: int) -> str | None:
+        """The feed column another symbol's site reads when its whole
+        expression is ``request.footprint(...)`` (``fp_delta_100_70``)."""
+        if not self._security_foreign(sec_id):
+            return None
+        item = next((i for i in self._security_calls if i["sec_id"] == sec_id), None)
+        payload = item.get("expr_node") if item is not None else None
+        return (getattr(payload, "annotations", None) or {}).get(FOOTPRINT_COLUMN_ANNOTATION)
 
     def _security_foreign(self, sec_id: int | None) -> bool:
         """The site reads another symbol's feed: its bars close when the
@@ -5311,6 +5320,11 @@ class SecurityEmitter:
         """Build C++ expression for a security evaluator."""
         if expr_node is None:
             return "na<double>()"
+        column = (getattr(expr_node, "annotations", None) or {}).get(FOOTPRINT_COLUMN_ANNOTATION)
+        if column is not None and self._security_foreign(sec_id):
+            # request.footprint(...) of another symbol: the delta its feed
+            # records for the requested bar (the value its delta() reads).
+            return f'_pf_symbol_column({sec_id}, "{column}")'
 
         if resolving is None:
             resolving = set()

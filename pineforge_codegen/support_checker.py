@@ -51,7 +51,8 @@ from .errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from .builtin_keywords import POSITIONAL_BUILTINS
 from .pine_spelling import expr_start
 from .external_requests import (
-    FEED_LOWERING, LOWERING_ANNOTATION, NO_DATA_REQUEST_FUNCS, TradeSlice, spell_call,
+    FEED_LOWERING, FOOTPRINT_COLUMN_ANNOTATION, LOWERING_ANNOTATION, NO_DATA_REQUEST_FUNCS,
+    FootprintValues, TradeSlice, footprint_column, spell_call,
 )
 from .external_requests import _nodes as _walk_nodes
 from . import signatures as sigs
@@ -142,7 +143,8 @@ SUPPORTED_LOG: frozenset[str] = frozenset({"info", "warning", "error"})
 # Requests PineForge has no data for (``external_requests``): refused only
 # when their value can reach a trade; one that reaches display and alert sinks
 # only is lowered to na with a warning. ``request.security`` on another
-# symbol follows the same rule.
+# symbol follows the same rule when it reads no feed; ``request.footprint``
+# as its whole expression reads the feed's delta column.
 NO_DATA_REQUEST_FUNC: dict[str, str] = {
     "request.financial":         "External fundamentals data not available in PineForge.",
     "request.dividends":         "External corporate-action data not available in PineForge.",
@@ -612,6 +614,10 @@ class SupportChecker:
         # Inside the arguments of a request PineForge has no data for, whose
         # field constants (``earnings.actual``) name what it would read.
         self._request_field_ctx_depth: int = 0
+        # request.footprint calls that are the whole expression of a request
+        # of another symbol reading its feed (_lower_foreign_request).
+        self._feed_footprints: set[int] = set()
+        self._footprints: FootprintValues | bool | None = None
         # Built on the first request with no data: which values reach a trade.
         self._trade_slice: TradeSlice | None = None
         # id()s of Identifier/MemberAccess nodes that are the *callee* of a
@@ -1460,11 +1466,36 @@ class SupportChecker:
 
         full = f"{ns}.{name}" if ns else name
 
+        # The footprint another symbol's feed carries: the column of the
+        # request.security whose whole expression this is.
+        if id(node) in self._feed_footprints:
+            node.annotations = {**(node.annotations or {}),
+                                FOOTPRINT_COLUMN_ANNOTATION: footprint_column(node)}
+            self._visit_request_arguments(node)
+            return
+
         # A request PineForge has no data for: na when its value reaches
         # display sinks only, else a deferred refusal.
         if ns == "request" and name in NO_DATA_REQUEST_FUNCS:
             self._lower_no_data_request(node, node, NO_DATA_REQUEST_FUNC[full])
             self._visit_request_arguments(node)
+            return
+
+        # A footprint value is its delta (external_requests.read_footprint_deltas):
+        # every other member is refused by name.
+        footprint = self._footprint_member(node)
+        if footprint is not None:
+            if footprint != "delta":
+                self._err(
+                    node, f"footprint.{footprint}(...) is not supported.",
+                    hint=("PineForge reads a footprint's delta() only: the "
+                          "fp_delta_<ticks>_<va> column of the feed a requests manifest pins "
+                          "for the symbol requested."))
+            receiver = node.callee.object
+            if not (isinstance(receiver, Identifier) and receiver.name == "footprint"):
+                self._visit(receiver)
+            for arg in (*node.args, *node.kwargs.values()):
+                self._visit(arg)
             return
 
         # Hard rejects by full name.
@@ -2150,6 +2181,9 @@ class SupportChecker:
                 reason=reason)
             return
         node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: FEED_LOWERING}
+        payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+        if footprint_column(payload) is not None:
+            self._feed_footprints.add(id(payload))
         self._warn(
             symbol_node,
             f"{spell_call(node)}: another symbol's bars, read from the feed the requests "
@@ -2159,6 +2193,29 @@ class SupportChecker:
                   "and syminfo.* in its context) and merges them by time as TradingView "
                   "does; a symbol equal to the chart's reads the chart."),
         )
+
+    def _footprint_member(self, node: FuncCall) -> str | None:
+        """The member ``node`` calls on a footprint value (``fp.delta()``,
+        ``footprint.poc(fp)``), else None."""
+        if not isinstance(node.callee, MemberAccess):
+            return None
+        if self._footprints is None:
+            # Most scripts name no footprint: index none for them.
+            mentions = any(
+                (isinstance(n, Identifier) and n.name == "footprint")
+                or (isinstance(n, MemberAccess) and n.member == "footprint")
+                or (isinstance(n, VarDecl) and str(n.type_hint or "").strip() == "footprint")
+                for n in _walk_nodes(self._ast))
+            if not mentions:
+                self._footprints = False
+            else:
+                if self._trade_slice is None:
+                    self._trade_slice = TradeSlice(self._ast)
+                self._footprints = FootprintValues(self._trade_slice.index)
+        if self._footprints is False:
+            return None
+        read = self._footprints.member(node)
+        return read[0] if read is not None else None
 
     def _foreign_feed_blocker(self, node: FuncCall, symbol_node: ASTNode) -> str | None:
         """Why ``node`` cannot read another symbol's feed, or None: the
@@ -2182,6 +2239,14 @@ class SupportChecker:
         if ignore is not None and not index.registration_value(ignore):
             return "registration computes its ignore_invalid_symbol before the first bar"
         payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+        if isinstance(payload, FuncCall) and _qualified_name(payload.callee) == (
+                "request", "footprint"):
+            # The feed's footprint column: its name spells the literal ticks
+            # per row and value-area percent.
+            if footprint_column(payload) is None:
+                return ("its request.footprint states ticks_per_row and va_percent as "
+                        "literal whole numbers")
+            return None
         for inner in _walk_nodes(payload):
             if isinstance(inner, FuncCall) and _qualified_name(inner.callee)[0] == "request":
                 return "its expression holds no request of its own"
