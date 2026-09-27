@@ -1,0 +1,13 @@
+//@version=6
+strategy("pf-w2-mincontract-exit", overlay = true, initial_capital = 10000000000,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     commission_value = 0, slippage = 0)
+
+// Every order is 1000 * syminfo.mincontract; the exit comment spells the fact
+// and a quantity floored to it, the way lot-sized scripts round their size.
+step = syminfo.mincontract
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("mc", strategy.long, qty = step * 1000)
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("mc", comment = "mincontract=" + str.tostring(step) +
+         "|floored=" + str.tostring(math.floor(2.3456789 / step) * step))

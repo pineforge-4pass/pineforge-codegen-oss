@@ -429,8 +429,11 @@ SYMINFO_MEMBER_MAP = {
     "root": 'na<std::string>()',
     "pricescale": 'na<double>()',
     "minmove": 'na<double>()',
+    # --- Run facts: the value the run declares through the syminfo
+    # metadata channel (runtime_overrides.syminfo_metadata, a lane fact),
+    # na when it declares none. ---
+    "mincontract": 'get_syminfo_metadata("mincontract")',
     # --- External-data fields: na-accept so scripts compile ---
-    "mincontract": 'na<double>()',
     "current_contract": 'na<std::string>()',
     "expiration_date": 'na<int64_t>()',
     "isin": 'na<std::string>()',

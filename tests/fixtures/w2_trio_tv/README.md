@@ -88,3 +88,24 @@ Two neighbours are TradingView compile errors, so they have no tape: a tuple
 reassignment `[p, q] := pair(v)` ("Syntax error at input ':='", CE10156), and
 a loop whose body ends in `if ... break`, which TradingView types void ("Void
 expression cannot be assigned to a variable", CE10098).
+
+## syminfo.mincontract
+
+```bash
+lab tv --pine mincontract_exit.pine --slug pf-w2-mincontract_exit --no-note \
+  --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-03
+```
+
+| File | sha256 |
+|---|---|
+| `mincontract_exit.pine` | `98836edb3645de664a4a5187cdb292794a294079af80308145e02e462f06d4c8` |
+| `mincontract_exit_tv_trades.csv` (8 trades, exported 2026-09-27) | `93a2acd863e1ea036d4673c27765ee735cc3cf0e9108dce6132f4c24752e9d2b` |
+
+Every order is `1000 * syminfo.mincontract` and every exit comment spells the
+value and a quantity floored to it: TradingView's BINANCE:ETHUSDT.P reads
+`mincontract=0.0001|floored=2.3456`, quantity 0.1. A read-out of the same
+fact on every lane's symbol and timeframe (qty `1000 * syminfo.mincontract`,
+the value in the entry comment) gave 0.0001 on BINANCE:ETHUSDT.P (15, 1D),
+0.00001 on BINANCE:BTCUSDT (15, 1D), 0.01 on OANDA:EURUSD and OANDA:XAUUSD
+(15, 1D), and 1 on NASDAQ:AAPL, NYSE:F, NSE:NIFTY, CME_MINI:ES1! and
+CME_MINI:NQ1! (15, 1D); those tapes stay with the lane's evidence.

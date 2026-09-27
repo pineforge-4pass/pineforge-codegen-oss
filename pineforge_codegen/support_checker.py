@@ -467,6 +467,9 @@ class SupportChecker:
         for member, emission in SYMINFO_MEMBER_MAP.items()
         if "na<" in emission or "get_syminfo_metadata" in emission
     )
+    # Silent-gap fields a run declares as a symbol fact (a lane fact through
+    # the syminfo metadata channel): na only when the run declares none.
+    _SYMINFO_RUN_FACT_FIELDS: frozenset[str] = frozenset({"mincontract"})
 
     def __init__(self, ast: Program, filename: str = "<input>") -> None:
         self._ast = ast
@@ -1769,6 +1772,14 @@ class SupportChecker:
         if isinstance(node.object, Identifier) and node.object.name == "syminfo":
             if node.member not in SUPPORTED_SYMINFO:
                 self._err(node, f"syminfo.{node.member} is not implemented in PineForge runtime.")
+            elif node.member in self._SYMINFO_RUN_FACT_FIELDS:
+                # Read from the symbol fact the run declares; na without one.
+                self._warn(
+                    node,
+                    f"syminfo.{node.member} is na unless the run declares the "
+                    f"symbol's {node.member} (syminfo metadata "
+                    f"\"{node.member}\", a lane fact).",
+                )
             elif node.member in self._SYMINFO_SILENT_GAP_FIELDS:
                 # These fields silently return na in current PineForge. Warn on
                 # EVERY read — not just inside an if/ternary condition — because
