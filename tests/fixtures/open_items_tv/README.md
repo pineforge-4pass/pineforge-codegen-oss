@@ -119,3 +119,20 @@ Untyped variables bound to `matrix.row(m, 0)`, `m.row(1)`, `matrix.col(m,
 1)`, `matrix.eigenvalues(m)` and to `array.standardize` / `abs` /
 `sort_indices` in both forms; each exit comment spells a read of each (a
 sum, max, min or element) and the bar's `close % 7`.
+
+## A function and another function's local series sharing a name
+
+| File | sha256 |
+|---|---|
+| `tails_b.pine` (lane W2's `pf-w2-f04_tails_b`) | `0f53dc88d7b4396f0e44697e725663dd9699c2f2e311d65ab51b63d7dbeac911` |
+| `tails_b_tv_trades.csv` (7 trades, exported 2026-09-26 by lane W2) | `16f790439beb79a1cf4e016a0b7a68578b61896aca44fccfb164554a0e275863` |
+| `func_local_name.pine` | `bd51e5234829be1cca10c50bf24220014eeabff232cfd6b919f7565aec564805` |
+| `func_local_name_tv_trades.csv` (7 trades, exported 2026-09-27) | `188ad424004ec5f9d4c8d4d3b4e85f32676c00e1721aff9b6bcd5e88cadb2e1d` |
+
+`tails_b` is lane W2's function-tail probe, unedited: `fHist` keeps a float
+series `f` and a string function `f(x)` is defined after it (W2 replayed a
+variant without the collision because this one did not compile).
+`func_local_name` keeps a float series `g` beside a string function `g`, a
+float series `k` beside an int function `k`, and an int series `m` beside a
+float function `m` defined after it; each exit comment spells what the three
+functions keeping them returned, `k(close)`, `g(m(close))` and the close.

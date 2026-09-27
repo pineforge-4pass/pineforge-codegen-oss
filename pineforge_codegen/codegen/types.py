@@ -1395,7 +1395,7 @@ class TypeInferer:
         # init RHS is such a builtin, so also match the builtin name directly.
         if name in INT64_BUILTINS:
             return "int64_t"
-        sym = self.ctx.symbols.resolve(name)
+        sym = self._variable_symbol(name)
         # A float or bool an epoch reaches keeps its type: the analyzer types
         # every request.security value float (a double holds an epoch
         # exactly), and a name is keyed by spelling across scopes.
@@ -1407,6 +1407,35 @@ class TypeInferer:
         if sym is not None:
             return PINE_TYPE_TO_CPP.get(sym.pine_type, "double")
         return "double"
+
+    def _variable_symbol(self, name: str):
+        """The symbol the variable ``name`` resolves to.
+
+        The symbol table keeps one name per scope, and a user function is
+        defined in the global scope under its name, typed by what it
+        returns. A function-local variable of the same spelling -- the
+        ``float f`` series of another function beside ``f(x) =>
+        str.tostring(x)`` -- resolved there once the analyzer had left its
+        scope. Inside a function the variable is that function's own
+        symbol; outside one, a series is the symbol of the function that
+        keeps it (``func_series_vars``).
+        """
+        sym = self.ctx.symbols.resolve(name)
+        if name not in getattr(self, "_func_names", ()):
+            return sym
+        active = getattr(self, "_active_func_name", None)
+        if active:
+            scope_names = {f"func_{active}"}
+        else:
+            scope_names = {
+                f"func_{owner}"
+                for owner, names in getattr(self.ctx, "func_series_vars", {}).items()
+                if name in names
+            }
+        for scope in self.ctx.symbols.all_scopes:
+            if scope.name in scope_names and name in scope.symbols:
+                return scope.symbols[name]
+        return sym
 
     def _series_param_element_cpp_type(
         self,
@@ -2638,7 +2667,7 @@ class TypeInferer:
                 return self._current_func_local_types[node.name]
             if node.name in getattr(self, "_current_loop_vars", set()):
                 return "double"
-            sym = self.ctx.symbols.resolve(node.name)
+            sym = self._variable_symbol(node.name)
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return self._type_spec_to_cpp(sym.type_spec)
             if sym is not None and sym.pine_type != PineType.UNKNOWN:

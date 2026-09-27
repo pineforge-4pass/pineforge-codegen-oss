@@ -763,7 +763,11 @@ setting all paths makes the verification reproducible. See `CONTRIBUTING.md`.
 and aligns with TradingView's primitive types. For collection /
 composite types use `TypeSpec`. Codegen's `_infer_type` returns a C++
 type STRING (e.g. `"std::string"`, `"PineMatrix"`) — that's what most
-emission paths consume.
+emission paths consume. The symbol table keeps one name per scope and a
+user function lives in the global scope typed by its return, while Pine
+keeps functions and variables apart: `types._variable_symbol` resolves a
+variable spelled like a user function in its own function's scope
+(`tests/test_e2e_function_local_name.py`).
 - **Errors.** Use `errors.CompileError` for fatal issues raised from
 the transpiler. Carry `SourceLocation` so users can map back to the
 Pine line/col. Diagnostics inside the support checker use
