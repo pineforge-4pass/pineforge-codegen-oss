@@ -3511,9 +3511,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 sec.heikinashi = per_cs[0][3]
                 new_calls.append(sec)
                 continue
-            series = next((name for _, key, timeframe, _ in per_cs
-                           if key and key[0][0] == "expr"
-                           and (name := reads_bar_series(timeframe))), None)
+            # With a timeframe parameter, a key's first part is its timeframe.
+            series = tf_param and next(
+                (name for _, key, timeframe, _ in per_cs
+                 if key[0][0] == "expr" and (name := reads_bar_series(timeframe))), None)
             if series is not None:
                 self._error(
                     "request.security timeframe parameter '" + str(tf_param)

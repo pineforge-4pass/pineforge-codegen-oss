@@ -615,11 +615,18 @@ class SupportChecker:
         # -- so a constant argument read through a name is trusted only when
         # that name has exactly one binding and no scope can shadow it.
         self._binding_counts: dict[str, int] = {}
+        # User functions by node id, and every call of each by name, so a
+        # request.security symbol that is a helper parameter resolves through
+        # the arguments of the helper's calls.
+        self._user_func_defs: dict[int, FuncDef] = {}
+        self._user_func_calls: dict[str, list[FuncCall]] = {}
+        self._overloaded_user_funcs: set[str] = set()
 
     # -- Public API --
 
     def check(self) -> list[Diagnostic]:
         self._collect_user_definitions(self._ast)
+        self._collect_user_calls()
         self._collect_scalar_rebinds(self._ast)
         self._index_security_symbol_bindings()
         self._count_bindings(self._ast)
@@ -672,6 +679,31 @@ class SupportChecker:
                 for item in value.values():
                     if isinstance(item, ASTNode):
                         self._collect_scalar_rebinds(item)
+
+    def _collect_user_calls(self) -> None:
+        """Index the user functions and every call of each, anywhere."""
+        names: dict[str, int] = {}
+        for stmt in self._ast.body:
+            if isinstance(stmt, FuncDef):
+                self._user_func_defs[id(stmt)] = stmt
+                names[stmt.name] = names.get(stmt.name, 0) + 1
+        self._overloaded_user_funcs = {n for n, count in names.items() if count > 1}
+        stack: list = [self._ast]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, (list, tuple)):
+                stack.extend(item)
+                continue
+            if isinstance(item, dict):
+                stack.extend(item.values())
+                continue
+            if not isinstance(item, ASTNode):
+                continue
+            if (isinstance(item, FuncCall) and isinstance(item.callee, Identifier)
+                    and item.callee.name in names):
+                self._user_func_calls.setdefault(item.callee.name, []).append(item)
+            stack.extend(value for key, value in vars(item).items()
+                         if key not in ("loc", "annotations"))
 
     def _index_security_symbol_bindings(self) -> None:
         """Bind symbol reads and every ``:=`` to their lexical declaration.
@@ -2238,6 +2270,10 @@ class SupportChecker:
                     for value in self._scalar_rebinds.get(node.name, ())
                 )
             binding = self._security_symbol_refs.get(id(node))
+            if (isinstance(binding, tuple) and binding[0] == "param"
+                    and binding not in _seen):
+                return self._param_is_current_symbol(
+                    binding, _seen | {binding}, require_all_paths)
             if binding is not None and binding not in _seen:
                 definition = self._security_symbol_defs.get(binding)
                 if definition is None:
@@ -2254,6 +2290,31 @@ class SupportChecker:
                     for value in self._security_symbol_rebinds.get(binding, ())
                 )
         return False
+
+    def _param_is_current_symbol(
+        self, binding: tuple, seen: frozenset, require_all_paths: bool,
+    ) -> bool:
+        """A helper parameter is the chart's symbol when the argument every
+        call of the helper binds to it is, read in the caller's scope --
+        through further helpers' parameters too. A helper nothing calls
+        never runs. A method's parameter, or an overloaded helper's, keeps
+        the refusal."""
+        _, func_id, name = binding
+        fdef = self._user_func_defs.get(func_id)
+        if fdef is None or fdef.name in self._overloaded_user_funcs:
+            return False
+        index = fdef.params.index(name)
+        defaults = (fdef.annotations or {}).get("param_defaults") or []
+        for call in self._user_func_calls.get(fdef.name, ()):
+            arg = call.kwargs.get(name)
+            if arg is None and index < len(call.args):
+                arg = call.args[index]
+            if arg is None and index < len(defaults):
+                arg = defaults[index]
+            if arg is None or not self._is_current_symbol_expr(
+                    arg, seen, require_all_paths=require_all_paths):
+                return False
+        return True
 
     # -- Pine timeframe-literal validation --
 

@@ -24,6 +24,7 @@ a trade.
 | `xa_import_ta` | `0160f73a95bde5ecee656451f8db5eac0e630855508d56487f627d5d7106dcdb` | `6179eb2113fc891932d09fd26eeebdf4e2d4b2ec485ec605ea57620c2c83d707` | 265 |
 | `xa_import_ta_plain` | `9b88a881cb79073304137daae3f078b54871896382f810c74569e7f7b3a76cdb` | the `xa_import_ta` tape, byte for byte | 265 |
 | `xa_nested_tf_only` | `27f33344047cc3a98e97b3c6b10f16645997c3d15baef7f8c9bac1249606352e` | `074114f03fdcc89f437d39e9da3ad4a89ac6d373ccd3f631b9d94ee7df3611c1` | 265 |
+| `xa_nested_tf` | `8e4d22fb09244a1d0d59c2261c79a47db956a12378e5383303b266c10b01a047` | `1d9062c25c02b58e9e6403bff4360ed79bb9be8375b2d4518f52287b3cc4c83e` | 265 |
 
 What each tape shows:
 
@@ -39,3 +40,12 @@ What each tape shows:
   `d5ba8f84b8a1520f1f35e09a760eaa9ec260ee33034b2c9ec3ea62ecfb803dfd`, 267
   trades, the last one still open) is replayed outside this repository, on
   the AAPL lane feed the tests cannot reach.
+- `xa_nested_tf`: the symbol and the timeframe through two helper levels,
+  `g(sym, tf) => request.security(sym, tf, ta.sma(close, 3))`, `h(sym, tf) =>
+  g(sym, tf)`, `k(tf) => h(syminfo.tickerid, tf)`, called as
+  `h(syminfo.tickerid, tfA)`, `h(syminfo.tickerid, tfB)`, `k("60")`,
+  `k(tfB)` and `h(ticker.heikinashi(syminfo.tickerid), tfA)`: the last reads
+  the Heikin-Ashi 60-minute SMA. Exit Signals: `a` ... `e`. The NASDAQ:AAPL
+  15 export over 2025-04-01..2025-05-01 (tape sha256
+  `0a40b6b98084d0ff1e6ab776f1a1ab007cf2700770701ec3fa275e0f56ee874b`, 267
+  trades, the last one open) is replayed outside this repository.

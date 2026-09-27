@@ -397,7 +397,12 @@ you delete or weaken the special case, the test will tell you.
    allowed (`ignore_invalid_symbol` is accepted but inert — the symbol is
    always the chart symbol, so no symbol can be invalid). An unconditional
    alternate symbol is rejected. Chart-symbol aliases resolve by lexical
-   binding, so a local rebind cannot taint an unrelated global. A ternary
+   binding, so a local rebind cannot taint an unrelated global. A helper
+   parameter is the chart's symbol when every call of its helper binds one
+   to it, through further helpers' parameters too (a method's or an
+   overloaded helper's parameter stays refused), and each call path's
+   symbol, Heikin-Ashi or plain, is part of its request's context
+   (`tests/test_security_symbol_helper_param.py`). A ternary
    symbol warns if either arm can select an alternate feed; its existing
    chart-symbol lowering stays accepted to preserve working scripts. Safe
    forms include `syminfo.tickerid`, `syminfo.ticker`, and
