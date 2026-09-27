@@ -339,3 +339,37 @@ def test_missing_feed_read_only_in_a_branch_never_taken_runs(tmp_path_factory):
     result = run(engine, work, feed_path, None, inputs={"Macro": "true"},
                  tag="macro")
     assert not result.ok and PINNED in result.error
+
+
+def test_symbol_that_can_select_another_never_reads_the_chart_for_it(tmp_path_factory):
+    """``useOther ? "PF:A" : syminfo.tickerid`` read the chart's bars for
+    both arms. Its value reaching a trade, it now registers by the string
+    the run computes: the chart's arm reads the chart, PF:A's its feed, and
+    with no feed PF:A's reads stop the run."""
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("xe_alternate")
+    feed_path, opens = _chart(engine, base)
+    body = ('useOther = input.bool(false, "Other")\n'
+            'c = request.security(useOther ? "PF:A" : syminfo.tickerid, "60", close)\n' + TRADE)
+    result = transpile_full(HEAD + body)
+    assert any("its symbol can select another symbol" in d.message
+               for d in result["diagnostics"])
+    other = hourly("PF:A", opens[0], 70)
+    runs = {}
+    for key, source in (("xe-alternate", _traced("c", body)),
+                        ("xe-chart", _traced("c", body.replace(
+                            'useOther ? "PF:A" : syminfo.tickerid', "syminfo.tickerid")))):
+        build(source, base / key)
+        runs[key] = run(engine, base / key, feed_path, None)
+        assert runs[key].ok, runs[key].error
+    assert runs["xe-alternate"].trace == runs["xe-chart"].trace
+    work = base / "xe-alternate"
+    missing = run(engine, work, feed_path, None, inputs={"Other": "true"}, tag="other")
+    assert not missing.ok and PINNED in missing.error
+    fed = run(engine, work, feed_path, write_root(base, "xe-alternate", "BINANCE:ETHUSDT", "15",
+                                                 [other]), inputs={"Other": "true"}, tag="fed")
+    assert fed.ok, fed.error
+    closes = [bar[2] for bar in other.bars]
+    for chart_open in opens:
+        i = _visible(other, chart_open, False)
+        assert same(fed.trace[chart_open]["pf_c"], float("nan") if i is None else closes[i])

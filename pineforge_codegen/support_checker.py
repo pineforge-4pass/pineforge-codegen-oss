@@ -2081,12 +2081,13 @@ class SupportChecker:
             elif not scoped_safe or not self._is_current_symbol_expr(
                 symbol_node, require_all_paths=True
             ):
-                self._warn(
-                    symbol_node,
-                    "request.security symbol can select an alternate symbol, but "
-                    "PineForge always loads the current chart symbol.",
-                    hint="Every reachable symbol value must resolve to syminfo.tickerid or syminfo.ticker for exact results.",
-                )
+                if not self._lower_alternate_symbol(node, symbol_node):
+                    self._warn(
+                        symbol_node,
+                        "request.security symbol can select an alternate symbol, but "
+                        "PineForge always loads the current chart symbol.",
+                        hint="Every reachable symbol value must resolve to syminfo.tickerid or syminfo.ticker for exact results.",
+                    )
 
         # timeframe literal-format check (positional [1] or kwarg).
         tf_node = node.kwargs.get("timeframe")
@@ -2191,10 +2192,7 @@ class SupportChecker:
                    else "."),
                 reason=reason)
             return
-        node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: FEED_LOWERING}
-        payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
-        if footprint_column(payload) is not None:
-            self._feed_footprints.add(id(payload))
+        self._mark_feed(node)
         self._warn(
             symbol_node,
             f"{spell_call(node)}: another symbol's bars, read from the feed the requests "
@@ -2204,6 +2202,36 @@ class SupportChecker:
                   "and syminfo.* in its context) and merges them by time as TradingView "
                   "does; a symbol equal to the chart's reads the chart."),
         )
+
+    def _mark_feed(self, node: FuncCall) -> None:
+        node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: FEED_LOWERING}
+        payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+        if footprint_column(payload) is not None:
+            self._feed_footprints.add(id(payload))
+
+    def _lower_alternate_symbol(self, node: FuncCall, symbol_node: ASTNode) -> bool:
+        """A symbol that can select the chart's or another symbol's, and
+        whose value can reach a trade: registered by the string the run
+        computes, the chart's reading the chart and another's its pinned feed
+        (never the chart's bars in its place). False, keeping the chart's
+        lowering with its warning, for one whose value reaches display sinks
+        only or that registration cannot key."""
+        if self._trade_slice is None:
+            self._trade_slice = TradeSlice(self._ast)
+        if (self._trade_slice.reason(node) is None
+                or self._foreign_feed_blocker(node, symbol_node) is not None):
+            return False
+        self._mark_feed(node)
+        self._warn(
+            symbol_node,
+            f"{spell_call(node)}: its symbol can select another symbol: registered by the "
+            "string the run computes, the chart's reads the chart and another symbol's the "
+            "feed the requests manifest pins for it; with none installed, the run stops "
+            "with an error where its value is read.",
+            hint=("It read the chart's bars for every symbol: another symbol's value never "
+                  "comes from the chart."),
+        )
+        return True
 
     def _lower_recorded_request(self, node: FuncCall, why: str) -> None:
         """``request.earnings`` / ``dividends`` / ``splits`` / ``financial``.
