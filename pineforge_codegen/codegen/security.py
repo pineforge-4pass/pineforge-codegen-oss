@@ -5035,6 +5035,13 @@ class SecurityEmitter:
                     return f"{state_name}[0]"
                 return state_name
 
+            var_input = self._security_var_input_call(expr_node)
+            if var_input is not None:
+                return self._build_security_expr(
+                    sec_id, var_input, ta_range, ta_results, resolving,
+                    security_mutable_names, (), emitted_lines,
+                )
+
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
             if (
                 self._security_identifier_is_global_binding(expr_node)
@@ -6161,3 +6168,22 @@ class SecurityEmitter:
                     "under a builtin call on the chart's bar; TradingView evaluates "
                     "it on the requested bar.",
                 )
+
+    def _security_var_input_call(self, node: Identifier):
+        """The input call of a never-reassigned ``var v = input.*()`` read
+        while a TA constructor argument or history index is lowered, or None.
+
+        Such a ``v`` holds the input's value on every bar, and there it is
+        read through its getter, as a plain input is (the plain one inlines
+        through the expression map, which holds no ``var``):
+        ``evaluate_security`` resets the TA object before ``on_bar`` has
+        initialized the member, so ``g(close, int(vf))`` built
+        ``ta::SMA((int)vf)`` from an ``na`` member, a length of INT_MIN, and
+        the run crashed (P1 of lane CG-SECURITY-2's review)."""
+        if not (self._security_index_inputs
+                and self._security_identifier_is_global_binding(node)):
+            return None
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        if node.name in global_expr_map:
+            return None
+        return self._input_var_to_call.get(node.name)

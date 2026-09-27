@@ -1,0 +1,18 @@
+//@version=6
+// A var input as the TA length of a request.security helper: a bare
+// multi-statement helper and the helper under nz, beside the same helper
+// with the literal length.
+strategy("PF oi sec var input length", overlay = true)
+var float vf = input.float(6.0, "VF")
+g(float src, int n) =>
+    y = ta.sma(src, n)
+    y
+a1 = request.security(syminfo.tickerid, "60", g(close, int(vf)))
+a3 = request.security(syminfo.tickerid, "60", nz(g(close, int(vf))))
+a4 = request.security(syminfo.tickerid, "60", g(close, 6))
+x(v) => na(v) ? "na" : str.tostring(v, "#.####")
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = x(a1) + "|" + x(a3) + "|" + x(a4))

@@ -168,3 +168,19 @@ Each close spells, requested on "60": `nz(s)` with `s = close - open`,
 0.0)`, `nz(s) + nz(f())` with `f() => close * 2`, and the bare `s`.
 TradingView evaluates each global on the requested bar: the first field
 equals the last on every close.
+
+## A var input as a request.security helper's TA length
+
+The same convention (265 closes, 2025-04-01..04-08).
+
+| File | sha256 |
+|---|---|
+| `sec_var_input_len.pine` | `4e1e6f9e96485bfb4bc1807d0d7aa1093eaf0c4fbd4c3f9018e7105a5bd9181d` |
+| `sec_var_input_len_tv_trades.csv` (265 trades, exported 2026-09-27) | `ddb0d231143200e6933d003b50cbd367b813e2405b80de8573a0f779aee70cb4` |
+
+`var float vf = input.float(6.0, "VF")` is the length of a multi-statement
+helper `g(src, n) => y = ta.sma(src, n)`; each close spells `g(close,
+int(vf))`, `nz(g(close, int(vf)))` and `g(close, 6)` requested on "60": the
+first equals the last on every close. A first draft also called a typed
+method `close.gm(int(vf))`, which TradingView refused ("Could not find
+method", CE10271).
