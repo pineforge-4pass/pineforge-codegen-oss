@@ -1,0 +1,26 @@
+//@version=6
+// SPDX-License-Identifier: Apache-2.0
+// Synthetic probe (lane XSYM-C): a string tuple selected by an if from a
+// function or [string(na), string(na)], then read through a ternary; each
+// value spelled in an exit comment.
+strategy("xc string tuple select", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=2)
+
+sig(string s) => na(s) ? "-" : s
+pair() => [close > close[1] ? "HI" : na, close < close[1] ? "LO" : na]
+useA = input.bool(true, "A")
+useB = input.bool(false, "B")
+[hi, lo] = if useA
+    pair()
+else
+    [string(na), string(na)]
+[hi2, lo2] = if useB
+    pair()
+else
+    [string(na), string(na)]
+sHi = useA ? hi : na
+sLo2 = useB ? lo2 : na
+
+if bar_index % 2 == 0
+    strategy.entry("A", strategy.long)
+else
+    strategy.close("A", comment=sig(hi) + sig(lo) + sig(hi2) + sig(lo2) + sig(sHi) + sig(sLo2))

@@ -4903,6 +4903,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 ):
                     # A string element of a request.security helper tuple.
                     cpp_type = "std::string"
+                elif (
+                    ptype == PineType.STRING
+                    and isinstance(expr, (IfStmt, SwitchStmt))
+                ):
+                    # A string element of an if/switch selection tuple
+                    # (``[a, b] = if c ... f() else [string(na), string(na)]``):
+                    # the whole selection infers as double, which a
+                    # std::string element could not be assigned to.
+                    cpp_type = "std::string"
                 else:
                     cpp_type = (
                         self._infer_type(expr)

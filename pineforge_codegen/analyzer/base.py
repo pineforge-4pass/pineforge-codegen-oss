@@ -5636,6 +5636,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     self._visit(arg)
                 return PineType.COLOR
 
+            # string(x): Pine's cast to string, usually of na
+            # (``[string(na), string(na)]`` arms of a string tuple). It fell
+            # to the unknown-builtin default FLOAT, which untyped a selection
+            # tuple whose other arm carries strings.
+            if func_name == "string":
+                for arg in node.args:
+                    self._visit(arg)
+                for val in node.kwargs.values():
+                    self._visit(val)
+                return PineType.STRING
+
             # User-defined function call
             if func_name in self._func_defs:
                 return self._handle_user_func_call(func_name, node)

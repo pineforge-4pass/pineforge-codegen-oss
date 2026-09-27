@@ -2136,6 +2136,12 @@ class CallVisitor:
             # string passthrough and TV-style "true"/"false" for bools
             # (std::to_string would reject strings / render bools as 0/1).
             arg = node.args[0]
+            if self._is_na_expr(arg):
+                # ``string(na)`` types an ``na`` as a string (``[string(na),
+                # string(na)]`` arms of a tuple): the string na, not
+                # ``str.tostring(na)`` ("NaN"), whose formatter a script
+                # without str.tostring does not declare.
+                return "na<std::string>()"
             inferred = self._infer_type(arg)
             if inferred == "std::string":
                 return self._visit_expr(arg)
