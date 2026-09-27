@@ -1,0 +1,35 @@
+// SPDX-License-Identifier: Apache-2.0
+// Synthetic script (lane XSYM-C) importing the clean-room pftest libraries.
+//@version=6
+strategy("xc lib twin", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=2, margin_long=0, margin_short=0)
+import pftest/Signals/1 as S
+
+type Filter
+    bool on
+Filter filter = Filter.new(true)
+trSmooth = ta.sma(close, 3)
+secret = "main"
+sig(string s) => na(s) ? "-" : s
+pin = S.pin()
+pin2 = S.pin(frac = 0.5, strict = false)
+[n1, s1] = S.counter(5)
+[n2, s2] = S.counter(9)
+sm = S.smooth(close, 4)
+sp = S.span(high, low)
+b = S.Bar2.new(low, high)
+w = b.width()
+w2 = S.width(b)
+S.Side side = close > open ? S.Side.long : S.Side.short
+sc = S.scaled(close)
+pm = S.ptMid(high, low)
+tg = S.tag("x")
+d1 = S.dir(1)
+f2(float v) => str.tostring(v, "#.##")
+sA = sig(pin) + sig(pin2) + "," + str.tostring(n1) + "," + str.tostring(n2) + "," + f2(s1) + "," + f2(s2) + "," + f2(sm) + "," + f2(sp) + "," + f2(w) + "," + f2(w2)
+sB = (side == S.Side.long ? "L" : "S") + "," + f2(sc) + "," + f2(pm) + "," + tg + "," + secret + "," + (filter.on ? "1" : "0") + "," + f2(trSmooth) + "," + str.tostring(d1) + "," + str.tostring(S.RATIO)
+if bar_index % 2 == 0
+    strategy.entry("A", strategy.long)
+    strategy.entry("B", strategy.long)
+else
+    strategy.close("A", comment="a " + sA)
+    strategy.close("B", comment="b " + sB)

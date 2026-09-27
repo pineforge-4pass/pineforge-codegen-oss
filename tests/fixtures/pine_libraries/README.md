@@ -15,3 +15,8 @@ by import path.
 |---|---|---|
 | `pftest/Base/1` | 6 | An export, a private helper and a type an importing library uses: the transitive import. |
 | `pftest/Signals/1` | 6 | String signals with `na`, private helpers and a private constant, per-call-site state, locals and parameters that collide with a script's names, a type with a method, an enum, an `export const`, a transitive import, and an export PineForge refuses that only a script calling it reaches. |
+
+Scripts importing them live in `../library_scripts`: `signals_import.pine`
+reads every export of `pftest/Signals/1`, and `signals_spelled.pine` is the
+same script with both libraries written in as user code, renamed by hand
+(`tests/test_e2e_library_inline.py`).

@@ -71,6 +71,14 @@ def test_pinned_libraries_resolve(env, tmp_path):
         library_text("pftest/Base/1").encode())
 
 
+def test_a_script_transpiles_on_its_own_pins(env, tmp_path):
+    """The verifier's path: ``transpile(source_text)`` with no options."""
+    layout = Layout(tmp_path)
+    env(layout.pin_all("probe", SCRIPT, "pftest/Signals/1", "pftest/Base/1"))
+    cpp = transpile(SCRIPT)
+    assert "Signals_v1__scaled" in cpp and "Base_v1__twice" in cpp
+
+
 def test_a_neighbours_pin_resolves_nothing(env, tmp_path):
     """The case-wide directory lists the library (another probe pins it),
     but no manifest pins this script: its import keeps its refusal."""
