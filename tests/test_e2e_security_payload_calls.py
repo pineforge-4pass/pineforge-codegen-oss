@@ -373,7 +373,6 @@ plot(v + w)
 
 @pytest.mark.parametrize("declaration, read", [
     ("g = close - open", "g[1]"),
-    ("", "bar_index"),
     # Per run, yet a requested context reads its own timeframe.
     ("tfm = timeframe.multiplier * 1", "tfm"),
     ("", "(session.isfirstbar ? 1 : 0)"),

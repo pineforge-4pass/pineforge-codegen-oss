@@ -198,3 +198,20 @@ With `g() => close`, each close spells `h()` for `h() => nz(g()[1])`, `k()`
 for `k() => g()[1]` and `close[1]`, all requested on "60": TradingView reads
 the previous requested close in each (0 and `na` on the first close, where
 `nz` differs).
+
+## bar_index in a request.security payload
+
+The same convention (265 closes, 2025-04-01..04-08).
+
+| File | sha256 |
+|---|---|
+| `sec_bar_index.pine` | `af1471545b690c5e793f216aef8e124962ba2546dadab9e243544a045aa0b842` |
+| `sec_bar_index_tv_trades.csv` (265 trades, exported 2026-09-27) | `78e6428ed33cf5a44774b93b21b8942cc27485c2d198ee81b4b2f38030080de1` |
+
+Each close spells the payload's `bar_index` on "60" and on "240", `nz(bar_index)
++ 1` and a helper's `bar_index * 2` on "60", `bar_index[1]` on "60", the
+payload's `bar_index` on the chart's own "15", and the chart's `bar_index`.
+TradingView counts requested bars from the first one: the 60m value is 0 on
+the chart bars inside the second hour and becomes 1 on the chart bar that
+closes with it; `bar_index[1]` is na until the second 60m bar; on "15" it
+equals the chart's.

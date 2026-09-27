@@ -2241,6 +2241,11 @@ class SecurityEmitter:
     def _emit_security_expr_hist_members(
         self, sec_id: int, expr_node, lines: list[str], mbb_suffix: str
     ) -> None:
+        if self._security_reads_bar_index(expr_node):
+            # The requested bar's ``bar_index``: one count per requested bar,
+            # advanced where the evaluator opens its slot.
+            self._security_bar_index_secs.add(sec_id)
+            lines.append(f"    int {self._security_bar_index_member(sec_id)} = -1;")
         for idx, node in enumerate(self._collect_security_expr_hist_subscripts(expr_node)):
             # A session.* flag is a bool: its history reads false, not na,
             # before the first requested bar.
@@ -4727,6 +4732,9 @@ class SecurityEmitter:
             ]
 
         lines.append(f"    void _eval_security_{sec_id}(const Bar& bar, bool is_complete) {{")
+        if sec_id in self._security_bar_index_secs:
+            member = self._security_bar_index_member(sec_id)
+            lines.append(f"        if (security_series_slot_is_new({sec_id})) ++{member};")
 
         ta_results = {}
         pre_rebind_ta_indices: list[int] = []
@@ -5054,6 +5062,9 @@ class SecurityEmitter:
                     return f"{state_name}[0]"
                 return state_name
 
+            if self._security_is_bar_index(expr_node) and sec_id in self._security_bar_index_secs:
+                return self._security_bar_index_member(sec_id)
+
             var_input = self._security_var_input_call(expr_node)
             if var_input is not None:
                 return self._build_security_expr(
@@ -5108,6 +5119,19 @@ class SecurityEmitter:
             resolved = self._build_security_timeframe_member(sec_id, expr_node.member)
             if resolved is not None:
                 return resolved
+
+        if (isinstance(expr_node, Subscript)
+                and self._security_is_bar_index(expr_node.object)
+                and sec_id in self._security_bar_index_secs):
+            # ``bar_index[k]``: k requested bars back, na before the first.
+            member = self._security_bar_index_member(sec_id)
+            offset = self._build_security_expr(
+                sec_id, expr_node.index, ta_range, ta_results, resolving,
+                security_mutable_names, helper_binding_stack, emitted_lines,
+            )
+            return (f"([&]() -> double {{ auto _pf_bar_back = ({offset}); "
+                    f"if (is_na(_pf_bar_back) || {member} - _pf_bar_back < 0) "
+                    f"return na<double>(); return (double)({member} - _pf_bar_back); }}())")
 
         if isinstance(expr_node, Subscript):
             if isinstance(expr_node.object, Identifier):
@@ -6025,7 +6049,12 @@ class SecurityEmitter:
             return self._security_call_inlinable(node)
         if isinstance(node, Identifier):
             return (self._security_fallback_owns_name(node, helper_binding_stack)
-                    or self._security_fallback_owns_global(node))
+                    or self._security_fallback_owns_global(node)
+                    or (self._security_is_bar_index(node)
+                        and sec_id in self._security_bar_index_secs))
+        if (isinstance(node, Subscript) and self._security_is_bar_index(node.object)
+                and sec_id in self._security_bar_index_secs):
+            return True
         if isinstance(node, Subscript):
             obj = node.object
             if isinstance(obj, Identifier):
@@ -6206,3 +6235,43 @@ class SecurityEmitter:
         if node.name in global_expr_map:
             return None
         return self._input_var_to_call.get(node.name)
+
+    @staticmethod
+    def _security_bar_index_member(sec_id: int) -> str:
+        return f"_sec{sec_id}_bar_index_"
+
+    def _security_is_bar_index(self, node) -> bool:
+        """The built-in ``bar_index``, where no declaration binds the name."""
+        return (isinstance(node, Identifier) and node.name == "bar_index"
+                and "bar_index" not in getattr(self, "_safe_name_bound", ()))
+
+    def _security_reads_bar_index(self, expr_node) -> bool:
+        """Whether a payload reads ``bar_index``: in itself, the globals it
+        reads or the user functions it calls. TradingView evaluates it on
+        the requested bar -- the count of requested bars before it -- where
+        the evaluator used to read the chart's (``pine_bar_index()``)."""
+        from ..limits import iter_ast_nodes
+
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        seen: set[tuple[str, str]] = set()
+        pending = [expr_node]
+        while pending:
+            root = pending.pop()
+            if not isinstance(root, ASTNode):
+                continue
+            for n, _depth in iter_ast_nodes(root):
+                if self._security_is_bar_index(n):
+                    return True
+                if (isinstance(n, Identifier) and n.name in global_expr_map
+                        and ("global", n.name) not in seen
+                        and self._security_identifier_is_global_binding(n)):
+                    seen.add(("global", n.name))
+                    pending.append(global_expr_map[n.name])
+                if (isinstance(n, FuncCall) and isinstance(n.callee, Identifier)
+                        and n.callee.name in self._func_names
+                        and ("func", n.callee.name) not in seen):
+                    seen.add(("func", n.callee.name))
+                    info = self._func_info_map.get(n.callee.name)
+                    if info is not None and getattr(info, "node", None) is not None:
+                        pending.extend(info.node.body)
+        return False
