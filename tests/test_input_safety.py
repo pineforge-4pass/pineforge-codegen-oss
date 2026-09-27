@@ -277,7 +277,10 @@ def test_slow_passes_stop_at_the_time_budget(monkeypatch, shape: str) -> None:
 def test_existing_security_rejections_and_string_escaping_still_work() -> None:
     for body in (
         "import ../../private",
-        'x = request.security("NASDAQ:AAPL", "D", close)',
+        # Its value reaches an order (one reaching display sinks only is
+        # lowered to na: tests/test_external_requests.py).
+        'x = request.security("NASDAQ:AAPL", "D", close)\n'
+        'if x > close\n    strategy.entry("L", strategy.long)',
     ):
         with pytest.raises(CompileError) as caught:
             transpile(BASE + body + "\n", filename="security.pine")

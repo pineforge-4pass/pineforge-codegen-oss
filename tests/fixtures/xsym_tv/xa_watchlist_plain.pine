@@ -1,0 +1,9 @@
+//@version=6
+// xa_watchlist.pine with its watchlist, financial, alert and table deleted.
+strategy("PF xa watchlist", overlay = true)
+fast = ta.sma(close, 5)
+slow = ta.sma(close, 13)
+if ta.crossover(fast, slow)
+    strategy.entry("L", strategy.long)
+if ta.crossunder(fast, slow)
+    strategy.close("L")

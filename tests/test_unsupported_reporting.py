@@ -94,7 +94,7 @@ def test_bare_builtins_still_transpile():
 # ---------------------------------------------------------------------------
 
 def test_str_of_compile_error_includes_location():
-    src = PRELUDE + "\n\n" + 'x = request.financial("A","B","C")\n'  # line 5
+    src = PRELUDE + "\n\n" + 'x = request.seed("A","B","C")\n'  # line 5
     with pytest.raises(CompileError) as exc:
         transpile(src)
     s = str(exc.value)
@@ -102,7 +102,7 @@ def test_str_of_compile_error_includes_location():
 
 
 def test_transpile_filename_threads_to_diagnostics():
-    src = PRELUDE + 'x = request.financial("A","B","C")\n'  # line 3
+    src = PRELUDE + 'x = request.seed("A","B","C")\n'  # line 3
     with pytest.raises(CompileError) as exc:
         transpile(src, filename="my_strategy.pine")
     loc = exc.value.diagnostics[0].location

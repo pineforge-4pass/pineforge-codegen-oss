@@ -1,0 +1,32 @@
+//@version=6
+// A watchlist of other symbols and a financial whose values reach only an
+// alert and a table, beside a chart signal that trades. The tape equals the
+// tape of xa_watchlist_plain.pine: the same strategy, watchlist deleted.
+strategy("PF xa watchlist", overlay = true)
+tf = input.timeframe("", "Scan timeframe")
+s1 = input.symbol("BINANCE:BTCUSDT", "Symbol 1")
+s2 = input.symbol("OANDA:EURUSD", "Symbol 2")
+s3 = input.symbol("TVC:DXY", "Symbol 3")
+scan(sym) => request.security(sym, tf, [ta.rsi(close, 14) > 50, close > ta.sma(close, 20)])
+[b1, u1] = scan(s1)
+[b2, u2] = scan(s2)
+[b3, u3] = scan(s3)
+shares = request.financial(syminfo.tickerid, "TOTAL_SHARES_OUTSTANDING", "FQ", ignore_invalid_symbol = true)
+cap = shares * close / 1e9
+fast = ta.sma(close, 5)
+slow = ta.sma(close, 13)
+if ta.crossover(fast, slow)
+    strategy.entry("L", strategy.long)
+if ta.crossunder(fast, slow)
+    strategy.close("L")
+if b1 or b2 or b3
+    alert("up: " + (b1 ? s1 + " " : "") + (b2 ? s2 + " " : "") + (b3 ? s3 : ""), alert.freq_once_per_bar)
+var table board = table.new(position.top_right, 2, 4)
+row(r, name, up, above) =>
+    table.cell(board, 0, r, name)
+    table.cell(board, 1, r, up ? "UP" : above ? "above" : "-")
+if barstate.islast
+    row(0, s1, b1, u1)
+    row(1, s2, b2, u2)
+    row(2, s3, b3, u3)
+    table.cell(board, 0, 3, na(cap) ? "n/a" : str.tostring(cap, "#.##"))

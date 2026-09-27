@@ -19,6 +19,7 @@ from pineforge_codegen.support_checker import (
     DIVERGENT_VARS,
     DIVERGENT_VARS_ERROR,
     NOT_YET_FUNC,
+    NO_DATA_REQUEST_FUNC,
     SECURITY_ALLOWED_PARAMS,
 )
 
@@ -156,8 +157,14 @@ def test_request_security_lower_tf_accepted():
     assert "_req_sec_lower_tf" in cpp
 
 
+# A request PineForge has no data for is refused when its value can reach a
+# trade (an unread one is lowered to na: tests/test_external_requests.py).
+TRADES_ON_A = 'if a > close\n    strategy.entry("L", strategy.long)\n'
+TRADES_ON_DATA = 'if data > close\n    strategy.entry("L", strategy.long)\n'
+
+
 def test_request_financial_rejected():
-    src = PRELUDE + 'a = request.financial(syminfo.tickerid, "REVENUE", "FY")\n'
+    src = PRELUDE + 'a = request.financial(syminfo.tickerid, "REVENUE", "FY")\n' + TRADES_ON_A
     _expect_error(src, "request.financial")
 
 
@@ -352,7 +359,7 @@ def test_request_security_positional_currency_rejected():
 
 
 def test_request_security_alternate_symbol_rejected():
-    src = PRELUDE + 'a = request.security("BINANCE:BTCUSDT", "60", close)\n'
+    src = PRELUDE + 'a = request.security("BINANCE:BTCUSDT", "60", close)\n' + TRADES_ON_A
     _expect_error(src, "current chart symbol")
 
 
@@ -396,6 +403,7 @@ def test_request_security_reassigned_symbol_identifier_rejected():
         + 'var sym = syminfo.tickerid\n'
         + 'sym := "EXCH:OTHER"\n'
         + 'a = request.security(sym, "60", close)\n'
+        + TRADES_ON_A
     )
     _expect_error_at(src, "current chart symbol", line=5, col=22)
 
@@ -407,6 +415,7 @@ def test_request_security_reassigned_symbol_after_call_rejected():
         + 'var sym = syminfo.tickerid\n'
         + 'a = request.security(sym, "60", close)\n'
         + 'sym := "EXCH:OTHER"\n'
+        + TRADES_ON_A
     )
     _expect_error(src, "current chart symbol")
 
@@ -428,6 +437,7 @@ def test_request_security_symbol_compound_rebind_rejected():
         + 'var sym = syminfo.tickerid\n'
         + 'sym += "X"\n'
         + 'a = request.security(sym, "60", close)\n'
+        + TRADES_ON_A
     )
     _expect_error(src, "current chart symbol")
 
@@ -478,6 +488,7 @@ def test_request_security_nested_rebind_of_global_still_rejected():
         + 'if close > open\n'
         + '    sym := "EXCH:OTHER"\n'
         + 'data = request.security(sym, "D", close)\n'
+        + TRADES_ON_DATA
     )
     _expect_error(src, "current chart symbol")
 
@@ -835,19 +846,19 @@ def test_security_allowed_params_locked():
 
 
 def test_hard_reject_includes_external_request_feeds():
-    """request.financial / dividends / earnings / splits / seed / quandl / currency_rate
-    remain hard-rejected because PineForge has no auxiliary-data ingestion path.
-    request.security_lower_tf was removed from this list when lower-TF arrays landed."""
+    """request.seed / quandl / currency_rate remain hard-rejected because
+    PineForge has no auxiliary-data ingestion path; request.financial /
+    dividends / earnings / splits are refused only when their value can reach
+    a trade (NO_DATA_REQUEST_FUNC). request.security_lower_tf was removed
+    from this list when lower-TF arrays landed."""
     for fn in (
-        "request.financial",
-        "request.dividends",
-        "request.earnings",
-        "request.splits",
         "request.seed",
         "request.quandl",
         "request.currency_rate",
     ):
         assert fn in HARD_REJECT_FUNC, f"{fn} should remain hard-rejected"
+    for fn in ("request.financial", "request.dividends", "request.earnings", "request.splits"):
+        assert fn in NO_DATA_REQUEST_FUNC and fn not in HARD_REJECT_FUNC, fn
     assert "request.security_lower_tf" not in HARD_REJECT_FUNC, (
         "request.security_lower_tf is now supported; it should not be in HARD_REJECT_FUNC"
     )

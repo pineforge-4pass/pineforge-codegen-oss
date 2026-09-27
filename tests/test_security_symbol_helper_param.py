@@ -71,14 +71,17 @@ def test_chart_symbol_through_helpers_is_accepted(body):
     'f(s) => request.security(s, "60", close)\n'
     'a = f(syminfo.tickerid)\nb = f("BINANCE:BTCUSDT")\n',
     'g(s) => request.security(s, "60", close)\nh(s) => g(s)\n'
-    'a = h(input.symbol("BINANCE:BTCUSDT", "Sym"))\n',
+    'b = h(input.symbol("BINANCE:BTCUSDT", "Sym"))\n',
     # A method's parameter: its calls are not followed.
     'type P\n    float v\n'
     'method pull(P self, string s) => request.security(s, "60", close)\n'
-    'p = P.new(1.0)\nx = p.pull(syminfo.tickerid)\n',
+    'p = P.new(1.0)\nb = p.pull(syminfo.tickerid)\n',
 ])
 def test_alternate_symbol_through_helpers_stays_refused(body):
-    assert CURRENT in _messages(PRELUDE + body, Level.ERROR)
+    # The value reaches a trade (one that does not is lowered to na:
+    # tests/test_external_requests.py).
+    src = PRELUDE + body + 'if b > close\n    strategy.entry("L", strategy.long)\n'
+    assert CURRENT in _messages(src, Level.ERROR)
 
 
 def test_alternate_branch_through_a_helper_warns():

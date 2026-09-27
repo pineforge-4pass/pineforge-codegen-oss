@@ -145,7 +145,7 @@ def _spell(node) -> str:
     return type(node).__name__
 
 
-class _Program:
+class ScriptIndex:
     """The lexical bindings, helpers and calls of a program."""
 
     def __init__(self, program: Program) -> None:
@@ -166,6 +166,9 @@ class _Program:
         # and callables have none.
         self.refs: dict[int, tuple] = {}
         self.decls: dict[tuple, VarDecl] = {}
+        # Declaration (VarDecl, or TupleAssign and name) id -> the binding
+        # its name's reads resolve to in its block.
+        self.decl_binding: dict[tuple, tuple] = {}
         self.unstable: set[tuple] = set()  # reassigned, var or varip
         # FuncCall id -> the callable whose body holds it (None: top level).
         self.owner: dict[int, str | None] = {}
@@ -188,12 +191,14 @@ class _Program:
                     key = ("global", stmt.name) if top else ("local", id(stmt))
                     scope.setdefault(stmt.name, key)
                     self.decls.setdefault(key, stmt)
+                    self.decl_binding[(id(stmt), stmt.name)] = scope[stmt.name]
                     if stmt.is_var or stmt.is_varip:
                         self.unstable.add(key)
                 elif isinstance(stmt, TupleAssign):
                     for name in stmt.names:
                         scope.setdefault(
                             name, ("global", name) if top else ("bound", id(stmt), name))
+                        self.decl_binding[(id(stmt), name)] = scope[name]
             nested = (*scopes, scope)
             for stmt in stmts:
                 walk(stmt, nested, owner)
@@ -355,7 +360,7 @@ def _error(node, message: str, filename: str) -> Diagnostic:
 
 def specialize_security_contexts(program: Program, filename: str = "<input>") -> Program:
     """Resolve the context of every helper request (module docstring)."""
-    prog = _Program(program)
+    prog = ScriptIndex(program)
     # The requests whose context this pass owns, by helper.
     owned: dict[str, list[FuncCall]] = {}
     for owner, requests in prog.requests.items():
@@ -511,7 +516,7 @@ def specialize_security_contexts(program: Program, filename: str = "<input>") ->
     return program
 
 
-def _type_context_params(prog: _Program, owned: dict, leads: set[str]) -> None:
+def _type_context_params(prog: ScriptIndex, owned: dict, leads: set[str]) -> None:
     """Declare ``string`` every untyped helper parameter that carries a
     request's symbol or timeframe as it is -- the request's own argument, or
     passed on whole to such a parameter of another helper. TradingView
@@ -554,7 +559,7 @@ def _type_context_params(prog: _Program, owned: dict, leads: set[str]) -> None:
         notes["param_type_hints"] = hints
 
 
-def _reachable(prog: _Program, func: str, leads: set[str]) -> set[str]:
+def _reachable(prog: ScriptIndex, func: str, leads: set[str]) -> set[str]:
     """The helpers ``func``'s body calls, transitively."""
     seen: set[str] = set()
     stack = [func]
@@ -568,7 +573,7 @@ def _reachable(prog: _Program, func: str, leads: set[str]) -> set[str]:
     return seen
 
 
-def _body_calls(prog: _Program, func: str, leads: set[str]) -> list[FuncCall]:
+def _body_calls(prog: ScriptIndex, func: str, leads: set[str]) -> list[FuncCall]:
     """The calls in ``func``'s body to helpers leading to owned requests, in
     source order."""
     return [node for node in _walk(prog.funcs[func].body)
@@ -577,7 +582,7 @@ def _body_calls(prog: _Program, func: str, leads: set[str]) -> list[FuncCall]:
             and id(node) in prog.call_ids]
 
 
-def _analyzer_resolves(prog: _Program, func: str, symbol, tf) -> bool:
+def _analyzer_resolves(prog: ScriptIndex, func: str, symbol, tf) -> bool:
     """The analyzer's call-site clones serve this request: its symbol and
     timeframe are each a global expression or a bare parameter of ``func``,
     and every call of ``func`` passes a global expression for them."""

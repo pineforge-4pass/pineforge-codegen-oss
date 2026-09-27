@@ -8,7 +8,11 @@ own analyzer/codegen/signatures modules so the checker cannot drift.
 Buckets:
 
 * HARD_REJECT_FUNC / HARD_REJECT_NAMESPACE - calls that have no PineForge
-  semantics at all (e.g. ``request.financial``, ``ticker.*``).
+  semantics at all (e.g. ``request.seed``, ``ticker.new``).
+* NO_DATA_REQUEST_FUNC - requests PineForge has no data for
+  (``request.financial``, ...): refused only when their value can reach a
+  trade; one that reaches display and alert sinks only is lowered to na
+  (``external_requests``). ``request.security`` on another symbol too.
 * DIVERGENT_VARS - built-in variables whose PineForge value diverges from
   TradingView. They are reported as WARNING (e.g. ``bar_index`` and
   ``last_bar_index`` depend on the fed data window, ``timenow`` is not
@@ -18,7 +22,8 @@ Buckets:
 * NOT_YET - calls the runtime could support but the transpiler does not yet
   emit (e.g. ``max_bars_back``, bare ``barssince``).
 * request.security - only ``symbol`` / ``timeframe`` / ``expression`` allowed,
-  symbol must be the current chart symbol.
+  symbol must be the current chart symbol (a helper parameter's through its
+  call sites), or the value must reach display and alert sinks only.
 * Declarations - only ``strategy(...)`` accepted; ``indicator(...)`` and
   ``library(...)`` rejected.
 * Unknown ``ta.X`` / ``math.X`` / ``str.X`` / ``input.X`` calls (codegen would
@@ -44,6 +49,9 @@ from .ast_nodes import (
 )
 from .errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from .pine_spelling import expr_start
+from .external_requests import (
+    LOWERING_ANNOTATION, NO_DATA_REQUEST_FUNCS, TradeSlice, spell_call,
+)
 from . import signatures as sigs
 from .tv_input_choices import INPUT_SOURCE_SERIES_IDS
 from .analyzer import TA_CLASS_MAP
@@ -128,11 +136,20 @@ SUPPORTED_RUNTIME_FUNC: frozenset[str] = frozenset({"error"})
 # string statement that hides the typo from the strategy author.
 SUPPORTED_LOG: frozenset[str] = frozenset({"info", "warning", "error"})
 
-HARD_REJECT_FUNC: dict[str, str] = {
+# Requests PineForge has no data for (``external_requests``): refused only
+# when their value can reach a trade; one that reaches display and alert sinks
+# only is lowered to na with a warning. ``request.security`` on another
+# symbol follows the same rule.
+NO_DATA_REQUEST_FUNC: dict[str, str] = {
     "request.financial":         "External fundamentals data not available in PineForge.",
     "request.dividends":         "External corporate-action data not available in PineForge.",
     "request.earnings":          "External corporate-action data not available in PineForge.",
     "request.splits":            "External corporate-action data not available in PineForge.",
+    "request.footprint":         "Footprint (bid/ask volume) data not available in PineForge.",
+}
+assert set(NO_DATA_REQUEST_FUNC) == {f"request.{n}" for n in NO_DATA_REQUEST_FUNCS}
+
+HARD_REJECT_FUNC: dict[str, str] = {
     "request.seed":              "External seed data feeds not available in PineForge.",
     "request.quandl":            "External Quandl data not available in PineForge.",
     "request.currency_rate":     "Currency conversion data not available in PineForge.",
@@ -580,6 +597,11 @@ class SupportChecker:
         # request.security (barmerge.* gaps/lookahead values). While > 0 the
         # UNSUPPORTED_CONST_NAMESPACES rejection is suppressed.
         self._const_arg_ctx_depth: int = 0
+        # Inside the arguments of a request PineForge has no data for, whose
+        # field constants (``earnings.actual``) name what it would read.
+        self._request_field_ctx_depth: int = 0
+        # Built on the first request with no data: which values reach a trade.
+        self._trade_slice: TradeSlice | None = None
         # id()s of Identifier/MemberAccess nodes that are the *callee* of a
         # FuncCall. A divergent built-in NAME used as a call target (e.g. the
         # session-aware ``time_close("D")`` function, which is distinct from the
@@ -1381,6 +1403,17 @@ class SupportChecker:
 
         full = f"{ns}.{name}" if ns else name
 
+        # A request PineForge has no data for is refused only when its value
+        # can reach a trade.
+        if ns == "request" and name in NO_DATA_REQUEST_FUNCS:
+            reason = self._lower_if_trade_inert(node)
+            if reason is not None:
+                self._err(node, f"{full}(...) is not supported.",
+                          hint=f"{NO_DATA_REQUEST_FUNC[full]} Its value can reach "
+                               f"a trade: {reason}.")
+            self._visit_request_arguments(node)
+            return
+
         # Hard rejects by full name.
         if full in HARD_REJECT_FUNC:
             self._err(node, f"{full}(...) is not supported.", hint=HARD_REJECT_FUNC[full])
@@ -1838,13 +1871,15 @@ class SupportChecker:
             lambda k, v: f"{k[0]}.{k[1]}: {v}",
         ):
             return
-        # Namespace-wide variable rejections (e.g. dividends.*, earnings.*).
-        if isinstance(node.object, Identifier) and self._reject_if_in(
-            UNSUPPORTED_NAMESPACE_VARS,
-            node.object.name,
-            node,
-            lambda k, v: f"{k}.{node.member}: {v}",
-        ):
+        # Namespace-wide variable rejections (e.g. dividends.*, earnings.*),
+        # but for the field argument of the request that reads them.
+        if (isinstance(node.object, Identifier) and self._request_field_ctx_depth == 0
+                and self._reject_if_in(
+                    UNSUPPORTED_NAMESPACE_VARS,
+                    node.object.name,
+                    node,
+                    lambda k, v: f"{k}.{node.member}: {v}",
+                )):
             return
         # Constant-only namespace members (plot.style_*, text.align_*,
         # barmerge.*, alert.freq_*, ...) used as FREE EXPRESSIONS. Inside
@@ -1940,15 +1975,20 @@ class SupportChecker:
         if symbol_node is not None:
             scoped_safe = self._is_current_symbol_expr(symbol_node)
             legacy_safe = self._is_current_symbol_expr(symbol_node, legacy_names=True)
+            reason = lowered = None
             if not scoped_safe and not legacy_safe:
+                reason = self._lower_if_trade_inert(node)
+                lowered = reason is None
+            if reason is not None:
                 self._err(
                     symbol_node,
                     "request.security symbol must reference the current chart symbol.",
-                    hint="Use syminfo.tickerid or syminfo.ticker; PineForge backtests do not load alternate symbols.",
+                    hint="Use syminfo.tickerid or syminfo.ticker; PineForge backtests do not "
+                         f"load alternate symbols, and this value can reach a trade: {reason}.",
                 )
-            elif not scoped_safe or not self._is_current_symbol_expr(
+            elif not lowered and (not scoped_safe or not self._is_current_symbol_expr(
                 symbol_node, require_all_paths=True
-            ):
+            )):
                 self._warn(
                     symbol_node,
                     "request.security symbol can select an alternate symbol, but "
@@ -2011,6 +2051,33 @@ class SupportChecker:
         # implicitly; reject anything else loudly to surface the silent-
         # wrong-result bug. See SECURITY_ADJUSTMENT_ALLOWED_VALUES.
         self._check_security_adjustment_kwargs(node)
+
+    def _lower_if_trade_inert(self, node: FuncCall) -> str | None:
+        """Lower a request PineForge has no data for to na, with a warning,
+        when its value reaches display and alert sinks only; else the use
+        through which it can reach a trade."""
+        if self._trade_slice is None:
+            self._trade_slice = TradeSlice(self._ast)
+        reason = self._trade_slice.reason(node)
+        if reason is None:
+            node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: "inert"}
+            self._warn(
+                node,
+                f"{spell_call(node)}: value reaches only display/alert sinks; "
+                "lowered to na; trades are unaffected.",
+                hint="PineForge has no data for this request; the value it lowers to "
+                     "reaches alerts, plots and tables only.",
+            )
+        return reason
+
+    def _visit_request_arguments(self, node: FuncCall) -> None:
+        """A no-data request's arguments: ``barmerge.*`` and its field
+        constants (``earnings.actual``) are what it reads."""
+        self._request_field_ctx_depth += 1
+        try:
+            self._visit_children_const_ok(node)
+        finally:
+            self._request_field_ctx_depth -= 1
 
     def _check_security_adjustment_kwargs(self, node: FuncCall) -> None:
         """Reject request.security adjustment kwargs that the engine drops."""
