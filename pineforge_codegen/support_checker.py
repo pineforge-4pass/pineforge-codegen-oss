@@ -441,6 +441,15 @@ def import_spelling(node: ImportStmt) -> str:
     return f"{node.path} as {node.alias}" if node.alias else node.path
 
 
+def import_refusal(node: ImportStmt) -> str:
+    """The refusal of an import PineForge did not inline, with the reason the
+    library inliner recorded when library sources were configured but none
+    applies to the script (``pine_libraries``)."""
+    message = f"Import is not supported: '{import_spelling(node)}'"
+    reason = (node.annotations or {}).get("unresolved_reason")
+    return f"{message}: {reason}" if reason else message
+
+
 def import_is_builtin_namespace_no_op(program: Program, node: ImportStmt) -> bool:
     """``node`` imports a library under the name of a built-in namespace
     (its alias, else its own name) and every member the script names through
@@ -1283,7 +1292,7 @@ class SupportChecker:
 
     def _visit_ImportStmt(self, node: ImportStmt) -> None:
         if not import_is_builtin_namespace_no_op(self._ast, node):
-            self._err(node, f"Import is not supported: '{import_spelling(node)}'")
+            self._err(node, import_refusal(node))
 
     def _visit_VarDecl(self, node: VarDecl) -> None:
         self._check_tuple_literal_value(node.value)

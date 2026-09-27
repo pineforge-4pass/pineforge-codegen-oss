@@ -1,5 +1,7 @@
 """PineScript v6 to C++ transpiler."""
 
+from collections.abc import Mapping
+
 from .lexer import Lexer
 from .parser import Parser
 from .analyzer import Analyzer
@@ -8,6 +10,7 @@ from .errors import CompileError, Level, Phase
 from .external_requests import lower_no_data_requests
 from .builtin_keywords import bind_builtin_keywords
 from .finite_ta_length import expand_finite_choice_extrema_lengths
+from .library_inline import inline_libraries
 from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
 from .pragmas import extract_pf_trace_pragmas
 from .security_contexts import specialize_security_contexts
@@ -32,7 +35,8 @@ def _parse_bounded(pine_source: str, filename: str, budget: TimeBudget | None = 
     return ast, pragmas, budget
 
 
-def _generate(pine_source: str, check_support: bool, filename: str):
+def _generate(pine_source: str, check_support: bool, filename: str,
+              libraries: Mapping[str, str] | None = None):
     """The pipeline, first without the per-call clones of functions that read
     a ``session.<flag>[k]``, as scripts compiled before such reads were
     supported; then again with the functions whose reads that C++ holds
@@ -42,11 +46,16 @@ def _generate(pine_source: str, check_support: bool, filename: str):
     out never costs a clone (the clones of a function called along a deep
     call tree grow with every path to it).
 
+    Each pass inlines the libraries the script imports before the support
+    check (``library_inline``).
+
     Returns ``(codegen, ctx, cpp, support_diagnostics)``."""
     budget = None
     clones: frozenset[str] = frozenset()
     while True:
         ast, pragmas, budget = _parse_bounded(pine_source, filename, budget)
+        ast = inline_libraries(ast, pine_source, libraries=libraries,
+                               filename=filename, budget=budget)
         support_diagnostics = []
         if check_support:
             support_diagnostics = _support_diagnostics(ast, filename=filename)
@@ -81,7 +90,8 @@ def _generate(pine_source: str, check_support: bool, filename: str):
         del ast, ctx, gen, cpp
 
 
-def transpile(pine_source: str, *, check_support: bool = True, filename: str = "<input>") -> str:
+def transpile(pine_source: str, *, check_support: bool = True, filename: str = "<input>",
+              libraries: Mapping[str, str] | None = None) -> str:
     """Transpile PineScript v6 source code to C++ code.
 
     Semantic rules enforced in :class:`Analyzer` (before codegen), including:
@@ -108,16 +118,25 @@ def transpile(pine_source: str, *, check_support: bool = True, filename: str = "
             ``file:line:col`` shown in ``CompileError`` (both ``str()`` and
             :meth:`~pineforge_codegen.errors.CompileError.format`) points back
             at the caller's file. Defaults to ``"<input>"``.
+        libraries: The sources of the Pine libraries the script imports,
+            by import path (``{"user/name/version": source_text}``); each
+            import the script uses is inlined from its source (see
+            :mod:`pineforge_codegen.library_inline`). ``None`` (default)
+            reads them from ``$PINEFORGE_PINE_LIBRARIES`` through the
+            script's own requests manifest under ``$PINEFORGE_REQUESTS_ROOT``
+            (see :mod:`pineforge_codegen.pine_libraries`); with neither, an
+            import is refused as before.
 
     Returns:
         Generated C++ source string.
     """
-    _gen, _ctx, cpp, _support = _generate(pine_source, check_support, filename)
+    _gen, _ctx, cpp, _support = _generate(pine_source, check_support, filename, libraries)
     return cpp
 
 
 def transpile_full(pine_source: str, *, check_support: bool = True,
-                   filename: str = "<input>") -> dict:
+                   filename: str = "<input>",
+                   libraries: Mapping[str, str] | None = None) -> dict:
     """Transpile like :func:`transpile`, plus the host-UI input manifest.
 
     Runs the pipeline (Lexer -> Parser -> support check -> Analyzer ->
@@ -146,7 +165,7 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
         ``{"cpp": str, "inputs": list[dict], "strategyParams": dict,
         "diagnostics": list[Diagnostic]}``.
     """
-    gen, ctx, cpp, support_diagnostics = _generate(pine_source, check_support, filename)
+    gen, ctx, cpp, support_diagnostics = _generate(pine_source, check_support, filename, libraries)
     return {
         "cpp": cpp,
         "inputs": gen.extract_input_manifest(),
