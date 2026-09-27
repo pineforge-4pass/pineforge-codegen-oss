@@ -1,0 +1,16 @@
+{
+  "title": "w8a ichimoku lazy mom in-between",
+  "slug": "w8a-lazy-mom-held",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-27T16:16:05.527Z",
+  "chart": {
+    "symbol": "NASDAQ:AAPL",
+    "interval": "15",
+    "from": "2025-04-01",
+    "to": "2026-05-01"
+  },
+  "pine_sha256": "37dd201bd9b7f5129dee4a976fa47e2b62464e5afaf698490b4bcc6c4af70527",
+  "tv_trades_sha256": "c00011e6448a4422b339e75d1a29da9e2ed54b485e573e3b240031ca754f0e66",
+  "tv_trades_rows": 364
+}

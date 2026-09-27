@@ -566,9 +566,10 @@ you delete or weaken the special case, the test will tell you.
     held on skipped bars, na before the first execution -- through the
     generated `_PFLazySourceClock` + `_pf_lazy_src_hist_N` members
     (`tests/test_lazy_source_clock*.py`; this replaced the #64 roc3-only
-    clock, whose eager first-execution fallback the tapes refute; its eager
-    chart `source[length]` read between executions closer than `length` bars
-    is kept for chart-builtin sources via `_pf_lazy_src_chart_N`);
+    clock, whose eager chart `source[length]` fallbacks the tapes refute:
+    before the first execution, and between executions closer than `length`
+    bars, where the `w8a-lazy-mom-held` tape reads the held `close[4]` for
+    `ta.mom(close, 3)`, `tests/test_e2e_lazy_held_source.py`);
     `cum`/`barssince`/`valuewhen`/`cross*`/`rising`/`falling`/`math.sum`
     (`LAZY_PER_EXECUTION_TA`) keep the reached-only inline compute, which is
     TradingView's per-execution clock, and never precalc.

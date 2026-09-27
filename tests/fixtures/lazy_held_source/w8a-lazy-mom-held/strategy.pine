@@ -1,0 +1,25 @@
+//@version=6
+// SYNTHETIC probe (lane W8A-SIGSTATE-1): pins what TradingView reads for ta.mom(close, 3) below a lazy
+// edge when the previous execution is CLOSER than the length but bar-length itself was skipped.
+// gate runs the call on 3 of every 4 bars (bar_index % 4 != 3). On bars with bar_index % 4 == 2
+// the previous execution is 1 bar back and bar-3 (% 4 == 3) was skipped:
+//   held source[3] (call's own history, last executed value held on skipped bars) -> close - close[4]
+//   codegen hybrid (_PFLazySourceClock eager arm)                                  -> close - close[3]
+// Control: C is the same ta.mom at top level (every bar, eager in both TV and the engine).
+// Value exposure: both ids long, qty = 1 + round((value + 50) * 10000); one trade per 4-bar cycle per id.
+strategy("w8a ichimoku lazy mom in-between", overlay = true, initial_capital = 1000000000, default_qty_type = strategy.fixed, default_qty_value = 1, pyramiding = 2)
+
+t0 = timestamp("UTC", 2025, 6, 2, 13, 30)
+t1 = timestamp("UTC", 2025, 6, 20, 20, 0)
+inwin = time >= t0 and time < t1
+
+gate = bar_index % 4 != 3
+m = gate ? ta.mom(close, 3) : na
+c = ta.mom(close, 3)
+
+if inwin and bar_index % 4 == 2 and not na(m)
+    strategy.entry("M", strategy.long, qty = 1 + math.round((m + 50) * 10000))
+if inwin and bar_index % 4 == 2 and not na(c)
+    strategy.entry("C", strategy.long, qty = 1 + math.round((c + 50) * 10000))
+if bar_index % 4 == 3
+    strategy.close_all()

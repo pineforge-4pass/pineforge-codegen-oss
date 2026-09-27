@@ -858,10 +858,7 @@ def test_nested_ta_below_and_rhs_keeps_inline_sma_and_clocks_outer_change():
     base_line = _stmt_line(cpp, "base = (")
     assert "_ta_sma_" in base_line and ".compute(current_bar_.close)" in base_line
     assert "_pf_lazy_src_clock_1.change(" in base_line
-    assert (
-        "previous_source(_pf_lazy_src_hist_1[0], _pf_lazy_src_hist_1[0], 1, bar_index_)"
-        in base_line
-    )
+    assert "previous_source(_pf_lazy_src_hist_1[0], 1)" in base_line
     assert "_ta_change_" not in base_line
     assert "_ta_mom_" in base_line
 
@@ -889,8 +886,7 @@ def test_ta_precalc_lazy_scope_routes_recursive_ema_only():
     assert "struct _PFLazySourceClock {" in cpp
     assert (
         "_pf_lazy_src_clock_1.roc(current_bar_.close, "
-        "_pf_lazy_src_clock_1.previous_source(_pf_lazy_src_hist_1[2], "
-        "_pf_lazy_src_chart_1[3], 3, bar_index_))"
+        "_pf_lazy_src_clock_1.previous_source(_pf_lazy_src_hist_1[2], 3))"
     ) in _stmt_line(cpp, "b = (")
     # No site reads its own history, so nothing is hoisted.
     assert "_pf_every_bar_ta_" not in cpp
