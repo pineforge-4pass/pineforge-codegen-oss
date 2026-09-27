@@ -203,3 +203,38 @@ symbols have no extended session. Each session day's first bar opens at the
 first window's open (09:00, 09:30, 19:00) and its last in the last window
 (15:30, 15:45, 13:15). TSE:7203's last bar opens at 15:30, the published end
 of the afternoon window, and TradingView keeps it in the session.
+
+## `ksw-flags-*`: the same three charts at 60 and 240 minutes (engine lane K-SESSION-WINDOWS)
+
+Copied unchanged from the engine repository, branch `r5/k-session` at
+`73888644`, `tests/fixtures/session_windows/` (added there in `53b31066`; the
+branch was rebased onto XSYM-D as `7b35bf8c`, which holds the same bytes,
+added in `15b5e1c5`): the
+every-flag probe (the `cgim-flags-*` source with its title and header comment
+changed, `strategy.pine` sha256
+`1a78deccefb408d955112da398240e8fc5b146d126c40e514ee24078e4af83d4`) on
+TSE:7203, HKEX:700 and CBOT:ZC1!, 2025-03-03 .. 03-15, exported by that lane
+with `lab tv` on 2026-09-27 (UTC), `--no-note`:
+
+```sh
+lab tv --pine <probe> --slug <tape> --symbol <chart> --interval <tf> \
+  --from 2025-03-03 --to 2025-03-15 --out <dir> --no-note --json
+```
+
+| tape | chart | bars | tv_trades.csv sha256 | exported (UTC) |
+|---|---|---|---|---|
+| `ksw-flags-tse7203-60` | TSE:7203 60 | 70 | `8ab368d71a6e8a87e27c6b2c0f312a2e911261de73100761a1ba4e27ce6ec657` | 2026-09-27 14:56:18 |
+| `ksw-flags-tse7203-240` | TSE:7203 240 | 20 | `30134cad170cac95eb251511479b34a69bf9733bb26d694805e6c1df9b5eab56` | 2026-09-27 14:56:29 |
+| `ksw-flags-hkex700-60` | HKEX:700 60 | 60 | `2ec27bec172e1955cb9b3859c3b0c7831d30a8c64718e9c8aa1c3eb6bb0074a2` | 2026-09-27 14:56:15 |
+| `ksw-flags-hkex700-240` | HKEX:700 240 | 20 | `749048b62deb91a92aa670f1ad4ad9a33c92b8d86ea0ef9b6b6a4f68be6bdb8a` | 2026-09-27 14:56:25 |
+| `ksw-flags-zc1-60` | CBOT:ZC1! 60 | 190 | `bb1094fb0ae4d4bb0916387117c1b2f774fc23e1157240b1eccf57809c42fd55` | 2026-09-27 14:56:22 |
+| `ksw-flags-zc1-240` | CBOT:ZC1! 240 | 50 | `64b998d56cf824a6f1fcbbc04c5ced77a3fd0c85661956c413457cb5f0310231` | 2026-09-27 14:56:33 |
+
+Every bar is in market and none pre- or post-market (`M1P0Q0`). TSE:7203's
+60-minute bar that opens at 12:00, inside the 11:30-12:30 lunch break, and
+CBOT:ZC1!'s that opens at 08:00, inside the 07:45-08:30 break, are in market
+like every other bar. The TSE:7203 and CBOT:ZC1! bars open where the engine
+aggregates the `cgs2-flags-*-15` tapes' bars. HKEX:700's 60-minute bars open
+at 09:30, 10:00, 11:00, 13:00, 14:00 and 15:00, and TradingView flags both the
+09:30 and the 10:00 bar `isfirstbar`; its 240-minute bars open at 09:30 and
+13:00, and both are `isfirstbar` and `islastbar` (each `_regular` twin alike).

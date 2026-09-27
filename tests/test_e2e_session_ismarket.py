@@ -17,23 +17,31 @@ TradingView flags a bar by its own open time, asked of the session day the
 instant belongs to: the extended-hours 09:00 bar, which holds the 09:30 open,
 is pre-market and the 16:00 bar post-market, while a ``:23456`` day mask names
 trading dates, so an overnight session's Sunday-evening open is Monday's.
-Codegen asks the engine's session calendar for the bar's open
+Codegen reads the kernel's in-session fact, which reads a bar at its
+interval's first eligible instant (its open, or the reopen for a bar that
+opens in a session break), and asks the engine's session calendar about the
+bar's open only in a run without a timeframe, which gets no such fact
 (``codegen/session_market.py``); a bar in market is in neither extended
-session. The pre-lane lowering, time-of-day predicates such as
+session, and off it the engine's windows decide: pre-market from 04:00 to the
+session day's first open, post-market from its last close to 20:00, and
+neither for an overnight or 24-hour session (engine lane K-SESSION-WINDOWS;
+before it the windows also held an overnight session's in-market bars from
+04:00 to its open and from its close to 20:00). The pre-lane lowering,
+time-of-day predicates such as
 ``pine_session_ismarket(syminfo_.session, syminfo_.timezone, time)``, tests
-each instant's own weekday and window: it read every Sunday-evening open of a
-``:23456`` session and every bar of ``0000-2400`` as out of market, and the
-in-market bars of an overnight session from 04:00 to its open as pre-market
-and from its close to 20:00 as post-market. session.isfirstbar / islastbar
-(and their ``_regular`` twins) read the kernel's session-day facts, which
-this lane leaves as they are; the extended-hours tape pins where they differ.
+each instant's own weekday and window: it reads every Sunday-evening open of a
+``:23456`` session and every bar of ``0000-2400`` as out of market.
+session.isfirstbar / islastbar read the kernel's session-day facts, which the
+engine widens to the chart's day on an extended-hours chart, and their
+``_regular`` twins the regular day's facts (see ``EXTENDED``).
 
 Each tape is replayed end to end -- ``transpile_json``, the built runtime,
 ``run_strategy.py`` with the session and timezone as runtime overrides -- on
-flat bars stamped at the tape's entry times, plus one bar a chart interval
-after the last: the flags are a function of the bars' times, the chart's
-timeframe and the symbol's session and timezone only, and every intraday
-tape's session day goes on past its window. The
+flat bars stamped at the tape's entry times, plus the bar TradingView's chart
+holds next (``next_chart_bar``): the flags are a function of the bars' times,
+the chart's timeframe and the symbol's session and timezone only, and a
+batch's final bar closes its session day, which the tape's last bar does only
+where TradingView's does. The
 tape's own probe runs with a ``@pf-trace`` of every flag, under each session
 spelling H-MEASURE measured: the campaign's lane facts, the same sessions with
 TradingView's weekday mask, and a 24-hour day spelled ``0000-2400`` and
@@ -53,6 +61,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -89,62 +98,56 @@ class Case:
     # flag letter -> bars where the pre-lane build was not TradingView's flag
     legacy: dict[str, int] = field(hash=False)
     legacy_sunday: int = 0  # of its session.ismarket misses, those on a local Sunday
-    # flag letter -> bars where the kernel's session-day facts are not
-    # TradingView's, in both builds (see EXTENDED)
-    engine: dict[str, int] = field(default_factory=dict, hash=False)
+    # flag letter -> bars where this build is not TradingView's (see EXTENDED)
+    pinned: dict[str, int] = field(default_factory=dict, hash=False)
 
     @property
     def key(self) -> str:
         return f"{self.slug}@{self.session}"
 
 
-def _cases(chart: str, session: str, timezone: str, hm: dict[str, int],
-           flags: dict[str, int], sunday: int = 0) -> list[Case]:
-    return [Case(f"hm-g236-{chart}", session, timezone, hm, sunday),
-            Case(f"cgim-flags-{chart}", session, timezone, flags, sunday)]
+def _cases(chart: str, session: str, timezone: str, legacy: dict[str, int],
+           sunday: int = 0) -> list[Case]:
+    return [Case(f"hm-g236-{chart}", session, timezone, legacy, sunday),
+            Case(f"cgim-flags-{chart}", session, timezone, legacy, sunday)]
 
 
 CASES = tuple(case for cases in (
     # The campaign's lane facts (pineforge-lab config/symbol-lanes-v1.json).
-    _cases("es1-60-dst-mar", "1700-1600", "America/Chicago", {}, {"P": 108, "Q": 30}),
-    _cases("es1-60-dst-nov", "1700-1600", "America/Chicago", {}, {"P": 108, "Q": 29}),
-    _cases("es1-60-thanksgiving", "1700-1600", "America/Chicago", {}, {"P": 98, "Q": 29}),
-    _cases("eurusd-60-dst-mar", "1700-1700", "America/New_York", {}, {}),
-    _cases("xauusd-60-dst-mar", "1800-1700", "America/New_York", {}, {"P": 117, "Q": 20}),
-    _cases("eth-60-24x7", "24x7", "UTC", {}, {}),
+    _cases("es1-60-dst-mar", "1700-1600", "America/Chicago", {}),
+    _cases("es1-60-dst-nov", "1700-1600", "America/Chicago", {}),
+    _cases("es1-60-thanksgiving", "1700-1600", "America/Chicago", {}),
+    _cases("eurusd-60-dst-mar", "1700-1700", "America/New_York", {}),
+    _cases("xauusd-60-dst-mar", "1800-1700", "America/New_York", {}),
+    _cases("eth-60-24x7", "24x7", "UTC", {}),
     # The same sessions with TradingView's weekday mask: the time-of-day
     # predicate missed every Sunday-evening open.
-    _cases("es1-60-dst-mar", "1700-1600:23456", "America/Chicago",
-           {"M": 14}, {"M": 14, "P": 108, "Q": 24}, 14),
-    _cases("es1-60-dst-nov", "1700-1600:23456", "America/Chicago",
-           {"M": 14}, {"M": 14, "P": 108, "Q": 23}, 14),
-    _cases("es1-60-thanksgiving", "1700-1600:23456", "America/Chicago",
-           {"M": 14}, {"M": 14, "P": 98, "Q": 23}, 14),
-    _cases("eurusd-60-dst-mar", "1700-1700:23456", "America/New_York",
-           {"M": 14}, {"M": 14}, 14),
-    _cases("xauusd-60-dst-mar", "1800-1700:23456", "America/New_York",
-           {"M": 12}, {"M": 12, "P": 117, "Q": 16}, 12),
+    _cases("es1-60-dst-mar", "1700-1600:23456", "America/Chicago", {"M": 14}, 14),
+    _cases("es1-60-dst-nov", "1700-1600:23456", "America/Chicago", {"M": 14}, 14),
+    _cases("es1-60-thanksgiving", "1700-1600:23456", "America/Chicago", {"M": 14}, 14),
+    _cases("eurusd-60-dst-mar", "1700-1700:23456", "America/New_York", {"M": 14}, 14),
+    _cases("xauusd-60-dst-mar", "1800-1700:23456", "America/New_York", {"M": 12}, 12),
     # A 24-hour day: "0000-2400" (the predicate: never in market) and
     # TradingView's spelling "0000-0000" (both: always).
-    _cases("eth-60-24x7", "0000-2400", "UTC", {"M": 97}, {"M": 97}, 24),
-    _cases("eth-60-24x7", "0000-0000", "UTC", {}, {}),
+    _cases("eth-60-24x7", "0000-2400", "UTC", {"M": 97}, 24),
+    _cases("eth-60-24x7", "0000-0000", "UTC", {}),
 ) for case in cases) + (
     # NASDAQ:AAPL's regular session, whose extended hours TradingView reads as
     # the 04:00-09:30 pre-market and 16:00-20:00 post-market windows.
     Case("cgim-flags-aapl-60-reg", "0930-1600", "America/New_York", {}),
-    Case("cgim-flags-aapl-60-ext", "0930-1600", "America/New_York", {},
-         engine={"F": 20, "L": 20, "l": 20}),
+    Case("cgim-flags-aapl-60-ext", "0930-1600", "America/New_York", {"f": 20, "l": 20}),
     # A daily bar stamped at the 17:00 ET break, with and without the mask.
     Case("cgim-flags-xauusd-1d", "1800-1700", "America/New_York", {}),
     Case("cgim-flags-xauusd-1d", "1800-1700:23456", "America/New_York", {}),
 )
 # On the extended-hours chart TradingView's isfirstbar / islastbar are the
 # extended day's 04:00 and 19:00 bars and the _regular twins the regular
-# day's 10:00 and 15:00 bars. The engine holds one session string, so
-# isfirstbar is isfirstbar_regular (10:00: right for f, wrong for F on both
-# bars), and its session-day facts ask a bar's grid interval, which the 16:00
-# bar shares with the 15:30 open of the regular day's last interval: islastbar
-# and islastbar_regular both land on 16:00.
+# day's 10:00 and 15:00 bars. The engine's session_isfirstbar_ /
+# session_islastbar_ are the chart's day and its session_isfirstbar_regular_ /
+# session_islastbar_regular_ the regular day (lane K-SESSION-WINDOWS), which
+# codegen reads for the _regular spellings; the pre-lane build read the
+# chart's pair for them, so its isfirstbar_regular and islastbar_regular land
+# on 04:00 and 19:00.
 EXTENDED = "cgim-flags-aapl-60-ext"
 SECURITY_CASE = next(case for case in CASES if case.key == "cgim-flags-es1-60-dst-mar@1700-1600:23456")
 SECURITY_TRACE = "".join(
@@ -175,6 +178,37 @@ def read_tape(slug: str) -> list[tuple[int, dict[str, bool]]]:
     return sorted(tape, key=lambda bar: bar[0])
 
 
+def next_chart_bar(tape: list[tuple[int, dict[str, bool]]], interval_ms: int,
+                   timezone: str) -> int:
+    """The bar TradingView's chart holds after the tape's last one. A batch's
+    final bar closes its session day, so a replay ends on this bar, past the
+    tape: each tape bar's islastbar then turns on the bar after it, as on
+    TradingView's chart. It is one interval on while the last bar's day goes
+    on (``L0``, or a tape without the flag, whose every-flag twin ends
+    ``L0``), else the next session day's first bar -- the bar that followed
+    the same weekday and time one week before, one week on, in ``timezone``'s
+    wall-clock time (a DST switch keeps the hour). One interval on can be a
+    post-market bar the chart does not hold, which widens the day the
+    engine's plain islastbar closes."""
+    last, flags = tape[-1]
+    if not flags.get("L", False):
+        return last + interval_ms
+    zone = ZoneInfo(timezone)
+
+    def shift(ts: int, days: int) -> int:
+        local = dt.datetime.fromtimestamp(ts / 1000, zone).replace(tzinfo=None)
+        return int((local + dt.timedelta(days=days)).replace(tzinfo=zone).timestamp() * 1000)
+
+    stamps = [ts for ts, _ in tape]
+    week_before = shift(last, -7)
+    assert week_before in stamps, f"no bar one week before the tape's last ({last})"
+    i = stamps.index(week_before)
+    # That bar ended its day too, and the one after it opened the next.
+    assert tape[i][1]["L"] and tape[i + 1][1].get("F", True), (
+        f"the bar one week before the tape's last ({last}) does not end its session day")
+    return shift(stamps[i + 1], 7)
+
+
 def engine_entry_times(trades_csv: bytes) -> list[int]:
     rows = csv.DictReader(trades_csv.decode().splitlines())
     return sorted(_utc_ms(row["Date and time"], 0) for row in rows
@@ -196,8 +230,9 @@ def _interval(slug: str) -> str:
 
 
 def _replay_stamps(slug: str) -> list[int]:
-    stamps = [ts for ts, _ in read_tape(slug)]
-    return stamps + [stamps[-1] + INTERVAL_MS[_interval(slug)]]
+    tape = read_tape(slug)
+    timezone = next(case.timezone for case in CASES if case.slug == slug)
+    return [ts for ts, _ in tape] + [next_chart_bar(tape, INTERVAL_MS[_interval(slug)], timezone)]
 
 
 def _overrides(case: Case) -> dict:
@@ -284,7 +319,9 @@ def _on_sunday(stamps: list[int], timezone: str) -> int:
 def test_tapes_are_the_recorded_exports() -> None:
     """Every fixture is its export byte for byte. TradingView flagged every one
     of each six-chart set's 1,138 bars in market and none pre- or post-market,
-    and the extended-hours AAPL bars by their own open time."""
+    and the extended-hours AAPL bars by their own open time. A session.ismarket
+    tape holds its every-flag twin's bars, whose last bar's session day goes on
+    (``next_chart_bar``)."""
     bars = {"hm-g236": 0, "cgim-flags": 0}
     for slug in TAPES:
         metrics = json.loads((FIXTURES / slug / "metrics.json").read_text())
@@ -295,6 +332,10 @@ def test_tapes_are_the_recorded_exports() -> None:
         assert metrics["wsProvenance"]["rangeProof"] == "covered", slug
         tape = read_tape(slug)
         assert len(tape) == metrics["trades"], slug
+        if slug.startswith("hm-g236-"):
+            twin = read_tape(slug.replace("hm-g236-", "cgim-flags-", 1))
+            assert [ts for ts, _ in tape] == [ts for ts, _ in twin], slug
+            assert not twin[-1][1]["L"], slug
         if "-aapl-" in slug or slug.endswith("-1d"):
             continue
         assert all(flags["M"] and not flags.get("P") and not flags.get("Q")
@@ -309,7 +350,7 @@ def test_tapes_are_the_recorded_exports() -> None:
     assert by_hour["09:00"] == {"M0P1Q0F0L0f0l0"}   # holds the 09:30 open
     assert by_hour["10:00"] == {"M1P0Q0F0L0f1l0"}
     assert by_hour["15:00"] == {"M1P0Q0F0L0f0l1"}
-    assert by_hour["16:00"] == {"M0P0Q1F0L0f0l0"}   # shares the kernel's 15:30 interval
+    assert by_hour["16:00"] == {"M0P0Q1F0L0f0l0"}
     daily = read_tape("cgim-flags-xauusd-1d")
     assert {dt.datetime.fromtimestamp(ts / 1000, zone).strftime("%H:%M") for ts, _ in daily} == {"17:00"}
     assert all(all(flags[k] for k in "MFLfl") and not flags["P"] and not flags["Q"]
@@ -321,15 +362,17 @@ def test_session_flags_are_tradingviews(case: Case, replays) -> None:
     replay = replays[("current", case.slug)]
     misses = _misses(case, replay)
     wrong = {FLAGS[letter]: len(bars) for letter, bars in misses.items()
-             if len(bars) != case.engine.get(letter, 0)}
+             if len(bars) != case.pinned.get(letter, 0)}
     assert not wrong, f"[{case.key}] bars where a flag is not TradingView's: {wrong}"
     # The probe entered on every bar TradingView held, at the same time.
     assert engine_entry_times(replay.trades[case.key]) == _replay_stamps(case.slug), case.key
     assert "_pf_session_market_(" in replay.cpp
-    exact = "".join(letter for letter in misses if letter not in case.engine)
-    pinned = {FLAGS[k]: v for k, v in case.engine.items()}
+    assert ("session_isfirstbar_regular_" in replay.cpp
+            and "session_islastbar_regular_" in replay.cpp), case.key
+    exact = "".join(letter for letter in misses if letter not in case.pinned)
+    pinned = {FLAGS[k]: v for k, v in case.pinned.items()}
     print(f"session flags {case.key}: {exact} == TradingView on {len(read_tape(case.slug))} bars"
-          + (f"; kernel session-day facts off as pinned: {pinned}" if pinned else ""))
+          + (f"; off as pinned: {pinned}" if pinned else ""))
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.key)
@@ -339,10 +382,9 @@ def test_legacy_predicates_missed_the_pinned_bars(case: Case, replays) -> None:
     replay = replays[("legacy", case.slug)]
     assert "_pf_session_market_(" not in replay.cpp
     misses = _misses(case, replay)
-    assert ({letter: len(bars) for letter, bars in misses.items() if bars}
-            == {**case.legacy, **case.engine}), case.key
+    assert {letter: len(bars) for letter, bars in misses.items() if bars} == case.legacy, case.key
     assert _on_sunday(misses["M"], case.timezone) == case.legacy_sunday, case.key
-    missed = {FLAGS[k]: v for k, v in {**case.legacy, **case.engine}.items()}
+    missed = {FLAGS[k]: v for k, v in case.legacy.items()}
     print(f"session flags {case.key}: pre-lane build missed {missed} of "
           f"{len(read_tape(case.slug))} bars ({case.legacy_sunday} ismarket on a local Sunday)")
 
@@ -405,9 +447,14 @@ def one_bar(tmp_path_factory) -> dict[str, tuple[bytes, list[dict]]]:
 
 def test_one_bar_without_timeframe_reads_the_calendar(one_bar) -> None:
     """The calendar needs no timeframe: the Sunday-evening open of a ":23456"
-    session is in market on a one-bar run too (the ES1! tapes' first bar)."""
+    session is in market on a one-bar run too (the ES1! tapes' first bar).
+    The kernel presents no session-day facts to such a run, so a run without a
+    timeframe keeps the calendar's answer; its isfirstbar reads false, where
+    TradingView's tapes flag that bar its day's first (a divergence of such a
+    run, pinned)."""
     trades, records = one_bar["current"]
     assert traced(records, "ismarket") == [(SUNDAY_OPEN, True)]
+    assert traced(records, "isfirstbar") == [(SUNDAY_OPEN, False)]
     assert engine_entry_times(trades) == [SUNDAY_OPEN]
     if "legacy" not in one_bar:
         pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
@@ -425,12 +472,15 @@ def test_pine_names_of_the_emitted_helpers_stay_distinct(tmp_path: Path) -> None
     pine = tmp_path / "strategy.pine"
     pine.write_text('//@version=6\nstrategy("emitted names", overlay=true)\n'
                     "_pf_session_market_ = close > open\n"
+                    "session_ismarket_ = high > low\n"
                     "script_tf_ = input.int(2)\n"
-                    "if session.ismarket and _pf_session_market_ and script_tf_ > 0\n"
+                    "if session.ismarket and _pf_session_market_ and session_ismarket_ "
+                    "and script_tf_ > 0\n"
                     '    strategy.entry("L", strategy.long)\n', encoding="utf-8")
     result = transpile_json(pine)
     assert result["ok"], result["diagnostics"]
     assert [entry["title"] for entry in result["inputs"]] == ["script_tf_"]
+    assert "pf_safe_session_ismarket_" in result["cpp"]
     compile_cpp(result["cpp"], label="emitted names")
 
 
@@ -444,7 +494,9 @@ def _transpiled(tmp_path: Path, body: str) -> dict:
 
 
 def test_session_market_is_emitted_once_when_read(tmp_path: Path) -> None:
-    """Needs no engine: the calendar type precedes the strategy class once, the
+    """Needs no engine: a chart's session.ismarket reads the kernel's
+    in-session fact, and the session calendar only when the run has no
+    timeframe; the calendar type precedes the strategy class once, the
     strategy holds one cache outside its checkpointed script state, and a
     script that reads no chart session flag gets neither."""
     cpp = _transpiled(tmp_path, "f() => session.ispremarket\n"
@@ -458,8 +510,29 @@ def test_session_market_is_emitted_once_when_read(tmp_path: Path) -> None:
                    for line in cpp.splitlines())
     assert cpp.count("_pf_session_market_(syminfo_.session, syminfo_.timezone, "
                      "script_tf_, current_bar_.timestamp)") == 2
+    assert cpp.count("(script_tf_.empty() ? _pf_session_market_(syminfo_.session, "
+                     "syminfo_.timezone, script_tf_, current_bar_.timestamp) "
+                     ": session_ismarket_)") == 2
     plain = _transpiled(tmp_path, 'if session.isfirstbar\n    strategy.entry("L", strategy.long)\n')
     assert "_PFSessionMarket" not in plain["cpp"]
+
+
+def test_regular_flags_read_the_regular_day(tmp_path: Path) -> None:
+    """Needs no engine: session.isfirstbar_regular / islastbar_regular read
+    the host's regular-day facts and session.isfirstbar / islastbar the
+    chart day's, on the bar and at an offset (the flag's Series takes the
+    same member)."""
+    cpp = _transpiled(tmp_path, "a = session.isfirstbar_regular and not session.islastbar_regular[1]\n"
+                                "b = session.isfirstbar or session.islastbar\n"
+                                "if a or b\n"
+                                '    strategy.entry("L", strategy.long)\n')["cpp"]
+
+    def reads(member: str) -> int:
+        return len(re.findall(rf"(?<![\w.]){member}(?!\w)", cpp))
+
+    assert reads("session_isfirstbar_regular_") == 1
+    assert reads("session_isfirstbar_") == 1 and reads("session_islastbar_") == 1
+    assert "_pf_session_hist_islastbar_regular.update(session_islastbar_regular_)" in cpp
 
 
 def test_security_payload_session_read_warns_once_per_site(tmp_path: Path) -> None:
@@ -477,4 +550,23 @@ def test_security_payload_session_read_warns_once_per_site(tmp_path: Path) -> No
     warned = [(d["line"], d["col"]) for d in result["diagnostics"]
               if "inside request.security" in d["message"]]
     assert warned == [(3, 16)]  # the `ismarket` of f's body, once for both payloads
+    # It names the bars the chart's reading holds and the predicate does not:
+    # one that opens in a session break (TradingView's TSE:7203 / CBOT:ZC1!
+    # 60-minute tapes, test_e2e_session_windows).
+    message = next(d["message"] for d in result["diagnostics"]
+                   if "inside request.security" in d["message"])
+    assert "a bar that opens in a session break" in message
+
+
+def test_security_payload_prepost_warning_names_no_break(tmp_path: Path) -> None:
+    """Needs no engine: the pre- and post-market predicates read a session
+    break as neither, as TradingView does, so their warning does not name it."""
+    result = _transpiled(tmp_path,
+                         'p = request.security(syminfo.tickerid, "60", session.ispremarket)\n'
+                         "if p\n"
+                         '    strategy.entry("L", strategy.long)\n')
+    message = next(d["message"] for d in result["diagnostics"]
+                   if "inside request.security" in d["message"])
+    assert message.startswith("session.ispremarket inside request.security")
+    assert "session break" not in message
 

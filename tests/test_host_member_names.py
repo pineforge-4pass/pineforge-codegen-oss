@@ -37,6 +37,7 @@ from tests._e2e import (
     reference_codegen, skip_unless_e2e_env, transpile_json,
 )
 from tests.test_e2e_session_history import LEGACY, QUARTER, _replay, _utc_ms
+from tests.test_e2e_session_ismarket import next_chart_bar
 
 
 GENERATOR = REPO_ROOT / "scripts" / "gen_host_members.py"
@@ -79,7 +80,8 @@ def test_committed_host_members_are_the_derived_set() -> None:
         "run scripts/gen_host_members.py")
     assert (REPO_ROOT / "pineforge_codegen" / "codegen" / "host_members.py").read_text() \
         == gen.render(derived)
-    for name in ("session_isfirstbar_", "session_islastbar_", "syminfo_", "current_bar_",
+    for name in ("session_isfirstbar_", "session_islastbar_", "session_isfirstbar_regular_",
+                 "session_islastbar_regular_", "session_ismarket_", "syminfo_", "current_bar_",
                  "bar_index_", "trades_", "closed_trade_profit", "open_trade_max_drawdown"):
         assert name in derived.names, name
     # A private member cannot be read by the generated class, and a Pine name
@@ -155,19 +157,22 @@ def test_script_names_of_host_members_are_renamed(tmp_path: Path) -> None:
                     "f(prev_bar_timestamp_) => prev_bar_timestamp_ + 1\n"
                     "syminfo_ = input.float(2.0)\n"
                     "trades_ = 3\n"
+                    "session_islastbar_regular_ = close > open\n"
                     "[_src_close_, _src_open_] = [close, open]\n"
                     "total = 0\n"
                     "for security_eval_states_ = 0 to 1\n"
                     "    total += security_eval_states_\n"
                     "h = Holder.new(close)\n"
                     "if time > 0 and syminfo.mintick > 0 and h.current_bar_ > 0 and "
-                    "input_tf_(1) + f(1) + syminfo_ + trades_ + _src_close_ + total > 0\n"
+                    "input_tf_(1) + f(1) + syminfo_ + trades_ + _src_close_ + total > 0 and "
+                    "(session.islastbar_regular or session_islastbar_regular_)\n"
                     '    strategy.entry("L", strategy.long)\n', encoding="utf-8")
     result = transpile_json(pine)
     assert result["ok"], result["diagnostics"]
     cpp = result["cpp"]
     for name in ("current_bar_", "input_tf_", "prev_bar_timestamp_", "syminfo_", "trades_",
-                 "_src_close_", "_src_open_", "security_eval_states_"):
+                 "_src_close_", "_src_open_", "security_eval_states_",
+                 "session_islastbar_regular_"):
         assert f"pf_safe_{name}" in cpp, name
     assert [entry["title"] for entry in result["inputs"]] == ["syminfo_"]
     compile_cpp_or_skip(cpp)
@@ -181,6 +186,9 @@ SILENT = '''//@version=6
 strategy("host member names", overlay=true, process_orders_on_close=true)
 {fb} = close > open
 {lb} = not {fb}
+{fbr} = high > low
+{lbr} = not {fbr}
+{mk} = close < open
 {bi} = 7
 {bl} = true
 {lt} = false
@@ -190,8 +198,13 @@ if session.isfirstbar or barstate.isfirst
     strategy.entry("L", strategy.long)
 if session.islastbar and barstate.isconfirmed
     strategy.close("L")
+if session.isfirstbar_regular and session.islastbar_regular
+    strategy.entry("S", strategy.short)
 // @pf-trace fb=session.isfirstbar
 // @pf-trace lb=session.islastbar
+// @pf-trace fbr=session.isfirstbar_regular
+// @pf-trace lbr=session.islastbar_regular
+// @pf-trace mk=session.ismarket
 // @pf-trace first=barstate.isfirst
 // @pf-trace last=barstate.islast
 // @pf-trace conf=barstate.isconfirmed
@@ -199,8 +212,12 @@ if session.islastbar and barstate.isconfirmed
 // @pf-trace lbt=last_bar_time
 // @pf-trace own={fb} ? 1 : 0
 // @pf-trace own2={bi} + {ic} + {lbt} + ({bl} ? 1 : 0) + ({lt} ? 1 : 0) + ({lb} ? 1 : 0)
+// @pf-trace own3=({fbr} ? 1 : 0) + ({lbr} ? 2 : 0) + ({mk} ? 4 : 0)
 '''
-SILENT_NAMES = {"fb": "session_isfirstbar_", "lb": "session_islastbar_", "bi": "bar_index_",
+SILENT_NAMES = {"fb": "session_isfirstbar_", "lb": "session_islastbar_",
+                "fbr": "session_isfirstbar_regular_", "lbr": "session_islastbar_regular_",
+                "mk": "session_ismarket_",
+                "bi": "bar_index_",
                 "bl": "barstate_islast_", "lt": "is_last_tick_", "ic": "initial_capital_",
                 "lbt": "last_bar_time_"}
 
@@ -331,13 +348,13 @@ def test_tradingview_keeps_builtins_beside_host_named_variables() -> None:
 
 @pytest.fixture(scope="module")
 def tape_replays(tmp_path_factory) -> dict:
-    """The probe replayed on the tape's bars, and with the pre-lane codegen
-    as exported and without its two loud names; an exception when a build
-    failed."""
+    """The probe replayed on the tape's bars and the chart's next one
+    (``next_chart_bar``), and with the pre-lane codegen as exported and
+    without its two loud names; an exception when a build failed."""
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("host_member_names_tape")
-    stamps = [ts for ts, _ in read_host_tape()]
-    stamps.append(stamps[-1] + QUARTER)
+    tape = [(ts, {"L": values["lb"] == 1.0}) for ts, values in read_host_tape()]
+    stamps = [ts for ts, _ in tape] + [next_chart_bar(tape, QUARTER, "America/New_York")]
     jobs = {"now": (_tape_probe(), REPO_ROOT)}
     legacy = reference_codegen(LEGACY)
     if legacy is not None:
