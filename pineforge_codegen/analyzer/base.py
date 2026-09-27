@@ -30,6 +30,7 @@ from ..symbols import (
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes
+from ..security_contexts import context_key, reads_bar_series
 from ..session_reads import emitted_session_reads
 from ..method_binding import (
     BoundMethodArgs,
@@ -3410,16 +3411,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         )
 
     # ------------------------------------------------------------------
-    # Mixed-callsite UDF timeframe-param security rejection.
+    # Per-call-site request.security contexts of a helper.
     #
-    # A ``request.security`` whose ``timeframe`` is a parameter of its
-    # containing UDF maps to ONE evaluator regardless of how many times the
-    # UDF is called. When the UDF is called from >= 2 sites with DISTINCT
-    # literal timeframes, a single evaluator cannot faithfully serve them
-    # all and the resolver would silently collapse onto the chart timeframe
-    # (``input_tf_``). Per-callsite evaluator specialization (cloning the
-    # evaluator + UDF) is the correct fix but is not wired in this iteration,
-    # so we reject deterministically instead of emitting wrong semantics.
+    # A ``request.security`` whose ``timeframe`` or ``symbol`` is a parameter
+    # of its containing UDF maps to ONE evaluator however often the UDF is
+    # called. When its call sites pass different contexts -- timeframes, or a
+    # Heikin-Ashi and a plain chart symbol -- one evaluator cannot serve them
+    # all: the request is cloned per call site (``callsite_idx``), each clone
+    # registered with its site's timeframe argument (a literal as a literal,
+    # anything else -- an input, a global -- as that expression, read at
+    # registration) and its site's symbol. A context reaching the helper
+    # through another helper's parameter or a local is resolved before the
+    # analyzer runs (``security_contexts``) and arrives here resolved.
     # ------------------------------------------------------------------
     def _check_mixed_callsite_security_tf(self) -> None:
         sec_calls = getattr(self, "_security_calls", None)
@@ -3435,16 +3438,19 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         cloned_any = False
         for sec in sec_calls:
             containing = getattr(sec, "containing_func", "") or ""
+            fdef = func_defs.get(containing) if containing else None
             tf_node = getattr(sec, "timeframe", None)
-            if not containing or not isinstance(tf_node, Identifier):
+            symbol_node = getattr(sec, "symbol", None)
+            if fdef is None or sec.context_resolved or sec.is_lower_tf_array:
                 new_calls.append(sec)
                 continue
-            param_name = tf_node.name
-            fdef = func_defs.get(containing)
-            if fdef is None or param_name not in fdef.params:
+            tf_param = (tf_node.name if isinstance(tf_node, Identifier)
+                        and tf_node.name in fdef.params else None)
+            symbol_param = (symbol_node.name if isinstance(symbol_node, Identifier)
+                            and symbol_node.name in fdef.params else None)
+            if tf_param is None and symbol_param is None:
                 new_calls.append(sec)
                 continue
-            pidx = fdef.params.index(param_name)
             calls = list(self._iter_user_func_calls(containing))
             if not calls:
                 new_calls.append(sec)  # dead code — evaluator result never read
@@ -3467,7 +3473,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             # naming (which keys purely off func_call_cs_map, not
             # has_ta/has_series) picks the right ``_cs{N}`` variant.
             already_tracked = self._func_call_site_count.get(containing, 0) > 0
-            per_cs: list[tuple[int, str | None]] = []
+            # (cs_idx, context key, registered timeframe, heikinashi)
+            per_cs: list[tuple[int, tuple, object, bool]] = []
             for i, call in enumerate(calls):
                 if already_tracked:
                     cs_info = self._func_call_cs_map.get(id(call))
@@ -3477,31 +3484,42 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 else:
                     cs_idx = i
                     self._func_call_cs_map.setdefault(id(call), (containing, cs_idx))
-                arg = call.args[pidx] if pidx < len(call.args) else None
-                lit = self._callsite_tf_literal_value(arg)
-                per_cs.append((cs_idx, lit))
+                key: list = []
+                timeframe = tf_node
+                if tf_param is not None:
+                    pidx = fdef.params.index(tf_param)
+                    arg = call.args[pidx] if pidx < len(call.args) else None
+                    lit = self._callsite_tf_literal_value(arg)
+                    if lit is not None:
+                        key.append(("lit", lit))
+                        timeframe = StringLiteral(value=lit, loc=tf_node.loc)
+                    else:
+                        key.append(("expr", self._security_context_key(arg)))
+                        timeframe = arg
+                heikinashi = sec.heikinashi
+                if symbol_param is not None:
+                    sidx = fdef.params.index(symbol_param)
+                    arg = call.args[sidx] if sidx < len(call.args) else None
+                    heikinashi = arg is not None and self._security_symbol_is_heikinashi(arg)
+                    key.append(heikinashi)
+                per_cs.append((cs_idx, tuple(key), timeframe, heikinashi))
             if not per_cs:
                 new_calls.append(sec)  # dead code — evaluator result never read
                 continue
-            distinct_literals = {lit for _, lit in per_cs if lit is not None}
-            if len(distinct_literals) < 2:
-                new_calls.append(sec)  # single TF (or unresolved) — no cloning needed
+            if len({key for _, key, _, _ in per_cs}) < 2:
+                # One context on every call site: the helper's own request.
+                sec.heikinashi = per_cs[0][3]
+                new_calls.append(sec)
                 continue
-            if any(lit is None for _, lit in per_cs):
-                # Some call site's tf isn't a compile-time literal — can't
-                # pin every clone to a concrete timeframe. Keep the original
-                # deterministic rejection rather than guess.
+            series = next((name for _, key, timeframe, _ in per_cs
+                           if key and key[0][0] == "expr"
+                           and (name := reads_bar_series(timeframe))), None)
+            if series is not None:
                 self._error(
-                    "request.security timeframe parameter '"
-                    + param_name
-                    + "' of function '"
-                    + containing
-                    + "' is called with multiple distinct literal timeframes ("
-                    + ", ".join(sorted(distinct_literals))
-                    + "). A single request.security evaluator cannot serve "
-                    "them all and would silently collapse onto the chart "
-                    "timeframe. Pass a single timeframe, or inline a separate "
-                    "request.security call at each call site.",
+                    "request.security timeframe parameter '" + str(tf_param)
+                    + "' of function '" + containing + "' is passed a timeframe "
+                    "that reads the chart bar ('" + series + "'): PineForge "
+                    "registers each call site's timeframe before the first bar.",
                     tf_node.loc,
                 )
                 new_calls.append(sec)
@@ -3515,16 +3533,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 # in turn while it does.
                 self._func_call_site_count[containing] = len(calls)
                 self._func_security_clone_only.add(containing)
-            # Clone: one SecurityCallInfo per call site, each pinned to that
-            # site's literal timeframe via a synthetic StringLiteral (so the
-            # existing literal-timeframe resolution path needs no changes)
-            # and given a fresh, currently-unused sec_id.
+            # Clone: one SecurityCallInfo per call site, each registered with
+            # its site's context and given a fresh, currently-unused sec_id.
             next_sec_id = max((s.sec_id for s in sec_calls), default=-1) + 1
             next_sec_id = max(next_sec_id, len(sec_calls) + len(new_calls))
-            for cs_idx, lit in sorted(per_cs):
+            for cs_idx, _key, timeframe, heikinashi in sorted(per_cs, key=lambda c: c[0]):
                 clone = SecurityCallInfo(
                     sec_id=next_sec_id,
-                    timeframe=StringLiteral(value=lit, loc=tf_node.loc),
+                    timeframe=timeframe,
                     expression=sec.expression,
                     returns_tuple=sec.returns_tuple,
                     tuple_size=sec.tuple_size,
@@ -3532,11 +3548,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     gaps=sec.gaps,
                     lookahead=sec.lookahead,
                     ta_range=sec.ta_range,
+                    heikinashi=heikinashi,
                     depends_on_mutable_globals=sec.depends_on_mutable_globals,
                     mutable_globals=sec.mutable_globals,
                     is_lower_tf_array=sec.is_lower_tf_array,
                     containing_func=sec.containing_func,
                     callsite_idx=cs_idx,
+                    string_result=sec.string_result,
+                    symbol=sec.symbol,
                 )
                 new_calls.append(clone)
                 next_sec_id += 1
@@ -3578,19 +3597,28 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         yield from _walk(self._ast)
 
     def _callsite_tf_literal_value(self, arg) -> str | None:
-        """Resolve a UDF call-site timeframe argument to a literal string
-        value when it is statically known: a string literal, or a known
-        constant / input-backed variable whose stored value is a string.
-        Returns None for anything that is not a compile-time string."""
+        """A UDF call-site timeframe argument's value when it is a string
+        literal, directly or through never-reassigned global aliases, else
+        None. An input's default is not its value: an override changes it."""
+        seen: set[str] = set()
+        while (isinstance(arg, Identifier) and arg.name not in seen
+               and arg.name not in self._global_reassigned_names):
+            seen.add(arg.name)
+            arg = self._global_expr_map.get(arg.name)
         if isinstance(arg, StringLiteral):
             return arg.value
-        if isinstance(arg, Identifier):
-            sym = self._symbols.resolve(arg.name)
-            if sym is not None and getattr(sym, "const_value", None) is not None:
-                val = sym.const_value
-                if isinstance(val, str):
-                    return val
         return None
+
+    def _security_context_key(self, arg):
+        """A call-site context argument, compared by what it spells after
+        following never-reassigned global aliases."""
+        seen: set[str] = set()
+        while (isinstance(arg, Identifier) and arg.name not in seen
+               and arg.name not in self._global_reassigned_names
+               and isinstance(self._global_expr_map.get(arg.name), Identifier)):
+            seen.add(arg.name)
+            arg = self._global_expr_map[arg.name]
+        return context_key(arg)
 
     def _is_static_expression(self, node: ASTNode | None) -> bool:
         if node is None:

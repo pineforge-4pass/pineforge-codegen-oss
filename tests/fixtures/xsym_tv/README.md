@@ -23,6 +23,7 @@ a trade.
 |---|---|---|---|
 | `xa_import_ta` | `0160f73a95bde5ecee656451f8db5eac0e630855508d56487f627d5d7106dcdb` | `6179eb2113fc891932d09fd26eeebdf4e2d4b2ec485ec605ea57620c2c83d707` | 265 |
 | `xa_import_ta_plain` | `9b88a881cb79073304137daae3f078b54871896382f810c74569e7f7b3a76cdb` | the `xa_import_ta` tape, byte for byte | 265 |
+| `xa_nested_tf_only` | `27f33344047cc3a98e97b3c6b10f16645997c3d15baef7f8c9bac1249606352e` | `074114f03fdcc89f437d39e9da3ad4a89ac6d373ccd3f631b9d94ee7df3611c1` | 265 |
 
 What each tape shows:
 
@@ -30,3 +31,11 @@ What each tape shows:
   built-in `ta.sma`, `ta.highest`, `ta.rsi` and `ta.tr` changes no trade: the
   tape of the script without the import is the same file. Exit Signals:
   `f`, `hi`, `r`, `tr`.
+- `xa_nested_tf_only`: `g(tf) => request.security(syminfo.tickerid, tf,
+  ta.sma(close, 3))` reached through `h(tf) => g(tf)` and `k(tf) => h(tf)`
+  as `h(tfA)`, `h(tfB)`, `k("60")`, `k(tfB)` (inputs 60 and 240): each call
+  reads its own timeframe's SMA. Exit Signals: `a`, `b`, `c`, `d`. The same
+  probe exported on NASDAQ:AAPL 15 over 2025-04-01..2025-05-01 (tape sha256
+  `d5ba8f84b8a1520f1f35e09a760eaa9ec260ee33034b2c9ec3ea62ecfb803dfd`, 267
+  trades, the last one still open) is replayed outside this repository, on
+  the AAPL lane feed the tests cannot reach.

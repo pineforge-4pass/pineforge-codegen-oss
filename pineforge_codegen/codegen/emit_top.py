@@ -1247,12 +1247,16 @@ class TopLevelEmitter:
                 tf_expr = info.get("tf_expr")
                 if tf:
                     tf_expr = f'"{tf}"'
-                elif not tf_expr:
-                    # No static tf and no resolvable runtime expression — fall
-                    # back to the chart timeframe so registration still compiles
-                    # (e.g. a request.security inside a dead-code UDF, or one
-                    # whose tf is a function param called with mixed timeframes).
+                elif tf == "" and not tf_expr:
+                    # An empty timeframe string is the chart's.
                     tf_expr = "input_tf_"
+                elif not tf_expr:
+                    # Every timeframe is resolved or refused
+                    # (``_resolve_security_tf``); none registers by default.
+                    self._codegen_error(
+                        info.get("tf_node"),
+                        "request.security timeframe was not resolved for registration",
+                    )
                 if tf_expr:
                     la = "true" if info["lookahead_on"] else "false"
                     go = "true" if info.get("gaps_on") else "false"

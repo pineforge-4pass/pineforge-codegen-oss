@@ -951,8 +951,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # evaluator is a class method, so the param is not in scope there).
             # A lower-timeframe request has no chart-timeframe fallback.
             self._security_tf_lower = bool(item.get("is_lower_tf_array"))
-            tf_str, tf_expr = self._resolve_security_tf(
-                tf_node, item.get("containing_func", ""))
+            if item.get("dead"):
+                # A helper no top-level statement reaches: its evaluator is
+                # never read, registered on the chart timeframe.
+                tf_str, tf_expr = None, "input_tf_"
+            else:
+                tf_str, tf_expr = self._resolve_security_tf(
+                    tf_node, item.get("containing_func", ""))
 
             is_lookahead_on = False
             if lookahead_node is not None:

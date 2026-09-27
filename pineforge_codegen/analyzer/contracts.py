@@ -183,6 +183,14 @@ class SecurityCallInfo:
     # A scalar payload of string type: the result is a ``std::string``
     # holding na (empty) until the first requested value.
     string_result: bool = False
+    # The call's symbol argument (None when omitted).
+    symbol: Any = None
+    # ``timeframe`` and ``symbol`` hold the context
+    # ``security_contexts.specialize_security_contexts`` resolved through the
+    # helper call paths: expressions of globals, inputs and built-ins.
+    context_resolved: bool = False
+    # The call sits in a helper no top-level statement reaches: it never runs.
+    dead: bool = False
 
 
 @dataclass

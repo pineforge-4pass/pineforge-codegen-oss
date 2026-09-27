@@ -8,6 +8,7 @@ from .errors import CompileError, Level, Phase
 from .finite_ta_length import expand_finite_choice_extrema_lengths
 from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
 from .pragmas import extract_pf_trace_pragmas
+from .security_contexts import specialize_security_contexts
 from .support_checker import check_support as _support_diagnostics
 from .support_checker import check_support_or_raise
 
@@ -50,6 +51,7 @@ def _generate(pine_source: str, check_support: bool, filename: str):
             if any(d.level == Level.ERROR for d in support_diagnostics):
                 raise CompileError(support_diagnostics)
         budget.check(phase=Phase.ANALYZER)
+        ast = specialize_security_contexts(ast, filename=filename)
         ast = expand_finite_choice_extrema_lengths(ast)
         check_ast_depth(ast, filename)
         budget.check(phase=Phase.ANALYZER)

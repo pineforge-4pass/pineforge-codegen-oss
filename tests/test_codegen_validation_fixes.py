@@ -184,13 +184,12 @@ def test_bar_index_history_series_is_pushed_from_offset_helper():
 
 
 def test_security_param_tf_mixed_with_non_literal_callsite_rejected():
-    # Two distinct literal tfs PLUS a third call site whose tf isn't a
-    # compile-time literal (a ternary the const-folder can't resolve) ->
-    # can't pin every clone to a concrete timeframe, so the original
-    # deterministic rejection still applies rather than guessing or silently
-    # dropping the non-literal site.
+    # Two distinct literal tfs PLUS a third call site whose tf reads the
+    # chart bar (a series ternary) -> its clone has no timeframe before the
+    # first bar, so the deterministic rejection still applies rather than
+    # registering a value computed from no bar.
     import pytest
-    with pytest.raises(Exception, match="multiple distinct literal timeframes"):
+    with pytest.raises(Exception, match="reads the chart bar"):
         _cpp(
             "f(tf) =>\n"
             "    request.security(syminfo.tickerid, tf, close)\n"

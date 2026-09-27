@@ -1,0 +1,20 @@
+//@version=6
+// request.security reached through nested helpers: the timeframe is a helper
+// parameter two and three levels down. Each exit comment spells what every
+// call read on the bar the close was sent.
+strategy("PF xa nested tf only", overlay = true)
+tfA = input.timeframe("60", "A")
+tfB = input.timeframe("240", "B")
+g(tf) => request.security(syminfo.tickerid, tf, ta.sma(close, 3))
+h(tf) => g(tf)
+k(tf) => h(tf)
+a = h(tfA)
+b = h(tfB)
+c = k("60")
+d = k(tfB)
+s(x) => na(x) ? "na" : str.tostring(x)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(a) + "|" + s(b) + "|" + s(c) + "|" + s(d))

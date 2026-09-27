@@ -170,8 +170,12 @@ class SecurityEmitter:
 
         A function-parameter tf (e.g. ``f(tf) => request.security(sym, tf, ...)``)
         is not visible at class scope (the evaluator is a class method), so it is
-        resolved from the function's call sites. A dead-code UDF (never called)
-        falls back to the chart timeframe — its evaluator result is never read.
+        resolved from the function's call sites (a timeframe reaching the
+        helper through another helper arrives resolved by
+        ``security_contexts``). A dead-code UDF (never called) registers the
+        chart timeframe — its evaluator result is never read. Any other
+        timeframe registration cannot compute is refused: it used to register
+        the chart timeframe, silently.
         """
         if isinstance(tf_node, StringLiteral):
             return tf_node.value, None
@@ -213,14 +217,28 @@ class SecurityEmitter:
                 resolved = self._resolve_param_tf_from_callsites(containing_func, name)
                 if resolved is not None:
                     return resolved
-            # graceful fallback so transpile does not hard-fail
-            return None, "input_tf_"
+            self._security_tf_unresolved(tf_node, f"timeframe '{name}'")
         # any other expression — visit if it resolves at class scope
         try:
             expanded = self._security_tf_runtime_expr(tf_node)
             return None, expanded if expanded is not None else self._visit_expr(tf_node)
+        except CompileError:
+            raise
         except Exception:
-            return None, "input_tf_"
+            self._security_tf_unresolved(tf_node, "timeframe expression")
+
+    def _security_tf_unresolved(self, tf_node, what: str) -> None:
+        """Refuse a request.security timeframe registration cannot compute."""
+        self._codegen_error(
+            tf_node,
+            f"request.security {what} cannot be resolved before the first bar: "
+            "PineForge registers every requested timeframe before the script "
+            "runs.",
+            hint=(
+                "Pass a literal, an input or a global to the helper that holds "
+                "request.security."
+            ),
+        )
 
     def _security_tf_runtime_expr(self, node, resolving: set[str] | None = None) -> str | None:
         """Render a request.security timeframe expression for registration time.
@@ -762,9 +780,10 @@ class SecurityEmitter:
     def _resolve_param_tf_from_callsites(self, func_name: str, param_name: str):
         """For a ``request.security`` whose tf is function parameter ``param_name``
         of user function ``func_name``, return ``(tf_str, tf_expr)`` resolved from
-        the call sites, or None. If every call passes the same literal/member tf,
-        that tf is used; mixed timeframes or a never-called (dead-code) function
-        fall back to the chart timeframe (``input_tf_``)."""
+        the call sites, or None. Every call passes the same timeframe (the
+        analyzer clones a request whose call sites differ), which is used; a
+        never-called (dead-code) function registers the chart timeframe
+        (``input_tf_``), whose evaluator is never read."""
         fdef = None
         for node in self._walk_ast(self.ctx.ast):
             if isinstance(node, FuncDef) and node.name == func_name:
@@ -789,16 +808,18 @@ class SecurityEmitter:
             # dead code — evaluator never read; register with chart tf.
             return (None, "input_tf_")
         valid = [r for r in resolved if r is not None]
-        if not valid:
-            return (None, "input_tf_")
         strs = {r[0] for r in valid}
         exprs = {r[1] for r in valid}
         if len(strs) == 1 and next(iter(strs), None) is not None:
             return (next(iter(strs)), None)
         if len(exprs) == 1 and next(iter(exprs), None) is not None:
             return (None, next(iter(exprs)))
-        # mixed timeframes across call sites — cannot pick one statically
-        return (None, "input_tf_")
+        self._codegen_error(
+            fdef,
+            f"request.security timeframe parameter '{param_name}' of '{func_name}' "
+            "has no single timeframe across its call sites",
+            hint="Pass the timeframe as a positional literal, input or global.",
+        )
 
     def _normalize_security_call(self, item) -> dict:
         if hasattr(item, "sec_id"):
@@ -821,6 +842,7 @@ class SecurityEmitter:
                 "containing_func": getattr(item, "containing_func", "") or "",
                 "callsite_idx": getattr(item, "callsite_idx", None),
                 "string_result": bool(getattr(item, "string_result", False)),
+                "dead": bool(getattr(item, "dead", False)),
             }
         return {
             "sec_id": item[0],
