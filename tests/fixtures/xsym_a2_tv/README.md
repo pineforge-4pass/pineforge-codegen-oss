@@ -23,6 +23,7 @@ close's comment spelling the values it reads on that bar, so a tape's exit
 | `xa2_source_payload_high` | `6d628d3d8fb1cee71a672577d97c815d243a065444fb8cb7b0413ccd39e4010e` | `437a6275190a8960969c9b6eefdb5b62d0c9bf9deeaed582ca0a12ab536f7967` | 336 |
 | `xa2_source_param` | `59f293fecfcc122fe4f78f54e17b59536492c936c02f279119e5e3c7f8a98ca5` | `542b8804cb3ff7573c460b96f1305c9762f6a1119691b9f7a120d950d101616c` | 336 |
 | `xa2_source_param_low` | `94943784f3ccbdd6349ef19e7b5882859f129d5fce6c49b5858bea3561ec3735` | `2eb1b764d7af492c31cc608519cd96fae167190dd4cc9892ecc3baa0263f64ae` | 336 |
+| `xa2_single_context` | `7b5aa0e73aa5973ac112f6de0df961e576eb4d76fdeb2c3570bcef4a75d7a6ad` | `17d1b3579d9dadcd041e906c0a0e7f7e9fd741d60261af8dec2d969db504431d` | 336 |
 
 What each tape shows:
 
@@ -43,3 +44,10 @@ What each tape shows:
   Exit Signals: `a`, `b`, `c`, four decimals.
 - `xa2_source_param_low`: the same probe with the default `low`; its tape is
   what the first probe reads under the override `Src=low`.
+- `xa2_single_context`: request.security helpers whose symbol or timeframe
+  parameter every call passes one value, with no TA of their own:
+  `f(string sym) => request.security(sym, "60", close[1])`,
+  `g(tf) => request.security(syminfo.tickerid, tf, close)` as `g("240")`
+  and `h(string tf, int n) => request.security(syminfo.tickerid, tf,
+  high[1]) + n` as `h("60", 1)`. Exit Signals: `a`, `b`, `c`, four
+  decimals.

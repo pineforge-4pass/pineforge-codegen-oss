@@ -3495,8 +3495,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         continue  # shouldn't happen: has_ta/has_series tracks ALL call sites
                     cs_idx = cs_info[1]
                 else:
+                    # Numbered in func_call_cs_map only if the request is
+                    # cloned below: a call mapped to ``f_cs0`` while one
+                    # context left ``f`` uncloned named a function nothing
+                    # emits (``f(string sym) => request.security(sym, "60",
+                    # close[1])`` did not compile).
                     cs_idx = i
-                    self._func_call_cs_map.setdefault(id(call), (containing, cs_idx))
                 key: list = []
                 timeframe = tf_node
                 if tf_param is not None:
@@ -3545,6 +3549,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 # func_security_clone_only) actually clones its body, with
                 # self._active_call_site_idx set to each of our cs_idx values
                 # in turn while it does.
+                for cs_idx, call in enumerate(calls):
+                    self._func_call_cs_map.setdefault(id(call), (containing, cs_idx))
                 self._func_call_site_count[containing] = len(calls)
                 self._func_security_clone_only.add(containing)
             # Clone: one SecurityCallInfo per call site, each registered with
