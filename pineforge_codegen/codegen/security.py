@@ -27,6 +27,9 @@ attributes (all set by ``CodeGen.__init__`` unless noted):
   ``(sec_id, ta_idx, signature) -> C++ member name``.
 - ``self._security_ohlc_hist_fields_by_sec`` (``dict[int, set[str]]``):
   set in ``CodeGen.generate()`` before ``_emit_security_evaluators`` runs.
+- ``self._security_source_hist_fields`` (``dict[tuple[str, str], tuple]``):
+  a source input's ``(key, default)`` -> ``(its call, the history field
+  its payload reads)`` (``_security_bar_history_field``).
 - ``self._ta_index_by_site_id`` (``dict[int, int]``): TA call-site
   identity → index in ``ctx.ta_call_sites``.
 - ``self._func_names`` (``set[str]``): user-defined function names.
@@ -1177,7 +1180,7 @@ class SecurityEmitter:
         if isinstance(bound, Subscript):
             if not (
                 isinstance(bound.object, Identifier)
-                and bound.object.name in SECURITY_BAR_FIELDS
+                and self._security_bar_history_field(bound.object) is not None
             ):
                 self._codegen_error(
                     source_node,
@@ -1195,7 +1198,10 @@ class SecurityEmitter:
                     right=local_index,
                 )
             return Subscript(object=bound.object, index=combined_index)
-        if isinstance(bound, Identifier) and bound.name in SECURITY_BAR_FIELDS:
+        if (
+            isinstance(bound, Identifier)
+            and self._security_bar_history_field(bound) is not None
+        ):
             return Subscript(object=bound, index=local_index)
         self._codegen_error(
             source_node,
@@ -1290,12 +1296,13 @@ class SecurityEmitter:
                             bound_stack,
                         )
                     return
-                if n.object.name in SECURITY_BAR_FIELDS:
+                field = self._security_bar_history_field(n.object)
+                if field is not None:
                     idx = self._resolve_security_index_literal(n.index, bindings)
                     # field[0] uses the current requested bar; k>=1 reads the
                     # completed-bar Series. Dynamic indices need that Series too.
                     if idx is None or idx >= 1:
-                        out.add(n.object.name)
+                        out.add(field)
                     return
                 global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
                 if (
@@ -1437,7 +1444,67 @@ class SecurityEmitter:
                 f"{self._security_timeframe_expr(sec_id)}, "
                 "syminfo_.session, syminfo_.timezone, script_tf_)"
             )
+        for call, source_field in self._security_source_hist_fields.values():
+            if source_field == field:
+                return self._security_source_input_expr(call)
         return SECURITY_BAR_FIELD_EXPRS.get(field, f"bar.{field}")
+
+    def _security_source_input_call(self, node, seen: frozenset = frozenset()):
+        """The ``input.source(<native series>)`` call (or bare ``input(close)``)
+        ``node`` is, or a global name bound to one reads, else None."""
+        if isinstance(node, FuncCall):
+            default = self._get_input_default(node) if self._is_source_input(node) else None
+            if isinstance(default, Identifier) and default.name in self._NATIVE_SOURCE_SERIES:
+                return node
+            return None
+        if (
+            isinstance(node, Identifier)
+            and node.name not in seen
+            and self._security_identifier_is_global_binding(node)
+            and node.name not in self._global_mutable_infos
+        ):
+            value = (getattr(self.ctx, "global_expr_map", {}) or {}).get(node.name)
+            if value is not None:
+                return self._security_source_input_call(value, seen | {node.name})
+        return None
+
+    def _security_source_input_expr(self, call: FuncCall) -> str:
+        """The requested bar's value of the series a source input selects.
+
+        TradingView evaluates the input in the requested context like any
+        series; its override picks another native series there too. The
+        engine's ``get_input_source`` resolves the override (or the default)
+        to one of the chart's source series, the one whose requested-bar
+        value is read here."""
+        default = self._get_input_default(call).name
+        selected = (
+            f"&get_input_source({self._input_key_literal(self._get_input_title(call))}, "
+            f"_src_{default}_)"
+        )
+        arms = "".join(
+            f"_pf_src == &_src_{name}_ ? {SECURITY_BAR_FIELD_EXPRS[name]} : "
+            for name in sorted(self._NATIVE_SOURCE_SERIES) if name != default
+        )
+        return (
+            f"([&]() -> double {{ const Series<double>* _pf_src = {selected}; "
+            f"return {arms}{SECURITY_BAR_FIELD_EXPRS[default]}; }}())"
+        )
+
+    def _security_bar_history_field(self, node: Identifier) -> str | None:
+        """The requested-bar series a payload's ``node[k]`` reads the history
+        of: a bar field, or a source input's selected series (its own
+        ``_sec<N>_hist_`` member, one per input); else None."""
+        if node.name in SECURITY_BAR_FIELDS:
+            return node.name
+        call = self._security_source_input_call(node)
+        if call is None:
+            return None
+        key = (self._get_input_title(call), self._get_input_default(call).name)
+        if key not in self._security_source_hist_fields:
+            self._security_source_hist_fields[key] = (
+                call, f"input_source_{len(self._security_source_hist_fields)}"
+            )
+        return self._security_source_hist_fields[key][1]
 
     @staticmethod
     def _security_tuple_element_cpp_types(
@@ -4696,8 +4763,8 @@ class SecurityEmitter:
                         bound_stack,
                         emitted_lines,
                     )
-                if expr_node.object.name in SECURITY_BAR_FIELDS:
-                    field = expr_node.object.name
+                field = self._security_bar_history_field(expr_node.object)
+                if field is not None:
                     idx_lit = self._resolve_security_index_literal(
                         expr_node.index,
                         helper_binding_stack,
@@ -5035,6 +5102,13 @@ class SecurityEmitter:
                 for element in expr_node.elements
             ]
             return f"std::make_tuple({', '.join(elements)})"
+
+        if (
+            isinstance(expr_node, FuncCall)
+            and self._security_source_input_call(expr_node) is not None
+        ):
+            # ``src`` of ``src = input.source(ohlc4, ...)``: the requested bar's.
+            return self._security_source_input_expr(expr_node)
 
         if isinstance(expr_node, FuncCall):
             func_name = self._security_user_call_key(expr_node)
@@ -5487,11 +5561,12 @@ class SecurityEmitter:
             # Every earlier build's lowering, but an input read while a TA
             # history index or constructor argument is lowered keeps its
             # getter: the evaluator can run before on_bar sets the members.
-            return (
-                self._security_index_inputs
-                and isinstance(node, Identifier)
-                and self._security_identifier_is_global_binding(node)
-                and node.name in self._input_backed_vars
+            # A source input reads the requested bar, as ``close`` does.
+            return isinstance(node, Identifier) and (
+                (self._security_index_inputs
+                 and self._security_identifier_is_global_binding(node)
+                 and node.name in self._input_backed_vars)
+                or self._security_source_input_call(node) is not None
             )
         if self._get_ta_site(node) is not None:
             return True
@@ -5508,8 +5583,8 @@ class SecurityEmitter:
                     )
                     if binding is not None:
                         return self._security_bound_is_scalar(*binding)
-                # ``close[1]``: the requested bar's history.
-                return obj.name in SECURITY_BAR_FIELDS
+                # ``close[1]`` (``src[1]``): the requested bar's history.
+                return self._security_bar_history_field(obj) is not None
             if self._get_ta_site(obj) is not None:
                 # ``ta.sma(close, 5)[1]``: the requested TA's history series.
                 return True
@@ -5546,15 +5621,15 @@ class SecurityEmitter:
         helper_binding_stack: tuple[dict[str, ASTNode], ...],
     ) -> bool:
         """A name the builder resolves itself: a scalar helper binding, the
-        requested ``time_close``, and -- while a TA history index is lowered
-        -- an input, read through its getter."""
+        requested ``time_close``, a source input, and -- while a TA history
+        index is lowered -- an input, read through its getter."""
         if not self._security_identifier_is_global_binding(node):
             binding = self._security_lookup_helper_binding_context(
                 node.name, helper_binding_stack
             )
             if binding is not None:
                 return self._security_bound_is_scalar(*binding)
-        if node.name == "time_close":
+        if node.name == "time_close" or self._security_source_input_call(node) is not None:
             return True
         return (
             self._security_index_inputs
@@ -5576,12 +5651,18 @@ class SecurityEmitter:
         if id(node) in memo:
             return memo[id(node)]
         args = frame["args"]
-        if id(node) in frame["chart"] or not self._security_fallback_owns(
+        # A source input reads the requested bar wherever it sits, as a bar
+        # field does (the visitor spells ``close`` from ``bar``); it inlines
+        # no call beside a chart read.
+        source = (isinstance(node, Identifier)
+                  and self._security_source_input_call(node) is not None)
+        if (id(node) in frame["chart"] and not source) or not self._security_fallback_owns(
             node, args[5], args[0]
         ):
             self._security_warn_chart_call(node)
             return None
-        self._security_requested_used = True
+        if not source:
+            self._security_requested_used = True
         self._security_fallback_frame = None
         try:
             memo[id(node)] = self._build_security_expr(args[0], node, *args[1:])

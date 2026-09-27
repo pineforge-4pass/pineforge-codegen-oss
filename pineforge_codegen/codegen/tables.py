@@ -148,6 +148,7 @@ BAR_SERIES_PUSH = {
     "hl2": "((current_bar_.high + current_bar_.low) / 2.0)",
     "hlc3": "((current_bar_.high + current_bar_.low + current_bar_.close) / 3.0)",
     "ohlc4": "((current_bar_.open + current_bar_.high + current_bar_.low + current_bar_.close) / 4.0)",
+    "hlcc4": "((current_bar_.high + current_bar_.low + current_bar_.close + current_bar_.close) / 4.0)",
 }
 
 # Bar identifiers that refer to the *security* (HTF) bar inside
@@ -159,6 +160,12 @@ SECURITY_BAR_FIELD_EXPRS = {
     "close": "bar.close",
     "volume": "bar.volume",
     "time": "bar.timestamp",
+    # The derived series, as the engine computes its source series of a bar;
+    # their history is the requested bar's, like ``close[1]``'s.
+    "hl2": "((bar.high + bar.low) / 2.0)",
+    "hlc3": "((bar.high + bar.low + bar.close) / 3.0)",
+    "ohlc4": "((bar.open + bar.high + bar.low + bar.close) / 4.0)",
+    "hlcc4": "((bar.high + bar.low + bar.close + bar.close) / 4.0)",
 }
 SECURITY_BAR_FIELD_TYPES = {
     "open": "double",

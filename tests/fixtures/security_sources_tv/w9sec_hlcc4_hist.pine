@@ -1,0 +1,12 @@
+//@version=6
+// hlcc4 history, in a request.security payload and on the chart.
+strategy("PF w9sec hlcc4 history", overlay = true)
+a = request.security(syminfo.tickerid, "60", hlcc4[1])
+b = request.security(syminfo.tickerid, "60", hlcc4)
+c = hlcc4[1]
+s(x) => na(x) ? "na" : str.tostring(x)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(a) + "|" + s(b) + "|" + s(c))

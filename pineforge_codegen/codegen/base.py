@@ -4122,6 +4122,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._prescan_strategy_series()
         self._prescan_session_history()
         self._security_ohlc_hist_fields_by_sec: dict[int, set[str]] = {}
+        # A source input's selected series read at a history offset in a
+        # payload: (key, default) -> (the input call, its history field).
+        self._security_source_hist_fields: dict[tuple[str, str], tuple] = {}
         # request.security TA call-sites read at a history offset (``ta.ema(...)[k>=1]``).
         # Maps sec_id -> set of TA call-site indices needing an HTF history Series.
         self._security_ta_hist_idx_by_sec: dict[int, set[int]] = {}
