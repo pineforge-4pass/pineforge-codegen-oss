@@ -937,6 +937,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Collect request.security metadata per call
         self._security_eval_info: list[dict] = []
         self._security_ta_variant_names: dict[tuple[int, int, tuple], str] = {}
+        # Reassigned globals a timeframe reads (``_security_tf_replay_prologue``).
+        self._security_tf_mutable_reads: set[str] = set()
         for item in self._security_calls:
             sec_id = item["sec_id"]
             tf_node = item["tf_node"]

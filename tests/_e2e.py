@@ -168,10 +168,11 @@ def closed_trades(engine_root: Path, workdir: Path, feed: Path,
                   params: dict | None = None, **run_kwargs) -> list[dict]:
     """The built strategy's closed trades from the engine runner's own report
     (``run_strategy.Strategy.run``), under the input overrides ``params``
-    (keyed by title) when given, and ``run_kwargs`` (such as
-    ``syminfo_metadata``). ``engine_trades.csv`` carries no order ids or
-    comments; each report trade carries ``entry_id``, ``exit_id`` and
-    ``exit_comment`` beside its times (Unix ms), prices and ``qty``."""
+    (keyed by title) when given, and ``run_kwargs`` (``syminfo_metadata``,
+    an auxiliary lower-timeframe feed, the chart's timeframes).
+    ``engine_trades.csv`` carries no order ids or comments; each report
+    trade carries ``entry_id``, ``exit_id`` and ``exit_comment`` beside its
+    times (Unix ms), prices and ``qty``."""
     module = _RUN_STRATEGY_MODULES.get(engine_root)
     if module is None:
         scripts = engine_root / "scripts"

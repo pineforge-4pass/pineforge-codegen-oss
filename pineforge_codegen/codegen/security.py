@@ -72,6 +72,7 @@ from ..ast_nodes import (
     NaLiteral, NumberLiteral, StringLiteral, Subscript, SwitchStmt, Ternary,
     TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
 )
+from ..ast_nodes import MethodDef
 from ..analyzer import (
     FuncInfo, TACallSite, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
 )
@@ -198,6 +199,9 @@ class SecurityEmitter:
                 )
                 if expanded is not None:
                     return None, expanded
+            if (name in self._global_mutable_infos
+                    and self._security_identifier_is_global_binding(tf_node)):
+                self._security_tf_mutable_reads.add(name)
             # class-scope resolvable (global / input member)?
             if self._ident_is_resolvable(name):
                 try:
@@ -384,9 +388,23 @@ class SecurityEmitter:
                     annotations=node.annotations,
                 )
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+            global_binding = self._security_identifier_is_global_binding(node)
             if name in global_expr_map and name not in resolving:
+                if (global_binding
+                        and self._security_tf_reads_reassigned(global_expr_map[name])
+                        and self._security_tf_replay_closure({name})[0]):
+                    # Built from a reassigned global: the first bar computes it
+                    # at its declaration (``_security_tf_replay_prologue``),
+                    # before the reassignments after it.
+                    self._security_tf_mutable_reads.add(name)
+                    return node
                 return self._substitute_tf_input_reads(
                     global_expr_map[name], resolving | {name})
+            if name in self._global_mutable_infos and global_binding:
+                # Reassigned: its member holds its initial value before the
+                # first bar; registration replays what that bar computes
+                # (``_security_tf_replay_prologue``).
+                self._security_tf_mutable_reads.add(name)
             return node
         if isinstance(node, Ternary):
             cond = self._substitute_tf_input_reads(node.condition, resolving)
@@ -433,6 +451,313 @@ class SecurityEmitter:
                 return node
             return replace(node, object=obj, index=idx)
         return node
+
+    # Calls a timeframe's first-bar value may make: pure, per-run values.
+    _SECURITY_TF_REPLAY_CALLS = frozenset({"nz", "na", "int", "float", "bool", "string", "input"})
+    _SECURITY_TF_REPLAY_NAMESPACES = frozenset({"math", "str", "input"})
+    _SECURITY_TF_REPLAY_TIMEFRAME_CALLS = frozenset({"in_seconds", "from_seconds"})
+    _SECURITY_TF_REPLAY_MEMBERS = frozenset({"timeframe", "syminfo", "math", "format"})
+    _SECURITY_TF_REPLAY_OPS = frozenset({":=", "+=", "-=", "*=", "/=", "%="})
+
+    def _security_tf_replay_prologue(self) -> list[str]:
+        """The first bar's computation of the reassigned globals the requests'
+        timeframes read, as locals of ``configure_security_evaluators()``.
+
+        The engine registers every request before the first bar, where a
+        global the script reassigns (``lowerSeconds := math.max(60,
+        lowerSeconds)``) still holds its member's initial value: iamalala's
+        lower-timeframe sites registered "1" where TradingView computes "72".
+        TradingView computes a simple timeframe on the first bar. The locals
+        shadow the members the rendered timeframes name (a global built from
+        a reassigned one is one of them, computed at its declaration), and
+        are computed by the top-level declarations, reassignments and ``if``
+        blocks that give them their value, in source order, from literals,
+        inputs (their getters), ``timeframe.*`` / ``syminfo.*`` / ``format.*``
+        and pure ``math`` / ``str`` calls. A name that cannot be computed so
+        keeps the registration every earlier build emitted, with a warning
+        naming what stops it."""
+        replayed: set[str] = set()
+        for name in sorted(self._security_tf_mutable_reads):
+            closure, blocker = self._security_tf_replay_closure({name})
+            if closure:
+                replayed.update(closure)
+                continue
+            where, reason = blocker
+            info = self._global_mutable_infos.get(name)
+            self._codegen_warning(
+                getattr(info, "decl_node", None),
+                f"request.security timeframe reads '{name}', which the script "
+                "reassigns: PineForge registers every request before the first "
+                "bar, where it holds its initial value, and cannot compute it "
+                f"there ('{where}' {reason})",
+            )
+        if not replayed:
+            return []
+        names, stmts = self._security_tf_replay_closure(replayed)
+        pad = "        "
+        lines = [
+            f"{pad}// The first bar's values of the reassigned globals the "
+            "timeframes read; registration runs before it."
+        ]
+        for name in names:
+            safe = self._safe_name(name)
+            lines.append(f"{pad}decltype(this->{safe}) {safe}{{}};")
+        for stmt in stmts:
+            self._security_tf_replay_stmt(stmt, set(names), lines, pad)
+        return lines
+
+    def _security_tf_replay_target(self, name: str, body: list):
+        """``(declaration, top-level statements)`` that give global ``name``
+        its first-bar value, or ``(None, reason)``: a reassigned global's
+        declaration and reassignments, a global built from one's declaration."""
+        info = self._global_mutable_infos.get(name)
+        decl = getattr(info, "decl_node", None) if info is not None else next(
+            (stmt for stmt in body if isinstance(stmt, VarDecl) and stmt.name == name),
+            None,
+        )
+        sym = self.ctx.symbols.resolve(name)
+        pine_type = getattr(info, "pine_type", None) if info is not None else getattr(
+            sym, "pine_type", None)
+        if not isinstance(decl, VarDecl) or not any(decl is stmt for stmt in body):
+            return None, "is not declared at the top level"
+        if (getattr(info, "is_series", False) or name in self.ctx.series_vars
+                or pine_type not in (
+                    PineType.INT, PineType.FLOAT, PineType.BOOL, PineType.STRING)):
+            return None, "is not a scalar int, float, bool or string"
+        return decl, (list(info.source_stmts) if info is not None else [decl])
+
+    def _security_tf_replay_closure(self, names: set[str]):
+        """``(closure names, top-level statements)``, each in source order,
+        that compute ``names`` on the first bar before any request, or
+        ``(None, (name, reason))`` for the first one that cannot be."""
+        body = list(getattr(self.ctx.ast, "body", None) or ())
+        position = {id(stmt): i for i, stmt in enumerate(body)}
+        first_request = self._security_first_request_position(body)
+        closure = set(names)
+        while True:
+            stmts: dict[int, ASTNode] = {}
+            decls: dict[str, ASTNode] = {}
+            for name in sorted(closure):
+                decl, source = self._security_tf_replay_target(name, body)
+                if decl is None:
+                    return None, (name, source)
+                decls[name] = decl
+                for stmt in source:
+                    if position.get(id(stmt), first_request) >= first_request:
+                        return None, (name, "is assigned after the first request")
+                    stmts[id(stmt)] = stmt
+            reads: set[str] = set()
+            for stmt in stmts.values():
+                if not self._security_tf_replay_stmt_ok(stmt, closure, reads, True):
+                    culprit = next(
+                        (n for n, d in decls.items() if self._security_tf_assigns(stmt, {n})),
+                        sorted(closure)[0],
+                    )
+                    return None, (culprit, "is assigned a value it cannot compute there")
+            if reads <= closure:
+                names_in_order = sorted(closure, key=lambda n: position[id(decls[n])])
+                return names_in_order, sorted(stmts.values(), key=lambda s: position[id(s)])
+            closure |= reads
+
+    def _security_first_request_position(self, body: list) -> int:
+        """Index of the first top-level statement that makes a request, or
+        calls a user function or method that (transitively) does; len(body)
+        if none."""
+        def makes_request(node) -> bool:
+            for child in self._walk_ast(node):
+                if isinstance(child, FuncCall):
+                    func_name, namespace = self._resolve_callee(child.callee)
+                    if namespace == "request" or func_name in requesting:
+                        return True
+            return False
+
+        requesting: set[str] = set()
+        functions = [stmt for stmt in body if isinstance(stmt, (FuncDef, MethodDef))]
+        changed = True
+        while changed:
+            changed = False
+            for fdef in functions:
+                if fdef.name not in requesting and any(
+                    makes_request(stmt) for stmt in fdef.body
+                ):
+                    requesting.add(fdef.name)
+                    changed = True
+        for i, stmt in enumerate(body):
+            if not isinstance(stmt, (FuncDef, MethodDef)) and makes_request(stmt):
+                return i
+        return len(body)
+
+    def _security_tf_reads_reassigned(self, node, seen: frozenset = frozenset()) -> bool:
+        """Whether ``node`` reads a reassigned global, directly or through
+        the declarations of the globals it reads."""
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        for child in self._walk_ast(node):
+            if (not isinstance(child, Identifier)
+                    or not self._security_identifier_is_global_binding(child)):
+                continue
+            if child.name in self._global_mutable_infos:
+                return True
+            if (child.name in global_expr_map and child.name not in seen
+                    and self._security_tf_reads_reassigned(
+                        global_expr_map[child.name], seen | {child.name})):
+                return True
+        return False
+
+    def _security_tf_assigns(self, stmt, closure: set[str]) -> bool:
+        """Whether ``stmt`` binds or assigns a name of ``closure`` anywhere."""
+        for node in self._walk_ast(stmt):
+            if isinstance(node, VarDecl) and node.name in closure:
+                return True
+            if (isinstance(node, Assignment) and isinstance(node.target, Identifier)
+                    and node.target.name in closure):
+                return True
+            if isinstance(node, TupleAssign) and set(node.names) & closure:
+                return True
+            if isinstance(node, (ForStmt, ForInStmt)) and (
+                {getattr(node, "var", None), *(getattr(node, "vars", None) or ())}
+                & closure
+            ):
+                return True
+        return False
+
+    def _security_tf_replay_stmt_ok(
+        self, stmt, closure: set[str], reads: set[str], top: bool
+    ) -> bool:
+        """Whether registration can replay ``stmt``: a top-level declaration
+        (``var`` too: its first-bar value is its initializer's) or an
+        assignment of a ``closure`` name with a first-bar value, or an ``if``
+        on a first-bar condition around such assignments. A statement that
+        assigns no ``closure`` name is left out (a function cannot assign a
+        global, so a call cannot either)."""
+        if isinstance(stmt, VarDecl):
+            if stmt.name not in closure:
+                # A block local: a closure value reading it is no global read.
+                return not top
+            return (
+                top and stmt.value is not None
+                and not isinstance(stmt.value, (IfStmt, SwitchStmt))
+                and self._security_tf_replay_reads(stmt.value, reads)
+            )
+        if isinstance(stmt, Assignment) and isinstance(stmt.target, Identifier):
+            if stmt.target.name not in closure:
+                return True
+            return (
+                stmt.op in self._SECURITY_TF_REPLAY_OPS
+                and not isinstance(stmt.value, (IfStmt, SwitchStmt))
+                and self._security_tf_replay_reads(stmt.value, reads)
+            )
+        if not self._security_tf_assigns(stmt, closure):
+            return True
+        if isinstance(stmt, IfStmt):
+            return (
+                self._security_tf_replay_reads(stmt.condition, reads)
+                and all(self._security_tf_replay_stmt_ok(child, closure, reads, False)
+                        for child in stmt.body)
+                and all(self._security_tf_replay_stmt_ok(child, closure, reads, False)
+                        for child in stmt.else_body or ())
+            )
+        return False
+
+    def _security_tf_replay_reads(
+        self, node, reads: set[str], seen: frozenset = frozenset()
+    ) -> bool:
+        """Whether ``node``'s first-bar value is computed from literals,
+        inputs, ``timeframe.*`` / ``syminfo.*`` / ``format.*``, pure ``math``
+        / ``str`` calls and globals built from them; collects into ``reads``
+        the reassigned globals it reads and the globals built from one (both
+        computed where they are declared)."""
+        if node is None or isinstance(
+            node, (NumberLiteral, StringLiteral, BoolLiteral, NaLiteral, ColorLiteral)
+        ):
+            return True
+        if isinstance(node, Identifier):
+            name = node.name
+            if not self._security_identifier_is_global_binding(node):
+                return False
+            if name in self._timeframe_period_vars or (
+                name in self._input_backed_vars and name in self._input_var_to_call
+            ):
+                return True
+            if name in self._global_mutable_infos:
+                reads.add(name)
+                return True
+            value = (getattr(self.ctx, "global_expr_map", {}) or {}).get(name)
+            if value is None or name in seen:
+                return value is not None
+            if self._security_tf_reads_reassigned(value):
+                reads.add(name)
+                return True
+            return self._security_tf_replay_reads(value, reads, seen | {name})
+        if isinstance(node, MemberAccess):
+            return (isinstance(node.object, Identifier)
+                    and node.object.name in self._SECURITY_TF_REPLAY_MEMBERS)
+        if isinstance(node, FuncCall):
+            func_name, namespace = self._resolve_callee(node.callee)
+            if not (
+                (namespace is None and func_name in self._SECURITY_TF_REPLAY_CALLS)
+                or (namespace in self._SECURITY_TF_REPLAY_NAMESPACES
+                    and (namespace, func_name) != ("math", "random"))
+                or (namespace == "timeframe"
+                    and func_name in self._SECURITY_TF_REPLAY_TIMEFRAME_CALLS)
+            ):
+                return False
+            return all(
+                self._security_tf_replay_reads(arg, reads, seen)
+                for arg in [*node.args, *node.kwargs.values()]
+                if isinstance(arg, ASTNode)
+            )
+        if isinstance(node, BinOp):
+            return (self._security_tf_replay_reads(node.left, reads, seen)
+                    and self._security_tf_replay_reads(node.right, reads, seen))
+        if isinstance(node, UnaryOp):
+            return self._security_tf_replay_reads(node.operand, reads, seen)
+        if isinstance(node, Ternary):
+            return all(
+                self._security_tf_replay_reads(part, reads, seen)
+                for part in (node.condition, node.true_val, node.false_val)
+            )
+        return False
+
+    def _security_tf_replay_stmt(self, stmt, closure: set[str], lines: list[str],
+                                 pad: str) -> None:
+        """``stmt``'s replay (``_security_tf_replay_stmt_ok``), rendered as the
+        chart renders the assignment, its values read at registration."""
+        if isinstance(stmt, VarDecl) and stmt.name in closure:
+            self._security_tf_replay_assign(stmt.name, ":=", stmt.value, lines, pad)
+        elif (isinstance(stmt, Assignment) and isinstance(stmt.target, Identifier)
+                and stmt.target.name in closure):
+            self._security_tf_replay_assign(
+                stmt.target.name, stmt.op, stmt.value, lines, pad)
+        elif isinstance(stmt, IfStmt) and self._security_tf_assigns(stmt, closure):
+            condition = self._substitute_tf_input_reads(stmt.condition, set())
+            cond = self._coerce_bool_expr(self._visit_expr(condition), condition)
+            lines.append(f"{pad}if ({cond}) {{")
+            for child in stmt.body:
+                self._security_tf_replay_stmt(child, closure, lines, pad + "    ")
+            if stmt.else_body:
+                lines.append(f"{pad}}} else {{")
+                for child in stmt.else_body:
+                    self._security_tf_replay_stmt(child, closure, lines, pad + "    ")
+            lines.append(f"{pad}}}")
+
+    def _security_tf_replay_assign(self, name: str, op: str, value, lines: list[str],
+                                   pad: str) -> None:
+        """One replayed write, coerced into its slot as ``_visit_assignment``
+        writes a global scalar."""
+        safe = self._safe_name(name)
+        value = self._substitute_tf_input_reads(value, set())
+        target_cpp_type = self._na_reassign_cpp_type(name) if self._is_na_expr(value) else None
+        val_cpp = self._visit_rhs_value(value, name, target_cpp_type=target_cpp_type)
+        int_slot = self._int_slot_cpp_type(name)
+        if op == ":=":
+            lines.append(f"{pad}{safe} = {self._coerce_int_slot(val_cpp, value, int_slot)};")
+            return
+        rhs = self._compound_assign_rhs(safe, op, val_cpp)
+        if rhs is not None:
+            rhs = self._coerce_int_slot(rhs, value, int_slot, value_is_double=True)
+        else:
+            rhs = self._coerce_int_slot(f"{safe} {op[0]} {val_cpp}", value, int_slot)
+        lines.append(f"{pad}{safe} = {rhs};")
 
     def _resolve_param_tf_from_callsites(self, func_name: str, param_name: str):
         """For a ``request.security`` whose tf is function parameter ``param_name``

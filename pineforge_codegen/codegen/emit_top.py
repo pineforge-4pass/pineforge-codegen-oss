@@ -1241,6 +1241,7 @@ class TopLevelEmitter:
             lines.append("")
             lines.append("    void configure_security_evaluators() override {")
             lines.append("        security_eval_states_.clear();")
+            lines.extend(self._security_tf_replay_prologue())
             for info in self._security_eval_info:
                 tf = info.get("tf")
                 tf_expr = info.get("tf_expr")
