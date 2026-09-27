@@ -360,7 +360,11 @@ you delete or weaken the special case, the test will tell you.
    call-site indices in `ctx.func_call_cs_map`; the codegen's
    `_active_call_site_idx` machinery threads them through user-defined
    functions. When adding TA dispatch, make sure the new path respects
-   `cs_info` / `_func_cs_var_remap`.
+   `cs_info` / `_func_cs_var_remap`. A helper reached through a second call
+   of its caller runs as a context-sensitive instance (`g__ni1`,
+   `_build_func_instances`) with fresh copies of the path's TA, `var`,
+   fixnan and history-read local (`f := ... f[1]`) state;
+   `tests/test_e2e_nested_path_series.py` pins the locals.
 5. `**Series<T>` ring buffer.** Bar-related fields (`close`, `high`,
   `low`, `open`, `volume`, derived `hl2/hlc3/ohlc4/hlcc4`) auto-promote
    to `_s_<name>` series whenever the script reads them with `[k]`. The

@@ -1467,10 +1467,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return
 
         func_bodies: dict[str, list] = {}
+        func_params: dict[str, set[str]] = {}
         for fi in ctx.func_infos:
             node = getattr(fi, "node", None)
             if node is not None and getattr(node, "body", None):
                 func_bodies.setdefault(fi.name, node.body)
+                func_params.setdefault(fi.name, set(getattr(node, "params", ()) or ()))
 
         # Pine forbids recursive callable execution. Most scalar-only cycles
         # never enter this state-instance pass (and some legacy dead-branch
@@ -1531,10 +1533,30 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return list(self._func_cs_ta_remap.get((fname, 0), {}).keys())
 
         def var_originals(fname: str) -> list[str]:
-            return [
+            names = [
                 self._safe_name(self._func_var_storage_name(fname, n))
                 for n, _, _ in ctx.func_var_members.get(fname, [])
             ]
+            # A history-read local (``float f = 0.0`` then ``f := ... f[1]``)
+            # is persistent Series state too. Without it a fresh instance
+            # kept writing the original member, so every call path it served
+            # shared one series (cs-lev's second f_pole path fed its nine
+            # true-range filters into the price filter's ``_f``).
+            # Same storage rule as the natural csN remap of the callee's own
+            # series vars (``orig_names`` above).
+            params = func_params.get(fname, set())
+            for sv in sorted(ctx.func_series_vars.get(fname, ())):
+                if sv in params:
+                    continue  # a history-read parameter is the caller's series
+                exact = self._func_var_storage_name(fname, sv)
+                storage = self._safe_name(
+                    exact
+                    if self._safe_name(exact) in self._series_var_member_names
+                    else sv
+                )
+                if storage not in names:
+                    names.append(storage)
+            return names
 
         def fixnan_originals(fname: str) -> list[str]:
             return list(self._func_cs_fixnan_remap.get((fname, 0), {}).keys())
