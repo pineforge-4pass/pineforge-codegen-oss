@@ -891,13 +891,19 @@ class ExprVisitor:
                             self._warned_security_session_sites.add(id(node))
                             constant = ("always true" if node.member == "ismarket"
                                         else "always false")
+                            # A bar that opens in a break and holds the reopen
+                            # is in market (the chart's reading); pre- and
+                            # post-market read a break as neither.
+                            opens = (" (a bar that opens in a session break and "
+                                     "holds the reopen reads as out of market)"
+                                     if node.member == "ismarket" else "")
                             self._codegen_warning(
                                 node,
                                 f"session.{node.member} inside request.security keeps "
                                 "the time-of-day predicate, which can differ from "
                                 "TradingView: on an intraday chart it tests the "
-                                "security bar's open time, a session's day mask on "
-                                "that instant's own weekday, and does not read "
+                                f"security bar's open time{opens}, a session's day "
+                                "mask on that instant's own weekday, and does not read "
                                 f"\"2400\"; on a D/W/M chart it is {constant}. The "
                                 "chart's own session flags read the engine's session "
                                 "facts.",

@@ -550,4 +550,23 @@ def test_security_payload_session_read_warns_once_per_site(tmp_path: Path) -> No
     warned = [(d["line"], d["col"]) for d in result["diagnostics"]
               if "inside request.security" in d["message"]]
     assert warned == [(3, 16)]  # the `ismarket` of f's body, once for both payloads
+    # It names the bars the chart's reading holds and the predicate does not:
+    # one that opens in a session break (TradingView's TSE:7203 / CBOT:ZC1!
+    # 60-minute tapes, test_e2e_session_windows).
+    message = next(d["message"] for d in result["diagnostics"]
+                   if "inside request.security" in d["message"])
+    assert "a bar that opens in a session break" in message
+
+
+def test_security_payload_prepost_warning_names_no_break(tmp_path: Path) -> None:
+    """Needs no engine: the pre- and post-market predicates read a session
+    break as neither, as TradingView does, so their warning does not name it."""
+    result = _transpiled(tmp_path,
+                         'p = request.security(syminfo.tickerid, "60", session.ispremarket)\n'
+                         "if p\n"
+                         '    strategy.entry("L", strategy.long)\n')
+    message = next(d["message"] for d in result["diagnostics"]
+                   if "inside request.security" in d["message"])
+    assert message.startswith("session.ispremarket inside request.security")
+    assert "session break" not in message
 
