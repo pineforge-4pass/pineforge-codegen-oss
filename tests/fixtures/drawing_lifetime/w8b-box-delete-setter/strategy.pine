@@ -1,0 +1,34 @@
+//@version=6
+strategy("W8B readout: setters and getters on deleted and collected boxes", overlay=true, max_boxes_count=5, pyramiding=20, default_qty_type=strategy.fixed, default_qty_value=0.01)
+
+// Lane W8B-SIGSTATE-2. D (top 333, bottom 33) is deleted with box.delete at
+// 00:15 on 2025-04-08, then box.set_top(D, 555) runs every bar from 00:30. E
+// (top 444, bottom 44) is kept only in a var array; from 00:30 one filler box
+// is drawn every bar on a chart that keeps five, so the collection deletes E
+// once the sixth filler lands (the 11th box drawn in all), and from 00:30
+// box.set_top(E, 666) runs every bar. Each readout is an entry whose comment
+// carries D's top and bottom and E's top and bottom.
+t(h, m) => timestamp("UTC", 2025, 4, 8, h, m)
+var box d = na
+var array<box> keep = array.new_box()
+if time == t(0, 0)
+    d := box.new(bar_index, 333.0, bar_index + 1, 33.0)
+    array.push(keep, box.new(bar_index, 444.0, bar_index + 1, 44.0))
+if time == t(0, 15)
+    box.delete(d)
+if time >= t(0, 30)
+    box.set_top(d, 555.0)
+    box.set_top(array.get(keep, 0), 666.0)
+if time >= t(0, 30) and time <= t(12, 0)
+    box.new(bar_index, 200.0, bar_index + 1, 100.0)
+tag(string n) => n + ":" + str.tostring(box.get_top(d)) + "/" + str.tostring(box.get_bottom(d)) + "|" + str.tostring(box.get_top(array.get(keep, 0))) + "/" + str.tostring(box.get_bottom(array.get(keep, 0)))
+if time == t(0, 15)
+    strategy.entry("R0", strategy.long, comment=tag("deleted"))
+if time == t(0, 45)
+    strategy.entry("R1", strategy.long, comment=tag("set1"))
+if time == t(2, 30)
+    strategy.entry("R2", strategy.long, comment=tag("set9"))
+if time == t(4, 0)
+    strategy.entry("R3", strategy.long, comment=tag("set15"))
+if time == t(13, 0)
+    strategy.close_all(comment="cleanup")

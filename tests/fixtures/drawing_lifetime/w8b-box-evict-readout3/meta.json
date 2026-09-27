@@ -1,0 +1,16 @@
+{
+  "title": "W8B readout: first box after hundreds more on a 100-box chart",
+  "slug": "w8b-box-evict-readout3",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-27T15:36:36.071Z",
+  "chart": {
+    "symbol": "BINANCE:ETHUSDT.P",
+    "interval": "15",
+    "from": "2025-04-01",
+    "to": "2025-05-01"
+  },
+  "pine_sha256": "fc6d2faa881d67e23ce3fcec7fb371938785f400b48e4a976ea66f0a608d6bef",
+  "tv_trades_sha256": "e2e25cc33072ca5e3504ff48105c13c12d00b63935c1423032aac2408cc28d9e",
+  "tv_trades_rows": 14
+}

@@ -98,6 +98,7 @@ from .tables import (
     RUNTIME_REGISTER_SECURITY_EVAL_FN,
     RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN,
 )
+from .drawing import DRAWING_LIFETIME_CPP
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 
 
@@ -209,6 +210,8 @@ class TopLevelEmitter:
         lines.append("using namespace pineforge;")
         lines.append("")
         self._emit_ta_compat_shims(lines)
+        if getattr(self, "_uses_drawing", False):
+            lines.append(DRAWING_LIFETIME_CPP)
         if self._uses_tv_number_format:
             lines.append(TV_NUMBER_FORMAT_CPP)
             lines.append("")

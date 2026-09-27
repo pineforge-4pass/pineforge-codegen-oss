@@ -1,0 +1,16 @@
+{
+  "title": "W8B readout: when array-held boxes die on a 100-box chart",
+  "slug": "w8b-box-gc-steps",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-27T16:04:50.034Z",
+  "chart": {
+    "symbol": "BINANCE:ETHUSDT.P",
+    "interval": "15",
+    "from": "2025-04-01",
+    "to": "2025-05-01"
+  },
+  "pine_sha256": "89f721945aebed8ad4c4b493b7761f15d1b9ed7c8cce8f4d2b3b32fc06f0684a",
+  "tv_trades_sha256": "daab96f7e1c0330f50b06a2d6100bb72f7e47746ac3e901f1600b4840929971e",
+  "tv_trades_rows": 120
+}

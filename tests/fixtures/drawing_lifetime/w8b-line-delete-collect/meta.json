@@ -1,0 +1,16 @@
+{
+  "title": "W8B readout: deleted and collected lines",
+  "slug": "w8b-line-delete-collect",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-27T16:23:46.027Z",
+  "chart": {
+    "symbol": "BINANCE:ETHUSDT.P",
+    "interval": "15",
+    "from": "2025-04-01",
+    "to": "2025-05-01"
+  },
+  "pine_sha256": "d93c88b6c9ff96e56adc0199c877fe0f218356a733cc35a32047a29c035cd38f",
+  "tv_trades_sha256": "1006d86d8d454c0c15f74f55b1e5d6230a34721f4468f1aa949809fe14a6e80b",
+  "tv_trades_rows": 6
+}

@@ -284,6 +284,9 @@ CPP_EMITTER_NAMES = frozenset("""
     pf_box_set_lefttop pf_box_set_right pf_box_set_rightbottom pf_box_set_top
     pf_box_set_top_left_point pf_box_set_xloc
     pf_linefill_new pf_linefill_delete pf_linefill_get_line1 pf_linefill_get_line2
+    _PF_DRAWING_UNBOUNDED _PFDrawingArg _pf_drawing_get _pf_drawing_set
+    _pf_drawing_na _pf_collect_drawings _pf_collect_lines_ _pf_collect_boxes_
+    _pf_collect_labels_ _pf_new _pf_held
     get_input_int get_input_float get_input_bool get_input_string
     trace is_na na nz fixnan
 """.split())

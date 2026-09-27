@@ -4581,6 +4581,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.append(f"    Series<double> _s_{field_name}{_mbb};")
 
         # 5. var/varip members (deduplicate by name)
+        # Sections 5-6 and 8c-8c2 declare the script's var/varip and
+        # history-read variables, whose drawing handles keep a drawing from
+        # the collection; 8b's plain non-var globals do not.
+        _variable_decls_start = len(lines)
         seen_var_members: set[str] = set()
         for name, ptype, init_str in self.ctx.var_members:
             if name in seen_var_members:
@@ -4736,6 +4740,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 cpp_type = self._series_type_for(name)
                 lines.append(f"    Series<{cpp_type}> {safe}{_mbb};")
 
+        _variable_decls = lines[_variable_decls_start:]
         # 7. Fixnan members
         for _fi_idx, site in enumerate(self.ctx.fixnan_sites):
             if _fi_idx in self._dead_fixnan_indices:
@@ -4840,6 +4845,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 default = self._default_for_type(cpp_type)
                 lines.append(f"    {cpp_type} {safe} = {default};")
 
+        _variable_decls_start = len(lines)
         # 8c. Cloned var/series members for per-call-site function variants
         #     Same pattern as TA member cloning: each call site gets its own copy
         emitted_clones: set[str] = set()
@@ -4865,6 +4871,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 orig_safe, fresh_safe, _mbb, lines, owner_func=owner_func
             )
 
+        _variable_decls = _variable_decls + lines[_variable_decls_start:]
+        self._drawing_pins = self._drawing_pin_members(_variable_decls)
+
         # 8c3. Fresh fixnan members for context-sensitive helper instances.
         #      Each fresh instance gets its OWN previous-value member so two
         #      call paths never share fixnan state (mirrors 8c2 for vars).
@@ -4877,14 +4886,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 8d. Drawing-objects-as-data arenas (gated on _uses_drawing so
         #     non-drawing strategies emit byte-identical C++). Each arena is a
-        #     per-strategy member, reset by prepare_script_run. Caps come from
-        #     the strategy() header max_*_count (default 50; linefill default 50).
+        #     per-strategy member, reset by prepare_script_run. The arenas never
+        #     evict: the generated collectors apply the strategy() header's
+        #     max_*_count the way TradingView does (default 50; see
+        #     DRAWING_LIFETIME_CPP), and linefills are never collected.
         if self._uses_drawing:
-            caps = self._drawing_caps or {}
-            lines.append(f"    DrawingArena<LineRec> _pf_lines_{{{caps.get('line', 50)}}};")
-            lines.append(f"    DrawingArena<BoxRec> _pf_boxes_{{{caps.get('box', 50)}}};")
-            lines.append(f"    DrawingArena<LabelRec> _pf_labels_{{{caps.get('label', 50)}}};")
-            lines.append(f"    DrawingArena<LinefillRec> _pf_linefills_{{{caps.get('linefill', 50)}}};")
+            lines.append("    DrawingArena<LineRec> _pf_lines_{_PF_DRAWING_UNBOUNDED};")
+            lines.append("    DrawingArena<BoxRec> _pf_boxes_{_PF_DRAWING_UNBOUNDED};")
+            lines.append("    DrawingArena<LabelRec> _pf_labels_{_PF_DRAWING_UNBOUNDED};")
+            lines.append("    DrawingArena<LinefillRec> _pf_linefills_{_PF_DRAWING_UNBOUNDED};")
 
         # 9. _var_initialized flag
         if self.ctx.var_members:
@@ -4960,6 +4970,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         lines.append("")
         self._emit_script_run_prepare(lines, _script_state_declarations)
         lines.append("")
+        if self._uses_drawing:
+            self._emit_drawing_collectors(lines)
+            lines.append("")
 
         # 10. User-defined functions (with per-call-site variants for functions
         #     containing TA calls OR series variables that need isolation)

@@ -1,0 +1,25 @@
+//@version=6
+strategy("W8B readout: when and which boxes max_boxes_count evicts", overlay=true, max_boxes_count=5, pyramiding=30, default_qty_type=strategy.fixed, default_qty_value=0.01)
+
+// Lane W8B-SIGSTATE-2. On a chart that keeps five boxes: A (top 111) is kept
+// in a var box only, B (top 222) in a var array only, C (top 333) in both.
+// They are drawn at 00:00, 00:15 and 00:30 on 2025-04-08, then one filler
+// every bar from 00:45 (the sixth box is drawn at 01:15). Every bar from 01:00
+// to 03:00 an entry's comment carries the three tops.
+t(h, m) => timestamp("UTC", 2025, 4, 8, h, m)
+var array<box> zones = array.new_box()
+var box a = na
+var box c = na
+if time == t(0, 0)
+    a := box.new(bar_index, 111.0, bar_index + 1, 11.0)
+if time == t(0, 15)
+    array.push(zones, box.new(bar_index, 222.0, bar_index + 1, 22.0))
+if time == t(0, 30)
+    c := box.new(bar_index, 333.0, bar_index + 1, 33.0)
+    array.push(zones, c)
+if time >= t(0, 45) and time <= t(12, 0)
+    box.new(bar_index, 200.0, bar_index + 1, 100.0)
+if time >= t(1, 0) and time <= t(3, 0)
+    strategy.entry("R" + str.tostring(bar_index), strategy.long, comment=str.format("{0}|{1}|{2}", str.tostring(box.get_top(a)), str.tostring(box.get_top(array.get(zones, 0))), str.tostring(box.get_top(array.get(zones, 1)))))
+if time == t(13, 0)
+    strategy.close_all(comment="cleanup")

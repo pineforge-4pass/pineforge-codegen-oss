@@ -1,0 +1,16 @@
+{
+  "title": "W8B readout: a box evicted by max_boxes_count",
+  "slug": "w8b-box-evict-readout",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-27T15:34:52.449Z",
+  "chart": {
+    "symbol": "BINANCE:ETHUSDT.P",
+    "interval": "15",
+    "from": "2025-04-01",
+    "to": "2025-05-01"
+  },
+  "pine_sha256": "f509272571367849e1093849b723fcf8c3f241ecc2303919b337d5d00d12f1d0",
+  "tv_trades_sha256": "d08ae8ee7be3374c9197ad305d47c5815b84c18a9bd9845c00c8a345c2cc64af",
+  "tv_trades_rows": 8
+}

@@ -1,0 +1,23 @@
+//@version=6
+strategy("W8B readout: when array-held boxes die on a 100-box chart", overlay=true, max_boxes_count=100, pyramiding=60, default_qty_type=strategy.fixed, default_qty_value=0.01)
+
+// Lane W8B-SIGSTATE-2. From 2025-04-08 00:00 UTC one box is drawn every bar
+// and kept only in a var array (box k has top k). Every bar the script counts
+// the array's boxes whose top reads na; whenever that count changes, an entry's
+// comment carries the number of boxes drawn so far and the dead count.
+start = timestamp("UTC", 2025, 4, 8, 0, 0)
+var array<box> zones = array.new_box()
+var int n = 0
+var int prevDead = 0
+if time >= start and n < 520
+    n += 1
+    array.push(zones, box.new(bar_index, n, bar_index + 1, 0.0))
+    int dead = 0
+    for i = 0 to array.size(zones) - 1
+        if na(box.get_top(array.get(zones, i)))
+            dead += 1
+    if dead != prevDead
+        strategy.entry("R" + str.tostring(n), strategy.long, comment=str.tostring(n) + ":" + str.tostring(dead))
+        prevDead := dead
+if n == 520
+    strategy.close_all(comment="cleanup")

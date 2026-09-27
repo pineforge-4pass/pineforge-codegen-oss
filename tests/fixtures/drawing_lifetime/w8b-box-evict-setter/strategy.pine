@@ -1,0 +1,37 @@
+//@version=6
+strategy("W8B readout: setters on boxes max_boxes_count evicted", overlay=true, max_boxes_count=5, pyramiding=20, default_qty_type=strategy.fixed, default_qty_value=0.01)
+
+// Lane W8B-SIGSTATE-2. A (top 111) and B (top 222) are drawn at 00:00 and
+// 00:15 on 2025-04-08; from 00:30 one filler box is drawn every bar on a chart
+// that keeps five, so both leave the five newest by 01:30. From 01:30 the
+// script calls box.set_right on A every bar (as a zone scanner extends its
+// zones), never on B. D (top 444) is drawn at 06:00 and extended every bar
+// while still among the five newest. Each readout is an entry whose comment
+// carries A's, B's and D's tops.
+t(h, m) => timestamp("UTC", 2025, 4, 8, h, m)
+var box a = na
+var box b = na
+var box d = na
+if time == t(0, 0)
+    a := box.new(bar_index, 111.0, bar_index + 1, 11.0)
+if time == t(0, 15)
+    b := box.new(bar_index, 222.0, bar_index + 1, 22.0)
+if time >= t(0, 30) and time <= t(12, 0) and time != t(6, 0)
+    box.new(bar_index, 200.0, bar_index + 1, 100.0)
+if time == t(6, 0)
+    d := box.new(bar_index, 444.0, bar_index + 1, 44.0)
+if time >= t(1, 30)
+    box.set_right(a, bar_index)
+if time > t(6, 0) and time <= t(6, 45)
+    box.set_right(d, bar_index)
+tag(string n) => n + ":" + str.tostring(box.get_top(a)) + "/" + str.tostring(box.get_top(b)) + "/" + str.tostring(box.get_top(d))
+if time == t(1, 30)
+    strategy.entry("R1", strategy.long, comment=tag("set1"))
+if time == t(2, 30)
+    strategy.entry("R2", strategy.long, comment=tag("set5"))
+if time == t(6, 30)
+    strategy.entry("R3", strategy.long, comment=tag("set21"))
+if time == t(11, 0)
+    strategy.entry("R4", strategy.long, comment=tag("set39"))
+if time == t(13, 0)
+    strategy.close_all(comment="cleanup")

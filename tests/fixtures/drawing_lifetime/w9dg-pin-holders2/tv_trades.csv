@@ -1,0 +1,7 @@
+﻿Trade number,Type,Date and time,Signal,Price USDT,Size (qty),Size (value),Net PnL USDT,Return %,Commission USDT,Favorable excursion USDT,Favorable excursion %,Adverse excursion USDT,Adverse excursion %,Cumulative PnL USDT,Cumulative PnL %,Duration (bars)
+1,Exit long,2025-04-09 21:15,cleanup,1461.49,0.01,13.968,0.6469,4.63,0,0.992,7.10,-0.0073,-0.05,0.6469,0.00,47
+1,Entry long,2025-04-09 09:30,before:101/102/103/105/106/107,1396.8,0.01,13.968,0.6469,4.63,0,0.992,7.10,-0.0073,-0.05,0.6469,0.00,47
+2,Exit long,2025-04-09 21:15,cleanup,1461.49,0.01,14.1992,0.4157,2.93,0,0.7608,5.36,-0.1313,-0.92,1.0626,0.00,46
+2,Entry long,2025-04-09 09:45,first:NaN/102/103/NaN/NaN/107,1419.92,0.01,14.1992,0.4157,2.93,0,0.7608,5.36,-0.1313,-0.92,1.0626,0.00,46
+3,Exit long,2025-04-09 21:15,cleanup,1461.49,0.01,14.2228,0.3921,2.76,0,0.7372,5.18,-0.1549,-1.09,1.4547,0.00,40
+3,Entry long,2025-04-09 11:15,second:NaN/102/103/NaN/NaN/107,1422.28,0.01,14.2228,0.3921,2.76,0,0.7372,5.18,-0.1549,-1.09,1.4547,0.00,40

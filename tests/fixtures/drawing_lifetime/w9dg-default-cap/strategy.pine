@@ -1,0 +1,37 @@
+//@version=6
+strategy("W9 readout: collection at the default drawing counts", overlay=true, pyramiding=60, default_qty_type=strategy.fixed, default_qty_value=0.01)
+
+// Lane CG-W9-MISC. No max_*_count is declared. From 2025-04-09 00:00 UTC one
+// box and one linefill are drawn every bar and kept only in var arrays (box k
+// has top k; every linefill joins the same two var lines). Every bar the script
+// counts the array's boxes whose top reads na and the linefills na() calls na;
+// whenever either count changes, and at n = 55 and 56, an entry's comment
+// carries the number of drawings so far and both counts.
+start = timestamp("UTC", 2025, 4, 9, 0, 0)
+var array<box> boxes = array.new_box()
+var array<linefill> fills = array.new_linefill()
+var line l1 = na
+var line l2 = na
+var int n = 0
+var int prevDeadBoxes = 0
+var int prevDeadFills = 0
+if time >= start and n < 130
+    if n == 0
+        l1 := line.new(bar_index, 10.0, bar_index + 1, 10.0)
+        l2 := line.new(bar_index, 20.0, bar_index + 1, 20.0)
+    n += 1
+    array.push(boxes, box.new(bar_index, n, bar_index + 1, 0.0))
+    array.push(fills, linefill.new(l1, l2, color.red))
+    int deadBoxes = 0
+    int deadFills = 0
+    for i = 0 to array.size(boxes) - 1
+        if na(box.get_top(array.get(boxes, i)))
+            deadBoxes += 1
+        if na(array.get(fills, i))
+            deadFills += 1
+    if deadBoxes != prevDeadBoxes or deadFills != prevDeadFills or n == 55 or n == 56
+        strategy.entry("R" + str.tostring(n), strategy.long, comment=str.tostring(n) + ":" + str.tostring(deadBoxes) + "/" + str.tostring(deadFills))
+        prevDeadBoxes := deadBoxes
+        prevDeadFills := deadFills
+if n == 130
+    strategy.close_all(comment="cleanup")

@@ -19,6 +19,8 @@ reads only attributes established by ``CodeGen.__init__`` (``_uses_drawing``,
 
 from __future__ import annotations
 
+import re
+
 from ..ast_nodes import FuncCall, Identifier, MemberAccess
 from ..symbols import method_receiver_type_name
 from .tables import (
@@ -40,6 +42,63 @@ _VOID_BUILTIN_CALLS = frozenset({
     ("log", "info"), ("log", "warning"), ("log", "error"),
     ("runtime", "error"),
 })
+
+# TradingView's drawing lifetime, emitted once per drawing TU after
+# ``using namespace pineforge;``. The engine's arena keeps a deleted record
+# readable and evicts at exactly the cap; TradingView does neither (lane
+# CG-W9-MISC tapes, tests/fixtures/drawing_lifetime). The generated arenas are
+# therefore unbounded (``_PF_DRAWING_UNBOUNDED``), every getter and setter goes
+# through the liveness check below, and ``_pf_collect_<kind>s_`` (a member of
+# the strategy, which knows its variables) runs the collection.
+DRAWING_LIFETIME_CPP = """\
+// TradingView's drawing lifetime. A deleted or collected drawing reads like a
+// na handle: every getter returns na, every setter does nothing and na() is
+// true. A new line, box or label that makes its kind's live count reach
+// max_<kind>_count + 6 deletes the oldest drawings of that kind that no var,
+// varip or history-read variable holds, until max_<kind>_count remain; one
+// held only by an array, a map, an object field, a local or a plain non-var
+// variable is collectable. Linefills are never collected.
+constexpr int _PF_DRAWING_UNBOUNDED = 2147483647;
+template <class T> struct _PFDrawingArg { using type = T; };
+template <class R, class Rec, class H, class... A>
+inline R _pf_drawing_get(R (*get)(DrawingArena<Rec>&, H, A...),
+                         typename _PFDrawingArg<DrawingArena<Rec>&>::type arena,
+                         typename _PFDrawingArg<H>::type h,
+                         typename _PFDrawingArg<A>::type... args) {
+    return arena.alive(h.id) ? get(arena, h, args...) : na<R>();
+}
+template <class Rec, class H, class... A>
+inline void _pf_drawing_set(void (*set)(DrawingArena<Rec>&, H, A...),
+                            typename _PFDrawingArg<DrawingArena<Rec>&>::type arena,
+                            typename _PFDrawingArg<H>::type h,
+                            typename _PFDrawingArg<A>::type... args) {
+    if (arena.alive(h.id)) set(arena, h, args...);
+}
+template <class Rec, class H>
+inline bool _pf_drawing_na(const DrawingArena<Rec>& arena, H h) {
+    return !arena.alive(h.id);
+}
+template <class Rec>
+inline void _pf_collect_drawings(DrawingArena<Rec>& arena, int keep,
+                                 const int32_t* pins, std::size_t pin_count) {
+    const std::size_t excess = arena.order().size() - static_cast<std::size_t>(keep);
+    std::vector<int32_t> doomed;
+    for (int32_t id : arena.order()) {
+        if (doomed.size() == excess) break;
+        if (std::find(pins, pins + pin_count, id) == pins + pin_count) doomed.push_back(id);
+    }
+    for (int32_t id : doomed) arena.erase(id);
+}
+"""
+
+# Drawing kinds TradingView collects, with their member collector.
+DRAWING_COLLECTED = {
+    "line": "_pf_collect_lines_",
+    "box": "_pf_collect_boxes_",
+    "label": "_pf_collect_labels_",
+}
+# TradingView keeps up to max_<kind>_count + 5 live drawings of a kind.
+DRAWING_COLLECTION_SLACK = 6
 
 # ---------------------------------------------------------------------------
 # Canonical Pine v6 constructor param-name lists (positional order).
@@ -208,7 +267,16 @@ class DrawingVisitor:
                 return True
         return False
 
+    @staticmethod
+    def _collected(dtype: str, handle: str) -> str:
+        """A new drawing of a collected kind passes through its collector."""
+        collector = DRAWING_COLLECTED.get(dtype)
+        return f"{collector}({handle})" if collector else handle
+
     def _emit_drawing_ctor(self, dtype: str, node: FuncCall) -> str:
+        return self._collected(dtype, self._emit_drawing_alloc(dtype, node))
+
+    def _emit_drawing_alloc(self, dtype: str, node: FuncCall) -> str:
         arena = DRAWING_ARENA[dtype]
         if dtype == "linefill":
             vals = self._merge_drawing_args(node, ["line1", "line2", "color"])
@@ -339,106 +407,88 @@ class DrawingVisitor:
             return self._emit_linefill_method(method, arena, recv, av)
         return "0"
 
+    # Getters and setters reach the arena through ``_pf_drawing_get`` /
+    # ``_pf_drawing_set`` (DRAWING_LIFETIME_CPP): a deleted, collected or na
+    # handle reads na and ignores the write. Every argument is still evaluated.
+    @staticmethod
+    def _live_get(fn: str, a: str, r: str, *args: str) -> str:
+        extra = "".join(", " + x for x in args)
+        return f"_pf_drawing_get({fn}, {a}, {r}{extra})"
+
+    @staticmethod
+    def _live_set(fn: str, a: str, r: str, *args: str) -> str:
+        extra = "".join(", " + x for x in args)
+        return f"_pf_drawing_set({fn}, {a}, {r}{extra})"
+
     def _emit_line_method(self, m, a, r, av, raw) -> str:
-        if m == "get_x1":
-            return f"pf_line_get_x1({a}, {r})"
-        if m == "get_x2":
-            return f"pf_line_get_x2({a}, {r})"
-        if m == "get_y1":
-            return f"pf_line_get_y1({a}, {r})"
-        if m == "get_y2":
-            return f"pf_line_get_y2({a}, {r})"
+        get, put = self._live_get, self._live_set
+        if m in ("get_x1", "get_x2", "get_y1", "get_y2"):
+            return get(f"pf_line_{m}", a, r)
         if m == "get_price":
-            return f"pf_line_get_price({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')})"
-        if m == "set_x1":
-            return f"pf_line_set_x1({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')})"
-        if m == "set_x2":
-            return f"pf_line_set_x2({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')})"
-        if m == "set_y1":
-            return f"pf_line_set_y1({a}, {r}, (double)({av[0]}))"
-        if m == "set_y2":
-            return f"pf_line_set_y2({a}, {r}, (double)({av[0]}))"
-        if m == "set_xy1":
-            return f"pf_line_set_xy1({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, (double)({av[1]}))"
-        if m == "set_xy2":
-            return f"pf_line_set_xy2({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, (double)({av[1]}))"
-        if m == "set_first_point":
-            return f"pf_line_set_first_point({a}, {r}, {av[0]})"
-        if m == "set_second_point":
-            return f"pf_line_set_second_point({a}, {r}, {av[0]})"
+            return get("pf_line_get_price", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'))
+        if m in ("set_x1", "set_x2"):
+            return put(f"pf_line_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'))
+        if m in ("set_y1", "set_y2"):
+            return put(f"pf_line_{m}", a, r, f"(double)({av[0]})")
+        if m in ("set_xy1", "set_xy2"):
+            return put(f"pf_line_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({av[1]})")
+        if m in ("set_first_point", "set_second_point"):
+            return put(f"pf_line_{m}", a, r, av[0])
         if m == "set_xloc":
-            return f"pf_line_set_xloc({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, {self._coerce_int_slot_with_cast(av[1], raw[1], 'int64_t')}, {self._lower_xloc(raw[2])})"
+            return put("pf_line_set_xloc", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), self._coerce_int_slot_with_cast(av[1], raw[1], 'int64_t'), self._lower_xloc(raw[2]))
         if m == "copy":
-            return f"pf_line_copy({a}, {r})"
+            return self._collected("line", f"pf_line_copy({a}, {r})")
         if m == "delete":
             return f"pf_line_delete({a}, {r})"
         return "0"
 
     def _emit_box_method(self, m, a, r, av, raw) -> str:
-        if m == "get_left":
-            return f"pf_box_get_left({a}, {r})"
-        if m == "get_right":
-            return f"pf_box_get_right({a}, {r})"
-        if m == "get_top":
-            return f"pf_box_get_top({a}, {r})"
-        if m == "get_bottom":
-            return f"pf_box_get_bottom({a}, {r})"
-        if m == "set_left":
-            return f"pf_box_set_left({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')})"
-        if m == "set_right":
-            return f"pf_box_set_right({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')})"
-        if m == "set_top":
-            return f"pf_box_set_top({a}, {r}, (double)({av[0]}))"
-        if m == "set_bottom":
-            return f"pf_box_set_bottom({a}, {r}, (double)({av[0]}))"
-        if m == "set_lefttop":
-            return f"pf_box_set_lefttop({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, (double)({av[1]}))"
-        if m == "set_rightbottom":
-            return f"pf_box_set_rightbottom({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, (double)({av[1]}))"
-        if m == "set_top_left_point":
-            return f"pf_box_set_top_left_point({a}, {r}, {av[0]})"
-        if m == "set_bottom_right_point":
-            return f"pf_box_set_bottom_right_point({a}, {r}, {av[0]})"
+        get, put = self._live_get, self._live_set
+        if m in ("get_left", "get_right", "get_top", "get_bottom"):
+            return get(f"pf_box_{m}", a, r)
+        if m in ("set_left", "set_right"):
+            return put(f"pf_box_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'))
+        if m in ("set_top", "set_bottom"):
+            return put(f"pf_box_{m}", a, r, f"(double)({av[0]})")
+        if m in ("set_lefttop", "set_rightbottom"):
+            return put(f"pf_box_{m}", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({av[1]})")
+        if m in ("set_top_left_point", "set_bottom_right_point"):
+            return put(f"pf_box_{m}", a, r, av[0])
         if m == "set_xloc":
-            return f"pf_box_set_xloc({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, {self._coerce_int_slot_with_cast(av[1], raw[1], 'int64_t')}, {self._lower_xloc(raw[2])})"
+            return put("pf_box_set_xloc", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), self._coerce_int_slot_with_cast(av[1], raw[1], 'int64_t'), self._lower_xloc(raw[2]))
         if m == "copy":
-            return f"pf_box_copy({a}, {r})"
+            return self._collected("box", f"pf_box_copy({a}, {r})")
         if m == "delete":
             return f"pf_box_delete({a}, {r})"
         return "0"
 
     def _emit_label_method(self, m, a, r, av, raw) -> str:
-        if m == "get_x":
-            return f"pf_label_get_x({a}, {r})"
-        if m == "get_y":
-            return f"pf_label_get_y({a}, {r})"
-        if m == "get_text":
-            return f"pf_label_get_text({a}, {r})"
+        get, put = self._live_get, self._live_set
+        if m in ("get_x", "get_y", "get_text"):
+            return get(f"pf_label_{m}", a, r)
         if m == "set_x":
-            return f"pf_label_set_x({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')})"
+            return put("pf_label_set_x", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'))
         if m == "set_y":
-            return f"pf_label_set_y({a}, {r}, (double)({av[0]}))"
+            return put("pf_label_set_y", a, r, f"(double)({av[0]})")
         if m == "set_xy":
-            return f"pf_label_set_xy({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, (double)({av[1]}))"
+            return put("pf_label_set_xy", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), f"(double)({av[1]})")
         if m == "set_point":
-            return f"pf_label_set_point({a}, {r}, {av[0]})"
+            return put("pf_label_set_point", a, r, av[0])
         if m == "set_xloc":
-            return f"pf_label_set_xloc({a}, {r}, {self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t')}, {self._lower_xloc(raw[1])})"
+            return put("pf_label_set_xloc", a, r, self._coerce_int_slot_with_cast(av[0], raw[0], 'int64_t'), self._lower_xloc(raw[1]))
         if m == "set_yloc":
-            return f"pf_label_set_yloc({a}, {r}, {self._lower_yloc(raw[0])})"
+            return put("pf_label_set_yloc", a, r, self._lower_yloc(raw[0]))
         if m == "set_text":
-            return f"pf_label_set_text({a}, {r}, {av[0]})"
+            return put("pf_label_set_text", a, r, av[0])
         if m == "copy":
-            return f"pf_label_copy({a}, {r})"
+            return self._collected("label", f"pf_label_copy({a}, {r})")
         if m == "delete":
             return f"pf_label_delete({a}, {r})"
         return "0"
 
     def _emit_linefill_method(self, m, a, r, av) -> str:
-        if m == "get_line1":
-            return f"pf_linefill_get_line1({a}, {r})"
-        if m == "get_line2":
-            return f"pf_linefill_get_line2({a}, {r})"
+        if m in ("get_line1", "get_line2"):
+            return self._live_get(f"pf_linefill_{m}", a, r)
         if m == "delete":
             return f"pf_linefill_delete({a}, {r})"
         return "0"
@@ -600,6 +650,68 @@ class DrawingVisitor:
             return False
         recv_spec = param_spec or self._type_spec_from_expr(node.callee.object)
         return recv_spec is not None and recv_spec.kind == "map"
+
+    # ------------------------------------------------------------------
+    # Drawing lifetime: na(), the collection and its pins
+    # ------------------------------------------------------------------
+    def _drawing_na_expr(self, arg) -> str | None:
+        """``na(<line|box|label|linefill>)`` asks the arena, which knows a
+        deleted or collected drawing; ``is_na`` sees only a na handle."""
+        if not getattr(self, "_uses_drawing", False):
+            return None
+        spec = self._type_spec_from_expr(arg)
+        if spec is None or spec.kind != "udt" or spec.name not in DRAWING_ARENA:
+            return None
+        return f"_pf_drawing_na({DRAWING_ARENA[spec.name]}, {self._visit_expr(arg)})"
+
+    _DRAWING_PIN_DECL = re.compile(
+        r"^    (?:Series<(Line|Box|Label)>|(Line|Box|Label)) (\w+)\b")
+
+    @classmethod
+    def _drawing_pin_members(cls, declarations: list[str]) -> dict[str, list[str]]:
+        """The current value of every drawing-typed pinning variable, per kind.
+
+        ``declarations`` are the generated member lines of the ``var`` /
+        ``varip`` variables (global, block and callable, with their
+        per-call-site and fresh clones) and of the non-var variables whose
+        history is read. TradingView keeps a drawing one of them holds. A
+        drawing held only by an array, an object field, a local or a plain
+        non-var variable is collectable, as is one a ``var`` held before it
+        was reassigned (tests/fixtures/drawing_lifetime ``w9dg-pin-*``).
+        """
+        kinds = {"Line": "line", "Box": "box", "Label": "label"}
+        pins: dict[str, list[str]] = {kind: [] for kind in kinds.values()}
+        for line in declarations:
+            match = cls._DRAWING_PIN_DECL.match(line)
+            if match is None:
+                continue
+            series, plain, name = match.groups()
+            current = f"this->{name}[0]" if series else f"this->{name}"
+            pins[kinds[series or plain]].append(f"{current}.id")
+        return pins
+
+    def _emit_drawing_collectors(self, lines: list[str]) -> None:
+        """One collector per collected kind: a new drawing passes through it,
+        and the one that makes the kind's live count reach its
+        max_<kind>_count + 6 deletes the oldest drawings no pinning variable
+        (``_drawing_pin_members``) holds."""
+        pins = getattr(self, "_drawing_pins", None) or {}
+        caps = self._drawing_caps or {}
+        for dtype, collector in DRAWING_COLLECTED.items():
+            handle = DRAWING_TYPE_TO_CPP[dtype]
+            arena = DRAWING_ARENA[dtype]
+            keep = caps.get(dtype, 50)
+            held = ", ".join(["_pf_new.id", *pins.get(dtype, ())])
+            lines.extend([
+                f"    {handle} {collector}({handle} _pf_new) {{",
+                f"        if ((int)this->{arena}.order().size() >= {keep + DRAWING_COLLECTION_SLACK}) {{",
+                f"            const int32_t _pf_held[] = {{{held}}};",
+                f"            _pf_collect_drawings(this->{arena}, {keep}, _pf_held,",
+                "                                 sizeof(_pf_held) / sizeof(_pf_held[0]));",
+                "        }",
+                "        return _pf_new;",
+                "    }",
+            ])
 
     # ------------------------------------------------------------------
     # _uses_drawing detection + arena caps

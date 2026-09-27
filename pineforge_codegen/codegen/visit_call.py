@@ -1469,7 +1469,7 @@ class CallVisitor:
 
         func_name, namespace = self._resolve_callee(callee)
 
-        # na(x) -> is_na(x)
+        # na(x) -> is_na(x); a drawing asks its arena (codegen/drawing.py).
         if func_name == "na" and namespace is None:
             if (len(node.args) == 1 and not node.kwargs
                     and self._infer_type(node.args[0]) == "std::string"):
@@ -1482,6 +1482,10 @@ class CallVisitor:
                     "is na here, while TradingView tells the two apart.",
                 )
                 return f"({self._visit_expr(node.args[0])}).empty()"
+            if len(node.args) == 1:
+                drawing = self._drawing_na_expr(node.args[0])
+                if drawing is not None:
+                    return drawing
             args = ", ".join(self._visit_expr(a) for a in node.args)
             return f"is_na({args})"
 

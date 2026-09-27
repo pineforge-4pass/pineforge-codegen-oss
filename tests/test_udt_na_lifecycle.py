@@ -387,8 +387,8 @@ float measured = segment.span()
 bool ignored = poison()
 '''
         cpp = transpile(source)
-        assert "pf_line_get_x2(_pf_lines_, ln)" in cpp
-        assert "pf_line_get_x1(_pf_lines_, ln)" in cpp
+        assert "_pf_drawing_get(pf_line_get_x2, _pf_lines_, ln)" in cpp
+        assert "_pf_drawing_get(pf_line_get_x1, _pf_lines_, ln)" in cpp
         assert "ln.get_x2()" not in cpp
         assert "ln.get_x1()" not in cpp
         compile_cpp(
@@ -415,7 +415,7 @@ float observed = probe(segments)
         cpp = transpile(source)
         assert "double probe(std::vector<Line>& items)" in cpp
         assert "return None();" not in cpp
-        assert "pf_line_get_x1(_pf_lines_," in cpp
+        assert "_pf_drawing_get(pf_line_get_x1, _pf_lines_," in cpp
         compile_cpp(cpp, label=f"udt-exact-drawing-array-{label}")
 
 

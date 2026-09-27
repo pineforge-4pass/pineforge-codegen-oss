@@ -88,7 +88,8 @@ def test_void_setter_as_last_udf_expr_does_not_assign_to_retval():
     # The void setter is emitted as a statement; the function does NOT assign
     # the void call to its return slot. The broken
     # ``_func_ret = pf_label_set_text(...)`` must NOT appear.
-    assert "pf_label_set_text(_pf_labels_, lb" in cpp
+    assert "_pf_drawing_set(pf_label_set_text, _pf_labels_, lb" in cpp
+    assert "= _pf_drawing_set" not in cpp
     assert "_func_ret = pf_label_set_text" not in cpp
     assert "= pf_label_set_text" not in cpp
 
@@ -1370,8 +1371,8 @@ def test_function_scoped_var_drawing_handle_per_clone_init():
     # cs0 inits topLine, cs1 inits topLine_cs1 — each with its own flag.
     assert "if (!this->_pf_var_init_topLine)" in cpp
     assert "if (!this->_pf_var_init_topLine_cs1)" in cpp
-    assert "topLine = pf_line_new(" in cpp
-    assert "topLine_cs1 = pf_line_new(" in cpp
+    assert "topLine = _pf_collect_lines_(pf_line_new(" in cpp
+    assert "topLine_cs1 = _pf_collect_lines_(pf_line_new(" in cpp
     assert "bool _pf_var_init_topLine = false;" in cpp
     assert "bool _pf_var_init_topLine_cs1 = false;" in cpp
 

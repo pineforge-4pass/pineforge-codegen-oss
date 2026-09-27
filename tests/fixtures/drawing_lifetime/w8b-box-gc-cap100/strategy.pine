@@ -1,0 +1,18 @@
+//@version=6
+strategy("W8B readout: array-held boxes on a 100-box chart", overlay=true, max_boxes_count=100, pyramiding=40, default_qty_type=strategy.fixed, default_qty_value=0.01)
+
+// Lane W8B-SIGSTATE-2. From 2025-04-08 00:00 UTC one box is drawn every bar
+// and kept only in a var array; box k (k = 1, 2, ...) has top k. Around the
+// 200th box, every bar's entry comment carries how many boxes were drawn and
+// the tops of the array's elements 0, 1, 99, 100, 101 and the newest.
+start = timestamp("UTC", 2025, 4, 8, 0, 0)
+var array<box> zones = array.new_box()
+var int n = 0
+if time >= start
+    n += 1
+    array.push(zones, box.new(bar_index, n, bar_index + 1, 0.0))
+    if n >= 195 and n <= 225
+        s = array.size(zones)
+        strategy.entry("R" + str.tostring(n), strategy.long, comment=str.format("{0}:{1}|{2}|{3}|{4}|{5}|{6}", n, str.tostring(box.get_top(array.get(zones, 0))), str.tostring(box.get_top(array.get(zones, 1))), str.tostring(box.get_top(array.get(zones, 99))), str.tostring(box.get_top(array.get(zones, 100))), str.tostring(box.get_top(array.get(zones, 101))), str.tostring(box.get_top(array.get(zones, s - 1)))))
+    if n == 226
+        strategy.close_all(comment="cleanup")

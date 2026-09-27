@@ -1,0 +1,16 @@
+{
+  "title": "W9 readout: when and which labels max_labels_count collects (2)",
+  "slug": "w9dg-label-collect2",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-27T17:36:59.751Z",
+  "chart": {
+    "symbol": "BINANCE:ETHUSDT.P",
+    "interval": "15",
+    "from": "2025-04-01",
+    "to": "2025-05-01"
+  },
+  "pine_sha256": "68eaf8631845bc70e33597e23a4a533a9750285b7dfa9e0534edbb16c8118122",
+  "tv_trades_sha256": "c3aed04061372459d1eaa875d6db6b537ff522fee7278c52ef8b0de804e7e73b",
+  "tv_trades_rows": 10
+}

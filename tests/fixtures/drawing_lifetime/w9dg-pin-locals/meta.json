@@ -1,0 +1,16 @@
+{
+  "title": "W9 readout: local variables and the box collection",
+  "slug": "w9dg-pin-locals",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-27T17:31:06.177Z",
+  "chart": {
+    "symbol": "BINANCE:ETHUSDT.P",
+    "interval": "15",
+    "from": "2025-04-01",
+    "to": "2025-05-01"
+  },
+  "pine_sha256": "94be08353567d294abf9e7b6fd1fdb36f1bfe391665d1c2641af4a98bb6fff9a",
+  "tv_trades_sha256": "f3d3ae8ae6e9a7fcb8cf25fd0110d7323cb11d368ccd5b943a6ed830c8e9b9f2",
+  "tv_trades_rows": 6
+}
