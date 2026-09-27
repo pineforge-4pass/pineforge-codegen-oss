@@ -37,6 +37,7 @@ from tests._e2e import (
     reference_codegen, skip_unless_e2e_env, transpile_json,
 )
 from tests.test_e2e_session_history import LEGACY, QUARTER, _replay, _utc_ms
+from tests.test_e2e_session_ismarket import next_chart_bar
 
 
 GENERATOR = REPO_ROOT / "scripts" / "gen_host_members.py"
@@ -331,13 +332,13 @@ def test_tradingview_keeps_builtins_beside_host_named_variables() -> None:
 
 @pytest.fixture(scope="module")
 def tape_replays(tmp_path_factory) -> dict:
-    """The probe replayed on the tape's bars, and with the pre-lane codegen
-    as exported and without its two loud names; an exception when a build
-    failed."""
+    """The probe replayed on the tape's bars and the chart's next one
+    (``next_chart_bar``), and with the pre-lane codegen as exported and
+    without its two loud names; an exception when a build failed."""
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("host_member_names_tape")
-    stamps = [ts for ts, _ in read_host_tape()]
-    stamps.append(stamps[-1] + QUARTER)
+    tape = [(ts, {"L": values["lb"] == 1.0}) for ts, values in read_host_tape()]
+    stamps = [ts for ts, _ in tape] + [next_chart_bar(tape, QUARTER, "America/New_York")]
     jobs = {"now": (_tape_probe(), REPO_ROOT)}
     legacy = reference_codegen(LEGACY)
     if legacy is not None:

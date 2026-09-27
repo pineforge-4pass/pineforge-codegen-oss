@@ -35,9 +35,9 @@ evaluates, is refused, located at the read.
 The pre-lane build emitted ``<flag>[k]`` on a C++ bool and did not compile.
 Each tape is replayed end to end -- ``transpile_json``, the built runtime,
 ``run_strategy.py`` with the session and timezone as runtime overrides -- on
-flat bars stamped at the tape's entry times, plus one bar after the last: the
-flags are a function of the bars' times and the symbol's session and timezone
-only.
+flat bars stamped at the tape's entry times, plus the bar TradingView's chart
+holds next (``next_chart_bar``): the flags are a function of the bars' times
+and the symbol's session and timezone only.
 """
 
 from __future__ import annotations
@@ -62,6 +62,7 @@ from tests._e2e import (
     REPO_ROOT, build_strategy_library, reference_codegen, run_strategy,
     skip_unless_e2e_env, transpile_json,
 )
+from tests.test_e2e_session_ismarket import next_chart_bar
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "session_ismarket"
@@ -81,12 +82,12 @@ TRACE = "".join(
 ) + ("\n// @pf-trace b=blk\n// @pf-trace u=fn\n// @pf-trace z=lz"
      "\n// @pf-trace k=session.isfirstbar[k]\n// @pf-trace d=session.ismarket[0]"
      "\n// @pf-trace w=session.ismarket[64]\n")
-# The kernel's session-day facts on the extended-hours chart: the engine holds
-# one session string, so isfirstbar is isfirstbar_regular and islastbar is
-# islastbar_regular, the regular day's 09:30 and 15:45 bars, where
-# TradingView's are the extended day's 04:00 and 19:45 bars (engine findings
-# F1/F2 of lane CG-ISMARKET); the history reads carry them.
-ENGINE = {EXTENDED: {"isfirstbar": 20, "islastbar": 20}}
+# On the extended-hours chart the engine's session_isfirstbar_ /
+# session_islastbar_ are the chart's day, the 04:00 and 19:45 bars, as
+# TradingView's isfirstbar / islastbar (lane K-SESSION-WINDOWS); codegen reads
+# them for the _regular spellings too, where TradingView's are the regular
+# day's 09:30 and 15:45 bars. The history reads carry them.
+PINNED = {EXTENDED: {"isfirstbar_regular": 20, "islastbar_regular": 20}}
 QUARTER = 15 * 60_000
 
 
@@ -163,9 +164,11 @@ def _write_feed(stamps: list[int], path: Path) -> Path:
 
 
 def _replay_stamps(slug: str) -> list[int]:
-    tape = read_function_tape() if slug == FUNCTIONS else read_tape(slug)
-    stamps = [ts for ts, _ in tape]
-    return stamps + [stamps[-1] + QUARTER]
+    if slug == FUNCTIONS:
+        last = [(ts, {"L": values["c"]["islastbar"]}) for ts, values in read_function_tape()]
+    else:
+        last = [(ts, {"L": values["c_islastbar"]}) for ts, values in read_tape(slug)]
+    return [ts for ts, _ in last] + [next_chart_bar(last, QUARTER, TIMEZONE)]
 
 
 OVERRIDES = {"input_tf": "15", "script_tf": "15",
@@ -312,8 +315,8 @@ def test_history_reads_are_the_earlier_values(slug: str, replays) -> None:
 @pytest.mark.parametrize("slug", TAPES)
 def test_history_reads_are_tradingviews(slug: str, replays) -> None:
     """Each read equals TradingView's on every bar, except where the flag it
-    reads already differs from TradingView on the bar it reads (the kernel's
-    session-day facts on the extended-hours chart, pinned)."""
+    reads already differs from TradingView on the bar it reads (the _regular
+    flags on the extended-hours chart, pinned)."""
     replay = _ok(replays, slug)
     tape = read_tape(slug)
     n = len(tape)
@@ -321,7 +324,7 @@ def test_history_reads_are_tradingviews(slug: str, replays) -> None:
     for flag in FLAGS:
         got = traced(replay, f"c_{flag}")[:n]
         wrong_current[flag] = {i for i in range(n) if got[i] != tape[i][1][f"c_{flag}"]}
-    assert {flag: len(bars) for flag, bars in wrong_current.items() if bars} == ENGINE.get(slug, {})
+    assert {flag: len(bars) for flag, bars in wrong_current.items() if bars} == PINNED.get(slug, {})
     for name, src in sources(n).items():
         got = traced(replay, name)[:n]
         missed = {i for i in range(n) if got[i] != tape[i][1][name]}
@@ -330,7 +333,7 @@ def test_history_reads_are_tradingviews(slug: str, replays) -> None:
         assert missed == expected, (name, sorted(missed)[:5], sorted(expected)[:5])
     reads = sum(len(src) for src in sources(n).values()) - 7 * n
     print(f"session history {slug}: {reads} reads on {n} bars == TradingView"
-          + (f" but for the pinned kernel facts {ENGINE[slug]}" if slug in ENGINE else ""))
+          + (f" but for the pinned flags {PINNED[slug]}" if slug in PINNED else ""))
 
 
 def test_payload_history_runs_on_the_requested_clock(replays) -> None:

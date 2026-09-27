@@ -10,22 +10,22 @@ post-market: no bar opens between the windows or after the close, and these
 symbols have no extended session.
 
 Replayed under those sessions, every flag PineForge computes is TradingView's
-on every bar of HKEX:700 and CBOT:ZC1!. On TSE:7203 TradingView keeps the bar that
-opens at 15:30 in the session, which the published 15:30 end leaves out: the
-calendar puts it out of market and the post-market window holds it, and the
-kernel's last bar is the 15:15 one (pinned); a session ending at 15:45 gives
-TradingView's flags on every bar.
+on every bar of HKEX:700 and CBOT:ZC1!. On TSE:7203 TradingView keeps the bar
+that opens at 15:30 in the session, which the published 15:30 end leaves out:
+the calendar puts it out of market and the post-market window holds it
+(pinned), and it is the last bar of the chart's session day, as the engine
+reads it; a session ending at 15:45 gives TradingView's flags on every bar.
 
 The pre- and post-market windows are the engine's (``session_in_premarket``
 and ``session_in_postmarket`` in src/session_time.cpp, which the emitted
-``pine_session_ispremarket`` / ``pine_session_ispostmarket`` call): 04:00 to
-the FIRST window's open and the FIRST window's close to 20:00. Codegen gates
-them with the calendar's in-market answer only, so an off-market bar reads as
-the first window makes it: a lunch break is post-market, and pre-market with
-the same windows written the other way round, and a bar after an overnight
-first window's close is both. No TradingView chart above has such a bar; the
-synthetic day below pins the engine's reading (lane CG-SESSION-2's finding F6,
-for the engine lane that owns the fix).
+``pine_session_ispremarket`` / ``pine_session_ispostmarket`` call; engine lane
+K-SESSION-WINDOWS): 04:00 to the session day's first open and its last close
+to 20:00, over every window in either order; a bar between two windows is
+neither, and a session with an overnight window has neither. Codegen gates
+them with the calendar's in-market answer. No TradingView chart above holds
+an off-market bar, so the synthetic day below pins the rule as the tapes show
+it where a chart holds such a bar: NASDAQ:AAPL's extended hours
+(``cgim-flags-aapl-60-ext``) for one window.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from tests._e2e import build_strategy_library, run_strategy, skip_unless_e2e_env, transpile_json
-from tests.test_e2e_session_ismarket import FIXTURES, FLAGS, TRACE, read_tape
+from tests.test_e2e_session_ismarket import FIXTURES, FLAGS, TRACE, next_chart_bar, read_tape
 
 
 TAPES = {"cgs2-flags-tse7203-15": ("Asia/Tokyo", 230),
@@ -62,7 +62,7 @@ class Case:
 
 
 CASES = (
-    Case("cgs2-flags-tse7203-15", "0900-1130,1230-1530", {"M": 10, "Q": 10, "L": 20, "l": 20}),
+    Case("cgs2-flags-tse7203-15", "0900-1130,1230-1530", {"M": 10, "Q": 10}),
     Case("cgs2-flags-tse7203-15", "0900-1130,1230-1545"),
     Case("cgs2-flags-hkex700-15", "0930-1200,1300-1600"),
     Case("cgs2-flags-zc1-15", "1900-0745,0830-1320"),
@@ -130,7 +130,8 @@ def test_multi_window_charts_are_tradingviews(case: Case, engine: Path, tmp_path
     timezone, _ = TAPES[case.slug]
     tape = read_tape(case.slug)
     stamps = [ts for ts, _ in tape]
-    traces = _run(engine, tmp_path / "run", stamps + [stamps[-1] + QUARTER], case.session, timezone)
+    traces = _run(engine, tmp_path / "run", stamps + [next_chart_bar(tape, QUARTER, timezone)],
+                  case.session, timezone)
     misses = {}
     for letter, name in FLAGS.items():
         got = traces[name][:len(tape)]
@@ -139,8 +140,7 @@ def test_multi_window_charts_are_tradingviews(case: Case, engine: Path, tmp_path
             misses[letter] = missed
     assert misses == case.pinned, case.key
     print(f"session windows {case.key}: every flag == TradingView on {len(tape)} bars"
-          + (f" but {case.pinned} (the 15:30 bar and the one before)"
-             if case.pinned else ""))
+          + (f" but {case.pinned} (the 15:30 bar)" if case.pinned else ""))
 
 
 def _day(timezone: str) -> list[int]:
@@ -170,33 +170,33 @@ def _span(opens: list[str]) -> tuple[int, str, str]:
     return len(opens), opens[0], opens[-1]
 
 
-def test_pre_and_post_market_read_the_first_window(engine: Path, tmp_path: Path) -> None:
-    """Pinned engine divergence (finding F6): the same two windows in either
-    order give the same in-market bars but different pre- and post-market
-    bars, and an overnight first window makes an off-market bar both."""
+def test_pre_and_post_market_read_every_window(engine: Path, tmp_path: Path) -> None:
+    """Pre-market is 04:00 to the session day's first open and post-market its
+    last close to 20:00, whichever window the session names first; a bar in
+    the break between two windows is neither, and so is every bar of a
+    session with an overnight window (engine lane K-SESSION-WINDOWS F6, which
+    the tapes above hold no off-market bar to test: every one of their bars is
+    in market and neither pre- nor post-market)."""
     work = tmp_path / "run"
     hk = _day("Asia/Hong_Kong")
     in_order = _wednesday("Asia/Hong_Kong", hk, _run(engine, work, hk, "0930-1200,1300-1600",
                                                      "Asia/Hong_Kong"))
     reversed_ = _wednesday("Asia/Hong_Kong", hk, _run(engine, work, hk, "1300-1600,0930-1200",
                                                       "Asia/Hong_Kong"))
-    assert in_order["M"] == reversed_["M"] and _span(in_order["M"]) == (22, "09:30", "15:45")
+    assert in_order == reversed_
+    assert _span(in_order["M"]) == (22, "09:30", "15:45")
     assert _span(in_order["P"]) == (22, "04:00", "09:15")
-    assert _span(in_order["Q"]) == (20, "12:00", "19:45")      # the lunch break is post-market
-    assert _span(reversed_["P"]) == (26, "04:00", "12:45")     # ... or pre-market
-    assert _span(reversed_["Q"]) == (16, "16:00", "19:45")
+    assert _span(in_order["Q"]) == (16, "16:00", "19:45")
     lunch = ["12:00", "12:15", "12:30", "12:45"]
-    assert set(lunch) <= set(in_order["Q"]) and set(lunch) <= set(reversed_["P"])
+    assert set(lunch) <= set(in_order["-"]) and "PQ" not in in_order
     corn = _day("America/Chicago")
     overnight = _wednesday("America/Chicago", corn, _run(engine, work, corn, "1900-0745,0830-1320",
                                                          "America/Chicago"))
     day_first = _wednesday("America/Chicago", corn, _run(engine, work, corn, "0830-1320,1900-0745",
                                                          "America/Chicago"))
-    assert overnight["M"] == day_first["M"] and len(overnight["M"]) == 71
-    assert _span(overnight["PQ"]) == (25, "07:45", "18:45")    # both pre- and post-market
-    assert "P" not in overnight and "Q" not in overnight
-    assert _span(day_first["P"]) == (3, "07:45", "08:15")
-    assert _span(day_first["Q"]) == (22, "13:30", "18:45")
-    print("session windows: pre-/post-market follow the first window (engine finding F6): "
-          f"HKEX lunch {lunch[0]}-{lunch[-1]} post-market, pre-market reversed; "
-          f"{len(overnight['PQ'])} CBOT:ZC1! off-market bars both")
+    assert overnight == day_first
+    assert len(overnight["M"]) == 71 and set(overnight) == {"M", "-"}
+    assert _span(overnight["-"]) == (25, "07:45", "18:45")
+    print("session windows: pre-/post-market read every window: HKEX lunch "
+          f"{lunch[0]}-{lunch[-1]} neither, either order; CBOT:ZC1! "
+          f"{len(overnight['-'])} off-market bars neither")
