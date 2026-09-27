@@ -2663,8 +2663,15 @@ class CallVisitor:
         else:
             self._fixnan_counter += 1
             member = f"_prev_fixnan_{self._fixnan_counter}"
+        # x is evaluated exactly once, as in ``nz``: a stateful call in it
+        # (``fixnan(100 * ta.rma(plusDM, len) / tr)``, TradingView's DMI) used
+        # to run twice per bar, once for the is_na() test and once for the
+        # store, double-stepping the RMA.
         x = self._visit_expr(node.args[0])
-        return f"(is_na({x}) ? {member} : ({member} = {x}))"
+        return (
+            f"([&]{{ auto _fixnan_v = ({x}); "
+            f"return is_na(_fixnan_v) ? {member} : ({member} = _fixnan_v); }}())"
+        )
 
     @staticmethod
     def _strategy_close_callsite_token(node: FuncCall) -> str:
