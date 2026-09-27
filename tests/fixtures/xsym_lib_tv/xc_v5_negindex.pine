@@ -1,0 +1,10 @@
+//@version=5
+// SPDX-License-Identifier: Apache-2.0
+// Synthetic probe (lane XSYM-C): a negative array index under v5.
+strategy("xc v5 negindex", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1)
+a = array.from(1, 2, 3)
+v = bar_index == 10 ? array.get(a, -1) : 0
+if bar_index % 2 == 0
+    strategy.entry("A", strategy.long)
+else
+    strategy.close("A", comment=str.tostring(v))

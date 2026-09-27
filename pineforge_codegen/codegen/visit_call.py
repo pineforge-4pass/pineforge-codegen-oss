@@ -1479,6 +1479,10 @@ class CallVisitor:
 
         func_name, namespace = self._resolve_callee(callee)
 
+        if (func_name in ("na", "nz", "fixnan") and namespace is None
+                and self._pine_v5_body and node.args):
+            self._refuse_v5_bool_na_observer(node, f"{func_name}()", node.args[:1])
+
         # na(x) -> is_na(x); a drawing asks its arena (codegen/drawing.py).
         if func_name == "na" and namespace is None:
             if (len(node.args) == 1 and not node.kwargs
@@ -2146,6 +2150,8 @@ class CallVisitor:
             if inferred == "std::string":
                 return self._visit_expr(arg)
             if inferred == "bool":
+                if self._pine_v5_body:
+                    self._refuse_v5_bool_na_observer(node, "string()", [arg])
                 visited = self._visit_expr(arg)
                 return f'(({visited}) ? std::string("true") : std::string("false"))'
             return self._visit_str_call("tostring", node)
@@ -3033,6 +3039,8 @@ class CallVisitor:
 
     def _str_format_expr(self, fmt_node, arg_nodes) -> str:
         """Shared TradingView MessageFormat lowering for str.format and log.*."""
+        if self._pine_v5_body:
+            self._refuse_v5_bool_na_observer(fmt_node, "str.format()", arg_nodes)
         fmt_arg = self._visit_expr(fmt_node)
         rest = [f"_PFTvFormatValue({self._visit_expr(orig)})" for orig in arg_nodes]
         vec = "{" + ", ".join(rest) + "}"
@@ -3089,6 +3097,8 @@ class CallVisitor:
             if inferred == "std::string":
                 return args[0] if args else 'std::string("")'
             if inferred == "bool":
+                if self._pine_v5_body:
+                    self._refuse_v5_bool_na_observer(node, "str.tostring()", [val_arg])
                 return (f'({args[0]} ? std::string("true") : '
                         'std::string("false"))')
             if len(args) >= 2:

@@ -14,9 +14,12 @@ by import path.
 | Library | `//@version` | What it exercises |
 |---|---|---|
 | `pftest/Base/1` | 6 | An export, a private helper and a type an importing library uses: the transitive import. |
+| `pftest/V5Rules/1` | 5 | The functions of the synthetic v5 strategy `xc_v5_lib` (`../xsym_lib_tv`), one per v5 rule PineForge implements: int division by v5 qualifiers, strict `and`/`or` beside a lazy `?:`, a `for` end fixed before the first iteration, v5's color constants, numbers as conditions, a bool na where v5 reads it as a bool and across the library boundary, `timeframe.period`; and `at()`, a negative array index. |
 | `pftest/Signals/1` | 6 | String signals with `na`, private helpers and a private constant, per-call-site state, locals and parameters that collide with a script's names, a type with a method, an enum, an `export const`, a transitive import, and an export PineForge refuses that only a script calling it reaches. |
 
 Scripts importing them live in `../library_scripts`: `signals_import.pine`
 reads every export of `pftest/Signals/1`, and `signals_spelled.pine` is the
 same script with both libraries written in as user code, renamed by hand
-(`tests/test_e2e_library_inline.py`).
+(`tests/test_e2e_library_inline.py`). `v5rules_import.pine` is
+`xc_v5_lib`'s global code calling `pftest/V5Rules/1`
+(`tests/test_e2e_library_v5.py`).

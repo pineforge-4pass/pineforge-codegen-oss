@@ -55,6 +55,7 @@ from .tables import (
     ARRAY_ARGS_READ_REPEATEDLY,
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_METHODS,
+    V5_ARRAY_INDEX_METHODS,
     BAR_BUILTINS,
     BAR_FIELDS,
     DRAWING_NS,
@@ -1262,10 +1263,14 @@ class TypeInferer:
                 arg_bindings.append((token, args[arg_index]))
             self._array_arg_counter = counter
 
+            table = (V5_ARRAY_INDEX_METHODS
+                     if self._pine_v5_body and method in V5_ARRAY_INDEX_METHODS
+                     else ARRAY_METHODS)
+
             def lower_receiver(recv: str) -> str:
                 lowered = evaluate_args_once(
                     bound_args, ARRAY_ARGS_READ_REPEATEDLY.get(method, ()),
-                    lambda a: ARRAY_METHODS[method](recv, a), "_pf_array_a",
+                    lambda a: table[method](recv, a), "_pf_array_a",
                 )
                 for token, original in reversed(arg_bindings):
                     lowered = (

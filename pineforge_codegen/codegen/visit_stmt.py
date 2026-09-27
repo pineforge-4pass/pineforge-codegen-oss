@@ -1697,12 +1697,15 @@ class StmtVisitor:
             f"!is_na({s_var}) && !is_na({e_var}) && !is_na({step_var}) && "
             if na_capable else ""
         )
+        # Pine v6 evaluates ``to`` before every iteration; v5 (a v5 library's
+        # body) fixes it before the first one.
+        refresh = "" if self._pine_v5_body else f", {e_var} = {end_expr}"
         lines.append(
             f"{pad}for (int {var} = {s_var}; "
             f"{na_guard}"
             f"({down_var} ? ({var} >= {e_var}) : ({var} <= {e_var})); "
-            f"{var} += ({down_var} ? -{step_var} : {step_var}), "
-            f"{e_var} = {end_expr}) {{"
+            f"{var} += ({down_var} ? -{step_var} : {step_var})"
+            f"{refresh}) {{"
         )
         # Register the loop counter so reads of it inside the body resolve (the
         # unknown-identifier guard in _visit_ident would otherwise flag it).

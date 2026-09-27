@@ -1192,6 +1192,13 @@ class ExprVisitor:
             # true, so both operands need the same na-aware truthiness rule.
             left = self._coerce_bool_expr(left, node.left)
             right = self._coerce_bool_expr(right, node.right)
+            if self._pine_v5_body:
+                # v5 evaluates both operands, left then right, whatever the
+                # left one decides (TradingView: a stateful right operand
+                # runs on every bar).
+                return (f"([&]() -> bool {{ const bool _pf_v5_l = ({left}); "
+                        f"const bool _pf_v5_r = ({right}); "
+                        f"return _pf_v5_l {op} _pf_v5_r; }}())")
         if node.op == "+":
             lt = self._infer_type(node.left)
             rt = self._infer_type(node.right)
@@ -1213,7 +1220,27 @@ class ExprVisitor:
         # Ref: https://www.tradingview.com/pine-script-docs/concepts/operators/
         if node.op == "/":
             return f"((double)({left}) / (double)({right}))"
+        if node.op in ("==", "!=") and self._pine_v5_body:
+            self._refuse_v5_bool_na_observer(
+                node, f"'{node.op}'", (node.left, node.right))
         return self._lower_relational(op, node.left, node.right, left, right)
+
+    def _refuse_v5_bool_na_observer(self, node, what: str, operands) -> None:
+        """A v5 bool can be na (a comparison with na, an na literal, a bool's
+        history before the first bar); PineForge's bool cannot. It reads as
+        false wherever v5 casts it to a bool (TradingView's tape of
+        ``xc_v5_lib``), but ``na()``, ``nz()``, ``fixnan()``,
+        ``str.tostring``/``str.format`` and ``==``/``!=`` of a bool tell the
+        third state apart (a v5 probe's tape outside this repository:
+        ``na(b)`` true, ``b == false`` na)."""
+        if any(self._infer_type(o) == "bool" for o in operands if o is not None):
+            library = (getattr(node.loc, "file", None) or "a v5 library")
+            self._codegen_error(
+                node,
+                f"library '{library}' is //@version=5: {what} of a bool reads "
+                "v5's third bool state (na), which PineForge's two-state bool "
+                "does not keep",
+            )
 
     def _visit_unaryop(self, node: UnaryOp) -> str:
         operand = self._visit_expr(node.operand)

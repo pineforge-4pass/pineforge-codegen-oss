@@ -194,6 +194,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     because the chain shares the constructor constant folder.
     """
 
+    # True while emitting the body of a function or method inlined from a
+    # v5 library (``library_v5``): and/or evaluate both operands, a for
+    # loop's end is fixed before its first iteration, a negative array
+    # index stops the run, and an observer of v5's na bool is refused.
+    _pine_v5_body = False
+
     def __init__(self, ctx: AnalyzerContext,
                  budget: TimeBudget | None = None) -> None:
         self.ctx = ctx

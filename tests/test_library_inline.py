@@ -223,8 +223,8 @@ def test_a_primitive_local_named_like_a_namespace_leaves_it_built_in():
     assert "Tf_v1__first__array" in cpp
 
 
-def test_a_v5_library_is_refused_by_name():
+def test_a_v5_library_inlines():
+    """Its body keeps v5's rules (``tests/test_library_v5.py``)."""
     lib = {"pftest/Five/1": '//@version=5\nlibrary("Five")\nexport f(float x) => x * 2\n'}
-    (err,) = _errors('import pftest/Five/1 as F\nx = F.f(close)\nplot(x)\n', libraries=lib)
-    assert err.location.file == "pftest/Five/1"
-    assert "is //@version=5" in err.message
+    cpp = _cpp('import pftest/Five/1 as F\nx = F.f(close)\nplot(x)\n', libraries=lib)
+    assert "Five_v1__f(" in cpp

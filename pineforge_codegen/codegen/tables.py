@@ -614,13 +614,14 @@ def _checked_array_range_prelude(*, reject_inverted: bool = True) -> str:
     )
 
 
-def _checked_array_insert(a: str, args: list[str]) -> str:
+def _checked_array_insert(a: str, args: list[str], normalize_negative: bool = True) -> str:
     """``array.insert(id, index, value)`` — index is an INSERTION point.
 
     ``index == size`` appends, so the bound is ``index <= size``; a negative
     index is end-relative, exactly as for ``get``/``set``/``remove``.
     """
-    check = _checked_array_index_prelude(allow_size=True)
+    check = _checked_array_index_prelude(allow_size=True,
+                                         normalize_negative=normalize_negative)
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_value){ "
@@ -666,8 +667,8 @@ def checked_array_slice(a: str, args: list[str], *, result_type: str) -> str:
     )
 
 
-def _checked_array_get(a: str, args: list[str]) -> str:
-    check = _checked_array_index_prelude()
+def _checked_array_get(a: str, args: list[str], normalize_negative: bool = True) -> str:
+    check = _checked_array_index_prelude(normalize_negative=normalize_negative)
     return (
         "[&](auto&& __pf_array)->decltype(auto){ "
         "return [&](auto&& __pf_raw_index_value)->decltype(auto){ "
@@ -681,8 +682,8 @@ def _checked_array_get(a: str, args: list[str]) -> str:
     )
 
 
-def _checked_array_set(a: str, args: list[str]) -> str:
-    check = _checked_array_index_prelude()
+def _checked_array_set(a: str, args: list[str], normalize_negative: bool = True) -> str:
+    check = _checked_array_index_prelude(normalize_negative=normalize_negative)
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_value){ "
@@ -693,8 +694,8 @@ def _checked_array_set(a: str, args: list[str]) -> str:
     )
 
 
-def _checked_array_remove(a: str, args: list[str]) -> str:
-    check = _checked_array_index_prelude()
+def _checked_array_remove(a: str, args: list[str], normalize_negative: bool = True) -> str:
+    check = _checked_array_index_prelude(normalize_negative=normalize_negative)
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_value){ "
@@ -757,6 +758,17 @@ def _checked_array_percentrank(a: str, args: list[str]) -> str:
         "return (double)(le-1)/(__pf_array.size()-1)*100.0; "
         f"}}(({args[0]})); }}(({a}))"
     )
+
+
+# Pine v5 raises a runtime error on a negative index to these (TradingView:
+# "Index -1 is out of bounds"); v6 counts from the array's end. The v5 forms
+# lower a v5 library's body (``library_v5``).
+V5_ARRAY_INDEX_METHODS = {
+    "get": lambda a, args: _checked_array_get(a, args, normalize_negative=False),
+    "set": lambda a, args: _checked_array_set(a, args, normalize_negative=False),
+    "insert": lambda a, args: _checked_array_insert(a, args, normalize_negative=False),
+    "remove": lambda a, args: _checked_array_remove(a, args, normalize_negative=False),
+}
 
 
 # Methods called as ``array.method(arr, ...)`` or ``arr.method(...)``.

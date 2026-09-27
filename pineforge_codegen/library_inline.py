@@ -810,6 +810,7 @@ class _Linker:
         self._finish()
         handled_ids = {id(s) for s in handled}
         definitions = self._definitions()
+        self._check_v5_in_requests([*definitions, *body])
         merged: list = []
         inserted = False
         first_use = self._first_library_use(body, handled_ids)
@@ -848,10 +849,54 @@ class _Linker:
                         self._filename))
         from .library_v5 import lower_v5_modules
         lower_v5_modules(
-            [(self._modules[p].lib, self._ordered_included(self._modules[p]))
+            [(self._modules[p].lib, self._ordered_included(self._modules[p]),
+              self._modules[p].names)
              for p in self._load_order if self._modules[p].included],
             self._filename,
         )
+
+    def _check_v5_in_requests(self, statements: list) -> None:
+        """A request.*() payload is evaluated by the request's own builder,
+        which inlines the user functions it calls outside the codegen's v5
+        rules: refuse a v5 library function a payload reaches."""
+        v5: dict[str, str] = {}
+        methods: dict[str, str] = {}
+        for path in self._load_order:
+            mod = self._modules[path]
+            if mod.lib.pine_version != 5:
+                continue
+            for stmt in self._ordered_included(mod):
+                if isinstance(stmt, FuncDef):
+                    v5[stmt.name] = path
+                elif isinstance(stmt, MethodDef):
+                    methods[stmt.name] = path
+        if not v5 and not methods:
+            return
+        funcs = {s.name: s for s in statements if isinstance(s, (FuncDef, MethodDef))}
+        for node in self._walk(statements):
+            if not (isinstance(node, FuncCall)
+                    and _callee_alias(node.callee) is not None
+                    and node.callee.object.name == "request"):
+                continue
+            seen: set[str] = set()
+            stack = [*node.args, *node.kwargs.values()]
+            while stack:
+                for sub in self._walk(stack.pop()):
+                    if not isinstance(sub, FuncCall):
+                        continue
+                    callee = sub.callee
+                    name = callee.name if isinstance(callee, Identifier) else (
+                        callee.member if isinstance(callee, MemberAccess) else None)
+                    path = v5.get(name) if isinstance(callee, Identifier) else methods.get(name)
+                    if path is not None:
+                        raise _LinkError(_error(
+                            f"library '{path}' is //@version=5: its function "
+                            f"reached from a request.{node.callee.member}() "
+                            "payload would run outside v5's rules there",
+                            sub.loc, self._filename))
+                    if name in funcs and name not in seen:
+                        seen.add(name)
+                        stack.append(funcs[name].body)
 
     def _ordered_included(self, mod: _Module) -> list:
         return [stmt for stmt in mod.lib.program.body if id(stmt) in mod.included]

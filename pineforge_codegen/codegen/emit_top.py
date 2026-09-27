@@ -1820,6 +1820,22 @@ class TopLevelEmitter:
 
     def _emit_func_def(self, fi: FuncInfo, lines: list[str], call_site_idx: int | None = None,
                        instance: dict | None = None) -> None:
+        """Emit a user-defined function as a class method, under v5's rules
+        when it was inlined from a v5 library (``library_v5``)."""
+        node = fi.node
+        previous = self._pine_v5_body
+        self._pine_v5_body = (
+            node is not None
+            and (getattr(node, "annotations", None) or {}).get("pine_version") == 5
+        )
+        try:
+            self._emit_func_def_body(fi, lines, call_site_idx, instance)
+        finally:
+            self._pine_v5_body = previous
+
+    def _emit_func_def_body(self, fi: FuncInfo, lines: list[str],
+                            call_site_idx: int | None = None,
+                            instance: dict | None = None) -> None:
         """Emit a user-defined function as a class method.
 
         If call_site_idx is not None, emit a per-call-site variant with
