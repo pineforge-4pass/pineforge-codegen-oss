@@ -1,0 +1,16 @@
+//@version=6
+// A TA length chosen by a ternary over an input.string, passed through a
+// helper into request.security and on the chart.
+strategy("PF sec2 ta len choice", overlay = true)
+mode = input.string("B", "Mode", options = ["A", "B", "C"])
+len = mode == "A" ? 5 : mode == "B" ? 10 : 20
+f_t(_len) =>
+    ta.sma(close, _len)
+s60 = request.security(syminfo.tickerid, "60", f_t(len))
+sChart = f_t(len)
+s(x) => na(x) ? "na" : str.tostring(x)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(s60) + "|" + s(sChart))

@@ -85,7 +85,7 @@ from __future__ import annotations
 import re
 
 from ..ast_nodes import (
-    ExprStmt, FuncCall, IfStmt, SwitchStmt, VarDecl,
+    ExprStmt, FuncCall, Identifier, IfStmt, MemberAccess, SwitchStmt, VarDecl,
 )
 from ..analyzer import FuncInfo
 from ..symbols import PineType, method_receiver_cpp_token
@@ -123,6 +123,8 @@ class TopLevelEmitter:
         )
         lines.append('#include <pineforge/source/pine_strategy_host.hpp>')
         lines.append('#include <pineforge/ta.hpp>')
+        if self._ta_uses_dynamic_lengths():
+            lines.append('#include <pineforge/source/pine_ta_length.hpp>')
         lines.append('#include <pineforge/math.hpp>')
         lines.append('#include <pineforge/series.hpp>')
         lines.append('#include <pineforge/na.hpp>')
@@ -512,6 +514,7 @@ class TopLevelEmitter:
         """
         members: list[str] = []
         seen: set[str] = set()
+        varip_members = self._varip_state_member_names()
         for line in declaration_lines:
             name = self._script_state_member_name(line)
             if name is None:
@@ -521,8 +524,43 @@ class TopLevelEmitter:
             if name in seen:
                 raise AssertionError(f"duplicate generated script-state member: {name}")
             seen.add(name)
+            if name in varip_members:
+                continue
             members.append(name)
         return members
+
+    def _varip_state_member_names(self) -> set[str]:
+        """Generated members holding ``varip`` state, with their first-run
+        initialization latches.
+
+        A historical bar executes the script once, so ``varip`` keeps its
+        value exactly like ``var``, except that a calc_on_order_fills
+        recalculation rolls ``var`` back to the bar's committed state and
+        leaves ``varip`` alone (TradingView tapes, COOF on/off and with the
+        bar magnifier). The rollback checkpoint therefore skips these members;
+        a new run still resets them (``prepare_script_run``).
+        """
+        names: set[str] = set()
+        metadata = getattr(self.ctx, "var_member_metadata_by_node", {}) or {}
+        for node_id, meta in metadata.items():
+            decl = meta[0]
+            if not (isinstance(decl, VarDecl) and decl.is_varip):
+                continue
+            base = self._safe_name(meta[1])
+            storages = {base}
+            for remap in self._func_cs_var_remap.values():
+                if base in remap:
+                    storages.add(remap[base])
+            for instance in self._fresh_instances:
+                clone = (instance.get("var_remap") or {}).get(base)
+                if clone is not None:
+                    storages.add(clone)
+            names |= storages
+            for storage in storages:
+                flag = self._runtime_var_init_flags.get((node_id, storage))
+                if flag is not None:
+                    names.add(flag)
+        return names
 
     def _emit_script_run_prepare(self, lines: list[str], declarations: list[str]) -> None:
         """Reset every declared script member, then prepare this run's cache.
@@ -924,6 +962,10 @@ class TopLevelEmitter:
             # run and their ctor args (bare param names) can never be sized.
             if ta_idx in self._dead_ta_indices:
                 continue
+            if self._ta_dynamic_plan(site) is not None:
+                # A simple or series length is read on the bar
+                # (``_ta_dynamic_plan``): the member is default-constructed.
+                continue
             if site.ctor_args:
                 # If a ctor arg is neither a compile-time literal nor expandable
                 # to an input-backed runtime expression, the old code silently
@@ -934,8 +976,12 @@ class TopLevelEmitter:
                 # reset overwrites the placeholder before the first compute.
                 for arg_pos, a in enumerate(site.ctor_args):
                     r = self._resolve_ta_ctor_arg(a)
+                    # An argument ``_ta_arg_takes_plan`` sends to the lowering
+                    # of ``_ta_dynamic_plan`` that it cannot spell is refused
+                    # here, as before string literals were spelled.
                     if (not self._is_compile_time_value(r)
-                            and self._runtime_ctor_arg_for_reset(a) is None):
+                            and (self._runtime_ctor_arg_for_reset(a) is None
+                                 or self._ta_arg_takes_plan(site, arg_pos, a))):
                         # A TA source reached through request.security can have
                         # several helper-bound constructor variants. Validate
                         # only variants of this exact source node before the
@@ -988,6 +1034,12 @@ class TopLevelEmitter:
                 if not site.ctor_args:
                     continue
                 for variant in variants:
+                    if self._ta_security_plan(
+                        info["sec_id"], site, variant.get("binding_stack", ())
+                    ) is not None:
+                        # Default-constructed: the length is read on the bar
+                        # (``_ta_security_plan``).
+                        continue
                     ctor_args, _ctor_arg_stability = self._security_ta_ctor_args_for_variant(
                         info["sec_id"],
                         site,
@@ -1333,17 +1385,18 @@ class TopLevelEmitter:
         #     members (base.py section 6) but — unlike user series vars (pushed at
         #     their assignment) and bar fields (pushed above) — have no push site,
         #     so ``[n]`` would read an unfed buffer (the na sentinel) on every bar.
-        #     Push each from its scalar lowering. A builtin whose lowering is a
-        #     self-referential call (e.g. ``time_close`` -> ``time_close()``) is
-        #     skipped — the call would resolve to the shadowing Series member.
+        #     Push each from its scalar lowering. ``time_close``'s Series
+        #     member is escaped (``_time_close_``) so its ``time_close()``
+        #     lowering still calls the host; a lowering that would call its
+        #     own member is skipped.
         from .tables import BAR_BUILTINS
         for _bname in sorted(self.ctx.series_vars):
             if _bname in self._var_names:
                 continue
             _bexpr = BAR_BUILTINS.get(_bname)
-            if _bexpr is None or _bexpr.strip().startswith(f"{_bname}("):
-                continue
             _bsafe = self._safe_name(_bname)
+            if _bexpr is None or _bexpr.strip().startswith(f"{_bsafe}("):
+                continue
             self._emit_history_series_write(lines, "        ", _bsafe, _bexpr)
 
         # a2. Push strategy series
@@ -1351,6 +1404,53 @@ class TopLevelEmitter:
             member = svar.replace("_strat_", "")
             push_expr = self._STRAT_SERIES_PUSH.get(member, "0")
             self._emit_history_series_write(lines, "        ", svar, push_expr)
+
+        # a3. Push the session.* flags the top level reads at an offset: its
+        #     history is the chart bars', whether or not the read runs on this
+        #     bar (TradingView's tapes: tests/test_e2e_session_history.py).
+        for flag in sorted(self._session_history_flags):
+            value = self._visit_expr(MemberAccess(object=Identifier(name="session"),
+                                                  member=flag))
+            self._emit_history_series_write(
+                lines, "        ", self._session_history_member(flag), value)
+
+        # b0. Evaluate static global inputs once, BEFORE the first-bar ``var``
+        #     latch below: a ``var`` array / matrix / map / UDT initializer
+        #     reads input members (``array.new_bool(gridLines, false)``); built
+        #     first, it read their zero and sized an empty array. TradingView
+        #     requires constant input defaults, so the inputs read nothing the
+        #     latch builds.
+        static_vars = []
+        for stmt in self.ctx.ast.body:
+            if isinstance(stmt, VarDecl):
+                is_input = isinstance(stmt.value, FuncCall) and self._is_input_call(stmt.value)
+                if is_input:
+                    func_name_i, namespace_i = self._resolve_callee(stmt.value.callee)
+                    is_static_global_input = (
+                        stmt.name in self._global_member_vars
+                        and not self._is_source_input(stmt.value)
+                        and stmt.name not in self._array_vars
+                        and stmt.name not in getattr(self, "_matrix_specs", {})
+                        and stmt.name not in getattr(self, "_map_vars", {})
+                        and not stmt.is_var
+                        and not stmt.is_varip
+                    )
+                    if is_static_global_input:
+                        safe = self._safe_name(stmt.name)
+                        default = self._get_input_default(stmt.value)
+                        default_cpp = self._visit_expr(default) if default is not None else "0"
+                        title = self._get_input_title(stmt.value, var_name=stmt.name)
+                        getter = self._input_type_to_getter(func_name_i, namespace_i)
+                        default_cpp = self._coerce_string_input_default(getter, default_cpp)
+                        cpp_val = f'{getter}({self._input_key_literal(title)}, {default_cpp})'
+                        static_vars.append(f"{safe} = {cpp_val};")
+
+        if static_vars:
+            lines.append("        if (!_inputs_initialized_) {")
+            for var_expr in static_vars:
+                lines.append(f"            {var_expr}")
+            lines.append("            _inputs_initialized_ = true;")
+            lines.append("        }")
 
         # b. Var init / carry-forward
         if self.ctx.var_members:
@@ -1519,39 +1619,6 @@ class TopLevelEmitter:
 
         # c. Push non-var series (they start fresh each bar with a push)
         # (actual push happens in visit_VarDecl when the decl is visited)
-
-        # c3. Evaluate static global inputs and variables once
-        static_vars = []
-        for stmt in self.ctx.ast.body:
-            if isinstance(stmt, VarDecl):
-                is_input = isinstance(stmt.value, FuncCall) and self._is_input_call(stmt.value)
-                if is_input:
-                    func_name_i, namespace_i = self._resolve_callee(stmt.value.callee)
-                    is_static_global_input = (
-                        stmt.name in self._global_member_vars
-                        and not self._is_source_input(stmt.value)
-                        and stmt.name not in self._array_vars
-                        and stmt.name not in getattr(self, "_matrix_specs", {})
-                        and stmt.name not in getattr(self, "_map_vars", {})
-                        and not stmt.is_var
-                        and not stmt.is_varip
-                    )
-                    if is_static_global_input:
-                        safe = self._safe_name(stmt.name)
-                        default = self._get_input_default(stmt.value)
-                        default_cpp = self._visit_expr(default) if default is not None else "0"
-                        title = self._get_input_title(stmt.value, var_name=stmt.name)
-                        getter = self._input_type_to_getter(func_name_i, namespace_i)
-                        default_cpp = self._coerce_string_input_default(getter, default_cpp)
-                        cpp_val = f'{getter}({self._input_key_literal(title)}, {default_cpp})'
-                        static_vars.append(f"{safe} = {cpp_val};")
-
-        if static_vars:
-            lines.append("        if (!_inputs_initialized_) {")
-            for var_expr in static_vars:
-                lines.append(f"            {var_expr}")
-            lines.append("            _inputs_initialized_ = true;")
-            lines.append("        }")
 
         # c2. First-bar TA resize: rebuild any TA object whose ctor args come
         # from input-backed variables so strategy_set_input() actually changes
@@ -1909,7 +1976,8 @@ class TopLevelEmitter:
                 # a string -> ``std::string``. User UDT field mutation propagates
                 # through the arena even though the handle parameter is by value.
                 spec = fi.param_type_specs[i]
-                cpp_t = self._type_spec_to_cpp(spec)
+                cpp_t = self._wide_declared_int_param(
+                    fi, i, self._type_spec_to_cpp(spec))
                 if spec.kind == "udt":
                     self._udt_param_udt[p] = spec.name
                     self._udt_param_udt[self._safe_name(p)] = spec.name
@@ -1924,7 +1992,8 @@ class TopLevelEmitter:
                         cpp_t = f"{cpp_t}&"
             elif i < len(fi.param_types):
                 pt = fi.param_types[i]
-                cpp_t = PINE_TYPE_TO_CPP.get(pt, "double")
+                cpp_t = self._wide_declared_int_param(
+                    fi, i, PINE_TYPE_TO_CPP.get(pt, "double"))
             else:
                 cpp_t = "double"
             param_strs.append(f"{cpp_t} {self._safe_name(p)}")
@@ -2084,6 +2153,18 @@ class TopLevelEmitter:
 
         lines.append(f"    {ret_type} {func_name}({', '.join(param_strs)}) {{")
 
+        # A session.* flag the body reads at an offset: its history is this
+        # call site's calls, so push the flag once per call, before a lazy
+        # operand or a block can skip the read (TradingView's function tape,
+        # tests/test_e2e_session_history.py).
+        for flag in sorted(self._session_call_flags.get(fi.name, ())):
+            member = self._inline_history_member_by_key.get(
+                ("session_call", fi.name, flag, self._current_instance_name))
+            if member is not None:
+                value = self._visit_expr(MemberAccess(object=Identifier(name="session"),
+                                                      member=flag))
+                self._emit_history_series_write(lines, "        ", member, value)
+
         emitted_return = False
         if node.is_single_expr and node.body:
             expr = node.body[0].expr if isinstance(node.body[0], ExprStmt) else None
@@ -2131,6 +2212,8 @@ class TopLevelEmitter:
                     # reject ``Label _func_ret = 0.0;``.
                     if return_udt or ret_type in DRAWING_TYPE_TO_CPP.values():
                         default_ret = f"{ret_type}{{}}"
+                    elif fi.returns_tuple:
+                        default_ret = self._tuple_default_expr(tuple_types_list)
                     else:
                         default_ret = self._default_for_type(ret_type)
                     lines.append(f"        {ret_type} _func_ret = {default_ret};")

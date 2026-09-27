@@ -64,7 +64,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from ..ast_nodes import (
-    ASTNode, Assignment, BinOp, BoolLiteral, BreakStmt, ContinueStmt, ExprStmt,
+    ASTNode, Assignment, BinOp, BoolLiteral, BreakStmt, ColorLiteral, ContinueStmt, ExprStmt,
     ForStmt, ForInStmt, FuncCall, FuncDef, Identifier, IfStmt, MemberAccess,
     NaLiteral, NumberLiteral, StringLiteral, Subscript, SwitchStmt, Ternary,
     TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
@@ -73,12 +73,65 @@ from ..analyzer import (
     FuncInfo, TACallSite, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
 )
 from .. import signatures as sigs
-from ..symbols import PineType
+from ..errors import CompileError
+from ..symbols import PineType, method_receiver_type_name
 from .tables import (
-    MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_BAR_FIELDS,
-    SECURITY_BAR_FIELD_EXPRS, SECURITY_BAR_FIELD_TYPES, _math_minmax_na_expr,
-    _merge_kwargs,
+    BAR_BUILTINS, MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_BAR_FIELDS,
+    SECURITY_BAR_FIELD_EXPRS, SECURITY_BAR_FIELD_TYPES, TA_TUPLE_FIELDS,
+    _math_minmax_na_expr, _merge_kwargs,
 )
+
+
+# Statements a multi-statement request.security helper may hold before its
+# final expression: declarations (``[a, b] = rhs`` too), assignments,
+# if-branches and a block's trailing value.
+_SECURITY_HELPER_STMTS = (VarDecl, Assignment, IfStmt, TupleAssign, ExprStmt)
+# The bare expression statements a helper body admits: a block's value.
+_SECURITY_BLOCK_VALUES = (Identifier, NumberLiteral, StringLiteral, BoolLiteral, NaLiteral)
+
+
+# C++ scalar types a request.security helper argument or method receiver may
+# have for the payload to inline the call.
+_SECURITY_SCALAR_CPP = frozenset({"double", "int", "int64_t", "bool", "std::string"})
+# What a builtin wrapping a payload's user call (``nz(f())``) may read besides
+# what it hands back to the builder, for the call to be inlined on the
+# requested bar: pure calls, namespace constants, and names the evaluator
+# spells from the requested bar (``current_bar_`` becomes ``bar``).
+_SECURITY_PURE_CALLS = frozenset({
+    "nz", "na", "int", "float", "bool", "string", "input",
+    "hour", "minute", "second", "dayofmonth", "dayofweek", "month", "year", "weekofyear",
+})
+_SECURITY_PURE_CALL_NAMESPACES = frozenset({"math", "str", "color", "input"})
+# ``math.random`` draws per chart bar (its stream is keyed by ``bar_index_``).
+_SECURITY_IMPURE_CALLS = frozenset({("math", "random")})
+_SECURITY_PURE_MEMBER_NAMESPACES = frozenset({"math", "color", "syminfo", "format"})
+# The session flags the payload reads at the requested bar's time; the
+# session-day facts (``session.isfirstbar``) are the chart kernel's.
+_SECURITY_PURE_SESSION_MEMBERS = frozenset({
+    "ismarket", "ispremarket", "ispostmarket", "regular", "extended",
+})
+_SECURITY_REQUESTED_NAMES = frozenset(
+    name for name, cpp in BAR_BUILTINS.items() if "current_bar_" in cpp
+) | {"open", "high", "low", "close", "volume"}
+
+
+# The signature under which ``inline_helper_ta_indices`` records a global's
+# TA site that a multi-statement helper reads: the evaluator's prologue
+# computes that site, but every earlier build computed it where the helper
+# was inlined (``_security_check_tuple_element_history``).
+_SECURITY_THROUGH_GLOBAL = "@through-global"
+
+
+def _security_tuple_binding(func_name: str, name: str) -> str:
+    """Opaque prepass binding of a name a helper's tuple declaration binds:
+    the prepasses only need to know the name is a local, the emitter binds
+    it to the element's C++ local."""
+    return f"@tuple:{func_name}:{name}"
+
+
+class _SecurityKeepChart(Exception):
+    """An evaluator decided before its emission to keep every earlier
+    build's lowering (``_security_chart_evaluators``)."""
 
 
 class _SecurityHelperArgumentFrame(dict):
@@ -89,9 +142,13 @@ class _SecurityHelperArgumentFrame(dict):
     identifiers inside its own argument expression and falsely recursing.
     """
 
-    def __init__(self, values: dict, caller_stack: tuple[dict, ...]) -> None:
+    def __init__(self, values: dict, caller_stack: tuple[dict, ...],
+                 method: bool = False) -> None:
         super().__init__(values)
         self.caller_stack = caller_stack
+        # Bound by a typed method call, which every earlier build called on
+        # the chart (``_security_info_without_methods``).
+        self.method = method
 
 
 class SecurityEmitter:
@@ -193,9 +250,17 @@ class SecurityEmitter:
         conditional expressions over setup-time-safe leaves such as
         ``script_tf_`` and direct input getters.
 
-        Only pure, single-expression arms with an explicit default are accepted
-        here.  Other shapes cannot be registered deterministically and produce
-        a clear codegen diagnostic.
+        Only pure, single-expression arms are accepted here.  Other shapes
+        cannot be registered deterministically and produce a clear codegen
+        diagnostic.  Without a default arm an unmatched switch yields ``na``,
+        with which TradingView's ``request.security`` reads the chart's
+        timeframe (tests/test_e2e_popfix_tf_switch_no_default.py replays its
+        tape): the fallback is ``script_tf_``, ``timeframe.period``'s value.
+        ``request.security_lower_tf`` reads the chart's timeframe too (one
+        intrabar per chart bar), which the engine's lower-timeframe request
+        rejects, so there the default arm stays required. An ``na`` arm is
+        refused: the switch itself would store it in the timeframe string as a
+        number.
         """
 
         def arm_value(body: list) -> str:
@@ -208,6 +273,25 @@ class SecurityEmitter:
                         "request.security call or rewrite it as pure switch arms."
                     ),
                 )
+            if isinstance(body[0].expr, NaLiteral):
+                if getattr(self, "_security_tf_lower", False):
+                    self._codegen_error(
+                        node,
+                        "request.security_lower_tf timeframe switch arm is na",
+                        hint=(
+                            "TradingView reads an na timeframe as the chart's, which "
+                            "the engine's lower-timeframe request rejects: spell a "
+                            "strictly finer timeframe."
+                        ),
+                    )
+                self._codegen_error(
+                    node,
+                    "request.security timeframe switch arm is na",
+                    hint=(
+                        "TradingView reads an na timeframe as the chart's: spell "
+                        "the arm timeframe.period."
+                    ),
+                )
             value = self._security_tf_runtime_expr(body[0].expr, resolving)
             if value is None:
                 self._codegen_error(
@@ -216,16 +300,20 @@ class SecurityEmitter:
                 )
             return value
 
-        if not node.default_body:
+        if node.default_body:
+            result = arm_value(node.default_body)
+        elif getattr(self, "_security_tf_lower", False):
             self._codegen_error(
                 node,
-                "request.security timeframe switch requires a default arm",
+                "request.security_lower_tf timeframe switch requires a default arm",
                 hint=(
-                    "An unmatched Pine switch yields na; add an explicit default "
-                    "timeframe so the evaluator can be registered deterministically."
+                    "When no arm matches, TradingView reads the chart's timeframe "
+                    "(one intrabar per chart bar); the engine's lower-timeframe "
+                    "request needs a strictly finer timeframe."
                 ),
             )
-        result = arm_value(node.default_body)
+        else:
+            result = "script_tf_"
 
         selector = None
         if node.expr is not None:
@@ -404,6 +492,7 @@ class SecurityEmitter:
                 "is_lower_tf_array": bool(getattr(item, "is_lower_tf_array", False)),
                 "containing_func": getattr(item, "containing_func", "") or "",
                 "callsite_idx": getattr(item, "callsite_idx", None),
+                "string_result": bool(getattr(item, "string_result", False)),
             }
         return {
             "sec_id": item[0],
@@ -421,6 +510,58 @@ class SecurityEmitter:
             "containing_func": "",
             "callsite_idx": None,
         }
+
+    def _security_ta_tuple_element_field(self, name: str) -> str | None:
+        """The result field a global names when a top-level tuple declaration
+        binds it to an element of a TA tuple call (``[m, s, h] =
+        ta.macd(...)``: ``s`` is ``signal``), else None."""
+        fields = getattr(self, "_security_ta_tuple_fields_cache", None)
+        if fields is None:
+            fields = {}
+            for stmt in self.ctx.ast.body:
+                if not isinstance(stmt, TupleAssign):
+                    continue
+                site = self._get_ta_site(stmt.value)
+                if site is None or not getattr(site, "returns_tuple", False):
+                    continue
+                names = TA_TUPLE_FIELDS.get(self._ta_name_from_site(site)) or []
+                for index, element in enumerate(stmt.names):
+                    if element != "_" and index < len(names):
+                        fields[element] = names[index]
+            self._security_ta_tuple_fields_cache = fields
+        return fields.get(name)
+
+    def _security_tuple_binding_names(self) -> frozenset[str]:
+        """Names a top-level ``[a, b] = request.security(...)`` binds."""
+        names = getattr(self, "_security_tuple_names_cache", None)
+        if names is None:
+            found: set[str] = set()
+            for stmt in self.ctx.ast.body:
+                if not (isinstance(stmt, TupleAssign)
+                        and isinstance(stmt.value, FuncCall)):
+                    continue
+                func_name, namespace = self._resolve_callee(stmt.value.callee)
+                if namespace == "request" and func_name == "security":
+                    found.update(name for name in stmt.names if name != "_")
+            names = frozenset(found)
+            self._security_tuple_names_cache = names
+        return names
+
+    def _security_call_returns_string(self, node: FuncCall) -> bool:
+        """Whether this ``request.security(...)`` call's payload is a string
+        (its registered call carries ``string_result``)."""
+        args = list(node.args)
+        for idx, name in enumerate(("symbol", "timeframe", "expression")):
+            if name in node.kwargs:
+                while len(args) <= idx:
+                    args.append(None)
+                args[idx] = node.kwargs[name]
+        expr_node = args[2] if len(args) > 2 else None
+        return expr_node is not None and any(
+            item.get("string_result")
+            for item in self._security_calls
+            if not item.get("is_lower_tf_array") and item["expr_node"] is expr_node
+        )
 
     def _security_state_name(self, sec_id: int, name: str) -> str:
         return f"_sec{sec_id}_{self._safe_name(name)}"
@@ -454,6 +595,19 @@ class SecurityEmitter:
     ) -> str:
         import re
 
+        # The names below are C++ tokens of the rendered text: a string
+        # literal's contents (``"bull"`` beside a helper local ``bull``) stay.
+        literals = re.compile(r'"(?:[^"\\\n]|\\.)*"' + r"|'(?:[^'\\\n]|\\.)*'")
+
+        def sub(pattern: str, repl: str, text: str) -> str:
+            out, last = [], 0
+            for match in literals.finditer(text):
+                out.append(re.sub(pattern, repl, text[last:match.start()]))
+                out.append(match.group(0))
+                last = match.end()
+            out.append(re.sub(pattern, repl, text[last:]))
+            return "".join(out)
+
         result = cpp.replace("current_bar_.", "bar.")
         for name in sorted(security_mutable_names, key=len, reverse=True):
             info = self._global_mutable_infos.get(name)
@@ -462,10 +616,10 @@ class SecurityEmitter:
             safe = self._safe_name(name)
             state = self._security_state_name(sec_id, name)
             if getattr(info, "is_series", False):
-                result = re.sub(rf"\b{re.escape(safe)}\b(?=\s*\[)", state, result)
-                result = re.sub(rf"\b{re.escape(safe)}\b(?!\s*\[)", f"{state}[0]", result)
+                result = sub(rf"\b{re.escape(safe)}\b(?=\s*\[)", state, result)
+                result = sub(rf"\b{re.escape(safe)}\b(?!\s*\[)", f"{state}[0]", result)
             else:
-                result = re.sub(rf"\b{re.escape(safe)}\b", state, result)
+                result = sub(rf"\b{re.escape(safe)}\b", state, result)
         if helper_binding_stack:
             for frame in helper_binding_stack:
                 for name, bound in frame.items():
@@ -473,18 +627,19 @@ class SecurityEmitter:
                         continue
                     series_name = self._security_series_binding_target(bound)
                     if series_name is not None:
-                        result = re.sub(
+                        ref = self._security_helper_series_ref(series_name)
+                        result = sub(
                             rf"\b{re.escape(name)}\b(?=\s*\[)",
-                            f'_security_helper_series_["{series_name}"]',
+                            ref.replace("\\", "\\\\"),
                             result,
                         )
-                        result = re.sub(
+                        result = sub(
                             rf"\b{re.escape(name)}\b(?!\s*\[)",
-                            f'_security_helper_series_["{series_name}"][0]',
+                            f"{ref}[0]".replace("\\", "\\\\"),
                             result,
                         )
                     else:
-                        result = re.sub(rf"\b{re.escape(name)}\b", bound, result)
+                        result = sub(rf"\b{re.escape(name)}\b", bound, result)
         return result
 
     def _security_lookup_helper_binding(
@@ -523,6 +678,41 @@ class SecurityEmitter:
             )
             return bound, lexical_stack
         return None
+
+    def _security_index_reads_helper_local(
+        self,
+        index,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+    ) -> bool:
+        """Whether a history index reads a helper-local name. The linear
+        emitter binds a local to its C++ variable, so it lowers such an index
+        at run time even where the prepasses could fold the local's value
+        (``k = 0`` then ``src[k]``): they must declare the history it reads."""
+        stack = [(index, helper_binding_stack or ())]
+        for _ in range(4096):
+            if not stack:
+                return False
+            n, frames = stack.pop()
+            if isinstance(n, (list, tuple)):
+                stack.extend((child, frames) for child in n)
+                continue
+            if not isinstance(n, ASTNode):
+                continue
+            if (isinstance(n, Identifier)
+                    and not self._security_identifier_is_global_binding(n)):
+                for frame in reversed(frames):
+                    if n.name in frame:
+                        if not isinstance(frame, _SecurityHelperArgumentFrame):
+                            return True
+                        # An argument: read it in the caller's scope, where
+                        # it may be the caller's local (``f(close, k)``).
+                        if isinstance(frame[n.name], ASTNode):
+                            stack.append((frame[n.name], frame.caller_stack))
+                        break
+            stack.extend(
+                (v, frames) for k, v in vars(n).items() if k != "annotations"
+            )
+        return True
 
     def _literal_int_for_security_index(self, node) -> int | None:
         """Integer index for bar-field[n] inside request.security (must be literal)."""
@@ -855,6 +1045,122 @@ class SecurityEmitter:
             resolving | {id(node)},
         )
 
+    _SECURITY_STABLE_INT_MATH = frozenset({"round", "floor", "ceil"})
+    _SECURITY_STABLE_SAME_MATH = frozenset({"abs", "max", "min"})
+    _SECURITY_STABLE_FLOAT_MATH = frozenset({
+        "sqrt", "pow", "log", "log10", "exp", "avg", "sin", "cos", "tan",
+        "asin", "acos", "atan", "todegrees", "toradians", "round_to_mintick",
+        "sign",
+    })
+
+    def _security_stable_value_type(
+        self,
+        node,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+        depth: int = 0,
+    ) -> str | None:
+        """Pine type (``int``/``float``/``bool``/``string``) of a bar-invariant
+        request.security expression, else None.
+
+        Admits literals, ``input.*`` values, ``timeframe.multiplier``, and
+        math, casts, arithmetic, comparisons and ternaries over those, reached
+        through helper parameters and immutable globals by their lexical
+        binding -- a block local or loop variable sharing a global's name is
+        not the global. Mutable globals (``var``, reassigned) and the
+        containing function's parameters stay out, as in
+        ``_resolve_security_immutable_input_int``.
+        """
+        if node is None or depth > 64:
+            return None
+        nxt = depth + 1
+        if isinstance(node, NumberLiteral):
+            if isinstance(node.value, bool):
+                return None
+            return "float" if isinstance(node.value, float) else "int"
+        if isinstance(node, BoolLiteral):
+            return "bool"
+        if isinstance(node, StringLiteral):
+            return "string"
+        if isinstance(node, Identifier):
+            if not self._security_identifier_is_global_binding(node):
+                binding = self._security_lookup_helper_binding_context(
+                    node.name, helper_binding_stack
+                )
+                if binding is None or isinstance(binding[0], str):
+                    return None
+                return self._security_stable_value_type(binding[0], binding[1], nxt)
+            if node.name in self._global_mutable_infos:
+                return None
+            global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+            if node.name not in global_expr_map:
+                return None
+            return self._security_stable_value_type(global_expr_map[node.name], (), nxt)
+        if isinstance(node, MemberAccess):
+            if (isinstance(node.object, Identifier)
+                    and node.object.name == "timeframe"
+                    and node.member == "multiplier"):
+                return "int"
+            return None
+        if isinstance(node, UnaryOp):
+            operand = self._security_stable_value_type(node.operand, helper_binding_stack, nxt)
+            if node.op == "not":
+                return "bool" if operand == "bool" else None
+            return operand if operand in ("int", "float") else None
+        if isinstance(node, BinOp):
+            left = self._security_stable_value_type(node.left, helper_binding_stack, nxt)
+            right = self._security_stable_value_type(node.right, helper_binding_stack, nxt)
+            if left is None or right is None:
+                return None
+            if node.op in ("and", "or"):
+                return "bool" if left == right == "bool" else None
+            if node.op in ("==", "!=", "<", ">", "<=", ">="):
+                return "bool"
+            numeric = {left, right} <= {"int", "float"}
+            if node.op in ("+", "-", "*", "%") and numeric:
+                return "int" if left == right == "int" else "float"
+            if node.op == "/" and numeric:
+                return "float"
+            return None
+        if isinstance(node, Ternary):
+            if self._security_stable_value_type(
+                node.condition, helper_binding_stack, nxt
+            ) != "bool":
+                return None
+            arms = {
+                self._security_stable_value_type(node.true_val, helper_binding_stack, nxt),
+                self._security_stable_value_type(node.false_val, helper_binding_stack, nxt),
+            }
+            if None in arms:
+                return None
+            if len(arms) == 1:
+                return arms.pop()
+            return "float" if arms <= {"int", "float"} else None
+        if isinstance(node, FuncCall):
+            func_name, namespace = self._resolve_callee(node.callee)
+            if namespace == "input":
+                return {
+                    "int": "int", "float": "float", "bool": "bool",
+                    "string": "string", "timeframe": "string",
+                }.get(func_name)
+            args = [
+                self._security_stable_value_type(arg, helper_binding_stack, nxt)
+                for arg in node.args
+            ]
+            if node.kwargs or not args or None in args:
+                return None
+            if namespace is None and func_name in ("int", "float"):
+                return func_name if args[0] in ("int", "float") else None
+            if namespace == "math" and set(args) <= {"int", "float"}:
+                if func_name in self._SECURITY_STABLE_INT_MATH:
+                    # ``math.round(x, precision)`` is a float.
+                    return "int" if len(args) == 1 else "float"
+                if func_name in self._SECURITY_STABLE_SAME_MATH:
+                    return "int" if set(args) == {"int"} else "float"
+                if func_name in self._SECURITY_STABLE_FLOAT_MATH:
+                    return "float"
+            return None
+        return None
+
     def _compose_security_helper_history_subscript(
         self,
         bound,
@@ -961,13 +1267,20 @@ class SecurityEmitter:
                     bound, bound_stack = binding
                     if not isinstance(bound, str):
                         local_index = n.index
-                        resolved_local_index = self._resolve_security_index_literal(
-                            n.index, bindings
+                        resolved_local_index = (
+                            None
+                            if self._security_index_reads_helper_local(n.index, bindings)
+                            else self._resolve_security_index_literal(n.index, bindings)
                         )
                         if resolved_local_index is not None:
                             local_index = NumberLiteral(
                                 value=resolved_local_index
                             )
+                        else:
+                            # Lowered in this helper's scope by the emitter
+                            # (``__pf_security_index_``): a dynamic read of the
+                            # bound series, never resolved in the caller's.
+                            local_index = Identifier(name="__pf_security_index_dynamic")
                         walk(
                             self._compose_security_helper_history_subscript(
                                 bound,
@@ -1001,9 +1314,9 @@ class SecurityEmitter:
                     resolving.remove(n.object.name)
                     return
 
-            if isinstance(n, FuncCall) and isinstance(n.callee, Identifier):
-                func_name = n.callee.name
-                if func_name in self._func_names:
+            if isinstance(n, FuncCall):
+                func_name = self._security_user_call_key(n)
+                if func_name is not None:
                     call_key = f"func:{func_name}"
                     if call_key in resolving:
                         return
@@ -1054,6 +1367,24 @@ class SecurityEmitter:
                                 else_bindings = dict(current)
                                 for child in stmt.else_body:
                                     walk_stmt(child, else_bindings)
+                                return
+                            if isinstance(stmt, TupleAssign):
+                                walk(stmt.value, local_stack)
+                                for name in stmt.names:
+                                    if name == "_":
+                                        continue
+                                    current[name] = (
+                                        self._security_series_binding(
+                                            f"{plan['func_info'].name}:{name}"
+                                        )
+                                        if name in local_series_names
+                                        else _security_tuple_binding(
+                                            plan["func_info"].name, name
+                                        )
+                                    )
+                                return
+                            if isinstance(stmt, ExprStmt):
+                                walk(stmt.expr, local_stack)
 
                         for stmt in plan["body"]:
                             walk_stmt(stmt, active)
@@ -1097,45 +1428,70 @@ class SecurityEmitter:
     def _security_bar_hist_type(self, field: str) -> str:
         return SECURITY_BAR_FIELD_TYPES.get(field, "double")
 
-    def _security_bar_field_expr(self, field: str) -> str:
+    def _security_bar_field_expr(self, field: str, sec_id: int | None = None) -> str:
+        if field == "time_close" and sec_id is not None:
+            # The requested bar's close on the requested timeframe, as the
+            # chart's ``time_close()`` reads its own bar on the chart's.
+            return (
+                "pine_time_close(bar.timestamp, "
+                f"{self._security_timeframe_expr(sec_id)}, "
+                "syminfo_.session, syminfo_.timezone, script_tf_)"
+            )
         return SECURITY_BAR_FIELD_EXPRS.get(field, f"bar.{field}")
 
     @staticmethod
+    def _security_tuple_element_cpp_types(
+        tuple_size: int,
+        tuple_element_types: tuple[PineType, ...] = (),
+    ) -> list[str]:
+        """Per-element C++ storage of a helper tuple of arbitrary arity.
+
+        A bool element keeps a real ``bool`` so true/false semantics survive
+        the requested-context boundary, and a string element a
+        ``std::string``. Every numeric element, and one whose type was not
+        inferred, retains the established double-coercing representation.
+        """
+        if len(tuple_element_types) != tuple_size:
+            return ["double"] * max(0, tuple_size)
+        return [
+            "bool" if item == PineType.BOOL
+            else "std::string" if item == PineType.STRING
+            else "double"
+            for item in tuple_element_types
+        ]
+
+    @classmethod
     def _security_tuple_result_default(
+        cls,
         cpp_type: str,
         tuple_size: int,
         tuple_element_types: tuple[PineType, ...] = (),
     ) -> str:
-        is_bool_tuple = (
-            len(tuple_element_types) == tuple_size
-            and tuple_size > 0
-            and all(item == PineType.BOOL for item in tuple_element_types)
-        )
-        default_value = "false" if is_bool_tuple else "na<double>()"
+        # TradingView reads a bool element false and a numeric or string
+        # element na before the first requested value and on a gaps_on bar
+        # that completes none (tests/test_e2e_security_helper_tuple_elements.py).
+        defaults = {
+            "bool": "false",
+            "std::string": "na<std::string>()",
+        }
         vals = ", ".join(
-            default_value for _ in range(max(0, tuple_size))
+            defaults.get(element, "na<double>()")
+            for element in cls._security_tuple_element_cpp_types(
+                tuple_size, tuple_element_types
+            )
         )
         return f"{cpp_type}{{{vals}}}"
 
-    @staticmethod
+    @classmethod
     def _security_helper_tuple_cpp_type(
+        cls,
         tuple_size: int,
         tuple_element_types: tuple[PineType, ...] = (),
     ) -> str:
-        """C++ storage type for a supported helper tuple of arbitrary arity.
-
-        Numeric int/float families retain the established double-coercing
-        representation. Homogeneous bool families use real ``bool`` fields so
-        true/false semantics survive the requested-context boundary.
-        """
-        is_bool_tuple = (
-            len(tuple_element_types) == tuple_size
-            and tuple_size > 0
-            and all(item == PineType.BOOL for item in tuple_element_types)
-        )
-        element_cpp_type = "bool" if is_bool_tuple else "double"
+        """C++ storage type for a supported helper tuple of arbitrary arity
+        (``_security_tuple_element_cpp_types`` per element)."""
         return "std::tuple<" + ", ".join(
-            element_cpp_type for _ in range(max(0, tuple_size))
+            cls._security_tuple_element_cpp_types(tuple_size, tuple_element_types)
         ) + ">"
 
     def _collect_security_ta_hist_indices(self, node) -> set[int]:
@@ -1236,9 +1592,9 @@ class SecurityEmitter:
                         if site_idx is not None:
                             out.add(site_idx)
 
-            if isinstance(n, FuncCall) and isinstance(n.callee, Identifier):
-                func_name = n.callee.name
-                if func_name in self._func_names:
+            if isinstance(n, FuncCall):
+                func_name = self._security_user_call_key(n)
+                if func_name is not None:
                     call_key = f"func:{func_name}"
                     if call_key in resolving:
                         return
@@ -1293,6 +1649,24 @@ class SecurityEmitter:
                                 else_bindings = dict(current)
                                 for child in stmt.else_body:
                                     walk_stmt(child, else_bindings)
+                                return
+                            if isinstance(stmt, TupleAssign):
+                                walk(stmt.value, local_stack)
+                                for name in stmt.names:
+                                    if name == "_":
+                                        continue
+                                    current[name] = (
+                                        self._security_series_binding(
+                                            f"{plan['func_info'].name}:{name}"
+                                        )
+                                        if name in local_series_names
+                                        else _security_tuple_binding(
+                                            plan["func_info"].name, name
+                                        )
+                                    )
+                                return
+                            if isinstance(stmt, ExprStmt):
+                                walk(stmt.expr, local_stack)
 
                         for stmt in plan["body"]:
                             walk_stmt(stmt, active)
@@ -1359,8 +1733,11 @@ class SecurityEmitter:
                 return
             if (
                 isinstance(n, Subscript)
-                and isinstance(n.object, FuncCall)
-                and self._get_ta_site(n.object) is None
+                and (
+                    (isinstance(n.object, FuncCall)
+                     and self._get_ta_site(n.object) is None)
+                    or self._is_compound_history_object(n.object)
+                )
             ):
                 add(n)
             if isinstance(n, (list, tuple)):
@@ -1389,7 +1766,10 @@ class SecurityEmitter:
         self, sec_id: int, expr_node, lines: list[str], mbb_suffix: str
     ) -> None:
         for idx, node in enumerate(self._collect_security_expr_hist_subscripts(expr_node)):
-            cpp_t = self._infer_type(node.object)
+            # A session.* flag is a bool: its history reads false, not na,
+            # before the first requested bar.
+            cpp_t = ("bool" if self._is_session_flag(node.object)
+                     else self._infer_type(node.object))
             if cpp_t not in ("double", "int", "bool"):
                 cpp_t = "double"
             name = f"_sec{sec_id}_expr_hist_{idx}"
@@ -1439,6 +1819,10 @@ class SecurityEmitter:
             x = args[0] if args else "0.0"
             return f"({x} * M_PI / 180.0)"
         if func_name == "random":
+            # Its stream is keyed by the chart's bar_index_.
+            self._security_note_chart_read(
+                node, "the payload reads 'math.random' on the chart's bar"
+            )
             lo = args[0] if len(args) > 0 else "0.0"
             hi = args[1] if len(args) > 1 else "1.0"
             seed = args[2] if len(args) > 2 else "0"
@@ -1494,6 +1878,132 @@ class SecurityEmitter:
         if member == "isticks":
             return "false"
         return None
+
+    def _security_local_value(
+        self,
+        expr_cpp: str,
+        value,
+        cpp_type: str | None,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...],
+    ) -> str:
+        """``expr_cpp`` as stored in an evaluator local of ``cpp_type``:
+        ``na`` spelled for that type, and a value narrowed to ``int`` or
+        ``bool`` without losing ``na`` (quirk 9), as the chart declares its
+        locals -- ``na<double>()`` in a ``bool`` is true, in an ``int``
+        undefined. The value is judged as the evaluator renders it: a helper
+        series or ``var`` state is a double whatever the chart's type."""
+        if cpp_type not in _SECURITY_SCALAR_CPP:
+            return expr_cpp
+        if value is None or isinstance(value, NaLiteral):
+            return f"na<{cpp_type}>()"
+        if cpp_type in ("int", "int64_t", "bool"):
+            return self._coerce_int_slot(
+                expr_cpp, value, cpp_type,
+                value_is_double=self._security_emits_double(value, helper_binding_stack),
+            )
+        return expr_cpp
+
+    def _security_helper_series_ref(self, series_name: str) -> str:
+        """The map entry holding one helper series (string values in their
+        own map, every other scalar in the historical double map)."""
+        store = (
+            "_security_helper_series_str_"
+            if series_name in self._security_string_series
+            else "_security_helper_series_"
+        )
+        return f'{store}["{series_name}"]'
+
+    def _security_store_string_series(self, node, series_name: str) -> None:
+        """Keep a string helper series (and its ``var`` seed) in the string
+        map, which ``_security_needs_string_series`` declared."""
+        if not self._security_string_series_declared:
+            self._codegen_error(
+                node,
+                "Internal: request.security string helper state without its "
+                "declared series map",
+            )
+        self._security_string_series.update(
+            (series_name, f"{series_name}@var_seed")
+        )
+
+    def _security_needs_string_series(self) -> bool:
+        """Whether a helper a payload reaches holds string state: a ``var``
+        string or a string local read with history. Decided before the
+        members are declared, so the string map is emitted only then."""
+        seen: set[str] = set()
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+
+        def is_string_decl(stmt: VarDecl) -> bool:
+            # The emitter's own rule (``_type_for_decl``), read in the same
+            # class-scope context it runs in.
+            try:
+                return self._type_for_decl(stmt) == "std::string"
+            except Exception:
+                return stmt.type_hint == "string" or isinstance(stmt.value, StringLiteral)
+
+        def nodes(node):
+            if isinstance(node, ASTNode):
+                yield node
+                for name, value in vars(node).items():
+                    if name != "annotations":
+                        yield from nodes(value)
+            elif isinstance(node, (list, tuple)):
+                for item in node:
+                    yield from nodes(item)
+            elif isinstance(node, dict):
+                for item in node.values():
+                    yield from nodes(item)
+
+        def scan_expr(node) -> bool:
+            for child in nodes(node):
+                if isinstance(child, Identifier):
+                    # A payload re-evaluates the globals it reads (and the
+                    # statements rebinding a mutable one) on the requested bar.
+                    name_key = f"global:{child.name}"
+                    if name_key in seen:
+                        continue
+                    seen.add(name_key)
+                    info = self._global_mutable_infos.get(child.name)
+                    if info is not None:
+                        if any(scan_expr(stmt) for stmt in
+                               getattr(info, "source_stmts", []) or []):
+                            return True
+                    elif child.name in global_expr_map and scan_expr(
+                            global_expr_map[child.name]):
+                        return True
+                    continue
+                key = self._security_user_call_key(child)
+                if key is None or key in seen:
+                    continue
+                seen.add(key)
+                info = self._func_info_map.get(key)
+                if info is None or info.node is None:
+                    continue
+                series = set(self.ctx.func_series_vars.get(info.name, set()))
+                if scan_body(info.node.body, series):
+                    return True
+            return False
+
+        def scan_body(body, series: set[str]) -> bool:
+            for stmt in body or []:
+                if isinstance(stmt, VarDecl):
+                    if ((stmt.is_var or stmt.name in series)
+                            and is_string_decl(stmt)):
+                        return True
+                    if scan_expr(stmt.value):
+                        return True
+                elif isinstance(stmt, IfStmt):
+                    if (scan_expr(stmt.condition)
+                            or scan_body(stmt.body, series)
+                            or scan_body(stmt.else_body, series)):
+                        return True
+                elif scan_expr(stmt):
+                    return True
+            return False
+
+        return any(
+            scan_expr(item.get("expr_node")) for item in self._security_calls
+        )
 
     @staticmethod
     def _security_series_binding(series_name: str) -> str:
@@ -1567,7 +2077,19 @@ class SecurityEmitter:
         local_series_names = set(plan.get("local_series_names", ()))
 
         def _series_expr(binding_name: str, index_expr: str) -> str:
-            return f'_security_helper_series_["{binding_name}"][{index_expr}]'
+            return f"{self._security_helper_series_ref(binding_name)}[{index_expr}]"
+
+        def emit_series_value(series_name: str, expr_cpp: str, pad: str) -> None:
+            """One requested bar's value of a helper local read with history:
+            pushed on a new requested bar, rewritten on a recomputation."""
+            ref = self._security_helper_series_ref(series_name)
+            lines.append(f'{pad}if ({ref}.size() == 0) {{')
+            lines.append(f'{pad}    {ref}.push({expr_cpp});')
+            lines.append(f'{pad}}} else if (security_series_slot_is_new({sec_id})) {{')
+            lines.append(f'{pad}    {ref}.push({expr_cpp});')
+            lines.append(f'{pad}}} else {{')
+            lines.append(f'{pad}    {ref}.update({expr_cpp});')
+            lines.append(f'{pad}}}')
 
         def emit_stmt(stmt: ASTNode, active_bindings: dict[str, str], indent: int) -> None:
             pad = "    " * indent
@@ -1603,13 +2125,19 @@ class SecurityEmitter:
                         lines,
                     )
                     active_bindings[stmt.name] = binding
-                    if is_persistent_var:
+                    cpp_type = None
+                    if is_persistent_var or self._security_string_series_declared:
                         cpp_type = self._type_for_decl(stmt)
-                        if cpp_type not in {"double", "int", "bool"}:
+                    if cpp_type == "std::string":
+                        self._security_store_string_series(stmt, series_name)
+                        if stmt.value is None or isinstance(stmt.value, NaLiteral):
+                            expr_cpp = "na<std::string>()"
+                    if is_persistent_var:
+                        if cpp_type not in {"double", "int", "bool", "std::string"}:
                             self._codegen_error(
                                 stmt,
-                                "request.security helper-local var state currently supports only int, float, and bool values",
-                                hint="Hoist collection, string, UDT, or drawing state outside request.security().",
+                                "request.security helper-local var state currently supports only int, float, bool and string values",
+                                hint="Hoist collection, UDT, or drawing state outside request.security().",
                             )
                         # A Pine ``var`` initializer runs once per helper call
                         # site in the requested context.  On a new requested
@@ -1622,33 +2150,21 @@ class SecurityEmitter:
                         # recomputations without adding another generated
                         # member/state family.
                         seed_name = f"{series_name}@var_seed"
-                        lines.append(f'{pad}if (_security_helper_series_["{series_name}"].size() == 0) {{')
-                        lines.append(f'{pad}    _security_helper_series_["{seed_name}"].push({expr_cpp});')
-                        lines.append(
-                            f'{pad}    _security_helper_series_["{series_name}"].push('
-                            f'_security_helper_series_["{seed_name}"][0]);'
-                        )
+                        ref = self._security_helper_series_ref(series_name)
+                        seed_ref = self._security_helper_series_ref(seed_name)
+                        lines.append(f'{pad}if ({ref}.size() == 0) {{')
+                        lines.append(f'{pad}    {seed_ref}.push({expr_cpp});')
+                        lines.append(f'{pad}    {ref}.push({seed_ref}[0]);')
                         lines.append(f'{pad}}} else if (security_series_slot_is_new({sec_id})) {{')
-                        lines.append(
-                            f'{pad}    _security_helper_series_["{series_name}"].push('
-                            f'_security_helper_series_["{series_name}"][0]);'
-                        )
+                        lines.append(f'{pad}    {ref}.push({ref}[0]);')
                         lines.append(f'{pad}}} else {{')
                         lines.append(
-                            f'{pad}    _security_helper_series_["{series_name}"].update('
-                            f'_security_helper_series_["{series_name}"].size() > 1 '
-                            f'? _security_helper_series_["{series_name}"][1] '
-                            f': _security_helper_series_["{seed_name}"][0]);'
+                            f'{pad}    {ref}.update({ref}.size() > 1 '
+                            f'? {ref}[1] : {seed_ref}[0]);'
                         )
                         lines.append(f'{pad}}}')
                     else:
-                        lines.append(f'{pad}if (_security_helper_series_["{series_name}"].size() == 0) {{')
-                        lines.append(f'{pad}    _security_helper_series_["{series_name}"].push({expr_cpp});')
-                        lines.append(f'{pad}}} else if (security_series_slot_is_new({sec_id})) {{')
-                        lines.append(f'{pad}    _security_helper_series_["{series_name}"].push({expr_cpp});')
-                        lines.append(f'{pad}}} else {{')
-                        lines.append(f'{pad}    _security_helper_series_["{series_name}"].update({expr_cpp});')
-                        lines.append(f'{pad}}}')
+                        emit_series_value(series_name, expr_cpp, pad)
                     activate_decl()
                     return
 
@@ -1670,7 +2186,11 @@ class SecurityEmitter:
                         runtime_stack_local,
                         lines,
                     )
+                    expr_cpp = self._security_local_value(
+                        expr_cpp, stmt.value, cpp_type, runtime_stack_local
+                    )
                     active_bindings[stmt.name] = local_name
+                    self._security_local_cpp_types[local_name] = cpp_type
                     lines.append(f"{pad}{cpp_type} {local_name} = {expr_cpp};")
                 else:
                     expr_cpp = self._build_security_expr(
@@ -1682,6 +2202,10 @@ class SecurityEmitter:
                         security_mutable_names,
                         runtime_stack_local,
                         lines,
+                    )
+                    expr_cpp = self._security_local_value(
+                        expr_cpp, stmt.value, self._security_local_cpp_types.get(local_name),
+                        runtime_stack_local,
                     )
                     lines.append(f"{pad}{local_name} = {expr_cpp};")
                 activate_decl()
@@ -1712,12 +2236,22 @@ class SecurityEmitter:
                 )
                 series_name = self._security_series_binding_target(binding)
                 if series_name is not None:
+                    if series_name in self._security_string_series and isinstance(
+                            stmt.value, NaLiteral):
+                        expr_cpp = "na<std::string>()"
+                elif stmt.op == ":=":
+                    expr_cpp = self._security_local_value(
+                        expr_cpp, stmt.value, self._security_local_cpp_types.get(binding),
+                        runtime_stack_local,
+                    )
+                if series_name is not None:
+                    ref = self._security_helper_series_ref(series_name)
                     if stmt.op == ":=":
-                        lines.append(f'{pad}_security_helper_series_["{series_name}"].update({expr_cpp});')
+                        lines.append(f'{pad}{ref}.update({expr_cpp});')
                     else:
                         op_char = stmt.op[0]
                         lines.append(
-                            f'{pad}_security_helper_series_["{series_name}"].update('
+                            f'{pad}{ref}.update('
                             f'{_series_expr(series_name, "0")} {op_char} {expr_cpp});'
                         )
                     return
@@ -1809,6 +2343,69 @@ class SecurityEmitter:
                 lines.append(f"{pad}}}")
                 return
 
+            if isinstance(stmt, TupleAssign):
+                # ``[a, b] = rhs``: evaluate the tuple once in the requested
+                # context, then bind each named element to its own local (a
+                # TA tuple result's field, else the tuple's element).
+                value_cpp = self._build_security_expr(
+                    sec_id,
+                    stmt.value,
+                    None,
+                    ta_results,
+                    resolving,
+                    security_mutable_names,
+                    runtime_stack_local,
+                    lines,
+                )
+                temp = self._security_next_inline_name(
+                    sec_id, plan["func_info"].name, "tuple"
+                )
+                lines.append(f"{pad}auto {temp} = {value_cpp};")
+                fields = self._security_tuple_value_fields(
+                    stmt.value, runtime_stack_local
+                )
+                for idx, name in enumerate(stmt.names):
+                    if name == "_":
+                        continue
+                    element = (
+                        f"{temp}.{fields[idx]}"
+                        if fields is not None and idx < len(fields)
+                        else f"std::get<{idx}>({temp})"
+                    )
+                    if name in local_series_names:
+                        if self._security_tuple_element_is_string(
+                                stmt.value, idx, runtime_stack_local):
+                            self._codegen_error(
+                                stmt,
+                                "request.security helper tuple declaration: a string "
+                                "element read with history is not supported",
+                                hint="Declare the element with its own string variable.",
+                            )
+                        binding = self._security_series_binding(
+                            self._security_next_inline_name(
+                                sec_id, plan["func_info"].name, name
+                            )
+                        )
+                        emit_series_value(
+                            self._security_series_binding_target(binding),
+                            element,
+                            pad,
+                        )
+                        active_bindings[name] = binding
+                        continue
+                    local_name = self._security_next_inline_name(
+                        sec_id, plan["func_info"].name, name
+                    )
+                    lines.append(f"{pad}auto {local_name} = {element};")
+                    active_bindings[name] = local_name
+                return
+
+            if isinstance(stmt, ExprStmt) and isinstance(stmt.expr, _SECURITY_BLOCK_VALUES):
+                # A block's trailing value (``lastHigh := ph`` then
+                # ``lastHigh``): no effect to lower. A call statement stays
+                # refused below: it could mutate chart state.
+                return
+
             self._codegen_error(
                 stmt,
                 "request.security multi-statement helpers may only use local declarations, assignments, and if-branches before the final expression",
@@ -1852,11 +2449,254 @@ class SecurityEmitter:
                 sig_frames.append(tuple(sorted(frame.keys())))
         return tuple(sig_frames)
 
+    def _security_user_call_key(self, node) -> str | None:
+        """The ``_func_info_map`` key of the user function or typed user
+        method a request.security payload calls, else None.
+
+        A plain call keeps its spelling, so an undefined name still reaches
+        the binder's refusal. ``recv.m(...)`` resolves through its receiver's
+        type exactly as the chart visitor does (``_typed_user_method_info``);
+        the evaluator inlines it like any helper, so its body reads the
+        requested bar instead of calling the chart-bar method.
+        """
+        if not isinstance(node, FuncCall):
+            return None
+        callee = node.callee
+        if isinstance(callee, Identifier):
+            return callee.name if callee.name in self._func_names else None
+        if not isinstance(callee, MemberAccess) or not self._security_requested_calls:
+            return None
+        if callee.member not in self._security_method_member_names():
+            return None
+        _spec, info = self._typed_user_method_info(callee.object, callee.member)
+        if info is None or info.node is None:
+            return None
+        cache = getattr(self, "_security_method_inlinable_cache", None)
+        if cache is None:
+            cache = self._security_method_inlinable_cache = {}
+        if id(node) not in cache:
+            cache[id(node)] = self._security_method_inlinable(info, node)
+        return info.name if cache[id(node)] else None
+
+    def _security_method_member_names(self) -> set[str]:
+        """Member names of the script's typed user methods (``recv.m``)."""
+        names = getattr(self, "_security_user_method_members", None)
+        if names is None:
+            names = self._security_user_method_members = {
+                name.rsplit(".", 1)[-1]
+                for name, info in self._func_info_map.items()
+                if getattr(info, "is_udt_method", False)
+            }
+        return names
+
+    def _security_method_inlinable(self, info: FuncInfo, node: FuncCall) -> bool:
+        """Whether a payload inlines this typed method call on the requested
+        bar: a scalar receiver and scalar arguments, and a single-expression
+        body (``_security_body_is_expression``). Any other method keeps the
+        chart call it always had, with a warning (``_security_warn_chart_call``)."""
+        spec, _info = self._typed_user_method_info(node.callee.object, node.callee.member)
+        if method_receiver_type_name(spec) not in ("float", "int", "bool", "string"):
+            return False
+        try:
+            binding = self._bind_typed_method_args(info, node)
+        except CompileError:
+            return False
+        args = [node.callee.object, *binding.args_by_param]
+        if any(self._infer_type(arg) not in _SECURITY_SCALAR_CPP for arg in args):
+            return False
+        if not self._security_body_is_expression(info.node):
+            return False
+        # The payload's prepasses walk an inlined method's body. One that one
+        # of them refuses keeps the chart call instead; the provisional entry
+        # lets the walks enter this call.
+        self._security_method_inlinable_cache[id(node)] = True
+        try:
+            self._validate_security_persistent_var_control_flow(node)
+            self._collect_security_ohlc_hist_fields(node)
+            self._collect_security_ta_hist_indices(node)
+        except CompileError:
+            return False
+        return True
+
+    def _security_body_is_expression(self, func_node) -> bool:
+        """Whether a payload inlines this user function or method body on the
+        requested bar where every earlier build called it on the chart: one
+        expression, reading no mutable global and no ``request.*``, every
+        user call in it such a body in turn. A multi-statement body keeps the
+        chart call: the evaluator writes its statements ahead of the payload,
+        so in a ternary arm or an ``and``/``or`` operand they would run, and
+        advance their TA and ``var`` state, on every requested bar. Decided
+        once per definition; a body reached again through its own calls is
+        not inlined."""
+        cache = getattr(self, "_security_body_expression_cache", None)
+        if cache is None:
+            cache = self._security_body_expression_cache = {}
+        if id(func_node) in cache:
+            return cache[id(func_node)]
+        cache[id(func_node)] = False
+        body = getattr(func_node, "body", None) or []
+        cache[id(func_node)] = (
+            len(body) == 1
+            and isinstance(body[0], ExprStmt)
+            and self._security_expression_inlinable(body[0].expr)
+        )
+        return cache[id(func_node)]
+
+    def _security_expression_inlinable(self, expr) -> bool:
+        """``_security_body_is_expression``'s test of one expression."""
+        stack = [expr]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (list, tuple)):
+                stack.extend(n)
+                continue
+            if isinstance(n, dict):
+                stack.extend(n.values())
+                continue
+            if not isinstance(n, ASTNode):
+                continue
+            if isinstance(n, (IfStmt, SwitchStmt, ForStmt, ForInStmt, WhileStmt)):
+                return False
+            if (isinstance(n, Identifier)
+                    and self._security_identifier_is_global_binding(n)):
+                if n.name in self._global_mutable_infos:
+                    return False
+                if not self._security_global_value_inlinable(n.name):
+                    return False
+            if isinstance(n, FuncCall):
+                _func, namespace = self._resolve_callee(n.callee)
+                if namespace == "request":
+                    return False
+                if isinstance(n.callee, Identifier) and n.callee.name in self._func_names:
+                    callee = self._func_info_map.get(n.callee.name)
+                    if (callee is None or callee.node is None
+                            or not self._security_body_is_expression(callee.node)):
+                        return False
+                elif (isinstance(n.callee, MemberAccess)
+                        and n.callee.member in self._security_method_member_names()):
+                    _spec, method = self._typed_user_method_info(
+                        n.callee.object, n.callee.member)
+                    if method is not None and self._security_user_call_key(n) is None:
+                        return False
+            stack.extend(v for k, v in vars(n).items() if k != "annotations")
+        return True
+
+    def _security_global_value_inlinable(self, name: str) -> bool:
+        """Whether a global an inlined body reads can be re-evaluated on the
+        requested bar at each read: its value, through the globals it reads,
+        calls no multi-statement user function, whose statements -- and TA
+        state -- the evaluator would emit again at every read."""
+        cache = getattr(self, "_security_global_value_cache", None)
+        if cache is None:
+            cache = self._security_global_value_cache = {}
+        if name in cache:
+            return cache[name]
+        cache[name] = False
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        value = global_expr_map.get(name)
+        cache[name] = value is None or self._security_expression_inlinable(value)
+        return cache[name]
+
+    def _security_call_inlinable(self, node) -> bool:
+        """Whether a payload inlines this user call where a builtin wraps it:
+        a typed method its gate admits, or a plain call of a single-expression
+        body (``_security_body_is_expression``)."""
+        if self._security_user_call_key(node) is None:
+            return False
+        if isinstance(node.callee, MemberAccess):
+            return True
+        info = self._func_info_map.get(node.callee.name)
+        return (info is not None and info.node is not None
+                and self._security_body_is_expression(info.node))
+
+    def _security_user_call_site(self, node) -> bool:
+        """Whether ``node`` calls a user function or typed user method,
+        whether or not a payload can inline it."""
+        if not isinstance(node, FuncCall):
+            return False
+        callee = node.callee
+        if isinstance(callee, Identifier):
+            return callee.name in self._func_names
+        if (isinstance(callee, MemberAccess)
+                and callee.member in self._security_method_member_names()):
+            _spec, info = self._typed_user_method_info(callee.object, callee.member)
+            return info is not None
+        return False
+
+    def _security_warn_chart_call(self, node, reason: str | None = None) -> None:
+        """Warn once per call site that a payload's user call keeps the chart
+        call it always had, which reads the chart's bar: a method whose
+        receiver, arguments or body a payload does not inline, or a call whose
+        inlining the evaluator refused (``reason``)."""
+        if not self._security_user_call_site(node):
+            return
+        if reason is None and (not self._security_requested_calls
+                               or self._security_call_inlinable(node)):
+            return
+        warned = getattr(self, "_security_warned_calls", None)
+        if warned is None:
+            warned = self._security_warned_calls = set()
+        if id(node) in warned:
+            return
+        warned.add(id(node))
+        if isinstance(node.callee, Identifier):
+            what = f"function '{node.callee.name}'"
+        else:
+            what = f"method '{node.callee.member}'"
+        if reason is None and isinstance(node.callee, MemberAccess):
+            why = (
+                "a payload inlines a method on the requested bar only for a "
+                "scalar receiver and arguments and a single-expression body "
+                "reading no mutable global, whose user calls, directly or "
+                "through a global's value, are single expressions too"
+            )
+        elif reason is None:
+            why = (
+                "a payload inlines a function under a builtin call only when its "
+                "body is a single expression and so is every user call it makes, "
+                "directly or through a global's value"
+            )
+        else:
+            why = f"the evaluator cannot inline it ({reason})"
+        self._codegen_warning(
+            node,
+            f"request.security payload calls {what} on the chart's bar: {why}; "
+            "TradingView evaluates it on the requested bar.",
+        )
+
     def _security_bind_helper_args(
         self,
         node: FuncCall,
         helper_binding_stack: tuple[dict[str, ASTNode], ...] | None = None,
     ) -> tuple[FuncInfo, tuple[dict[str, ASTNode], ...]]:
+        if isinstance(node.callee, MemberAccess):
+            method_key = self._security_user_call_key(node)
+            if method_key is not None:
+                fi = self._func_info_map[method_key]
+                binding = self._bind_typed_method_args(fi, node)
+                params = list(fi.node.params)
+                bound_args = [node.callee.object, *binding.args_by_param]
+                if len(bound_args) != len(params) or any(
+                    arg is None for arg in bound_args
+                ):
+                    self._codegen_error(
+                        node,
+                        "request.security helper calls must bind every parameter explicitly",
+                    )
+                base_stack = helper_binding_stack or ()
+                # A default is authored in the method's declaration, at global
+                # scope: bind it there, not in the caller's scope.
+                defaults = list(getattr(fi, "param_defaults", ()) or ())
+                written: dict[str, ASTNode] = {}
+                declared: dict[str, ASTNode] = {}
+                for index, (param, arg) in enumerate(zip(params, bound_args)):
+                    default = defaults[index] if index < len(defaults) else None
+                    target = declared if index and arg is default else written
+                    target[param] = arg
+                frames = (_SecurityHelperArgumentFrame(written, base_stack, method=True),)
+                if declared:
+                    frames += (_SecurityHelperArgumentFrame(declared, (), method=True),)
+                return fi, base_stack + frames
         if not isinstance(node.callee, Identifier):
             self._codegen_error(
                 node,
@@ -1958,7 +2798,6 @@ class SecurityEmitter:
             SwitchStmt,
             BreakStmt,
             ContinueStmt,
-            TupleAssign,
         )
         for stmt in stmt_body:
             if isinstance(stmt, unsupported_control_flow):
@@ -1967,7 +2806,9 @@ class SecurityEmitter:
                     "request.security does not support multi-statement helpers with control flow",
                     hint="Inline a straight-line helper body or hoist the control-flow helper outside request.security().",
                 )
-            if not isinstance(stmt, (VarDecl, Assignment, IfStmt)):
+            if not isinstance(stmt, _SECURITY_HELPER_STMTS) or (
+                    isinstance(stmt, ExprStmt)
+                    and not isinstance(stmt.expr, _SECURITY_BLOCK_VALUES)):
                 self._codegen_error(
                     node,
                     "request.security multi-statement helpers may only use local declarations, assignments, and if-branches before the final expression",
@@ -1997,6 +2838,109 @@ class SecurityEmitter:
             "local_series_names": local_series_names,
         }
 
+    def _security_tuple_value_fields(
+        self,
+        value,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+        depth: int = 0,
+    ) -> list[str] | None:
+        """Field names of the TA tuple result a helper's ``[a, b] = rhs``
+        destructures (``rhs`` a TA tuple call, directly or as the final
+        expression of a helper it calls); None for a ``std::tuple``."""
+        site = self._get_ta_site(value)
+        if site is not None:
+            return TA_TUPLE_FIELDS.get(self._ta_name_from_site(site))
+        if depth < 32 and self._security_user_call_key(value) is not None:
+            plan = self._security_helper_call_plan(value, helper_binding_stack)
+            return self._security_tuple_value_fields(
+                plan["expr"], plan["binding_stack"], depth + 1
+            )
+        return None
+
+    def _security_tuple_element_is_string(
+        self,
+        value,
+        index: int,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+        depth: int = 0,
+    ) -> bool:
+        """Whether element ``index`` of the tuple a helper destructures is a
+        string: the final tuple of the helper it calls (through a helper whose
+        final expression calls another), each element read through the
+        callee's parameters and top-level locals."""
+        if depth > 32 or self._get_ta_site(value) is not None:
+            return False
+        if self._security_user_call_key(value) is None:
+            return False
+        try:
+            plan = self._security_helper_call_plan(value, helper_binding_stack)
+        except CompileError:
+            return False
+        final = plan["expr"]
+        if self._security_user_call_key(final) is not None:
+            return self._security_tuple_element_is_string(
+                final, index, plan["binding_stack"], depth + 1
+            )
+        if isinstance(final, TupleLiteral) and index < len(final.elements):
+            return self._security_value_is_string(
+                final.elements[index], plan["binding_stack"], plan["body"], depth + 1
+            )
+        return False
+
+    def _security_value_is_string(
+        self,
+        node,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+        body: list,
+        depth: int = 0,
+    ) -> bool:
+        """Whether a helper's value is a string, read through its top-level
+        locals (``body``), its parameters' arguments and the helpers it
+        calls; anything else by the chart's inference."""
+        if node is None or depth > 64:
+            return False
+        nxt = depth + 1
+        if isinstance(node, StringLiteral):
+            return True
+        if isinstance(node, Identifier) and not self._security_identifier_is_global_binding(node):
+            for stmt in reversed(body or []):
+                if isinstance(stmt, VarDecl) and stmt.name == node.name:
+                    if stmt.type_hint:
+                        return stmt.type_hint == "string"
+                    return self._security_value_is_string(
+                        stmt.value, helper_binding_stack, body, nxt
+                    )
+            binding = self._security_lookup_helper_binding_context(
+                node.name, helper_binding_stack
+            )
+            if binding is not None:
+                bound, bound_stack = binding
+                if isinstance(bound, str):
+                    series_name = self._security_series_binding_target(bound)
+                    if series_name is not None:
+                        return series_name in self._security_string_series
+                    return self._security_local_cpp_types.get(bound) == "std::string"
+                return self._security_value_is_string(bound, bound_stack, (), nxt)
+        if isinstance(node, Ternary):
+            return any(
+                self._security_value_is_string(arm, helper_binding_stack, body, nxt)
+                for arm in (node.true_val, node.false_val)
+            )
+        if isinstance(node, BinOp) and node.op == "+":
+            return any(
+                self._security_value_is_string(side, helper_binding_stack, body, nxt)
+                for side in (node.left, node.right)
+            )
+        if self._security_user_call_key(node) is not None:
+            try:
+                plan = self._security_helper_call_plan(node, helper_binding_stack)
+            except CompileError:
+                return False
+            return self._security_value_is_string(
+                plan["expr"], plan["binding_stack"], plan["body"], nxt
+            )
+        return self._infer_type(node) == "std::string"
+
     def _validate_security_persistent_var_control_flow(self, expr_node) -> None:
         """Reject helper ``var`` state whose rollback would be conditional.
 
@@ -2011,9 +2955,9 @@ class SecurityEmitter:
         def visit_expr(node, conditional: bool) -> None:
             if node is None:
                 return
-            if isinstance(node, FuncCall) and isinstance(node.callee, Identifier):
-                name = node.callee.name
-                if name in self._func_names:
+            if isinstance(node, FuncCall):
+                name = self._security_user_call_key(node)
+                if name is not None:
                     if name in call_stack:
                         return
                     fi = self._func_info_map.get(name)
@@ -2085,8 +3029,9 @@ class SecurityEmitter:
 
     def _security_next_inline_name(self, sec_id: int, func_name: str, base_name: str) -> str:
         self._security_inline_counter += 1
+        # A typed method's key is ``Type.name``: not a C++ identifier part.
         return (
-            f"_sec{sec_id}_{self._safe_name(func_name)}_"
+            f"_sec{sec_id}_{self._safe_name(func_name.replace('.', '_'))}_"
             f"{self._security_inline_counter}_{self._safe_name(base_name)}"
         )
 
@@ -2131,9 +3076,9 @@ class SecurityEmitter:
                 return depends
             return False
 
-        if isinstance(expr_node, FuncCall) and isinstance(expr_node.callee, Identifier):
-            func_name = expr_node.callee.name
-            if func_name in self._func_names:
+        if isinstance(expr_node, FuncCall):
+            func_name = self._security_user_call_key(expr_node)
+            if func_name is not None:
                 call_key = f"func:{func_name}"
                 if call_key in resolving:
                     return False
@@ -2154,7 +3099,12 @@ class SecurityEmitter:
                     linear_stack = plan["binding_stack"] + (local_ast_bindings,)
                     depends = False
                     for stmt in plan["body"][:-1]:
-                        value = stmt.value if isinstance(stmt, (VarDecl, Assignment)) else None
+                        if isinstance(stmt, (VarDecl, Assignment, TupleAssign)):
+                            value = stmt.value
+                        elif isinstance(stmt, ExprStmt):
+                            value = stmt.expr
+                        else:
+                            value = None
                         if value is not None and self._expr_depends_on_security_mutables(
                             value,
                             security_mutable_names,
@@ -2163,9 +3113,12 @@ class SecurityEmitter:
                         ):
                             depends = True
                             break
-                        target_name = (
-                            stmt.name if isinstance(stmt, VarDecl) else self._get_target_name(stmt.target)
-                        )
+                        if isinstance(stmt, VarDecl):
+                            target_name = stmt.name
+                        elif isinstance(stmt, Assignment):
+                            target_name = self._get_target_name(stmt.target)
+                        else:
+                            target_name = None
                         if target_name is not None and value is not None:
                             local_ast_bindings[target_name] = value
                     if not depends:
@@ -2269,8 +3222,19 @@ class SecurityEmitter:
         arg_nodes = self._security_ta_ctor_arg_nodes(site)
         if len(arg_nodes) != len(fallback):
             return fallback, None
-        return (
-            [
+        # A constructor argument is lowered as every earlier build did, except
+        # in a typed method's inline, which needs the method's bindings. One
+        # the evaluator cannot lower there keeps the TA object at a placeholder
+        # length and its evaluator on the chart (``_security_chart_evaluators``).
+        in_method = any(getattr(frame, "method", False) for frame in helper_binding_stack)
+        saved_flag = self._security_requested_calls
+        saved_index_inputs = self._security_index_inputs
+        self._security_requested_calls = in_method
+        # evaluate_security resets the TA object before on_bar has read the
+        # inputs into their members: read each input through its getter.
+        self._security_index_inputs = True
+        try:
+            lowered = [
                 self._build_security_expr(
                     sec_id,
                     arg,
@@ -2282,15 +3246,41 @@ class SecurityEmitter:
                     emitted_lines=None,
                 )
                 for arg in arg_nodes
-            ],
-            [
-                self._security_ta_ctor_arg_is_stable(
-                    arg,
-                    helper_binding_stack,
-                )
+            ]
+            stability = [
+                self._security_ta_ctor_arg_is_stable(arg, helper_binding_stack)
                 for arg in arg_nodes
-            ],
-        )
+            ]
+            if in_method:
+                for arg, cpp, stable in zip(arg_nodes, lowered, stability):
+                    # What the runtime reset refuses (neither a per-run
+                    # value nor a compile-time one) keeps the chart call.
+                    if (not stable
+                            and self._runtime_ctor_arg_for_reset(cpp) is None
+                            and not self._is_compile_time_value(
+                                self._resolve_ta_ctor_arg(cpp))):
+                        self._codegen_error(
+                            arg,
+                            f"request.security method TA constructor argument '{cpp}' "
+                            "is not a stable per-run scalar",
+                        )
+        except Exception as exc:  # noqa: BLE001 -- the method stays on the chart
+            if getattr(exc, "limit", False) or not in_method:
+                raise
+            diagnostic = (
+                exc.diagnostics[0]
+                if isinstance(exc, CompileError) and exc.diagnostics else None
+            )
+            self._security_chart_evaluators.setdefault(sec_id, (
+                (diagnostic.location, diagnostic.message.splitlines()[0])
+                if diagnostic is not None
+                else (None, f"a method's TA constructor argument ({type(exc).__name__})")
+            ))
+            return ["1"] * len(arg_nodes), None
+        finally:
+            self._security_requested_calls = saved_flag
+            self._security_index_inputs = saved_index_inputs
+        return lowered, stability
 
     def _security_ta_ctor_arg_is_stable(
         self,
@@ -2306,6 +3296,19 @@ class SecurityEmitter:
         from bypassing the ordinary TA-length guard just because an earlier
         call through the same source TA site used a safe length.
         """
+        resolved = self._security_helper_bound_ast(node, helper_binding_stack)
+        return resolved is not None and self._expr_is_stable(resolved)
+
+    def _security_helper_bound_ast(
+        self,
+        node: ASTNode,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+    ):
+        """``node`` with its helper parameters and locals replaced by the
+        argument ASTs ``helper_binding_stack`` binds them to, each resolved in
+        its own lexical stack; identifiers bound elsewhere (globals included)
+        are kept as authored. None for a shape outside literals, identifiers,
+        member reads, operators, ternaries and calls."""
         import dataclasses
 
         def resolve(
@@ -2385,8 +3388,7 @@ class SecurityEmitter:
             # stable TA lengths.  Fail closed instead of inventing a buffer size.
             return None
 
-        resolved = resolve(node, helper_binding_stack)
-        return resolved is not None and self._expr_is_stable(resolved)
+        return resolve(node, helper_binding_stack)
 
     def _security_ta_ctor_depends_on_mutables(
         self,
@@ -2421,7 +3423,7 @@ class SecurityEmitter:
         resolving: set[str] | None = None,
         helper_binding_stack: tuple[dict[str, ASTNode], ...] | None = None,
         collected: dict[int, tuple[dict[str, ASTNode], ...]] | None = None,
-        inline_ta_indices: set[int] | None = None,
+        inline_ta_indices: set[tuple] | None = None,
         inline_helper: bool = False,
     ) -> dict[int, tuple[dict[str, ASTNode], ...]]:
         if collected is None:
@@ -2462,6 +3464,10 @@ class SecurityEmitter:
                 resolving.discard(bind_key)
                 return collected
 
+            # A global's TA sites belong to the evaluator's prologue (or its
+            # rebinds), computed once however many helpers read the global:
+            # not to the helper that reads it.
+            through_global = _SECURITY_THROUGH_GLOBAL if inline_helper else False
             mutable_info = self._global_mutable_infos.get(expr_node.name)
             if mutable_info is not None and expr_node.name not in resolving:
                 resolving.add(expr_node.name)
@@ -2472,7 +3478,7 @@ class SecurityEmitter:
                         helper_binding_stack,
                         collected,
                         inline_ta_indices,
-                        inline_helper,
+                        through_global,
                     )
                 resolving.remove(expr_node.name)
                 return collected
@@ -2490,14 +3496,14 @@ class SecurityEmitter:
                     (),
                     collected,
                     inline_ta_indices,
-                    inline_helper,
+                    through_global,
                 )
                 resolving.remove(expr_node.name)
                 return collected
 
-        if isinstance(expr_node, FuncCall) and isinstance(expr_node.callee, Identifier):
-            func_name = expr_node.callee.name
-            if func_name in self._func_names:
+        if isinstance(expr_node, FuncCall):
+            func_name = self._security_user_call_key(expr_node)
+            if func_name is not None:
                 call_key = f"func:{func_name}"
                 if call_key in resolving:
                     return collected
@@ -2579,6 +3585,40 @@ class SecurityEmitter:
                                 collect_stmt(child, else_bindings)
                             return
 
+                        if isinstance(stmt, TupleAssign):
+                            self._collect_security_ta_binding_stacks(
+                                stmt.value,
+                                resolving,
+                                local_stack,
+                                collected,
+                                inline_ta_indices,
+                                True,
+                            )
+                            for name in stmt.names:
+                                if name == "_":
+                                    continue
+                                active_bindings[name] = (
+                                    self._security_series_binding(
+                                        f"{plan['func_info'].name}:{name}"
+                                    )
+                                    if name in local_series_names
+                                    else _security_tuple_binding(
+                                        plan["func_info"].name, name
+                                    )
+                                )
+                            return
+
+                        if isinstance(stmt, ExprStmt):
+                            self._collect_security_ta_binding_stacks(
+                                stmt.expr,
+                                resolving,
+                                local_stack,
+                                collected,
+                                inline_ta_indices,
+                                True,
+                            )
+                            return
+
                     for stmt in plan["body"]:
                         collect_stmt(stmt, local_ast_bindings)
 
@@ -2601,7 +3641,11 @@ class SecurityEmitter:
                 existing = collected.setdefault(idx, {})
                 existing[current_sig] = helper_binding_stack or ()
                 if inline_helper and inline_ta_indices is not None:
-                    inline_ta_indices.add(idx)
+                    # Per variant: the same TA site outside the helper is
+                    # still computed once in the evaluator's prologue.
+                    inline_ta_indices.add(
+                        (idx, current_sig if inline_helper is True else inline_helper)
+                    )
 
         def walk(value) -> None:
             if value is None:
@@ -2833,9 +3877,9 @@ class SecurityEmitter:
                 resolving.remove(expr_node.name)
                 return out
 
-        if isinstance(expr_node, FuncCall) and isinstance(expr_node.callee, Identifier):
-            func_name = expr_node.callee.name
-            if func_name in self._func_names:
+        if isinstance(expr_node, FuncCall):
+            func_name = self._security_user_call_key(expr_node)
+            if func_name is not None:
                 return set(
                     self._collect_security_ta_binding_stacks(
                         expr_node,
@@ -2936,9 +3980,9 @@ class SecurityEmitter:
                     resolving.remove(node.name)
                     return
 
-            if isinstance(node, FuncCall) and isinstance(node.callee, Identifier):
-                func_name = node.callee.name
-                if func_name in self._func_names:
+            if isinstance(node, FuncCall):
+                func_name = self._security_user_call_key(node)
+                if func_name is not None:
                     call_key = f"func:{func_name}"
                     if call_key in resolving:
                         return
@@ -2991,12 +4035,12 @@ class SecurityEmitter:
             return set()
 
         hist_indices = set(self._security_ta_hist_idx_by_sec.get(sec_id, ()))
-        inline_helper_ta_indices = set(info.get("inline_helper_ta_indices", []))
+        inline_helper_ta_keys = set(info.get("inline_helper_ta_indices", []))
         return {
             key
             for key, reaches in occurrences.items()
             if key[0] not in hist_indices
-            and key[0] not in inline_helper_ta_indices
+            and key not in inline_helper_ta_keys
             and len(reaches) == 1
             and reaches[0]
         }
@@ -3019,7 +4063,7 @@ class SecurityEmitter:
         lines.append("        if (is_complete) {")
         for field in fields:
             lines.append(
-                f"            {self._security_ohlc_hist_series_cpp(sec_id, field)}.push({self._security_bar_field_expr(field)});"
+                f"            {self._security_ohlc_hist_series_cpp(sec_id, field)}.push({self._security_bar_field_expr(field, sec_id)});"
             )
         lines.append("        }")
 
@@ -3042,6 +4086,10 @@ class SecurityEmitter:
             return
         pushes: list[str] = []
         for idx in indices:
+            if getattr(self.ctx.ta_call_sites[idx], "returns_tuple", False):
+                # Its element history is refused where it is read; the
+                # struct has no Series<double> to push into.
+                continue
             for variant in (info.get("ta_variants") or {}).get(idx, []):
                 result_name = ta_results.get((idx, variant["signature"]))
                 if result_name is None:
@@ -3054,145 +4102,296 @@ class SecurityEmitter:
         lines.extend(pushes)
         lines.append("        }")
 
+    def _emit_security_evaluator_requested(self, item: dict, lines: list[str]) -> None:
+        """Emit one evaluator, lowering its payload's user calls under builtin
+        calls (``nz(f())``) and its typed method calls on the requested bar.
+
+        All or nothing, per evaluator: that lowering is kept only when it
+        leaves nothing on the chart's terms beside what it inlines -- no
+        builtin call that also reads a global, history the builder does not
+        own or ``bar_index`` (``_security_root_chart_read``) -- and the
+        evaluator refuses none of it. Otherwise the evaluator every earlier
+        build emitted is emitted instead, its calls on the chart as they were,
+        with a warning: a requested ``f()`` beside the chart's ``g`` would mix
+        two bars. A failure of that emission is the script's own and
+        propagates, as does a limit error."""
+        snapshot = self._security_state_snapshot()
+        body: list[str] = []
+        self._security_requested_calls = True
+        self._security_requested_used = False
+        self._security_chart_read = None
+        reason = self._security_chart_evaluators.get(item["sec_id"])
+        try:
+            if reason is not None:
+                raise _SecurityKeepChart()
+            self._emit_security_evaluator(item, body)
+        except _SecurityKeepChart:
+            pass
+        except Exception as exc:  # noqa: BLE001 -- retried below as every earlier build
+            if getattr(exc, "limit", False):
+                raise
+            diagnostic = (
+                exc.diagnostics[0]
+                if isinstance(exc, CompileError) and exc.diagnostics else None
+            )
+            reason = (
+                (diagnostic.location, diagnostic.message.splitlines()[0])
+                if diagnostic is not None
+                else (None, f"the evaluator cannot inline them there ({type(exc).__name__})")
+            )
+        else:
+            if self._security_requested_used and self._security_chart_read is not None:
+                reason = self._security_chart_read
+        if reason is None:
+            lines.extend(body)
+            return
+        self._security_state_restore(snapshot)
+        body = []
+        self._security_requested_calls = False
+        try:
+            self._emit_security_evaluator(item, body)
+        finally:
+            self._security_requested_calls = True
+        location, message = reason
+        self._codegen_warning(
+            item["expr_node"],
+            "request.security payload keeps its user calls under builtin calls and its "
+            f"methods on the chart's bar, as before: {message}"
+            + (f" (line {location.line})" if location is not None else "")
+            + "; TradingView evaluates them on the requested bar.",
+        )
+        lines.extend(body)
+
+    def _security_state_snapshot(self) -> tuple:
+        """The generator's state before an evaluator is emitted: each
+        attribute, with the contents of its containers two levels deep kept
+        in place (an alias sees the restore), and the diagnostics count."""
+        def contents(value, depth):
+            if isinstance(value, dict):
+                return ("dict", value, [
+                    (k, v, contents(v, depth - 1) if depth > 1 else None)
+                    for k, v in value.items()
+                ])
+            if isinstance(value, list):
+                return ("list", value, [
+                    (None, v, contents(v, depth - 1) if depth > 1 else None)
+                    for v in value
+                ])
+            if isinstance(value, set):
+                return ("set", value, list(value))
+            return None
+        return (
+            {name: (value, contents(value, 2)) for name, value in vars(self).items()},
+            len(self.ctx.diagnostics),
+        )
+
+    def _security_state_restore(self, snapshot: tuple) -> None:
+        """Put back ``_security_state_snapshot``'s state in place."""
+        def restore(saved) -> None:
+            if saved is None:
+                return
+            kind, obj, items = saved
+            if kind == "set":
+                obj.clear()
+                obj.update(items)
+                return
+            for _k, _v, inner in items:
+                restore(inner)
+            if kind == "dict":
+                obj.clear()
+                obj.update((k, v) for k, v, _inner in items)
+            else:
+                obj[:] = [v for _k, v, _inner in items]
+
+        attrs, n_diagnostics = snapshot
+        for name in list(vars(self)):
+            if name not in attrs:
+                delattr(self, name)
+        for name, (value, saved) in attrs.items():
+            setattr(self, name, value)
+            restore(saved)
+        del self.ctx.diagnostics[n_diagnostics:]
+
+    @staticmethod
+    def _security_info_without_methods(info: dict) -> dict:
+        """``info`` without the TA variants the prepasses found inside a
+        typed method call, which an evaluator lowered as every earlier build
+        did keeps on the chart."""
+        variants = {
+            idx: [
+                variant for variant in found
+                if not any(getattr(frame, "method", False)
+                           for frame in variant.get("binding_stack", ()))
+            ]
+            for idx, found in (info.get("ta_variants") or {}).items()
+        }
+        return dict(
+            info,
+            ta_variants=variants,
+            ta_indices=[idx for idx in info.get("ta_indices") or [] if variants.get(idx)],
+        )
+
+    def _emit_security_evaluator(self, item: dict, lines: list[str]) -> None:
+        """Emit one ``_eval_security_N`` method."""
+        sec_id = item["sec_id"]
+        expr_node = item["expr_node"]
+        info = self._security_eval_info[sec_id]
+        if not self._security_requested_calls:
+            info = self._security_info_without_methods(info)
+        ta_indices = info.get("ta_indices") or []
+        security_mutable_names = set(info.get("mutable_globals", []))
+        # A variant a multi-statement helper computes where it is inlined.
+        inline_helper_ta_keys = set(info.get("inline_helper_ta_indices", []))
+        lazy_ta_keys = self._security_lazy_ta_keys(sec_id, expr_node, info)
+
+        def prologue_variants(idx: int) -> list[dict]:
+            return [
+                variant for variant in (info.get("ta_variants") or {}).get(idx, [])
+                if (idx, variant["signature"]) not in inline_helper_ta_keys
+            ]
+
+        lines.append(f"    void _eval_security_{sec_id}(const Bar& bar, bool is_complete) {{")
+
+        ta_results = {}
+        pre_rebind_ta_indices: list[int] = []
+        post_rebind_ta_indices: list[int] = []
+        for idx in ta_indices:
+            variants = prologue_variants(idx)
+            if not variants:
+                continue
+            site = self.ctx.ta_call_sites[idx]
+            depends_on_mutables = False
+            for variant in variants:
+                helper_binding_stack = variant.get("binding_stack", ())
+                if self._security_ta_ctor_depends_on_mutables(
+                    site,
+                    security_mutable_names,
+                    helper_binding_stack,
+                ) and self._ta_security_plan(
+                    sec_id, site, helper_binding_stack
+                ) is not None:
+                    # The lowered length is read per call (a series one
+                    # through the rebound value): run after the rebinds.
+                    depends_on_mutables = True
+                elif self._security_ta_ctor_depends_on_mutables(
+                    site,
+                    security_mutable_names,
+                    helper_binding_stack,
+                ):
+                    self._codegen_error(
+                        site.node or expr_node,
+                        "request.security does not support TA constructor args that depend on rebound mutable globals",
+                        hint="Keep TA constructor arguments immutable/simple inside request.security(), or hoist the TA call outside the security expression.",
+                    )
+                if self._security_ta_depends_on_mutables(
+                    site,
+                    security_mutable_names,
+                    helper_binding_stack,
+                ):
+                    depends_on_mutables = True
+            if depends_on_mutables:
+                post_rebind_ta_indices.append(idx)
+            else:
+                pre_rebind_ta_indices.append(idx)
+
+        def emit_security_ta(indices: list[int]) -> None:
+            for idx in indices:
+                site = self.ctx.ta_call_sites[idx]
+                for variant in prologue_variants(idx):
+                    if (idx, variant["signature"]) in lazy_ta_keys:
+                        # Pine only reaches this site through a
+                        # short-circuited operand or an untaken ternary
+                        # branch. Leave it out of the eager prologue:
+                        # _build_security_expr emits its
+                        # compute()/recompute() inline in expression
+                        # position, where C++'s &&/||/?: short-circuit
+                        # advances the series exactly on the bars Pine does.
+                        continue
+                    helper_binding_stack = variant.get("binding_stack", ())
+                    compute_args = self._security_ta_compute_args_for_site(
+                        sec_id,
+                        site,
+                        ta_results,
+                        security_mutable_names,
+                        helper_binding_stack,
+                        emitted_lines=lines,
+                    )
+                    var_name = variant["result_name"]
+                    sec_name = variant["member_name"]
+                    lines.append(f"        auto {var_name} = security_series_slot_is_new({sec_id}) "
+                                 f"? {sec_name}.compute({compute_args}) "
+                                 f": {sec_name}.recompute({compute_args});")
+                    ta_results[(idx, variant["signature"])] = var_name
+
+        emit_security_ta(pre_rebind_ta_indices)
+
+        self._emit_security_rebinds(sec_id, info, lines, ta_results, indent=2, emitted_lines=lines)
+        emit_security_ta(post_rebind_ta_indices)
+        returns_tuple = item.get("returns_tuple", False)
+        tuple_size = item.get("tuple_size", 0)
+        if (
+            returns_tuple
+            and tuple_size
+            and tuple_size > 0
+            and isinstance(expr_node, TupleLiteral)
+        ):
+            # A tuple body destructures into per-element scalar members
+            # ``_req_sec_{sec_id}_{i}`` (declared in ``base.py`` and reset in
+            # ``clear_security``). Assign each element individually rather
+            # than building the whole ``TupleLiteral`` (which lowers to an
+            # ``std::make_tuple(...)`` against the non-existent aggregate
+            # member ``_req_sec_{sec_id}``).
+            for i, el in enumerate(expr_node.elements):
+                el_cpp = self._build_security_expr(
+                    sec_id,
+                    el,
+                    None,
+                    ta_results,
+                    security_mutable_names=security_mutable_names,
+                    emitted_lines=lines,
+                )
+                lines.append(f"        _req_sec_{sec_id}_{i} = {el_cpp};")
+            self._emit_security_ohlc_hist_pushes(sec_id, lines)
+            self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
+            lines.append("    }")
+            lines.append("")
+            return
+        expr_cpp = self._build_security_expr(
+            sec_id,
+            expr_node,
+            None,
+            ta_results,
+            security_mutable_names=security_mutable_names,
+            emitted_lines=lines,
+        )
+        if item.get("is_lower_tf_array"):
+            # ``request.security_lower_tf`` accumulates one element per
+            # synthesised sub-bar of the current chart bar. The runtime's
+            # ``feed_security_eval_state`` resets ``lower_tf_sub_bar_index``
+            # to 0 at the start of every chart bar's synthesis loop, so
+            # we clear the vector on index 0 and push for every sub-bar
+            # (including index 0).
+            lines.append(
+                f"        if (security_lower_tf_sub_bar_index({sec_id}) == 0)"
+                f" _req_sec_lower_tf_{sec_id}.clear();"
+            )
+            lines.append(
+                f"        _req_sec_lower_tf_{sec_id}.push_back({expr_cpp});"
+            )
+        else:
+            lines.append(f"        _req_sec_{sec_id} = {expr_cpp};")
+        self._emit_security_ohlc_hist_pushes(sec_id, lines)
+        self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
+        lines.append("    }")
+        lines.append("")
+
     def _emit_security_evaluators(self, lines: list[str]) -> None:
         """Emit _eval_security_N() methods and evaluate_security() dispatch."""
         if not self._security_calls:
             return
 
         for item in self._security_calls:
-            sec_id = item["sec_id"]
-            expr_node = item["expr_node"]
-            info = self._security_eval_info[sec_id]
-            ta_indices = info.get("ta_indices") or []
-            security_mutable_names = set(info.get("mutable_globals", []))
-            inline_helper_ta_indices = set(info.get("inline_helper_ta_indices", []))
-            lazy_ta_keys = self._security_lazy_ta_keys(sec_id, expr_node, info)
-
-            lines.append(f"    void _eval_security_{sec_id}(const Bar& bar, bool is_complete) {{")
-
-            ta_results = {}
-            pre_rebind_ta_indices: list[int] = []
-            post_rebind_ta_indices: list[int] = []
-            for idx in ta_indices:
-                if idx in inline_helper_ta_indices:
-                    continue
-                site = self.ctx.ta_call_sites[idx]
-                variants = (info.get("ta_variants") or {}).get(idx, [])
-                depends_on_mutables = False
-                for variant in variants:
-                    helper_binding_stack = variant.get("binding_stack", ())
-                    if self._security_ta_ctor_depends_on_mutables(
-                        site,
-                        security_mutable_names,
-                        helper_binding_stack,
-                    ):
-                        self._codegen_error(
-                            site.node or expr_node,
-                            "request.security does not support TA constructor args that depend on rebound mutable globals",
-                            hint="Keep TA constructor arguments immutable/simple inside request.security(), or hoist the TA call outside the security expression.",
-                        )
-                    if self._security_ta_depends_on_mutables(
-                        site,
-                        security_mutable_names,
-                        helper_binding_stack,
-                    ):
-                        depends_on_mutables = True
-                if depends_on_mutables:
-                    post_rebind_ta_indices.append(idx)
-                else:
-                    pre_rebind_ta_indices.append(idx)
-
-            def emit_security_ta(indices: list[int]) -> None:
-                for idx in indices:
-                    site = self.ctx.ta_call_sites[idx]
-                    variants = (info.get("ta_variants") or {}).get(idx, [])
-                    for variant in variants:
-                        if (idx, variant["signature"]) in lazy_ta_keys:
-                            # Pine only reaches this site through a
-                            # short-circuited operand or an untaken ternary
-                            # branch. Leave it out of the eager prologue:
-                            # _build_security_expr emits its
-                            # compute()/recompute() inline in expression
-                            # position, where C++'s &&/||/?: short-circuit
-                            # advances the series exactly on the bars Pine does.
-                            continue
-                        helper_binding_stack = variant.get("binding_stack", ())
-                        compute_args = self._security_ta_compute_args_for_site(
-                            sec_id,
-                            site,
-                            ta_results,
-                            security_mutable_names,
-                            helper_binding_stack,
-                            emitted_lines=lines,
-                        )
-                        var_name = variant["result_name"]
-                        sec_name = variant["member_name"]
-                        lines.append(f"        auto {var_name} = security_series_slot_is_new({sec_id}) "
-                                     f"? {sec_name}.compute({compute_args}) "
-                                     f": {sec_name}.recompute({compute_args});")
-                        ta_results[(idx, variant["signature"])] = var_name
-
-            emit_security_ta(pre_rebind_ta_indices)
-
-            self._emit_security_rebinds(sec_id, info, lines, ta_results, indent=2, emitted_lines=lines)
-            emit_security_ta(post_rebind_ta_indices)
-            returns_tuple = item.get("returns_tuple", False)
-            tuple_size = item.get("tuple_size", 0)
-            if (
-                returns_tuple
-                and tuple_size
-                and tuple_size > 0
-                and isinstance(expr_node, TupleLiteral)
-            ):
-                # A tuple body destructures into per-element scalar members
-                # ``_req_sec_{sec_id}_{i}`` (declared in ``base.py`` and reset in
-                # ``clear_security``). Assign each element individually rather
-                # than building the whole ``TupleLiteral`` (which lowers to an
-                # ``std::make_tuple(...)`` against the non-existent aggregate
-                # member ``_req_sec_{sec_id}``).
-                for i, el in enumerate(expr_node.elements):
-                    el_cpp = self._build_security_expr(
-                        sec_id,
-                        el,
-                        None,
-                        ta_results,
-                        security_mutable_names=security_mutable_names,
-                        emitted_lines=lines,
-                    )
-                    lines.append(f"        _req_sec_{sec_id}_{i} = {el_cpp};")
-                self._emit_security_ohlc_hist_pushes(sec_id, lines)
-                self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
-                lines.append("    }")
-                lines.append("")
-                continue
-            expr_cpp = self._build_security_expr(
-                sec_id,
-                expr_node,
-                None,
-                ta_results,
-                security_mutable_names=security_mutable_names,
-                emitted_lines=lines,
-            )
-            if item.get("is_lower_tf_array"):
-                # ``request.security_lower_tf`` accumulates one element per
-                # synthesised sub-bar of the current chart bar. The runtime's
-                # ``feed_security_eval_state`` resets ``lower_tf_sub_bar_index``
-                # to 0 at the start of every chart bar's synthesis loop, so
-                # we clear the vector on index 0 and push for every sub-bar
-                # (including index 0).
-                lines.append(
-                    f"        if (security_lower_tf_sub_bar_index({sec_id}) == 0)"
-                    f" _req_sec_lower_tf_{sec_id}.clear();"
-                )
-                lines.append(
-                    f"        _req_sec_lower_tf_{sec_id}.push_back({expr_cpp});"
-                )
-            else:
-                lines.append(f"        _req_sec_{sec_id} = {expr_cpp};")
-            self._emit_security_ohlc_hist_pushes(sec_id, lines)
-            self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
-            lines.append("    }")
-            lines.append("")
+            self._emit_security_evaluator_requested(item, lines)
 
         # Dispatch method. Security evaluators fire BEFORE on_bar, so we also
         # gate a TA reset here: whichever path fires first (evaluate_security
@@ -3293,9 +4492,12 @@ class SecurityEmitter:
                 hist = self._security_ohlc_hist_fields_by_sec.get(sec_id, ())
                 ta_hist_names = self._security_ta_hist_series_names(sec_id)
                 expr_hist_names = self._security_expr_hist_series_names(sec_id)
+                na_cpp = (
+                    "na<std::string>()" if item.get("string_result") else "na<double>()"
+                )
                 if hist or ta_hist_names or expr_hist_names:
                     lines.append(f"            case {sec_id}:")
-                    lines.append(f"                _req_sec_{sec_id} = na<double>();")
+                    lines.append(f"                _req_sec_{sec_id} = {na_cpp};")
                     for field in sorted(hist):
                         lines.append(
                             f"                {self._security_ohlc_hist_series_cpp(sec_id, field)}.clear();"
@@ -3306,7 +4508,7 @@ class SecurityEmitter:
                         lines.append(f"                {name}.clear();")
                     lines.append("                break;")
                 else:
-                    lines.append(f"            case {sec_id}: _req_sec_{sec_id} = na<double>(); break;")
+                    lines.append(f"            case {sec_id}: _req_sec_{sec_id} = {na_cpp}; break;")
         lines.append("        }")
         lines.append("    }")
 
@@ -3333,6 +4535,9 @@ class SecurityEmitter:
             helper_binding_stack = ()
 
         if isinstance(expr_node, Identifier):
+            raw_cpp = self._security_raw_cpp.get(expr_node.name)
+            if raw_cpp is not None:
+                return raw_cpp
             binding = None
             if not self._security_identifier_is_global_binding(expr_node):
                 binding = self._security_lookup_helper_binding_context(
@@ -3343,7 +4548,7 @@ class SecurityEmitter:
                 if isinstance(bound, str):
                     series_name = self._security_series_binding_target(bound)
                     if series_name is not None:
-                        return f'_security_helper_series_["{series_name}"][0]'
+                        return f"{self._security_helper_series_ref(series_name)}[0]"
                     return bound
                 return self._build_security_expr(
                     sec_id,
@@ -3363,6 +4568,8 @@ class SecurityEmitter:
             }
             if expr_node.name in bar_fields:
                 return bar_fields[expr_node.name]
+            if expr_node.name == "time_close":
+                return self._security_bar_field_expr("time_close", sec_id)
 
             if expr_node.name in security_mutable_names:
                 info = self._global_mutable_infos.get(expr_node.name)
@@ -3389,6 +4596,25 @@ class SecurityEmitter:
                     emitted_lines,
                 )
                 resolving.remove(expr_node.name)
+                field = self._security_ta_tuple_element_field(expr_node.name)
+                if field is None and expr_node.name in self._direct_program_tuple_binding_names:
+                    # The whole tuple value, not the element (a user
+                    # function's tuple would be inlined per element read).
+                    self._codegen_error(
+                        expr_node,
+                        f"request.security payload reads '{expr_node.name}', an element of a "
+                        "tuple declaration it cannot re-evaluate",
+                    )
+                if field is not None:
+                    # ``[m, s, h] = ta.macd(...)``: the name's value is the
+                    # whole TA call; read its element of the committed result.
+                    if not resolved.isidentifier():
+                        self._codegen_error(
+                            expr_node,
+                            f"request.security payload reads '{expr_node.name}', an element "
+                            "of a TA tuple it does not compute once per requested bar",
+                        )
+                    return f"{resolved}.{field}"
                 return resolved
 
         if (
@@ -3422,7 +4648,10 @@ class SecurityEmitter:
                                 helper_binding_stack,
                                 emitted_lines,
                             )
-                            return f'_security_helper_series_["{series_name}"][{index_cpp}]'
+                            return (
+                                f"{self._security_helper_series_ref(series_name)}"
+                                f"[{index_cpp}]"
+                            )
                         return bound
                     # Function parameters retain Pine's series identity. Apply
                     # history to the supported bound bar series and compose
@@ -3434,6 +4663,24 @@ class SecurityEmitter:
                     )
                     if resolved_local_index is not None:
                         local_index = NumberLiteral(value=resolved_local_index)
+                    else:
+                        # ``src[k]`` with ``k`` a helper local (``src[mHiAgo]``):
+                        # the index belongs to this helper's scope, not to the
+                        # caller scope the bound series is lowered in. Lower it
+                        # here and hand the C++ over by name, outside the
+                        # binding stack (whose shape keys the TA variants).
+                        index_name = f"__pf_security_index_{id(expr_node)}"
+                        self._security_raw_cpp[index_name] = self._build_security_expr(
+                            sec_id,
+                            expr_node.index,
+                            ta_range,
+                            ta_results,
+                            resolving,
+                            security_mutable_names,
+                            helper_binding_stack,
+                            emitted_lines,
+                        )
+                        local_index = Identifier(name=index_name)
                     composed = self._compose_security_helper_history_subscript(
                         bound,
                         local_index,
@@ -3457,7 +4704,7 @@ class SecurityEmitter:
                     )
                     if idx_lit is not None:
                         if idx_lit == 0:
-                            return self._security_bar_field_expr(field)
+                            return self._security_bar_field_expr(field, sec_id)
                         if idx_lit >= 1:
                             # lookahead_off: we evaluate when an HTF bar completes; `bar` is that
                             # bar. On the HTF series, high[0]/time[0] is the current
@@ -3473,7 +4720,7 @@ class SecurityEmitter:
                         )
                     hist = self._security_ohlc_hist_series_cpp(sec_id, field)
                     cpp_t = self._security_bar_hist_type(field)
-                    current = self._security_bar_field_expr(field)
+                    current = self._security_bar_field_expr(field, sec_id)
                     index_cpp = self._build_security_expr(
                         sec_id,
                         expr_node.index,
@@ -3509,6 +4756,18 @@ class SecurityEmitter:
                 global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
                 if (
                     self._security_identifier_is_global_binding(expr_node.object)
+                    and expr_node.object.name in self._direct_program_tuple_binding_names
+                    and expr_node.object.name not in self._global_mutable_infos
+                ):
+                    # Its value is the whole tuple: every earlier build
+                    # emitted the tuple's history, which did not compile.
+                    self._codegen_error(
+                        expr_node,
+                        f"request.security payload reads the history of "
+                        f"'{expr_node.object.name}', an element of a tuple declaration",
+                    )
+                if (
+                    self._security_identifier_is_global_binding(expr_node.object)
                     and expr_node.object.name in global_expr_map
                     and expr_node.object.name not in resolving
                 ):
@@ -3526,12 +4785,24 @@ class SecurityEmitter:
                     resolving.remove(expr_node.object.name)
                     return resolved
             if (
-                isinstance(expr_node.object, FuncCall)
-                and self._get_ta_site(expr_node.object) is None
+                (isinstance(expr_node.object, FuncCall)
+                 and self._get_ta_site(expr_node.object) is None)
+                # ``(close > ta.ema(close, n))[1]``: history of an operator
+                # expression on the requested clock, one value per completed
+                # requested bar, like a helper call result.
+                or (self._is_compound_history_object(expr_node.object)
+                    and (sec_id, id(expr_node)) in self._security_expr_hist_by_node)
             ):
                 meta = self._security_expr_hist_by_node.get((sec_id, id(expr_node)))
-                hist = meta["name"] if meta else f"_sec{sec_id}_expr_hist_missing"
-                cpp_t = meta["type"] if meta else "double"
+                if meta is None:
+                    # Not registered (the prepasses walk the payload and the
+                    # globals it reads, not every helper body): no history.
+                    self._codegen_error(
+                        expr_node,
+                        "request.security helper call history is only supported in the payload itself",
+                    )
+                hist = meta["name"]
+                cpp_t = meta["type"]
                 index_cpp = self._build_security_expr(
                     sec_id,
                     expr_node.index,
@@ -3594,22 +4865,43 @@ class SecurityEmitter:
                     resolved_input = self._resolve_security_immutable_input_int(
                         expr_node.index, helper_binding_stack
                     )
+                    if (
+                        resolved_input is None
+                        and self._security_stable_value_type(
+                            expr_node.index, helper_binding_stack
+                        ) == "int"
+                    ):
+                        # A bar-invariant int over inputs (``n = math.round(
+                        # nMin / 15)``) reads the same history offset on every
+                        # requested bar; lowered in the requested context.
+                        resolved_input = (expr_node.index, helper_binding_stack)
                     if resolved_input is None:
                         self._codegen_error(
                             expr_node,
                             "request.security() TA history index must be a literal integer (e.g. ta.ema(close, 55)[1])",
+                            hint=(
+                                "An int computed from inputs and literals is admitted; "
+                                "a series index is not."
+                            ),
                         )
                     input_node, input_stack = resolved_input
-                    index_cpp = self._build_security_expr(
-                        sec_id,
-                        input_node,
-                        ta_range,
-                        ta_results,
-                        resolving,
-                        security_mutable_names,
-                        input_stack,
-                        emitted_lines,
-                    )
+                    # An evaluator can run before on_bar sets the input
+                    # members: read each input through its getter.
+                    saved_index_inputs = self._security_index_inputs
+                    self._security_index_inputs = True
+                    try:
+                        index_cpp = self._build_security_expr(
+                            sec_id,
+                            input_node,
+                            ta_range,
+                            ta_results,
+                            resolving,
+                            security_mutable_names,
+                            input_stack,
+                            emitted_lines,
+                        )
+                    finally:
+                        self._security_index_inputs = saved_index_inputs
                     index_cpp = self._coerce_int_slot_with_cast(
                         index_cpp, expr_node.index, "int"
                     )
@@ -3688,6 +4980,14 @@ class SecurityEmitter:
                 right = self._coerce_bool_expr(right, expr_node.right)
             if expr_node.op == "%":
                 return f"std::fmod((double)({left}), (double)({right}))"
+            # Pine v6 ``/`` yields a float on int operands too (the chart's
+            # ``_visit_binop``); C++ divides two ints as integers. A double
+            # operand already divides in floating point and keeps its spelling.
+            if expr_node.op == "/" and not any(
+                self._security_emits_double(side, helper_binding_stack)
+                for side in (expr_node.left, expr_node.right)
+            ):
+                return f"((double)({left}) / (double)({right}))"
             # KI-71: honour Pine's falsy-on-na relational rule inside
             # request.security expressions too (this builder is a second
             # relational emission site independent of _visit_binop).
@@ -3736,9 +5036,12 @@ class SecurityEmitter:
             ]
             return f"std::make_tuple({', '.join(elements)})"
 
-        if isinstance(expr_node, FuncCall) and isinstance(expr_node.callee, Identifier):
-            func_name = expr_node.callee.name
-            if func_name in self._func_names:
+        if isinstance(expr_node, FuncCall):
+            func_name = self._security_user_call_key(expr_node)
+            if func_name is not None and isinstance(expr_node.callee, MemberAccess):
+                # Every earlier build called the chart method.
+                self._security_requested_used = True
+            if func_name is not None:
                 call_key = f"func:{func_name}"
                 if call_key in resolving:
                     self._codegen_error(
@@ -3797,17 +5100,20 @@ class SecurityEmitter:
                 math_sig = self._security_binding_stack_signature(helper_binding_stack)
                 if math_idx is not None and (math_idx, math_sig) in ta_results:
                     return ta_results[(math_idx, math_sig)]
-            return self._build_security_math_call(
-                sec_id,
-                expr_node.callee.member,
-                expr_node,
-                ta_range,
-                ta_results,
-                resolving,
-                security_mutable_names,
-                helper_binding_stack,
-                emitted_lines,
-            )
+            if math_site is None:
+                return self._build_security_math_call(
+                    sec_id,
+                    expr_node.callee.member,
+                    expr_node,
+                    ta_range,
+                    ta_results,
+                    resolving,
+                    security_mutable_names,
+                    helper_binding_stack,
+                    emitted_lines,
+                )
+            # A reducer the prologue left to a multi-statement helper (math.sum)
+            # is computed where the helper is inlined, as any TA site below.
 
         site = self._get_ta_site(expr_node)
         if site:
@@ -3831,9 +5137,470 @@ class SecurityEmitter:
             )
             return f"(security_series_slot_is_new({sec_id}) ? {sec_name}.compute({compute_args}) : {sec_name}.recompute({compute_args}))"
 
+        # The expression visitor renders this node on the chart's terms. Every
+        # node below it that this builder lowers itself -- a user function or
+        # method call, a TA site, a helper-bound name, requested-bar history --
+        # is handed back through the frame (``_security_fallback_delegate``),
+        # so ``nz(f())`` inlines ``f`` on the requested bar instead of calling
+        # the chart-bar method. A node that also reads something else on the
+        # chart's terms (``nz(f() - g)`` with a global ``g``) keeps the
+        # rendering every earlier build gave it; the evaluator then keeps the
+        # requested lowering only if it used none
+        # (``_emit_security_evaluator_requested``).
+        args = (
+            sec_id,
+            ta_range,
+            ta_results,
+            resolving,
+            security_mutable_names,
+            helper_binding_stack,
+            emitted_lines,
+        )
+        self._security_warn_chart_call(expr_node)
+        self._security_check_tuple_element_history(expr_node, sec_id, helper_binding_stack)
+        chart: set[int] = set()
+        if self._security_requested_calls:
+            chart_read = self._security_root_chart_read(
+                expr_node, helper_binding_stack, sec_id, security_mutable_names
+            )
+            if chart_read is not None:
+                if self._security_requested_used:
+                    # Beside, or inside, what the evaluator already inlined.
+                    self._codegen_error(
+                        expr_node, f"the payload reads {chart_read} on the chart's bar"
+                    )
+                # Rendered as every earlier build did, its calls on the chart;
+                # the evaluator keeps the requested lowering only if it
+                # inlines nothing else.
+                chart = self._security_subtree_ids(expr_node)
+                for call in self._security_user_call_sites(expr_node):
+                    self._security_warn_chart_call(
+                        call,
+                        f"the expression around it reads {chart_read} on the chart's bar"
+                        if self._security_call_inlinable(call) else None,
+                    )
+                self._security_note_chart_read(
+                    expr_node, f"the payload reads {chart_read} on the chart's bar"
+                )
+        return self._security_render_fallback(expr_node, args, chart)
+
+    def _security_check_tuple_element_history(
+        self, root, sec_id: int, helper_binding_stack=None
+    ) -> None:
+        """History of a tuple declaration's element read under a node the
+        expression visitor renders, directly or through a global's value,
+        reads the chart's series: warned. Refused, as the builder refuses the
+        bare form, where every earlier build failed to compile it: a TA
+        tuple's element outside a user call's arguments, its site in the
+        requested history and reached by no multi-statement helper, whose
+        struct result the evaluator then pushed into a ``Series<double>``
+        (``_emit_security_ta_hist_pushes`` skips it)."""
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        info = self._security_info_without_methods(self._security_eval_info[sec_id])
+        hist = self._security_ta_hist_idx_by_sec.get(sec_id, ())
+        helper_reached = {key[0] for key in info.get("inline_helper_ta_indices", [])}
+        followed: set[tuple[str, bool]] = set()
+        stack = [(root, False, helper_binding_stack)]
+        while stack:
+            n, in_call, bindings = stack.pop()
+            if isinstance(n, (list, tuple, dict)):
+                stack.extend(
+                    (item, in_call, bindings)
+                    for item in (n.values() if isinstance(n, dict) else n)
+                )
+                continue
+            if not isinstance(n, ASTNode):
+                continue
+            if (isinstance(n, Identifier)
+                    and self._security_identifier_is_global_binding(n)
+                    and n.name in global_expr_map
+                    and n.name not in self._global_mutable_infos
+                    and (n.name, in_call) not in followed):
+                # The visitor reads the global's chart value, its history too.
+                followed.add((n.name, in_call))
+                stack.append((global_expr_map[n.name], in_call, ()))
+                continue
+            if (isinstance(n, Subscript) and isinstance(n.object, Identifier)
+                    and self._security_identifier_is_global_binding(n.object)
+                    and n.object.name in self._direct_program_tuple_binding_names
+                    and n.object.name not in self._global_mutable_infos
+                    and self._resolve_security_index_literal(n.index, bindings) != 0):
+                name = n.object.name
+                site = self._get_ta_site(global_expr_map.get(name))
+                idx = self._ta_index_by_site_id.get(id(site)) if site is not None else None
+                if (not in_call and idx in hist and idx not in helper_reached
+                        and info["ta_variants"].get(idx)):
+                    self._codegen_error(
+                        n,
+                        f"request.security payload reads the history of "
+                        f"'{name}', an element of a tuple declaration",
+                    )
+                warned = getattr(self, "_security_warned_tuple_history", None)
+                if warned is None:
+                    warned = self._security_warned_tuple_history = set()
+                if id(n) not in warned:
+                    warned.add(id(n))
+                    self._codegen_warning(
+                        n,
+                        f"request.security payload reads the history of "
+                        f"'{name}', an element of a tuple declaration, on "
+                        "the chart's bar; TradingView reads it on the requested bar.",
+                    )
+            if (isinstance(n, FuncCall) and isinstance(n.callee, Identifier)
+                    and n.callee.name in self._func_names):
+                in_call = True
+            stack.extend(
+                (v, in_call, bindings) for k, v in vars(n).items() if k != "annotations"
+            )
+
+    def _security_note_chart_read(self, node, reason: str) -> None:
+        """Record the first thing the evaluator being emitted reads on the
+        chart's terms (``_emit_security_evaluator_requested``)."""
+        if self._security_requested_calls and self._security_chart_read is None:
+            self._security_chart_read = (getattr(node, "loc", None), reason)
+
+    def _security_render_fallback(self, expr_node, args: tuple, chart: set[int]) -> str:
+        """``expr_node`` rendered by the expression visitor, handing back to
+        the builder every node it owns outside ``chart``."""
+        sec_id, _ta_range, _ta_results, _resolving, mutable_names, stack, _lines = args
         self._security_payload_depth += 1
+        saved_frame = self._security_fallback_frame
+        self._security_fallback_frame = {
+            "root": expr_node,
+            "memo": {},
+            # Nodes the visitor keeps on the chart's terms.
+            "chart": chart,
+            "args": args,
+        }
         try:
             result = self._visit_expr(expr_node)
         finally:
+            self._security_fallback_frame = saved_frame
             self._security_payload_depth -= 1
-        return self._rewrite_security_cpp(result, sec_id, security_mutable_names, helper_binding_stack)
+        return self._rewrite_security_cpp(result, sec_id, mutable_names, stack)
+
+    def _security_root_chart_read(
+        self,
+        root,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...],
+        sec_id: int,
+        mutable_names: set[str],
+    ) -> str | None:
+        """What a node the builder renders through the expression visitor
+        reads on the chart's terms besides the nodes it hands back to the
+        builder, or None: only pure calls (``nz``, ``math.*``, ``str.*``),
+        literals, namespace constants, per-run values, mutable globals the
+        evaluator replays, and names the evaluator spells from the requested
+        bar may surround a call inlined on the requested bar. Anything else --
+        a global, history the builder does not own, a call kept on the chart,
+        ``bar_index``, ``timeframe.*`` -- would put two bars side by side."""
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (list, tuple)):
+                stack.extend(n)
+                continue
+            if isinstance(n, dict):
+                stack.extend(n.values())
+                continue
+            if not isinstance(n, ASTNode):
+                continue
+            if n is not root and self._security_fallback_owns(n, helper_binding_stack, sec_id):
+                continue
+            if isinstance(n, (NumberLiteral, StringLiteral, BoolLiteral, NaLiteral, ColorLiteral)):
+                continue
+            if isinstance(n, BinOp):
+                stack.extend((n.left, n.right))
+                continue
+            if isinstance(n, UnaryOp):
+                stack.append(n.operand)
+                continue
+            if isinstance(n, Ternary):
+                stack.extend((n.condition, n.true_val, n.false_val))
+                continue
+            if isinstance(n, Identifier):
+                # A name no helper binds is the visitor's global (a method
+                # default carries no binding scope).
+                bound = (
+                    None
+                    if self._security_identifier_is_global_binding(n)
+                    else self._security_lookup_helper_binding_context(
+                        n.name, helper_binding_stack
+                    )
+                )
+                if bound is None and (
+                    n.name in _SECURITY_REQUESTED_NAMES
+                    or n.name in mutable_names
+                    or (self._expr_is_stable(n)
+                        and not self._security_global_reads_timeframe(n.name))
+                ):
+                    continue
+                return f"'{n.name}'"
+            if isinstance(n, MemberAccess) and isinstance(n.object, Identifier) and (
+                n.object.name in _SECURITY_PURE_MEMBER_NAMESPACES
+                or (n.object.name == "session"
+                    and n.member in _SECURITY_PURE_SESSION_MEMBERS)
+            ):
+                continue
+            if isinstance(n, FuncCall) and not self._security_user_call_site(n):
+                func_name, namespace = self._resolve_callee(n.callee)
+                if (namespace, func_name) not in _SECURITY_IMPURE_CALLS and (
+                        (namespace is None and func_name in _SECURITY_PURE_CALLS)
+                        or namespace in _SECURITY_PURE_CALL_NAMESPACES):
+                    stack.extend(n.args)
+                    stack.extend(n.kwargs.values())
+                    continue
+                return f"'{namespace + '.' if namespace else ''}{func_name}'"
+            if isinstance(n, FuncCall):
+                return "a user call it cannot inline"
+            if isinstance(n, Subscript):
+                return "history it does not keep on the requested clock"
+            return f"a {type(n).__name__}"
+        return None
+
+    def _security_user_call_sites(self, node) -> list:
+        """Every user call under ``node``, itself included."""
+        found = []
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (list, tuple)):
+                stack.extend(n)
+            elif isinstance(n, dict):
+                stack.extend(n.values())
+            elif isinstance(n, ASTNode):
+                if self._security_user_call_site(n):
+                    found.append(n)
+                stack.extend(v for k, v in vars(n).items() if k != "annotations")
+        return found
+
+    def _security_global_reads_timeframe(self, name: str) -> bool:
+        """Whether a global's value reads ``timeframe.*``, through the globals
+        it reads: a per-run value that still differs between the chart and a
+        requested context (``tfm = timeframe.multiplier``)."""
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        seen: set[str] = set()
+        stack = [global_expr_map.get(name)]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (list, tuple)):
+                stack.extend(n)
+                continue
+            if isinstance(n, dict):
+                stack.extend(n.values())
+                continue
+            if not isinstance(n, ASTNode):
+                continue
+            if (isinstance(n, MemberAccess) and isinstance(n.object, Identifier)
+                    and n.object.name == "timeframe"):
+                return True
+            if (isinstance(n, Identifier) and n.name in global_expr_map
+                    and n.name not in seen):
+                seen.add(n.name)
+                stack.append(global_expr_map[n.name])
+            stack.extend(v for k, v in vars(n).items() if k != "annotations")
+        return False
+
+    def _security_emits_double(
+        self,
+        node,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+        depth: int = 0,
+    ) -> bool:
+        """``_emitted_value_is_double`` for a requested-context operand, read
+        the way the builder lowers it: a helper-bound name reads its
+        argument's (or evaluator local's) C++ type, an immutable global the
+        builder re-evaluates reads its value, and a user call it inlines reads
+        its final expression -- the chart's inference knows none of them (a
+        ``float g = 1`` global is re-emitted as ``1``)."""
+        if node is None or depth > 64:
+            return False
+        if isinstance(node, Identifier):
+            if not self._security_identifier_is_global_binding(node):
+                binding = self._security_lookup_helper_binding_context(
+                    node.name, helper_binding_stack
+                )
+                if binding is not None:
+                    bound, bound_stack = binding
+                    if isinstance(bound, str):
+                        series_name = self._security_series_binding_target(bound)
+                        if series_name is not None:
+                            return series_name not in self._security_string_series
+                        return self._security_local_cpp_types.get(bound) == "double"
+                    return self._security_emits_double(bound, bound_stack, depth + 1)
+            else:
+                global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+                if (node.name in global_expr_map
+                        and node.name not in self._global_mutable_infos):
+                    return self._security_emits_double(
+                        global_expr_map[node.name], (), depth + 1
+                    )
+        if isinstance(node, FuncCall) and self._security_user_call_key(node) is not None:
+            try:
+                plan = self._security_helper_call_plan(node, helper_binding_stack)
+            except CompileError:
+                return self._emitted_value_is_double(node)
+            final, stack = plan["expr"], plan["binding_stack"]
+            if plan["mode"] == "linear":
+                # The emitter declares each local with ``_type_for_decl``.
+                decls = {
+                    stmt.name: stmt for stmt in plan["body"] if isinstance(stmt, VarDecl)
+                }
+                if isinstance(final, Identifier):
+                    # A tuple element's local is ``auto``: not known double.
+                    return (final.name in decls
+                            and self._type_for_decl(decls[final.name]) == "double")
+                stack = stack + ({
+                    name: decl.value for name, decl in decls.items()
+                    if decl.value is not None
+                },)
+            return self._security_emits_double(final, stack, depth + 1)
+        if isinstance(node, BinOp):
+            if node.op in ("/", "%"):
+                return True
+            if node.op in ("+", "-", "*"):
+                return (self._security_emits_double(node.left, helper_binding_stack, depth + 1)
+                        or self._security_emits_double(node.right, helper_binding_stack, depth + 1))
+        if isinstance(node, UnaryOp) and node.op in ("-", "+"):
+            return self._security_emits_double(node.operand, helper_binding_stack, depth + 1)
+        if isinstance(node, Ternary):
+            return (self._security_emits_double(node.true_val, helper_binding_stack, depth + 1)
+                    or self._security_emits_double(node.false_val, helper_binding_stack, depth + 1))
+        return self._emitted_value_is_double(node)
+
+    def _security_fallback_owns(
+        self,
+        node,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...],
+        sec_id: int,
+    ) -> bool:
+        """Whether ``_build_security_expr`` lowers ``node`` itself rather than
+        through its expression-visitor fallback: a user call it inlines, a TA
+        site, a scalar helper binding, and history it keeps on the requested
+        clock (a bar field's, a TA site's, a helper call's or an operator
+        expression's the prepasses registered). Anything else keeps the
+        visitor's rendering, as before this path existed: a global and its
+        history (re-evaluating ``g`` on the requested bar would pair it with
+        the chart's ``g[1]``), and ``timeframe.*`` (beside the chart's
+        ``timeframe.in_seconds()``)."""
+        if not self._security_requested_calls:
+            # Every earlier build's lowering, but an input read while a TA
+            # history index or constructor argument is lowered keeps its
+            # getter: the evaluator can run before on_bar sets the members.
+            return (
+                self._security_index_inputs
+                and isinstance(node, Identifier)
+                and self._security_identifier_is_global_binding(node)
+                and node.name in self._input_backed_vars
+            )
+        if self._get_ta_site(node) is not None:
+            return True
+        if isinstance(node, FuncCall):
+            return self._security_call_inlinable(node)
+        if isinstance(node, Identifier):
+            return self._security_fallback_owns_name(node, helper_binding_stack)
+        if isinstance(node, Subscript):
+            obj = node.object
+            if isinstance(obj, Identifier):
+                if not self._security_identifier_is_global_binding(obj):
+                    binding = self._security_lookup_helper_binding_context(
+                        obj.name, helper_binding_stack
+                    )
+                    if binding is not None:
+                        return self._security_bound_is_scalar(*binding)
+                # ``close[1]``: the requested bar's history.
+                return obj.name in SECURITY_BAR_FIELDS
+            if self._get_ta_site(obj) is not None:
+                # ``ta.sma(close, 5)[1]``: the requested TA's history series.
+                return True
+            if isinstance(obj, FuncCall):
+                return (sec_id, id(node)) in self._security_expr_hist_by_node
+            return (
+                self._is_compound_history_object(obj)
+                and (sec_id, id(node)) in self._security_expr_hist_by_node
+            )
+        return False
+
+    def _security_bound_is_scalar(self, bound, bound_stack) -> bool:
+        """Whether a helper binding holds a scalar: an evaluator local or
+        helper series, or an argument whose value is an int, float, bool or
+        string (a collection, UDT or drawing argument keeps the visitor's
+        rendering)."""
+        if isinstance(bound, str):
+            return True
+        for _ in range(64):
+            if not (isinstance(bound, Identifier)
+                    and not self._security_identifier_is_global_binding(bound)):
+                break
+            binding = self._security_lookup_helper_binding_context(bound.name, bound_stack)
+            if binding is None:
+                break
+            bound, bound_stack = binding
+            if isinstance(bound, str):
+                return True
+        return self._infer_type(bound) in _SECURITY_SCALAR_CPP
+
+    def _security_fallback_owns_name(
+        self,
+        node: Identifier,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...],
+    ) -> bool:
+        """A name the builder resolves itself: a scalar helper binding, the
+        requested ``time_close``, and -- while a TA history index is lowered
+        -- an input, read through its getter."""
+        if not self._security_identifier_is_global_binding(node):
+            binding = self._security_lookup_helper_binding_context(
+                node.name, helper_binding_stack
+            )
+            if binding is not None:
+                return self._security_bound_is_scalar(*binding)
+        if node.name == "time_close":
+            return True
+        return (
+            self._security_index_inputs
+            and self._security_identifier_is_global_binding(node)
+            and node.name in self._input_backed_vars
+        )
+
+    def _security_fallback_delegate(self, node) -> str | None:
+        """The builder's C++ for a node the expression visitor reached while
+        lowering a request.security payload node it does not handle itself
+        (``_build_security_expr``'s fallback); None to render it as usual.
+        A node is lowered once per fallback: a builtin whose visitor renders
+        an argument twice (``str.format``) must not emit a helper's
+        statements, and advance its TA state, twice."""
+        frame = self._security_fallback_frame
+        if frame is None or node is frame["root"]:
+            return None
+        memo = frame["memo"]
+        if id(node) in memo:
+            return memo[id(node)]
+        args = frame["args"]
+        if id(node) in frame["chart"] or not self._security_fallback_owns(
+            node, args[5], args[0]
+        ):
+            self._security_warn_chart_call(node)
+            return None
+        self._security_requested_used = True
+        self._security_fallback_frame = None
+        try:
+            memo[id(node)] = self._build_security_expr(args[0], node, *args[1:])
+        finally:
+            self._security_fallback_frame = frame
+        return memo[id(node)]
+
+    @staticmethod
+    def _security_subtree_ids(node) -> set[int]:
+        """``id`` of every AST node under ``node``, itself included."""
+        out: set[int] = set()
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (list, tuple)):
+                stack.extend(n)
+            elif isinstance(n, dict):
+                stack.extend(n.values())
+            elif isinstance(n, ASTNode) and id(n) not in out:
+                out.add(id(n))
+                stack.extend(v for k, v in vars(n).items() if k != "annotations")
+        return out

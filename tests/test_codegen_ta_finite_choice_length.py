@@ -3,8 +3,11 @@
 The engine extrema ABI owns one fixed-size history per object.  A Pine length
 that selects between two input-qualified values is therefore lowered to two
 fixed histories advanced on every bar, followed by a value selection.  These
-tests pin that bounded lowering and keep arbitrary series-length support out of
-scope.
+tests pin that bounded lowering. Every other series length of these two
+functions takes the general series-length route instead (lane K-TA-DYNLEN:
+``pineforge::source::SeriesLowest`` / ``SeriesHighest``, TradingView's
+re-windowing rule, ``tests/test_e2e_ta_dynamic_length.py``); the shapes below
+that used to be refused must still stay off the finite-choice rewrite.
 """
 
 from __future__ import annotations
@@ -18,6 +21,20 @@ from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests.test_float_relational_runtime import _compile_and_run
+
+
+def _declined_by_finite_route(source: str, *, check_support: bool = True) -> str | None:
+    """The C++ of a program the finite-choice rewrite must leave alone: it
+    either is refused (a spelling PineForge still rejects) or reaches the
+    general series-length lowering, never the fixed-history pair. Returns the
+    C++ when it transpiles."""
+    try:
+        cpp = transpile(source, check_support=check_support)
+    except CompileError:
+        return None
+    assert "pf_ta_length_choice" not in cpp
+    assert re.search(r"pineforge::source::Series(Lowest|Highest) ", cpp), cpp
+    return cpp
 
 
 def _member_periods(cpp: str, family: str) -> list[int]:
@@ -265,11 +282,15 @@ plot(x + pf_ta_length_choice_1_selected() + pf_ta_length_choice_1_true() + pf_ta
         "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\nn = close > open ? a : b\nx = ta.lowest(low, n)\nx = 0.0",
     ],
 )
-def test_unsafe_or_ambiguous_finite_choices_remain_rejected(
+def test_unsafe_or_ambiguous_finite_choices_stay_off_the_finite_route(
     source: str,
 ) -> None:
-    with pytest.raises(CompileError, match="Unsupported TA constructor length"):
-        transpile(f'//@version=6\nstrategy("mutation guard")\n{source}\nplot(x)\n')
+    # These used to be refused by the constructor guard. A series length now
+    # lowers onto the series-length extrema (TradingView re-windows every
+    # call); the finite-choice rewrite still never gives them its
+    # fixed-history pair.
+    _declined_by_finite_route(
+        f'//@version=6\nstrategy("mutation guard")\n{source}\nplot(x)\n')
 
 
 def test_aliased_length_is_snapshotted_at_call_site() -> None:
@@ -321,14 +342,13 @@ n = close > open ? a : b
 plot(x)
 """
 
-    # check_support=False reaches this lowering for varip; the ordinary public
-    # path rejects varip even earlier because batch mode has no intrabar ticks.
-    with pytest.raises(CompileError, match="Unsupported TA constructor length"):
-        transpile(src, check_support=False)
+    # ``varip`` shares ``var``'s declaration lowering: both take the
+    # series-length route, not the finite-choice pair.
+    assert _declined_by_finite_route(src, check_support=False) is not None
 
 
 @pytest.mark.parametrize("shadowed", ["ta", "input"])
-def test_shadowed_builtin_namespace_remains_rejected(
+def test_shadowed_builtin_namespace_stays_off_the_finite_route(
     shadowed: str,
 ) -> None:
     src = f"""//@version=6
@@ -341,8 +361,7 @@ x = ta.lowest(low, n)
 plot(x)
 """
 
-    with pytest.raises(CompileError, match="Unsupported TA constructor length"):
-        transpile(src)
+    _declined_by_finite_route(src)
 
 
 def test_positive_options_domains_are_admitted() -> None:
@@ -397,8 +416,6 @@ plot(x)
         "n = ta.barssince(close > open)\nx = ta.lowest(low, n)",
         # One choice is itself series-valued rather than a fixed leaf.
         "a = input.int(2, \"A\")\nn = close > open ? a : int(ta.atr(3))\nx = ta.lowest(low, n)",
-        # Other TA families retain their simple/fixed-length contract.
-        "a = input.int(2, \"A\")\nb = input.int(4, \"B\")\nn = close > open ? a : b\nx = ta.ema(close, n)",
         # Non-identifier source expressions stay outside the bounded route.
         "a = input.int(2, \"A\")\nb = input.int(4, \"B\")\nn = close > open ? a : b\nx = ta.lowest(low + 0.0, n)",
         # The two-argument route is deliberately native-source exact:
@@ -411,9 +428,20 @@ plot(x)
         "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\n[high, other] = [close, open]\nn = close > open ? a : b\nx = ta.highest(high, n)",
     ],
 )
-def test_unbounded_or_out_of_scope_lengths_remain_rejected(source: str) -> None:
+def test_unbounded_or_out_of_scope_lengths_take_the_series_route(source: str) -> None:
+    cpp = _declined_by_finite_route(
+        f'//@version=6\nstrategy("negative")\n{source}\nplot(x)\n')
+    assert cpp is not None
+    compile_cpp(cpp, label="series_length_route")
+
+
+def test_other_families_keep_their_simple_length_contract() -> None:
+    # TradingView refuses a series length for ta.ema at compile time (CE10123,
+    # "a 'simple int' is expected"), so PineForge still refuses it.
     with pytest.raises(CompileError, match="Unsupported TA constructor length"):
-        transpile(f'//@version=6\nstrategy("negative")\n{source}\nplot(x)\n')
+        transpile('//@version=6\nstrategy("negative")\na = input.int(2, "A")\n'
+                  'b = input.int(4, "B")\nn = close > open ? a : b\n'
+                  'x = ta.ema(close, n)\nplot(x)\n')
 
 
 _RUNTIME_PINE = """//@version=6

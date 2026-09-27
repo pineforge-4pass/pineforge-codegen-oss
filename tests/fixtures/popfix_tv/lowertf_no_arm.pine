@@ -1,0 +1,16 @@
+//@version=6
+// A request.security_lower_tf timeframe switch with no default arm that
+// matches no arm (the switch yields na). Each entry comment spells how many
+// intrabars the request returned and whether the last one is the chart bar.
+strategy("PF lowertf no arm", overlay = true)
+pick = input.string("none", "Pick")
+tf = switch pick
+    "1" => "1"
+    "5" => "5"
+v = request.security_lower_tf(syminfo.tickerid, tf, close)
+n = array.size(v)
+lastClose = n > 0 ? array.get(v, n - 1) : na
+if minute(time, "UTC") == 0 and strategy.position_size == 0
+    strategy.entry("L", strategy.long, comment = "n=" + str.tostring(n) + " chart=" + str.tostring(lastClose == close))
+if minute(time, "UTC") == 30
+    strategy.close("L", comment = str.tostring(n) + "|" + str.tostring(lastClose) + "|" + str.tostring(close))

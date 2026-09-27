@@ -29,7 +29,8 @@ from ..symbols import (
     method_receiver_type_name,
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
-from ..limits import TimeBudget
+from ..limits import TimeBudget, iter_ast_nodes
+from ..session_reads import emitted_session_reads
 from ..method_binding import (
     BoundMethodArgs,
     MethodBindError,
@@ -126,10 +127,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     """
 
     def __init__(self, ast: Program, filename: str = "<stdin>",
-                 budget: TimeBudget | None = None) -> None:
+                 budget: TimeBudget | None = None,
+                 session_clones: frozenset[str] | None = None) -> None:
         self._ast = ast
         self._filename = filename
         self._budget = budget
+        # The functions that may be emitted once per call site for their
+        # session.<flag>[k] reads; None: every one that reads a flag at an
+        # offset (pineforge_codegen._generate passes none first, then each
+        # time adds the ones whose reads the C++ holds).
+        self._session_clones = session_clones
+        self._session_uncloned: frozenset[str] = frozenset()
         self._budget_visit_count = 0
         self._method_signatures = inventory_method_signatures(ast)
         self._method_call_bindings: dict[
@@ -286,6 +294,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # their established paths.
         self._func_var_storage_names: dict[str, dict[str, str]] = {}
         self._func_series_vars: dict[str, set] = {}   # func_name -> set[str]
+        self._session_history_unsafe: dict[str, str] = {}
         # Declaration-bound non-persistent history locals are distinct from
         # history parameters/global reads carried by ``func_series_vars``.
         # Codegen needs this exact subset when a raw spelling also belongs to
@@ -608,6 +617,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 for name, specs in self._func_param_type_specs.items()
             },
             func_security_clone_only=self._func_security_clone_only,
+            session_history_unsafe=self._session_history_unsafe,
+            session_uncloned=self._session_uncloned,
             func_cs_ta_clone_names=self._func_cs_ta_clone_names,
             udt_defs=self._udt_fields,
             enum_defs=self._enum_defs,
@@ -2247,6 +2258,99 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         return out
 
+    def _session_history_unsafe_functions(
+            self, func_defs: dict, find_calls, known_func_names: set[str],
+            calls_by_parent: dict) -> dict[str, str]:
+        """The functions and methods that cannot keep a ``session.*`` flag's
+        history per call site, each with the reason (name -> why).
+
+        A read in a function keeps its call site's history: the function is
+        emitted once per call site (``_session_call_*``, codegen). Four kinds
+        of callable do not get that:
+
+        * a method: a call on a receiver the analyzer cannot type
+          (``mk().m()``, a loop variable) is not told apart from the method's
+          other calls;
+        * a function a method calls, once in the method's one body;
+        * a function a request.security expression evaluates: the evaluator
+          inlines it or calls its chart variant, on the requested clock. The
+          functions reached are those the expression calls, those they call,
+          and those a global variable's definition or a mutable global's
+          statements call when anything it reaches spells the global's name
+          (the evaluator follows a mutable global by name, so a function's
+          own binding of the name does not stop it);
+        * a function a UDT field default calls, once for every ``new()``.
+
+        Codegen refuses a ``session.<flag>[k]`` it emits in one of them; a read
+        it never emits (in ``plot()``, a dropped argument) refuses nothing.
+        Every such emitted read failed the C++ compile before this lane.
+        """
+        unsafe: dict[str, str] = {}
+
+        def mark(names, why: str) -> None:
+            for name in sorted(names):
+                unsafe.setdefault(name, why)
+
+        def closure(roots) -> set[str]:
+            found, pending = set(), list(roots)
+            while pending:
+                name = pending.pop()
+                if name in found or name not in func_defs:
+                    continue
+                found.add(name)
+                pending.extend(callee for callee, _call in calls_by_parent.get(name, []))
+            return found
+
+        methods = {name for name in func_defs if "." in name}
+        mark(methods, "a method, whose calls PineForge cannot always tell apart")
+        mark(closure(callee for m in methods for callee, _call in calls_by_parent.get(m, [])),
+             "which a method calls")
+
+        # A request.security expression's reach.
+        pending: list[tuple[Any, str | None]] = [
+            (sec.expression, getattr(sec, "containing_func", "") or None)
+            for sec in getattr(self, "_security_calls", []) or []
+            if getattr(sec, "expression", None) is not None
+        ]
+        reached: set[str] = set()
+        seen_nodes: set[int] = set()
+        followed: set[str] = set()
+        while pending:
+            node, owner = pending.pop()
+            if id(node) in seen_nodes:
+                continue
+            seen_nodes.add(id(node))
+            if self._budget is not None:
+                self._budget.check(getattr(node, "loc", None), Phase.ANALYZER)
+            for callee, _call in find_calls(node, known_func_names, owner):
+                if callee not in reached and callee in func_defs:
+                    reached.add(callee)
+                    pending.append((func_defs[callee], callee))
+            for child, _depth in iter_ast_nodes(node):
+                if not isinstance(child, Identifier) or child.name in followed:
+                    continue
+                name = child.name
+                info = self._global_binding_infos.get(name)
+                if info is not None and (info.is_var or name in self._global_reassigned_names):
+                    followed.add(name)
+                    pending.extend((stmt, None) for stmt in info.source_stmts)
+                elif name in self._global_expr_map:
+                    followed.add(name)
+                    pending.append((self._global_expr_map[name], None))
+        mark(reached, "which a request.security expression evaluates on the requested clock")
+
+        # A UDT field default's call, for the types a script builds.
+        built = {node.callee.object.name for node, _depth in iter_ast_nodes(self._ast)
+                 if isinstance(node, FuncCall) and isinstance(node.callee, MemberAccess)
+                 and node.callee.member == "new" and isinstance(node.callee.object, Identifier)}
+        mark(closure(callee
+                     for stmt in self._ast.body
+                     if isinstance(stmt, TypeDecl) and stmt.name in built
+                     for field in stmt.fields if field.default is not None
+                     for callee, _call in find_calls(field.default, known_func_names, None)),
+             "which a UDT field default calls once for every new()")
+        return unsafe
+
     def _propagate_call_site_counts(self) -> None:
         """Propagate stateful UDF identity through complete call paths.
 
@@ -2568,12 +2672,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         owner_requirements.add(actual.name)
                         series_changed = True
 
-        # Codegen synthesizes a Series buffer for two expression shapes that
+        # Codegen synthesizes a Series buffer for three expression shapes that
         # do not appear in ``_func_series_vars`` themselves:
         #
         #   * a call result read through history, e.g. ``f()[1]``;
         #   * a scalar expression bridged into a UDF series parameter, e.g.
-        #     ``history(close + open)`` where ``history(src) => src[1]``.
+        #     ``history(close + open)`` where ``history(src) => src[1]``;
+        #   * a session.* flag read at an offset, e.g. ``session.ismarket[1]``,
+        #     whose history in a function is the calls' of its call site
+        #     (TradingView's tapes, tests/test_e2e_session_history.py).
         #
         # A buffer is mutable per-call-site state just like TA/fixnan.  Mark
         # its lexical owner stateful before the normal call-path closure so a
@@ -2613,6 +2720,15 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 return True
             return False
 
+        # A read written in a request.security expression keeps the requested
+        # clock's history (codegen security.py), not its function's calls.
+        requested_node_ids = {
+            id(child)
+            for sec in getattr(self, "_security_calls", []) or []
+            if getattr(sec, "expression", None) is not None
+            for child, _depth in iter_ast_nodes(sec.expression)
+        }
+
         def _has_synthetic_history_state(
                 node, seen: set[int] | None = None) -> bool:
             if node is None:
@@ -2649,6 +2765,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             name for name, func_def in func_defs.items()
             if _has_synthetic_history_state(func_def)
         }
+        # A plain function that reads a flag at an offset is emitted once per
+        # call site, if this analysis may clone it. A callable that cannot
+        # keep its call sites apart gets no clone for it (codegen refuses such
+        # a read where it emits one).
+        self._session_history_unsafe = self._session_history_unsafe_functions(
+            func_defs, _find_calls, known_func_names, calls_by_parent)
+        session_readers = frozenset(
+            name for name, func_def in func_defs.items()
+            if name not in self._session_history_unsafe
+            and emitted_session_reads(func_def, requested_node_ids)
+        )
+        cloned = (session_readers if self._session_clones is None
+                  else session_readers & self._session_clones)
+        self._session_uncloned = session_readers - cloned
+        synthetic_history_stateful |= cloned
 
         # request.security owns a separate evaluator context and already
         # materializes/remaps its embedded TA state per SecurityCallInfo.  Do
@@ -4065,10 +4196,92 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
         return val_type
 
+    def _selection_tuple_shape(
+        self, node
+    ) -> tuple[int, tuple[PineType, ...]] | None:
+        """``(size, element types)`` of an if/switch whose every arm yields a
+        tuple: a ``[a, b]`` literal, a call of a tuple-returning user function,
+        or a nested selection of those. Pine types the selection as that
+        tuple; arms must agree on its size. ``None`` for any other shape.
+
+        Element types are the arms' common type per position (int and float
+        make float); a position the arms disagree on is left untyped.
+        """
+        if isinstance(node, IfStmt):
+            arms = [node.body] + ([node.else_body] if node.else_body else [])
+        elif isinstance(node, SwitchStmt):
+            arms = [body for _case, body in node.cases]
+            if node.default_body:
+                arms.append(node.default_body)
+        else:
+            return None
+        shapes: list[tuple[int, tuple[PineType, ...]]] = []
+        for body in arms:
+            if not body:
+                return None
+            terminal = body[-1]
+            expr = terminal.expr if isinstance(terminal, ExprStmt) else terminal
+            if isinstance(expr, TupleLiteral):
+                shapes.append((
+                    len(expr.elements),
+                    self._tuple_element_types_by_node.get(id(expr), ()),
+                ))
+            elif (isinstance(expr, FuncCall)
+                    and isinstance(expr.callee, Identifier)
+                    and self._func_returns_tuple.get(expr.callee.name, False)):
+                shapes.append((
+                    self._func_tuple_element_count.get(expr.callee.name, 0),
+                    self._func_tuple_element_types.get(expr.callee.name, ()),
+                ))
+            elif isinstance(expr, (IfStmt, SwitchStmt)):
+                nested = self._selection_tuple_shape(expr)
+                if nested is None:
+                    return None
+                shapes.append(nested)
+            else:
+                return None
+        sizes = {size for size, _types in shapes}
+        if len(sizes) != 1:
+            return None
+        size = sizes.pop()
+        if size < 2:
+            return None
+        if any(len(types) != size for _size, types in shapes):
+            return size, ()
+        element_types: list[PineType] = []
+        for position in range(size):
+            known = {
+                types[position] for _size, types in shapes
+                if types[position] not in (PineType.NA, PineType.UNKNOWN)
+            }
+            if len(known) == 1:
+                element_types.append(known.pop())
+            elif known and known <= {PineType.INT, PineType.FLOAT}:
+                element_types.append(PineType.FLOAT)
+            else:
+                return size, ()
+        return size, tuple(element_types)
+
     def _visit_TupleAssign(self, node: TupleAssign) -> PineType:
         val_type = self._visit(node.value)
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
         element_types = self._tuple_element_types_by_node.get(id(node.value), ())
+        if not element_types and isinstance(node.value, (IfStmt, SwitchStmt)):
+            shape = self._selection_tuple_shape(node.value)
+            if shape is not None:
+                element_types = shape[1]
+        if (not element_types
+                and isinstance(node.value, FuncCall)
+                and isinstance(node.value.callee, Identifier)
+                and self._func_returns_tuple.get(node.value.callee.name, False)):
+            # A user function's string elements bind as strings. Its other
+            # families keep the historical double storage of a call tuple.
+            element_types = tuple(
+                PineType.STRING if item == PineType.STRING else PineType.FLOAT
+                for item in self._func_tuple_element_types.get(
+                    node.value.callee.name, ()
+                )
+            )
 
         is_val_static = self._is_static_expression(node.value)
 
@@ -4083,10 +4296,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             )
             # Tuple bindings historically use double storage for every
             # numeric element, including integer literals. Preserve that
-            # contract while retaining the newly-authoritative bool family.
+            # contract while retaining the bool and string families: a string
+            # element read as a double compared by value (``a == b``) through
+            # a static_cast of a std::string.
             element_type = (
-                PineType.BOOL
-                if inferred_element_type == PineType.BOOL
+                inferred_element_type
+                if inferred_element_type in (PineType.BOOL, PineType.STRING)
                 else PineType.FLOAT
             )
 
@@ -4272,12 +4487,23 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 tuple_node = last_stmt.expr
             elif isinstance(last_stmt, TupleLiteral):
                 tuple_node = last_stmt
+            selection_shape = (
+                self._selection_tuple_shape(last_stmt)
+                if isinstance(last_stmt, (IfStmt, SwitchStmt))
+                else None
+            )
             if tuple_node is not None:
                 self._func_returns_tuple[node.name] = True
                 self._func_tuple_element_count[node.name] = len(tuple_node.elements)
                 self._func_tuple_element_types[node.name] = (
                     self._tuple_element_types_by_node.get(id(tuple_node), ())
                 )
+            elif selection_shape is not None:
+                # ``f() => if c ... g() else [a, b]``: every arm yields a
+                # tuple of one size, so the function returns that tuple.
+                self._func_returns_tuple[node.name] = True
+                self._func_tuple_element_count[node.name] = selection_shape[0]
+                self._func_tuple_element_types[node.name] = selection_shape[1]
             elif (
                 isinstance(terminal_ret_expr, FuncCall)
                 and isinstance(terminal_ret_expr.callee, Identifier)
@@ -6028,9 +6254,11 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if ns == "barstate":
                 return PineType.BOOL
 
-            # alert.* constants (freq_once_per_bar, freq_once_per_bar_close, etc.)
+            # alert.freq_* are const strings ("all", "once_per_bar",
+            # "once_per_bar_close"); any other alert.* member is refused by
+            # the support checker.
             if ns == "alert":
-                return PineType.INT
+                return PineType.STRING
 
             # position.* constants for tables (middle_right, top_left, etc.)
             if ns == "position":

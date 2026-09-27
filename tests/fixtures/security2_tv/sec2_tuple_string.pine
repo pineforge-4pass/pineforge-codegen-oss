@@ -1,0 +1,18 @@
+//@version=6
+// String elements of a request.security helper tuple and a string payload,
+// with gaps off and on (gaps_on reads na on a chart bar completing no
+// requested bar).
+strategy("PF sec2 tuple string", overlay = true)
+f_tag() =>
+    dir = close > open ? "up" : close < open ? "down" : "flat"
+    [dir, close - open, close > open]
+[d1, x1, b1] = request.security(syminfo.tickerid, "60", f_tag())
+[d2, x2, b2] = request.security(syminfo.tickerid, "60", f_tag(), gaps = barmerge.gaps_on)
+sg = request.security(syminfo.tickerid, "60", str.tostring(close), gaps = barmerge.gaps_on)
+s(x) => na(x) ? "na" : str.tostring(x)
+tb(x) => x ? "T" : "F"
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = d1 + "|" + s(x1) + "|" + tb(b1) + "|" + d2 + "|" + s(x2) + "|" + tb(b2) + "|" + sg)

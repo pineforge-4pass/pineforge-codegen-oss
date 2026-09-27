@@ -40,7 +40,10 @@ def test_security_timeframe_alias_from_switch_is_registration_expression():
     assert 'std::string("60")' in line
 
 
-def test_security_timeframe_switch_without_default_is_rejected():
+def test_security_timeframe_switch_without_default_falls_back_to_the_chart():
+    """An unmatched switch yields na, with which TradingView's request.security
+    reads the chart's timeframe (tests/test_e2e_popfix_tf_switch_no_default.py
+    replays its tape)."""
     source = (
         PRELUDE
         + "HTF = switch timeframe.period\n"
@@ -50,8 +53,10 @@ def test_security_timeframe_switch_without_default_is_rejected():
         + "plot(value)\n"
     )
 
-    with pytest.raises(CompileError, match="timeframe switch requires a default arm"):
-        transpile(source)
+    line = _registration_line(source)
+
+    assert 'std::string("5")' in line and 'std::string("15")' in line
+    assert line.count("script_tf_") >= 3  # two selectors and the fallback
 
 
 def test_security_timeframe_switch_with_multistatement_arm_is_rejected():

@@ -1,0 +1,8 @@
+//@version=6
+strategy("PF KRUNERR env facts", overlay=true, pyramiding=4)
+if bar_index == 3
+    strategy.entry("tz=" + syminfo.timezone + "|tid=" + syminfo.tickerid, strategy.long)
+    strategy.entry("tf=" + timeframe.period + "|m=" + str.tostring(timeframe.multiplier) + "|min=" + str.tostring(timeframe.isminutes) + "|d=" + str.tostring(timeframe.isdaily) + "|std=" + str.tostring(chart.is_standard), strategy.long)
+    strategy.entry("tk=" + syminfo.ticker + "|pre=" + syminfo.prefix + "|type=" + syminfo.type, strategy.long)
+if bar_index == 5
+    strategy.close_all(comment = "cur=" + syminfo.currency + "|base=" + syminfo.basecurrency + "|mt=" + str.tostring(syminfo.mintick) + "|pv=" + str.tostring(syminfo.pointvalue))

@@ -148,6 +148,7 @@ from ..ast_nodes import (
 from ..symbols import TypeSpec, method_receiver_type_name
 from ..method_binding import (
     MethodBindError,
+    bind_function_defaults,
     bind_method_call,
     signature_from_callable,
 )
@@ -315,6 +316,56 @@ class CallVisitor:
         ):
             return receiver_spec, None
         return receiver_spec, method_info
+
+    def _check_time_bars_back(self, func_name: str, node: FuncCall) -> FuncCall:
+        """Refuse ``time()`` / ``time_close()`` reading another bar.
+
+        Pine v6's ``time(timeframe, session, bars_back, timeframe_bars_back)``
+        overloads take the bar offset where the timezone form has its string
+        (``time("", "", -1)`` is the next bar's open). The engine has no API
+        for another chart bar's time, above all a future one; the offset used
+        to be passed as the timezone, C++ that does not compile.
+        """
+        offsets = [node.kwargs[name] for name in ("bars_back", "timeframe_bars_back")
+                   if name in node.kwargs]
+        offsets += [arg for arg in node.args[2:]
+                    if self._infer_type(arg) in ("int", "int64_t", "double")]
+        for offset in offsets:
+            if isinstance(offset, NumberLiteral) and offset.value == 0:
+                continue
+            self._codegen_error(
+                node,
+                f"{func_name}() with bars_back / timeframe_bars_back is not "
+                "supported: the engine exposes no other chart bar's time, "
+                "including a future bar's.",
+                hint=f"Read a past bar's value with {func_name}(...)[k].",
+            )
+        if not offsets:
+            return node
+        # Every offset is a literal 0, the current bar: drop it.
+        positional = list(node.args)
+        while len(positional) > 2 and any(positional[-1] is o for o in offsets):
+            positional.pop()
+        return FuncCall(
+            callee=node.callee, args=positional,
+            kwargs={k: v for k, v in node.kwargs.items()
+                    if k not in ("bars_back", "timeframe_bars_back")},
+            loc=node.loc, annotations=node.annotations,
+        )
+
+    def _user_call_args_with_defaults(self, func_name: str, node: FuncCall):
+        """A plain user-function call's arguments with omitted parameters
+        filled from their declared defaults (``bind_function_defaults``);
+        ``None`` when the established binding applies."""
+        fi = self._func_info_map.get(func_name)
+        if (fi is None or fi.node is None or not fi.node.params
+                or getattr(fi, "is_udt_method", False)):
+            return None
+        return bind_function_defaults(
+            fi.node.params,
+            (fi.node.annotations or {}).get("param_defaults", ()),
+            node,
+        )
 
     def _bind_typed_method_args(self, method_info, node: FuncCall):
         """Bind typed method arguments through the analyzer-shared rules."""
@@ -1415,6 +1466,17 @@ class CallVisitor:
 
         # na(x) -> is_na(x)
         if func_name == "na" and namespace is None:
+            if (len(node.args) == 1 and not node.kwargs
+                    and self._infer_type(node.args[0]) == "std::string"):
+                # A string na is stored as the empty string (the engine's
+                # ``na<std::string>()``), which has no ``is_na`` overload.
+                self._codegen_warning(
+                    node,
+                    "na() of a string reads the empty string as na: PineForge "
+                    "stores a string na as \"\", so an authored empty string "
+                    "is na here, while TradingView tells the two apart.",
+                )
+                return f"({self._visit_expr(node.args[0])}).empty()"
             args = ", ".join(self._visit_expr(a) for a in node.args)
             return f"is_na({args})"
 
@@ -1615,6 +1677,18 @@ class CallVisitor:
                 spec = self._type_spec_from_expr(node) or TypeSpec.array(TypeSpec.primitive("float"))
                 target = getattr(self, "_array_ctor_target_name", None)
                 if target is not None:
+                    # The declaration's own element type wins over the
+                    # argument inference, which cannot see every scalar's
+                    # family (a ``color`` variable reads as float there):
+                    # ``color[] cs = array.from(c1, c2)`` declares
+                    # ``std::vector<int64_t>`` and must construct one.
+                    declared = self._collection_spec_for_name(target)
+                    if (declared is not None and declared.kind == "array"
+                            and declared.element is not None
+                            and declared.element.kind == "primitive"
+                            and spec.kind == "array"
+                            and declared.element != spec.element):
+                        spec = declared
                     spec = self._widen_array_spec_for_name(target, spec)
                 elem_spec = spec.element
                 elems = ", ".join(
@@ -1875,6 +1949,9 @@ class CallVisitor:
         # to nothing against the base engine (legacy 5-arg call), so the same
         # generated.cpp builds in every lab-experiment cell.
         #
+        if (func_name in ("time", "time_close") and namespace is None
+                and (node.args or node.kwargs)):
+            node = self._check_time_bars_back(func_name, node)
         if func_name == "time" and namespace is None and (node.args or node.kwargs):
             args = _merge_kwargs(node.args, node.kwargs, sigs.get_param_names(None, "time"), self._visit_expr)
             tf_e = args[0] if len(args) > 0 else 'script_tf_'
@@ -2010,8 +2087,16 @@ class CallVisitor:
         # Type cast functions: int(x), float(x), bool(x), string(x)
         if func_name == "int" and namespace is None and node.args:
             # Pine int(na) → na (int form). Evaluate once, propagate na via
-            # the engine's int sentinel instead of collapsing NaN to 0.
+            # the engine's int sentinel instead of collapsing NaN to 0. Pine
+            # int is 64-bit: int(time) keeps the epoch, so a wide argument
+            # (``_wide_int_provenance``) casts to int64_t.
             x = self._visit_expr(node.args[0])
+            owner = self._func_info_map.get(
+                getattr(self, "_active_func_name", "") or "")
+            if self._expr_returns_wide_int(
+                    node.args[0], owner, set(),
+                    getattr(self, "_active_call_site_idx", None)):
+                return na_preserving_int_cast(x, "int64_t")
             return na_preserving_int_cast(x)
         if func_name == "float" and namespace is None and node.args:
             return f"(double)({self._visit_expr(node.args[0])})"
@@ -2382,7 +2467,20 @@ class CallVisitor:
             return self._visit_expr(arg_node)
 
         ordered_arg_nodes: list = []
-        if node.kwargs:
+        defaulted_arg_nodes = (
+            self._user_call_args_with_defaults(func_name, node)
+            if namespace is None and func_name in self._func_names
+            else None
+        )
+        if defaulted_arg_nodes is not None:
+            # Omitted parameters take their declared defaults, and keywords
+            # land on their own parameters past any omitted one.
+            ordered_arg_nodes = list(defaulted_arg_nodes)
+            all_args = [
+                _visit_arg_for_series(a, i)
+                for i, a in enumerate(defaulted_arg_nodes)
+            ]
+        elif node.kwargs:
             # Try to resolve kwargs using FuncInfo params for user-defined functions
             fi = self._func_info_map.get(func_name)
             if fi and fi.node and fi.node.params:

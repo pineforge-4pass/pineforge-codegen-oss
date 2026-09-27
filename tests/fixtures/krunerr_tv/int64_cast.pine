@@ -1,0 +1,12 @@
+//@version=6
+strategy("PF KRUNERR int64 cast", overlay=true, pyramiding=10, default_qty_type=strategy.fixed, default_qty_value=0.01)
+int it = int(time)
+var int first = na
+if na(first)
+    first := int(time_close)
+f_id(int t) => int(t)
+if bar_index == 3
+    strategy.entry("it=" + str.tostring(it) + "|first=" + str.tostring(first), strategy.long)
+    strategy.entry("ts=" + str.tostring(int(timestamp("2025-04-01 00:45 +0000"))) + "|fid=" + str.tostring(f_id(time)), strategy.long)
+if bar_index == 5
+    strategy.close_all()

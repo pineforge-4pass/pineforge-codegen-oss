@@ -1,0 +1,26 @@
+//@version=6
+// A string var state machine inside a request.security helper, with a lazy
+// `and` guarding ta.crossover / ta.crossunder in its if conditions.
+strategy("PF sec2 var string", overlay = true)
+f_state() =>
+    var float bullT = na
+    var float bearT = na
+    var string state = "Neutral"
+    bool isInside = high < high[1] and low > low[1]
+    if not na(bullT) and ta.crossover(close, bullT)
+        state := "Bullish"
+    if not na(bearT) and ta.crossunder(close, bearT)
+        state := "Bearish"
+    if close < open and not isInside
+        bullT := open
+    if close > open and not isInside
+        bearT := open
+    state
+s60 = request.security(syminfo.tickerid, "60", f_state())
+s240 = request.security(syminfo.tickerid, "240", f_state())
+sChart = f_state()
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s60 + "|" + s240 + "|" + sChart)

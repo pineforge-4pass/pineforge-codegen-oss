@@ -1,0 +1,135 @@
+{
+ "exported": "2026-09-26, lab tv --no-note --symbol BINANCE:ETHUSDT.P --interval 15 --from 2025-04-01 --to 2025-04-03",
+ "probes": [
+  {
+   "probe": "get2",
+   "source": "//@version=6\nstrategy(\"PF KRUNERR neg err get2\", overlay=true, default_qty_type=strategy.fixed, default_qty_value=0.01)\nvar string msg = \"\"\nif bar_index == 3\n    a = array.from(1.0, 2.0, 3.0)\n    float x = array.get(a, -4)\n    msg := \"ok:\" + str.tostring(x)\n    strategy.entry(msg, strategy.long)\nif bar_index == 5\n    strategy.close_all()\n",
+   "tradingview": {
+    "verdict": "runtime error",
+    "ctx": {
+     "funcName": "get",
+     "index": -4,
+     "code": "RE10045",
+     "size": 3,
+     "bar_index": 3
+    },
+    "error": "Error on bar {bar_index}: In 'array.{funcName}()' function. Index {index} is out of bounds, array size is {size}."
+   }
+  },
+  {
+   "probe": "set",
+   "source": "//@version=6\nstrategy(\"PF KRUNERR neg err set\", overlay=true, default_qty_type=strategy.fixed, default_qty_value=0.01)\nvar string msg = \"\"\nif bar_index == 3\n    a = array.from(1.0, 2.0, 3.0)\n    array.set(a, -4, 1.0)\n    msg := \"ok:\" + array.join(a, \",\")\n    strategy.entry(msg, strategy.long)\nif bar_index == 5\n    strategy.close_all()\n",
+   "tradingview": {
+    "verdict": "runtime error",
+    "ctx": {
+     "funcName": "set",
+     "index": -4,
+     "code": "RE10045",
+     "size": 3,
+     "bar_index": 3
+    },
+    "error": "Error on bar {bar_index}: In 'array.{funcName}()' function. Index {index} is out of bounds, array size is {size}."
+   }
+  },
+  {
+   "probe": "insert",
+   "source": "//@version=6\nstrategy(\"PF KRUNERR neg err insert\", overlay=true, default_qty_type=strategy.fixed, default_qty_value=0.01)\nvar string msg = \"\"\nif bar_index == 3\n    a = array.from(1.0, 2.0, 3.0)\n    array.insert(a, -4, 1.0)\n    msg := \"ok:\" + array.join(a, \",\")\n    strategy.entry(msg, strategy.long)\nif bar_index == 5\n    strategy.close_all()\n",
+   "tradingview": {
+    "verdict": "runtime error",
+    "ctx": {
+     "funcName": "insert",
+     "index": -4,
+     "code": "RE10045",
+     "size": 3,
+     "bar_index": 3
+    },
+    "error": "Error on bar {bar_index}: In 'array.{funcName}()' function. Index {index} is out of bounds, array size is {size}."
+   }
+  },
+  {
+   "probe": "remove",
+   "source": "//@version=6\nstrategy(\"PF KRUNERR neg err remove\", overlay=true, default_qty_type=strategy.fixed, default_qty_value=0.01)\nvar string msg = \"\"\nif bar_index == 3\n    a = array.from(1.0, 2.0, 3.0)\n    array.remove(a, -4)\n    msg := \"ok:\" + array.join(a, \",\")\n    strategy.entry(msg, strategy.long)\nif bar_index == 5\n    strategy.close_all()\n",
+   "tradingview": {
+    "verdict": "runtime error",
+    "ctx": {
+     "funcName": "remove",
+     "index": -4,
+     "code": "RE10045",
+     "size": 3,
+     "bar_index": 3
+    },
+    "error": "Error on bar {bar_index}: In 'array.{funcName}()' function. Index {index} is out of bounds, array size is {size}."
+   }
+  },
+  {
+   "probe": "slice2",
+   "source": "//@version=6\nstrategy(\"PF KRUNERR neg err slice2\", overlay=true, default_qty_type=strategy.fixed, default_qty_value=0.01)\nvar string msg = \"\"\nif bar_index == 3\n    a = array.from(1.0, 2.0, 3.0)\n    b = array.slice(a, -2, 3)\n    msg := \"ok:\" + array.join(b, \",\")\n    strategy.entry(msg, strategy.long)\nif bar_index == 5\n    strategy.close_all()\n",
+   "tradingview": {
+    "verdict": "runtime error",
+    "ctx": {
+     "funcName": "slice",
+     "index": -2,
+     "code": "RE10045",
+     "size": 3,
+     "bar_index": 3
+    },
+    "error": "Error on bar {bar_index}: In 'array.{funcName}()' function. Index {index} is out of bounds, array size is {size}."
+   }
+  },
+  {
+   "probe": "slice3",
+   "source": "//@version=6\nstrategy(\"PF KRUNERR neg err slice3\", overlay=true, default_qty_type=strategy.fixed, default_qty_value=0.01)\nvar string msg = \"\"\nif bar_index == 3\n    a = array.from(1.0, 2.0, 3.0)\n    b = array.slice(a, 0, -1)\n    msg := \"ok:\" + array.join(b, \",\")\n    strategy.entry(msg, strategy.long)\nif bar_index == 5\n    strategy.close_all()\n",
+   "tradingview": {
+    "verdict": "runtime error",
+    "ctx": {
+     "funcName": "slice",
+     "index": -1,
+     "code": "RE10045",
+     "size": 3,
+     "bar_index": 3
+    },
+    "error": "Error on bar {bar_index}: In 'array.{funcName}()' function. Index {index} is out of bounds, array size is {size}."
+   }
+  },
+  {
+   "probe": "fill",
+   "source": "//@version=6\nstrategy(\"PF KRUNERR neg err fill\", overlay=true, default_qty_type=strategy.fixed, default_qty_value=0.01)\nvar string msg = \"\"\nif bar_index == 3\n    a = array.from(1.0, 2.0, 3.0)\n    array.fill(a, 0.0, -2, 3)\n    msg := \"ok:\" + array.join(a, \",\")\n    strategy.entry(msg, strategy.long)\nif bar_index == 5\n    strategy.close_all()\n",
+   "tradingview": {
+    "verdict": "runtime error",
+    "ctx": {
+     "funcName": "fill",
+     "index": -2,
+     "code": "RE10045",
+     "size": 3,
+     "bar_index": 3
+    },
+    "error": "Error on bar {bar_index}: In 'array.{funcName}()' function. Index {index} is out of bounds, array size is {size}."
+   }
+  },
+  {
+   "probe": "percentrank2",
+   "source": "//@version=6\nstrategy(\"PF KRUNERR neg err percentrank2\", overlay=true, default_qty_type=strategy.fixed, default_qty_value=0.01)\nvar string msg = \"\"\nif bar_index == 3\n    a = array.from(1.0, 2.0, 3.0)\n    float x = array.percentrank(a, -1)\n    msg := \"ok:\" + str.tostring(x)\n    strategy.entry(msg, strategy.long)\nif bar_index == 5\n    strategy.close_all()\n",
+   "tradingview": {
+    "verdict": "runtime error",
+    "ctx": {
+     "funcName": "percentrank",
+     "index": -1,
+     "code": "RE10045",
+     "size": 3,
+     "bar_index": 3
+    },
+    "error": "Error on bar {bar_index}: In 'array.{funcName}()' function. Index {index} is out of bounds, array size is {size}."
+   }
+  },
+  {
+   "probe": "get3",
+   "source": "//@version=6\nstrategy(\"PF KRUNERR neg err get3\", overlay=true, default_qty_type=strategy.fixed, default_qty_value=0.01)\nvar string msg = \"\"\nif bar_index == 3\n    a = array.from(1.0, 2.0, 3.0)\n    float x = array.get(a, -3)\n    msg := \"ok:\" + str.tostring(x)\n    strategy.entry(msg, strategy.long)\nif bar_index == 5\n    strategy.close_all()\n",
+   "tradingview": {
+    "verdict": "ran",
+    "entry_signals": [
+     "ok:1"
+    ]
+   }
+  }
+ ]
+}

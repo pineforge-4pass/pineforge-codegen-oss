@@ -1,0 +1,28 @@
+//@version=6
+// Helper-local var state inside request.security: one counter per call site,
+// advancing once per requested bar, reset at 00:00 UTC; one up-candle latch.
+// Each exit comment spells what every call read on the bar the close was sent.
+strategy("PF sec2 var ctx", overlay = true)
+f_cnt() =>
+    var int n = 0
+    n := hour(time, "UTC") == 0 ? 1 : n + 1
+    n
+f_up() =>
+    var float lastUp = na
+    if close > open
+        lastUp := close
+    lastUp
+c60 = request.security(syminfo.tickerid, "60", f_cnt())
+c240 = request.security(syminfo.tickerid, "240", f_cnt())
+c60on = request.security(syminfo.tickerid, "60", f_cnt(), lookahead = barmerge.lookahead_on)
+cChart = f_cnt()
+u60 = request.security(syminfo.tickerid, "60", f_up())
+u240 = request.security(syminfo.tickerid, "240", f_up())
+u60on1 = request.security(syminfo.tickerid, "60", f_up()[1], lookahead = barmerge.lookahead_on)
+uChart = f_up()
+s(x) => na(x) ? "na" : str.tostring(x)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(c60) + "|" + s(c240) + "|" + s(c60on) + "|" + s(cChart) + "|" + s(u60) + "|" + s(u240) + "|" + s(u60on1) + "|" + s(uChart))

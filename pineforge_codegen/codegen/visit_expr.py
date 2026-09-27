@@ -107,6 +107,7 @@ from ..ast_nodes import (
 from .helpers import pine_index_int_cast
 from .tables import (
     ADJUSTMENT_MAP,
+    ALERT_FREQ_VALUES,
     BAR_BUILTINS,
     BAR_FIELDS,
     BAR_SERIES_PUSH,
@@ -200,6 +201,10 @@ class ExprVisitor:
             self._budget_visit_count += 1
             if self._budget_visit_count % 128 == 0:
                 self._budget.check(node.loc, Phase.CODEGEN)
+        if self._security_fallback_frame is not None:
+            delegated = self._security_fallback_delegate(node)
+            if delegated is not None:
+                return delegated
         if isinstance(node, NumberLiteral):
             return str(node.value)
         if isinstance(node, StringLiteral):
@@ -575,6 +580,9 @@ class ExprVisitor:
             return f"{arena}.{access}({owner}).{self._safe_name(node.member)}"
         if isinstance(node.object, Identifier):
             ns = node.object.name
+            if ns == "alert" and node.member in ALERT_FREQ_VALUES:
+                # TradingView's const string values (its own tape spells them).
+                return f'std::string("{ALERT_FREQ_VALUES[node.member]}")'
             if ns == "strategy":
                 # Direction constants
                 if node.member == "long":
@@ -1167,6 +1175,81 @@ class ExprVisitor:
             return f"!({self._coerce_bool_expr(operand, node.operand)})"
         return f"({node.op}{operand})"
 
+    def _visit_session_history(self, node: Subscript, series_idx: str) -> str:
+        """``session.<flag>[k]``: the value the flag had k bars ago at the top
+        level of the script, k calls ago in a function body.
+
+        TradingView's tapes (``tests/test_e2e_session_history.py``) read a
+        top-level offset by bars, in a block and on a lazy operand too, and a
+        function body's by the calls of its call site, whichever operand or
+        block holds the read. A top-level read indexes the flag's Series,
+        pushed on every chart bar (``_prescan_session_history``); a function
+        body's indexes its emitted call site's Series, pushed at the function's
+        entry (``_prepare_inline_history_members``). A request.security
+        expression that reaches the read through its own operators builds it
+        on the requested clock (security.py); one that reaches it through a
+        call's argument or a variable has no such history here and is refused
+        at the read. So is a read emitted in a function the analyzer lists in
+        ``session_history_unsafe`` (a method, or a function a method, a
+        request.security expression or a UDT field default reaches), and one
+        with no registered Series: never shared state. The refusal waits for
+        the C++ (``_settle_session_reads``): a read in an argument the codegen
+        renders and leaves out refuses nothing. A read in a function this
+        analysis did not clone (``session_uncloned``) asks for its clones
+        instead.
+        """
+        flag = node.object.member
+        where = next((n for n in (node, node.index, node.object)
+                      if getattr(n, "loc", None) is not None), node)
+        if self._security_payload_depth:
+            return self._refused_session_read(
+                node, where,
+                f"session.{flag}[...] cannot be read here: PineForge keeps a session "
+                "flag's history on the requested clock only for a read the "
+                "request.security expression reaches through its own operators, "
+                "not through a call's argument, a function or a variable.",
+            )
+        owner = self._session_call_owner.get(id(node))
+        if owner is not None:
+            why = (getattr(self.ctx, "session_history_unsafe", None) or {}).get(owner)
+            if why:
+                return self._refused_session_read(
+                    node, where,
+                    f"session.{flag}[...] cannot be read in {owner.split('.')[-1]}(), "
+                    f"{why}: PineForge keeps a session flag's history in a function by "
+                    "each of its call sites, and cannot tell this one apart.",
+                )
+            member = self._inline_history_member_by_key.get(
+                ("session_call", owner, flag, self._current_instance_name))
+            if member is not None:
+                return f"{member}[{series_idx}]"
+        elif flag in self._session_history_flags:
+            return f"{self._session_history_member(flag)}[{series_idx}]"
+        uncloned = getattr(self.ctx, "session_uncloned", None) or ()
+        return self._refused_session_read(
+            node, where,
+            f"session.{flag}[...] is not supported here: PineForge keeps a session "
+            "flag's history for the script's top level, a function body and a "
+            "request.security expression that reads it.",
+            owner if owner in uncloned else None,
+        )
+
+    def _refused_session_read(self, node: Subscript, where, message: str,
+                              uncloned: str | None = None) -> str:
+        """A stand-in for a ``session.<flag>[k]`` read PineForge keeps no
+        history for: a name only this read spells, the refusal raised (or, in
+        the uncloned function ``uncloned``, its clones asked for) if the
+        emitted code holds it (``_settle_session_reads``)."""
+        key = (id(node), message)
+        name = self._refused_session_read_names.get(key)
+        if name is None:
+            name = self._allocate_generated_cpp_name(
+                f"_refused_session_read_{len(self._refused_session_reads) + 1}",
+                self._session_names_used)
+            self._refused_session_read_names[key] = name
+            self._refused_session_reads[name] = (node, where, message, uncloned)
+        return name
+
     def _visit_subscript(self, node: Subscript) -> str:
         idx = self._visit_expr(node.index)
         # Series::operator[] accepts C++ int. A Pine int can be backed by an
@@ -1218,6 +1301,8 @@ class ExprVisitor:
                     if series_name not in self._strategy_series_vars:
                         self._strategy_series_vars.add(series_name)
                     return f"{series_name}[{series_idx}]"
+        if self._is_session_flag(node.object):
+            return self._visit_session_history(node, series_idx)
         # History reference applied directly to an inline call result, e.g.
         # ``ta.highest(high, 10)[1]`` or ``f()[2]``. In Pine the call yields a
         # series, so ``[k]`` reads its value k bars ago — but the call lowers to
@@ -1309,6 +1394,32 @@ class ExprVisitor:
                 f"else {member}.update(_hv); "
                 f"return {member}[{idx_int}]; }}())"
             )
+        # History on an operator expression (``(a > b)[1]``) reads the value
+        # the expression had k bars ago: its prepass-registered synthetic
+        # Series (``_is_compound_history_object``) is pushed once per
+        # evaluation, like the inline call results above.
+        compound_member = (
+            self._inline_history_member_by_key.get(
+                ("hist_call", id(node), self._current_instance_name)
+            )
+            if isinstance(node.object, (BinOp, UnaryOp, Ternary))
+            else None
+        )
+        if compound_member is not None:
+            cpp_t = self._infer_type(node.object)
+            if cpp_t in ("double", "int", "int64_t", "bool"):
+                inner = self._visit_expr(node.object)
+                idx_int = self._coerce_int_slot(idx, node.index, "int")
+                if (idx_int == idx
+                        and not self._emitted_value_is_double(node.index)):
+                    idx_int = pine_index_int_cast(idx)
+                return (
+                    f"([&]() -> {cpp_t} {{ "
+                    f"{cpp_t} _hv = ({inner}); "
+                    f"if (history_advances_new_bar()) {compound_member}.push(_hv); "
+                    f"else {compound_member}.update(_hv); "
+                    f"return {compound_member}[{idx_int}]; }}())"
+                )
         obj = self._visit_expr(node.object)
         # If subscripting a non-series variable (e.g., function parameter),
         # src[0] → src (current value), src[N>0] → src (can't access history)

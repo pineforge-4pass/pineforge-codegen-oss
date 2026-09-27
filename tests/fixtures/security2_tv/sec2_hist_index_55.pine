@@ -1,0 +1,13 @@
+//@version=6
+// A request.security TA history index computed from an input.
+strategy("PF sec2 hist index 55", overlay = true)
+nMin = input.int(55, "Lookback N (minutes)")
+n = math.min(290, math.max(1, math.round(nMin / 15)))
+e15 = request.security(syminfo.tickerid, "15", ta.sma(close, 20)[n])
+e60 = request.security(syminfo.tickerid, "60", ta.sma(close, 5)[n])
+s(x) => na(x) ? "na" : str.tostring(x)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(n) + "|" + s(e15) + "|" + s(e60))

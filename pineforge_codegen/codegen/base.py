@@ -30,9 +30,11 @@ from ..analyzer import (
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
-from ..limits import TimeBudget
+from ..limits import TimeBudget, iter_ast_nodes
+from ..session_reads import emitted_session_reads
 from ..pine_spelling import (
-    input_call_spans, pine_string_literal, spell_input_call, sub_identifiers,
+    blank_string_literals, input_call_spans, pine_string_literal,
+    spell_input_call, sub_identifiers,
 )
 
 
@@ -107,7 +109,10 @@ TA_TUPLE_RESULT_TYPES = {
 
 # CPP_RESERVED + the NamingHelper mixin are pulled in from helpers.py so the
 # small naming/walk utilities can be shared with future visitor mixins.
-from .helpers import CPP_RESERVED, NamingHelper, na_preserving_int_cast, pine_truth_cast
+from .helpers import (
+    CPP_RESERVED, INLINE_HISTORY_KINDS, SESSION_FLAG_MEMBERS, NamingHelper,
+    cpp_code_only, na_preserving_int_cast, pine_truth_cast,
+)
 from .constant_fold import fold_numeric_expression
 from .session_market import SESSION_MARKET_CPP, SESSION_MARKET_MEMBER
 
@@ -324,6 +329,36 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # payload (``_build_security_expr``): the session helper below reads
         # the chart's timeframe, which does not describe the security bar.
         self._security_payload_depth: int = 0
+        # The request.security builder's context while its expression visitor
+        # fallback lowers a payload node: a user call, TA site, helper-bound
+        # name or requested-bar history the visitor reaches under that node is
+        # handed back to the builder (``_security_fallback_delegate``).
+        self._security_fallback_frame: dict | None = None
+        # Whether the evaluator being emitted lowers its payload's user calls
+        # under builtin calls, and its typed methods, on the requested bar;
+        # whether it did, and the first thing it left on the chart's terms
+        # (``_emit_security_evaluator_requested``).
+        self._security_requested_calls: bool = True
+        self._security_requested_used: bool = False
+        self._security_chart_read: tuple | None = None
+        # Evaluators that keep every earlier build's lowering, decided while
+        # a method's TA constructor arguments were lowered: sec_id -> reason.
+        self._security_chart_evaluators: dict[int, tuple] = {}
+        # request.security helper series of string values (``var string``, a
+        # string local read with history) live in their own map; the member
+        # is declared when a payload's helper holds one.
+        self._security_string_series_declared: bool = False
+        self._security_string_series: set[str] = set()
+        # Each request.security evaluator local's C++ type (a string local
+        # takes ``na<std::string>()``; the builder's ``/`` reads it).
+        self._security_local_cpp_types: dict[str, str] = {}
+        # C++ the security builder hands a synthetic name: a helper-local
+        # history index lowered in its helper's scope.
+        self._security_raw_cpp: dict[str, str] = {}
+        # Set while a request.security TA history index is lowered: an input
+        # it reads is its override-aware getter, since the evaluator can run
+        # before on_bar initializes the input members.
+        self._security_index_inputs: bool = False
         # Set when a chart expression calls ``_pf_session_market_``; its type
         # and member are emitted once the whole TU is lowered.
         self._uses_session_market: bool = False
@@ -731,6 +766,25 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 self._fixnan_site_map[id(_fsite.node)] = _fsite
         # Track strategy series vars (e.g., strategy.closedtrades[1])
         self._strategy_series_vars: set[str] = set()
+        # session.* flags read at an offset at the top level (their per-bar
+        # Series): _prescan_session_history.
+        self._session_history_flags: set[str] = set()
+        self._session_call_flags: dict[str, set[str]] = {}
+        self._session_call_owner: dict[int, str] = {}
+        self._session_history_member_names: dict[str, str] = {}
+        # The names a rendered read may not take (the script's own first: a
+        # request.security timeframe renders here, before the prescans), and
+        # each read refused where it renders: its stand-in name, then the
+        # read (kept alive, so its id stays its own), where to report it, why,
+        # and the uncloned function it asks to clone, if any; raised or asked
+        # only if the C++ emits the stand-in (_settle_session_reads).
+        self._session_names_used: set[str] = set(self._safe_name_occupied)
+        self._refused_session_read_names: dict[tuple[int, str], str] = {}
+        self._refused_session_reads: dict[
+            str, tuple[ASTNode, ASTNode, str, str | None]] = {}
+        # The uncloned functions whose reads the emitted C++ holds: another
+        # analysis clones them (pineforge_codegen._generate).
+        self.session_functions_needing_clones: frozenset[str] = frozenset()
         # Track global-scope non-var declarations (emitted as class members)
         self._global_member_vars: set[str] = set()
         for name, _ in ctx.global_var_decls:
@@ -871,6 +925,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     _h = _hints[_i] if _i < len(_hints) else None
                     if _h and str(_h).replace(" ", "") in _SKIP_DECL_TYPES:
                         self._visual_drop_vars.add(_p)
+        # Build set of all member names (series vars, var members) for collision
+        # detection. It precedes the security metadata below: a timeframe
+        # computed by a user function (``tf = tfFromLabel(choice)``) renders
+        # that call through ``_func_safe_name`` at registration time.
+        self._all_member_names: set[str] = set()
+        for name in ctx.series_vars:
+            self._all_member_names.add(self._safe_name(name))
+        for name, _, _ in ctx.var_members:
+            self._all_member_names.add(self._safe_name(name))
         # Collect request.security metadata per call
         self._security_eval_info: list[dict] = []
         self._security_ta_variant_names: dict[tuple[int, int, tuple], str] = {}
@@ -884,6 +947,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # Resolve the timeframe: a literal/const/global gives a static tf;
             # a function-parameter tf is resolved from the call sites (the
             # evaluator is a class method, so the param is not in scope there).
+            # A lower-timeframe request has no chart-timeframe fallback.
+            self._security_tf_lower = bool(item.get("is_lower_tf_array"))
             tf_str, tf_expr = self._resolve_security_tf(
                 tf_node, item.get("containing_func", ""))
 
@@ -898,7 +963,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     is_gaps_on = True
 
             expr_node = item["expr_node"]
-            inline_helper_ta_indices: set[int] = set()
+            inline_helper_ta_indices: set[tuple] = set()
             ta_binding_stacks = self._collect_security_ta_binding_stacks(
                 expr_node,
                 inline_ta_indices=inline_helper_ta_indices,
@@ -945,17 +1010,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "ta_indices": sorted(ta_indices),
                 "ta_binding_stacks": ta_binding_stacks,
                 "ta_variants": ta_variants,
-                "inline_helper_ta_indices": sorted(inline_helper_ta_indices),
+                # (index, signature) of each TA variant computed inline, and
+                # (index, _SECURITY_THROUGH_GLOBAL) of a global's site a
+                # multi-statement helper reads, which the prologue computes.
+                "inline_helper_ta_indices": sorted(inline_helper_ta_indices, key=repr),
                 "depends_on_mutable_globals": item.get("depends_on_mutable_globals", False),
                 "mutable_globals": list(item.get("mutable_globals", [])),
                 "is_lower_tf_array": bool(item.get("is_lower_tf_array", False)),
             })
-        # Build set of all member names (series vars, var members) for collision detection
-        self._all_member_names: set[str] = set()
-        for name in ctx.series_vars:
-            self._all_member_names.add(self._safe_name(name))
-        for name, _, _ in ctx.var_members:
-            self._all_member_names.add(self._safe_name(name))
         self._register_global_aggregate_member_types()
         self._uses_map = self._detect_map_usage()
         self._uses_matrix = self._detect_matrix_usage()
@@ -1302,8 +1364,29 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # var-member metadata.  Record their exact source declaration type so
         # functions can resolve globals without consulting the analyzer's
         # legacy raw-name UDT registry (which later locals may overwrite).
-        for stmt in self.ctx.ast.body:
-            if not isinstance(stmt, VarDecl) or stmt.is_var or stmt.is_varip:
+        # A declaration in a top-level block (``if c`` / ``for``) is hoisted
+        # to the same class-member storage, so it is recorded too: its
+        # ``cond ? box.new(...) : na`` needs the handle type for the ``na``.
+        def top_level_scope_decls(stmts):
+            for stmt in stmts:
+                if isinstance(stmt, VarDecl):
+                    yield stmt
+                elif isinstance(stmt, IfStmt):
+                    yield from top_level_scope_decls(stmt.body)
+                    yield from top_level_scope_decls(stmt.else_body)
+                elif isinstance(stmt, (ForStmt, ForInStmt, WhileStmt)):
+                    yield from top_level_scope_decls(stmt.body)
+                elif isinstance(stmt, SwitchStmt):
+                    for _case, body in stmt.cases:
+                        yield from top_level_scope_decls(body)
+                    yield from top_level_scope_decls(stmt.default_body)
+
+        top_level_ids = {id(stmt) for stmt in self.ctx.ast.body}
+        for stmt in top_level_scope_decls(self.ctx.ast.body):
+            if stmt.is_var or stmt.is_varip:
+                continue
+            if (id(stmt) not in top_level_ids
+                    and stmt.name in self._global_drawing_cpp_types):
                 continue
             spec = (
                 self._type_spec_from_hint_name(stmt.type_hint)
@@ -2989,7 +3072,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     # tree: Pine grouping ``(a - b) / (c - d)`` degrades to ``a - b / c - d``
     # under C++ precedence. See ``_runtime_ctor_arg_for_reset`` (the string is
     # re-parsed and lowered through the expression visitor).
-    _ATOMIC_ARITH_NODES = (NumberLiteral, Identifier, MemberAccess, FuncCall)
+    _ATOMIC_ARITH_NODES = (NumberLiteral, StringLiteral, Identifier, MemberAccess, FuncCall)
 
     def _arith_operand_to_str(self, node, _udf_stack: frozenset = frozenset(),
                               _depth: int = 0) -> str | None:
@@ -3019,6 +3102,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if isinstance(v, float) and v == int(v):
                 return str(int(v))
             return str(v)
+        if isinstance(node, StringLiteral):
+            # ``len = mode == "Fast" ? 8 : 21``: a length chosen by comparing
+            # an input.string with its options.
+            return pine_string_literal(node.value)
         if isinstance(node, Identifier):
             return node.name
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
@@ -3137,7 +3224,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if expr_str is not None and self._expr_is_stable(node.value):
                 import re as _re
                 tokens = set(_re.findall(r"[A-Za-z_][A-Za-z_0-9]*",
-                                         self._inline_inputs_masked(expr_str)))
+                                         blank_string_literals(
+                                             self._inline_inputs_masked(expr_str))))
                 refs_input = self._refs_input(expr_str)
                 refs_derived = any(t in self._derived_input_expr for t in tokens)
                 # The stability classifier already proved this expression is a
@@ -3184,19 +3272,19 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             message=message, hint=hint))
 
     def _codegen_error(self, node: ASTNode | None, message: str, hint: str | None = None) -> None:
+        raise CompileError([self._codegen_error_diagnostic(node, message, hint)])
+
+    def _codegen_error_diagnostic(self, node: ASTNode | None, message: str,
+                                  hint: str | None = None) -> Diagnostic:
         loc = node.loc if node is not None else None
         if loc is None:
             loc = SourceLocation(file=self.ctx.filename, line=1, col=1, end_col=1)
-        raise CompileError(
-            [
-                Diagnostic(
-                    level=Level.ERROR,
-                    phase=Phase.CODEGEN,
-                    location=loc,
-                    message=message,
-                    hint=hint,
-                )
-            ]
+        return Diagnostic(
+            level=Level.ERROR,
+            phase=Phase.CODEGEN,
+            location=loc,
+            message=message,
+            hint=hint,
         )
 
     def _ta_return_type(self, site: TACallSite) -> str:
@@ -3286,11 +3374,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         """
         self._inline_history_members = []
         self._inline_history_member_by_key = {}
-        counters = {
-            "hist_call": 0,
-            "series_arg": 0,
-            "udf_series_arg": 0,
-        }
+        # session.* flags a function reads at an offset (owner -> flags) and
+        # the owner of each such read: one Series per flag and emitted call
+        # site, pushed at the function's entry (emit_top.py).
+        self._session_call_flags: dict[str, set[str]] = {}
+        self._session_call_owner: dict[int, str] = {}
+        counters = {kind: 0 for kind in INLINE_HISTORY_KINDS}
+        # A per-call session Series is numbered past a script name spelled
+        # like one; the older kinds keep their numbering.
+        authored_names = set(getattr(self, "_safe_name_occupied", ()))
 
         def walk_nodes(value):
             """Yield AST nodes in stable field order, including tuple elements.
@@ -3386,6 +3478,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return
             counters[kind] += 1
             member_name = f"_{kind}_{counters[kind]}"
+            while kind == "session_call" and member_name in authored_names:
+                counters[kind] += 1
+                member_name = f"_{kind}_{counters[kind]}"
             self._inline_history_member_by_key[key] = member_name
             self._inline_history_members.append({
                 "kind": kind,
@@ -3432,6 +3527,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return list(
                     self._bind_typed_method_args(method_info, call).args_by_param
                 )
+            if isinstance(call.callee, Identifier):
+                defaulted = self._user_call_args_with_defaults(
+                    call.callee.name, call
+                )
+                if defaulted is not None:
+                    return defaulted
             if call.kwargs:
                 return _merge_kwargs(call.args, call.kwargs, params, lambda arg: arg)
             return list(call.args)
@@ -3487,6 +3588,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 id(child) for child in walk_nodes(expression)
             )
         self._requested_context_inline_node_ids = requested_node_ids
+        # The session.* reads a function body emits, outside its own
+        # request.security expressions (session_reads.py); a callable that
+        # cannot keep its call sites apart, or that this analysis did not
+        # clone, gets no per-call Series (a read it emits is refused, or asks
+        # for the clones).
+        no_call_history = (
+            set(getattr(self.ctx, "session_history_unsafe", None) or {})
+            | set(getattr(self.ctx, "session_uncloned", None) or ())
+        )
+        emitted_function_reads = {
+            id(read)
+            for fi in self.ctx.func_infos if fi.node is not None
+            for read in emitted_session_reads(fi.node, requested_node_ids)
+        }
 
         def emitted_context_for_call(
             fi,
@@ -3572,6 +3687,27 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for node in walk_nodes(self.ctx.ast):
             owner = owner_by_node.get(id(node))
             if isinstance(node, Subscript) and isinstance(node.object, FuncCall):
+                register(
+                    "hist_call", (id(node),), self._infer_type(node.object), owner
+                )
+            elif (isinstance(node, Subscript)
+                    and self._is_session_flag(node.object)):
+                # In a function body the flag's history is the calls' of its
+                # call site: one Series per flag and emitted variant (the
+                # analyzer clones the function per call site), pushed once
+                # per call at the function's entry. A top-level read uses the
+                # flag's per-bar Series (_prescan_session_history), and one
+                # written in a request.security expression the requested
+                # clock's (security.py).
+                if owner is not None and id(node) not in requested_node_ids:
+                    self._session_call_owner[id(node)] = owner
+                    if (id(node) in emitted_function_reads
+                            and owner not in no_call_history):
+                        flag = node.object.member
+                        self._session_call_flags.setdefault(owner, set()).add(flag)
+                        register("session_call", (owner, flag), "bool", owner)
+            elif (isinstance(node, Subscript)
+                    and self._is_compound_history_object(node.object)):
                 register(
                     "hist_call", (id(node),), self._infer_type(node.object), owner
                 )
@@ -3694,6 +3830,107 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                             expected_cpp_type,
                             context,
                         )
+
+    def _is_compound_history_object(self, node) -> bool:
+        """Whether ``node[k]`` is history on an operator expression or a
+        ``session.*`` flag.
+
+        ``(a > b)[1]``, ``(x - y)[2]`` and ``(c ? p : q)[1]`` read the
+        expression's value k bars ago; its C++ scalar cannot be indexed, so
+        the subscript owns a synthetic ``_hist_call_*`` Series exactly like an
+        inline call result. Numeric and bool expressions only: other families
+        keep their established lowering. A ``session.*`` flag's C++ value
+        cannot be indexed either: a request.security payload keeps its history
+        on the requested clock like an operator expression's (security.py); a
+        function body reads its call site's per-call Series
+        (``_prepare_inline_history_members``) and a top-level read the flag's
+        per-bar Series (``_prescan_session_history``).
+        """
+        if self._is_session_flag(node):
+            return True
+        return (isinstance(node, (BinOp, UnaryOp, Ternary))
+                and self._infer_type(node) in ("double", "int", "int64_t", "bool"))
+
+    @staticmethod
+    def _is_session_flag(node) -> bool:
+        """Whether ``node`` is a ``session.*`` boolean (``session.ismarket``)."""
+        return (isinstance(node, MemberAccess)
+                and isinstance(node.object, Identifier)
+                and node.object.name == "session"
+                and node.member in SESSION_FLAG_MEMBERS)
+
+    def _session_history_member(self, flag: str) -> str:
+        """The per-bar Series of a ``session.*`` flag read at the top level:
+        ``_pf_session_hist_<flag>``, suffixed past a script name spelled so."""
+        return self._session_history_member_names[flag]
+
+    def _settle_session_reads(self, cpp: str) -> None:
+        """Refuse the ``session.<flag>[k]`` reads the C++ emits with no
+        history, or, for a function this analysis did not clone
+        (``session_uncloned``), ask for its clones
+        (``session_functions_needing_clones``).
+
+        Both follow the emitted code, not the rendered reads: a call can render
+        an argument and leave it out of the C++ (``color.from_gradient``'s
+        arguments, a drawing's xloc), and a read there refuses nothing and
+        needs no clone. Such a read renders as a stand-in name
+        (``_refused_session_read``), which only that read can spell in code.
+        """
+        if not self._refused_session_reads:
+            return
+        pattern = re.compile(r"(?<![\w.])(" + "|".join(map(
+            re.escape, sorted(self._refused_session_reads, key=len, reverse=True))) + r")\b")
+        emitted = set(pattern.findall(cpp_code_only(cpp)))
+        # One error per read, the refusal rendered first (a read can be
+        # rendered on the chart and in a request.security evaluator).
+        refused: dict[tuple[int, int], Diagnostic] = {}
+        needing: set[str] = set()
+        for name, (_read, where, message, uncloned) in self._refused_session_reads.items():
+            if name not in emitted:
+                continue
+            if uncloned is not None:
+                needing.add(uncloned)
+                continue
+            diagnostic = self._codegen_error_diagnostic(where, message)
+            refused.setdefault(
+                (diagnostic.location.line, diagnostic.location.col), diagnostic)
+        if refused:
+            raise CompileError([refused[key] for key in sorted(refused)])
+        self.session_functions_needing_clones = frozenset(needing)
+
+    def _prescan_session_history(self) -> None:
+        """The ``session.*`` flags the script reads at an offset at its top
+        level, each of which gets one Series pushed on every chart bar.
+
+        TradingView reads a flag's history by bars at the top level of the
+        script, in a block and on a lazy operand as well, and by calls inside a
+        function (``tests/test_e2e_session_history.py``): function bodies
+        (``_prepare_inline_history_members``) and ``request.security`` payloads
+        (the requested clock, security.py) keep their own history instead. A
+        ``// @pf-trace`` expression is read at the top level.
+        """
+        roots = [stmt for stmt in self.ctx.ast.body
+                 if not isinstance(stmt, (FuncDef, MethodDef))]
+        roots += [pragma.expr_node for pragma in (self.ctx.pf_trace_pragmas or [])
+                  if getattr(pragma, "expr_node", None) is not None]
+        payloads: set[int] = set()
+        for root in roots:
+            for node, _depth in iter_ast_nodes(root):
+                if not isinstance(node, FuncCall):
+                    continue
+                name, namespace = self._resolve_callee(node.callee)
+                if namespace == "request" and name in ("security", "security_lower_tf"):
+                    payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+                    if payload is not None:
+                        payloads.add(id(payload))
+        flags = {read.object.member for root in roots
+                 for read in emitted_session_reads(root, payloads)}
+        used = self._session_names_used
+        self._session_history_member_names = {
+            flag: self._allocate_generated_cpp_name(f"_pf_session_hist_{flag}", used)
+            for flag in sorted(flags)
+        }
+        self._session_history_flags = flags
 
     def _inline_history_member(self, kind: str, node: ASTNode,
                                arg_idx: int | None = None) -> str:
@@ -3861,6 +4098,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._prepare_udt_generated_names()
         # Pre-scan for strategy series vars
         self._prescan_strategy_series()
+        self._prescan_session_history()
         self._security_ohlc_hist_fields_by_sec: dict[int, set[str]] = {}
         # request.security TA call-sites read at a history offset (``ta.ema(...)[k>=1]``).
         # Maps sec_id -> set of TA call-site indices needing an HTF history Series.
@@ -4238,7 +4476,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 self._security_ohlc_hist_fields_by_sec[sec_id] = (
                     self._collect_security_ohlc_hist_fields_for_call(item)
                 )
-                lines.append(f"    double _req_sec_{sec_id} = na<double>();")
+                if item.get("string_result"):
+                    lines.append(f"    std::string _req_sec_{sec_id} = na<std::string>();")
+                else:
+                    lines.append(f"    double _req_sec_{sec_id} = na<double>();")
             for field in sorted(self._security_ohlc_hist_fields_by_sec.get(sec_id, ())):
                 ctype = self._security_bar_hist_type(field)
                 lines.append(
@@ -4253,6 +4494,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         if self._security_calls:
             lines.append('    std::unordered_map<std::string, Series<double>> _security_helper_series_;')
+            self._security_string_series_declared = self._security_needs_string_series()
+            if self._security_string_series_declared:
+                lines.append(
+                    '    std::unordered_map<std::string, Series<std::string>> '
+                    '_security_helper_series_str_;'
+                )
 
         # Security-local mutable global state for request.security
         for info in self._security_eval_info:
@@ -4276,7 +4523,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for _ta_idx, site in enumerate(self.ctx.ta_call_sites):
             if _ta_idx in self._dead_ta_indices:
                 continue
-            lines.append(f"    {site.class_name} {site.member_name};")
+            lines.append(f"    {self._ta_member_cpp_type(site)} {site.member_name};")
             if self._ta_site_uses_precalc(site):
                 vtype = self._ta_return_type(site)
                 lines.append(f"    std::vector<{vtype}> _precalc_{site.member_name};")
@@ -4304,7 +4551,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for idx, variants in (info.get("ta_variants") or {}).items():
                 site = self.ctx.ta_call_sites[idx]
                 for variant in variants:
-                    lines.append(f"    {site.class_name} {variant['member_name']};")
+                    cpp_type = self._ta_security_member_cpp_type(info["sec_id"], site, variant)
+                    lines.append(f"    {cpp_type} {variant['member_name']};")
 
         # 4. Series members for bar field history
         for field_name in sorted(self.ctx.series_bar_fields):
@@ -4483,6 +4731,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             else:
                 lines.append(f"    Series<double> {svar}{_mbb};")
 
+        # 8. session.* flags read at an offset at the top level: one Series per
+        #    flag, pushed on every chart bar (emit_top.py).
+        for flag in sorted(self._session_history_flags):
+            lines.append(f"    Series<bool> {self._session_history_member(flag)}{_mbb};")
+
         # 8a. Synthetic temporary history.  Unlike the legacy function-local
         # static buffers, these members are value-copyable rollback state and
         # have one identity per source site / emitted UDF variant.
@@ -4546,12 +4799,22 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     # coarse request.security call expression itself still
                     # reports FLOAT, so prefer that exact binding type here.
                     cpp_type = "bool"
+                elif (
+                    ptype == PineType.STRING
+                    and name in self._security_tuple_binding_names()
+                ):
+                    # A string element of a request.security helper tuple.
+                    cpp_type = "std::string"
                 else:
                     cpp_type = (
                         self._infer_type(expr)
                         if expr is not None
                         else PINE_TYPE_TO_CPP.get(ptype, "double")
                     )
+                    # The var-member rule: a plain global an epoch reaches
+                    # (``_wide_int_provenance``) is stored in 64 bits too.
+                    if cpp_type == "int" and self._is_int64_builtin_init(name):
+                        cpp_type = "int64_t"
                 default = self._default_for_type(cpp_type)
                 lines.append(f"    {cpp_type} {safe} = {default};")
 
@@ -4740,7 +5003,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.insert(_session_market_member_at, SESSION_MARKET_MEMBER)
             lines.insert(_session_market_at, SESSION_MARKET_CPP)
 
-        return "\n".join(lines)
+        cpp = "\n".join(lines)
+        self._settle_session_reads(cpp)
+        return cpp
 
     # ------------------------------------------------------------------
     # Top-level emitters (_emit_includes / _emit_constructor / _emit_on_bar
@@ -4857,7 +5122,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if masked != expr:
             return True
         return any(t in self._input_backed_vars
-                   for t in re.findall(r"[A-Za-z_][A-Za-z_0-9]*", expr))
+                   for t in re.findall(r"[A-Za-z_][A-Za-z_0-9]*",
+                                       blank_string_literals(expr)))
 
     def _fold_inline_input_defaults(self, expr: str) -> str | None:
         """``expr`` const-folded with each inline input call read as its
@@ -5138,7 +5404,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # An inline input call is one leaf of the expression; its title string
         # and keyword names are not identifiers the gate below should judge.
-        tokens = set(ident_re.findall(self._inline_inputs_masked(expanded)))
+        tokens = set(ident_re.findall(
+            blank_string_literals(self._inline_inputs_masked(expanded))))
         if any(
             self._known_var_is_lexically_shadowed(name)
             for name in tokens
@@ -5361,6 +5628,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 continue
             if not site.ctor_args:
                 continue
+            if self._ta_dynamic_plan(site) is not None:
+                continue
             runtime_args, any_runtime = self._ta_run_ctor_args(site)
             if any_runtime:
                 resets.append(
@@ -5402,6 +5671,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if not ctor_site.ctor_args:
                     continue
                 for variant in variants:
+                    if self._ta_security_plan(
+                        info["sec_id"], site, variant.get("binding_stack", ())
+                    ) is not None:
+                        continue
                     ctor_args, ctor_arg_stability = self._security_ta_ctor_args_for_variant(
                         info["sec_id"],
                         site,

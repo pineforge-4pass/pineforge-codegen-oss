@@ -151,6 +151,15 @@ def input_binding_names(body) -> dict[int, str]:
     return names
 
 
+def blank_string_literals(text: str) -> str:
+    """``text`` with every string literal emptied, so an identifier scan
+    never reads a literal's contents (``mode == "Fast"``) as a name."""
+    def _one(match: re.Match) -> str:
+        token = match.group(0)
+        return token[0] * 2 if token[0] in "\"'" else token
+    return _STRING_OR_IDENT.sub(_one, text)
+
+
 def sub_identifiers(text: str, repl: Callable[[re.Match], str]) -> str:
     """``re.sub`` over identifier tokens only; string literals pass through."""
     def _one(match: re.Match) -> str:

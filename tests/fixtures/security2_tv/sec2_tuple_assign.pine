@@ -1,0 +1,26 @@
+//@version=6
+// Tuple declarations inside request.security helpers: a ta.bb tuple, a nested
+// helper's tuple, an ignored element, and a helper read at [1] with
+// lookahead_on (the no-repaint idiom).
+strategy("PF sec2 tuple assign", overlay = true)
+f_pair(src) =>
+    hi = ta.highest(src, 5)
+    lo = ta.lowest(src, 5)
+    [hi, lo]
+f_bands() =>
+    [mid, up, lo] = ta.bb(close, 20, 2)
+    [hh, ll] = f_pair(high)
+    width = up - lo
+    [mid, width, hh - ll]
+f_last() =>
+    [_, u, _] = ta.bb(close, 10, 1)
+    u
+[bMid, bW, bR] = request.security(syminfo.tickerid, "60", f_bands())
+lastU = request.security(syminfo.tickerid, "60", f_last()[1], lookahead = barmerge.lookahead_on)
+[cMid, cW, cR] = f_bands()
+s(x) => na(x) ? "na" : str.tostring(x)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(bMid) + "|" + s(bW) + "|" + s(bR) + "|" + s(lastU) + "|" + s(cMid) + "|" + s(cW) + "|" + s(cR))

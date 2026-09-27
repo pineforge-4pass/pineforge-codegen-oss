@@ -106,6 +106,9 @@ def test_int_cast_preserves_wide_integer_na_before_narrowing() -> None:
     )
     cpp = transpile(pine)
     assert "int64_t stamp = na<int64_t>();" in cpp
+    # int(stamp) of an epoch slot is itself an epoch (Pine int is 64-bit), so
+    # ``narrowed`` is int64_t too and holds the wide na sentinel.
+    assert "int64_t narrowed;" in cpp
     assert "auto _pf_v = (stamp); return is_na(_pf_v)" in cpp
     assert "auto _pf_idx_v = (stamp)" in cpp
     driver = r"""
@@ -116,7 +119,7 @@ int main() {
     GeneratedStrategy s;
     pineforge::Bar b{100.0, 101.0, 99.0, 100.0, 1.0, 1743466500000LL};
     s.run(&b, 1);
-    std::printf("%d %d\n", s.narrowed == std::numeric_limits<int>::min(),
+    std::printf("%d %d\n", s.narrowed == std::numeric_limits<int64_t>::min(),
                 std::isnan(s.indexed));
 }
 """

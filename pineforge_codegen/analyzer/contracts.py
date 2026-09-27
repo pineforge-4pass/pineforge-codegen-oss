@@ -51,6 +51,12 @@ class TACallSite:
     # owning callee's emitted clone body referencing undeclared members
     # (regression: quantbyboji-nq-hma-midday ``_ta_change_*_cs1``).
     owner_func: str | None = None
+    # The AST nodes ``ctor_args`` were spelled from, in the same order (the
+    # nodes of the textual call: a clone keeps its template's). Empty for the
+    # shim sites that build their ctor args another way. The series- and
+    # simple-length lowering renders a length the constructor cannot take
+    # from these at the call site.
+    ctor_nodes: list = field(default_factory=list)
 
 
 @dataclass
@@ -174,6 +180,9 @@ class SecurityCallInfo:
     # body (``self._active_call_site_idx``). None for an ordinary
     # (non-cloned) security call.
     callsite_idx: int | None = None
+    # A scalar payload of string type: the result is a ``std::string``
+    # holding na (empty) until the first requested value.
+    string_result: bool = False
 
 
 @dataclass
@@ -268,6 +277,15 @@ class AnalyzerContext:
     # emits each call site's body — required for the per-clone
     # SecurityCallInfo.callsite_idx disambiguation in visit_call.py to work.
     func_security_clone_only: set = field(default_factory=set)
+    # Functions and methods that cannot keep a session.* flag's history per
+    # call site (name -> why): every method, and the functions a method, a
+    # request.security expression or a UDT field default reaches. Codegen
+    # refuses a session.<flag>[k] it emits in one of them.
+    session_history_unsafe: dict = field(default_factory=dict)
+    # Functions that read a flag at an offset this analysis did not clone:
+    # no per-call Series. A read of theirs the C++ holds asks
+    # pineforge_codegen._generate to clone them.
+    session_uncloned: frozenset = frozenset()
     # (func_name, cs_idx) -> {orig_member_name: cloned_member_name}. Populated by
     # the analyzer ONLY for clones whose default ``{base}_cs{cs_idx}`` name would
     # collide with a clone minted through another enclosing function; lets codegen

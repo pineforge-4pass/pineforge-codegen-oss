@@ -509,7 +509,6 @@ plot(x)
         ('k = input.float(2.0, "Offset")', "k"),
         ('var int k = input.int(2, "Offset")', "k"),
         ('k = input.int(2, "Offset")\nk := 3', "k"),
-        ('k = input.int(2, "Offset")', "k + 1"),
     ],
 )
 def test_nonliteral_ta_offset_remains_fail_closed(declaration: str, index: str):
@@ -524,6 +523,23 @@ plot(x)
         match=r"TA history index must be a literal integer",
     ):
         transpile(src)
+
+
+def test_input_arithmetic_ta_offset_is_lowered_in_the_requested_context():
+    # A bar-invariant int over an input is a legal Pine history offset
+    # (tests/test_e2e_security_history_index.py replays TradingView's tape).
+    src = """//@version=6
+strategy("input arithmetic TA offset")
+k = input.int(2, "Offset")
+x = request.security(syminfo.tickerid, "60", ta.ema(close, 5)[k + 1])
+plot(x)
+"""
+    cpp = transpile(src)
+    body = _eval_body(cpp)
+    assert 'get_input_int("Offset", 2) + 1' in body
+    assert "_sec0__ta_ema_1_hist[_hidx - 1]" in body
+    assert "_sec0__ta_ema_1_hist.push(_secval_0);" in body
+    compile_cpp(cpp, label="security_input_arithmetic_history_offset")
 
 
 def test_negative_literal_ta_offset_is_rejected_loudly():

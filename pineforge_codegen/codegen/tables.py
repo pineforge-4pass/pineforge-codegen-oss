@@ -98,6 +98,15 @@ def tz_time_field_lambda(field_expr: str, ts_arg: str, tz_arg: str) -> str:
     )
 
 
+# ``alert.freq_*``: TradingView's ``const string`` values. A TradingView tape
+# spells them as order comments: "all", "once_per_bar", "once_per_bar_close".
+ALERT_FREQ_VALUES = {
+    "freq_all": "all",
+    "freq_once_per_bar": "once_per_bar",
+    "freq_once_per_bar_close": "once_per_bar_close",
+}
+
+
 BAR_BUILTINS = {
     "bar_index": "pine_bar_index()",
     "time": "current_bar_.timestamp",
@@ -155,8 +164,12 @@ SECURITY_BAR_FIELD_TYPES = {
     "close": "double",
     "volume": "double",
     "time": "int64_t",
+    "time_close": "int64_t",
 }
-SECURITY_BAR_FIELDS = frozenset(SECURITY_BAR_FIELD_EXPRS)
+# ``time_close`` is the requested bar's close time, which depends on the
+# requested timeframe: the evaluator renders it (security.py
+# ``_security_bar_field_expr``) instead of a fixed ``bar.*`` read.
+SECURITY_BAR_FIELDS = frozenset(SECURITY_BAR_FIELD_EXPRS) | {"time_close"}
 
 # Backwards-compatible name for consumers that only need the OHLCV subset.
 SECURITY_OHLC_BAR_FIELDS = frozenset({"open", "high", "low", "close", "volume"})

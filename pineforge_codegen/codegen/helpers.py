@@ -4,8 +4,8 @@ Mixin holding stateless / near-stateless name-mangling and AST-walk
 helpers used everywhere in the codegen. Lives here so the heavier
 visitor / emitter mixins can depend on it without owning its
 implementation. Keep this module free of imports from any other
-``codegen/*`` submodule so it stays at the bottom of the dependency
-graph.
+``codegen/*`` submodule (the generated data module ``host_members``
+aside) so it stays at the bottom of the dependency graph.
 
 Mixin contract: ``NamingHelper`` reads at most one piece of host state,
 ``self._all_member_names`` (used by ``_func_safe_name``). The class
@@ -21,6 +21,8 @@ from ..ast_nodes import (
     VarDecl, Assignment, TupleAssign, ForStmt, ForInStmt,
 )
 from ..limits import iter_ast_nodes
+from ..signatures import SESSION_FLAG_MEMBERS
+from .host_members import HOST_MEMBER_NAMES
 
 
 # Integer C++ types an na-capable ``double`` expression may be narrowed into.
@@ -116,6 +118,19 @@ def color_alpha_cast(value_cpp: str) -> str:
         f"return _pf_color_v ? 1 : 0; "
         f"else return is_na(_pf_color_v) ? 100 : (int)_pf_color_v; }}()"
     )
+
+
+# A comment or a string or character literal of the generated C++, which
+# spells no raw string literal and no digit separator.
+_CPP_COMMENT_OR_LITERAL = re.compile(
+    r"//[^\n]*|/\*.*?\*/|\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])*'", re.S
+)
+
+
+def cpp_code_only(cpp: str) -> str:
+    """``cpp`` with every comment and string or character literal replaced by
+    a space: what is left is code, which a script's string cannot spell."""
+    return _CPP_COMMENT_OR_LITERAL.sub(" ", cpp)
 
 
 # Preserve the historic spelling for names already escaped in released TUs.
@@ -219,9 +234,20 @@ CPP_EMITTER_NAMES = frozenset("""
     trace is_na na nz fixnan
 """.split())
 
+# The generated history members, ``_<kind>_<n>`` (codegen/base.py
+# _prepare_inline_history_members), numbered past any script name spelled
+# like one.
+INLINE_HISTORY_KINDS = ("hist_call", "series_arg", "udf_series_arg", "session_call")
+
+
+# HOST_MEMBER_NAMES (codegen/host_members.py, derived by
+# scripts/gen_host_members.py from the emitter and the host header): the host
+# members the generated class reads or writes unqualified. A script identifier
+# with one of these names would hide the member (``session_isfirstbar_ =
+# close > open`` became the value of ``session.isfirstbar``).
 CPP_RESERVED = set(
     LEGACY_CPP_RESERVED | CPP_KEYWORDS | CPP_CONTEXTUAL |
-    CPP_STANDARD_MACROS | CPP_EMITTER_NAMES
+    CPP_STANDARD_MACROS | CPP_EMITTER_NAMES | HOST_MEMBER_NAMES
 )
 
 
@@ -247,6 +273,9 @@ BUILTIN_ACCESSOR_NAMES = {
     "avg_winning_trade_percent", "avg_losing_trade_percent",
     "margin_liquidation_price", "open_profit", "current_equity",
     "open_trades_capital_held",
+    # The host's own ``time_close()``: a ``time_close[k]`` history Series
+    # member of that name would shadow the call its value is pushed from.
+    "time_close",
 }
 
 
@@ -310,6 +339,10 @@ class NamingHelper:
                     bound.add(node.var)
                 if isinstance(getattr(node, "vars", None), list):
                     bound.update(node.vars)
+        # A history-read builtin becomes a Series member of its own name.
+        ctx = getattr(self, "ctx", None)
+        if "time_close" in getattr(ctx, "series_vars", ()):
+            bound.add("time_close")
         self._safe_name_map: dict[str, str] = {}
         self._safe_name_occupied = authored
         self._safe_name_bound = bound

@@ -442,11 +442,11 @@ plot(pivHi)
 
 
 # ---------------------------------------------------------------------------
-# Guardrail (negative): a genuinely reassigned scalar whose value depends on a
-# series remains outside the bounded, expression-level finite-choice route.
+# A genuinely reassigned scalar whose value depends on a series stays outside
+# the bounded, expression-level finite-choice route: it is a series length.
 # ---------------------------------------------------------------------------
 
-def test_series_reassigned_ternary_length_rejected():
+def test_series_reassigned_ternary_length_takes_the_series_route():
     src = """//@version=6
 strategy("series-reassigned-ternary")
 normalSwingLookback = input.int(10, "Normal")
@@ -459,9 +459,12 @@ if volatilityRatio >= highVolThreshold
 x = ta.lowest(low, activeSwingLookback)
 plot(x)
 """
-    with pytest.raises(CompileError) as ei:
-        transpile(src)
-    assert "Unsupported TA constructor length" in str(ei.value)
+    # A length reassigned on a series condition is a series length: it used
+    # to be refused, and now re-windows every bar as TradingView does
+    # (lane K-TA-DYNLEN, tests/test_e2e_ta_dynamic_length.py).
+    cpp = transpile(src)
+    assert "pineforge::source::SeriesLowest " in cpp
+    assert "ta_number(activeSwingLookback)" in cpp
 
 
 # ---------------------------------------------------------------------------

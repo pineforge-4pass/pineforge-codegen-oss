@@ -12,10 +12,10 @@ from .support_checker import check_support as _support_diagnostics
 from .support_checker import check_support_or_raise
 
 
-def _parse_bounded(pine_source: str, filename: str):
+def _parse_bounded(pine_source: str, filename: str, budget: TimeBudget | None = None):
     ensure_recursion_headroom()
     check_source_size(pine_source, filename)
-    budget = TimeBudget(filename)
+    budget = budget or TimeBudget(filename)
     pragmas = extract_pf_trace_pragmas(
         pine_source, filename=filename, budget=budget,
     )
@@ -27,6 +27,53 @@ def _parse_bounded(pine_source: str, filename: str):
     check_ast_depth(ast, filename)
     budget.check(phase=Phase.PARSER)
     return ast, pragmas, budget
+
+
+def _generate(pine_source: str, check_support: bool, filename: str):
+    """The pipeline, first without the per-call clones of functions that read
+    a ``session.<flag>[k]``, as scripts compiled before such reads were
+    supported; then again with the functions whose reads that C++ holds
+    cloned as well, until the C++ asks for no more (a clone can make a
+    caller's read reach the C++: its callers are cloned per call site, which
+    can retype their parameters). A read in an argument the codegen leaves
+    out never costs a clone (the clones of a function called along a deep
+    call tree grow with every path to it).
+
+    Returns ``(codegen, ctx, cpp, support_diagnostics)``."""
+    budget = None
+    clones: frozenset[str] = frozenset()
+    while True:
+        ast, pragmas, budget = _parse_bounded(pine_source, filename, budget)
+        support_diagnostics = []
+        if check_support:
+            support_diagnostics = _support_diagnostics(ast, filename=filename)
+            if any(d.level == Level.ERROR for d in support_diagnostics):
+                raise CompileError(support_diagnostics)
+        budget.check(phase=Phase.ANALYZER)
+        ast = expand_finite_choice_extrema_lengths(ast)
+        check_ast_depth(ast, filename)
+        budget.check(phase=Phase.ANALYZER)
+        ctx = Analyzer(ast, filename=filename, budget=budget,
+                       session_clones=clones).analyze()
+        budget.check(phase=Phase.ANALYZER)
+        # Attach after analysis: pragma expressions are not part of the
+        # program body, so the analyzer never inspects them; the codegen
+        # consumes them directly from the context to emit the on_bar tail
+        # ``if (trace_enabled_) { trace(...); ... }`` block.
+        ctx.pf_trace_pragmas = pragmas
+        gen = CodeGen(ctx, budget=budget)
+        cpp = gen.generate()
+        budget.check(phase=Phase.CODEGEN)
+        needed = gen.session_functions_needing_clones
+        if not needed:
+            return gen, ctx, cpp, support_diagnostics
+        # Only uncloned functions ask, so the set grows each time and the
+        # loop ends by the time every function that reads a flag at an
+        # offset is cloned.
+        if needed <= clones:
+            raise AssertionError("a cloned function asked for session clones again")
+        clones |= needed
+        del ast, ctx, gen, cpp
 
 
 def transpile(pine_source: str, *, check_support: bool = True, filename: str = "<input>") -> str:
@@ -60,22 +107,7 @@ def transpile(pine_source: str, *, check_support: bool = True, filename: str = "
     Returns:
         Generated C++ source string.
     """
-    ast, pragmas, budget = _parse_bounded(pine_source, filename)
-    if check_support:
-        check_support_or_raise(ast, filename=filename)
-    budget.check(phase=Phase.ANALYZER)
-    ast = expand_finite_choice_extrema_lengths(ast)
-    check_ast_depth(ast, filename)
-    budget.check(phase=Phase.ANALYZER)
-    ctx = Analyzer(ast, filename=filename, budget=budget).analyze()
-    budget.check(phase=Phase.ANALYZER)
-    # Attach after analysis: pragma expressions are not part of the
-    # program body, so the analyzer never inspects them; the codegen
-    # consumes them directly from the context to emit the on_bar tail
-    # ``if (trace_enabled_) { trace(...); ... }`` block.
-    ctx.pf_trace_pragmas = pragmas
-    cpp = CodeGen(ctx, budget=budget).generate()
-    budget.check(phase=Phase.CODEGEN)
+    _gen, _ctx, cpp, _support = _generate(pine_source, check_support, filename)
     return cpp
 
 
@@ -83,8 +115,10 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
                    filename: str = "<input>") -> dict:
     """Transpile like :func:`transpile`, plus the host-UI input manifest.
 
-    Runs ONE pipeline pass (Lexer -> Parser -> support check -> Analyzer ->
-    CodeGen.generate) and returns the generated C++ alongside the data the
+    Runs the pipeline (Lexer -> Parser -> support check -> Analyzer ->
+    CodeGen.generate) once, again while the C++ holds a
+    ``session.<flag>[k]`` read of a function not yet cloned for it (see
+    ``_generate``), and returns the generated C++ alongside the data the
     cloud Studio needs to auto-build a backtest "override params" form:
 
     - ``cpp``: the generated C++ source (identical to :func:`transpile`).
@@ -107,22 +141,7 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
         ``{"cpp": str, "inputs": list[dict], "strategyParams": dict,
         "diagnostics": list[Diagnostic]}``.
     """
-    ast, pragmas, budget = _parse_bounded(pine_source, filename)
-    support_diagnostics = []
-    if check_support:
-        support_diagnostics = _support_diagnostics(ast, filename=filename)
-        if any(d.level == Level.ERROR for d in support_diagnostics):
-            raise CompileError(support_diagnostics)
-    budget.check(phase=Phase.ANALYZER)
-    ast = expand_finite_choice_extrema_lengths(ast)
-    check_ast_depth(ast, filename)
-    budget.check(phase=Phase.ANALYZER)
-    ctx = Analyzer(ast, filename=filename, budget=budget).analyze()
-    budget.check(phase=Phase.ANALYZER)
-    ctx.pf_trace_pragmas = pragmas
-    gen = CodeGen(ctx, budget=budget)
-    cpp = gen.generate()
-    budget.check(phase=Phase.CODEGEN)
+    gen, ctx, cpp, support_diagnostics = _generate(pine_source, check_support, filename)
     return {
         "cpp": cpp,
         "inputs": gen.extract_input_manifest(),

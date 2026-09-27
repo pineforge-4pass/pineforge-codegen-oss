@@ -161,6 +161,29 @@ def run_strategy(engine_root: Path, workdir: Path, feed: Path,
     return out.read_bytes(), records, proc.stderr
 
 
+_RUN_STRATEGY_MODULES: dict[Path, object] = {}
+
+
+def closed_trades(engine_root: Path, workdir: Path, feed: Path,
+                  params: dict | None = None) -> list[dict]:
+    """The built strategy's closed trades from the engine runner's own report
+    (``run_strategy.Strategy.run``), under the input overrides ``params``
+    (keyed by title) when given. ``engine_trades.csv`` carries no order
+    ids or comments; each report trade carries ``entry_id``, ``exit_id`` and
+    ``exit_comment`` beside its times (Unix ms) and prices."""
+    module = _RUN_STRATEGY_MODULES.get(engine_root)
+    if module is None:
+        scripts = engine_root / "scripts"
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        spec = importlib.util.spec_from_file_location(
+            "_pf_run_strategy", scripts / "run_strategy.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _RUN_STRATEGY_MODULES[engine_root] = module
+    return module.Strategy(workdir / "strategy.so").run(feed, params)["trades"]
+
+
 def trade_count(trades_csv: bytes) -> int:
     rows = csv.DictReader(trades_csv.decode().splitlines())
     return len({row["Trade #"] for row in rows})
@@ -245,6 +268,32 @@ def ok(outcomes: dict[str, Outcome], key: str) -> Outcome:
         pytest.fail(f"[{key}] {outcome.error}\n--- source ---\n{outcome.build.source}",
                     pytrace=False)
     return outcome
+
+
+def chart_feed_head(engine_root: Path, base: Path, bars: int) -> Path:
+    """The first ``bars`` bars of the corpus 15m chart feed, under ``base``."""
+    full_feed = derive_chart_feed(engine_root, base / "full_chart.csv")
+    feed = base / "chart.csv"
+    with full_feed.open() as inp, feed.open("w") as out:
+        for _, line in zip(range(bars + 1), inp):
+            out.write(line)
+    return feed
+
+
+def assert_same_runs(subject: Outcome, reference: Outcome) -> str:
+    """Fail unless ``subject`` traces bar for bar and trades byte for byte
+    like ``reference`` in every run (defaults and overrides); returns a
+    summary of the subject's runs."""
+    for tag in subject.trades:
+        if subject.traces:
+            compared, mismatched, first = per_bar_mismatches(
+                subject.traces[tag], reference.traces[tag], ("shape", "reference"))
+            assert compared > 0, f"[{tag}] no trace records"
+            assert mismatched == 0, f"[{tag}] {first}"
+        assert subject.trades[tag] == reference.trades[tag], (
+            f"[{tag}] shape {summary(subject.trades[tag])}, "
+            f"reference {summary(reference.trades[tag])}")
+    return "; ".join(f"{tag} {summary(blob)}" for tag, blob in subject.trades.items())
 
 
 def same(a: float, b: float) -> bool:

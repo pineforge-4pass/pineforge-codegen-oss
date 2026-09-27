@@ -68,8 +68,9 @@ from typing import Any
 from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier,
     IfStmt, MemberAccess, NumberLiteral, StringLiteral, Subscript, SwitchStmt,
-    Ternary, TupleLiteral, UnaryOp, VarDecl,
+    Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
+from ..method_binding import bind_function_defaults
 from ..symbols import PineType
 from .. import signatures as sigs
 from .. import tv_input_choices as tv_in
@@ -79,6 +80,19 @@ from .tables import (
     TA_TUPLE_RETURNS, TA_TUPLE_ELEMENT_COUNTS, TA_COMPUTE_ARGS,
     TA_LENGTH_ONLY_DEFAULT_SOURCE,
 )
+
+
+# Element types a request.security helper tuple may carry (see
+# ``_handle_request_call``); an ``na`` element is stored as a double like every
+# numeric one. An element the definition leaves untyped is typed at the call
+# (``_security_callsite_tuple_types``) or refused.
+_SECURITY_TUPLE_ELEMENT_TYPES = frozenset({
+    PineType.INT, PineType.FLOAT, PineType.BOOL, PineType.STRING, PineType.NA,
+})
+_HINT_TYPES = {
+    "int": PineType.INT, "float": PineType.FLOAT, "bool": PineType.BOOL,
+    "string": PineType.STRING,
+}
 
 
 class CallHandlers:
@@ -588,6 +602,7 @@ class CallHandlers:
 
         # Determine constructor args
         ctor_args: list[str] = []
+        ctor_nodes: list = []
         effective_multi_ctor = TA_MULTI_CTOR.copy()
         if func_name in ("pivothigh", "pivotlow") and len(all_args) == 3:
             effective_multi_ctor[func_name] = [1, 2]
@@ -598,10 +613,12 @@ class CallHandlers:
             for idx in effective_multi_ctor[func_name]:
                 if idx < len(all_args) and all_args[idx] is not None:
                     ctor_args.append(self._expr_to_str(all_args[idx]))
+                    ctor_nodes.append(all_args[idx])
         elif func_name in TA_PERIOD_ARG:
             idx = TA_PERIOD_ARG[func_name]
             if idx < len(all_args) and all_args[idx] is not None:
                 ctor_args.append(self._expr_to_str(all_args[idx]))
+                ctor_nodes.append(all_args[idx])
 
         # Determine compute args (all args that aren't ctor args)
         compute_args: list = []
@@ -630,6 +647,7 @@ class CallHandlers:
             node=node,
             is_static=is_static,
             owner_func=(self._enclosing_func_names[-1] if self._enclosing_func_names else None),
+            ctor_nodes=ctor_nodes,
         )
         self._ta_call_sites.append(site)
         self._ta_member_names.add(site.member_name)
@@ -654,6 +672,59 @@ class CallHandlers:
             _seen.add(node.name)
             return self._security_symbol_is_heikinashi(self._global_expr_map[node.name], _seen)
         return False
+
+    def _security_callsite_tuple_types(
+        self,
+        func_name: str,
+        call: FuncCall,
+        element_types: tuple[PineType, ...],
+    ) -> tuple[PineType, ...]:
+        """Type the elements a helper's definition leaves untyped from this
+        request.security call's arguments (``f(high, 10)``: ``src[k]`` is a
+        float), following the helper's top-level declarations. An element
+        still untyped keeps ``UNKNOWN`` and is refused."""
+        fdef = self._func_defs.get(func_name)
+        if fdef is None or not fdef.body:
+            return element_types
+        final = fdef.body[-1]
+        final = final.expr if isinstance(final, ExprStmt) else final
+        if not isinstance(final, TupleLiteral) or len(final.elements) != len(element_types):
+            return element_types
+
+        def arg_type(arg) -> PineType:
+            if isinstance(arg, Identifier):
+                if arg.name in BAR_FIELDS:
+                    return PineType.FLOAT
+                if arg.name == "time":
+                    return PineType.INT
+                sym = self._symbols.resolve(arg.name)
+                if sym is not None and sym.pine_type in _SECURITY_TUPLE_ELEMENT_TYPES:
+                    return sym.pine_type
+            return self._callsite_primitive_expr_type(arg, {})
+
+        env: dict[str, PineType] = {}
+        for index, param in enumerate(fdef.params):
+            arg = call.kwargs.get(param)
+            if arg is None and index < len(call.args):
+                arg = call.args[index]
+            env[param] = arg_type(arg) if arg is not None else PineType.UNKNOWN
+        for stmt in fdef.body[:-1]:
+            if isinstance(stmt, VarDecl):
+                env[stmt.name] = (
+                    _HINT_TYPES.get(stmt.type_hint, PineType.UNKNOWN)
+                    if stmt.type_hint
+                    else self._callsite_primitive_expr_type(stmt.value, env)
+                )
+            elif isinstance(stmt, TupleAssign):
+                env.update((name, PineType.UNKNOWN) for name in stmt.names)
+        refined = []
+        for known, element in zip(element_types, final.elements):
+            if known == PineType.UNKNOWN:
+                typed = self._callsite_primitive_expr_type(element, env)
+                if typed in (PineType.INT, PineType.FLOAT, PineType.BOOL, PineType.STRING):
+                    known = typed
+            refined.append(known)
+        return tuple(refined)
 
     def _handle_request_call(self, func_name: str, node: FuncCall) -> PineType:
         """Handle request.* function calls."""
@@ -680,8 +751,9 @@ class CallHandlers:
 
             # Track TA sites created by the expression
             ta_start = len(self._ta_call_sites)
+            expr_type = None
             if expr_node is not None:
-                self._visit(expr_node)
+                expr_type = self._visit(expr_node)
             ta_end = len(self._ta_call_sites)
             security_ta_range = (ta_start, ta_end) if ta_end > ta_start else None
 
@@ -708,26 +780,30 @@ class CallHandlers:
                     if self._func_returns_tuple.get(expr_func, False):
                         tuple_size = self._func_tuple_element_count.get(expr_func, 0)
                         tuple_types = self._func_tuple_element_types.get(expr_func, ())
-                        numeric_tuple = (
+                        if PineType.UNKNOWN in tuple_types:
+                            tuple_types = self._security_callsite_tuple_types(
+                                expr_func, expr_node, tuple_types
+                            )
+                        # TradingView returns a tuple of any mix of scalars. A
+                        # bool element keeps a bool slot, a string element a
+                        # string slot; every numeric element, and one whose type
+                        # is not inferred (``src[k]`` of a parameter), keeps the
+                        # double storage of the numeric family.
+                        scalar_tuple = (
                             tuple_size >= 2
                             and len(tuple_types) == tuple_size
                             and all(
-                                item in (PineType.INT, PineType.FLOAT)
+                                item in _SECURITY_TUPLE_ELEMENT_TYPES
                                 for item in tuple_types
                             )
                         )
-                        bool_tuple = (
-                            tuple_size >= 2
-                            and len(tuple_types) == tuple_size
-                            and all(item == PineType.BOOL for item in tuple_types)
-                        )
-                        if not (numeric_tuple or bool_tuple):
+                        if not scalar_tuple:
                             inferred_types = ", ".join(
                                 item.value for item in tuple_types
                             ) or "unknown"
                             self._error(
                                 "request.security tuple-return helpers support two or more "
-                                "numeric int/float elements or homogeneous bool elements; inferred "
+                                "int, float, bool or string elements; inferred "
                                 f"{tuple_size} element(s) [{inferred_types}]",
                                 expr_node.loc,
                             )
@@ -764,6 +840,9 @@ class CallHandlers:
             containing_func = scope_name[5:] if scope_name.startswith("func_") else ""
             if returns_tuple and tuple_element_types:
                 self._tuple_element_types_by_node[id(node)] = tuple_element_types
+            # A string payload returns a string (TradingView's na string reads
+            # empty); every other scalar keeps the historical float result.
+            string_result = not returns_tuple and expr_type == PineType.STRING
             self._security_calls.append(SecurityCallInfo(
                 sec_id=sec_id,
                 timeframe=tf_node,
@@ -778,9 +857,10 @@ class CallHandlers:
                 depends_on_mutable_globals=bool(mutable_globals),
                 mutable_globals=mutable_globals,
                 containing_func=containing_func,
+                string_result=string_result,
             ))
 
-            return PineType.FLOAT
+            return PineType.STRING if string_result else PineType.FLOAT
 
         if func_name == "security_lower_tf":
             return self._handle_request_security_lower_tf(node)
@@ -1378,6 +1458,9 @@ class CallHandlers:
                 and isinstance(node.callee, MemberAccess)
             ):
                 positional_args.insert(0, node.callee.object)
+        param_defaults = list(
+            (func_def.annotations or {}).get("param_defaults", ())
+        )
         for p_idx, param_name in enumerate(func_def.params):
             if p_idx < len(positional_args):
                 param_arg_map[param_name] = self._expr_to_str(
@@ -1386,6 +1469,13 @@ class CallHandlers:
             elif param_name in node.kwargs:
                 param_arg_map[param_name] = self._expr_to_str(
                     node.kwargs[param_name]
+                )
+            elif (method_info is None
+                    and p_idx < len(param_defaults)
+                    and param_defaults[p_idx] is not None):
+                # An omitted parameter reads its declared default.
+                param_arg_map[param_name] = self._expr_to_str(
+                    param_defaults[p_idx]
                 )
 
         if func_name in self._func_ta_ranges:
@@ -1553,6 +1643,7 @@ class CallHandlers:
                         node=orig.node,
                         is_static=orig.is_static,
                         owner_func=func_name,
+                        ctor_nodes=orig.ctor_nodes[:],
                     )
                     selected_ta_indices[i] = len(self._ta_call_sites)
                     self._ta_call_sites.append(cloned)
@@ -1631,6 +1722,17 @@ class CallHandlers:
             visited_types[id(arg)] = self._visit(arg)
         for arg in node.kwargs.values():
             visited_types[id(arg)] = self._visit(arg)
+        # An omitted parameter binds its declared default, as codegen passes it.
+        defaulted = bind_function_defaults(
+            func_def.params,
+            (func_def.annotations or {}).get("param_defaults", ()),
+            node,
+        )
+        if defaulted is not None:
+            bound_args = list(defaulted)
+            for arg in bound_args:
+                if id(arg) not in visited_types:
+                    visited_types[id(arg)] = self._visit(arg)
 
         param_types = [
             visited_types.get(id(arg), PineType.UNKNOWN)
