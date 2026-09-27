@@ -1,5 +1,5 @@
 //@version=6
-strategy("PF KRUNERR env facts", overlay=true, pyramiding=4)
+strategy("PF KRUNERR env facts", overlay=true, pyramiding=4, default_qty_type=strategy.fixed, default_qty_value=0.01)
 if bar_index == 3
     strategy.entry("tz=" + syminfo.timezone + "|tid=" + syminfo.tickerid, strategy.long)
     strategy.entry("tf=" + timeframe.period + "|m=" + str.tostring(timeframe.multiplier) + "|min=" + str.tostring(timeframe.isminutes) + "|d=" + str.tostring(timeframe.isdaily) + "|std=" + str.tostring(chart.is_standard), strategy.long)
