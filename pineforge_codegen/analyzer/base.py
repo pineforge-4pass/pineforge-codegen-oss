@@ -30,7 +30,7 @@ from ..symbols import (
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes
-from ..security_contexts import context_key, reads_bar_series
+from ..security_contexts import PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series
 from ..session_reads import emitted_session_reads
 from ..method_binding import (
     BoundMethodArgs,
@@ -155,7 +155,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_infos: list[FuncInfo] = []
         self._fixnan_sites: list[FixnanCallSite] = []
         self._strategy_params: dict = {}
-        self._diagnostics: list[Diagnostic] = []
+        # The warnings of the passes between the support checker and here.
+        self._diagnostics: list[Diagnostic] = list(
+            (ast.annotations or {}).get(PASS_WARNINGS_ANNOTATION, ()))
         self._global_var_decls: list[tuple[str, PineType]] = []
         # Top-level ordinary bindings are lexical global state even when a
         # same-named callable history reference has already polluted the
@@ -244,6 +246,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_tuple_element_count: dict[str, int] = {}
         self._func_tuple_element_types: dict[str, tuple[PineType, ...]] = {}
         self._tuple_element_types_by_node: dict[int, tuple[PineType, ...]] = {}
+        # request.security call id -> its tuple's size (``call_handlers``).
+        self._security_tuple_shapes: dict[int, int] = {}
         # Track user-defined functions whose body returns a UDT instance —
         # maps func_name -> UDT type name. Detected from the body's final
         # expression (``=> Sample.new(...)`` or last stmt ``Sample.new(...)``).
@@ -3563,6 +3567,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     callsite_idx=cs_idx,
                     string_result=sec.string_result,
                     symbol=sec.symbol,
+                    foreign=sec.foreign,
+                    ignore_invalid=sec.ignore_invalid,
                 )
                 new_calls.append(clone)
                 next_sec_id += 1
@@ -4668,6 +4674,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     self._func_tuple_element_types[node.name] = (
                         self._func_tuple_element_types.get(terminal_callee, ())
                     )
+            elif (
+                isinstance(terminal_ret_expr, FuncCall)
+                and id(terminal_ret_expr) in self._security_tuple_shapes
+            ):
+                # ``htf(sym, tf) => request.security(sym, tf, pack())``
+                # returns the requested tuple: it was typed a double, which
+                # did not compile, and its callers destructure it.
+                self._func_returns_tuple[node.name] = True
+                self._func_tuple_element_count[node.name] = (
+                    self._security_tuple_shapes[id(terminal_ret_expr)]
+                )
+                self._func_tuple_element_types[node.name] = (
+                    self._tuple_element_types_by_node.get(id(terminal_ret_expr), ())
+                )
 
         # Re-run direct-wrapper propagation to a fixed point whenever a new
         # definition is analyzed. This makes ``outer()=>inner()`` source-order

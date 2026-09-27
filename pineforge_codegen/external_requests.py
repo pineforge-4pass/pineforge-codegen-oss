@@ -1,8 +1,13 @@
-"""Requests PineForge has no data for.
+"""Requests PineForge has no data for, and the reads of requests lowered
+onto data a run is given.
 
 ``request.security`` on another symbol and ``request.financial`` /
 ``earnings`` / ``dividends`` / ``splits`` / ``footprint`` read data the
-engine does not load. ``TradeSlice`` follows such a request's value forward
+engine does not load itself: a probe's requests manifest pins it
+(``PINEFORGE_REQUESTS_ROOT``). A request of another symbol the support checker
+lowers onto that symbol's pinned feed (``FEED_LOWERING``) stays; its reads
+are marked like a deferred refusal's below, and stop the run only when the
+run began with no feed for it. ``TradeSlice`` follows such a request's value forward
 through the script: when it reaches display and alert sinks only -- the
 backward slice of every trade sink holds no part of it -- the request is
 lowered to ``na`` with a warning (``lower_no_data_requests``). Every other one
@@ -33,12 +38,29 @@ from .ast_nodes import (
     MemberAccess, MethodDef, NaLiteral, Program, StringLiteral, Subscript,
     SwitchStmt, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
 )
+from .errors import Diagnostic, Level, Phase, SourceLocation
 from .security_contexts import ScriptIndex, replace_nodes
 
 
 LOWERING_ANNOTATION = "pf_request_lowering"
-# On a node whose evaluation stops the run: the message it stops with.
+# The lowering of a request of another symbol that reads the feed a requests
+# manifest pins for it (``request.security``; the engine's instrument feeds).
+FEED_LOWERING = "feed"
+# Lowerings whose data is looked up at run time: the request stays, and its
+# reads stop the run only where the data is missing.
+DATA_LOWERINGS = frozenset({FEED_LOWERING})
+# On a node whose evaluation stops the run: the message it stops with, or,
+# for a request lowered onto pinned data, ``{"message": ..., "ref":
+# RequestRef}``: the run stops there only when no data is installed for the
+# request that carries the same ref (``REQUEST_REF_ANNOTATION``).
 UNPINNED_ANNOTATION = "pf_request_unpinned"
+REQUEST_REF_ANNOTATION = "pf_request_ref"
+
+
+class RequestRef:
+    """Names a request lowered onto pinned data from the reads marked for
+    it. A plain object, not a node, so no AST walk follows it; a helper copy
+    (``security_contexts``) copies it once for the request and its reads."""
 # request.* calls whose data PineForge never has.
 NO_DATA_REQUEST_FUNCS = frozenset({"financial", "earnings", "dividends", "splits", "footprint"})
 
@@ -473,51 +495,107 @@ def unpinned_message(node: FuncCall) -> str:
     return f"{spell_call(node)}: no data is pinned for this request, and its value was read"
 
 
+def _na_of(request: FuncCall, funcs: dict[str, FuncDef]) -> ASTNode:
+    """The ``na`` a request lowers to when no data is read for it."""
+    payload = None if no_data_request(request) else (
+        request.args[2] if len(request.args) > 2 else request.kwargs.get("expression"))
+    return _na_like(payload, funcs) if payload is not None else NaLiteral(loc=request.loc)
+
+
+def _mark_reads(program: Program, index: ScriptIndex, declarations: dict,
+                request: FuncCall, evaluated: ASTNode, marker) -> None:
+    """Mark where ``request``'s value is read with ``marker``: the reads of
+    the names of a declaration holding the whole request, those names never
+    reassigned (binding it is no read); else ``evaluated``, the node the
+    request is evaluated as."""
+    stmt = declarations.get(id(request))
+    names = ([stmt.name] if isinstance(stmt, VarDecl) else
+             list(stmt.names) if isinstance(stmt, TupleAssign) else [])
+    bindings = {index.decl_binding.get((id(stmt), name)) for name in names} - {None}
+    if stmt is None or not bindings or bindings & index.reassigned:
+        evaluated.annotations = {**(evaluated.annotations or {}), UNPINNED_ANNOTATION: marker}
+        return
+    for node in _nodes(program):
+        if isinstance(node, Subscript) and isinstance(node.object, Identifier):
+            reads = node.object
+        elif isinstance(node, Identifier):
+            reads = node
+        else:
+            continue
+        if index.refs.get(id(reads)) in bindings:
+            node.annotations = {**(node.annotations or {}), UNPINNED_ANNOTATION: marker}
+
+
 def lower_no_data_requests(program: Program) -> Program:
     """Replace each request the support checker lowered
     (``annotations[LOWERING_ANNOTATION]``) by its ``na``: an inert one's
     plainly, and an unpinned one's so that its first read stops the run.
     When the request is the whole value of a declaration whose names are
     never reassigned, those names' reads stop it; otherwise evaluating the
-    request does."""
+    request does. A request lowered onto pinned data (``DATA_LOWERINGS``)
+    stays, and the same reads stop the run only when its data is missing
+    when the run begins."""
     funcs = {s.name: s for s in program.body if isinstance(s, FuncDef)}
     swaps: dict[int, ASTNode] = {}
     unpinned: list[FuncCall] = []
+    backed: list[FuncCall] = []
     for node in _nodes(program):
         lowering = (node.annotations or {}).get(LOWERING_ANNOTATION)
         if lowering is None or not isinstance(node, FuncCall):
             continue
-        payload = None if no_data_request(node) else (
-            node.args[2] if len(node.args) > 2 else node.kwargs.get("expression"))
-        swaps[id(node)] = (_na_like(payload, funcs) if payload is not None
-                           else NaLiteral(loc=node.loc))
+        if lowering in DATA_LOWERINGS:
+            backed.append(node)
+            continue
+        swaps[id(node)] = _na_of(node, funcs)
         if lowering == "unpinned":
             unpinned.append(node)
-    if unpinned:
+    if unpinned or backed:
         index = ScriptIndex(program)
         declarations = {id(stmt.value): stmt for stmt in _nodes(program)
                         if isinstance(stmt, (VarDecl, TupleAssign))}
         for request in unpinned:
-            message = unpinned_message(request)
-            stmt = declarations.get(id(request))
-            names = ([stmt.name] if isinstance(stmt, VarDecl) else
-                     list(stmt.names) if isinstance(stmt, TupleAssign) else [])
-            bindings = {index.decl_binding.get((id(stmt), name)) for name in names} - {None}
-            if stmt is None or not bindings or bindings & index.reassigned:
-                lowered = swaps[id(request)]
-                lowered.annotations = {**(lowered.annotations or {}),
-                                       UNPINNED_ANNOTATION: message}
-                continue
-            for node in _nodes(program):
-                if isinstance(node, Subscript) and isinstance(node.object, Identifier):
-                    reads = node.object
-                elif isinstance(node, Identifier):
-                    reads = node
-                else:
-                    continue
-                if index.refs.get(id(reads)) in bindings:
-                    node.annotations = {**(node.annotations or {}),
-                                        UNPINNED_ANNOTATION: message}
+            _mark_reads(program, index, declarations, request, swaps[id(request)],
+                        unpinned_message(request))
+        for request in backed:
+            ref = RequestRef()
+            request.annotations = {**(request.annotations or {}), REQUEST_REF_ANNOTATION: ref}
+            _mark_reads(program, index, declarations, request, request,
+                        {"message": unpinned_message(request), "ref": ref})
     if swaps:
         replace_nodes(program, swaps)
     return program
+
+
+def unpin_requests(program: Program, reasons: dict[int, str]) -> None:
+    """Give each request ``reasons`` names (by id: a request of another
+    symbol whose symbol registration cannot compute before the first bar)
+    the lowering it had before it read a feed: its ``na``, whose reads stop
+    the run with the request named. Each is reported with its reason."""
+    from .security_contexts import PASS_WARNINGS_ANNOTATION
+
+    funcs = {s.name: s for s in program.body if isinstance(s, FuncDef)}
+    requests = {id(node): node for node in _nodes(program) if id(node) in reasons}
+    refs = {id((node.annotations or {}).get(REQUEST_REF_ANNOTATION)) for node in requests.values()}
+    swaps: dict[int, ASTNode] = {}
+    warnings = []
+    for request_id, request in requests.items():
+        lowered = _na_of(request, funcs)
+        marker = (request.annotations or {}).get(UNPINNED_ANNOTATION)
+        if isinstance(marker, dict):
+            lowered.annotations = {**(lowered.annotations or {}),
+                                   UNPINNED_ANNOTATION: marker["message"]}
+        swaps[request_id] = lowered
+        warnings.append(Diagnostic(
+            level=Level.WARNING, phase=Phase.ANALYZER,
+            location=request.loc or SourceLocation(file="<input>", line=1, col=1, end_col=1),
+            message=(f"{spell_call(request)}: no data is pinned for this request; the run "
+                     "stops with an error where its value is read."),
+            hint=(f"PineForge reads another symbol's feed only for a symbol registration "
+                  f"computes before the first bar; {reasons[request_id]}.")))
+    for node in _nodes(program):
+        marker = (node.annotations or {}).get(UNPINNED_ANNOTATION)
+        if isinstance(marker, dict) and id(marker["ref"]) in refs:
+            node.annotations = {**node.annotations, UNPINNED_ANNOTATION: marker["message"]}
+    replace_nodes(program, swaps)
+    notes = program.annotations = dict(program.annotations or {})
+    notes[PASS_WARNINGS_ANNOTATION] = [*notes.get(PASS_WARNINGS_ANNOTATION, ()), *warnings]

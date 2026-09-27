@@ -2926,6 +2926,20 @@ class TypeInferer:
             expr = last_stmt.expr
         elif isinstance(last_stmt, TupleLiteral):
             expr = last_stmt
+        request = last_stmt.expr if isinstance(last_stmt, ExprStmt) else last_stmt
+        if (isinstance(request, FuncCall)
+                and self._resolve_callee(request.callee) == ("security", "request")):
+            # A helper returning a request's tuple returns it as the value
+            # read stores it (``_req_sec_N`` or its per-element members).
+            item = self._security_call_for_request(request)
+            if item is not None and item.get("returns_tuple"):
+                payload = item["expr_node"]
+                if isinstance(payload, TupleLiteral):
+                    return ["double" if item.get("foreign") and cpp_t == "int" else cpp_t
+                            for cpp_t in map(self._infer_cpp_type_for_security_elem,
+                                             payload.elements)]
+                return self._security_tuple_element_cpp_types(
+                    count, item.get("tuple_element_types", ()))
         if expr is not None:
             result: list[str] = []
             for e in expr.elements:

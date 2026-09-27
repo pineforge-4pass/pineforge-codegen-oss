@@ -79,6 +79,8 @@ from ..analyzer import (
 )
 from .. import signatures as sigs
 from ..errors import CompileError
+from ..external_requests import REQUEST_REF_ANNOTATION
+from ..external_requests import _nodes as walk_request_nodes
 from ..security_contexts import UNREACHED_ANNOTATION
 from ..symbols import PineType, method_receiver_type_name
 from .tables import (
@@ -855,6 +857,9 @@ class SecurityEmitter:
                 "callsite_idx": getattr(item, "callsite_idx", None),
                 "string_result": bool(getattr(item, "string_result", False)),
                 "dead": bool(getattr(item, "dead", False)),
+                "foreign": bool(getattr(item, "foreign", False)),
+                "symbol_node": getattr(item, "symbol", None),
+                "ignore_invalid_node": getattr(item, "ignore_invalid", None),
             }
         return {
             "sec_id": item[0],
@@ -1837,15 +1842,60 @@ class SecurityEmitter:
     def _security_bar_hist_type(self, field: str) -> str:
         return SECURITY_BAR_FIELD_TYPES.get(field, "double")
 
+    def _security_call_for_request(self, node) -> dict | None:
+        """The ``request.security`` site ``node`` registered, as the value
+        read (``visit_call``) finds it: by its expression, and among the
+        analyzer's call-site clones by the call site being emitted."""
+        payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+        candidates = [item for item in self._security_calls
+                      if not item.get("is_lower_tf_array") and payload is not None
+                      and item["expr_node"] is payload]
+        if len(candidates) > 1:
+            return next((c for c in candidates
+                         if c.get("callsite_idx") == self._active_call_site_idx),
+                        candidates[0])
+        return candidates[0] if candidates else None
+
+    def _request_data_missing(self, ref) -> str:
+        """C++ that is true when the pinned data of the request carrying
+        ``ref`` (``external_requests.RequestRef``) was missing when the run
+        began: another symbol's site the run did not register."""
+        requests = getattr(self, "_pf_request_refs", None)
+        if requests is None:
+            requests = self._pf_request_refs = {
+                id(node.annotations[REQUEST_REF_ANNOTATION]): node
+                for node in walk_request_nodes(self.ctx.ast)
+                if isinstance(node, FuncCall)
+                and REQUEST_REF_ANNOTATION in (node.annotations or {})}
+        request = requests.get(id(ref))
+        item = self._security_call_for_request(request) if request is not None else None
+        if item is None or not item.get("foreign"):
+            return "true"
+        return f"_pf_sec_missing_{item['sec_id']}"
+
+    def _security_foreign(self, sec_id: int | None) -> bool:
+        """The site reads another symbol's feed: its bars close when the
+        feed says they do, and the host answers for its context."""
+        return (sec_id is not None and 0 <= sec_id < len(self._security_eval_info)
+                and bool(self._security_eval_info[sec_id].get("foreign")))
+
     def _security_bar_field_expr(self, field: str, sec_id: int | None = None) -> str:
         if field == "time_close" and sec_id is not None:
             # The requested bar's close on the requested timeframe, as the
             # chart's ``time_close()`` reads its own bar on the chart's.
-            return (
+            chart = (
                 "pine_time_close(bar.timestamp, "
                 f"{self._security_timeframe_expr(sec_id)}, "
                 "syminfo_.session, syminfo_.timezone, script_tf_)"
             )
+            if self._security_foreign(sec_id):
+                # Another symbol's bar closes when its feed says it does: the
+                # host's time_close() while that symbol's payload runs (a
+                # generated time_close member would shadow the plain name).
+                # A symbol string equal to the chart's registers on the chart.
+                return ("(foreign_context_ != nullptr ? "
+                        f"pineforge::source::PineStrategyHost::time_close() : {chart})")
+            return chart
         for call, source_field in self._security_source_hist_fields.values():
             if source_field == field:
                 return self._security_source_input_expr(call)
@@ -4917,7 +4967,20 @@ class SecurityEmitter:
         lines.append(f"    void _eval_security_{sec_id}(const Bar& bar, bool is_complete) {{")
         if sec_id in self._security_bar_index_secs:
             member = self._security_bar_index_member(sec_id)
-            lines.append(f"        if (security_series_slot_is_new({sec_id})) ++{member};")
+            if self._security_foreign(sec_id):
+                # Another symbol's context answers its own bar_index
+                # (XSYM-D: the feed's bars handed over so far).
+                lines.append("#ifdef PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1")
+                lines.append(f"        {member} = pine_bar_index();")
+                lines.append("#else")
+                lines.append(f"        if (security_series_slot_is_new({sec_id})) ++{member};")
+                lines.append("#endif")
+            else:
+                lines.append(f"        if (security_series_slot_is_new({sec_id})) ++{member};")
+        if self._security_foreign(sec_id):
+            lines.append("#ifdef PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1")
+            lines.append("        _PFForeignEmaSeeding _pf_ema_seeding;")
+            lines.append("#endif")
 
         ta_results = {}
         pre_rebind_ta_indices: list[int] = []
@@ -5017,6 +5080,11 @@ class SecurityEmitter:
                     security_mutable_names=security_mutable_names,
                     emitted_lines=lines,
                 )
+                if (self._security_foreign(sec_id)
+                        and self._infer_cpp_type_for_security_elem(el) == "int"):
+                    # Held as a double (base.py): the integer's na stays na.
+                    el_cpp = ("[](auto _pf_v) { return is_na(_pf_v) ? na<double>() "
+                              f": static_cast<double>(_pf_v); }}({el_cpp})")
                 lines.append(f"        _req_sec_{sec_id}_{i} = {el_cpp};")
             self._emit_security_ohlc_hist_pushes(sec_id, lines)
             self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
@@ -5081,6 +5149,9 @@ class SecurityEmitter:
             expr_node = item["expr_node"]
             returns_tuple = item.get("returns_tuple", False)
             tuple_size = item.get("tuple_size", 0)
+            if self._security_foreign(sec_id):
+                self._emit_foreign_security_clear(item, lines)
+                continue
             if item.get("is_lower_tf_array"):
                 # The accumulator is reset on each sub-bar 0 inside the
                 # eval method itself, so ``clear_security`` only needs to
@@ -5178,6 +5249,53 @@ class SecurityEmitter:
                     lines.append(f"            case {sec_id}: _req_sec_{sec_id} = {na_cpp}; break;")
         lines.append("        }")
         lines.append("    }")
+
+    def _emit_foreign_security_clear(self, item: dict, lines: list[str]) -> None:
+        """``clear_security`` of another symbol's site: the engine calls it
+        under gaps_on on a chart bar the feed handed nothing, so the value
+        reads na there. The requested context's own history (``close[1]``,
+        ``ta.*``) is that symbol's and carries on at its next bar."""
+        sec_id = item["sec_id"]
+        expr_node = item["expr_node"]
+        returns_tuple = item.get("returns_tuple", False)
+        tuple_size = item.get("tuple_size", 0)
+        lines.append(f"            case {sec_id}:")
+        if returns_tuple and tuple_size and tuple_size > 0 and isinstance(expr_node, TupleLiteral):
+            for i, el in enumerate(expr_node.elements):
+                ctype = self._infer_cpp_type_for_security_elem(el)
+                value = {
+                    "double": "na<double>()",
+                    "bool": "false",
+                    "int": "na<double>()",
+                    "std::string": 'std::string("")',
+                }.get(ctype)
+                if ctype == "std::vector<double>":
+                    lines.append(f"                _req_sec_{sec_id}_{i}.clear();")
+                else:
+                    lines.append(f"                _req_sec_{sec_id}_{i} = "
+                                 f"{value or self._default_for_type(ctype)};")
+        elif returns_tuple and tuple_size and tuple_size > 0:
+            site = self._get_ta_site(expr_node)
+            ta_name = self._ta_name_from_site(site) if site is not None else ""
+            ctype = {
+                "macd": "ta::MACDResult",
+                "supertrend": "ta::SupertrendResult",
+                "dmi": "ta::DMIResult",
+                "bb": "ta::BBResult",
+                "kc": "ta::KCResult",
+                "vwap_bands": "ta::VWAPBandsResult",
+            }.get(
+                ta_name,
+                self._security_helper_tuple_cpp_type(
+                    tuple_size, item.get("tuple_element_types", ())),
+            )
+            default = self._security_tuple_result_default(
+                ctype, tuple_size, item.get("tuple_element_types", ()))
+            lines.append(f"                _req_sec_{sec_id} = {default};")
+        else:
+            na_cpp = "na<std::string>()" if item.get("string_result") else "na<double>()"
+            lines.append(f"                _req_sec_{sec_id} = {na_cpp};")
+        lines.append("                break;")
 
     def _build_security_expr(
         self,

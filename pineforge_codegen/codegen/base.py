@@ -1033,6 +1033,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "depends_on_mutable_globals": item.get("depends_on_mutable_globals", False),
                 "mutable_globals": list(item.get("mutable_globals", [])),
                 "is_lower_tf_array": bool(item.get("is_lower_tf_array", False)),
+                # Another symbol's feed (``_emit_foreign_security_registration``);
+                # a helper nothing reaches keeps the chart registration.
+                "foreign": bool(item.get("foreign")) and not item.get("dead"),
+                "symbol_node": item.get("symbol_node"),
+                "ignore_invalid_node": item.get("ignore_invalid_node"),
             })
         self._register_global_aggregate_member_types()
         self._uses_map = self._detect_map_usage()
@@ -4542,6 +4547,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 self._security_ohlc_hist_fields_by_sec[sec_id] = hist_fields
                 for i, el in enumerate(expr_node.elements):
                     ctype = self._infer_cpp_type_for_security_elem(el)
+                    if ctype == "int" and item.get("foreign"):
+                        # Another symbol's int element (its time, time_close,
+                        # bar_index) is held as a double: a millisecond
+                        # stamp overflows an int, and it reads na until the
+                        # symbol's first bar.
+                        ctype = "double"
                     if ctype == "std::vector<double>":
                         lines.append(f"    {ctype} _req_sec_{sec_id}_{i}{{}};")
                     else:
@@ -4592,6 +4603,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for name in self._security_ta_hist_series_names(sec_id):
                 lines.append(f"    Series<double> {name}{_mbb};")
             self._emit_security_expr_hist_members(sec_id, expr_node, lines, _mbb)
+            if item.get("foreign"):
+                # configure_security_evaluators() clears it when the site is
+                # registered: its reads stop the run while it is set.
+                lines.append(f"    bool _pf_sec_missing_{sec_id} = true;")
 
         if self._security_calls:
             lines.append('    std::unordered_map<std::string, Series<double>> _security_helper_series_;')

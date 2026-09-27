@@ -51,8 +51,9 @@ from .errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from .builtin_keywords import POSITIONAL_BUILTINS
 from .pine_spelling import expr_start
 from .external_requests import (
-    LOWERING_ANNOTATION, NO_DATA_REQUEST_FUNCS, TradeSlice, spell_call,
+    FEED_LOWERING, LOWERING_ANNOTATION, NO_DATA_REQUEST_FUNCS, TradeSlice, spell_call,
 )
+from .external_requests import _nodes as _walk_nodes
 from . import signatures as sigs
 from .tv_input_choices import INPUT_SOURCE_SERIES_IDS
 from .analyzer import TA_CLASS_MAP
@@ -389,10 +390,10 @@ UNSUPPORTED_NAMESPACE_VARS: dict[str, str] = {
 # Codegen supports symbol/timeframe/expression plus gaps/lookahead (read in
 # _eval_security_* emission and forwarded to register_security_eval).
 # `currency` is still rejected loudly (it changes the returned values via FX
-# conversion, which codegen drops — silently wrong). `ignore_invalid_symbol` is
-# a guaranteed no-op here: codegen forces request.security onto the current
-# chart symbol (see the "symbol must reference current chart symbol" check),
-# which is always valid, so the flag can never change the result — accept+ignore.
+# conversion, which codegen drops — silently wrong). `ignore_invalid_symbol`
+# is registered with a request of another symbol that reads its pinned feed
+# (na for a symbol its facts say is invalid); the chart's own symbol is always
+# valid, where the flag changes nothing.
 SECURITY_ALLOWED_PARAMS: frozenset[str] = frozenset(
     {"symbol", "timeframe", "expression", "gaps", "lookahead",
      "ignore_invalid_symbol",
@@ -2033,11 +2034,8 @@ class SupportChecker:
             scoped_safe = self._is_current_symbol_expr(symbol_node)
             legacy_safe = self._is_current_symbol_expr(symbol_node, legacy_names=True)
             if not scoped_safe and not legacy_safe:
-                # Another symbol: PineForge has no data for it.
-                self._lower_no_data_request(
-                    node, symbol_node,
-                    "PineForge backtests load the chart's symbol only "
-                    "(syminfo.tickerid, syminfo.ticker).")
+                # Another symbol: its pinned feed, when one can be read.
+                self._lower_foreign_request(node, symbol_node)
             elif not scoped_safe or not self._is_current_symbol_expr(
                 symbol_node, require_all_paths=True
             ):
@@ -2104,14 +2102,17 @@ class SupportChecker:
         # wrong-result bug. See SECURITY_ADJUSTMENT_ALLOWED_VALUES.
         self._check_security_adjustment_kwargs(node)
 
-    def _lower_no_data_request(self, node: FuncCall, at: ASTNode, why: str) -> None:
+    def _lower_no_data_request(self, node: FuncCall, at: ASTNode, why: str,
+                               reason: str | None | object = ...) -> None:
         """A request PineForge has no data for: lowered to na, with a
         warning, when its value reaches display and alert sinks only; else a
         deferred refusal whose first read stops the run
-        (``external_requests``)."""
+        (``external_requests``). ``reason`` is the trade slice's, when the
+        caller has it."""
         if self._trade_slice is None:
             self._trade_slice = TradeSlice(self._ast)
-        reason = self._trade_slice.reason(node)
+        if reason is ...:
+            reason = self._trade_slice.reason(node)
         lowering = "inert" if reason is None else "unpinned"
         node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: lowering}
         if reason is None:
@@ -2128,6 +2129,63 @@ class SupportChecker:
                 "stops with an error where its value is read.",
                 hint=f"{why} Its value can reach a trade: {reason}.",
             )
+
+    def _lower_foreign_request(self, node: FuncCall, symbol_node: ASTNode) -> None:
+        """``request.security`` of another symbol. Its value reaches display
+        and alert sinks only: na, as before. Otherwise it reads the feed the
+        probe's requests manifest pins for the symbol (``FEED_LOWERING``),
+        with its first read stopping the run when none is installed; a shape
+        registration cannot key keeps the deferred refusal."""
+        if self._trade_slice is None:
+            self._trade_slice = TradeSlice(self._ast)
+        reason = self._trade_slice.reason(node)
+        blocker = None if reason is None else self._foreign_feed_blocker(node, symbol_node)
+        if reason is None or blocker is not None:
+            self._lower_no_data_request(
+                node, symbol_node,
+                "PineForge backtests load the chart's symbol only "
+                "(syminfo.tickerid, syminfo.ticker)"
+                + (f", and reads another symbol's feed only when {blocker}." if blocker
+                   else "."),
+                reason=reason)
+            return
+        node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: FEED_LOWERING}
+        self._warn(
+            symbol_node,
+            f"{spell_call(node)}: another symbol's bars, read from the feed the requests "
+            "manifest pins for it; with none installed, the run stops with an error where "
+            "its value is read.",
+            hint=("PineForge runs the expression on that symbol's own bars (history, ta.* "
+                  "and syminfo.* in its context) and merges them by time as TradingView "
+                  "does; a symbol equal to the chart's reads the chart."),
+        )
+
+    def _foreign_feed_blocker(self, node: FuncCall, symbol_node: ASTNode) -> str | None:
+        """Why ``node`` cannot read another symbol's feed, or None: the
+        engine registers a feed site for ``request.security`` alone, keyed by
+        the symbol string and ``ignore_invalid_symbol`` as registration
+        computes them before the first bar (a symbol reaching the request
+        through a helper's parameters is resolved per call path, and falls
+        back there), with no other request in its expression."""
+        if _qualified_name(node.callee) != ("request", "security"):
+            return "it is request.security"
+        index = self._trade_slice.index
+        if index.depends_on_scope(symbol_node):
+            owner = index.owner.get(id(node))
+            if owner not in index.funcs or owner in index.overloaded:
+                # A method's parameter, a block's local: no call path to
+                # resolve it through (``security_contexts``).
+                return "registration computes its symbol before the first bar"
+        elif not index.registration_value(symbol_node):
+            return "registration computes its symbol before the first bar"
+        ignore = node.kwargs.get("ignore_invalid_symbol")
+        if ignore is not None and not index.registration_value(ignore):
+            return "registration computes its ignore_invalid_symbol before the first bar"
+        payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+        for inner in _walk_nodes(payload):
+            if isinstance(inner, FuncCall) and _qualified_name(inner.callee)[0] == "request":
+                return "its expression holds no request of its own"
+        return None
 
     def _visit_request_arguments(self, node: FuncCall) -> None:
         """A no-data request's arguments: ``barmerge.*`` and its field

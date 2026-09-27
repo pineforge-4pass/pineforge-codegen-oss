@@ -63,6 +63,25 @@ variable, a name the helper declares, a user call, an ``input.source``, a
 global declared after the helper (read on the chart's terms there), a
 history object other than an OHLCV series, a ``ta.*`` call or an inline
 operator expression, a global under a builtin rendered on the chart's terms.
+
+A request of another symbol that reads that symbol's pinned feed
+(``external_requests``: the support checker's ``feed`` lowering) is keyed by
+its symbol as well, so this pass owns every one whose symbol or timeframe
+reaches it through a helper's parameters, the analyzer's call-site clones
+included (they tell call sites apart by their timeframe only)::
+
+    f_htfPack(sym, tf) => request.security(sym, tf, f_packConfirmed())
+    f_symbolState(sym, tf) => f_htfPack(sym, tf)
+    f_tfRegime(sym) => [f_symbolState(sym, mainTf), f_symbolState(sym, confirmTf)]
+    [v1, v2] = f_tfRegime(vixSymbol)
+    [d1, d2] = f_tfRegime(dxySymbol)
+
+is six contexts. Registration reads a symbol before the first bar, so one
+that is not a value registration computes there on some call path (a
+series, a reassigned name, a user call: ``ScriptIndex.registration_value``)
+does not refuse the script: that request keeps the lowering it had before
+it read a feed, a deferred refusal whose first read stops the run
+(``external_requests.unpin_requests``), with a warning naming the path.
 """
 
 from __future__ import annotations
@@ -85,6 +104,13 @@ DEAD_ANNOTATION = "pf_security_dead"
 # On a payload's read of a parameter of a helper no top-level statement
 # reaches: the codegen does not warn that it reads na.
 UNREACHED_ANNOTATION = "pf_security_unreached"
+# On the Program: the warnings of the passes that run between the support
+# checker and the analyzer, which the analyzer reports as its own.
+PASS_WARNINGS_ANNOTATION = "pf_pass_warnings"
+# ``external_requests.LOWERING_ANNOTATION`` and its ``feed`` lowering, spelled
+# here too: that module imports this one.
+_LOWERING_ANNOTATION = "pf_request_lowering"
+_FEED_LOWERING = "feed"
 _REQUEST_FUNCS = ("security", "security_lower_tf")
 # Instances (a helper under one set of parameter values) the pass may build
 # before it refuses the script: diamond-shaped helper graphs multiply paths.
@@ -93,6 +119,13 @@ _MAX_INSTANCES = 512
 # helpers (``h(x) => g(x + x)``) keeps the earlier lowering.
 _MAX_PAYLOAD_NODES = 256
 _LITERALS = (StringLiteral, NumberLiteral, BoolLiteral, NaLiteral, ColorLiteral)
+# The chart's own symbol strings, and the inputs, registration reads
+# (``ScriptIndex.registration_value``).
+_REGISTRATION_MEMBERS = frozenset({
+    ("syminfo", "tickerid"), ("syminfo", "ticker"), ("syminfo", "prefix"),
+    ("syminfo", "currency"), ("syminfo", "basecurrency"),
+})
+_REGISTRATION_INPUTS = frozenset({"symbol", "string", "bool"})
 # Built-in series a context cannot be computed from before the first bar.
 _BAR_SERIES = frozenset({
     "open", "high", "low", "close", "volume", "hl2", "hlc3", "ohlc4", "hlcc4",
@@ -110,6 +143,19 @@ class _Fallback(Exception):
     def __init__(self, requests) -> None:
         super().__init__()
         self.requests = set(requests)
+
+
+class _FeedFallback(Exception):
+    """Requests of another symbol that read no feed: request id -> why."""
+
+    def __init__(self, reasons: dict[int, str]) -> None:
+        super().__init__()
+        self.reasons = dict(reasons)
+
+
+def _is_feed(request) -> bool:
+    """``request`` reads another symbol's pinned feed."""
+    return (request.annotations or {}).get(_LOWERING_ANNOTATION) == _FEED_LOWERING
 
 
 def reads_bar_series(expr) -> str | None:
@@ -497,6 +543,49 @@ class ScriptIndex:
                                     "call_arg_order": ArgOrder([*order, title])}
         return fresh
 
+    def registration_value(self, expr, seen: frozenset = frozenset()) -> bool:
+        """``expr`` is a value registration computes before the first bar:
+        literals, inputs (TradingView takes constant arguments), the chart's
+        own symbol strings, and operators and ternaries over them, read
+        through globals never reassigned. A request of another symbol is
+        registered with its symbol string and ``ignore_invalid_symbol`` so."""
+        if isinstance(expr, (StringLiteral, NumberLiteral, BoolLiteral)):
+            return True
+        if isinstance(expr, Identifier):
+            binding = self.refs.get(id(expr))
+            if (binding is None or binding[0] != "global" or binding in self.unstable
+                    or binding in seen):
+                return False
+            decl = self.decls.get(binding)
+            return (decl is not None and decl.value is not None
+                    and self.registration_value(decl.value, seen | {binding}))
+        if isinstance(expr, MemberAccess):
+            return (isinstance(expr.object, Identifier) and id(expr.object) not in self.refs
+                    and (expr.object.name, expr.member) in _REGISTRATION_MEMBERS)
+        if isinstance(expr, FuncCall):
+            callee = expr.callee
+            if isinstance(callee, Identifier):
+                return callee.name == "input" and id(callee) not in self.refs
+            if not (isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier)
+                    and id(callee.object) not in self.refs):
+                return False
+            if callee.object.name == "input":
+                return callee.member in _REGISTRATION_INPUTS
+            if callee.object.name == "ticker" and callee.member in ("inherit", "standard"):
+                first = expr.args[0] if expr.args else expr.kwargs.get("symbol")
+                return first is not None and self.registration_value(first, seen)
+            return False
+        if isinstance(expr, BinOp):
+            return (expr.op in ("+", "==", "!=", "and", "or")
+                    and self.registration_value(expr.left, seen)
+                    and self.registration_value(expr.right, seen))
+        if isinstance(expr, UnaryOp):
+            return expr.op == "not" and self.registration_value(expr.operand, seen)
+        if isinstance(expr, Ternary):
+            return all(self.registration_value(part, seen)
+                       for part in (expr.condition, expr.true_val, expr.false_val))
+        return False
+
 
 def _error(node, message: str, filename: str) -> Diagnostic:
     loc = getattr(node, "loc", None) or SourceLocation(file=filename, line=1, col=1, end_col=1)
@@ -507,6 +596,17 @@ def _error(node, message: str, filename: str) -> Diagnostic:
 
 def specialize_security_contexts(program: Program, filename: str = "<input>") -> Program:
     """Resolve the context of every helper request (module docstring)."""
+    while True:
+        try:
+            return _specialize(program, filename)
+        except _FeedFallback as exc:
+            # Nothing is rewritten before the plan holds: these requests keep
+            # their deferred refusal, and the pass starts over without them.
+            from .external_requests import unpin_requests
+            unpin_requests(program, exc.reasons)
+
+
+def _specialize(program: Program, filename: str) -> Program:
     prog = ScriptIndex(program)
     _mark_unreached(prog, _reached(prog))
     # The requests whose context this pass owns, by helper; those owned for
@@ -515,14 +615,24 @@ def specialize_security_contexts(program: Program, filename: str = "<input>") ->
     owned: dict[str, list[FuncCall]] = {}
     context_owned: set[int] = set()
     payload_reads: dict[int, list[Identifier]] = {}
+    # Another symbol's request whose symbol or timeframe reads a name this
+    # pass does not resolve (a method's parameter, a block's local) reads no
+    # feed: the support checker keeps those, this is its backstop.
+    stray = {id(request): "its symbol or timeframe reads a name of a method or a block"
+             for owner, requests in prog.requests.items() if owner not in prog.funcs
+             for request in requests if _is_feed(request)
+             and any(prog.depends_on_scope(arg) for arg in _request_args(request))}
+    if stray:
+        raise _FeedFallback(stray)
     for owner, requests in prog.requests.items():
         if owner not in prog.funcs:
             continue
         for request in requests:
             symbol, tf = _request_args(request)
-            if (prog.depends_on_scope(symbol) or prog.depends_on_scope(tf)) and not (
-                    _request_name(request) == "security"
-                    and _analyzer_resolves(prog, owner, symbol, tf)):
+            if (prog.depends_on_scope(symbol) or prog.depends_on_scope(tf)) and (
+                    _is_feed(request) or not (
+                        _request_name(request) == "security"
+                        and _analyzer_resolves(prog, owner, symbol, tf))):
                 context_owned.add(id(request))
             reads = _payload_params(prog, owner, request)
             if reads and not _analyzer_binds_payload(prog, owner, request, reads):
@@ -648,6 +758,10 @@ def _plan(prog: ScriptIndex, owned: dict, context_owned: set[int],
         if problem is None:
             continue
         reach = {func} | _reachable(prog, func, leads)
+        feeds = {id(r): f"helper '{func}' {problem}"
+                 for g in reach for r in owned.get(g, ()) if _is_feed(r)}
+        if feeds:
+            raise _FeedFallback(feeds)
         # The request a helper leads to, for the message.
         target = context_first.get(func) or next(
             (context_first[g] for g in sorted(context_first) if g in reach), None)
@@ -675,16 +789,26 @@ def _plan(prog: ScriptIndex, owned: dict, context_owned: set[int],
             symbol, tf = _request_args(request)
             values = []
             for what, arg in (("symbol", symbol), ("timeframe", tf)):
+                chain = " -> ".join(f"{name}()" for name, _ in here)
                 try:
                     values.append(prog.resolve(arg, env) if arg is not None else None)
                 except _Unresolvable as exc:
                     if id(request) not in context_owned:
                         raise _Fallback([id(request)]) from exc
-                    chain = " -> ".join(f"{name}()" for name, _ in here)
+                    if _is_feed(request):
+                        raise _FeedFallback({id(request): (
+                            f"its {what} cannot be resolved before the first bar on the "
+                            f"call path {chain}: {exc}")}) from exc
                     refuse(request, f"request.{_request_name(request)} {what} cannot be "
                                     f"resolved before the first bar on the call path "
                                     f"{chain}: {exc}")
                     values.append(None)
+                    continue
+                if (what == "symbol" and _is_feed(request) and values[-1] is not None
+                        and not prog.registration_value(values[-1])):
+                    raise _FeedFallback({id(request): (
+                        f"its symbol {_spell(values[-1])} on the call path {chain} is not "
+                        "a value registration computes before the first bar")})
             payload = ()
             if id(request) in payload_reads:
                 try:
@@ -716,6 +840,10 @@ def _plan(prog: ScriptIndex, owned: dict, context_owned: set[int],
                        for p in prog.funcs[name].params}
                 top.append((call, instantiate(name, env, ())))
     except _Unresolvable as exc:
+        feeds = {id(r): str(exc) for requests in owned.values() for r in requests
+                 if _is_feed(r)}
+        if feeds:
+            raise _FeedFallback(feeds) from exc
         if payload_reads:
             raise _Fallback(list(payload_reads)) from exc
         request = next(iter(owned.values()))[0]

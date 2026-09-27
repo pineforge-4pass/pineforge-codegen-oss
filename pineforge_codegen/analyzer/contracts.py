@@ -191,6 +191,11 @@ class SecurityCallInfo:
     context_resolved: bool = False
     # The call sits in a helper no top-level statement reaches: it never runs.
     dead: bool = False
+    # Another symbol's request that reads the feed a requests manifest pins
+    # for it (``external_requests.FEED_LOWERING``): registered with the
+    # ``symbol`` string and ``ignore_invalid_symbol`` (the node, or None).
+    foreign: bool = False
+    ignore_invalid: Any = None
 
 
 @dataclass

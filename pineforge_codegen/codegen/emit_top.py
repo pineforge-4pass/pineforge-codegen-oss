@@ -85,8 +85,8 @@ from __future__ import annotations
 import re
 
 from ..ast_nodes import (
-    ExprStmt, ForInStmt, ForStmt, FuncCall, Identifier, IfStmt, MemberAccess,
-    SwitchStmt, TupleAssign, TupleLiteral, VarDecl, WhileStmt,
+    BoolLiteral, ExprStmt, ForInStmt, ForStmt, FuncCall, Identifier, IfStmt,
+    MemberAccess, SwitchStmt, TupleAssign, TupleLiteral, VarDecl, WhileStmt,
 )
 from ..analyzer import FuncInfo
 from ..symbols import PineType, method_receiver_cpp_token
@@ -1239,6 +1239,8 @@ class TopLevelEmitter:
 
         if self._security_eval_info:
             lines.append("")
+            if any(info.get("foreign") for info in self._security_eval_info):
+                self._emit_foreign_security_lookups(lines)
             lines.append("    void configure_security_evaluators() override {")
             lines.append("        security_eval_states_.clear();")
             lines.extend(self._security_tf_replay_prologue())
@@ -1275,12 +1277,93 @@ class TopLevelEmitter:
                             f"        {RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN}"
                             f"({sec_id}, {tf_expr}, input_tf_);"
                         )
+                    elif info.get("foreign"):
+                        self._emit_foreign_security_registration(info, tf_expr, la, go, lines)
                     else:
                         lines.append(
                             f"        {RUNTIME_REGISTER_SECURITY_EVAL_FN}"
                             f"({sec_id}, {tf_expr}, "
                             f"input_tf_, {la}, {go}{ha_arg});")
             lines.append("    }")
+
+    def _emit_foreign_security_lookups(self, lines: list[str]) -> None:
+        """The run-time lookups of another symbol's request (lane XSYM-E):
+        whether its symbol string is the chart's, and whether its data is
+        installed (``strategy_set_symbol_feed`` / ``_facts``). An engine
+        without the symbol-keyed registration has neither."""
+        lines.extend([
+            "#ifdef PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1",
+            "    // A request of another symbol reads the chart when its symbol string is the",
+            "    // chart's ticker id, or the one the requests manifest resolved it to.",
+            "    bool _pf_symbol_is_chart(const std::string& symbol) const {",
+            "        if (symbol == syminfo_.tickerid) return true;",
+            "        const auto facts = symbol_facts_.find(symbol);",
+            "        return facts != symbol_facts_.end() && !facts->second.canonical.empty()",
+            "            && facts->second.canonical == syminfo_.tickerid;",
+            "    }",
+            "    // Otherwise it reads the feed installed for (symbol, timeframe), in the",
+            "    // engine's timeframe spelling (\"D\" is \"1D\"), or the symbol's facts say it",
+            "    // is invalid (na under ignore_invalid_symbol, a stopped run without it).",
+            "    bool _pf_symbol_data_installed(const std::string& symbol,",
+            "                                   const std::string& timeframe) const {",
+            "        const auto facts = symbol_facts_.find(symbol);",
+            "        if (facts != symbol_facts_.end() && facts->second.valid && !*facts->second.valid)",
+            "            return true;",
+            "        std::string tf = timeframe.empty() ? script_tf_ : timeframe;",
+            "        if (tf.size() == 1 && (tf[0] == 'D' || tf[0] == 'W' || tf[0] == 'M' || tf[0] == 'S'))",
+            "            tf = \"1\" + tf;",
+            "        for (const auto& feed : symbol_feeds_) {",
+            "            if (feed.instrument == symbol && feed.tf == tf) return true;",
+            "        }",
+            "        return false;",
+            "    }",
+            "    // Its payload seeds ta.ema as TradingView does in the requested context:",
+            "    // na until `length` values, then their mean (EmaSeeding::SimpleAverage).",
+            "    struct _PFForeignEmaSeeding {",
+            "        bool prior_ = ta::ema_na_warmup_flag();",
+            "        _PFForeignEmaSeeding() { ta::ema_na_warmup_flag() = true; }",
+            "        ~_PFForeignEmaSeeding() { ta::ema_na_warmup_flag() = prior_; }",
+            "        _PFForeignEmaSeeding(const _PFForeignEmaSeeding&) = delete;",
+            "        _PFForeignEmaSeeding& operator=(const _PFForeignEmaSeeding&) = delete;",
+            "    };",
+            "#endif",
+        ])
+
+    def _emit_foreign_security_registration(
+            self, info: dict, tf_expr: str, la: str, go: str, lines: list[str]) -> None:
+        """Register a request of another symbol by its symbol string as the
+        run computes it before the first bar: on the chart when the string
+        is the chart's, on the symbol's installed feed otherwise, and not at
+        all without one -- its reads then stop the run
+        (``_pf_sec_missing_N``), never reading the chart instead."""
+        sec_id = info["sec_id"]
+        symbol = self._security_tf_runtime_expr(info["symbol_node"])
+        ignore_node = info.get("ignore_invalid_node")
+        if ignore_node is None:
+            ignore = "false"
+        elif isinstance(ignore_node, BoolLiteral):
+            ignore = "true" if ignore_node.value else "false"
+        else:
+            ignore = f"static_cast<bool>({self._security_tf_runtime_expr(ignore_node)})"
+        lines.extend([
+            "#ifdef PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1",
+            "        {",
+            f"            const std::string _pf_symbol = {symbol};",
+            "            if (_pf_symbol_is_chart(_pf_symbol)) {",
+            f"                {RUNTIME_REGISTER_SECURITY_EVAL_FN}({sec_id}, {tf_expr}, input_tf_, {la}, {go});",
+            f"                _pf_sec_missing_{sec_id} = false;",
+            f"            }} else if (_pf_symbol_data_installed(_pf_symbol, {tf_expr})) {{",
+            f"                {RUNTIME_REGISTER_SECURITY_EVAL_FN}({sec_id}, _pf_symbol, {tf_expr}, "
+            f"input_tf_, {la}, {go}, {ignore});",
+            f"                _pf_sec_missing_{sec_id} = false;",
+            "            } else {",
+            f"                _pf_sec_missing_{sec_id} = true;",
+            "            }",
+            "        }",
+            "#else",
+            f"        _pf_sec_missing_{sec_id} = true;",
+            "#endif",
+        ])
 
     # Map strategy series member name to push expression
     _STRAT_SERIES_PUSH = {

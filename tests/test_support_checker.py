@@ -368,8 +368,25 @@ def test_request_security_positional_currency_rejected():
     _expect_error(src, "Extra positional arguments")
 
 
-def test_request_security_alternate_symbol_is_deferred():
+FEED = ("another symbol's bars, read from the feed the requests manifest pins for it; "
+        "with none installed, the run stops with an error where its value is read.")
+
+
+def test_request_security_alternate_symbol_reads_its_feed():
+    """Another symbol whose value reaches a trade reads the feed a probe's
+    requests manifest pins for it (lane XSYM-E); it used to be a deferred
+    refusal whatever data the run was given."""
     src = PRELUDE + 'a = request.security("BINANCE:BTCUSDT", "60", close)\n' + TRADES_ON_A
+    assert _errors(src) == []
+    assert [d.message for d in _warnings(src) if d.message.endswith(FEED)] == [
+        'request.security("BINANCE:BTCUSDT", "60", ...) at line 3: ' + FEED]
+
+
+def test_request_security_alternate_symbol_of_a_series_is_deferred():
+    """A symbol registration cannot compute before the first bar keys no
+    feed: the request stays a deferred refusal."""
+    src = (PRELUDE + 'a = request.security(close > open ? "A:X" : "B:Y", "60", close)\n'
+           + TRADES_ON_A)
     _expect_deferred(src)
 
 

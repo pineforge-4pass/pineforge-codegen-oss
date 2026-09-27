@@ -136,21 +136,39 @@ PINNED = "no data is pinned for this request, and its value was read"
 
 
 def test_trade_relevant_request_is_a_deferred_refusal():
-    """A value that can reach a trade is a deferred refusal: binding it is no
-    read, and each read stops the run with the request named."""
-    result = transpile_full(HEAD + WATCH + 'if other > close\n    strategy.entry("L", strategy.long)\n'
-                            + 'if other[1] > open\n    strategy.close("L")\n')
+    """A value that can reach a trade, of a request no data can be read for
+    (its symbol a series here), is a deferred refusal: binding it is no read,
+    and each read stops the run with the request named."""
+    result = transpile_full(
+        HEAD + 'other = request.security(close > open ? "A:X" : "B:Y", timeframe.period, close)\n'
+        + 'if other > close\n    strategy.entry("L", strategy.long)\n'
+        + 'if other[1] > open\n    strategy.close("L")\n')
     (warning,) = [d for d in result["diagnostics"] if "no data is pinned" in d.message]
     assert warning.message == (
-        'request.security("BINANCE:BTCUSDT", timeframe.period, ...) at line 3: no data is '
+        'request.security(..., timeframe.period, ...) at line 3: no data is '
         "pinned for this request; the run stops with an error where its value is read.")
     assert "it reaches strategy.entry(...)" in warning.hint
     cpp = result["cpp"]
-    message = 'request.security(\\"BINANCE:BTCUSDT\\", timeframe.period, ...) at line 3: ' + PINNED
+    message = 'request.security(..., timeframe.period, ...) at line 3: ' + PINNED
     # Two reads -- ``other`` and ``other[1]`` -- and no registration.
     assert cpp.count(f'pine_runtime_error(std::string("{message}"))') == 2
     assert "return other[0]; }())" in cpp and "return other[1]; }())" in cpp
     assert "register_security_eval" not in cpp
+
+
+def test_trade_relevant_request_of_another_symbol_reads_its_feed():
+    """Another symbol reached by a trade reads the feed pinned for it (lane
+    XSYM-E): it registers by its symbol string, and binding it is still no
+    read -- each read stops the run only when no feed was installed."""
+    cpp = transpile(HEAD + WATCH + 'if other > close\n    strategy.entry("L", strategy.long)\n'
+                    + 'if other[1] > open\n    strategy.close("L")\n')
+    message = 'request.security(\\"BINANCE:BTCUSDT\\", timeframe.period, ...) at line 3: ' + PINNED
+    stop = f'if (_pf_sec_missing_0) pine_runtime_error(std::string("{message}"));'
+    assert cpp.count(stop) == 2
+    assert "return other[0]; }())" in cpp and "return other[1]; }())" in cpp
+    assert 'const std::string _pf_symbol = std::string("BINANCE:BTCUSDT");' in cpp
+    assert ("register_security_eval(0, _pf_symbol, script_tf_, input_tf_, false, false, false);"
+            in cpp)
 
 
 def test_request_reassigned_or_inside_an_expression_stops_where_it_is_evaluated():
