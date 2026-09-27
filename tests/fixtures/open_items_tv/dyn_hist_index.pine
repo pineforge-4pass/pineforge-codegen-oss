@@ -1,0 +1,34 @@
+//@version=6
+strategy("pf-open-items-dyn-hist-index", overlay = true)
+
+// History reads whose index is a fractional float: (45 - 1) / (2 * 4) = 5.5
+// and 29 / 10 = 2.9. Every exit comment spells the read at the fractional
+// index, then the reads at the integers on each side.
+per = input.int(45, "per")
+N = input.int(4, "N")
+lag = (per - 1) / (2 * N)
+lag2 = input.int(29, "tenths") / 10
+f(float v) => v * 2
+
+a = ta.tr(true)[lag]
+a5 = ta.tr(true)[5]
+a6 = ta.tr(true)[6]
+b = ta.highest(high, 3)[lag2]
+b2 = ta.highest(high, 3)[2]
+b3 = ta.highest(high, 3)[3]
+c = (close - open)[lag]
+c5 = (close - open)[5]
+c6 = (close - open)[6]
+d = f(close)[lag2]
+d2 = f(close)[2]
+d3 = f(close)[3]
+e = close > 0 and ta.sma(close, 3)[lag] > 0
+e5 = ta.sma(close, 3)[5]
+e6 = ta.sma(close, 3)[6]
+ev = close > 0 ? ta.sma(close, 3)[lag] : na
+
+fmt(x) => str.tostring(x, "#.####")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = fmt(a) + "|" + fmt(a5) + "|" + fmt(a6) + "|" + fmt(b) + "|" + fmt(b2) + "|" + fmt(b3) + "|" + fmt(c) + "|" + fmt(c5) + "|" + fmt(c6) + "|" + fmt(d) + "|" + fmt(d2) + "|" + fmt(d3) + "|" + (e ? "T" : "F") + "|" + fmt(ev) + "|" + fmt(e5) + "|" + fmt(e6))

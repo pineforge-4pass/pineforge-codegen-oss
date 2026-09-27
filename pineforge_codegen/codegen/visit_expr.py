@@ -1301,6 +1301,24 @@ class ExprVisitor:
             return safe
         return self._active_var_remap[safe]
 
+    def _history_offset_cpp(self, idx: str, index_node) -> str:
+        """The ``int`` offset of a history read, safe right after a ``[``.
+
+        A double index narrows through the na-preserving lambda
+        ``[&](){ ... }()`` (``_coerce_int_slot``); spelled straight after a
+        subscript's ``[`` it reads ``[[``, which C++ parses as an attribute,
+        so a lambda offset is parenthesized. TradingView truncates a
+        fractional index toward zero (``x[5.5]`` reads ``x[5]``), as the
+        cast does.
+        """
+        idx_int = self._coerce_int_slot(idx, index_node, "int")
+        if (idx_int == idx
+                and not self._emitted_value_is_double(index_node)):
+            idx_int = pine_index_int_cast(idx)
+        if idx_int.startswith("["):
+            idx_int = f"({idx_int})"
+        return idx_int
+
     def _visit_subscript(self, node: Subscript) -> str:
         idx = self._visit_expr(node.index)
         # Series::operator[] accepts C++ int. A Pine int can be backed by an
@@ -1376,10 +1394,7 @@ class ExprVisitor:
             # previous chart bar in every run mode (``_lazy_edge_ta_hoist_plan``).
             hoisted_member = self._hoisted_hist_reads.get(id(node))
             if hoisted_member is not None:
-                idx_int = self._coerce_int_slot(idx, node.index, "int")
-                if (idx_int == idx
-                        and not self._emitted_value_is_double(node.index)):
-                    idx_int = pine_index_int_cast(idx)
+                idx_int = self._history_offset_cpp(idx, node.index)
                 return f"{hoisted_member}[{idx_int}]"
             inner = self._visit_expr(node.object)
             cpp_t = self._infer_type(node.object)
@@ -1411,10 +1426,7 @@ class ExprVisitor:
                 # established call-local history fallback below.
                 ta_mem = self._ta_member_name(ta_site)
                 precalc = f"_precalc_{ta_mem}"
-                idx_int = self._coerce_int_slot(idx, node.index, "int")
-                if (idx_int == idx
-                        and not self._emitted_value_is_double(node.index)):
-                    idx_int = pine_index_int_cast(idx)
+                idx_int = self._history_offset_cpp(idx, node.index)
                 return (
                     f"([&]() -> {cpp_t} {{ "
                     f"if (_use_precalc) {{ "
@@ -1438,10 +1450,7 @@ class ExprVisitor:
                     f"else {member}.update(_hv); "
                     f"return {member}[{idx_int}]; }}())"
                 )
-            idx_int = self._coerce_int_slot(idx, node.index, "int")
-            if (idx_int == idx
-                    and not self._emitted_value_is_double(node.index)):
-                idx_int = pine_index_int_cast(idx)
+            idx_int = self._history_offset_cpp(idx, node.index)
             return (
                 f"([&]() -> {cpp_t} {{ "
                 f"{cpp_t} _hv = ({inner}); "
@@ -1464,10 +1473,7 @@ class ExprVisitor:
             cpp_t = self._infer_type(node.object)
             if cpp_t in ("double", "int", "int64_t", "bool"):
                 inner = self._visit_expr(node.object)
-                idx_int = self._coerce_int_slot(idx, node.index, "int")
-                if (idx_int == idx
-                        and not self._emitted_value_is_double(node.index)):
-                    idx_int = pine_index_int_cast(idx)
+                idx_int = self._history_offset_cpp(idx, node.index)
                 return (
                     f"([&]() -> {cpp_t} {{ "
                     f"{cpp_t} _hv = ({inner}); "
@@ -1484,8 +1490,5 @@ class ExprVisitor:
                     and name not in self.ctx.series_vars
                     and name not in self._var_names):
                 return obj
-        idx_int = self._coerce_int_slot(idx, node.index, "int")
-        if (idx_int == idx
-                and not self._emitted_value_is_double(node.index)):
-            idx_int = pine_index_int_cast(idx)
+        idx_int = self._history_offset_cpp(idx, node.index)
         return f"{obj}[{idx_int}]"
