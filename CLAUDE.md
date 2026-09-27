@@ -357,7 +357,11 @@ you delete or weaken the special case, the test will tell you.
    `_visit_var_decl` (codegen/visit_stmt.py) consult this set to declare
    the LHS as `PineMatrix` instead of the analyzer's default `double`.
    Methods returning primitives (`det`, `rank`, `trace`, …) or arrays
-   (`row`, `col`, `eigenvalues`) must NOT be in the set.
+   (`row`, `col`, `eigenvalues`) must NOT be in the set: `_type_spec_from_expr`
+   types those as arrays in both the method and the namespace form
+   (`matrix.row(m, 0)`), as it does the array methods that build a new array
+   (`types.ARRAY_RESULT_METHODS`: abs, standardize, sort_indices), so an
+   untyped LHS is declared a vector (`tests/test_e2e_untyped_collection_results.py`).
 3. **`str.format` / `str.tostring` / `log.*` number text.** The emitted
    helper in `codegen/tv_number_format.py` takes typed format arguments and
    renders TradingView's `#,###.###` default for `str.format`, its

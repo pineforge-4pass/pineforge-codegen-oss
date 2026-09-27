@@ -91,6 +91,10 @@ _BOOL_RESULT_BINOPS = frozenset({
 })
 
 
+# Array methods whose result is a new array (a vector of doubles, as their
+# ``ARRAY_METHODS`` templates emit it).
+ARRAY_RESULT_METHODS = frozenset({"abs", "standardize", "sort_indices"})
+
 class TypeInferer:
     """Type-spec / C++-type inference helpers shared across visitor mixins.
 
@@ -957,6 +961,23 @@ class TypeInferer:
                 receiver_spec = self._type_spec_from_expr(receiver_node)
                 if receiver_spec is not None and receiver_spec.kind == "matrix":
                     return receiver_spec
+            # ``matrix.row(m, i)`` / ``matrix.col`` / ``matrix.eigenvalues``
+            # return arrays, as their method forms below do; an untyped
+            # ``r = matrix.row(m, 0)`` was declared a double.
+            if namespace == "matrix" and func_name in ("row", "col", "eigenvalues"):
+                receiver_node = node.args[0] if node.args else node.kwargs.get("id")
+                receiver_spec = self._type_spec_from_expr(receiver_node)
+                if receiver_spec is not None and receiver_spec.kind == "matrix":
+                    if func_name == "eigenvalues":
+                        return TypeSpec.array(TypeSpec.primitive("float"))
+                    return TypeSpec.array(receiver_spec.element)
+            # array.abs / standardize / sort_indices build a new array, which
+            # their templates (``ARRAY_METHODS``) emit as a vector of doubles.
+            if namespace == "array" and func_name in ARRAY_RESULT_METHODS:
+                receiver_node = node.args[0] if node.args else node.kwargs.get("id")
+                receiver_spec = self._type_spec_from_expr(receiver_node)
+                if receiver_spec is not None and receiver_spec.kind == "array":
+                    return TypeSpec.array(TypeSpec.primitive("float"))
             if namespace == "map" and func_name == "new":
                 key = self._type_spec_from_hint_name(targs[0]) if len(targs) > 0 else TypeSpec.primitive("string")
                 val = self._type_spec_from_hint_name(targs[1]) if len(targs) > 1 else TypeSpec.primitive("float")
@@ -995,6 +1016,8 @@ class TypeInferer:
                         return recv_spec.element
                     if member_name in ("copy", "slice"):
                         return recv_spec
+                    if member_name in ARRAY_RESULT_METHODS:
+                        return TypeSpec.array(TypeSpec.primitive("float"))
                 if recv_spec is not None and recv_spec.kind == "map":
                     if member_name in ("put", "get", "remove"):
                         return recv_spec.value

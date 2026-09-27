@@ -107,3 +107,15 @@ stdev, variance, the percentiles, covariance, binary_search, sort_indices and
 standardize. A first export of it (`pf-oi-temp-names-array`, identical
 signals) bound `array.standardize(m)` to an untyped variable, which PineForge
 declared as a number (lane item 6); this one reads it through `array.get`.
+
+## Collection results bound to untyped variables
+
+| File | sha256 |
+|---|---|
+| `untyped_collections.pine` | `d8dbb2eb750162bf327bbf2f2444b874896ff9a94ced187f49bcdc7967ef4580` |
+| `untyped_collections_tv_trades.csv` (7 trades, exported 2026-09-27) | `69e2763551f8cf51e0bdc951a25c08aee421bdc632022de1665d9e91380b6127` |
+
+Untyped variables bound to `matrix.row(m, 0)`, `m.row(1)`, `matrix.col(m,
+1)`, `matrix.eigenvalues(m)` and to `array.standardize` / `abs` /
+`sort_indices` in both forms; each exit comment spells a read of each (a
+sum, max, min or element) and the bar's `close % 7`.
