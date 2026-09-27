@@ -138,7 +138,11 @@ pineforge_codegen/
     │                               / _map_vars detection.
     ├── emit_top.py                 #include block, extern "C" wrappers,
     │                               strategy_create / run_backtest_full /
-    │                               strategy_set_input layouts.
+    │                               strategy_set_input layouts; the
+    │                               strategy_declares_bar_magnifier()
+    │                               export of a script that declares
+    │                               use_bar_magnifier = true (the host
+    │                               picks the feed and run parameters).
     ├── visit_stmt.py               Statement-level visitors (var decl,
     │                               assign, if/for/while/switch).
     ├── visit_expr.py               Expression-level visitors (literals,

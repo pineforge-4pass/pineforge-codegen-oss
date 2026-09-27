@@ -256,7 +256,8 @@ CPP_EMITTER_NAMES = frozenset("""
     on_bar on_source_bar prepare_script_run configure_pine_strategy
     configure_security_evaluators snapshot_script_state restore_script_state
     commit_script_state set_strategy_override set_input
-    set_magnifier_volume_weighted fill_report run precalculate
+    set_magnifier_volume_weighted strategy_declares_bar_magnifier fill_report run
+    precalculate
     strategy_entry strategy_close strategy_close_all strategy_exit
     strategy_exit_cancel_bracket strategy_cancel strategy_cancel_all strategy_order
     pine_bar_index pine_last_bar_index prev_chart_close is_first_tick is_last_tick

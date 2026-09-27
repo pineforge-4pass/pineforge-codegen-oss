@@ -190,3 +190,44 @@ strategy.risk.max_intraday_loss(500, strategy.cash)
         "set_pine_risk_max_intraday_loss((double)(10), true);",
         "set_pine_risk_max_intraday_loss((double)(500), false);",
     ]
+
+
+_MAGNIFIER_SOURCE = '''//@version=6
+strategy("magnifier"{declaration})
+if close > open
+    strategy.entry("L", strategy.long)
+'''
+_MAGNIFIER_EXPORT = (
+    "    int strategy_declares_bar_magnifier(void) {\n"
+    "        return 1;\n"
+    "    }\n"
+    "}\n"
+)
+
+
+def test_a_declared_bar_magnifier_is_exported_to_the_host():
+    """tests/test_e2e_bar_magnifier_flag.py replays the TradingView tapes."""
+    cpp = transpile(_MAGNIFIER_SOURCE.format(declaration=", use_bar_magnifier=true"))
+    extern_c = cpp[cpp.index('extern "C" {'):]
+    assert extern_c.endswith(_MAGNIFIER_EXPORT)
+
+
+def test_no_export_unless_the_magnifier_is_declared_true():
+    omitted = transpile(_MAGNIFIER_SOURCE.format(declaration=""))
+    declared_off = transpile(_MAGNIFIER_SOURCE.format(declaration=", use_bar_magnifier=false"))
+    assert "strategy_declares_bar_magnifier" not in omitted
+    assert declared_off == omitted.replace(
+        'strategy("magnifier")', 'strategy("magnifier", use_bar_magnifier=false)')
+
+
+def test_a_non_literal_declaration_warns_that_the_host_runs_without_it():
+    from pineforge_codegen import transpile_full
+
+    result = transpile_full(
+        "//@version=6\n"
+        "const bool MAGNIFY = true\n"
+        + _MAGNIFIER_SOURCE.format(declaration=", use_bar_magnifier=MAGNIFY")
+        .removeprefix("//@version=6\n"))
+    assert "strategy_declares_bar_magnifier" not in result["cpp"]
+    messages = [d.message for d in result["diagnostics"]]
+    assert any("not a literal bool" in m and "without one" in m for m in messages), messages

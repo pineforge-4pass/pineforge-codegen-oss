@@ -1775,8 +1775,36 @@ class TopLevelEmitter:
         lines.append("        if (!s) return;")
         lines.append("        static_cast<GeneratedStrategy*>(s)->set_magnifier_volume_weighted(on != 0);")
         lines.append("    }")
+        if self._declares_bar_magnifier():
+            # TradingView runs a script that declares use_bar_magnifier = true
+            # on its bar magnifier; the host reads this export to run it on
+            # intrabars with the magnifier on (the run parameters are the
+            # host's: bar_magnifier, a finer input_tf and its feed).
+            lines.append("    int strategy_declares_bar_magnifier(void) {")
+            lines.append("        return 1;")
+            lines.append("    }")
         lines.append("}")
         lines.append("")
+
+    def _declares_bar_magnifier(self) -> bool:
+        """``strategy(use_bar_magnifier = true)``. The argument is a const
+        bool; one that is not a literal cannot be read here, so the TU does
+        not declare the magnifier and the codegen warns."""
+        from ..ast_nodes import BoolLiteral, StrategyDecl
+        for node in self._walk_ast(self.ctx.ast):
+            if not isinstance(node, StrategyDecl):
+                continue
+            value = node.kwargs.get("use_bar_magnifier")
+            if value is None or isinstance(value, BoolLiteral):
+                return value is not None and value.value is True
+            self._codegen_warning(
+                value,
+                "strategy(use_bar_magnifier=...) is not a literal bool: the "
+                "generated strategy does not declare the bar magnifier, so a host "
+                "runs it without one.",
+                hint="Write use_bar_magnifier = true or false.")
+            return False
+        return False
 
     def _emit_udt_method_cpp_name(self, fi: FuncInfo) -> str:
         """Stable C++ identifier for a typed instance method."""
