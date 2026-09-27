@@ -3079,20 +3079,20 @@ class CallVisitor:
                 # 4-arg form: replace the Nth occurrence (0-based, per Pine
                 # spec). Out-of-range / negative occurrence → original string.
                 return (
-                    f'[&](){{ std::string s={args[0]}; std::string t={args[1]}; '
-                    f'std::string r={args[2]}; int _occ={self._coerce_int_slot(args[3], arg_nodes[3], "int")}; '
-                    f'if(is_na(_occ)) _occ=0; '
-                    f'if(t.empty()||_occ<0) return s; '
-                    f'size_t p=0; int _i=0; '
-                    f'while((p=s.find(t,p))!=std::string::npos){{ '
-                    f'if(_i==_occ){{ s.replace(p,t.length(),r); break; }} '
-                    f'p+=t.length(); _i++; }} return s; }}()'
+                    f'[&](){{ std::string __pf_s={args[0]}; std::string __pf_t={args[1]}; '
+                    f'std::string __pf_r={args[2]}; int __pf_occ={self._coerce_int_slot(args[3], arg_nodes[3], "int")}; '
+                    f'if(is_na(__pf_occ)) __pf_occ=0; '
+                    f'if(__pf_t.empty()||__pf_occ<0) return __pf_s; '
+                    f'size_t __pf_p=0; int __pf_i=0; '
+                    f'while((__pf_p=__pf_s.find(__pf_t,__pf_p))!=std::string::npos){{ '
+                    f'if(__pf_i==__pf_occ){{ __pf_s.replace(__pf_p,__pf_t.length(),__pf_r); break; }} '
+                    f'__pf_p+=__pf_t.length(); __pf_i++; }} return __pf_s; }}()'
                 )
             if len(args) >= 3:
                 # target is read twice: evaluate it once.
                 return evaluate_args_once(
                     args, (1,),
-                    lambda a: f'[&](){{ std::string s={a[0]}; auto p=s.find({a[1]}); if(p!=std::string::npos) s.replace(p,{a[1]}.length(),{a[2]}); return s; }}()',
+                    lambda a: f'[&](){{ std::string __pf_s={a[0]}; auto __pf_p=__pf_s.find({a[1]}); if(__pf_p!=std::string::npos) __pf_s.replace(__pf_p,{a[1]}.length(),{a[2]}); return __pf_s; }}()',
                     "_pf_str_a")
             return 'std::string("")'
 

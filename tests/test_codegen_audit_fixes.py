@@ -62,7 +62,7 @@ def test_compound_add_unchanged():
 def test_str_replace_occurrence_form():
     cpp = _gen('s = str.replace("aXbXc", "X", "-", 1)\nplot(close)\n')
     assert "_occ" in cpp
-    assert "while((p=s.find(t,p))!=std::string::npos)" in cpp
+    assert "while((__pf_p=__pf_s.find(__pf_t,__pf_p))!=std::string::npos)" in cpp
 
 
 def test_str_replace_three_arg_unchanged():
@@ -271,7 +271,7 @@ def test_array_stdev_no_arg_unchanged():
         "v = array.stdev(arr)\nplot(v)\n"
     )
     assert "_d=" not in cpp
-    assert "std::sqrt(s/arr.size())" in cpp
+    assert "std::sqrt(__pf_s/arr.size())" in cpp
 
 
 def test_array_variance_biased_arg():
@@ -291,8 +291,8 @@ def test_array_join_string_elements():
         'sa = array.new<string>(0)\narray.push(sa, "a")\n'
         's = array.join(sa, ",")\nplot(close)\n'
     )
-    assert "r+=sa[i];" in cpp
-    assert "std::to_string(sa[i])" not in cpp
+    assert "__pf_r+=sa[__pf_i];" in cpp
+    assert "std::to_string(sa[__pf_i])" not in cpp
 
 
 def test_array_join_numeric_elements():
@@ -300,7 +300,7 @@ def test_array_join_numeric_elements():
         "fa = array.new<float>(0)\narray.push(fa, close)\n"
         's = array.join(fa, ",")\nplot(close)\n'
     )
-    assert "std::to_string(fa[i])" in cpp
+    assert "std::to_string(fa[__pf_i])" in cpp
 
 
 def test_array_copy_int_elements():

@@ -84,3 +84,26 @@ a variable named `second` read as the built-in.) Two probes spelling
 TradingView's rejected names failed at its compiler, "The ... function does
 not have an argument with the name ...": `nz(x = x, y = -1.0)` /
 `fixnan(x = x)` and `str.repeat("ab", count = 2)`.
+
+## Names spelled like the emitter's temporaries
+
+| File | sha256 |
+|---|---|
+| `temp_names.pine` | `2e6ab484f2db25802ffee6743de2ebf0e2aaabb12f40615295ce2c08822845e3` |
+| `temp_names_tv_trades.csv` (7 trades, exported 2026-09-27) | `c0e0c856acc4b1b48c2e50d9ebf07e95b8af522abc6316cadd487f4e8789eac2` |
+| `temp_names_array.pine` (slug `pf-oi-temp-names-array2`) | `de4e47b11ebcf251f8ca2a500fa7a7763d5f230bf8801bba90c018d6414d529c` |
+| `temp_names_array_tv_trades.csv` (7 trades, exported 2026-09-27) | `9a59789b95bdf2cf784e0a40e7d6b6a42fcb7d022e49ad10c0b83129e3665ad5` |
+
+`temp_names` declares variables spelled like the C++ temporaries PineForge
+generated around nz (`_nz_v`, `_nz_y`), fixnan (`_fixnan_v`), a comparison
+(`_pna_l`, `_pna_r`), a history read (`_hv`), math.max / min (`_v0`, `_v1`)
+and timestamp (`_yr`, `_min`), and like the locals of its str.* templates
+(`s`, `r`, `i`, `p`, `t`), and reads each inside that call; the exit comment
+spells the results (`nz(x, _nz_v)` is twice the close on a bar whose `x` is
+na, `str.upper(s)` is `UP`/`DN`, `str.repeat("x", i)` is `xxx`/`xx`, ...).
+`temp_names_array` does the same with arrays named like the array.* template
+locals (`c`, `m`, `it`, `n`, `b`, `idx`) passed to median, mode, indexof,
+stdev, variance, the percentiles, covariance, binary_search, sort_indices and
+standardize. A first export of it (`pf-oi-temp-names-array`, identical
+signals) bound `array.standardize(m)` to an untyped variable, which PineForge
+declared as a number (lane item 6); this one reads it through `array.get`.

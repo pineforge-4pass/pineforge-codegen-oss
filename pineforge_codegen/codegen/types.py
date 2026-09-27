@@ -1186,7 +1186,7 @@ class TypeInferer:
             join_args = list(args) or ['std::string(",")']
             lower_receiver = lambda recv: evaluate_args_once(
                 join_args, ARRAY_ARGS_READ_REPEATEDLY["join"],
-                lambda a: f"[&](){{ std::string r; for(size_t i=0;i<{recv}.size();i++){{ if(i>0)r+={a[0]}; r+={recv}[i]; }} return r; }}()",
+                lambda a: f"[&](){{ std::string __pf_r; for(size_t __pf_i=0;__pf_i<{recv}.size();__pf_i++){{ if(__pf_i>0)__pf_r+={a[0]}; __pf_r+={recv}[__pf_i]; }} return __pf_r; }}()",
                 "_pf_array_a",
             )
         else:

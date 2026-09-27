@@ -786,7 +786,13 @@ against every host member a transpiled battery names. TradingView accepts
 such names and keeps each built-in beside them: its NASDAQ:AAPL 15 tape
 `fixtures/host_member_names/cgs2-hostnames-aapl-15-reg` is replayed bar for
 bar. Rerun the script after a lowering starts reading a host member or the
-engine's host changes.
+engine's host changes. The temporaries the emitter declares in the C++ around
+a user's expression (`_nz_v`, `_pna_l`, `_hv`, `_v0`, `__switch_val_N`, ...
+and every name in its `_pf` / `__pf` namespace:
+`helpers.is_emitter_temporary`) are escaped too, so a script name can neither
+capture nor be captured by one; a new template local belongs in the `_pf_`
+namespace (`tests/test_e2e_temporary_name_hygiene.py` derives the set from
+emitted C++).
 - **Input limits.** `limits.py` turns a crash or a hang into a located
 `CompileError`; where TradingView documents a limit, ours is at least as
 large. 5 MiB of source (TradingView's 5MB compilation request), 512 levels

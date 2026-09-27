@@ -1,0 +1,47 @@
+//@version=6
+strategy("pf-open-items-temp-names", overlay = true)
+
+// Variables spelled like the C++ temporaries PineForge generates around nz,
+// fixnan, a comparison, a history read, math.max / min and timestamp, and
+// like the locals of its str.* templates; each is read inside the call whose
+// lowering declares that temporary.
+_nz_v = close * 2
+_nz_y = close * 3
+_fixnan_v = close * 4
+_pna_l = close + 1
+_pna_r = close - 1
+_hv = close * 5
+_v0 = close * 0.5
+_v1 = close * 0.25
+_yr = 2025
+_min = 30
+x = close > open ? na : close
+a1 = nz(x, _nz_v)
+a2 = nz(x, _nz_y)
+a3 = fixnan(close > open ? na : _fixnan_v)
+a4 = _pna_l > close ? 1 : 0
+a5 = close < _pna_r ? 1 : 0
+a6 = (close + _hv * 0)[1]
+a7 = math.max(open, _v0, 1.0)
+a8 = math.min(high, _v0, _v1)
+a9 = timestamp("America/New_York", _yr, 4, 1, 9, _min, 0)
+s = close > open ? "Up" : "Dn"
+r = close > open ? "ab" : "cd"
+i = close > open ? 3 : 2
+p = close > open ? "p" : "n"
+t = close > open ? "U" : "D"
+b1 = str.upper(s)
+b2 = str.lower(s)
+b3 = str.trim(" " + s + " ")
+b4 = str.repeat(r, 2)
+b5 = str.repeat("x", i)
+b6 = str.pos(s, p)
+b7 = str.replace_all(s + s, t, p)
+b8 = str.replace(s + s, t, r)
+b9 = str.replace(s + s, t, r, 1)
+
+fmt(v) => str.tostring(v, "#.####")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = fmt(a1) + "|" + fmt(a2) + "|" + fmt(a3) + "|" + str.tostring(a4) + str.tostring(a5) + "|" + fmt(a6) + "|" + fmt(a7) + "|" + fmt(a8) + "|" + str.tostring(a9) + "|" + b1 + "|" + b2 + "|" + b3 + "|" + b4 + "|" + b5 + "|" + str.tostring(b6) + "|" + b7 + "|" + b8 + "|" + b9)

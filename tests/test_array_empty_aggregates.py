@@ -26,9 +26,9 @@ def _generate(body: str) -> str:
         ("array.median(values)", "std::sort"),
         ("array.mode(values)", "std::unordered_map"),
         ("array.percentile_linear_interpolation(values, 50)", "c.back()"),
-        ("array.percentile_nearest_rank(values, 50)", "c[r-1]"),
+        ("array.percentile_nearest_rank(values, 50)", "__pf_c[__pf_r-1]"),
         ("array.percentrank(values, 0)", "double v=__pf_array"),
-        ("array.covariance(values, peers)", "ma/=n"),
+        ("array.covariance(values, peers)", "__pf_ma/=__pf_n"),
     ],
 )
 def test_empty_numeric_array_calculations_guard_before_use(
@@ -193,6 +193,6 @@ def test_empty_standardize_remains_an_empty_array_not_scalar_na():
         for line in cpp.splitlines()
         if line.startswith("        ki48_result =")
     )
-    assert "std::vector<double> r" in assignment
-    assert "return r" in assignment
+    assert "std::vector<double> __pf_r" in assignment
+    assert "return __pf_r" in assignment
     assert "return na<double>()" not in assignment
