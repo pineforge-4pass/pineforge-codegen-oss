@@ -349,7 +349,7 @@ CPP_TEMPORARY_NAMES = frozenset("""
 _CPP_TEMPORARY_PATTERN = re.compile(
     r"_v\d+|_secval_\d+(?:_v\d+)?|_tuple_result_\d+|__switch_val_\d+"
     r"|_for_(?:start|end|end_eval)_\d+|_pf_(?:str|array|round)_a\d+"
-    r"|_pf_every_bar_ta_\d+|__pf_array\w*|__pf_raw_\w+"
+    r"|_pf_every_bar_ta_\d+|_pf_shared_\d+_\d+|__pf_array\w*|__pf_raw_\w+"
 )
 
 

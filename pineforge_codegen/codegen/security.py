@@ -128,6 +128,16 @@ _SECURITY_REQUESTED_NAMES = frozenset(
 _SECURITY_THROUGH_GLOBAL = "@through-global"
 
 
+# The requested bar's fields a pure helper body may read
+# (``_security_pure_body``): the builder spells each from the evaluator's
+# ``bar``.
+_SECURITY_SHARED_BAR_FIELDS = frozenset(SECURITY_BAR_FIELD_EXPRS) | {"hl2", "hlc3", "ohlc4"}
+# A pure call whose inlined text reaches this length is computed once, where
+# the evaluator opens (``_security_share_pure_call``); a shorter text is
+# inlined at every reach, as every earlier build inlined it.
+_SECURITY_SHARED_CALL_MIN_CHARS = 256
+
+
 def _security_tuple_binding(func_name: str, name: str) -> str:
     """Opaque prepass binding of a name a helper's tuple declaration binds:
     the prepasses only need to know the name is a local, the emitter binds
@@ -1714,6 +1724,8 @@ class SecurityEmitter:
             if isinstance(n, FuncCall):
                 func_name = self._security_user_call_key(n)
                 if func_name is not None:
+                    if self._security_shared_call_key(n, bindings) is not None:
+                        return
                     call_key = f"func:{func_name}"
                     if call_key in resolving:
                         return
@@ -2052,6 +2064,8 @@ class SecurityEmitter:
             if isinstance(n, FuncCall):
                 func_name = self._security_user_call_key(n)
                 if func_name is not None:
+                    if self._security_shared_call_key(n, bindings) is not None:
+                        return
                     call_key = f"func:{func_name}"
                     if call_key in resolving:
                         return
@@ -2203,7 +2217,8 @@ class SecurityEmitter:
                     and n.callee.name in self._func_names
                     and n.callee.name not in helpers):
                 info = self._func_info_map.get(n.callee.name)
-                if info is not None and getattr(info, "node", None) is not None:
+                if (info is not None and getattr(info, "node", None) is not None
+                        and not self._security_pure_body(info.node)):
                     helpers.append(n.callee.name)
                     walk(info.node.body)
                     helpers.pop()
@@ -3090,6 +3105,133 @@ class SecurityEmitter:
         return (info is not None and info.node is not None
                 and self._security_body_is_expression(info.node))
 
+    def _security_pure_body(self, func_node) -> bool:
+        """Whether a user function's body is one expression over its
+        parameters, the requested bar's fields and literals, through operators
+        and positional calls of such functions only. Its value is then the
+        same wherever the payload reaches it with the same arguments, and no
+        prepass finds anything in it: no TA call, history, ``var`` state,
+        global or builtin call. Decided once per definition; a body reached
+        again through its own calls is not pure."""
+        cache = getattr(self, "_security_pure_body_cache", None)
+        if cache is None:
+            cache = self._security_pure_body_cache = {}
+        key = id(func_node)
+        if key not in cache:
+            cache[key] = False
+            body = getattr(func_node, "body", None) or []
+            cache[key] = (
+                len(body) == 1
+                and isinstance(body[0], ExprStmt)
+                and self._security_pure_expr(body[0].expr, set(func_node.params))
+            )
+        return cache[key]
+
+    def _security_pure_expr(self, expr, params: set[str]) -> bool:
+        """``_security_pure_body``'s test of one expression."""
+        stack = [expr]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (NumberLiteral, BoolLiteral, NaLiteral)):
+                continue
+            if isinstance(n, Identifier):
+                if self._security_identifier_is_global_binding(n):
+                    # A builtin name the builder spells from ``bar``.
+                    if n.name in _SECURITY_SHARED_BAR_FIELDS:
+                        continue
+                elif n.name in params:
+                    continue
+                return False
+            if isinstance(n, BinOp):
+                stack.extend((n.left, n.right))
+            elif isinstance(n, UnaryOp):
+                stack.append(n.operand)
+            elif isinstance(n, Ternary):
+                stack.extend((n.condition, n.true_val, n.false_val))
+            elif isinstance(n, FuncCall) and self._security_pure_call(n):
+                stack.extend(n.args)
+            else:
+                return False
+        return True
+
+    def _security_pure_call(self, node: FuncCall) -> bool:
+        """A positional call binding every parameter of a pure user function
+        (``_security_pure_body``)."""
+        callee = node.callee
+        if (not isinstance(callee, Identifier) or node.kwargs
+                or callee.name not in self._func_names):
+            return False
+        info = self._func_info_map.get(callee.name)
+        return (info is not None and info.node is not None
+                and len(node.args) == len(info.node.params)
+                and self._security_pure_body(info.node))
+
+    def _security_shared_call_key(self, node, helper_binding_stack) -> tuple | None:
+        """What a pure call (``_security_pure_call``) evaluates on the
+        requested bar: its function and the canonical value of each argument
+        (``_security_canonical_value``); two calls with one key inline one
+        text. None for any other call, or an argument that reads anything
+        else."""
+        if not isinstance(node, FuncCall) or not self._security_pure_call(node):
+            return None
+        values = []
+        for arg in node.args:
+            value = self._security_canonical_value(arg, helper_binding_stack or ())
+            if value is None:
+                return None
+            values.append(value)
+        return (id(self._func_info_map[node.callee.name].node), tuple(values))
+
+    def _security_canonical_value(self, node, helper_binding_stack) -> tuple | None:
+        """A pure call's argument as the builder reads it, as a hashable tree:
+        literals, the requested bar's fields, operators and pure calls, each
+        name read through the helper bindings the way the builder reads it
+        and each operator with its inferred type. None for anything else: a
+        TA call, history, a global, an evaluator local."""
+        if isinstance(node, NumberLiteral):
+            return ("number", type(node.value).__name__, repr(node.value))
+        if isinstance(node, BoolLiteral):
+            return ("bool", bool(node.value))
+        if isinstance(node, NaLiteral):
+            return ("na",)
+        if isinstance(node, Identifier):
+            if node.name in self._security_raw_cpp:
+                return None
+            if not self._security_identifier_is_global_binding(node):
+                binding = self._security_lookup_helper_binding_context(
+                    node.name, helper_binding_stack
+                )
+                if binding is not None:
+                    bound, bound_stack = binding
+                    if isinstance(bound, str):
+                        return None
+                    value = self._security_canonical_value(bound, bound_stack)
+                    return None if value is None else ("argument", self._infer_type(node), value)
+            if node.name in _SECURITY_SHARED_BAR_FIELDS:
+                return ("bar", node.name)
+            return None
+        if isinstance(node, BinOp):
+            left = self._security_canonical_value(node.left, helper_binding_stack)
+            right = self._security_canonical_value(node.right, helper_binding_stack)
+            if left is None or right is None:
+                return None
+            return ("binary", node.op, self._infer_type(node), left, right)
+        if isinstance(node, UnaryOp):
+            operand = self._security_canonical_value(node.operand, helper_binding_stack)
+            if operand is None:
+                return None
+            return ("unary", node.op, self._infer_type(node), operand)
+        if isinstance(node, Ternary):
+            parts = [
+                self._security_canonical_value(part, helper_binding_stack)
+                for part in (node.condition, node.true_val, node.false_val)
+            ]
+            if any(part is None for part in parts):
+                return None
+            return ("ternary", self._infer_type(node), *parts)
+        key = self._security_shared_call_key(node, helper_binding_stack)
+        return None if key is None else ("call", self._infer_type(node), key)
+
     def _security_user_call_site(self, node) -> bool:
         """Whether ``node`` calls a user function or typed user method,
         whether or not a payload can inline it."""
@@ -3413,6 +3555,8 @@ class SecurityEmitter:
                 for side in (node.left, node.right)
             )
         if self._security_user_call_key(node) is not None:
+            if self._security_shared_call_key(node, helper_binding_stack) is not None:
+                return False
             try:
                 plan = self._security_helper_call_plan(node, helper_binding_stack)
             except CompileError:
@@ -3442,7 +3586,8 @@ class SecurityEmitter:
                     if name in call_stack:
                         return
                     fi = self._func_info_map.get(name)
-                    if fi is not None and fi.node is not None:
+                    if (fi is not None and fi.node is not None
+                            and not self._security_pure_body(fi.node)):
                         call_stack.add(name)
                         for stmt in fi.node.body:
                             visit_stmt(stmt, conditional)
@@ -3560,6 +3705,8 @@ class SecurityEmitter:
         if isinstance(expr_node, FuncCall):
             func_name = self._security_user_call_key(expr_node)
             if func_name is not None:
+                if self._security_shared_call_key(expr_node, helper_binding_stack) is not None:
+                    return False
                 call_key = f"func:{func_name}"
                 if call_key in resolving:
                     return False
@@ -3985,6 +4132,8 @@ class SecurityEmitter:
         if isinstance(expr_node, FuncCall):
             func_name = self._security_user_call_key(expr_node)
             if func_name is not None:
+                if self._security_shared_call_key(expr_node, helper_binding_stack) is not None:
+                    return collected
                 call_key = f"func:{func_name}"
                 if call_key in resolving:
                     return collected
@@ -4464,6 +4613,8 @@ class SecurityEmitter:
             if isinstance(node, FuncCall):
                 func_name = self._security_user_call_key(node)
                 if func_name is not None:
+                    if self._security_shared_call_key(node, binding_stack) is not None:
+                        return
                     call_key = f"func:{func_name}"
                     if call_key in resolving:
                         return
@@ -4713,6 +4864,38 @@ class SecurityEmitter:
         )
 
     def _emit_security_evaluator(self, item: dict, lines: list[str]) -> None:
+        """Emit one ``_eval_security_N`` method
+        (``_emit_security_evaluator_body``), with the values of its long pure
+        calls (``_security_share_pure_call``) computed where it opens."""
+        start = len(lines)
+        outer = (getattr(self, "_security_shared_calls", None),
+                 getattr(self, "_security_shared_definitions", None))
+        self._security_shared_calls = {}
+        self._security_shared_definitions = definitions = []
+        try:
+            self._emit_security_evaluator_body(item, lines)
+        finally:
+            self._security_shared_calls, self._security_shared_definitions = outer
+        lines[start + 1:start + 1] = definitions
+
+    def _security_share_pure_call(self, sec_id: int, text: str) -> str:
+        """What a pure call (``_security_shared_call_key``) reads, at this
+        reach and at every later one with the same arguments: the text it
+        inlined, or, once that text is ``_SECURITY_SHARED_CALL_MIN_CHARS``
+        long, ``_pf_shared_<N>_<k>``, its value computed where the evaluator
+        opens. The text reads only the requested bar, literals and earlier
+        such values, and evaluates nothing else: computed once, eagerly, it
+        is the value every reach would compute. A diamond of helpers
+        (``f1(x) => f0(x) + f0(x)``, ``f2(x) => f1(x) + f1(x)``, ...) inlined
+        its leaf once per path, doubling the payload per level."""
+        if len(text) < _SECURITY_SHARED_CALL_MIN_CHARS:
+            return text
+        definitions = self._security_shared_definitions
+        name = f"_pf_shared_{sec_id}_{len(definitions)}"
+        definitions.append(f"        const auto {name} = {text};")
+        return name
+
+    def _emit_security_evaluator_body(self, item: dict, lines: list[str]) -> None:
         """Emit one ``_eval_security_N`` method."""
         sec_id = item["sec_id"]
         expr_node = item["expr_node"]
@@ -5574,6 +5757,14 @@ class SecurityEmitter:
                         expr_node,
                         "request.security helper functions must not recurse while building a security context",
                     )
+                shared = getattr(self, "_security_shared_calls", None)
+                share_key = None
+                if shared is not None:
+                    # A pure call reached again with the same arguments reads
+                    # what its first reach spelled (``_security_share_pure_call``).
+                    share_key = self._security_shared_call_key(expr_node, helper_binding_stack)
+                    if share_key is not None and share_key in shared:
+                        return shared[share_key]
                 resolving.add(call_key)
                 plan = self._security_helper_call_plan(
                     expr_node,
@@ -5605,6 +5796,10 @@ class SecurityEmitter:
                         resolving,
                     )
                 resolving.remove(call_key)
+                if share_key is not None:
+                    resolved = shared[share_key] = self._security_share_pure_call(
+                        sec_id, resolved
+                    )
                 return resolved
 
         if (
@@ -5985,6 +6180,18 @@ class SecurityEmitter:
                         global_expr_map[node.name], (), depth + 1
                     )
         if isinstance(node, FuncCall) and self._security_user_call_key(node) is not None:
+            share_key = self._security_shared_call_key(node, helper_binding_stack)
+            if share_key is not None:
+                # A pure call's answer follows from its arguments' values.
+                memo = getattr(self, "_security_emits_double_memo", None)
+                if memo is None:
+                    memo = self._security_emits_double_memo = {}
+                if (share_key, depth) not in memo:
+                    plan = self._security_helper_call_plan(node, helper_binding_stack)
+                    memo[(share_key, depth)] = self._security_emits_double(
+                        plan["expr"], plan["binding_stack"], depth + 1
+                    )
+                return memo[(share_key, depth)]
             try:
                 plan = self._security_helper_call_plan(node, helper_binding_stack)
             except CompileError:

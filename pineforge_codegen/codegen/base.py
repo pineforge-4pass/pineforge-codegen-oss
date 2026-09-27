@@ -3129,6 +3129,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         against recursion cycles (Pine forbids recursion, but a malformed source
         must be refused, not looped forever).
         """
+        if getattr(self, "_arith_udf_memo", None) is None:
+            self._arith_udf_memo = {}
+            try:
+                return self._arith_expr_to_str(node, _udf_stack, _depth)
+            finally:
+                self._arith_udf_memo = None
         if isinstance(node, NumberLiteral):
             v = node.value
             if isinstance(v, float) and v == int(v):
@@ -3176,10 +3182,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return spell_input_call(node, title=self._input_spelling_title(node))
             fn, ns = self._resolve_callee(node.callee)
             if ns is None and fn is not None and self._get_udf_def(fn) is not None:
-                inlined = self._inline_single_expr_udf(node, _udf_stack, _depth)
-                if inlined is None:
-                    return None
-                return self._arith_expr_to_str(inlined, _udf_stack | {fn}, _depth + 1)
+                # A call of the same function on the same argument nodes (a
+                # caller's inlined body calling it twice, a diamond of such
+                # helpers) is spelled once; the entry keeps the arguments
+                # alive, so their ids stay theirs until the outermost call.
+                key = (fn, _depth, _udf_stack, tuple(id(a) for a in node.args), bool(node.kwargs))
+                memo = self._arith_udf_memo
+                if key not in memo:
+                    inlined = self._inline_single_expr_udf(node, _udf_stack, _depth)
+                    memo[key] = (
+                        None if inlined is None
+                        else self._arith_expr_to_str(inlined, _udf_stack | {fn}, _depth + 1),
+                        node.args,
+                    )
+                return memo[key][0]
             callee = self._arith_expr_to_str(node.callee, _udf_stack, _depth)
             if callee is None:
                 return None

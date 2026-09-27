@@ -2232,8 +2232,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     out |= self._collect_security_mutable_globals(arg, resolving)
                 for value in node.kwargs.values():
                     out |= self._collect_security_mutable_globals(value, resolving)
-                for stmt in self._func_defs[func_name].body:
-                    out |= self._collect_security_mutable_globals(stmt, resolving)
+                # One walk of a body holds every global it reads, and the walk
+                # returns their union: a helper reached again (``f(x) + f(x)``,
+                # a diamond of such helpers) is not walked once per path.
+                walked = f"walked:{func_name}"
+                if walked not in resolving:
+                    resolving.add(walked)
+                    for stmt in self._func_defs[func_name].body:
+                        out |= self._collect_security_mutable_globals(stmt, resolving)
                 resolving.remove(call_key)
                 return out
 
@@ -5896,6 +5902,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         """Re-run map-history safety after untyped callable args are known."""
         if owner in visiting:
             return
+        # The same owner, specs and path check the same nodes again, so a
+        # helper that a diamond of callers reaches (``f1(x) => f0(x) +
+        # f0(x)``, ...) is validated once, not once per path. A failed check
+        # raises, so only a passed validation is remembered.
+        key = (
+            owner, visiting, tuple(sorted(parameter_specs.items())),
+            len(self._deferred_param_history_refs.get(owner, [])),
+            len(self._deferred_param_call_edges.get(owner, [])),
+        )
+        validated = self.__dict__.setdefault("_deferred_param_history_validated", set())
+        if key in validated:
+            return
         next_visiting = visiting | {owner}
         for node, parameter_nodes in self._deferred_param_history_refs.get(
             owner, []
@@ -5944,6 +5962,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 callee_specs,
                 next_visiting,
             )
+        validated.add(key)
 
     def _propagate_deferred_map_callable_specs(
         self,
