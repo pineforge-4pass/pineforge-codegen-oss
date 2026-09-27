@@ -381,7 +381,8 @@ class _Linker:
         notes["pine_version"] = mod.lib.pine_version
         node.annotations = notes
         scope = _Scope(self, mod, callable_name)
-        node.params = [scope.declare(p) for p in node.params]
+        node.params = [scope.declare(p, hints[i] if i < len(hints) else None)
+                       for i, p in enumerate(node.params)]
         self._stmts(mod, node.body, scope)
 
     def _stmts(self, mod: _Module, stmts: list, scope: "_Scope") -> None:
@@ -390,9 +391,10 @@ class _Linker:
 
     def _stmt(self, mod: _Module, stmt, scope: "_Scope"):
         if isinstance(stmt, VarDecl):
+            hint = stmt.type_hint
             stmt.type_hint = self._rewrite_type(stmt.type_hint, mod, stmt)
             stmt.value = self._expr(mod, stmt.value, scope)
-            stmt.name = scope.declare(stmt.name)
+            stmt.name = scope.declare(stmt.name, hint)
             return stmt
         if isinstance(stmt, TupleAssign):
             stmt.value = self._expr(mod, stmt.value, scope)
@@ -469,7 +471,7 @@ class _Linker:
             return node
         if isinstance(node, MemberAccess):
             parts = _callee_alias(node)
-            if parts is not None and not self._is_local(scope, parts[0]):
+            if parts is not None and not self._is_object(scope, parts[0]):
                 alias, member = parts
                 if alias in mod.targets:
                     found = self._export(mod, alias, member, node)
@@ -481,6 +483,11 @@ class _Linker:
                     raise _LinkError(_error(
                         f"'{alias}.{member}' of library '{mod.targets[alias]}' is "
                         f"a {kind}, not a value", node.loc, self._filename))
+                if alias in _BUILTIN_NAMESPACES and alias not in mod.lib.globals:
+                    # The built-in namespace's member, even beside a
+                    # primitive local of the namespace's name.
+                    self._rewrite_template_args(node, mod)
+                    return node
             node.object = self._expr(mod, node.object, scope)
             self._rewrite_template_args(node, mod)
             return node
@@ -505,6 +512,13 @@ class _Linker:
     @staticmethod
     def _is_local(scope: "_Scope | None", name: str) -> bool:
         return scope is not None and scope.lookup(name) is not None
+
+    @staticmethod
+    def _is_object(scope: "_Scope | None", name: str) -> bool:
+        """``name.member`` reads a local object, not a namespace or alias."""
+        if scope is None or scope.lookup(name) is None:
+            return False
+        return name not in _BUILTIN_NAMESPACES or scope.shadows_namespace(name)
 
     @staticmethod
     def _named(name: str, like: ASTNode) -> Identifier:
@@ -594,7 +608,7 @@ class _Linker:
                 return self._as_method_call(node, mod.method_names[name], node)
             return node
         parts = _callee_alias(callee)
-        if parts is not None and not self._is_local(scope, parts[0]):
+        if parts is not None and not self._is_object(scope, parts[0]):
             alias, member = parts
             if alias in mod.targets:
                 found = self._export(mod, alias, member, node)
@@ -985,13 +999,15 @@ class _Scope:
         self._callable = callable_name
         self._parent = parent
         self._names: dict[str, str] = {}
+        self._hints: dict[str, str | None] = {}
 
     def child(self) -> "_Scope":
         return _Scope(self._linker, self._mod, self._callable, self)
 
-    def declare(self, name: str) -> str:
+    def declare(self, name: str, hint: str | None = None) -> str:
         new = self._linker._local_name(self._mod, self._callable, name)
         self._names[name] = new
+        self._hints[name] = hint
         return new
 
     def lookup(self, name: str) -> str | None:
@@ -1001,6 +1017,19 @@ class _Scope:
                 return scope._names[name]
             scope = scope._parent
         return None
+
+    def shadows_namespace(self, name: str) -> bool:
+        """``name`` is a local that ``name.member`` reads as an object: not
+        one of a primitive type, which has no members, so that a parameter
+        named ``timeframe`` (TradingView/RelativeValue/2) leaves
+        ``timeframe.change(...)`` the built-in."""
+        scope: _Scope | None = self
+        while scope is not None:
+            if name in scope._names:
+                hint = scope._hints.get(name)
+                return bool(hint) and hint not in ("int", "float", "bool", "string", "color")
+            scope = scope._parent
+        return False
 
 
 def inline_libraries(program: Program, source: str, *,
