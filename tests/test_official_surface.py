@@ -31,6 +31,8 @@ import pytest
 
 from pineforge_codegen import transpile, signatures as sigs
 from pineforge_codegen.errors import CompileError
+from pineforge_codegen.library_modules import parse_library_module
+from pineforge_codegen.library_v5 import V5_RULES
 from pineforge_codegen.support_checker import (
     SUPPORTED_TA,
     SUPPORTED_MATH,
@@ -395,6 +397,11 @@ INTENTIONALLY_REJECTED = [
     'x = str.foo("a")',
     # input.foo doesn't exist.
     'x = input.foo(1)',
+    # A library's source is resolved only from transpile(libraries=...) or the
+    # script's own requests manifest; with neither, an import is refused.
+    'import pftest/Nope/1 as N\nx = N.f(close)',
+    # PineForge transpiles strategies: 'export' belongs to a library.
+    'export f(float x) => x\nx = f(close)',
 ]
 
 
@@ -506,3 +513,59 @@ def test_hard_reject_namespace_covers_ticker():
         "ticker.pointfigure", "ticker.new", "ticker.modify",
     ):
         assert fn in HARD_REJECT_FUNC, f"{fn} should be per-function hard-rejected"
+
+
+# ---------------------------------------------------------------------------
+# Pine libraries: what a library exports, and the v5 -> v6 changes a v5
+# library's code keeps (``library_v5.V5_RULES``).
+# ---------------------------------------------------------------------------
+
+# The Pine v6 User Manual, "Libraries": a library exports functions, methods,
+# user-defined types, enums and (since June 2025) constants.
+OFFICIAL_LIBRARY_EXPORTS = frozenset({"function", "method", "type", "enum", "const"})
+
+# The migration guide to v6, "Here are the changes that affect v5 scripts"
+# (pine-script-docs migration-guides/to-pine-version-6, read 2026-09-28).
+OFFICIAL_V6_CHANGES = frozenset({
+    "implicit-bool-cast", "bool-na", "lazy-and-or", "dynamic-requests",
+    "const-int-division", "when-parameter", "default-margin", "excess-orders",
+    "exit-parameter-pairs", "literal-and-field-history", "repeated-parameters",
+    "series-offset", "unique-type-na", "timeframe-period-multiplier",
+    "negative-array-index", "mutable-const", "transp-parameter",
+    "default-colors", "dynamic-for-boundary",
+})
+
+_KINDS_LIBRARY = (
+    '//@version=6\nlibrary("Kinds")\n'
+    'export const float K = 2.0\n'
+    'export type P\n    float v = 1.0\n'
+    'export enum E\n    a\n    b\n'
+    'export f(float x) => x * K\n'
+    'export method twice(P p) => p.v * 2\n'
+)
+
+
+def test_every_official_export_kind_is_parsed_and_inlined():
+    module = parse_library_module("pftest/Kinds/1", _KINDS_LIBRARY)
+    exported = {
+        "function": [n for n, defs in module.functions.items() if any(map(module.exported, defs))],
+        "method": [n for n, defs in module.methods.items() if any(map(module.exported, defs))],
+        "type": [n for n, d in module.types.items() if module.exported(d)],
+        "enum": [n for n, d in module.enums.items() if module.exported(d)],
+        "const": [n for n, d in module.globals.items() if module.exported(d)],
+    }
+    assert set(exported) == OFFICIAL_LIBRARY_EXPORTS
+    assert all(exported.values()), exported
+    cpp = transpile(_pine(
+        'import pftest/Kinds/1 as L\np = L.P.new()\ne = L.E.a\n'
+        'x = L.f(close) + p.twice() + (e == L.E.b ? 1 : 0)\n'
+        'if x > 0\n    strategy.entry("L", strategy.long)'),
+        libraries={"pftest/Kinds/1": _KINDS_LIBRARY})
+    for name in ("Kinds_v1__f", "Kinds_v1__K", "Kinds_v1__P", "Kinds_v1__E", "twice"):
+        assert name in cpp, name
+
+
+def test_every_v6_change_has_a_v5_library_disposition():
+    assert set(V5_RULES) == OFFICIAL_V6_CHANGES
+    assert {rule.disposition for rule in V5_RULES.values()} <= {
+        "implemented", "refused", "not applicable"}

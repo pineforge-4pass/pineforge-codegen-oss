@@ -48,22 +48,14 @@ def _refusal(lib_body: str, call: str) -> str:
     return diag.message
 
 
-# The migration guide's list ("Here are the changes that affect v5 scripts"),
-# read 2026-09-28 (pine-script-docs migration-guides/to-pine-version-6).
-OFFICIAL_V6_CHANGES = frozenset({
-    "implicit-bool-cast", "bool-na", "lazy-and-or", "dynamic-requests",
-    "const-int-division", "when-parameter", "default-margin", "excess-orders",
-    "exit-parameter-pairs", "literal-and-field-history", "repeated-parameters",
-    "series-offset", "unique-type-na", "timeframe-period-multiplier",
-    "negative-array-index", "mutable-const", "transp-parameter",
-    "default-colors", "dynamic-for-boundary",
-})
-
-
-def test_every_v6_change_has_a_disposition():
-    assert set(V5_RULES) == OFFICIAL_V6_CHANGES
-    assert {r.disposition for r in V5_RULES.values()} <= {
-        "implemented", "refused", "not applicable"}
+def test_every_implemented_rule_is_pinned_here():
+    """``tests/test_official_surface.py`` locks ``V5_RULES`` to the migration
+    guide's list; each implemented rule has a lowering test below."""
+    implemented = {k for k, r in V5_RULES.items() if r.disposition == "implemented"}
+    assert implemented == {
+        "implicit-bool-cast", "lazy-and-or", "const-int-division",
+        "timeframe-period-multiplier", "negative-array-index", "default-colors",
+        "dynamic-for-boundary"}
 
 
 # -- implemented ---------------------------------------------------------
