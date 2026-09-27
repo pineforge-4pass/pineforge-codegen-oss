@@ -184,3 +184,17 @@ int(vf))`, `nz(g(close, int(vf)))` and `g(close, 6)` requested on "60": the
 first equals the last on every close. A first draft also called a typed
 method `close.gm(int(vf))`, which TradingView refused ("Could not find
 method", CE10271).
+
+## History of a helper call inside a helper body
+
+The same convention (265 closes, 2025-04-01..04-08).
+
+| File | sha256 |
+|---|---|
+| `sec_helper_body_hist.pine` | `10c377374a7266bd7645e8ea413ffb6fd96bbe36b4779b7cf8b0d6f89a7aeed1` |
+| `sec_helper_body_hist_tv_trades.csv` (265 trades, exported 2026-09-27) | `aa84a786d312b25428b196d33fa467316d5bfa721879bdf6c5f2622843eb7aac` |
+
+With `g() => close`, each close spells `h()` for `h() => nz(g()[1])`, `k()`
+for `k() => g()[1]` and `close[1]`, all requested on "60": TradingView reads
+the previous requested close in each (0 and `na` on the first close, where
+`nz` differs).

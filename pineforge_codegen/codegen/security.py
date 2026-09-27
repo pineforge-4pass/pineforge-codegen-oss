@@ -2163,7 +2163,12 @@ class SecurityEmitter:
     def _collect_security_expr_hist_subscripts(
         self, node, resolving: set[str] | None = None
     ) -> list[Subscript]:
-        """Subscripted helper-call results needing security-context history."""
+        """Subscripted helper-call results needing security-context history:
+        in the payload, the globals it reads, and the bodies of the user
+        functions it calls (``h() => nz(g()[1])``). One inside a helper body
+        is kept only where the payload reaches it once: two inlines of it
+        (``h() + h()``) would each need their own history, and are refused
+        where lowered, as every earlier build refused them."""
         if node is None:
             return []
         if resolving is None:
@@ -2171,9 +2176,15 @@ class SecurityEmitter:
 
         out: list[Subscript] = []
         seen: set[int] = set()
+        in_helper: set[int] = set()
+        reached: dict[int, int] = {}
+        helpers: list[str] = []
 
         def add(n: Subscript) -> None:
             key = id(n)
+            if helpers:
+                in_helper.add(key)
+                reached[key] = reached.get(key, 0) + 1
             if key not in seen:
                 seen.add(key)
                 out.append(n)
@@ -2188,6 +2199,14 @@ class SecurityEmitter:
                     walk(global_expr_map[n.name])
                     resolving.remove(n.name)
                 return
+            if (isinstance(n, FuncCall) and isinstance(n.callee, Identifier)
+                    and n.callee.name in self._func_names
+                    and n.callee.name not in helpers):
+                info = self._func_info_map.get(n.callee.name)
+                if info is not None and getattr(info, "node", None) is not None:
+                    helpers.append(n.callee.name)
+                    walk(info.node.body)
+                    helpers.pop()
             if (
                 isinstance(n, Subscript)
                 and (
@@ -2210,7 +2229,7 @@ class SecurityEmitter:
                             walk(x)
 
         walk(node)
-        return out
+        return [n for n in out if id(n) not in in_helper or reached[id(n)] == 1]
 
     def _security_expr_hist_series_names(self, sec_id: int) -> list[str]:
         names = []

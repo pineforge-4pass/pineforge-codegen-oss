@@ -3999,6 +3999,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         key = (kind, *source_key, self._current_instance_name)
         member = self._inline_history_member_by_key.get(key)
         if member is None:
+            if getattr(self, "_security_fallback_frame", None) is not None:
+                # A builtin call in a request.security payload reads history
+                # the evaluator keeps no series for (a helper call's inside a
+                # helper body the payload inlines twice): refused as the bare
+                # read is, where this used to crash the transpiler.
+                self._codegen_error(
+                    node,
+                    "request.security helper call history is only supported in "
+                    "the payload itself",
+                )
             raise AssertionError(
                 "missing pre-registered inline history member for "
                 f"{kind} at {getattr(node, 'loc', None)} in context "

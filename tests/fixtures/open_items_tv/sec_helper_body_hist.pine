@@ -1,0 +1,16 @@
+//@version=6
+// History of a helper call inside a helper's body, bare and under a builtin
+// call, in a request.security payload.
+strategy("PF oi sec helper body history", overlay = true)
+g() => close
+h() => nz(g()[1])
+k() => g()[1]
+a1 = request.security(syminfo.tickerid, "60", h())
+a2 = request.security(syminfo.tickerid, "60", k())
+a3 = request.security(syminfo.tickerid, "60", close[1])
+x(v) => na(v) ? "na" : str.tostring(v)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = x(a1) + "|" + x(a2) + "|" + x(a3))
