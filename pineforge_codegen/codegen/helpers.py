@@ -60,6 +60,60 @@ def na_preserving_int_cast(value_cpp: str, int_cpp_type: str = "int") -> str:
             f"({int_cpp_type})_pf_v; }}()")
 
 
+# C++ whose evaluation cannot be observed, so reading it twice -- or once per
+# loop iteration -- is harmless: a literal, a name or member chain (a history
+# read of it at a literal offset included), an na.
+_PLAIN_READ_CPP = re.compile(
+    r"[A-Za-z_]\w*(?:(?:\.|->)[A-Za-z_]\w*)*(?:\[\d+\])?"
+    r"|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
+    r'|std::string\("(?:[^"\\]|\\.)*"\)'
+    r"|na<[\w:]+>\(\)"
+)
+
+
+def _strip_outer_parens(text: str) -> str:
+    text = text.strip()
+    while text.startswith("(") and text.endswith(")"):
+        depth = 0
+        for i, ch in enumerate(text):
+            depth += ch == "("
+            depth -= ch == ")"
+            if depth == 0 and i < len(text) - 1:
+                return text  # the first "(" closes before the end: "(a) + (b)"
+        text = text[1:-1].strip()
+    return text
+
+
+def cpp_is_plain_read(value_cpp: str) -> bool:
+    """True when evaluating ``value_cpp`` more than once cannot be observed."""
+    return _PLAIN_READ_CPP.fullmatch(_strip_outer_parens(value_cpp)) is not None
+
+
+def evaluate_args_once(args: list[str], indices, render, token: str) -> str:
+    """``render(args)`` with every argument evaluated once, left to right.
+
+    Pine evaluates each call argument exactly once. A lowering template that
+    reads an argument twice, or once per loop iteration, re-runs that
+    argument's C++, so a stateful call in it (a ``ta.*`` compute(), a user
+    function with state) runs more than once per execution. Every argument
+    in ``indices`` that is not a plain read is bound once to a lambda local,
+    together with every earlier argument that is not, so the left-to-right
+    order holds; the template then reads the bindings. A call whose
+    ``indices`` arguments are all plain reads renders exactly as before.
+    """
+    need = [i for i in indices if i < len(args) and not cpp_is_plain_read(args[i])]
+    if not need:
+        return render(list(args))
+    bound = list(args)
+    decls = []
+    for i in range(max(need) + 1):
+        if cpp_is_plain_read(args[i]):
+            continue
+        decls.append(f"auto&& {token}{i} = ({args[i]});")
+        bound[i] = f"{token}{i}"
+    return f"([&]() {{ {' '.join(decls)} return {render(bound)}; }}())"
+
+
 def pine_index_int_cast(value_cpp: str) -> str:
     """Narrow a numeric index after checking its *original* na sentinel.
 

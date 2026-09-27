@@ -19,7 +19,10 @@ from __future__ import annotations
 import re
 
 from ..symbols import PineType
-from .helpers import na_preserving_int_cast, pine_index_int_cast, pine_truth_cast
+from .helpers import (
+    evaluate_args_once, na_preserving_int_cast, pine_index_int_cast,
+    pine_truth_cast,
+)
 
 
 _PROVEN_INT_ARG = re.compile(
@@ -811,6 +814,19 @@ ARRAY_METHODS = {
     "sort_indices": lambda a, args: f"[&](){{ std::vector<double> idx({a}.size()); std::iota(idx.begin(),idx.end(),0); std::sort(idx.begin(),idx.end(),[&](int i,int j){{return {a}[i]<{a}[j];}}); return idx; }}()",
 }
 
+# The ARRAY_METHODS arguments (receiver excluded) a template reads more than
+# once, or once per loop iteration: evaluate_args_once binds each that is not
+# a plain read. The typed string ``join`` lowering reads its separator the
+# same way.
+ARRAY_ARGS_READ_REPEATEDLY = {
+    "lastindexof": (0,),
+    "binary_search": (0,),
+    "binary_search_leftmost": (0,),
+    "binary_search_rightmost": (0,),
+    "join": (0,),
+    "concat": (0,),
+}
+
 # Pine parameter order for the checked-index subset. Keeping the receiver
 # (``id``) separate lets method syntax merge ``a.get(index = i)`` while the
 # namespace-functional path merges ``array.get(id = a, index = i)``.
@@ -1017,6 +1033,17 @@ def _math_minmax_na_expr(func_name: str, args: list[str]) -> str:
     )
 
 
+def _math_round_digits_expr(args: list[str]) -> str:
+    """``math.round(number, precision)``: the template reads the precision
+    twice, so one that is more than a plain read is evaluated once."""
+    return evaluate_args_once(
+        args, (1,),
+        lambda a: (f"(std::round({a[0]} * std::pow(10.0, {a[1]})) / "
+                   f"std::pow(10.0, {a[1]}))"),
+        "_pf_round_a",
+    )
+
+
 # Pine ``math.sign`` returns a float, propagates numeric ``na``, and must not
 # evaluate its argument more than once.  Keep the callable separate from the
 # call template because the stable-runtime TA reset fallback also substitutes
@@ -1059,10 +1086,22 @@ STR_FUNC_MAP = {
     "lower":       lambda args: f"[&](){{ std::string s={args[0]}; std::transform(s.begin(),s.end(),s.begin(),::tolower); return s; }}()",
     "upper":       lambda args: f"[&](){{ std::string s={args[0]}; std::transform(s.begin(),s.end(),s.begin(),::toupper); return s; }}()",
     "trim":        lambda args: f'[&](){{ std::string s={args[0]}; s.erase(0,s.find_first_not_of(" \\t\\n\\r")); s.erase(s.find_last_not_of(" \\t\\n\\r")+1); return s; }}()',
-    "repeat":      lambda args: f"[&](){{ std::string r; for(int i=0;i<{na_preserving_int_cast(args[1])};i++) r+={args[0]}; return r; }}()",
+    "repeat":      lambda args: (
+        f"[&](){{ std::string r; for(int i=0;i<{na_preserving_int_cast(args[1])};i++) r+={args[0]}; return r; }}()"
+        if len(args) < 3 else
+        f"[&](){{ std::string r; for(int i=0;i<{na_preserving_int_cast(args[1])};i++){{ if(i>0) r+={args[2]}; r+={args[0]}; }} return r; }}()"
+    ),
     "match":       lambda args: f'pine_str_match({args[0]}, {args[1]})',
     "split":       lambda args: f'pine_str_split({args[0]}, {args[1]})',
     "format":      None,  # handled separately
+}
+# The STR_FUNC_MAP arguments a template reads more than once, or once per
+# loop iteration: evaluate_args_once binds each that is not a plain read.
+STR_ARGS_READ_REPEATEDLY = {
+    "startswith": (1,),
+    "endswith": (0, 1),
+    "replace_all": (1, 2),
+    "repeat": (0, 1, 2),
 }
 
 

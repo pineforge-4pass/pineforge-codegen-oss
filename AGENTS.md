@@ -563,6 +563,27 @@ you delete or weaken the special case, the test will tell you.
     their existing lowering. The old "lazy SMA/EMA must not precalc" pins
     (pf-probe-oliver-dual-vol-sma) encoded the refuted per-call clock and were
     re-pinned in `test_codegen_validation_fixes.py`.
+16. **Every call argument is evaluated once.** Pine evaluates each argument
+    of a call exactly once per execution; only `and` / `or` and the `?:` arms
+    are lazy (a lab tv counting-probe tape, `fixtures/w2_trio_tv/eval_counts`,
+    shows every builtin slot below once per bar). A lowering template that
+    reads an argument twice, or once per loop iteration, re-runs its C++, so a
+    stateful call in it (a `ta.*` compute(), a user function with state) runs
+    more than once. `fixnan(x)` did that (TradingView's DMI/ADX helpers then
+    double-stepped their RMA), and `nz(x, y)` ran `y` only on na bars. Bind
+    such an argument first: `nz` and `fixnan` bind their own, and
+    `helpers.evaluate_args_once` binds every argument a template reads
+    repeatedly that is not a plain read (`cpp_is_plain_read`: a literal, a
+    name or member chain, a literal-offset history read), which keeps plain
+    reads byte for byte. `STR_ARGS_READ_REPEATEDLY` and
+    `ARRAY_ARGS_READ_REPEATEDLY` (`codegen/tables.py`) list the table-driven
+    slots (`math.round`, `str.substring` and `str.replace` bind where they
+    lower); add one when a template reads an argument more than once.
+    `color.from_gradient`
+    is a warned visual-only stub that evaluates none of its arguments.
+    `tests/test_e2e_argument_evaluation_once.py` runs every slot through a
+    counting probe and replays the tape; `tests/test_e2e_fixnan_single_eval.py`
+    replays a TradingView ADX tape.
 
 ## How to add a new Pine v6 function
 

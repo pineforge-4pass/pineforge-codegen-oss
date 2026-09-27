@@ -78,7 +78,7 @@ from ..symbols import PineType, method_receiver_type_name
 from .tables import (
     BAR_BUILTINS, MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_BAR_FIELDS,
     SECURITY_BAR_FIELD_EXPRS, SECURITY_BAR_FIELD_TYPES, TA_TUPLE_FIELDS,
-    _math_minmax_na_expr, _merge_kwargs,
+    _math_minmax_na_expr, _math_round_digits_expr, _merge_kwargs,
 )
 
 
@@ -1808,7 +1808,7 @@ class SecurityEmitter:
             visit,
         )
         if func_name == "round" and len(args) == 2:
-            return f"(std::round({args[0]} * std::pow(10.0, {args[1]})) / std::pow(10.0, {args[1]}))"
+            return _math_round_digits_expr(args)
         if func_name == "round_to_mintick":
             x = args[0] if args else "0.0"
             return f"round_to_mintick({x})"

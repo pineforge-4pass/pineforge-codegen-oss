@@ -45,12 +45,14 @@ from ..errors import Phase
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .helpers import (
     NA_PRESERVING_INT_TYPES,
+    evaluate_args_once,
     na_preserving_int_cast,
     pine_truth_cast,
 )
 from .. import signatures as sigs
 from .tables import (
     ALERT_FREQ_VALUES,
+    ARRAY_ARGS_READ_REPEATEDLY,
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_METHODS,
     BAR_BUILTINS,
@@ -1181,8 +1183,12 @@ class TypeInferer:
                 recv, args, result_type=arr_cpp_type
             )
         elif method == "join" and elem_cpp == "std::string":
-            sep = args[0] if args else 'std::string(",")'
-            lower_receiver = lambda recv: f"[&](){{ std::string r; for(size_t i=0;i<{recv}.size();i++){{ if(i>0)r+={sep}; r+={recv}[i]; }} return r; }}()"
+            join_args = list(args) or ['std::string(",")']
+            lower_receiver = lambda recv: evaluate_args_once(
+                join_args, ARRAY_ARGS_READ_REPEATEDLY["join"],
+                lambda a: f"[&](){{ std::string r; for(size_t i=0;i<{recv}.size();i++){{ if(i>0)r+={a[0]}; r+={recv}[i]; }} return r; }}()",
+                "_pf_array_a",
+            )
         else:
             numeric_only = {
                 "sum", "avg", "min", "max", "range", "stdev", "variance", "median",
@@ -1234,7 +1240,10 @@ class TypeInferer:
             self._array_arg_counter = counter
 
             def lower_receiver(recv: str) -> str:
-                lowered = ARRAY_METHODS[method](recv, bound_args)
+                lowered = evaluate_args_once(
+                    bound_args, ARRAY_ARGS_READ_REPEATEDLY.get(method, ()),
+                    lambda a: ARRAY_METHODS[method](recv, a), "_pf_array_a",
+                )
                 for token, original in reversed(arg_bindings):
                     lowered = (
                         f"[&](){{ auto {token}=({original}); "
