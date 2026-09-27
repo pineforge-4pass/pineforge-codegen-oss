@@ -1308,6 +1308,10 @@ class StmtVisitor:
             the tuple once whenever either case applies; ordinary lexical scalar
             elements remain locals, Series elements advance their remapped
             members, and top-level scalars assign their class storage.
+            Pine's ``_`` binds nothing, but a structured binding declares
+            every name: C++17 has no placeholder, and GCC rejects a second
+            ``_`` in one scope (``[a, _, _] = f()``, or two tuples of one
+            block) as a redeclaration. Each ``_`` gets a name of its own.
             """
             series_names = {
                 name
@@ -1317,7 +1321,9 @@ class StmtVisitor:
             }
             if not series_names and not global_targets.intersection(node.names):
                 binding_names = ", ".join(
-                    self._safe_name(name) for name in node.names
+                    self._tuple_placeholder_name() if name == "_"
+                    else self._safe_name(name)
+                    for name in node.names
                 )
                 lines.append(f"{pad}auto [{binding_names}] = {call_expr};")
                 return
@@ -1451,6 +1457,13 @@ class StmtVisitor:
                         return
 
         lines.append(f"{pad}/* unsupported tuple assignment */")
+
+    def _tuple_placeholder_name(self) -> str:
+        """A fresh C++ name for one ``_`` of a tuple declaration's structured
+        binding, which must name every element."""
+        index = getattr(self, "_tuple_placeholder_counter", 0)
+        self._tuple_placeholder_counter = index + 1
+        return f"_tuple_unused_{index}"
 
     def _tuple_binding_cpp_types(self, node: TupleAssign) -> list[str]:
         """Exact supported tuple element types for later lexical operations."""
