@@ -1368,7 +1368,10 @@ def test_expired_block_tuple_binding_does_not_shadow_element_callee(
     local_value := "replacement"
     local_value
 ''',
-        '''    [local_value, other] = [array.from(produce()).copy().get(0), 1]
+        '''    [local_value, other] = if true
+        [array.from(produce()).copy().get(0), 1]
+    else
+        [array.from(produce()).copy().get(0), 1]
     local_value
 ''',
         '''    if close > open

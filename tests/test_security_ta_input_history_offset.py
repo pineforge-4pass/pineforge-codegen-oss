@@ -436,7 +436,7 @@ plot(x)
     "shadow",
     [
         "int idx = 1",
-        "[idx, other] = [1, 2]",
+        "[idx, other] = if true\n            [1, 2]\n        else\n            [2, 1]",
     ],
     ids=["block-local", "tuple-local"],
 )

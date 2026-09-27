@@ -1,0 +1,9 @@
+//@version=6
+strategy("pf-open-items-tuple-literal-var", overlay = true)
+
+// A plain declaration whose value is a tuple literal.
+t = [close, open]
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = "X")

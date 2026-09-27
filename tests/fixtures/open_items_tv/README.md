@@ -48,3 +48,14 @@ runs only on an up bar: the close on an up bar, `NaN` on every other bar
 through `na()` because PineForge passes an int na to a float parameter as
 INT_MIN (an open finding of the lane); a first export spelling it through
 the float formatter (`pf-oi-if-tail-na`) read `NaN` on TradingView.
+
+## Tuple literals TradingView refuses
+
+These three probes have no tape: `lab tv --no-note` (2026-09-27) failed at
+TradingView's compiler, whose error `tests/test_tuple_literal_value.py` pins.
+
+| File | sha256 | TradingView |
+|---|---|---|
+| `tuple_literal_decl.pine` | `525dcf43a5ba98a680601dc2bddd5d38e47dbdc52426efaf647cd8fb17c00653` | `[a, b] = [close, open]`: "Syntax error at input "["", CE10156, line 5 column 10 |
+| `tuple_literal_var.pine` | `1096f167da1256aa6b3ea42772262a7cc537c68e1e972c3254ccb67b57097cc8` | `t = [close, open]`: the same error at line 5 column 5 |
+| `tuple_literal_ternary.pine` | `59b28e82ae9258ad2c36432b8717b6e69f38a15d83dedc9d23af14668690cf39` | `[a, b] = close > open ? [close, open] : [open, close]`: "Ternary operations cannot return tuples. Convert the expression into an `if` or `switch` conditional structure to return a tuple.", line 5 |

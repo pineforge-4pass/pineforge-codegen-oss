@@ -1284,6 +1284,7 @@ class SupportChecker:
             self._err(node, f"Import is not supported: '{import_spelling(node)}'")
 
     def _visit_VarDecl(self, node: VarDecl) -> None:
+        self._check_tuple_literal_value(node.value)
         if node.name and node.value is not None:
             self._scalar_defs.setdefault(node.name, node.value)
         if node.name and (node.is_var or node.is_varip):
@@ -1331,6 +1332,7 @@ class SupportChecker:
             )
             self._visit_children(node)
             return
+        self._check_tuple_literal_value(node.value)
         # ``_scalar_defs`` records only the DECLARATION, so a later ``:=``
         # rebind used to be invisible to the request.security symbol check.
         # (``check`` also pre-collects these; recording here keeps the visit
@@ -1338,7 +1340,50 @@ class SupportChecker:
         self._record_scalar_rebind(node)
         self._visit_children(node)
 
+    def _check_tuple_literal_value(self, value) -> None:
+        """Refuse a tuple literal or a ternary of tuples as a declaration's
+        or reassignment's value.
+
+        TradingView takes a tuple literal only as a function's or an
+        if/switch arm's value and as a request.security expression:
+        ``[a, b] = [close, open]`` and ``t = [close, open]`` are "Syntax
+        error at input '['" (CE10156), ``[a, b] = c ? [x, y] : [y, x]`` is
+        "Ternary operations cannot return tuples" (lab tv --no-note). The
+        tuple declarations reached the C++ as a dropped statement ("/*
+        unsupported tuple assignment */", their names left at 0), the plain
+        declaration a tuple assigned to a double.
+        """
+        if isinstance(value, TupleLiteral):
+            self._err(
+                value,
+                "A tuple literal [..] cannot be a variable's value: TradingView "
+                "rejects it here (Syntax error at input '[', CE10156). A tuple "
+                "is only a function's or an if/switch arm's value or a "
+                "request.security expression.",
+                hint="Declare each variable on its own line (a = x, b = y), or "
+                     "return the tuple from a function: f() => [x, y], then "
+                     "[a, b] = f().",
+            )
+        elif isinstance(value, Ternary) and self._ternary_yields_tuple(value):
+            self._err(
+                value,
+                "A ternary cannot return a tuple: TradingView rejects "
+                "[a, b] = c ? [..] : [..] (\"Ternary operations cannot return "
+                "tuples\").",
+                hint="Select the tuple with an if or switch: [a, b] = if c, "
+                     "each arm ending in its tuple.",
+            )
+
+    @classmethod
+    def _ternary_yields_tuple(cls, node) -> bool:
+        return any(
+            isinstance(arm, TupleLiteral)
+            or (isinstance(arm, Ternary) and cls._ternary_yields_tuple(arm))
+            for arm in (node.true_val, node.false_val)
+        )
+
     def _visit_TupleAssign(self, node: TupleAssign) -> None:
+        self._check_tuple_literal_value(node.value)
         drawing_mask = self._tuple_assign_drawing_mask(node.value)
         if drawing_mask:
             for idx, name in enumerate(node.names):

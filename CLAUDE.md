@@ -646,7 +646,10 @@ you delete or weaken the special case, the test will tell you.
     `tests/test_e2e_if_without_else_na.py`, tape
     `fixtures/open_items_tv/if_tail_na`).
     A tuple reassignment `[p, q] := f()` is a TradingView syntax error
-    (CE10156) and is refused. `tests/test_e2e_function_tail_value.py` replays
+    (CE10156) and is refused, as are a tuple literal as a variable's value
+    (`[a, b] = [x, y]`, `t = [x, y]`: CE10156) and a ternary returning
+    tuples (`support_checker._check_tuple_literal_value`,
+    `tests/test_tuple_literal_value.py`). `tests/test_e2e_function_tail_value.py` replays
     seven TradingView tapes (`fixtures/w2_trio_tv/tail_*`) and compiles the
     handle shapes.
 18. **A script variable read through history in a function body reads its
