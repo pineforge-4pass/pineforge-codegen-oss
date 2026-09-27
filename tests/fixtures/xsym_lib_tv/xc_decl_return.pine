@@ -1,0 +1,28 @@
+//@version=6
+// SPDX-License-Identifier: Apache-2.0
+// Synthetic probe (lane XSYM-C): a function whose last statement is a
+// declaration or a reassignment returns that variable's value; each value
+// spelled in an exit comment.
+strategy("xc decl return", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=2)
+
+f2(float v) => str.tostring(v, "#.####")
+twice(float x) =>
+    float result = x * 2
+typed(float x) =>
+    int n = math.round(x)
+plain(float x) =>
+    r = x / 3
+ewma(float src, float alpha) =>
+    float result = na
+    result := alpha * src + (1.0 - alpha) * nz(result[1], src)
+bump(float x) =>
+    float acc = x
+    acc += 1
+highest(float src) =>
+    var float hi = na
+    hi := math.max(nz(src, hi), nz(hi, src))
+
+if bar_index % 2 == 0
+    strategy.entry("A", strategy.long)
+else
+    strategy.close("A", comment=f2(twice(close)) + "," + str.tostring(typed(close)) + "," + f2(plain(close)) + "," + f2(ewma(close, 0.3)) + "," + f2(bump(close)) + "," + f2(highest(high)))
