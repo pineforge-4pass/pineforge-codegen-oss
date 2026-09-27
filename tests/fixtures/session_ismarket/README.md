@@ -207,7 +207,9 @@ of the afternoon window, and TradingView keeps it in the session.
 ## `ksw-flags-*`: the same three charts at 60 and 240 minutes (engine lane K-SESSION-WINDOWS)
 
 Copied unchanged from the engine repository, branch `r5/k-session` at
-`73888644`, `tests/fixtures/session_windows/` (added there in `53b31066`): the
+`73888644`, `tests/fixtures/session_windows/` (added there in `53b31066`; the
+branch was rebased onto XSYM-D as `7b35bf8c`, which holds the same bytes,
+added in `15b5e1c5`): the
 every-flag probe (the `cgim-flags-*` source with its title and header comment
 changed, `strategy.pine` sha256
 `1a78deccefb408d955112da398240e8fc5b146d126c40e514ee24078e4af83d4`) on

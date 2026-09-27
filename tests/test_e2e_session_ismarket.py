@@ -17,7 +17,10 @@ TradingView flags a bar by its own open time, asked of the session day the
 instant belongs to: the extended-hours 09:00 bar, which holds the 09:30 open,
 is pre-market and the 16:00 bar post-market, while a ``:23456`` day mask names
 trading dates, so an overnight session's Sunday-evening open is Monday's.
-Codegen asks the engine's session calendar for the bar's open
+Codegen reads the kernel's in-session fact, which reads a bar at its
+interval's first eligible instant (its open, or the reopen for a bar that
+opens in a session break), and asks the engine's session calendar about the
+bar's open only in a run without a timeframe, which gets no such fact
 (``codegen/session_market.py``); a bar in market is in neither extended
 session, and off it the engine's windows decide: pre-market from 04:00 to the
 session day's first open, post-market from its last close to 20:00, and
@@ -198,8 +201,12 @@ def next_chart_bar(tape: list[tuple[int, dict[str, bool]]], interval_ms: int,
 
     stamps = [ts for ts, _ in tape]
     week_before = shift(last, -7)
-    assert week_before in stamps, "the tape holds no bar one week before its last"
-    return shift(stamps[stamps.index(week_before) + 1], 7)
+    assert week_before in stamps, f"no bar one week before the tape's last ({last})"
+    i = stamps.index(week_before)
+    # That bar ended its day too, and the one after it opened the next.
+    assert tape[i][1]["L"] and tape[i + 1][1].get("F", True), (
+        f"the bar one week before the tape's last ({last}) does not end its session day")
+    return shift(stamps[i + 1], 7)
 
 
 def engine_entry_times(trades_csv: bytes) -> list[int]:
@@ -441,8 +448,10 @@ def one_bar(tmp_path_factory) -> dict[str, tuple[bytes, list[dict]]]:
 def test_one_bar_without_timeframe_reads_the_calendar(one_bar) -> None:
     """The calendar needs no timeframe: the Sunday-evening open of a ":23456"
     session is in market on a one-bar run too (the ES1! tapes' first bar).
-    The kernel presents no session-day facts to such a run (isfirstbar reads
-    false), so a run without a timeframe keeps the calendar's answer."""
+    The kernel presents no session-day facts to such a run, so a run without a
+    timeframe keeps the calendar's answer; its isfirstbar reads false, where
+    TradingView's tapes flag that bar its day's first (a divergence of such a
+    run, pinned)."""
     trades, records = one_bar["current"]
     assert traced(records, "ismarket") == [(SUNDAY_OPEN, True)]
     assert traced(records, "isfirstbar") == [(SUNDAY_OPEN, False)]

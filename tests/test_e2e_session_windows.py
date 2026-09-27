@@ -13,8 +13,11 @@ holds the reopen and is in market.
 
 Replayed under those sessions, on each tape's own bars and, for TSE:7203 and
 CBOT:ZC1!, on the 15-minute tape's bars the engine aggregates to 60 and 240
-minutes (TradingView's bars open where the engine's do), every flag PineForge
-computes is TradingView's, but for two pinned divergences:
+minutes (TradingView's bars open where the engine's do; the engine aggregates
+HKEX:700 on a 09:30-anchored grid, 09:30, 10:30, ..., where TradingView's
+60-minute bars open on the clock hour after the first), every flag PineForge
+computes is TradingView's, but for two pinned divergences, each pinned by the
+bars it misses:
 
 - TradingView keeps TSE:7203's 15-minute bar that opens at 15:30 in the
   session, which the published 15:30 end leaves out: out of market and
@@ -73,8 +76,9 @@ ZC = "1900-0745,0830-1320"
 class Case:
     slug: str
     session: str
-    # flag letter -> bars where PineForge's flag is not TradingView's
-    pinned: dict[str, int] = field(default_factory=dict, hash=False)
+    # flag letter -> {bar open, local time: bars at that time} where PineForge's
+    # flag is not TradingView's
+    pinned: dict[str, dict[str, int]] = field(default_factory=dict, hash=False)
     # the 15-minute tape whose bars the engine aggregates to the chart's, or
     # None: the tape's own bars
     feed: str | None = None
@@ -85,14 +89,20 @@ class Case:
 
 
 CASES = (
-    Case("cgs2-flags-tse7203-15", TSE[0], {"M": 10, "Q": 10, "l": 20}),
+    # The 15:30 bar TradingView keeps in the session; the regular day closes
+    # on the 15:15 bar before it.
+    Case("cgs2-flags-tse7203-15", TSE[0], {"M": {"15:30": 10}, "Q": {"15:30": 10},
+                                           "l": {"15:15": 10, "15:30": 10}}),
     Case("cgs2-flags-tse7203-15", TSE[1]),
     Case("cgs2-flags-hkex700-15", HKEX),
     Case("cgs2-flags-zc1-15", ZC),
     *(Case(f"ksw-flags-tse7203-{tf}", session, feed=feed) for tf in ("60", "240")
       for session in TSE for feed in (None, "cgs2-flags-tse7203-15")),
-    Case("ksw-flags-hkex700-60", HKEX, {"F": 10, "f": 10}),
-    Case("ksw-flags-hkex700-240", HKEX, {"F": 10, "L": 10, "f": 10, "l": 10}),
+    # TradingView's second first bar, and its 240-minute bars that are each
+    # the day's first and last.
+    Case("ksw-flags-hkex700-60", HKEX, {"F": {"10:00": 10}, "f": {"10:00": 10}}),
+    Case("ksw-flags-hkex700-240", HKEX, {"F": {"13:00": 10}, "L": {"09:30": 10},
+                                         "f": {"13:00": 10}, "l": {"09:30": 10}}),
     *(Case(f"ksw-flags-zc1-{tf}", ZC, feed=feed) for tf in ("60", "240")
       for feed in (None, "cgs2-flags-zc1-15")),
 )
@@ -185,13 +195,16 @@ def test_multi_window_charts_are_tradingviews(case: Case, engine: Path, tmp_path
     stamps = [ts for ts, _ in source]
     stamps.append(next_chart_bar(source, int(feed_tf) * MINUTE, timezone))
     traces = _run(engine, tmp_path / "run", stamps, case.session, timezone, feed_tf, tf)
-    misses = {}
+    zone = ZoneInfo(timezone)
+    misses: dict[str, dict[str, int]] = {}
     for letter, name in FLAGS.items():
         got = traces[name][:len(tape)]
         assert [ts for ts, _ in got] == [ts for ts, _ in tape], (case.key, name)
-        missed = sum(g != flags[letter] for (_, g), (_, flags) in zip(got, tape))
-        if missed:
-            misses[letter] = missed
+        for (ts, g), (_, flags) in zip(got, tape):
+            if g != flags[letter]:
+                hhmm = dt.datetime.fromtimestamp(ts / 1000, zone).strftime("%H:%M")
+                misses.setdefault(letter, {}).setdefault(hhmm, 0)
+                misses[letter][hhmm] += 1
     assert misses == case.pinned, case.key
     print(f"session windows {case.key}: every flag == TradingView on {len(tape)} bars"
           + (f" but {case.pinned}" if case.pinned else ""))
