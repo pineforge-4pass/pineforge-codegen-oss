@@ -29,3 +29,22 @@ reads at the integers on either side: `ta.tr(true)[lag]`,
 and `ta.sma(close, 3)[lag]` under a lazy `and` and in a ternary arm.
 TradingView truncates: every fractional read equals the read at the lower
 integer.
+
+## An if without else that runs no arm
+
+| File | sha256 |
+|---|---|
+| `if_tail_na.pine` (slug `pf-oi-if-tail-na2`) | `99b03ab1b8093df6dff07d0b809a7b79abcdf63282e8285a516bea986e3c21c7` |
+| `if_tail_na_tv_trades.csv` (7 trades, exported 2026-09-27) | `53e5b8a8dcd07ee359169a6e118e73b36eb3780aac11df5b48be2973405aa6aa` |
+
+Every exit comment spells, for an if without else (an else-if chain without
+a final else, a switch without default) whose arms do not run: a function's
+float tail, one nested in a taken arm, a switch tail and an else-if tail
+(`NaN` each); `na()` of an int and of a string tail (`na`); a bool tail
+(`F`); `nz` of a function-local if-value (-7); then whether the bar closed
+up, and a global declaration, a global switch and a reassignment whose arm
+runs only on an up bar: the close on an up bar, `NaN` on every other bar
+(the variable does not keep its previous value). The int tail is read
+through `na()` because PineForge passes an int na to a float parameter as
+INT_MIN (an open finding of the lane); a first export spelling it through
+the float formatter (`pf-oi-if-tail-na`) read `NaN` on TradingView.

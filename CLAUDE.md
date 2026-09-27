@@ -637,8 +637,14 @@ you delete or weaken the special case, the test will tell you.
     (`_tail_value_fits`, judged from the statement, not its emitted local):
     a drawing, UDT or collection handle keeps the statement-then-default
     lowering it always compiled to. Any other last statement falls through
-    to the default return, and so does a function ending in an if without
-    else whose arm does not run (0.0, where TradingView returns `na`: open).
+    to the default return. An if without else (an else-if chain without a
+    final else, a switch without default) that runs no arm is `na` -- a
+    numeric or string na, false for a bool -- as a function's last
+    statement, nested in a taken arm, and as the value a global, reassigned
+    or local variable takes, which does not keep its previous bar's value
+    (`visit_stmt._visit_selection_value`;
+    `tests/test_e2e_if_without_else_na.py`, tape
+    `fixtures/open_items_tv/if_tail_na`).
     A tuple reassignment `[p, q] := f()` is a TradingView syntax error
     (CE10156) and is refused. `tests/test_e2e_function_tail_value.py` replays
     seven TradingView tapes (`fixtures/w2_trio_tv/tail_*`) and compiles the

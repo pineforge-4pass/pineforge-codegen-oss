@@ -2248,7 +2248,7 @@ class TopLevelEmitter:
                     else:
                         default_ret = self._default_for_type(ret_type)
                     lines.append(f"        {ret_type} _func_ret = {default_ret};")
-                    self._visit_if_switch_expr(
+                    self._visit_selection_value(
                         s,
                         "_func_ret",
                         lines,
@@ -2258,6 +2258,7 @@ class TopLevelEmitter:
                             if rhs_return_cpp_type is not None
                             else self._int_slot_cpp_type(None, ret_type)
                         ),
+                        slot_cpp_type=None if fi.returns_tuple else ret_type,
                     )
                     lines.append("        return _func_ret;")
                     emitted_return = True

@@ -838,12 +838,16 @@ class StmtVisitor:
                 lines.append(f"{pad}{cpp_type} {safe} = {default};")
                 remember_local_type(cpp_type)
             indent = len(pad) // 4
-            self._visit_if_switch_expr(
+            self._visit_selection_value(
                 node.value,
                 safe,
                 lines,
                 indent,
                 target_cpp_type=selection_cpp_type,
+                slot_cpp_type=(
+                    cpp_type if cpp_type is not None
+                    else self._infer_type(Identifier(name=node.name))
+                ),
             )
             return
 
@@ -1034,12 +1038,13 @@ class StmtVisitor:
             if selection_cpp_type is None:
                 selection_cpp_type = self._int_slot_cpp_type(target_name)
             indent = len(pad) // 4
-            self._visit_if_switch_expr(
+            self._visit_selection_value(
                 node.value,
                 safe,
                 lines,
                 indent,
                 target_cpp_type=selection_cpp_type,
+                slot_cpp_type=self._infer_type(node.target),
             )
             return
 
@@ -1894,11 +1899,11 @@ class StmtVisitor:
             return
         target, target_cpp_type = value_target
         value_cpp = self._block_value_cpp_type(body, target_cpp_type)
-        saved = getattr(self, "_loop_value_na", None)
+        saved = getattr(self, "_unmatched_value_na", None)
         # TradingView: an if without else (a switch without default) is na
         # when no arm runs, so a loop whose body ends in one is na after an
         # iteration that ran none (lab tv probe pf-w2-f04_if_tails).
-        self._loop_value_na = (
+        self._unmatched_value_na = (
             (target, self._na_value_for_type(value_cpp))
             if value_cpp is not None else None
         )
@@ -1907,7 +1912,7 @@ class StmtVisitor:
                 body, target, lines, indent, target_cpp_type=target_cpp_type,
             )
         finally:
-            self._loop_value_na = saved
+            self._unmatched_value_na = saved
 
     def _emit_loop_with_assign(
         self,
@@ -1941,13 +1946,47 @@ class StmtVisitor:
             lines.append(f"{pad}{target} = {self._na_value_for_type(value_cpp)};")
         visit(node, lines, indent, value_target=(target, target_cpp_type))
 
-    def _loop_value_unmatched_na(self, target: str) -> str | None:
-        """The na a loop's value ``target`` takes when its last if/switch runs
-        no arm, or None outside a loop's value position."""
-        active = getattr(self, "_loop_value_na", None)
+    def _unmatched_arm_na(self, target: str) -> str | None:
+        """The na a value ``target`` takes when an if/switch assigning it runs
+        no arm (a loop's value, ``_visit_selection_value``), or None outside
+        such a value position."""
+        active = getattr(self, "_unmatched_value_na", None)
         if active is not None and active[0] == target:
             return active[1]
         return None
+
+    _UNMATCHED_NA_SLOTS = ("double", "int", "int64_t", "std::string", "bool")
+
+    def _visit_selection_value(
+        self,
+        node,
+        target: str,
+        lines: list[str],
+        indent: int,
+        target_cpp_type: str | None = None,
+        slot_cpp_type: str | None = None,
+    ) -> None:
+        """An if/switch whose value a declaration, a reassignment or a
+        function's last statement takes.
+
+        TradingView: an if without else, an else-if chain without a final
+        else or a switch without default is na when no arm runs -- a numeric
+        or string na, false for a bool -- as a function's last statement,
+        nested in a taken arm, and as the value a global, reassigned or local
+        variable takes, which does not keep its previous bar's value (lab tv
+        probe pf-oi-if-tail-na). ``slot_cpp_type`` is the target's C++ type;
+        a handle or collection slot keeps its existing lowering.
+        """
+        saved = getattr(self, "_unmatched_value_na", None)
+        if slot_cpp_type in self._UNMATCHED_NA_SLOTS:
+            self._unmatched_value_na = (
+                target, self._na_value_for_type(slot_cpp_type))
+        try:
+            self._visit_if_switch_expr(
+                node, target, lines, indent, target_cpp_type=target_cpp_type,
+            )
+        finally:
+            self._unmatched_value_na = saved
 
     def _na_value_for_type(self, cpp_type: str | None) -> str:
         """``na`` of a value slot: a numeric or string na, else its default."""
@@ -2237,9 +2276,9 @@ class StmtVisitor:
                 # non-var globals and reassignments: retaining the prior bar's
                 # map/matrix ID would turn the expression into implicit state.
                 emit_implicit_na_fallback()
-            elif self._loop_value_unmatched_na(target) is not None:
+            elif self._unmatched_arm_na(target) is not None:
                 lines.append(f"{pad}else {{")
-                lines.append(f"{pad}    {target} = {self._loop_value_unmatched_na(target)};")
+                lines.append(f"{pad}    {target} = {self._unmatched_arm_na(target)};")
                 lines.append(f"{pad}}}")
         elif isinstance(node, SwitchStmt):
             if node.expr:
@@ -2299,8 +2338,8 @@ class StmtVisitor:
                     lines.append(
                         f"{pad}{target} = {target_cpp_type}{{}};"
                     )
-            elif self._loop_value_unmatched_na(target) is not None:
-                na_value = self._loop_value_unmatched_na(target)
+            elif self._unmatched_arm_na(target) is not None:
+                na_value = self._unmatched_arm_na(target)
                 if node.cases:
                     lines.append(f"{pad}else {{")
                     lines.append(f"{pad}    {target} = {na_value};")
