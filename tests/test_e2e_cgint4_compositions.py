@@ -47,6 +47,12 @@ missed:
   the read now runs and equals its spelling with ``close``; a per-run global
   (``timeframe.*``) still keeps the chart's terms and the refusal
   (``tests/test_e2e_lane_compositions.py``).
+* An imported library in the pipeline: XSYM-C 046687a inlines a script's
+  libraries before the support check, main runs the passes in
+  ``_generate``'s session-clone loop, and f3e1816 binds ``nz`` keywords after
+  them. Inlined on every pass, a library function reading a flag at an
+  offset gets a clone per call site (``_session_call_*``), and a keyword
+  ``nz`` in library code is its positional twin byte for byte.
 * CG-OPEN-ITEMS d504053 parenthesizes a lambda history offset; CG-SESSION-2's
   flag histories and CG-W9-FN's function histories index through
   ``pine_index_int_cast``. A fractional runtime offset on every emitter
@@ -407,6 +413,36 @@ def test_main_refused_the_flags_history_beside_the_global(tmp_path: Path) -> Non
     assert not result["ok"]
     assert any("session.ismarket[...] cannot be read here" in d["message"]
                for d in result["diagnostics"])
+
+
+# ---------------------------------------------------------------------------
+# An imported library through _generate's passes
+# (XSYM-C 046687a x CG-SESSION-2 x CG-OPEN-ITEMS f3e1816)
+# ---------------------------------------------------------------------------
+
+LIBRARY = '''//@version=6
+// @description CGINT4 composition probe
+library("Probe")
+export flagHist() => session.ismarket[1] ? 1.0 : 0.0
+export keep(float x) => nz(source = x, replacement = -1.0)
+'''
+LIBRARY_SCRIPT = HEAD + '''import cgint4/Probe/1 as P
+a = P.flagHist()
+b = P.flagHist()
+c = P.keep(close[1])
+if a + b + c > 0
+    strategy.entry("L", strategy.long)
+'''
+
+
+def test_an_inlined_library_takes_every_pass() -> None:
+    cpp = transpile(LIBRARY_SCRIPT, libraries={"cgint4/Probe/1": LIBRARY})
+    assert {"Probe_v1__flagHist_cs0", "Probe_v1__flagHist_cs1"} <= set(
+        re.findall(r"\b(Probe_v1__flagHist_cs\d+)\(", cpp))
+    assert len(set(re.findall(r"_session_call_\d+", cpp))) == 2
+    positional = LIBRARY.replace("nz(source = x, replacement = -1.0)", "nz(x, -1.0)")
+    assert cpp == transpile(LIBRARY_SCRIPT, libraries={"cgint4/Probe/1": positional})
+    compile_env.compile_cpp(cpp, label="cgint4-library-passes")
 
 
 # ---------------------------------------------------------------------------

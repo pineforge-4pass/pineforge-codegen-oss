@@ -30,7 +30,9 @@ FIXTURES = Path(__file__).parent / "fixtures" / "xsym_lib_tv"
     's = close > open ? na : "DN"',
     's = close > open ? "UP" : close < open ? "DN" : na',
     'f() => close > open ? "UP" : na\ns = f()',
-    '[a, s] = [close > open ? "UP" : na, "x"]',
+    # A tuple literal is a value only in an arm (TradingView's CE10156 for
+    # ``[a, s] = [...]``, refused since CG-OPEN-ITEMS a0516a2).
+    '[a, s] = if true\n    [close > open ? "UP" : na, "x"]\nelse\n    ["x", "x"]',
 ])
 def test_string_ternary_na_arm_is_the_string_na(body):
     cpp = transpile('//@version=6\nstrategy("T")\n' + body
