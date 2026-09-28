@@ -21,12 +21,14 @@ timezone, Asia/Taipei (UTC+8).
 |---|---|---|---|
 | `cgint6_compositions` | `9060299ffa5365ebe25c9dc7fa344a9be30cc3d0195a023fb6344705bdafd55e` | `d6df61e99920940e52a5432c46ca5f82ed2c83f0c766450a04a8a248590faf8b` | 312 (entries from 12:00 UTC) |
 | `cgint6_const_transp` | `aad36219d8e356a42a59e71f4a461693989711034e94a21b372a1f4f7b814b8c` | `a8762c7827ba7cdfc81084b8e218db31578598d3d47d058581eb120449ba685c` | 336 |
+| `cgint6_var_source` | `8bbd7a20cde7cde72931edca509e2ffc8a753c27e608cda30e7dd39ac15fc149` | `b6979f2cffd498d25537e545cffcb74a395ed050639fa6dfaa28a89fbf238d65` | 312 (entries from 12:00 UTC) |
 
 Each exit Signal joins these fields with `|`, in this order:
 
 - `cgint6_compositions`: `ca`, `cb`, `cc`, `a0`, `a1`, `w`, `p`, `hh` (4
   decimals), `cnt`, `gv`
 - `cgint6_const_transp`: `d0` .. `d16`
+- `cgint6_var_source`: `src`, `s2`, `d`, `y`, `x` (4 decimals), `z`, `e` (4 decimals)
 
 What each tape shows:
 
@@ -51,3 +53,11 @@ What each tape shows:
   (`d13`, `d16`) and `color.rgb`'s constant (`d14`) go through the alpha byte
   nearest 255 * (100 - t) / 100 and read 11, as the engine's `new_color` does
   for every transparency the codegen hands it as a double.
+- `cgint6_var_source` re-checks CG-SILENT-2 item 5e on main: a `var` holding
+  `input.source(close)` (and one holding `input.source(hl2)`) keeps the first
+  bar's value, on the chart (`src`, `s2`, `d = src - src[1]` is 0, `y =
+  src[2]`) and on the requested bars (`x = ta.sma(src, 3)`, `z = src[1]` at 60
+  minutes read the first requested bar's close); `e = ta.sma(src, 5) - s2`
+  reads the same constants (-1.155). PineForge reads every field but `e`,
+  which it reads na: `precalculate()` computes the chart site over the `var`
+  before any bar has run.

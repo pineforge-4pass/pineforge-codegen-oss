@@ -46,6 +46,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "cgint6_tv"
 NAME = "cgint6_compositions"
 FIELDS = ("ca", "cb", "cc", "a0", "a1", "w", "p", "hh", "cnt", "gv")
 CONST = "cgint6_const_transp"
+VAR_SOURCE = "cgint6_var_source"
 # The constant color.new transparencies of cgint6_const_transp: TradingView
 # truncates them; the engine reads each through the alpha byte.
 TRUNCATED = {0: "11", 1: "11", 2: "11", 3: "11", 4: "11", 5: "11",
@@ -70,7 +71,8 @@ def replays(tmp_path_factory) -> dict[str, dict[int, str]]:
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("cgint6")
     return replay(engine, base, {NAME: Build(source(NAME, FIXTURES)),
-                                 CONST: Build(source(CONST, FIXTURES))})
+                                 CONST: Build(source(CONST, FIXTURES)),
+                                 VAR_SOURCE: Build(source(VAR_SOURCE, FIXTURES))})
 
 
 def test_the_composition_tape_replays(replays):
@@ -95,6 +97,23 @@ def test_a_constant_color_new_transparency_is_truncated_on_tradingview(replays):
     differ = _field_mismatches(tape, replays[CONST])
     assert {i: {pf for _tv, pf in v} for i, v in differ.items()} == {
         i: {pf} for i, pf in TRUNCATED.items()}
+
+
+def test_a_var_source_input_keeps_its_first_bar(replays):
+    """CG-SILENT-2 item 5e, re-checked on main: ``var src =
+    input.source(close)`` read with history emitted raw Pine (``input``) that
+    did not compile until CGINT5a ran a history-read ``var``'s initializer at
+    its declaration. It holds the first bar's value on the chart and on the
+    requested bars, as TradingView's tape shows. Pinned: ``ta.sma(src, 5)`` on
+    the chart reads na, where TradingView reads the var's value --
+    ``_is_precalc_replayed_source_var`` takes the ``var`` for a replayed
+    source input, so ``precalculate()`` computes the site over the member
+    before any bar has run (main 76a5b26 reads the same)."""
+    tape = tape_exits(VAR_SOURCE, FIXTURES)
+    assert len(tape) == 312
+    assert set(tape.values()) == {"1821.47|1822.625|0|1821.47|1831.2|1831.2|-1.155"}
+    differ = _field_mismatches(tape, replays[VAR_SOURCE])
+    assert differ == {6: {("-1.155", "NaN")}}
 
 
 @pytest.mark.parametrize("keyword, positional, conversion", [

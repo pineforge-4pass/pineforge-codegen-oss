@@ -1,0 +1,18 @@
+//@version=6
+// CGINT6 re-check of CG-SILENT-2 item 5e: a var holding input.source(...)
+// read with history, on the chart and in a request.security payload. Each
+// close's comment spells the reads (entries from 12:00 UTC on).
+strategy("CGINT6 var input.source", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+var src = input.source(close, "Source")
+var float s2 = input.source(hl2, "Source 2")
+d = src - src[1]
+y = src[2]
+x = request.security(syminfo.tickerid, "60", ta.sma(src, 3))
+z = request.security(syminfo.tickerid, "60", src[1])
+e = ta.sma(src, 5) - s2
+live = time >= timestamp("UTC", 2025, 4, 1, 12, 0)
+m = minute(time, "UTC")
+if live and (m == 0 or m == 30)
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = str.tostring(src) + "|" + str.tostring(s2) + "|" + str.tostring(d) + "|" + str.tostring(y) + "|" + str.tostring(x, "#.####") + "|" + str.tostring(z) + "|" + str.tostring(e, "#.####"))
