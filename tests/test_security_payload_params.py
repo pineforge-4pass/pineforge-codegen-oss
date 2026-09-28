@@ -12,8 +12,9 @@ length. ``security_contexts`` resolves each such parameter on every call
 path, copies the requests once per distinct value and puts the value in the
 parameter's place. What the analyzer's call-site clones already bind exactly
 keeps its lowering, and so does a value the requested bars do not recompute
-(a user call, an ``input.source``, a ``var`` global, a name the helper
-shadows), with a warning where it reads ``na``.
+(a user call, a ``var`` global, a name the helper shadows), with a warning
+where it reads ``na``. An ``input.source`` value is put in
+(``tests/test_security_input_source.py``).
 
 TradingView's tapes of ``xa_payload_param`` and ``xa_payload_bare``
 (``fixtures/xsym_tv``, BINANCE:ETHUSDT.P 15) spell every call's value on
@@ -107,9 +108,6 @@ def test_bare_reads_used_to_be_unknown_variables(payload, lowered):
     'x0 = ta.sma(close, 3)\n'
     'g(_e) =>\n    x0 = 1.0\n    request.security(syminfo.tickerid, "D", _e[1]) + x0\n'
     'x = g(x0)\n',
-    # input.source, read on the chart's bar by every earlier build.
-    'src = input.source(close, "Src")\n'
-    'g(_e) => request.security(syminfo.tickerid, "D", _e[1])\nx = g(src)\n',
     # History of a literal, na, or another history read does not compile.
     'g(_e) => request.security(syminfo.tickerid, "D", _e[1])\nx = g(1.5)\n',
     'g(_e) => request.security(syminfo.tickerid, "D", _e[1])\nx = g(na)\n',

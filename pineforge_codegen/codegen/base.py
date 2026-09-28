@@ -365,6 +365,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # it reads is its override-aware getter, since the evaluator can run
         # before on_bar initializes the input members.
         self._security_index_inputs: bool = False
+        # A source input's selected series read at a history offset in a
+        # payload (``_security_bar_history_field``): the payload-method
+        # pre-pass below reads it before generate() starts the run's own.
+        self._security_source_hist_fields: dict[tuple[str, str], tuple] = {}
         # Set when a chart expression calls ``_pf_session_market_``; its type
         # and member are emitted once the whole TU is lowered.
         self._uses_session_market: bool = False

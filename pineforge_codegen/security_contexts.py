@@ -59,10 +59,10 @@ its call-site clones for differing timeframes built every clone from the
 first call's length. Only a value the request builder lowers on the
 requested bars in the read's place is put in (``_Lowered``); any other keeps
 the earlier lowering, never a refusal: a reassigned or ``var`` name, a loop
-variable, a name the helper declares, a user call, an ``input.source``, a
-global declared after the helper (read on the chart's terms there), a
-history object other than an OHLCV series, a ``ta.*`` call or an inline
-operator expression, a global under a builtin rendered on the chart's terms.
+variable, a name the helper declares, a user call, a global declared after
+the helper (read on the chart's terms there), a history object other than
+an OHLCV series, a ``ta.*`` call, an ``input.source`` or an inline operator
+expression, a global under a builtin rendered on the chart's terms.
 
 A request of another symbol that reads that symbol's pinned feed
 (``external_requests``: the support checker's ``feed`` lowering) is keyed by
@@ -1101,8 +1101,8 @@ class _Lowered:
         return self.before[node.name]
 
     def _call(self, node) -> str | None:
-        """``ta``, ``math``, ``input`` or ``value`` for a call the builder
-        lowers, else None."""
+        """``ta``, ``math``, ``input``, ``source`` or ``value`` for a call the
+        builder lowers, else None."""
         callee = node.callee
         if (isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier)
                 and callee.object.name not in self.before
@@ -1114,7 +1114,17 @@ class _Lowered:
                 return "math"
             if space == "input" and member in _CONSTANT_INPUTS:
                 return "input"
+            if space == "input" and member == "source":
+                # The series it selects, read on the requested bars.
+                return "source"
             return None
+        if (isinstance(callee, Identifier) and callee.name == "input"
+                and callee.name not in self.before and callee.name not in self.prog.funcs
+                and node.args and isinstance(node.args[0], Identifier)
+                and node.args[0].name in _VALUE_SERIES
+                and id(node.args[0]) not in self.prog.refs):
+            # ``input(close)``, the source overload.
+            return "source"
         if (isinstance(callee, Identifier) and callee.name in _VALUE_CALLS
                 and callee.name not in self.before and callee.name not in self.prog.funcs):
             return "value"
@@ -1142,7 +1152,7 @@ class _Lowered:
             # render on the chart's terms: no global below them.
             kind = self._call(node)
             inner_ok = globals_ok and kind != "value"
-            return kind == "input" or (kind is not None and all(
+            return kind in ("input", "source") or (kind is not None and all(
                 self.value(a, seen, inner_ok) for a in (*node.args, *node.kwargs.values())))
         if isinstance(node, BinOp):
             return self.value(node.left, seen, globals_ok) and self.value(
@@ -1159,9 +1169,10 @@ class _Lowered:
 
     def history(self, node, seen: frozenset = frozenset(), globals_ok: bool = True) -> bool:
         """``node`` is a history object: a series with requested-bar history,
-        a ``ta.*`` call (inline, or a global's value), an inline operator
-        expression. Not a literal, ``na``, another history read, ``hl2`` and
-        its family, or a global holding an operator expression."""
+        a ``ta.*`` call (inline, or a global's value), an ``input.source``
+        (the series it selects), an inline operator expression. Not a
+        literal, ``na``, another history read, ``hl2`` and its family, or a
+        global holding an operator expression."""
         if isinstance(node, Identifier):
             if node.name in self.prog.program_names:
                 return globals_ok and self._judged(
@@ -1170,7 +1181,8 @@ class _Lowered:
                     and self.history(declared, inner, globals_ok))
             return node.name in _HISTORY_SERIES
         if isinstance(node, FuncCall):
-            return self._call(node) == "ta" and self.value(node, seen, globals_ok)
+            kind = self._call(node)
+            return kind == "source" or (kind == "ta" and self.value(node, seen, globals_ok))
         if isinstance(node, (BinOp, UnaryOp, Ternary)):
             return self.value(node, seen, globals_ok)
         return False

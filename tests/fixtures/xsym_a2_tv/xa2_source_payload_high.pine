@@ -1,0 +1,26 @@
+//@version=6
+// request.security payloads reading input.source values on the requested
+// bars: the value, its history, its history through a helper parameter with
+// an input length, a TA of it, a multi-statement helper's TA of it, and nz of
+// its history. Each exit comment spells what every request read on the bar
+// the close was sent.
+strategy("PF xa2 source payload high", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 0.01)
+src = input.source(high, "Src")
+hs = input.source(ohlc4, "HL Src")
+n = input.int(2, "N")
+logeq(_s, _l) => ta.change(_s, _l) / _s[_l]
+g(_s) =>
+    r = ta.rsi(_s, 5)
+    r - 50
+a = request.security(syminfo.tickerid, "60", src)
+b = request.security(syminfo.tickerid, "60", src[1])
+c = request.security(syminfo.tickerid, "240", logeq(src, n))
+d = request.security(syminfo.tickerid, "60", ta.sma(hs, 3))
+e = request.security(syminfo.tickerid, "60", g(src))
+f = request.security(syminfo.tickerid, "60", nz(hs[2]) - src)
+s(x) => na(x) ? "na" : str.tostring(x, "#.####")
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(a) + "|" + s(b) + "|" + s(c) + "|" + s(d) + "|" + s(e) + "|" + s(f))

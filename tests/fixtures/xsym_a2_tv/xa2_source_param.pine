@@ -1,0 +1,19 @@
+//@version=6
+// request.security payloads reading a parameter of the helper holding the
+// request, bound to an input.source value: its history, a TA of it and its
+// value on the requested bars. Each exit comment spells what every call read
+// on the bar the close was sent.
+strategy("PF xa2 source param", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 0.01)
+src = input.source(close, "Src")
+g(_e) => request.security(syminfo.tickerid, "60", _e[1])
+h(_v) => request.security(syminfo.tickerid, "240", ta.sma(_v, 3))
+k(_v) => request.security(syminfo.tickerid, "60", _v - open)
+a = g(src)
+b = h(src)
+c = k(src)
+s(x) => na(x) ? "na" : str.tostring(x, "#.####")
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(a) + "|" + s(b) + "|" + s(c))
