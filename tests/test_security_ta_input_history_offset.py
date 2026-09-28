@@ -370,7 +370,10 @@ plot(x)
     compile_cpp(cpp, label="security_keyword_udf_input_history_offset")
 
 
-def test_containing_udf_mixed_callsites_fail_closed():
+def test_containing_udf_mixed_callsites_get_a_request_each():
+    # Each call's offset reaches a request of its own (security_contexts),
+    # the input declared after the helper too: it was refused, as the
+    # analyzer's one binding of the parameter cannot hold both.
     src = """//@version=6
 strategy("mixed containing helper input offset")
 requested(int idx) =>
@@ -380,11 +383,11 @@ x = requested(k)
 y = requested(1)
 plot(x + y)
 """
-    with pytest.raises(
-        CompileError,
-        match=r"TA history index must be a literal integer",
-    ):
-        transpile(src)
+    cpp = transpile(src)
+    assert 'int _hidx = (int)(get_input_int("Offset", 2));' in _eval_body(cpp)
+    second = cpp[cpp.index("void _eval_security_1("):cpp.index("void evaluate_security(")]
+    assert "_req_sec_1 = _sec1__ta_ema_2_hist[0];" in second
+    compile_cpp(cpp, label="security_mixed_udf_input_history_offset")
 
 
 @pytest.mark.parametrize(

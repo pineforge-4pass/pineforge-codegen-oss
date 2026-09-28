@@ -1,0 +1,26 @@
+//@version=6
+// request.security payloads reading the history of the derived price series
+// and globals declared after the helpers that read them, and the chart's own
+// hlcc4 history. Each exit comment spells what every read gave on the bar the
+// close was sent.
+strategy("PF xa2 price later", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 0.01)
+g(_e) => request.security(syminfo.tickerid, "60", _e[1])
+h(_v, n) => request.security(syminfo.tickerid, "240", ta.sma(_v, n))
+u(_x) => ta.sma(_x, 3)
+a = request.security(syminfo.tickerid, "60", hl2[1])
+b = request.security(syminfo.tickerid, "240", ohlc4[2] - hlc3[1] + hlcc4[1] - hlcc4)
+c = g(hl2)
+ma = ta.sma(close, 3)
+d = g(ma)
+s5 = ta.sma(close, 5)
+e = request.security(syminfo.tickerid, "60", u(s5))
+len = input.int(4, "Len")
+body = close - open
+f = h(body, len)
+k = hlcc4[1]
+s(x) => na(x) ? "na" : str.tostring(x, "#.####")
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(a) + "|" + s(b) + "|" + s(c) + "|" + s(d) + "|" + s(e) + "|" + s(f) + "|" + s(k))

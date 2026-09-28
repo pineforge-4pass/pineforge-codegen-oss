@@ -14,7 +14,9 @@ parameter's place. What the analyzer's call-site clones already bind exactly
 keeps its lowering, and so does a value the requested bars do not recompute
 (a user call, a ``var`` global, a name the helper shadows), with a warning
 where it reads ``na``. An ``input.source`` value is put in
-(``tests/test_security_input_source.py``).
+(``tests/test_security_input_source.py``), and so are ``hl2`` and its family
+and a global declared after the helper
+(``tests/test_security_price_history_and_later_globals.py``).
 
 TradingView's tapes of ``xa_payload_param`` and ``xa_payload_bare``
 (``fixtures/xsym_tv``, BINANCE:ETHUSDT.P 15) spell every call's value on
@@ -118,11 +120,6 @@ def test_bare_reads_used_to_be_unknown_variables(payload, lowered):
     # An overloaded helper on the path.
     'g(float _e) => request.security(syminfo.tickerid, "D", _e[1])\n'
     'h(float x) => g(x)\nh(float x, float y) => x * y\nx = h(close)\n',
-    # A global declared after the helper reads the chart's value there.
-    'g(_e) => request.security(syminfo.tickerid, "D", _e[1])\n'
-    'ma = ta.sma(close, 20)\nx = g(ma)\n',
-    # hl2 and its family have no requested-bar history.
-    'g(_e) => request.security(syminfo.tickerid, "D", _e[1])\nx = g(hl2)\n',
     # A global holding an operator expression or a math call.
     'mid = (high + low) / 2\n'
     'g(_e) => request.security(syminfo.tickerid, "D", _e[1])\nx = g(mid)\n',
@@ -243,7 +240,7 @@ def test_warning_names_a_global_of_the_parameters_name(declare):
 def test_helper_copies_warn_once_under_the_helpers_name():
     result = transpile_full(PRELUDE + (
         'g(tf, _e) => request.security(syminfo.tickerid, tf, _e[1])\n'
-        'h(tf, _e) => g(tf, _e)\nx = h("60", hl2) + h("D", hl2)\n') + TRADE)
+        'h(tf, _e) => g(tf, _e)\nx = h("60", close[1]) + h("D", close[1])\n') + TRADE)
     warned = [d.message for d in result["diagnostics"] if d.message.endswith(UNBOUND)]
     assert len(warned) == 1 and "parameter of 'g'" in warned[0]
 

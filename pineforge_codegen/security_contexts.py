@@ -61,8 +61,9 @@ requested bars in the read's place is put in (``_Lowered``); any other keeps
 the earlier lowering, never a refusal: a reassigned or ``var`` name, a loop
 variable, a name the helper declares, a user call, a global declared after
 the helper (read on the chart's terms there), a history object other than
-an OHLCV series, a ``ta.*`` call, an ``input.source`` or an inline operator
-expression, a global under a builtin rendered on the chart's terms.
+a bar or price series, a ``ta.*`` call, an ``input.source`` or an inline
+operator expression, a global under a builtin rendered on the chart's
+terms.
 
 A request of another symbol that reads that symbol's pinned feed
 (``external_requests``: the support checker's ``feed`` lowering) is keyed by
@@ -112,6 +113,10 @@ PASS_WARNINGS_ANNOTATION = "pf_pass_warnings"
 _LOWERING_ANNOTATION = "pf_request_lowering"
 _FEED_LOWERING = "feed"
 _FEED_WARNING_ANNOTATION = "pf_request_feed_warning"
+# On a global's read a payload parameter's value put in a helper's copy:
+# the global may be declared after the helper, where the analyzer binds
+# no name, and the codegen reads it as the global all the same.
+GLOBAL_ANNOTATION = "pf_security_global"
 _REQUEST_FUNCS = ("security", "security_lower_tf")
 # Instances (a helper under one set of parameter values) the pass may build
 # before it refuses the script: diamond-shaped helper graphs multiply paths.
@@ -553,6 +558,11 @@ class ScriptIndex:
         memo: dict = {}
         fresh = copy.deepcopy(expr, memo)
         replace_nodes(fresh, {id(memo[key]): value for key, value in swaps.items()})
+        for node in _walk(expr):
+            if (isinstance(node, Identifier)
+                    and self.refs.get(id(node), ("",))[0] == "global"):
+                read = memo[id(node)]
+                read.annotations = {**(read.annotations or {}), GLOBAL_ANNOTATION: True}
         if sum(1 for _ in _walk(fresh)) > _MAX_PAYLOAD_NODES:
             raise _Unresolvable("its value is too large")
         # An untitled input is keyed by the declaration holding it, which its
@@ -1060,12 +1070,12 @@ def _payload_positions(prog: ScriptIndex, request: FuncCall) -> tuple[set[int], 
     return objects, lengths, rendered
 
 
-# The chart's own series a payload lowers on the requested bars: all of them
-# as a value, the ones with requested-bar history as a history object.
+# The chart's own series a payload lowers on the requested bars, as a value
+# and as a history object.
 _VALUE_SERIES = frozenset({
     "open", "high", "low", "close", "volume", "hl2", "hlc3", "ohlc4", "hlcc4",
 })
-_HISTORY_SERIES = frozenset({"open", "high", "low", "close", "volume"})
+_HISTORY_SERIES = _VALUE_SERIES
 _VALUE_CALLS = frozenset({"nz", "int", "float"})
 _CONSTANT_INPUTS = frozenset({"int", "float", "bool", "string"})
 
@@ -1073,9 +1083,14 @@ _CONSTANT_INPUTS = frozenset({"int", "float", "bool", "string"})
 class _Lowered:
     """Whether the request builder lowers a payload parameter's value on the
     requested bars in the read's place, never on the chart's terms or into
-    C++ that does not compile. It reads a global only when the global is
-    declared before the helper (a later one reads the chart's value), not
-    reassigned or ``var``, and its value is itself lowered."""
+    C++ that does not compile. It reads a global only when the global is not
+    reassigned or ``var`` and its value is itself lowered. A call's argument
+    names globals declared before the call, which may follow the helper: the
+    copy's read carries ``GLOBAL_ANNOTATION`` (``resolve_payload``), which
+    the builder takes for the binding the analyzer cannot give it there. The
+    analyzer types such a name a float, so a global declared after the
+    helper is put in only when its value is a number or a bool (``_numeric``):
+    a later string input typed the request a double, which did not compile."""
 
     def __init__(self, prog: ScriptIndex, func: str) -> None:
         from .analyzer.tables import TA_TUPLE_RETURNS
@@ -1085,27 +1100,65 @@ class _Lowered:
         # (rule, global name, globals_ok) -> verdict: a global's value is
         # judged once however many reads share it.
         self.memo: dict = {}
-        self.before: dict = {}
-        for stmt in prog.program.body[:prog.program.body.index(prog.funcs[func])]:
-            if isinstance(stmt, VarDecl) and stmt.name:
-                self.before.setdefault(stmt.name, stmt.value)
-            elif isinstance(stmt, TupleAssign):
-                for name in stmt.names:
-                    self.before.setdefault(name, None)
+        self.declared: dict = {}
+        # The globals declared after the helper.
+        self.later: set[str] = set()
+        helper = prog.program.body.index(prog.funcs[func])
+        for index, stmt in enumerate(prog.program.body):
+            names = ([stmt.name] if isinstance(stmt, VarDecl) and stmt.name
+                     else list(stmt.names) if isinstance(stmt, TupleAssign) else [])
+            for name in names:
+                if name in self.declared:
+                    continue
+                self.declared[name] = stmt.value if isinstance(stmt, VarDecl) else None
+                if index > helper:
+                    self.later.add(name)
 
     def _global(self, node, seen):
-        """A stable global's value declared before the helper, else None."""
-        if (node.name in seen or self.before.get(node.name) is None
+        """A stable global's declared value, else None."""
+        if (node.name in seen or self.declared.get(node.name) is None
                 or ("global", node.name) in self.prog.unstable):
             return None
-        return self.before[node.name]
+        if node.name in self.later and not self._numeric(self.declared[node.name], seen):
+            return None
+        return self.declared[node.name]
+
+    def _numeric(self, node, seen: frozenset) -> bool:
+        """``node`` is a number or a bool: literals, bar series, ``ta.*`` and
+        ``math.*`` calls, numeric inputs and ``input.source``, and operators
+        and ternaries over them, through stable globals."""
+        if isinstance(node, (NumberLiteral, BoolLiteral, NaLiteral)):
+            return True
+        if isinstance(node, Identifier):
+            if node.name in self.prog.program_names:
+                value = self.declared.get(node.name)
+                return (node.name not in seen and value is not None
+                        and ("global", node.name) not in self.prog.unstable
+                        and self._numeric(value, seen | {node.name}))
+            return node.name in _VALUE_SERIES
+        if isinstance(node, FuncCall):
+            kind = self._call(node)
+            if kind == "input":
+                return node.callee.member in ("int", "float", "bool")
+            if kind == "value":
+                return bool(node.args) and all(self._numeric(a, seen) for a in node.args)
+            return kind in ("ta", "math", "source")
+        if isinstance(node, BinOp):
+            return self._numeric(node.left, seen) and self._numeric(node.right, seen)
+        if isinstance(node, UnaryOp):
+            return self._numeric(node.operand, seen)
+        if isinstance(node, Ternary):
+            return self._numeric(node.true_val, seen) and self._numeric(node.false_val, seen)
+        if isinstance(node, Subscript):
+            return self._numeric(node.object, seen)
+        return False
 
     def _call(self, node) -> str | None:
         """``ta``, ``math``, ``input``, ``source`` or ``value`` for a call the
         builder lowers, else None."""
         callee = node.callee
         if (isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier)
-                and callee.object.name not in self.before
+                and callee.object.name not in self.declared
                 and id(callee.object) not in self.prog.refs):
             space, member = callee.object.name, callee.member
             if space == "ta" and member not in self.tuple_ta:
@@ -1119,14 +1172,14 @@ class _Lowered:
                 return "source"
             return None
         if (isinstance(callee, Identifier) and callee.name == "input"
-                and callee.name not in self.before and callee.name not in self.prog.funcs
+                and callee.name not in self.declared and callee.name not in self.prog.funcs
                 and node.args and isinstance(node.args[0], Identifier)
                 and node.args[0].name in _VALUE_SERIES
                 and id(node.args[0]) not in self.prog.refs):
             # ``input(close)``, the source overload.
             return "source"
         if (isinstance(callee, Identifier) and callee.name in _VALUE_CALLS
-                and callee.name not in self.before and callee.name not in self.prog.funcs):
+                and callee.name not in self.declared and callee.name not in self.prog.funcs):
             return "value"
         return None
 
@@ -1171,8 +1224,8 @@ class _Lowered:
         """``node`` is a history object: a series with requested-bar history,
         a ``ta.*`` call (inline, or a global's value), an ``input.source``
         (the series it selects), an inline operator expression. Not a
-        literal, ``na``, another history read, ``hl2`` and its family, or a
-        global holding an operator expression."""
+        literal, ``na``, another history read, or a global holding an
+        operator expression."""
         if isinstance(node, Identifier):
             if node.name in self.prog.program_names:
                 return globals_ok and self._judged(

@@ -1,0 +1,23 @@
+//@version=6
+// request.security payloads whose TA reads a global's TA declared after the
+// helpers, through a multi-statement helper with an if-branch: the global's
+// SMA advances once on every requested bar. Each exit comment spells what
+// every request read on the bar the close was sent.
+strategy("PF xa2 prologue order", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 0.01)
+f(_v) =>
+    r = 0.0
+    if close > open
+        r := _v
+    r + _v
+u(_x) => ta.sma(f(_x), 3)
+g(_e) => request.security(syminfo.tickerid, "240", ta.sma(f(_e), 3))
+s5 = ta.sma(close, 5)
+a = request.security(syminfo.tickerid, "60", u(s5))
+s6 = ta.sma(close, 6)
+b = g(s6)
+s(x) => na(x) ? "na" : str.tostring(x, "#.####")
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(a) + "|" + s(b))

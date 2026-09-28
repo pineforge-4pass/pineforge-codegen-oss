@@ -83,7 +83,7 @@ from ..external_requests import (
     FOOTPRINT_COLUMN_ANNOTATION, RECORDED_KEY_ANNOTATION, REQUEST_REF_ANNOTATION,
 )
 from ..external_requests import _nodes as walk_request_nodes
-from ..security_contexts import UNREACHED_ANNOTATION
+from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION
 from ..symbols import PineType, method_receiver_type_name
 from .tables import (
     BAR_BUILTINS, MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_BAR_FIELDS,
@@ -1253,9 +1253,15 @@ class SecurityEmitter:
         ``global_expr_map`` is keyed only by spelling.  Consulting it without
         node provenance lets a UDF parameter, block local, or loop iterator
         capture a same-named global input after analysis scopes have unwound.
+        A global's read that ``security_contexts`` put in a helper's copy is
+        one too where the analyzer bound nothing: the global is declared
+        after the helper (``GLOBAL_ANNOTATION``).
         """
         scopes = getattr(self.ctx, "identifier_binding_scopes", {}) or {}
-        return scopes.get(id(node)) == "global"
+        scope = scopes.get(id(node))
+        return scope == "global" or (
+            scope is None and bool((node.annotations or {}).get(GLOBAL_ANNOTATION))
+        )
 
     def _security_warn_unbound_param(self, node: Identifier) -> None:
         """Warn once that a payload reads the history of a parameter of the
@@ -4955,6 +4961,198 @@ class SecurityEmitter:
             ta_indices=[idx for idx in info.get("ta_indices") or [] if variants.get(idx)],
         )
 
+    def _emit_security_prologue_ta(
+        self,
+        sec_id: int,
+        idx: int,
+        variant: dict,
+        ta_results: dict,
+        security_mutable_names: set[str],
+        lines: list[str],
+    ) -> None:
+        """One TA variant's committed value in an evaluator's prologue."""
+        compute_args = self._security_ta_compute_args_for_site(
+            sec_id,
+            self.ctx.ta_call_sites[idx],
+            ta_results,
+            security_mutable_names,
+            variant.get("binding_stack", ()),
+            emitted_lines=lines,
+        )
+        var_name = variant["result_name"]
+        sec_name = variant["member_name"]
+        lines.append(f"        auto {var_name} = security_series_slot_is_new({sec_id}) "
+                     f"? {sec_name}.compute({compute_args}) "
+                     f": {sec_name}.recompute({compute_args});")
+        ta_results[(idx, variant["signature"])] = var_name
+
+    def _security_note_ta_read(self, key: tuple) -> None:
+        """Record a read of a TA variant's committed value while
+        ``_security_prologue_order`` builds a variant's arguments."""
+        reads = getattr(self, "_security_ta_reads", None)
+        if reads is not None:
+            reads.add(key)
+
+    def _security_ta_sites_reached(self, site: TACallSite, binding_stack) -> set[int]:
+        """Every TA site index a site's compute arguments can reach -- through
+        helper bindings, globals' values, mutable globals' statements and
+        user calls' bodies -- with no side effect: a superset of the
+        variants building those arguments reads."""
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        reached: set[int] = set()
+        seen: set[int] = set()
+        stack = [(arg, binding_stack or ()) for arg in site.compute_args or []]
+        while stack:
+            node, frames = stack.pop()
+            if isinstance(node, (list, tuple)):
+                stack.extend((child, frames) for child in node)
+                continue
+            if not isinstance(node, ASTNode) or id(node) in seen:
+                continue
+            seen.add(id(node))
+            ta_site = self._get_ta_site(node)
+            if ta_site is not None:
+                index = self._ta_index_by_site_id.get(id(ta_site))
+                if index is not None:
+                    reached.add(index)
+            if isinstance(node, Identifier):
+                for frame in frames:
+                    bound = frame.get(node.name) if isinstance(frame, dict) else None
+                    if isinstance(bound, ASTNode):
+                        stack.append((bound, getattr(frame, "caller_stack", frames)))
+                if node.name in global_expr_map:
+                    stack.append((global_expr_map[node.name], ()))
+                info = self._global_mutable_infos.get(node.name)
+                if info is not None:
+                    stack.extend((stmt, ()) for stmt in getattr(info, "source_stmts", []) or [])
+            elif isinstance(node, FuncCall):
+                key = self._security_user_call_key(node)
+                info = self._func_info_map.get(key) if key is not None else None
+                if info is not None and info.node is not None:
+                    stack.append((info.node.body, frames))
+            stack.extend((value, frames) for name, value in vars(node).items()
+                         if name not in ("annotations", "loc"))
+        return reached
+
+    def _security_prologue_order(
+        self,
+        sec_id: int,
+        entries: list[tuple[int, dict]],
+        ta_results: dict,
+        security_mutable_names: set[str],
+    ) -> list[tuple[int, dict]]:
+        """A prologue phase's variants, each after the variants of the phase
+        its compute arguments read, in their order otherwise. The top-level
+        statement of the evaluator computes each once, before any reader: a
+        variant reached through a global declared after the helper whose TA
+        reads it (``u(_x) => ta.sma(_x, 3)``, a later ``s5 = ta.sma(close,
+        5)``, ``u(s5)``) was computed inline in its reader's arguments and
+        again in the prologue, advancing twice a bar.
+
+        The order follows ``_security_ta_sites_reached``, a superset of the
+        reads with no side effect: a phase none of whose variants reaches a
+        later one keeps its order, and any other is sorted by that graph,
+        whose every order respects the reads. Only where it has a cycle are
+        the reads themselves learnt, by building each variant's arguments
+        once with every side effect undone (``_security_prologue_reads``)."""
+        keys = [(idx, variant["signature"]) for idx, variant in entries]
+        if len(keys) < 2:
+            return entries
+        by_index: dict[int, list[tuple]] = {}
+        for key in keys:
+            by_index.setdefault(key[0], []).append(key)
+        reach = {
+            key: {
+                other
+                for reached in self._security_ta_sites_reached(
+                    self.ctx.ta_call_sites[idx], variant.get("binding_stack", ())
+                )
+                for other in by_index.get(reached, ())
+                if other != key
+            }
+            for (idx, variant), key in zip(entries, keys)
+        }
+        position = {key: n for n, key in enumerate(keys)}
+        if not any(position[other] > position[key]
+                   for key, others in reach.items() for other in others):
+            return entries
+        order = self._security_topological_order(keys, reach)
+        if order is None:
+            order = self._security_topological_order(
+                keys,
+                self._security_prologue_reads(
+                    sec_id, entries, keys, ta_results, security_mutable_names
+                ),
+                keep_cycles=True,
+            )
+        by_key = dict(zip(keys, entries))
+        return [by_key[key] for key in order]
+
+    @staticmethod
+    def _security_topological_order(keys: list, edges: dict, keep_cycles: bool = False):
+        """``keys``, each after the keys ``edges`` gives it, stably; None on a
+        cycle unless ``keep_cycles`` (a cycle then keeps its order)."""
+        order: list = []
+        state: dict = {}
+
+        def visit(key) -> bool:
+            if state.get(key) == 2:
+                return True
+            if state.get(key) == 1:
+                return keep_cycles
+            state[key] = 1
+            for dep in keys:
+                if dep in edges.get(key, ()) and not visit(dep):
+                    return False
+            state[key] = 2
+            order.append(key)
+            return True
+
+        for key in keys:
+            if not visit(key):
+                return None
+        return order
+
+    def _security_prologue_reads(
+        self,
+        sec_id: int,
+        entries: list[tuple[int, dict]],
+        keys: list[tuple],
+        ta_results: dict,
+        security_mutable_names: set[str],
+    ) -> dict[tuple, set]:
+        """The phase's variants each variant's compute arguments read: its
+        arguments built once, with every side effect undone
+        (``_security_state_snapshot``) and every other variant standing in
+        as computed, so no read of one raises before the reads after it are
+        seen (``s5[1] + r``). Arguments that raise keep what they read."""
+        reads: dict[tuple, set] = {}
+        snapshot = self._security_state_snapshot()
+        try:
+            for (idx, variant), key in zip(entries, keys):
+                self._security_ta_reads = set()
+                computed = dict(ta_results)
+                computed.update(
+                    (other, f"_pf_prologue_{n}")
+                    for n, other in enumerate(keys) if other != key
+                )
+                try:
+                    self._security_ta_compute_args_for_site(
+                        sec_id,
+                        self.ctx.ta_call_sites[idx],
+                        computed,
+                        security_mutable_names,
+                        variant.get("binding_stack", ()),
+                        emitted_lines=[],
+                    )
+                except Exception as exc:  # noqa: BLE001 -- the real emission reports it
+                    if getattr(exc, "limit", False):
+                        raise
+                reads[key] = self._security_ta_reads - {key}
+        finally:
+            self._security_state_restore(snapshot)
+        return reads
+
     def _emit_security_evaluator(self, item: dict, lines: list[str]) -> None:
         """Emit one ``_eval_security_N`` method
         (``_emit_security_evaluator_body``), with the values of its long pure
@@ -5067,33 +5265,23 @@ class SecurityEmitter:
                 pre_rebind_ta_indices.append(idx)
 
         def emit_security_ta(indices: list[int]) -> None:
-            for idx in indices:
-                site = self.ctx.ta_call_sites[idx]
-                for variant in prologue_variants(idx):
-                    if (idx, variant["signature"]) in lazy_ta_keys:
-                        # Pine only reaches this site through a
-                        # short-circuited operand or an untaken ternary
-                        # branch. Leave it out of the eager prologue:
-                        # _build_security_expr emits its
-                        # compute()/recompute() inline in expression
-                        # position, where C++'s &&/||/?: short-circuit
-                        # advances the series exactly on the bars Pine does.
-                        continue
-                    helper_binding_stack = variant.get("binding_stack", ())
-                    compute_args = self._security_ta_compute_args_for_site(
-                        sec_id,
-                        site,
-                        ta_results,
-                        security_mutable_names,
-                        helper_binding_stack,
-                        emitted_lines=lines,
-                    )
-                    var_name = variant["result_name"]
-                    sec_name = variant["member_name"]
-                    lines.append(f"        auto {var_name} = security_series_slot_is_new({sec_id}) "
-                                 f"? {sec_name}.compute({compute_args}) "
-                                 f": {sec_name}.recompute({compute_args});")
-                    ta_results[(idx, variant["signature"])] = var_name
+            # Pine only reaches a lazy site through a short-circuited operand
+            # or an untaken ternary branch. Leave it out of the eager
+            # prologue: _build_security_expr emits its compute()/recompute()
+            # inline in expression position, where C++'s &&/||/?:
+            # short-circuit advances the series exactly on the bars Pine does.
+            entries = [
+                (idx, variant)
+                for idx in indices
+                for variant in prologue_variants(idx)
+                if (idx, variant["signature"]) not in lazy_ta_keys
+            ]
+            for idx, variant in self._security_prologue_order(
+                sec_id, entries, ta_results, security_mutable_names,
+            ):
+                self._emit_security_prologue_ta(
+                    sec_id, idx, variant, ta_results, security_mutable_names, lines,
+                )
 
         emit_security_ta(pre_rebind_ta_indices)
 
@@ -5763,6 +5951,7 @@ class SecurityEmitter:
                         index_cpp, expr_node.index, "int"
                     )
                     result_key = (idx, sig)
+                    self._security_note_ta_read(result_key)
                     if result_key not in ta_results:
                         self._codegen_error(
                             expr_node,
@@ -5808,6 +5997,7 @@ class SecurityEmitter:
                         ta_binding_stack,
                         emitted_lines,
                     )
+                self._security_note_ta_read((idx, sig))
                 if (idx, sig) not in ta_results:
                     self._codegen_error(
                         expr_node,
@@ -5984,6 +6174,8 @@ class SecurityEmitter:
             if math_site is not None:
                 math_idx = self._ta_index_by_site_id.get(id(math_site))
                 math_sig = self._security_binding_stack_signature(helper_binding_stack)
+                if math_idx is not None:
+                    self._security_note_ta_read((math_idx, math_sig))
                 if math_idx is not None and (math_idx, math_sig) in ta_results:
                     return ta_results[(math_idx, math_sig)]
             if math_site is None:
@@ -6007,6 +6199,7 @@ class SecurityEmitter:
             sig = self._security_binding_stack_signature(helper_binding_stack)
             if idx is not None:
                 result_key = (idx, sig)
+                self._security_note_ta_read(result_key)
                 if result_key in ta_results:
                     return ta_results[result_key]
             sec_name = self._security_ta_variant_names.get(

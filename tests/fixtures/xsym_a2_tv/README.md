@@ -24,6 +24,8 @@ close's comment spelling the values it reads on that bar, so a tape's exit
 | `xa2_source_param` | `59f293fecfcc122fe4f78f54e17b59536492c936c02f279119e5e3c7f8a98ca5` | `542b8804cb3ff7573c460b96f1305c9762f6a1119691b9f7a120d950d101616c` | 336 |
 | `xa2_source_param_low` | `94943784f3ccbdd6349ef19e7b5882859f129d5fce6c49b5858bea3561ec3735` | `2eb1b764d7af492c31cc608519cd96fae167190dd4cc9892ecc3baa0263f64ae` | 336 |
 | `xa2_single_context` | `7b5aa0e73aa5973ac112f6de0df961e576eb4d76fdeb2c3570bcef4a75d7a6ad` | `17d1b3579d9dadcd041e906c0a0e7f7e9fd741d60261af8dec2d969db504431d` | 336 |
+| `xa2_price_later` | `b4cd503f23935ab3ad82372b5e71f6e59f9c61a53f509e9f3ca0581053dbc00b` | `b259c487d8cce5fd993cea40ca4237af04c5ca9689b7d148e54064fc0f0ac456` | 336 |
+| `xa2_prologue_order` | `3bde7c98eceab704bd43fb5e137ba3bd1553cc28915e70aa03cefb33c91e92ac` | `b8780e1273a8f3750499b52b6a9ee55d69b58b8610d99858237242ac1e534003` | 336 |
 
 What each tape shows:
 
@@ -51,3 +53,22 @@ What each tape shows:
   and `h(string tf, int n) => request.security(syminfo.tickerid, tf,
   high[1]) + n` as `h("60", 1)`. Exit Signals: `a`, `b`, `c`, four
   decimals.
+- `xa2_price_later`: payloads reading the history of the derived price
+  series (`hl2[1]` on 60 minutes; `ohlc4[2] - hlc3[1] + hlcc4[1] - hlcc4` on
+  240), `g(_e) => request.security(syminfo.tickerid, "60", _e[1])` called
+  as `g(hl2)` and as `g(ma)` with `ma = ta.sma(close, 3)` declared after
+  `g`, `u(_x) => ta.sma(_x, 3)` read in a payload as `u(s5)` with
+  `s5 = ta.sma(close, 5)` declared after `u`, `h(_v, n) =>
+  request.security(syminfo.tickerid, "240", ta.sma(_v, n))` called as
+  `h(body, len)` with `len = input.int(4, "Len")` and `body = close - open`
+  declared after `h`, and the chart's own `hlcc4[1]`. Exit Signals: `a` ...
+  `f`, `k`, four decimals. An earlier export of the probe read `u(ema5)`
+  with `ema5 = ta.ema(close, 5)`; every column but that one matched, which
+  diverges on the engine's approximated EMA warmup, so the probe was
+  re-exported with an SMA.
+- `xa2_prologue_order`: a payload TA reading, through a multi-statement
+  helper with an if-branch (`f(_v) => ... if close > open ... r + _v`), an
+  SMA declared after the helpers: `u(_x) => ta.sma(f(_x), 3)` as `u(s5)`
+  with `s5 = ta.sma(close, 5)` on 60 minutes, and `g(_e) =>
+  request.security(syminfo.tickerid, "240", ta.sma(f(_e), 3))` as `g(s6)`
+  with `s6 = ta.sma(close, 6)`. Exit Signals: `a`, `b`, four decimals.
