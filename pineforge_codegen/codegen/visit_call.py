@@ -281,6 +281,14 @@ def _timestamp_calendar_lambda(tz: str, yr: str, mo: str, dy: str,
     )
 
 
+def _whole_transparency(node) -> bool:
+    """A color's transparency written as an integer literal from 0 to 100,
+    which the historic ``(int)`` conversion leaves as it is
+    (``color_alpha_cast``'s ``whole``)."""
+    return (isinstance(node, NumberLiteral) and isinstance(node.value, int)
+            and 0 <= node.value <= 100)
+
+
 class CallVisitor:
     """Function-call dispatch visitor methods shared across the codegen.
 
@@ -2993,7 +3001,8 @@ class CallVisitor:
                 base = self._coerce_int_slot(
                     args[0], node.args[0] if node.args else None, "int64_t",
                 )
-                alpha = color_alpha_cast(args[1])
+                whole = _whole_transparency(node.args[1])
+                alpha = color_alpha_cast(args[1], whole)
                 base_node = node.args[0]
                 if (isinstance(base_node, ColorLiteral)
                         or (isinstance(base_node, MemberAccess)
@@ -3010,7 +3019,7 @@ class CallVisitor:
                     f"auto _pf_color_alpha = ({args[1]}); "
                     f"if (is_na(_pf_color_base)) return na<int64_t>(); "
                     f"return pine_color::new_color(_pf_color_base, "
-                    f"{color_alpha_cast('_pf_color_alpha')}); }}()"
+                    f"{color_alpha_cast('_pf_color_alpha', whole)}); }}()"
                 )
             return "0"
         if func_name in ("r", "g", "b", "t"):
@@ -3023,7 +3032,7 @@ class CallVisitor:
                     self._coerce_int_slot(args[i], node.args[i], "int64_t")
                     for i in range(3)
                 ]
-                alpha = color_alpha_cast(args[3])
+                alpha = color_alpha_cast(args[3], _whole_transparency(node.args[3]))
                 return (
                     "pine_color::new_color(static_cast<int64_t>("
                     f"(static_cast<uint64_t>({channels[0]}) & 0xFFULL) << 16 | "
