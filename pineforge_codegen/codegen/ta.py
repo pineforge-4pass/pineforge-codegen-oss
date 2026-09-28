@@ -1419,17 +1419,35 @@ class TaSiteHelper:
                 # literals are spelled (``_ta_bound_arg_takes_plan``) that this
                 # lowering cannot spell either: refused, as before.
                 pos = forced[0]
-                self._codegen_error(
-                    site.node,
-                    f"Unsupported requested-context TA constructor "
-                    f"{'flag' if self._ta_ctor_arg_is_bool(site, pos) else 'length'} "
-                    f"'{ctor_args[pos]}' for {site.class_name}: the "
-                    "helper-bound expression is not a stable per-run scalar.",
-                    hint=("Use a literal, an input.*() value, timeframe.* metadata, "
-                          "or arithmetic over those for TA lengths."),
-                )
+                self._refuse_security_ta_ctor_arg(site, pos, ctor_args[pos], nodes[pos], stack)
             return None
         return {**plan, "site": site, "sec_id": sec_id, "bound_simple": bound_simple}
+
+    def _refuse_security_ta_ctor_arg(self, site: "TACallSite", pos: int, cpp: str,
+                                     node, stack) -> None:
+        """Refuse a requested-context TA constructor argument the evaluator
+        cannot size the object from, naming it. One that reads a helper's
+        ``var`` (or a local an if arm or a history read makes a value of each
+        requested bar) is named in Pine, with the local."""
+        shown, reason = cpp, ""
+        state = self._security_helper_state_reads(node, stack) if node is not None else []
+        if state:
+            shown = self._arith_expr_to_str(node) or cpp
+            reason = (
+                f": it reads {', '.join(repr(name) for name in state)}, a helper "
+                "local holding a value of each requested bar, and PineForge takes "
+                "such a length only for ta.highest, ta.lowest, ta.highestbars and "
+                "ta.lowestbars"
+            )
+        self._codegen_error(
+            site.node,
+            f"Unsupported requested-context TA constructor "
+            f"{'flag' if self._ta_ctor_arg_is_bool(site, pos) else 'length'} "
+            f"'{shown}' for {site.class_name}: the "
+            f"helper-bound expression is not a stable per-run scalar{reason}.",
+            hint=("Use a literal, an input.*() value, timeframe.* metadata, "
+                  "or arithmetic over those for TA lengths."),
+        )
 
     def _security_call_item(self, sec_id: int) -> dict:
         for item in self._security_calls:

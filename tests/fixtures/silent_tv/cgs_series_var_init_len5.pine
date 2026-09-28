@@ -1,0 +1,30 @@
+//@version=6
+// CG-SILENT item 4: a var read with history whose initializer is not a
+// constant runs once, in statement order, on the first bar: a field of a
+// UDT object declared before it, a global computed before it, a bar field,
+// an input-derived value and a user function's result. Each close's comment
+// spells what the script reads on that bar.
+strategy("CGS series var init", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+type Label
+    int long
+    int short
+    int neutral
+Label direction = Label.new(long = 1, short = -1, neutral = 0)
+var int signal = direction.neutral
+b = close * 2
+var float first2 = b
+var float firstClose = close
+len = input.int(5, "Len")
+var float seed = len * 1.5
+f(x) => x + 1
+var float fx = f(open)
+signal := close > open ? direction.long : close < open ? direction.short : nz(signal[1])
+first2 := first2 + 1
+seed := seed + 1
+si(int x) => na(x) ? "na" : str.tostring(x)
+sf(float x) => na(x) ? "na" : str.tostring(x)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = si(signal) + "|" + si(signal[1]) + "|" + sf(first2[1]) + "|" + sf(firstClose[1]) + "|" + sf(seed[1]) + "|" + sf(fx[1]))

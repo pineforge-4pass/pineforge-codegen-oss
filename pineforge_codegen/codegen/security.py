@@ -4025,6 +4025,122 @@ class SecurityEmitter:
         resolved = self._security_helper_bound_ast(node, helper_binding_stack)
         return resolved is not None and self._expr_is_stable(resolved)
 
+    @staticmethod
+    def _security_rebinding_reads_itself(name: str, stmt: Assignment,
+                                         frame: dict | None = None) -> bool:
+        """Whether ``stmt`` rebinds the helper local ``name`` from its own
+        value: a compound assignment (``c += 1``), a value reading it
+        (``c := c + 1``), or reading a local ``frame`` binds to an expression
+        that reads it (``b = a`` then ``a := b + 1``)."""
+        if stmt.op != ":=":
+            return True
+        seen: set[str] = set()
+
+        def reads(node) -> bool:
+            if isinstance(node, Identifier):
+                if node.name == name:
+                    return True
+                bound = (frame or {}).get(node.name)
+                if isinstance(bound, ASTNode) and node.name not in seen:
+                    seen.add(node.name)
+                    return reads(bound)
+                return False
+            if isinstance(node, ASTNode):
+                return any(reads(child) for key, child in vars(node).items()
+                           if key != "annotations")
+            if isinstance(node, (list, tuple)):
+                return any(reads(child) for child in node)
+            if isinstance(node, dict):
+                return any(reads(child) for child in node.values())
+            return False
+
+        return reads(stmt.value)
+
+    @staticmethod
+    def _security_arm_reassigned_names(body) -> set[str]:
+        """The enclosing locals an if arm's statements reassign (``:=`` and
+        the compound assignments), in nested blocks too; a name the arm
+        declares shadows the enclosing one from its declaration on, so its
+        reassignments there are the arm's own."""
+        names: set[str] = set()
+
+        def block(stmts, declared: frozenset) -> None:
+            local = set(declared)
+            for stmt in stmts or ():
+                expr(stmt, frozenset(local))
+                if isinstance(stmt, VarDecl):
+                    local.add(stmt.name)
+
+        def expr(node, declared: frozenset) -> None:
+            if isinstance(node, (FuncDef, MethodDef)):
+                return
+            if (isinstance(node, Assignment) and isinstance(node.target, Identifier)
+                    and node.target.name not in declared):
+                names.add(node.target.name)
+            if isinstance(node, IfStmt):
+                expr(node.condition, declared)
+                block(node.body, declared)
+                block(node.else_body, declared)
+                return
+            if isinstance(node, ASTNode):
+                for key, child in vars(node).items():
+                    if key == "annotations":
+                        continue
+                    if isinstance(child, list) and child and all(
+                            isinstance(item, ASTNode) for item in child):
+                        block(child, declared)
+                    else:
+                        expr(child, declared)
+            elif isinstance(node, (list, tuple)):
+                for child in node:
+                    expr(child, declared)
+
+        block(body, frozenset())
+        return names
+
+    def _security_helper_state_reads(
+        self,
+        node: ASTNode,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+        depth: int = 0,
+    ) -> list[str]:
+        """The helper locals ``node`` reads, through the bindings
+        ``helper_binding_stack`` holds, that are values of each requested bar
+        (a ``var``, a local read with history or rebound in an if arm), in
+        reading order."""
+        names: list[str] = []
+
+        def walk(current, stack, level) -> None:
+            if level > 32:
+                return
+            if isinstance(current, Identifier):
+                if self._security_identifier_is_global_binding(current):
+                    return
+                binding = self._security_lookup_helper_binding_context(current.name, stack)
+                if binding is None:
+                    return
+                bound, bound_stack = binding
+                if isinstance(bound, str):
+                    if (self._security_series_binding_target(bound) is not None
+                            and current.name not in names):
+                        names.append(current.name)
+                    return
+                walk(bound, bound_stack, level + 1)
+                return
+            if isinstance(current, ASTNode):
+                for key, child in vars(current).items():
+                    if key != "annotations":
+                        walk(child, stack, level + 1)
+            elif isinstance(current, (list, tuple)):
+                for child in current:
+                    walk(child, stack, level + 1)
+            elif isinstance(current, dict):
+                for child in current.values():
+                    walk(child, stack, level + 1)
+
+        walk(node, helper_binding_stack, depth)
+        return names
+
     def _security_helper_bound_ast(
         self,
         node: ASTNode,
@@ -4268,7 +4384,14 @@ class SecurityEmitter:
                                     inline_ta_indices,
                                     True,
                                 )
-                            if stmt.name in local_series_names:
+                            # A ``var`` local is state the evaluator keeps in
+                            # the helper's series (``emit_stmt``): its value on
+                            # a requested bar is not its initializer's. Bound
+                            # by value, a TA length reading it was planned from
+                            # the initializer -- or, after ``c += 1``, from the
+                            # literal 1 -- as a constant (the history walkers
+                            # above already bind it as series).
+                            if stmt.name in local_series_names or stmt.is_var:
                                 active_bindings[stmt.name] = self._security_series_binding(
                                     f"{plan['func_info'].name}:{stmt.name}"
                                 )
@@ -4288,7 +4411,28 @@ class SecurityEmitter:
                                     inline_ta_indices,
                                     True,
                                 )
-                            if target_name in local_series_names:
+                            existing = (
+                                active_bindings.get(target_name)
+                                if target_name is not None else None
+                            )
+                            if (
+                                target_name in local_series_names
+                                or (
+                                    isinstance(existing, str)
+                                    and self._security_series_binding_target(existing)
+                                    is not None
+                                )
+                            ):
+                                active_bindings[target_name] = self._security_series_binding(
+                                    f"{plan['func_info'].name}:{target_name}"
+                                )
+                            elif (target_name is not None and value is not None
+                                    and self._security_rebinding_reads_itself(
+                                        target_name, stmt, active_bindings)):
+                                # ``c += 1`` bound the local to ``1``, and
+                                # ``c := c + 1`` to an expression reading its
+                                # own binding (the planner recursed forever):
+                                # the local now holds a requested-bar value.
                                 active_bindings[target_name] = self._security_series_binding(
                                     f"{plan['func_info'].name}:{target_name}"
                                 )
@@ -4311,6 +4455,18 @@ class SecurityEmitter:
                             else_bindings = dict(active_bindings)
                             for child in stmt.else_body:
                                 collect_stmt(child, else_bindings)
+                            # A local an arm reassigns holds that arm's value
+                            # on the bars it runs and its own on the others: a
+                            # requested-bar value, never one expression. (A
+                            # local an arm declares shadows it there.)
+                            reassigned = (
+                                self._security_arm_reassigned_names(stmt.body)
+                                | self._security_arm_reassigned_names(stmt.else_body)
+                            )
+                            for name in sorted(reassigned & set(active_bindings)):
+                                active_bindings[name] = self._security_series_binding(
+                                    f"{plan['func_info'].name}:{name}"
+                                )
                             return
 
                         if isinstance(stmt, TupleAssign):
@@ -6037,6 +6193,13 @@ class SecurityEmitter:
                     for side in (expr_node.left, expr_node.right)
                 ):
                     return f"((double)({left}) / (double)({right}))"
+                # A global is expanded into its declaration and a helper
+                # parameter into its argument here, so ``400 * step`` over
+                # ``step = 2 * 60 * 60 * 1000`` is C++ ``int`` literal
+                # arithmetic: a result beyond int32 is a 64-bit Pine int.
+                folded_cpp = self._fold_int32_overflow_cpp(expr_node.op, left, right)
+                if folded_cpp is not None:
+                    return folded_cpp
                 # KI-71: honour Pine's falsy-on-na relational rule inside
                 # request.security expressions too (this builder is a second
                 # relational emission site independent of _visit_binop).
