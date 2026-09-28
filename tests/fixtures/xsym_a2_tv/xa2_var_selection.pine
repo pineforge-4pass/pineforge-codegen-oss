@@ -1,0 +1,30 @@
+//@version=6
+// var declarations whose initializer is a switch or an if expression: the
+// selection runs once, on the first bar that reaches the declaration. Each
+// exit comment spells what every var holds on the bar the close was sent.
+strategy("PF xa2 var selection", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 0.01)
+mode = input.string("B", "Mode", options = ["A", "B", "C"])
+var float first = switch mode
+    "A" => open
+    "B" => close
+    => high
+var string tag = switch mode
+    "A" => "alpha"
+    "B" => "beta"
+    => "gamma"
+var int dir = if close > open
+    1
+else
+    -1
+f() =>
+    var float p = switch mode
+        "B" => low
+        => high
+    p[1]
+g = f()
+s(x) => na(x) ? "na" : str.tostring(x, "#.####")
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(first) + "|" + tag + "|" + str.tostring(dir) + "|" + s(g))

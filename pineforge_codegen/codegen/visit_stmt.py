@@ -545,6 +545,37 @@ class StmtVisitor:
                         lines.append(f"{pad}    {flag_expr} = true;")
                         lines.append(f"{pad}}}")
                         return
+                    if isinstance(node.value, (IfStmt, SwitchStmt)):
+                        # Any other ``var`` whose initializer is an if/switch
+                        # expression: the selection, once, at first reach. It
+                        # rendered as ``/* unknown */``, which did not compile
+                        # (``var string dashPos = switch dashPosInput``). A
+                        # history-referenced one replaces its current slot.
+                        selection_cpp_type = (
+                            target_cpp_type or self._int_slot_cpp_type(member_name)
+                        )
+                        indent = len(pad) // 4 + 1
+                        lines.append(f"{pad}if (!{flag_expr}) {{")
+                        if info.get("is_series"):
+                            # The member's own element type (string, drawing
+                            # or number), from its current slot: the carry
+                            # has pushed the var's na there before its first
+                            # reach, which an arm no case selects keeps.
+                            selected = f"_pf_selection_{flag}"
+                            lines.append(f"{pad}    auto {selected} = {target_expr}[0];")
+                            self._visit_if_switch_expr(
+                                node.value, selected, lines, indent,
+                                target_cpp_type=selection_cpp_type,
+                            )
+                            lines.append(f"{pad}    {target_expr}.update({selected});")
+                        else:
+                            self._visit_if_switch_expr(
+                                node.value, target_expr, lines, indent,
+                                target_cpp_type=selection_cpp_type,
+                            )
+                        lines.append(f"{pad}    {flag_expr} = true;")
+                        lines.append(f"{pad}}}")
+                        return
                     if target_cpp_type is not None:
                         init_cpp = self._visit_rhs_value(
                             node.value,
