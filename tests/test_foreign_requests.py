@@ -442,6 +442,39 @@ def test_symbol_that_can_select_another_never_reads_the_chart_for_it(tmp_path_fa
         assert same(fed.trace[chart_open]["pf_c"], float("nan") if i is None else closes[i])
 
 
+def test_ticker_arm_of_a_symbol_that_can_select_another_reads_the_chart(tmp_path_factory):
+    """Registration computes ``syminfo.ticker`` as the chart's ticker
+    ("ETHUSDT"), which reads the chart as ``syminfo.tickerid`` does: it was
+    compared with the ticker id only, and stopped the run."""
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("xe_alternate_ticker")
+    feed_path, _ = _chart(engine, base)
+    runs = {}
+    for key, symbol in (("xe-alt-ticker", 'useOther ? "PF:A" : syminfo.ticker'),
+                        ("xe-alt-chart", "syminfo.tickerid")):
+        build(_traced("c", 'useOther = input.bool(false, "Other")\n'
+                           f'c = request.security({symbol}, "60", close)\n' + TRADE), base / key)
+        runs[key] = run(engine, base / key, feed_path, None)
+        assert runs[key].ok, runs[key].error
+    assert runs["xe-alt-ticker"].trace == runs["xe-alt-chart"].trace
+
+
+def test_symbol_that_can_select_the_chart_through_a_helper_keeps_the_chart_lowering():
+    """``f(useOther ? "PF:A" : mysym)``, ``mysym`` a ``var`` (no value before
+    the first bar): registration cannot key it, so the request keeps the
+    chart lowering every earlier build emitted, with its warning. It became a
+    deferred refusal, which stopped the run for the chart's arm too."""
+    result = transpile_full(HEAD + 'useOther = input.bool(false, "Other")\n'
+                            'var string mysym = syminfo.tickerid\n'
+                            'f(s) => request.security(s, "60", close)\n'
+                            'c = f(useOther ? "PF:A" : mysym)\n' + TRADE)
+    (warning,) = [d for d in result["diagnostics"] if "alternate symbol" in d.message]
+    assert ('its symbol useOther ? "PF:A" : mysym on the call path f() is not a value '
+            'registration computes before the first bar') in warning.hint
+    assert not any("no data is pinned" in d.message for d in result["diagnostics"])
+    assert "pine_runtime_error" not in result["cpp"] and "_pf_symbol" not in result["cpp"]
+
+
 def test_reassigned_tuple_request_stops_where_it_is_evaluated(tmp_path_factory):
     """``[a, b] = request.security(...)`` with ``a := a * 2``: evaluating the
     request is its read. The tuple emitter never visited the request, so a
@@ -458,3 +491,28 @@ def test_reassigned_tuple_request_stops_where_it_is_evaluated(tmp_path_factory):
     fed = run(engine, work, feed_path, write_root(base, "xe-tuple", "BINANCE:ETHUSDT", "15",
                                                  [hourly("PF:A", opens[0], 70)]), tag="fed")
     assert fed.ok, fed.error
+
+
+def test_lower_tf_request_of_another_symbol_never_reads_the_chart(tmp_path_factory):
+    """``request.security_lower_tf`` of another symbol read the chart's
+    intrabars. Its value reaching a trade (an array reaches one through any
+    ``array.*`` call), evaluating it stops the run with it named; a symbol
+    that can select the chart's keeps its lowering and warns."""
+    body = ('arr = request.security_lower_tf("PF:A", "5", close)\n'
+            'c = array.size(arr) > 0 ? array.get(arr, 0) : 0.0\n' + TRADE)
+    result = transpile_full(HEAD + body)
+    assert any(d.message == 'request.security_lower_tf("PF:A", "5", ...) at line 3: no data '
+                            'is pinned for this request; the run stops with an error where it '
+                            'is evaluated.' for d in result["diagnostics"])
+    either = transpile_full(HEAD + 'useOther = input.bool(false, "Other")\n' + body.replace(
+        '"PF:A"', 'useOther ? "PF:A" : syminfo.tickerid'))
+    assert any("whose lower-timeframe bars PineForge reads from the chart" in d.message
+               for d in either["diagnostics"])
+    assert "pine_runtime_error(std::string(\"request" not in either["cpp"]
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("xe_lower_tf")
+    feed_path, _ = _chart(engine, base)
+    build(HEAD + body, base / "xe-lower-tf")
+    result = run(engine, base / "xe-lower-tf", feed_path, None)
+    assert not result.ok
+    assert f'request.security_lower_tf("PF:A", "5", ...) at line 3: {PINNED}' in result.error

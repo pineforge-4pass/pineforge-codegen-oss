@@ -51,8 +51,8 @@ from .errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from .builtin_keywords import POSITIONAL_BUILTINS
 from .pine_spelling import expr_start
 from .external_requests import (
-    FEED_LOWERING, FEED_WARNING_ANNOTATION, FOOTPRINT_COLUMN_ANNOTATION, LOWERING_ANNOTATION,
-    NO_DATA_REQUEST_FUNCS,
+    ABSENT_LOWERING, CHART_FALLBACK_ANNOTATION, FEED_LOWERING, FEED_WARNING_ANNOTATION,
+    FOOTPRINT_COLUMN_ANNOTATION, LOWERING_ANNOTATION, NO_DATA_REQUEST_FUNCS,
     RECORDED_LOWERING, FootprintValues, TradeSlice, footprint_column, recorded_key,
     spell_call,
 )
@@ -1676,6 +1676,7 @@ class SupportChecker:
         # timeframe literal here so codegen catches malformed TF strings early.
         if full == "request.security_lower_tf":
             self._check_request_security_lower_tf_tf(node)
+            self._check_request_security_lower_tf_symbol(node)
             self._visit_children_const_ok(node)
             return
         if ns == "request":
@@ -2242,12 +2243,18 @@ class SupportChecker:
                 or self._foreign_feed_blocker(node, symbol_node) is not None):
             return False
         self._mark_feed(node)
-        self._warn(
-            symbol_node,
+        node.annotations = {**node.annotations, CHART_FALLBACK_ANNOTATION: True}
+        payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+        reads = ("a footprint reads the feed the requests manifest pins for each symbol, the "
+                 "chart's too (the chart's bars carry no footprint)"
+                 if footprint_column(payload) is not None else
+                 "the chart's reads the chart and another symbol's the feed the requests "
+                 "manifest pins for it")
+        self._feed_warning(
+            node, symbol_node,
             f"{spell_call(node)}: its symbol can select another symbol: registered by the "
-            "string the run computes, the chart's reads the chart and another symbol's the "
-            "feed the requests manifest pins for it; with none installed, the run stops "
-            "with an error where its value is read.",
+            f"string the run computes, {reads}; with none installed, the run stops with an "
+            "error where its value is read.",
             hint=("It read the chart's bars for every symbol: another symbol's value never "
                   "comes from the chart."),
         )
@@ -2769,6 +2776,39 @@ class SupportChecker:
             "Expected Pine TF format like '1', '15', '1H', '1D', '15S'.",
             hint=err,
         )
+
+    def _check_request_security_lower_tf_symbol(self, node: FuncCall) -> None:
+        """``request.security_lower_tf`` reads the chart's intrabars: the
+        engine loads no other symbol's. For another symbol whose value can
+        reach a trade, evaluating the request stops the run with it named
+        (``ABSENT_LOWERING``), never reading the chart's bars in its place;
+        one reaching display and alert sinks only, or that can select the
+        chart's symbol, keeps its lowering and warns."""
+        symbol_node = node.args[0] if node.args else node.kwargs.get("symbol")
+        if symbol_node is None or self._is_current_symbol_expr(
+                symbol_node, require_all_paths=True):
+            return
+        if self._trade_slice is None:
+            self._trade_slice = TradeSlice(self._ast)
+        reason = self._trade_slice.reason(node)
+        hint = "PineForge loads no other symbol's lower-timeframe bars."
+        if (reason is not None and not self._is_current_symbol_expr(symbol_node)
+                and not self._is_current_symbol_expr(symbol_node, legacy_names=True)):
+            node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: ABSENT_LOWERING}
+            self._warn(
+                symbol_node,
+                f"{spell_call(node)}: no data is pinned for this request; the run stops with "
+                "an error where it is evaluated.",
+                hint=f"{hint} Its value can reach a trade: {reason}.")
+            return
+        self._warn(
+            symbol_node,
+            f"{spell_call(node)}: its symbol can be another symbol's, whose lower-timeframe "
+            "bars PineForge reads from the chart"
+            + ("; its value reaches only display/alert sinks, so trades are unaffected."
+               if reason is None else "."),
+            hint=hint + " Every reachable symbol value must resolve to syminfo.tickerid or "
+                        "syminfo.ticker for exact results.")
 
     def _check_request_security_lower_tf_tf(self, node: FuncCall) -> None:
         """Validate the ``timeframe`` argument literal for

@@ -55,6 +55,11 @@ RECORDED_LOWERING = "recorded"
 # Lowerings whose data is looked up at run time: the request stays, and its
 # reads stop the run only where the data is missing.
 DATA_LOWERINGS = frozenset({FEED_LOWERING, RECORDED_LOWERING})
+# The lowering of a ``request.security_lower_tf`` of another symbol whose
+# value can reach a trade: the engine reads no other symbol's intrabars, and
+# the request read the chart's. It stays (its array type flows on), and
+# evaluating it stops the run with the request named.
+ABSENT_LOWERING = "absent"
 # On a recorded request once lowered: its key's parts but the symbol, which
 # stays the call's only argument (``lower_no_data_requests``).
 RECORDED_KEY_ANNOTATION = "pf_recorded_key"
@@ -81,6 +86,10 @@ _RECORDED_PARAMS = {
 # request that carries the same ref (``REQUEST_REF_ANNOTATION``).
 UNPINNED_ANNOTATION = "pf_request_unpinned"
 REQUEST_REF_ANNOTATION = "pf_request_ref"
+# On a request whose symbol can select the chart's or another symbol's: it
+# read the chart before it read a feed, and keeps that lowering where no feed
+# can be keyed (``unpin_requests``).
+CHART_FALLBACK_ANNOTATION = "pf_request_chart_fallback"
 # On a request of another symbol whose symbol or timeframe reaches it through
 # a helper's parameters: the support checker's warning, which
 # ``security_contexts`` reports once every call path keys a feed (else it
@@ -775,6 +784,9 @@ def lower_no_data_requests(program: Program) -> Program:
         if lowering in DATA_LOWERINGS:
             backed.append(node)
             continue
+        if lowering == ABSENT_LOWERING:
+            node.annotations = {**node.annotations, UNPINNED_ANNOTATION: unpinned_message(node)}
+            continue
         swaps[id(node)] = _na_of(node, funcs)
         if lowering == "unpinned":
             unpinned.append(node)
@@ -814,15 +826,32 @@ def unpin_requests(program: Program, reasons: dict[int, str]) -> None:
     """Give each request ``reasons`` names (by id: a request of another
     symbol whose symbol registration cannot compute before the first bar)
     the lowering it had before it read a feed: its ``na``, whose reads stop
-    the run with the request named. Each is reported with its reason."""
+    the run with the request named; or, for one whose symbol can select the
+    chart's (``CHART_FALLBACK_ANNOTATION``), the chart's bars, with the
+    warning it had. Each is reported with its reason."""
     from .security_contexts import PASS_WARNINGS_ANNOTATION
 
     funcs = {s.name: s for s in program.body if isinstance(s, FuncDef)}
     requests = {id(node): node for node in _nodes(program) if id(node) in reasons}
     refs = {id((node.annotations or {}).get(REQUEST_REF_ANNOTATION)) for node in requests.values()}
+    chart_refs = {id(node.annotations.get(REQUEST_REF_ANNOTATION)) for node in requests.values()
+                  if (node.annotations or {}).get(CHART_FALLBACK_ANNOTATION)}
     swaps: dict[int, ASTNode] = {}
     warnings = []
-    for request_id, request in requests.items():
+    for request_id, request in list(requests.items()):
+        if (request.annotations or {}).get(CHART_FALLBACK_ANNOTATION):
+            request.annotations = {
+                k: v for k, v in request.annotations.items()
+                if k not in (LOWERING_ANNOTATION, REQUEST_REF_ANNOTATION, UNPINNED_ANNOTATION,
+                             CHART_FALLBACK_ANNOTATION, FEED_WARNING_ANNOTATION)}
+            warnings.append(pass_warning(
+                request,
+                f"{spell_call(request)}: request.security symbol can select an alternate "
+                "symbol, but PineForge always loads the current chart symbol.",
+                f"It reads no feed of another symbol: {reasons[request_id]}. Every reachable "
+                "symbol value must resolve to syminfo.tickerid or syminfo.ticker for exact "
+                "results."))
+            continue
         lowered = _na_of(request, funcs)
         marker = (request.annotations or {}).get(UNPINNED_ANNOTATION)
         if isinstance(marker, dict):
@@ -837,8 +866,12 @@ def unpin_requests(program: Program, reasons: dict[int, str]) -> None:
             f"registration computes before the first bar; {reasons[request_id]}."))
     for node in _nodes(program):
         marker = (node.annotations or {}).get(UNPINNED_ANNOTATION)
-        if isinstance(marker, dict) and id(marker["ref"]) in refs:
+        if isinstance(marker, dict) and id(marker["ref"]) in chart_refs:
+            node.annotations = {k: v for k, v in node.annotations.items()
+                                if k != UNPINNED_ANNOTATION}
+        elif isinstance(marker, dict) and id(marker["ref"]) in refs:
             node.annotations = {**node.annotations, UNPINNED_ANNOTATION: marker["message"]}
-    replace_nodes(program, swaps)
+    if swaps:
+        replace_nodes(program, swaps)
     notes = program.annotations = dict(program.annotations or {})
     notes[PASS_WARNINGS_ANNOTATION] = [*notes.get(PASS_WARNINGS_ANNOTATION, ()), *warnings]
