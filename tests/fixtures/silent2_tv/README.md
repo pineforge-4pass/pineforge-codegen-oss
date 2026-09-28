@@ -34,6 +34,7 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `cgs2_array_index_loop` | `a78a4a551c94e3e6ab3cf951c430171774c0baeba0eeceedf7381b39a6dc2654` | `c3adfbefef8d27c40eac8094589d5a163a4a399f0a092c666736db0835fea02b` |
 | `cgs2_array_loop_bool_copy` | `8b0a48a00b91167b5c4266f223d400e8dc583accd5a25d290a0dd2689bb6c8f8` | `55ae0bec42e7f29f28b700c3b8314a6e8a2d8735ff37e65f59dbe88e22fd5088` |
 | `cgs2_scalar_method_global` | `50d1dfd04fb43e8052c1361a0adc7948a4453cb8e9b92e7a75257764144d925f` | `3284114b6da48ee4a7aae5172773c8c9ff84cf67eddf5643c67907507a2b565e` |
+| `cgs2_tostring_tuple_payload` | `d14e232de9881e366653d2f2236b147c85bc5fa8fb1579ff5347c326b8e56e88` | `db5a7bad218e919ecc9d69272bf172c479c06cb337324468f485c24309c4e016` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -50,6 +51,7 @@ Each exit Signal joins these fields with `|`, in this order:
 - `cgs2_array_index_loop`: `s`, `weights(arr)` (4 decimals), `n`, `t`
 - `cgs2_array_loop_bool_copy`: `cnt`, `after`
 - `cgs2_scalar_method_global`: `y`, `h`, `a` (4 decimals)
+- `cgs2_tostring_tuple_payload`: `x`, `y` (`up` / `down`), `p`, `q`
 
 What each tape shows:
 
@@ -111,3 +113,6 @@ What each tape shows:
   `s5.m()` (`ta.sma(x, 3)`) and `s5.half()`, on the chart and requested at
   60 minutes (entries from 08:00 UTC on, when every requested window lies
   inside the tape's range; 320 trades).
+- `cgs2_tostring_tuple_payload`: `str.tostring` and `str.format` inside
+  a `request.security` tuple payload at 60 minutes format the requested
+  bar's values (entries from 02:00 UTC on; 332 trades).

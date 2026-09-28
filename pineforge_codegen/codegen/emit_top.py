@@ -99,6 +99,7 @@ from .tables import (
     RUNTIME_REGISTER_SECURITY_EVAL_FN,
     RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN,
 )
+from ..limits import iter_ast_nodes
 from .drawing import DRAWING_LIFETIME_CPP
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 
@@ -114,13 +115,16 @@ class TopLevelEmitter:
         roots = [self.ctx.ast] + [
             pragma.expr_node for pragma in (self.ctx.pf_trace_pragmas or [])
         ]
+        # Every syntax child (``iter_ast_nodes``): ``_walk_ast`` does not enter
+        # a tuple literal, so ``str.tostring`` in a request.security tuple
+        # payload left ``pine_str_tostring_tv`` undeclared.
         self._uses_tv_number_format = any(
             (namespace == "str" and func_name in {"format", "tostring"})
             or (namespace is None and func_name == "tostring")
             or (namespace == "log" and func_name in {"info", "warning", "error"}
                 and len(node.args) > 1)
             for root in roots
-            for node in self._walk_ast(root)
+            for node, _depth in iter_ast_nodes(root)
             if isinstance(node, FuncCall)
             for func_name, namespace in [self._resolve_callee(node.callee)]
         )

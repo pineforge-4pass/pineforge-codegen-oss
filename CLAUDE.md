@@ -390,6 +390,10 @@ you delete or weaken the special case, the test will tell you.
    `{0,number,...}` styles and apostrophe quoting, and `str.tostring`'s
    `#.##########` default, custom `#`/`0`/`%` patterns, percent and volume.
    `format.mintick` delegates to the engine's tick-rounding formatter.
+   The helper is emitted when any syntax child calls a formatter
+   (`iter_ast_nodes`: `_walk_ast` skipped a tuple literal, so a
+   `request.security` tuple payload's `str.tostring` left it undeclared;
+   `tests/test_e2e_tostring_tuple_payload.py`).
    Numeric rounding converts a double to its shortest round-trip decimal with
    C++17 `std::to_chars`, shifts the decimal point as digits, then rounds the
    first discarded digit half-up; it uses no floating-point intermediate or
