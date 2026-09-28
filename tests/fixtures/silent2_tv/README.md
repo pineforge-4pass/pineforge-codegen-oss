@@ -28,6 +28,7 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `cgs2_int64_followup2` | `4b94979a31143cb9a24d7c8adcd236bf4dbc20320983931e0caad8c313b5030e` | `b9f4759b0b330aca7b12762a9100d5e36735805b8aa17e400191823951701ca2` |
 | `cgs2_float_time_local` | `f0dc91a0e879e824cdfd27d6d64aec9ac204b355db7a2cf31e7d1004906913fe` | `81a90b86cc23133dae6ab1e7313aecbf7363adb7603317b2ce714765fb9c051e` |
 | `cgs2_float_time_method` | `8e6fd4cf5ddf2bf55a74bd244e9fcb951d088f686864bae20ef9c786ea884b82` | `81a90b86cc23133dae6ab1e7313aecbf7363adb7603317b2ce714765fb9c051e` |
+| `cgs2_color_arrays` | `1eed73a34e1bddf73e0272a7cf5b5fb1b00cf72e5986a4c9b694e1ff0f422a15` | `3210a6c6870137852c358d123a6c6a5fa535aab0b7a15922bddb5e54351598fa` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -38,6 +39,7 @@ Each exit Signal joins these fields with `|`, in this order:
 - `cgs2_int64_followup2`: `s1 / 10**9`, `s3 / 10**9`, `e / 86400000`, `x - 3000000000`, `y / 10**9`
 - `cgs2_float_time_local`: `firstD`, `firstE` (the first bar's `f()` and `g()`), `d`, `e`
 - `cgs2_float_time_method`: the same of the methods `u.dt()` and `u.dc()`
+- `cgs2_color_arrays`: `A[0]`, `A[1]`, `B[0]`, `D[0]`, `E[0]`, `F[0]` (each `red,green,blue,transparency`), the four sizes' sum
 
 What each tape shows:
 
@@ -78,3 +80,7 @@ What each tape shows:
 - `cgs2_float_time_method`: the same of a method's locals (its tape is
   byte for byte `cgs2_float_time_local`'s). TradingView refuses a method
   that does not read its first argument, hence the probe's `this.v * 0`.
+- `cgs2_color_arrays`: arrays of colors built by `array.from`, declared
+  `array<color>` or not, from literals, `color.new` / `color.rgb` calls,
+  color variables and a conditional color, hold every element's channels
+  and transparency.

@@ -61,6 +61,7 @@ from .tables import (
     V5_ARRAY_INDEX_METHODS,
     BAR_BUILTINS,
     BAR_FIELDS,
+    COLOR_CONST_MAP,
     DRAWING_NS,
     DRAWING_TYPE_TO_CPP,
     MATRIX_RETURNING_METHODS,
@@ -1152,6 +1153,11 @@ class TypeInferer:
                         return TypeSpec.primitive("int64")
                     return TypeSpec.primitive("int")
             return None
+        if self._is_color_value(node):
+            # A color is a packed-ARGB ``int64_t``: ``array.from(color.red,
+            # color.new(c, 50))`` is ``std::vector<int64_t>``, which a
+            # ``double`` vector cannot be braced from.
+            return TypeSpec.primitive("color")
         spec = self._type_spec_from_expr(node)
         if spec is not None:
             return spec
@@ -1170,6 +1176,40 @@ class TypeInferer:
                 if primitive_name is not None:
                     return TypeSpec.primitive(primitive_name)
         return None
+
+    def _is_color_value(self, node, _depth: int = 0) -> bool:
+        """Whether ``node`` is a color value: a literal, a ``color.*``
+        constant, a ``color.new`` / ``rgb`` / ``from_gradient`` call, a
+        conditional selecting one, or a script variable declared ``color`` or
+        bound to one (``c1 = color.new(...)``, which the analyzer types
+        float)."""
+        if _depth > 16 or node is None:
+            return False
+        if isinstance(node, ColorLiteral):
+            return True
+        if isinstance(node, MemberAccess):
+            return (isinstance(node.object, Identifier)
+                    and node.object.name == "color"
+                    and node.member in COLOR_CONST_MAP)
+        if isinstance(node, FuncCall):
+            func_name, namespace = self._resolve_callee(node.callee)
+            return namespace == "color" and func_name in (
+                "new", "rgb", "from_gradient")
+        if isinstance(node, Ternary):
+            return (self._is_color_value(node.true_val, _depth + 1)
+                    or self._is_color_value(node.false_val, _depth + 1))
+        if isinstance(node, Identifier):
+            if self._slot_scalar_cpp_type(node.name) != "int64_t":
+                return False
+            sym = self._variable_symbol(node.name)
+            if sym is not None and sym.pine_type == PineType.COLOR:
+                return True
+            if (node.name in getattr(self, "_current_func_local_types", {})
+                    or node.name in getattr(self, "_current_func_param_types", {})):
+                return False
+            value = getattr(self.ctx, "global_expr_map", {}).get(node.name)
+            return self._is_color_value(value, _depth + 1)
+        return False
 
     @staticmethod
     def _selection_terminal_expr(body: list[ASTNode] | None) -> ASTNode | None:
