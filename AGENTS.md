@@ -82,11 +82,13 @@ adding work:
 3. `support_checker.check_support_or_raise` — rejects any Pine surface
   PineForge cannot faithfully execute (see "Support contracts" below).
 4. `Analyzer.analyze()` → `AnalyzerContext` (type inference, scope
-  resolution, per-call-site TA bookkeeping, security registration). Three
+  resolution, per-call-site TA bookkeeping, security registration). Four
   AST passes run before it: `external_requests.lower_no_data_requests`
   (requests the support checker lowered), `security_contexts.
-  specialize_security_contexts` (helper request contexts) and
-  `finite_ta_length`'s bounded extrema lengths.
+  specialize_security_contexts` (helper request contexts),
+  `finite_ta_length`'s bounded extrema lengths and `builtin_keywords`
+  (`nz` / `fixnan` keyword arguments in parameter order, the helper copies
+  `security_contexts` made included).
 5. `CodeGen(ctx).generate()` → C++ source string.
 
 Pragmas are reattached to `ctx.pf_trace_pragmas` between (4) and (5)
@@ -654,9 +656,10 @@ you delete or weaken the special case, the test will tell you.
     lowering it always compiled to. Any other last statement falls through
     to the default return. An if without else (an else-if chain without a
     final else, a switch without default) that runs no arm is `na` -- a
-    numeric or string na, false for a bool -- as a function's last
-    statement, nested in a taken arm, and as the value a global, reassigned
-    or local variable takes, which does not keep its previous bar's value
+    numeric or string na, false for a bool, `na<int64_t>()` for an `int` an
+    epoch reaches (see "Epoch ints") -- as a function's last statement,
+    nested in a taken arm, and as the value a global, reassigned or local
+    variable takes, which does not keep its previous bar's value
     (`visit_stmt._visit_selection_value`;
     `tests/test_e2e_if_without_else_na.py`, tape
     `fixtures/open_items_tv/if_tail_na`).

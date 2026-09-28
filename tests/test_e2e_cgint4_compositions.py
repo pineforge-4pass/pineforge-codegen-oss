@@ -1,0 +1,344 @@
+"""Where a lane integrated by CGINT4 meets a rule already on main, or changes
+a function one of main's lanes changed, the integration keeps both rules
+(integration lane CGINT4: CG-OPEN-ITEMS on main's CGINT3). Each case runs the
+composition end to end -- ``transpile_json``, the built runtime,
+``run_strategy.py`` -- or pins the C++ where the rules decide the lowering.
+``MAIN`` is the integration base, replayed beside a case to show what it
+missed:
+
+* ``TypeInferer._series_type_for``: CG-OPEN-ITEMS bf805c2 resolves a
+  function's local spelled like another user function in its own function's
+  scope (``_variable_symbol``); CG-W9-SEC c86c0de widens a name an epoch
+  reaches to ``int64_t`` only when its symbol is no float, bool or string.
+  Both now read the one symbol: an ``int f = time`` local beside a string
+  function ``f`` keeps 64 bits and a ``float h = time`` beside a string
+  function ``h`` is a double. Main resolved both to the string functions
+  (``Series<std::string>``, which did not compile); the lane alone declared
+  ``Series<int>`` and narrowed the epoch.
+* ``StmtVisitor._visit_selection_value``: CG-OPEN-ITEMS 9ad5694 gives an if
+  without else (a switch without default) that runs no arm the na of its
+  slot; K-RUNERR stores an ``int`` an epoch reaches as ``int64_t``. That
+  slot's na is ``na<int64_t>()``: the lane spelled ``na<int>()`` for a
+  global, switch or reassigned target (Pine's ``int``), which widens to a
+  value, so ``na(t)`` read false. Main kept the previous bar's value.
+* ``pineforge_codegen._generate``: CG-OPEN-ITEMS f3e1816 rewrites ``nz`` /
+  ``fixnan`` keyword arguments to their positions (``bind_builtin_keywords``)
+  after XSYM-A's passes in main's ``_generate`` loop: ``lower_no_data_requests``
+  and ``specialize_security_contexts``, which copies a helper per context and
+  puts a payload parameter's value in its place. A keyword call through each
+  is C++ byte for byte its positional twin; main raised IndexError on each.
+* One function on two clocks: CG-W9-FN reads ``bar_index[k]`` in a function
+  by its chart call site's calls (``_fn_global_hist_*``), CG-OPEN-ITEMS
+  41c5e4f a payload's ``bar_index`` on the requested bars
+  (``_sec<N>_bar_index_``). One function called on irregular chart bars and
+  inside a request equals, on each clock, its own twin.
+* CG-OPEN-ITEMS d504053 parenthesizes a lambda history offset; CG-SESSION-2's
+  flag histories and CG-W9-FN's function histories index through
+  ``pine_index_int_cast``. A fractional runtime offset on every emitter
+  compiles and opens no C++ attribute.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+from pineforge_codegen import transpile, transpile_full
+from tests import _compile as compile_env
+from tests._e2e import (
+    Build, chart_feed_head, execute_all, ok, reference_codegen, same,
+    skip_unless_e2e_env, transpile_json,
+)
+
+# The integration base: codegen main before the CGINT4 picks.
+MAIN = "9361dbb3927cb6a545e97ba0cf5a5574e3c9fc28"
+HEAD = ('//@version=6\nstrategy("cgint4 composition", overlay=true, '
+        'default_qty_type=strategy.fixed, default_qty_value=1)\n')
+BARS = 400
+
+
+def _values(records: list[dict], name: str) -> list[float]:
+    return [rec["value"] for rec in records if rec["name"] == name]
+
+
+def _series_type(cpp: str, name: str) -> str | None:
+    match = re.search(rf"^\s*Series<([\w:]+)> {name};$", cpp, re.M)
+    return match.group(1) if match else None
+
+
+def _main_transpiled(tmp_path: Path, source: str) -> dict:
+    main = reference_codegen(MAIN)
+    if main is None:
+        pytest.skip(f"codegen {MAIN} is not in this checkout's history")
+    pine = tmp_path / "strategy.pine"
+    pine.write_text(source, encoding="utf-8")
+    return transpile_json(pine, main)
+
+
+# ---------------------------------------------------------------------------
+# A function's local named like a function keeps its epoch width
+# (CG-OPEN-ITEMS bf805c2 x CG-W9-SEC c86c0de x K-RUNERR)
+# ---------------------------------------------------------------------------
+
+FUNC_LOCAL = HEAD + '''f(x) => str.tostring(x)
+h(x) => str.tostring(x)
+g() =>
+    int f = time
+    float h = time
+    [f - f[1], h - h[1]]
+g2() =>
+    int fa = time
+    float ha = time
+    [fa - fa[1], ha - ha[1]]
+[a, b] = g()
+[ra, rb] = g2()
+if bar_index == 3
+    strategy.entry("L", strategy.long, comment = f(a) + h(b))
+// @pf-trace a=a
+// @pf-trace b=b
+// @pf-trace ra=ra
+// @pf-trace rb=rb
+'''
+
+
+def test_a_local_named_like_a_function_keeps_its_own_width() -> None:
+    # The renamed twins' own types are not this composition's: ``fa`` is
+    # int64_t, and ``ha``, which no symbol lookup reaches after the
+    # analyzer leaves g2's scope, is int64_t on main too.
+    cpp = transpile(FUNC_LOCAL)
+    assert _series_type(cpp, "f") == "int64_t"
+    assert _series_type(cpp, "h") == "double"
+    assert _series_type(cpp, "fa") == "int64_t"
+
+
+def test_main_typed_both_locals_as_the_string_functions(tmp_path: Path) -> None:
+    cpp = _main_transpiled(tmp_path, FUNC_LOCAL)["cpp"]
+    assert _series_type(cpp, "f") == "std::string"
+    assert _series_type(cpp, "h") == "std::string"
+
+
+# ---------------------------------------------------------------------------
+# An if without else in an epoch slot is the 64-bit na
+# (CG-OPEN-ITEMS 9ad5694 x K-RUNERR)
+# ---------------------------------------------------------------------------
+
+IF_NA = HEAD + '''var int w = na
+up = close > open
+t = if up
+    time
+u = switch
+    up => time
+w := if up
+    time
+g() =>
+    int x = if close > open
+        time
+    x
+v = g()
+twin = up ? time : na
+tn = na(t) ? 1 : 0
+un = na(u) ? 1 : 0
+wn = na(w) ? 1 : 0
+vn = na(v) ? 1 : 0
+twn = na(twin) ? 1 : 0
+dt = na(t) ? 0 : t - time
+// @pf-trace tn=tn
+// @pf-trace un=un
+// @pf-trace wn=wn
+// @pf-trace vn=vn
+// @pf-trace twn=twn
+// @pf-trace dt=dt
+'''
+IF_NA_TARGETS = ("t", "u", "w", "x")
+
+
+def test_an_epoch_slot_takes_the_64_bit_na() -> None:
+    cpp = transpile(IF_NA)
+    for name in IF_NA_TARGETS:
+        assert re.search(rf"^\s*int64_t (this->)?{name}\b", cpp, re.M), name
+        assert re.search(rf"^\s*{name} = na<int64_t>\(\);$", cpp, re.M), name
+        assert not re.search(rf"^\s*{name} = na<int>\(\);$", cpp, re.M), name
+
+
+# ---------------------------------------------------------------------------
+# One function on the chart's clock and on the requested clock
+# (CG-W9-FN x CG-OPEN-ITEMS 41c5e4f)
+# ---------------------------------------------------------------------------
+
+BAR_CLOCKS = HEAD + '''f() => bar_index[1]
+fc() => bar_index[1]
+var float a = na
+var float ac = na
+if bar_index % 3 != 1
+    a := f()
+    ac := fc()
+b = request.security(syminfo.tickerid, "60", f())
+tb = request.security(syminfo.tickerid, "60", bar_index[1])
+chart = bar_index[1]
+// @pf-trace a=a
+// @pf-trace ac=ac
+// @pf-trace b=b
+// @pf-trace tb=tb
+// @pf-trace chart=chart
+'''
+
+
+# ---------------------------------------------------------------------------
+# Chart-feed runs, the integrated tree beside main
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def runs(tmp_path_factory):
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("cgint4_compositions")
+    feed = chart_feed_head(engine, base, BARS)
+    builds = {
+        "func_local": Build(FUNC_LOCAL, trace=True),
+        "if_na": Build(IF_NA, trace=True),
+        "bar_clocks": Build(BAR_CLOCKS, trace=True),
+    }
+    main = reference_codegen(MAIN)
+    if main is not None:
+        builds["if_na_main"] = Build(IF_NA, trace=True, codegen=main)
+    return execute_all(engine, feed, base, builds)
+
+
+# Compared from bar 1: integer arithmetic on an ``na`` epoch (``f - f[1]`` on
+# bar 0) reads garbage instead of ``na``, a gap that predates these lanes.
+def test_the_named_locals_read_like_their_renamed_twins(runs):
+    records = ok(runs, "func_local").traces["default"]
+    for name, twin in (("a", "ra"), ("b", "rb")):
+        got, want = _values(records, name), _values(records, twin)
+        assert len(got) == len(want) == BARS, name
+        assert all(same(x, y) for x, y in zip(got[1:], want[1:])), name
+    # The 15m chart's bar spacing, in 64 bits: a 32-bit epoch never reads it.
+    assert _values(records, "a")[1:].count(900000.0) > BARS // 2
+
+
+def test_the_unmatched_arm_is_na_on_every_slot(runs):
+    records = ok(runs, "if_na").traces["default"]
+    twin = _values(records, "twn")
+    assert len(twin) == BARS and {0.0, 1.0} <= set(twin)
+    for name in ("tn", "un", "wn", "vn"):
+        assert _values(records, name) == twin, name
+    assert set(_values(records, "dt")) == {0.0}
+
+
+def test_main_kept_the_previous_bars_epoch(runs):
+    if "if_na_main" not in runs:
+        pytest.skip(f"codegen {MAIN} is not in this checkout's history")
+    records = ok(runs, "if_na_main").traces["default"]
+    twin = _values(records, "twn")
+    assert _values(records, "tn") != twin
+    first_up = twin.index(0.0)
+    assert set(_values(records, "tn")[first_up:]) == {0.0}
+
+
+def test_one_function_reads_each_clocks_own_history(runs):
+    outcome = ok(runs, "bar_clocks")
+    cpp = outcome.transpiled["cpp"]
+    assert re.search(r"_fn_global_hist_\d+\[", cpp)
+    assert re.search(r"_sec\d+_bar_index_", cpp)
+    records = outcome.traces["default"]
+    for name, twin in (("a", "ac"), ("b", "tb")):
+        got, want = _values(records, name), _values(records, twin)
+        assert len(got) == len(want) == BARS, name
+        assert all(same(x, y) for x, y in zip(got, want)), name
+    # Each rule is live: neither clock reads the chart's bar_index[1].
+    chart = _values(records, "chart")
+    for name in ("a", "b"):
+        got = _values(records, name)
+        assert any(not same(x, y) for x, y in zip(got, chart)), name
+
+
+# ---------------------------------------------------------------------------
+# nz / fixnan keyword calls through XSYM-A's request passes
+# (CG-OPEN-ITEMS f3e1816 x XSYM-A)
+# ---------------------------------------------------------------------------
+
+KEYWORD_TWINS = {
+    "context_copies": (
+        HEAD + '''f(tf) => request.security(syminfo.tickerid, tf, nz(replacement = 0.0, source = close[1]))
+a = f("60")
+b = f("240")
+if a > b
+    strategy.entry("L", strategy.long)
+''',
+        HEAD + '''f(tf) => request.security(syminfo.tickerid, tf, nz(close[1], 0.0))
+a = f("60")
+b = f("240")
+if a > b
+    strategy.entry("L", strategy.long)
+'''),
+    "no_data_request": (
+        HEAD + '''x = nz(source = request.security("NASDAQ:AAPL", "60", close), replacement = 0.0)
+plot(x)
+if close > open
+    strategy.entry("L", strategy.long)
+''',
+        HEAD + '''x = nz(request.security("NASDAQ:AAPL", "60", close), 0.0)
+plot(x)
+if close > open
+    strategy.entry("L", strategy.long)
+'''),
+    "payload_parameter": (
+        HEAD + '''g(src, tf) => request.security(syminfo.tickerid, tf, fixnan(source = src))
+a = g(close, "60")
+b = g(open, "60")
+if a > b
+    strategy.entry("L", strategy.long)
+''',
+        HEAD + '''g(src, tf) => request.security(syminfo.tickerid, tf, fixnan(src))
+a = g(close, "60")
+b = g(open, "60")
+if a > b
+    strategy.entry("L", strategy.long)
+'''),
+}
+
+
+@pytest.mark.parametrize("case", sorted(KEYWORD_TWINS))
+def test_a_keyword_call_is_its_positional_twin(case: str) -> None:
+    keyword, positional = KEYWORD_TWINS[case]
+    got, want = transpile_full(keyword), transpile_full(positional)
+    assert got["cpp"] == want["cpp"]
+    assert ([d.message for d in got["diagnostics"]]
+            == [d.message for d in want["diagnostics"]])
+    compile_env.compile_cpp(got["cpp"], label=f"cgint4-keywords-{case}")
+
+
+@pytest.mark.parametrize("case", sorted(KEYWORD_TWINS))
+def test_main_crashed_on_the_keyword_call(tmp_path: Path, case: str) -> None:
+    with pytest.raises(RuntimeError, match="IndexError"):
+        _main_transpiled(tmp_path, KEYWORD_TWINS[case][0])
+
+
+# ---------------------------------------------------------------------------
+# A fractional history offset on every emitter
+# (CG-OPEN-ITEMS d504053 x CG-SESSION-2 x CG-W9-FN)
+# ---------------------------------------------------------------------------
+
+FRACTIONAL = HEAD + '''lag = (bar_index % 3) / 2
+gv = close * 2
+fs() => session.ismarket[lag] ? 1.0 : 0.0
+fg() => nz(gv[lag], -1.0)
+a = session.ismarket[lag] ? 1.0 : 0.0
+b = fs()
+c = fg()
+d = ta.tr(true)[lag]
+e = (close - open)[lag]
+if a + b + c + d + e > 0
+    strategy.entry("L", strategy.long)
+'''
+
+
+def test_every_history_emitter_takes_a_fractional_offset() -> None:
+    cpp = transpile(FRACTIONAL)
+    code = re.sub(r'"(?:[^"\\]|\\.)*"', '""', cpp)
+    assert "[[" not in code
+    assert re.search(r"_session_call_\d+\[", code)
+    assert re.search(r"_pf_session_hist_ismarket\[", code)
+    assert re.search(r"_fn_global_hist_\d+\[", code)
+    compile_env.compile_cpp(cpp, label="cgint4-fractional-offsets")

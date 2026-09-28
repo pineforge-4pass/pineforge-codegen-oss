@@ -1975,9 +1975,14 @@ class StmtVisitor:
         nested in a taken arm, and as the value a global, reassigned or local
         variable takes, which does not keep its previous bar's value (lab tv
         probe pf-oi-if-tail-na). ``slot_cpp_type`` is the target's C++ type;
-        a handle or collection slot keeps its existing lowering.
+        a handle or collection slot keeps its existing lowering. An ``int``
+        an epoch reaches is stored ``int64_t`` (``target_cpp_type``, the
+        slot's integer width), and its na is the 64-bit sentinel: ``na<int>()``
+        widened there is a value, not na (quirk 9).
         """
         saved = getattr(self, "_unmatched_value_na", None)
+        if slot_cpp_type == "int" and target_cpp_type == "int64_t":
+            slot_cpp_type = "int64_t"
         if slot_cpp_type in self._UNMATCHED_NA_SLOTS:
             self._unmatched_value_na = (
                 target, self._na_value_for_type(slot_cpp_type))
