@@ -623,11 +623,16 @@ class ExprVisitor:
         """Lower an assignment target with UDT journal capture enabled."""
 
         previous = getattr(self, "_udt_mutable_expr_depth", 0)
+        previous_target = getattr(self, "_udt_assignment_target", None)
         self._udt_mutable_expr_depth = previous + 1
+        # A UDT array field assigned rebinds the field itself, not the array
+        # it holds (``_visit_member_access``).
+        self._udt_assignment_target = node
         try:
             return self._visit_expr(node)
         finally:
             self._udt_mutable_expr_depth = previous
+            self._udt_assignment_target = previous_target
 
     def _visit_member_access(self, node: MemberAccess) -> str:
         # UDT field whose type was a drawing primitive (label/line/box/
@@ -664,7 +669,13 @@ class ExprVisitor:
                 or mutable_collection
                 else "read"
             )
-            return f"{arena}.{access}({owner}).{self._safe_name(node.member)}"
+            field = f"{arena}.{access}({owner}).{self._safe_name(node.member)}"
+            if (self._udt_array_field_cpp(field_spec, owner_spec.name) is not None
+                    and node is not getattr(self, "_udt_assignment_target", None)):
+                # A ``_PFArrayField<T>``: every read, element write and method
+                # call reaches the array it holds.
+                return f"(*{field})"
+            return field
         if isinstance(node.object, Identifier):
             ns = node.object.name
             if ns == "alert" and node.member in ALERT_FREQ_VALUES:

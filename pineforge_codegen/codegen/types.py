@@ -212,6 +212,227 @@ class TypeInferer:
             self, "_checkpoint_traits_cpp_name", "_PFCheckpointTraits"
         )
 
+    def _udt_array_field_cpp(self, spec: TypeSpec | None,
+                             type_name: str | None = None) -> str | None:
+        """The record type of an array field of the UDT ``type_name``
+        (``_PFArrayField<T>``, base.UDT_ARRAY_FIELD_CPP) when the type is
+        bar-local (``_udt_bar_local_types``), else None: its field stays the
+        ``std::vector<T>`` copy every earlier build stored."""
+        if spec is None or spec.kind != "array" or spec.element is None:
+            return None
+        if type_name not in self._udt_bar_local_types():
+            return None
+        return f"_PFArrayField<{self._type_spec_to_cpp(spec.element)}>"
+
+    def _udt_has_array_fields(self) -> bool:
+        """Whether any emitted UDT record holds a ``_PFArrayField``."""
+        return any(
+            self._udt_array_field_cpp(spec, type_name) is not None
+            for type_name, specs in self._udt_field_type_specs.items()
+            if type_name in self._udt_defs
+            for name, spec in specs.items()
+            if name not in self._udt_omitted_fields.get(type_name, set())
+        )
+
+    def _udt_array_field_target(self, node) -> str | None:
+        """The ``_PFArrayField<T>`` type of the UDT field ``node`` reads, when
+        it is one, else None."""
+        if not isinstance(node, MemberAccess) or self._is_omitted_udt_field(node):
+            return None
+        owner_spec = self._type_spec_from_expr(node.object)
+        if (owner_spec is None or owner_spec.kind != "udt"
+                or owner_spec.name not in self._udt_defs):
+            return None
+        return self._udt_array_field_cpp(
+            self._udt_field_type_specs.get(owner_spec.name, {}).get(node.member),
+            owner_spec.name)
+
+    # Builtin namespaces whose calls never return a user object.
+    _NO_USER_OBJECT_NAMESPACES = frozenset({
+        "ta", "math", "str", "color", "input", "timeframe", "syminfo",
+        "strategy", "table", "line", "label", "box", "linefill", "polyline",
+        "chart", "session", "ticker", "log", "runtime", "alert",
+    })
+
+    _PRIMITIVE_RESULTS = frozenset({
+        PineType.INT, PineType.FLOAT, PineType.BOOL, PineType.STRING,
+        PineType.COLOR,
+    })
+
+    def _may_hold_user_object(self, expr, seen: frozenset = frozenset()) -> bool:
+        """Whether ``expr`` can evaluate to a user-defined object: not a
+        literal, an operator's result, a builtin that returns a primitive or
+        a drawing, or a user function whose result is one of those (its UDT
+        or drawing result, a primitive result type, else what its last
+        expression can hold: ``pick(o) => o`` can return an object)."""
+        if expr is None or isinstance(expr, (
+                NumberLiteral, StringLiteral, BoolLiteral, ColorLiteral,
+                NaLiteral, UnaryOp, BinOp)):
+            return False
+        if isinstance(expr, FuncCall):
+            func_name, namespace = self._resolve_callee(expr.callee)
+            if namespace is None and func_name in self._func_info_map:
+                info = self._func_info_map[func_name]
+                returned = getattr(info, "udt_return_type", None)
+                if returned is not None:
+                    return returned in self._udt_defs
+                if getattr(info, "return_type", None) in self._PRIMITIVE_RESULTS:
+                    return False
+                body = getattr(getattr(info, "node", None), "body", None) or ()
+                if not body or func_name in seen:
+                    return True
+                terminal = body[-1]
+                if isinstance(terminal, ExprStmt):
+                    terminal = terminal.expr
+                return self._may_hold_user_object(terminal, seen | {func_name})
+            return namespace not in self._NO_USER_OBJECT_NAMESPACES
+        if isinstance(expr, Ternary):
+            return (self._may_hold_user_object(expr.true_val, seen)
+                    or self._may_hold_user_object(expr.false_val, seen))
+        return True
+
+    def _udt_bar_local_types(self) -> set[str]:
+        """User types none of whose objects outlives the bar that creates it.
+
+        TradingView keeps a ``var`` array's value per bar: an object kept from
+        an earlier bar reads the array as it was then, while one built this
+        bar holds the array itself (lab tv pf-cgs2-udt-array-fields: a push
+        through ``h.xs`` reaches ``a``; a record kept from the first bar reads
+        one element forever). An object nothing keeps past its bar can alias
+        the array it is built from, which is exact and copies nothing; any
+        other object keeps the copy every earlier build stored. A type escapes
+        its bar when a ``var`` / ``varip`` declaration can hold one, a
+        collection's element type or another type's field is it, a history
+        read reads one, or a ``var`` declaration of a type this cannot tell
+        exists. Cached."""
+        cached = getattr(self, "_udt_bar_local_cache", None)
+        if cached is not None:
+            return cached
+        types = set(self._udt_defs)
+        self._udt_bar_local_cache = set()
+        escaping: set[str] = set()
+
+        def udt_of_hint(hint) -> set[str]:
+            if not hint:
+                return set()
+            return {name for name in types
+                    if re.search(rf"(?<![A-Za-z0-9_.]){re.escape(name)}(?![A-Za-z0-9_])",
+                                 str(hint))}
+
+        def udt_of_spec(spec) -> set[str]:
+            found = set()
+            pending = [spec]
+            while pending:
+                current = pending.pop()
+                if current is None:
+                    continue
+                if current.kind == "udt" and current.name in types:
+                    found.add(current.name)
+                pending.extend((current.element, current.key, current.value))
+            return found
+
+        for type_name, fields in self._udt_defs.items():
+            for field in fields or ():
+                escaping |= udt_of_hint(getattr(field, "type_name", None))
+        ast = getattr(self.ctx, "ast", None)
+        for node in self._walk_ast(ast):
+            if isinstance(node, VarDecl):
+                hint = str(node.type_hint or "")
+                if any(mark in hint for mark in ("<", "[")):
+                    # A collection of objects keeps them past their bar.
+                    escaping |= udt_of_hint(hint)
+                if not (node.is_var or node.is_varip):
+                    continue
+                if hint:
+                    escaping |= udt_of_hint(hint)
+                    continue
+                try:
+                    spec = self._type_spec_from_expr(node.value)
+                except Exception as exc:  # an unresolvable value may hold any type
+                    if getattr(exc, "limit", False):
+                        raise
+                    spec = None
+                if spec is None and isinstance(node.value, FuncCall):
+                    func_name, namespace = self._resolve_callee(node.value.callee)
+                    info = (self._func_info_map.get(func_name)
+                            if namespace is None else None)
+                    returned = getattr(info, "udt_return_type", None)
+                    if returned in types:
+                        escaping.add(returned)
+                        continue
+                if spec is None and self._may_hold_user_object(node.value):
+                    return self._udt_bar_local_cache
+                escaping |= udt_of_spec(spec)
+            elif isinstance(node, FuncCall):
+                func_name, namespace = self._resolve_callee(node.callee)
+                if namespace in ("array", "map", "matrix") or func_name in (
+                        "push", "unshift", "insert", "set", "fill", "put"):
+                    for template in self._template_args_from_call(node) or ():
+                        escaping |= udt_of_hint(template)
+                    for arg in [*node.args, *node.kwargs.values()]:
+                        try:
+                            escaping |= udt_of_spec(self._type_spec_from_expr(arg))
+                        except Exception as exc:
+                            if getattr(exc, "limit", False):
+                                raise
+                            continue
+            elif isinstance(node, Subscript):
+                try:
+                    escaping |= udt_of_spec(self._type_spec_from_expr(node.object))
+                except Exception as exc:
+                    if getattr(exc, "limit", False):
+                        raise
+                    continue
+        self._udt_bar_local_cache = types - escaping
+        return self._udt_bar_local_cache
+
+    def _stable_var_array_names(self) -> set[str]:
+        """Top-level ``var`` arrays no statement rebinds (``:=``): one array
+        object for the whole run, whose member storage keeps that identity,
+        so a UDT field can alias it. Cached."""
+        cached = getattr(self, "_stable_var_array_cache", None)
+        if cached is not None:
+            return cached
+        ast = getattr(self.ctx, "ast", None)
+        top_level_vars = {
+            stmt.name for stmt in getattr(ast, "body", None) or ()
+            if isinstance(stmt, VarDecl) and stmt.is_var and not stmt.is_varip
+        }
+        declarations: dict[str, int] = {}
+        rebound: set[str] = set()
+        for node in self._walk_ast(ast):
+            if isinstance(node, VarDecl):
+                declarations[node.name] = declarations.get(node.name, 0) + 1
+            elif (isinstance(node, Assignment)
+                    and isinstance(node.target, Identifier)):
+                rebound.add(node.target.name)
+        names = set()
+        for name in top_level_vars:
+            # Declared once in the whole program, so no local shadows it.
+            if declarations.get(name) != 1 or name in rebound:
+                continue
+            spec = self._collection_spec_for_name_raw(name)
+            if spec is not None and spec.kind == "array":
+                names.add(name)
+        self._stable_var_array_cache = names
+        return names
+
+    def _udt_array_field_value(self, field_cpp: str, value_node, value_cpp: str) -> str:
+        """The ``_PFArrayField<T>`` a UDT array field takes from ``value_node``:
+        an alias of a stable script ``var`` array (``_stable_var_array_names``)
+        read at the script's level of names, else the value itself, moved or
+        copied in (the snapshot every earlier build stored)."""
+        name = value_node.name if isinstance(value_node, Identifier) else None
+        if (name is not None
+                and name in self._stable_var_array_names()
+                and name not in (getattr(self, "_current_func_param_types", {}) or {})
+                and name not in (getattr(self, "_current_func_local_types", {}) or {})
+                and name not in (getattr(self, "_current_func_locals", ()) or ())
+                and name not in (getattr(self, "_current_loop_vars", ()) or ())
+                and not self._known_var_is_lexically_shadowed(name)):
+            return f"{field_cpp}::alias({value_cpp})"
+        return f"{field_cpp}({value_cpp})"
+
     def _udt_direct_array_fields(self, type_name: str) -> tuple[str, ...]:
         """Direct array-valued fields whose UDT copy semantics are unsupported.
 

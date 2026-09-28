@@ -1,0 +1,32 @@
+//@version=6
+// CG-SILENT-2 item 6: a UDT field holds the array it is built from. An
+// object that lives one bar (Holder) holds the var arrays themselves: a push
+// through it reaches the array. An object kept across bars (Kept) reads the
+// array as it was on its own bar. Each close's comment spells the sizes the
+// script reads on that bar.
+strategy("CGS2 UDT array fields", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+type Holder
+    array<float> xs
+    array<float> ys
+type Kept
+    array<float> xs
+var a = array.new_float()
+var c = array.new_float()
+var kept = array.new<Kept>()
+a.push(close)
+c.push(open)
+h = Holder.new(a, c)
+h.xs.push(1.0)
+sizeA = a.size()
+last = h.xs.last()
+a.pop()
+sizeB = h.xs.size()
+ySize = h.ys.size()
+if kept.size() < 3
+    kept.push(Kept.new(a))
+firstSize = kept.first().xs.size()
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(sizeA) + "|" + str.tostring(last) + "|" + str.tostring(sizeB) + "|" + str.tostring(ySize) + "|" + str.tostring(firstSize) + "|" + str.tostring(kept.size()))

@@ -1113,7 +1113,14 @@ class StmtVisitor:
                 node.value, target_cpp_type=target_cpp_type
             )
             field_int = self._udt_field_int_cpp_type(node.target)
-            if node.op == ":=":
+            array_field = self._udt_array_field_target(node.target)
+            if node.op == ":=" and array_field is not None:
+                # The field rebinds to the array: an alias of a stable
+                # script var array, else the value moved or copied in.
+                lines.append(
+                    f"{pad}{target_cpp} = "
+                    f"{self._udt_array_field_value(array_field, node.value, val_cpp)};")
+            elif node.op == ":=":
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, field_int)
                 lines.append(f"{pad}{target_cpp} = {val_cpp};")
             else:

@@ -151,6 +151,8 @@ class TopLevelEmitter:
             lines.append("#include <deque>")
             lines.append("#include <functional>")
             lines.append("#include <limits>")
+            if self._udt_has_array_fields():
+                lines.append("#include <memory>")
         lines.append("#include <tuple>")
         lines.append("#include <optional>")
         lines.append("#include <type_traits>")
@@ -798,6 +800,32 @@ class TopLevelEmitter:
             "};",
             "",
         ])
+
+        if self._udt_has_array_fields():
+            # A UDT array field: its binding, and the contents of an array it
+            # owns (an aliased script array is checkpointed as itself).
+            lines.extend([
+                "template <typename _PFElement>",
+                f"struct {checkpoint_traits}<_PFArrayField<_PFElement>> {{",
+                f"    using vector_traits = {checkpoint_traits}<std::vector<_PFElement>>;",
+                "    struct snapshot_type {",
+                "        std::shared_ptr<std::vector<_PFElement>> owned;",
+                "        std::vector<_PFElement>* data;",
+                "        typename vector_traits::snapshot_type contents;",
+                "    };",
+                "    static snapshot_type take(const _PFArrayField<_PFElement>& value) {",
+                "        snapshot_type snapshot{value.owned(), value.data(), {}};",
+                "        if (value.owned()) snapshot.contents = vector_traits::take(*value.owned());",
+                "        return snapshot;",
+                "    }",
+                "    static void restore(_PFArrayField<_PFElement>& value,",
+                "                        const snapshot_type& snapshot) {",
+                "        value.rebind(snapshot.owned, snapshot.data);",
+                "        if (snapshot.owned) vector_traits::restore(*snapshot.owned, snapshot.contents);",
+                "    }",
+                "};",
+                "",
+            ])
 
         # Snapshot backing records field-by-field.  A nested UDT field is only
         # a numeric handle, so the primary trait copies its ID without recursing

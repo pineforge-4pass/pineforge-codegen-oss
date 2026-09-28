@@ -36,6 +36,7 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `cgs2_scalar_method_global` | `50d1dfd04fb43e8052c1361a0adc7948a4453cb8e9b92e7a75257764144d925f` | `3284114b6da48ee4a7aae5172773c8c9ff84cf67eddf5643c67907507a2b565e` |
 | `cgs2_tostring_tuple_payload` | `d14e232de9881e366653d2f2236b147c85bc5fa8fb1579ff5347c326b8e56e88` | `db5a7bad218e919ecc9d69272bf172c479c06cb337324468f485c24309c4e016` |
 | `cgs2_ta_tuple_helper` | `6c51333093ea1e3f6fc9248cb3906f4141b9aa4f88610960b762d77ba092774a` | `eb3e95ddd22413e859f8eae701b7a4d09ceae52fc25ea2617e38462a1c8ba8d4` |
+| `cgs2_udt_array_fields` | `0779460af759554c125a95ceed5cffc5b107299ea2c0bba3f49f515f36f74fdf` | `ac70b8946aa7222abe34ca53fe724814a5d68ac711c793c6fc48f7bf496184c3` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -54,6 +55,7 @@ Each exit Signal joins these fields with `|`, in this order:
 - `cgs2_scalar_method_global`: `y`, `h`, `a` (4 decimals)
 - `cgs2_tostring_tuple_payload`: `x`, `y` (`up` / `down`), `p`, `q`
 - `cgs2_ta_tuple_helper`: `mid`, `up`, `lo`, `m2`, `u2 - l2` (4 decimals)
+- `cgs2_udt_array_fields`: `sizeA`, `last`, `sizeB`, `ySize`, `firstSize`, `kept.size()`
 
 What each tape shows:
 
@@ -122,3 +124,9 @@ What each tape shows:
   `ta.bb` at 60 minutes, destructured by their callers (entries from 08:00
   UTC on; 320 trades). `ta.bb` keeps a finite window, so its bands do not
   depend on history before the tape's range.
+- `cgs2_udt_array_fields`: a `Holder` built each bar from two `var` arrays
+  holds the arrays themselves: `h.xs.push(1.0)` reaches `a` (`sizeA` is
+  the bar count plus one) and `h.xs` reads `a` after `a.pop()`. A `Kept`
+  pushed into a `var` array on the first bar reads `a` as it was on that
+  bar, one element, on every later bar: TradingView keeps a `var` array's
+  value per bar.

@@ -847,6 +847,20 @@ the transpiler. Carry `SourceLocation` so users can map back to the
 Pine line/col. Diagnostics inside the support checker use
 `Level.WARNING` for divergences-but-not-broken, `Level.ERROR`
 otherwise.
+- **UDT array fields.** TradingView holds the array a UDT field is built
+from, and keeps a `var` array's value per bar: a push through `h.xs`
+reaches `a`, while an object kept from an earlier bar reads the array as
+it was then. A type none of whose objects outlives its bar
+(`_udt_bar_local_types`: no `var` declaration, collection, other type's
+field or history read holds one; a `var` holding a value that can be an
+object of a type this cannot tell, a user function's result such as
+`pick(o) => o`'s among them, keeps every type) stores its array fields as
+`_PFArrayField<T>` (`base.UDT_ARRAY_FIELD_CPP`): an alias of a top-level
+`var` array no statement rebinds, else the value moved or copied in;
+reads dereference it, an assignment rebinds it. Every other type keeps
+the `std::vector<T>` copy it always stored. A record built each bar
+copied its growing arrays and the arena keeps every record: memory grew
+with the square of the bars (`tests/test_e2e_udt_array_fields.py`).
 - **TA tuple request helpers.** A helper whose value is a
 `request.security` of a TA tuple (`htf() => request.security(t, "D",
 ta.macd(...))`) returns the request's stored result struct

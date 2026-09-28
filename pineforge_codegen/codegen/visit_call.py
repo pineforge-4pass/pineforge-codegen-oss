@@ -2504,6 +2504,14 @@ class CallVisitor:
                     elif (self._is_nullable_collection_cpp_type(f_cpp_type)
                           and val == "na<double>()"):
                         val = f"{f_cpp_type}{{}}"
+                    array_field = self._udt_array_field_cpp(
+                        field_specs.get(f.name)
+                        or self._type_spec_from_hint_name(f.type_name),
+                        namespace)
+                    if array_field is not None:
+                        val = (f"{array_field}()" if val == "na<double>()"
+                               else self._udt_array_field_value(
+                                   array_field, value_node, val))
                     field_inits.append(f".{self._safe_name(f.name)} = {val}")
             return self._emit_udt_new_expr(namespace, field_inits)
 
