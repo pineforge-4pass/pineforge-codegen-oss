@@ -1255,6 +1255,17 @@ class ExprVisitor:
             return f"static_cast<int64_t>({folded}LL)"
         left = self._visit_expr(node.left)
         right = self._visit_expr(node.right)
+        if (self._int_arith_leaves_int32(node)
+                and self._fold_int32_overflow_cpp(node.op, left, right) is None):
+            # Both operands are 32-bit C++ ints and the value can leave
+            # int32: Pine's int is 64-bit (``days * 86400000``). Operands the
+            # C++ spells as int literals keep their fold (``_lower_binop``).
+            return self._left_operand_first(
+                node, left, right,
+                lambda left, right: self._wide_int_arith_cpp(
+                    node, left, right,
+                    lambda left, right: self._lower_binop(node, left, right)),
+            )
         return self._left_operand_first(
             node, left, right,
             lambda left, right: self._lower_binop(node, left, right),

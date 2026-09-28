@@ -1,0 +1,27 @@
+//@version=6
+// CG-SILENT-2 item 3: Pine's int is 64-bit. An input int or bar_index times
+// a constant, and a constant past int32 held in a tuple element, a UDT field
+// or a method result, keep every bit. Each close's comment spells what the
+// script reads on that bar.
+strategy("CGS2 int64 products", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+days = input.int(30, "days")
+a = days * 86400000
+int e = days * 86400000
+b = bar_index * 7200000
+c = time - days * 86400000
+cd = (time - c) / 86400000
+ms(n) => n * 60000
+f = ms(days * 1440)
+tup() => [3000000000, days * 86400000]
+[p, q] = tup()
+type U
+    int v = 3000000000
+method big(U this) => this.v * 2
+method konst(U this) => na(this.v) ? 0 : 3000000000
+u = U.new()
+s(x) => str.tostring(x)
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = s(a) + "|" + s(e) + "|" + s(bar_index) + "|" + s(b) + "|" + s(cd) + "|" + s(f) + "|" + s(p) + "|" + s(q) + "|" + s(u.v) + "|" + s(u.big()) + "|" + s(u.konst()))

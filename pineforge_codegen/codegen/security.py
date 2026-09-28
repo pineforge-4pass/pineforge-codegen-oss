@@ -83,6 +83,7 @@ from ..external_requests import (
     FOOTPRINT_COLUMN_ANNOTATION, RECORDED_KEY_ANNOTATION, REQUEST_REF_ANNOTATION,
 )
 from ..external_requests import _nodes as walk_request_nodes
+from ..limits import iter_ast_nodes
 from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION
 from ..symbols import PineType, method_receiver_type_name
 from .tables import (
@@ -6176,6 +6177,31 @@ class SecurityEmitter:
             right = self._build_security_expr(
                 sec_id, expr_node.right, ta_range, ta_results, resolving, security_mutable_names, helper_binding_stack, emitted_lines
             )
+            wide_na = False
+            if (self._int_arith_leaves_int32(expr_node)
+                    # Operands spelled as int literals keep their fold
+                    # (``_fold_int32_overflow_cpp`` in ``lower`` below).
+                    and self._fold_int32_overflow_cpp(expr_node.op, left, right) is None
+                    and not any(
+                        self._security_emits_double(side, helper_binding_stack)
+                        for side in (expr_node.left, expr_node.right))
+                    and not any(
+                        isinstance(sub, Identifier) and any(
+                            sub.name in frame
+                            for frame in helper_binding_stack or ())
+                        for sub, _depth in iter_ast_nodes(expr_node))):
+                # 32-bit int operands whose value can leave int32 (``bar_index
+                # * 7200000``): Pine's int is 64-bit, as on the chart; an
+                # operand that can be na makes the value na (the double form
+                # of ``_wide_int_arith_cpp``: the requested value is a double).
+                # A side the builder re-evaluates as a double (``int n =
+                # math.round(x)``) already computes in double and keeps its
+                # NaN, and a name a helper binds here is its argument, which
+                # the chart's rule does not see.
+                if self._int_operand_may_be_na(expr_node):
+                    wide_na = True
+                else:
+                    left = f"static_cast<int64_t>({left})"
 
             def lower(left: str, right: str) -> str:
                 cpp_ops = {"and": "&&", "or": "||"}
@@ -6206,6 +6232,11 @@ class SecurityEmitter:
                 return self._lower_relational(op, expr_node.left, expr_node.right, left, right)
 
             # The left operand first, as on the chart (``_left_operand_first``).
+            if wide_na:
+                return self._left_operand_first(
+                    expr_node, left, right,
+                    lambda left, right: self._wide_int_arith_cpp(
+                        expr_node, left, right, lower))
             return self._left_operand_first(expr_node, left, right, lower)
 
         if isinstance(expr_node, UnaryOp):

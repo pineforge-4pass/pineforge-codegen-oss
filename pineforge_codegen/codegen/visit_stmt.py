@@ -710,6 +710,9 @@ class StmtVisitor:
                 )
                 elem_spec = spec.element or elem_spec
                 cpp_type = self._type_spec_to_cpp(spec)
+                if len(node.value.args) > 2:
+                    self._warn_narrow_int_element(
+                        node.value, spec, node.value.args[2])
                 if len(node.value.args) >= 2:
                     r = self._visit_expr(node.value.args[0])
                     c = self._visit_expr(node.value.args[1])
@@ -1761,11 +1764,14 @@ class StmtVisitor:
         # unknown-identifier guard in _visit_ident would otherwise flag it).
         saved_loop = self._current_loop_vars
         saved_loop_specs = self._current_loop_var_specs
+        saved_counted = self._current_counted_loop_vars
         self._current_loop_vars = set(self._current_loop_vars)
         self._current_loop_var_specs = dict(self._current_loop_var_specs)
+        self._current_counted_loop_vars = set(self._current_counted_loop_vars)
         if node.var:
             self._current_loop_vars.add(node.var)
             self._current_loop_var_specs[node.var] = TypeSpec.primitive("int")
+            self._current_counted_loop_vars.add(node.var)
         _blk_saved = self._push_block_var_remap(node)
         if node.var:
             # The loop counter is a fresh primitive lexical binding.  Keep it
@@ -1780,6 +1786,7 @@ class StmtVisitor:
             self._pop_block_var_remap(_blk_saved)
         self._current_loop_vars = saved_loop
         self._current_loop_var_specs = saved_loop_specs
+        self._current_counted_loop_vars = saved_counted
         lines.append(f"{pad}}}")
 
     def _visit_for_in(self, node, lines: list[str], indent: int,
@@ -1788,8 +1795,12 @@ class StmtVisitor:
         iterable = self._visit_expr(node.iterable)
         saved_loop = self._current_loop_vars
         saved_loop_specs = self._current_loop_var_specs
+        saved_counted = self._current_counted_loop_vars
         self._current_loop_vars = set(self._current_loop_vars)
         self._current_loop_var_specs = dict(self._current_loop_var_specs)
+        # Its binders shadow a counted loop's of the same spelling.
+        self._current_counted_loop_vars = (
+            self._current_counted_loop_vars - {node.var, *(node.vars or ())})
         iterable_spec = self._type_spec_from_expr(node.iterable)
         elem_spec = (
             iterable_spec.element
@@ -1800,6 +1811,9 @@ class StmtVisitor:
             self._current_loop_vars.add(node.var)
             if elem_spec is not None:
                 self._current_loop_var_specs[node.var] = elem_spec
+            else:
+                # An outer binder's spec of the same spelling is not this one's.
+                self._current_loop_var_specs.pop(node.var, None)
         if node.vars:
             tuple_specs: list[TypeSpec | None] = []
             if iterable_spec is not None and iterable_spec.kind == "map":
@@ -1810,6 +1824,8 @@ class StmtVisitor:
                     if (idx < len(tuple_specs)
                             and tuple_specs[idx] is not None):
                         self._current_loop_var_specs[v] = tuple_specs[idx]
+                    else:
+                        self._current_loop_var_specs.pop(v, None)
         map_pair_loop = (
             iterable_spec is not None
             and iterable_spec.kind == "map"
@@ -1927,6 +1943,7 @@ class StmtVisitor:
         lines.append(f"{pad}}}")
         self._current_loop_vars = saved_loop
         self._current_loop_var_specs = saved_loop_specs
+        self._current_counted_loop_vars = saved_counted
 
     def _visit_while(self, node: WhileStmt, lines: list[str], indent: int,
                      value_target: tuple[str, str | None] | None = None) -> None:
