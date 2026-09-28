@@ -31,6 +31,8 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `cgs2_color_arrays` | `1eed73a34e1bddf73e0272a7cf5b5fb1b00cf72e5986a4c9b694e1ff0f422a15` | `3210a6c6870137852c358d123a6c6a5fa535aab0b7a15922bddb5e54351598fa` |
 | `cgs2_negated_constants` | `82ce0a41a9c6fecd10d5877aa17a6e45b310d447192c4f568cb63d5eaa2137a1` | `1f68c782f58f08ba3492b1bc1fed6188a73b79a28349b5c9dc346119b8758a46` |
 | `cgs2_nested_helper_payload` | `866e32079b4293c151344a0135084936ee47c9e8e26887c993d8a84e75a02261` | `af162ce74797836ddc007d9951674f2d303ebbb3c44f55feb3519aeee18efba9` |
+| `cgs2_array_index_loop` | `a78a4a551c94e3e6ab3cf951c430171774c0baeba0eeceedf7381b39a6dc2654` | `c3adfbefef8d27c40eac8094589d5a163a4a399f0a092c666736db0835fea02b` |
+| `cgs2_array_loop_bool_copy` | `8b0a48a00b91167b5c4266f223d400e8dc583accd5a25d290a0dd2689bb6c8f8` | `55ae0bec42e7f29f28b700c3b8314a6e8a2d8735ff37e65f59dbe88e22fd5088` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -44,6 +46,8 @@ Each exit Signal joins these fields with `|`, in this order:
 - `cgs2_color_arrays`: `A[0]`, `A[1]`, `B[0]`, `D[0]`, `E[0]`, `F[0]` (each `red,green,blue,transparency`), the four sizes' sum
 - `cgs2_negated_constants`: `-NEG * 2`, `+NEG`, `-FNEG`, `-NEG`
 - `cgs2_nested_helper_payload`: `a`, `b` (4 decimals)
+- `cgs2_array_index_loop`: `s`, `weights(arr)` (4 decimals), `n`, `t`
+- `cgs2_array_loop_bool_copy`: `cnt`, `after`
 
 What each tape shows:
 
@@ -94,3 +98,10 @@ What each tape shows:
   minutes as `u(u(close)) + u(open)` and `u(u(u(high)))` keeps a TA state
   per written call (entries start at 06:00 UTC, when every requested window
   lies inside the tape's range; 324 trades).
+- `cgs2_array_index_loop`: `for [i, v] in arr` reads index and element
+  over a script array, a function's parameter and a string array, and as a
+  function's last statement it is the last iteration's value (32).
+- `cgs2_array_loop_bool_copy`: `for [i, v] in flags` over three bools
+  reads each element as its iteration found it: `flags.set(i, not v)` in the
+  body leaves `v` alone, so `cnt` counts the set flags before the flip (3,
+  or 2 when `close <= open`) and a second loop the flipped ones (0 or 1).

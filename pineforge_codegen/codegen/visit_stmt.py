@@ -1818,6 +1818,8 @@ class StmtVisitor:
             tuple_specs: list[TypeSpec | None] = []
             if iterable_spec is not None and iterable_spec.kind == "map":
                 tuple_specs = [iterable_spec.key, iterable_spec.value]
+            elif elem_spec is not None:
+                tuple_specs = [TypeSpec.primitive("int"), elem_spec]
             for idx, v in enumerate(node.vars):
                 if v != "_":
                     self._current_loop_vars.add(v)
@@ -1891,6 +1893,42 @@ class StmtVisitor:
                 lines.append(
                     f"{pad}    auto {value_cpp} = {map_token}.get({key_cpp});"
                 )
+        elif node.vars and elem_spec is not None and len(node.vars) == 2:
+            # ``for [i, v] in arr``: the index and the element. A vector has
+            # no pairs to decompose (``auto [i, v] : arr`` did not compile);
+            # bind the array once, then index it, reading its size on every
+            # iteration as the single-name loop's element order does.
+            index_name, value_name = node.vars
+            authored_names = (
+                set(self._all_bound_names)
+                | set(self._func_names)
+                | set(self._udt_defs)
+                | set(self._current_func_param_types)
+            )
+            occupied_names = authored_names | {
+                self._safe_name(name) for name in authored_names
+            }
+            while True:
+                fid = self._for_counter
+                self._for_counter += 1
+                array_token = f"__pf_array_iter_{fid}"
+                index_token = f"__pf_array_index_{fid}"
+                if not ({array_token, index_token} & occupied_names):
+                    break
+            lines.append(f"{pad}auto&& {array_token} = {iterable};")
+            lines.append(
+                f"{pad}for (int {index_token} = 0; "
+                f"{index_token} < (int){array_token}.size(); ++{index_token}) {{")
+            if index_name != "_":
+                lines.append(f"{pad}    int {self._safe_name(index_name)} = {index_token};")
+            if value_name != "_":
+                # The element's value, not a reference: a ``std::vector<bool>``
+                # element read through ``auto`` is a proxy that a later
+                # ``arr.set(i, ...)`` in the body would change.
+                lines.append(
+                    f"{pad}    typename std::decay_t<decltype({array_token})>"
+                    f"::value_type {self._safe_name(value_name)} = "
+                    f"{array_token}[(size_t){index_token}];")
         elif node.vars:
             bindings = ", ".join(
                 self._safe_name(name) for name in node.vars

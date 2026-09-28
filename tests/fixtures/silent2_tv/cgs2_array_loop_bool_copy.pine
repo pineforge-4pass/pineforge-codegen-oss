@@ -1,0 +1,20 @@
+//@version=6
+// CG-SILENT-2 item 5d follow-up: for [i, v] in a bool array reads each
+// element's value at its iteration; setting the slot later in the loop body
+// does not change v. Each close's comment spells the counts on that bar.
+strategy("CGS2 array loop bool copy", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+flags = array.from(true, close > open, true)
+int cnt = 0
+for [i, v] in flags
+    flags.set(i, not v)
+    if v
+        cnt += 1
+int after = 0
+for [i, v] in flags
+    if v
+        after += 1
+mm = minute(time, "UTC")
+if mm == 0 or mm == 30
+    strategy.entry("L", strategy.long)
+if mm == 15 or mm == 45
+    strategy.close("L", comment = str.tostring(cnt) + "|" + str.tostring(after))

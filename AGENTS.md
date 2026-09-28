@@ -843,6 +843,14 @@ the transpiler. Carry `SourceLocation` so users can map back to the
 Pine line/col. Diagnostics inside the support checker use
 `Level.WARNING` for divergences-but-not-broken, `Level.ERROR`
 otherwise.
+- **Array index loops.** `for [i, v] in <array>` binds the array once and
+indexes it (`__pf_array_iter_N` / `__pf_array_index_N`), the index an
+`int`, the element a copy of its value (`value_type`: a `std::vector<bool>`
+element read through `auto` is a proxy a later `arr.set(i, ...)` in the
+body changes; tape `fixtures/silent2_tv/cgs2_array_loop_bool_copy`); it was
+a structured
+binding over the vector, which only a map's pairs admit, and did not
+compile (`tests/test_e2e_array_index_loop.py`).
 - **Unary signs.** A never-reassigned numeric name is inlined as its
 literal, so a sign's operand text can start with one: `unary_sign_cpp`
 (`codegen/helpers.py`) parenthesizes it there (`-NEG` over `NEG = -5` is
