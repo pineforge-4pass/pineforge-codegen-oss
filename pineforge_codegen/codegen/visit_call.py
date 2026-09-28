@@ -2955,6 +2955,25 @@ class CallVisitor:
     _FROM_GRADIENT_PARAMS = (
         "value", "bottom_value", "top_value", "bottom_color", "top_color",
     )
+    # TradingView's parameter names of the other color.* functions.
+    _COLOR_PARAMS = {
+        "new": ("color", "transp"),
+        "rgb": ("red", "green", "blue", "transp"),
+        "r": ("color",), "g": ("color",), "b": ("color",), "t": ("color",),
+    }
+
+    def _color_arg_nodes(self, func_name: str, node) -> list:
+        """The argument nodes of a ``color.*`` call in parameter order: the
+        positional ones, then each keyword in its parameter's slot, up to the
+        last one given (``color.new(transp = 40, color = c)`` is
+        ``color.new(c, 40)``). A slot nothing fills is None."""
+        params = self._COLOR_PARAMS.get(func_name, ())
+        bound = list(node.args)
+        for index, name in enumerate(params):
+            if index >= len(node.args) and name in node.kwargs:
+                bound += [None] * (index + 1 - len(bound))
+                bound[index] = node.kwargs[name]
+        return bound
 
     # Builtins whose call has no state and no side effect.
     _PURE_CALL_NAMESPACES = frozenset({"color", "math", "str"})
@@ -2995,15 +3014,20 @@ class CallVisitor:
             return ("([&]() -> int64_t { "
                     + " ".join(f"(void)({cpp});" for cpp in effects)
                     + " return 0; }())")
-        args = [self._visit_expr(a) for a in node.args]
+        # Keyword arguments take their parameter's slot; TradingView evaluates
+        # the arguments in parameter order, as the lowerings below do.
+        arg_nodes = self._color_arg_nodes(func_name, node)
+        if any(a is None for a in arg_nodes):
+            return "0"
+        args = [self._visit_expr(a) for a in arg_nodes]
         if func_name == "new":
             if len(args) >= 2:
                 base = self._coerce_int_slot(
-                    args[0], node.args[0] if node.args else None, "int64_t",
+                    args[0], arg_nodes[0], "int64_t",
                 )
-                whole = _whole_transparency(node.args[1])
+                whole = _whole_transparency(arg_nodes[1])
                 alpha = color_alpha_cast(args[1], whole)
-                base_node = node.args[0]
+                base_node = arg_nodes[0]
                 if (isinstance(base_node, ColorLiteral)
                         or (isinstance(base_node, MemberAccess)
                             and isinstance(base_node.object, Identifier)
@@ -3029,10 +3053,10 @@ class CallVisitor:
         if func_name == "rgb":
             if len(args) >= 4:
                 channels = [
-                    self._coerce_int_slot(args[i], node.args[i], "int64_t")
+                    self._coerce_int_slot(args[i], arg_nodes[i], "int64_t")
                     for i in range(3)
                 ]
-                alpha = color_alpha_cast(args[3], _whole_transparency(node.args[3]))
+                alpha = color_alpha_cast(args[3], _whole_transparency(arg_nodes[3]))
                 return (
                     "pine_color::new_color(static_cast<int64_t>("
                     f"(static_cast<uint64_t>({channels[0]}) & 0xFFULL) << 16 | "
@@ -3041,7 +3065,7 @@ class CallVisitor:
                 )
             elif len(args) >= 3:
                 channels = [
-                    self._coerce_int_slot(args[i], node.args[i], "int64_t")
+                    self._coerce_int_slot(args[i], arg_nodes[i], "int64_t")
                     for i in range(3)
                 ]
                 return (

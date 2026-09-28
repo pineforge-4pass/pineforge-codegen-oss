@@ -1,0 +1,21 @@
+//@version=6
+// CG-SILENT-2 item 1: color.new / color.rgb / color.r|g|b|t called with
+// keyword arguments, beside their positional twins. Each close's comment
+// spells red,green,blue,transparency of every color the script builds.
+strategy("CGS2 color keywords", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+base = close > open ? #1E90FF : #FF8C00
+c1 = color.new(#1E90FF, transp = 40)
+c2 = color.new(color = base, transp = 60)
+c3 = color.rgb(10, 20, 30, transp = 80)
+c4 = color.rgb(red = 200, green = 100, blue = 50, transp = 20)
+c5 = color.new(base, transp = close > open ? 20 : 80)
+c6 = color.rgb(blue = 7, red = 5, green = 6, transp = 40)
+c7 = color.new(transp = 60, color = #336699)
+p1 = color.new(#1E90FF, 40)
+p3 = color.rgb(10, 20, 30, 80)
+s(c) => str.tostring(color.r(color = c)) + "," + str.tostring(color.g(c)) + "," + str.tostring(color.b(color = c)) + "," + str.tostring(color.t(color = c))
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(c1) + "|" + s(c2) + "|" + s(c3) + "|" + s(c4) + "|" + s(c5) + "|" + s(c6) + "|" + s(c7) + "|" + s(p1) + "|" + s(p3))
