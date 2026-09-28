@@ -78,7 +78,7 @@ from ..analyzer import (
     FuncInfo, TACallSite, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
 )
 from .. import signatures as sigs
-from ..errors import CompileError
+from ..errors import CompileError, Phase
 from ..external_requests import (
     FOOTPRINT_COLUMN_ANNOTATION, RECORDED_KEY_ANNOTATION, REQUEST_REF_ANNOTATION,
 )
@@ -1022,6 +1022,26 @@ class SecurityEmitter:
             name, helper_binding_stack
         )
         return resolved[0] if resolved is not None else None
+
+    # Depth of the helper-local value re-walks under way in
+    # ``_collect_security_ta_binding_stacks``.
+    _security_local_rewalks = 0
+
+    @staticmethod
+    def _security_binding_is_helper_local(
+        name: str,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+    ) -> bool:
+        """Whether ``name`` resolves (as ``_security_lookup_helper_binding_context``
+        does) to a helper's local, not to a helper's argument."""
+        for frame in reversed(helper_binding_stack or ()):
+            if name not in frame:
+                continue
+            bound = frame[name]
+            if isinstance(bound, Identifier) and bound.name == name:
+                continue
+            return not isinstance(frame, _SecurityHelperArgumentFrame)
+        return False
 
     def _security_lookup_helper_binding_context(
         self,
@@ -4297,14 +4317,23 @@ class SecurityEmitter:
                 if bind_key in resolving:
                     return collected
                 resolving.add(bind_key)
-                self._collect_security_ta_binding_stacks(
-                    bound,
-                    resolving,
-                    bound_stack,
-                    collected,
-                    inline_ta_indices,
-                    inline_helper,
-                )
+                # A helper local's value was collected at its declaration, and
+                # the evaluator reads the local's C++ variable, never its value
+                # again: its re-walk finds only variants nothing emits.
+                local = self._security_binding_is_helper_local(
+                    expr_node.name, helper_binding_stack)
+                self._security_local_rewalks += local
+                try:
+                    self._collect_security_ta_binding_stacks(
+                        bound,
+                        resolving,
+                        bound_stack,
+                        collected,
+                        inline_ta_indices,
+                        inline_helper,
+                    )
+                finally:
+                    self._security_local_rewalks -= local
                 resolving.discard(bind_key)
                 return collected
 
@@ -4350,10 +4379,27 @@ class SecurityEmitter:
             if func_name is not None:
                 if self._security_shared_call_key(expr_node, helper_binding_stack) is not None:
                     return collected
-                call_key = f"func:{func_name}"
+                # Keyed by the written call: ``u(u(close))`` reaches the inner
+                # call through the outer body's parameter, in the caller's
+                # scope, and its TA site needs a variant of its own (it was
+                # skipped as recursion and read an undeclared base member).
+                call_key = f"func:{func_name}:{id(expr_node)}"
+                name_key = f"func:{func_name}"
                 if call_key in resolving:
                     return collected
+                if self._security_local_rewalks and name_key in resolving:
+                    # Re-walking a helper local's value (``a1 = u(a0)`` over
+                    # ``a0 = u(close)``): a helper already being walked is not
+                    # entered again, as before the call-keyed guard. Entering
+                    # it re-walked every earlier local once per read, 2**n
+                    # walks over a chain of n locals, each adding a variant.
+                    return collected
+                if self._budget is not None:
+                    self._budget.check(expr_node.loc, Phase.CODEGEN)
                 resolving.add(call_key)
+                added_name_key = name_key not in resolving
+                if added_name_key:
+                    resolving.add(name_key)
                 plan = self._security_helper_call_plan(
                     expr_node,
                     helper_binding_stack,
@@ -4517,6 +4563,8 @@ class SecurityEmitter:
                         True,
                     )
                 resolving.remove(call_key)
+                if added_name_key:
+                    resolving.discard(name_key)
                 return collected
 
         site = self._get_ta_site(expr_node)

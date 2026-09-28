@@ -30,6 +30,7 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `cgs2_float_time_method` | `8e6fd4cf5ddf2bf55a74bd244e9fcb951d088f686864bae20ef9c786ea884b82` | `81a90b86cc23133dae6ab1e7313aecbf7363adb7603317b2ce714765fb9c051e` |
 | `cgs2_color_arrays` | `1eed73a34e1bddf73e0272a7cf5b5fb1b00cf72e5986a4c9b694e1ff0f422a15` | `3210a6c6870137852c358d123a6c6a5fa535aab0b7a15922bddb5e54351598fa` |
 | `cgs2_negated_constants` | `82ce0a41a9c6fecd10d5877aa17a6e45b310d447192c4f568cb63d5eaa2137a1` | `1f68c782f58f08ba3492b1bc1fed6188a73b79a28349b5c9dc346119b8758a46` |
+| `cgs2_nested_helper_payload` | `866e32079b4293c151344a0135084936ee47c9e8e26887c993d8a84e75a02261` | `af162ce74797836ddc007d9951674f2d303ebbb3c44f55feb3519aeee18efba9` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -42,6 +43,7 @@ Each exit Signal joins these fields with `|`, in this order:
 - `cgs2_float_time_method`: the same of the methods `u.dt()` and `u.dc()`
 - `cgs2_color_arrays`: `A[0]`, `A[1]`, `B[0]`, `D[0]`, `E[0]`, `F[0]` (each `red,green,blue,transparency`), the four sizes' sum
 - `cgs2_negated_constants`: `-NEG * 2`, `+NEG`, `-FNEG`, `-NEG`
+- `cgs2_nested_helper_payload`: `a`, `b` (4 decimals)
 
 What each tape shows:
 
@@ -88,3 +90,7 @@ What each tape shows:
   and transparency.
 - `cgs2_negated_constants`: a sign over a negative constant (`NEG = -5`,
   `FNEG = -2.5`) reads 10, -5, 2.5 and 5.
+- `cgs2_nested_helper_payload`: `u(_x) => ta.sma(_x, 3)` requested at 60
+  minutes as `u(u(close)) + u(open)` and `u(u(u(high)))` keeps a TA state
+  per written call (entries start at 06:00 UTC, when every requested window
+  lies inside the tape's range; 324 trades).
