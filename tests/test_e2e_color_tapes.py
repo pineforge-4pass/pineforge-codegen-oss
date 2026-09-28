@@ -17,6 +17,15 @@ transparencies. The probe keys its readings on ``bar_index`` alone, so it
 replays on flat bars stamped at the chart's bars, from the range's first bar
 to the tape's last exit, and every trade carries the tape's entry id and exit
 comment at the tape's times.
+
+PineForge transpiles Pine v6 scripts only: the tape's ``//@version=5`` twin
+``w11-color-v5-eth15`` is refused, so v5's color reads reach the transpiler
+only as a v5 library's code, whose ``color.red``, ``color.teal`` and
+``color.yellow`` are v5's (#FF5252, #00897B, #FFEB3B: ``library_v5``) and
+every other constant the engine's, which v5 and v6 share. The twin's global
+code calling the synthetic v5 library ``pftest/W11ColorV5/1`` that holds its
+color reads (``fixtures/library_scripts/w11_color_v5_import.pine``) replays
+the v5 tape the same way.
 """
 
 from __future__ import annotations
@@ -34,10 +43,17 @@ import pytest
 from tests._e2e import (
     build_strategy_library, closed_trades, skip_unless_e2e_env, transpile_json,
 )
+from tests._pine_libraries import Layout
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "color_tv"
-TAPES = ("w11-color-v6-eth15",)
+# tape -> (the script replayed for it, the library it imports)
+SOURCES = {
+    "w11-color-v6-eth15": (FIXTURES / "w11-color-v6-eth15" / "strategy.pine", None),
+    "w11-color-v5-eth15": (Path(__file__).parent / "fixtures" / "library_scripts"
+                           / "w11_color_v5_import.pine", "pftest/W11ColorV5/1"),
+}
+TAPES = tuple(SOURCES)
 QUARTER_HOUR_MS = 900_000
 
 
@@ -67,8 +83,13 @@ def chart_bars(slug: str) -> list[int]:
 
 
 def _replay(engine: Path, work: Path, slug: str) -> list[dict]:
+    source, library = SOURCES[slug]
     work.mkdir(parents=True)
-    transpiled = transpile_json(FIXTURES / slug / "strategy.pine")
+    pine = work / "strategy.pine"
+    pine.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    env = (None if library is None else
+           Layout(work / "env").pin_all(slug, pine.read_text(encoding="utf-8"), library))
+    transpiled = transpile_json(pine, extra_env=env)
     assert transpiled["ok"], transpiled["diagnostics"]
     build_strategy_library(transpiled["cpp"], work)
     feed = work / "chart.csv"
@@ -79,7 +100,7 @@ def _replay(engine: Path, work: Path, slug: str) -> list[dict]:
 
 @pytest.fixture(scope="module")
 def replays(tmp_path_factory) -> dict[str, list[dict]]:
-    """Each tape's probe, transpiled by this checkout and run on its chart's bars."""
+    """Each tape's script, transpiled by this checkout and run on its chart's bars."""
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("color_tapes")
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(TAPES)) as pool:
@@ -89,7 +110,8 @@ def replays(tmp_path_factory) -> dict[str, list[dict]]:
 
 def test_tapes_are_the_recorded_exports() -> None:
     """Every fixture is its export byte for byte; TradingView reads a half
-    transparency through the alpha byte."""
+    transparency through the alpha byte, and v5 and v6 read the same but for
+    color.red, color.teal and color.yellow."""
     for slug in TAPES:
         metrics = json.loads((FIXTURES / slug / "metrics.json").read_text())
         tape_bytes = (FIXTURES / slug / "tv_trades.csv").read_bytes()
@@ -103,6 +125,10 @@ def test_tapes_are_the_recorded_exports() -> None:
              for _, _, _, comment in read_tape("w11-color-v6-eth15") if comment.startswith("t")}
     assert len(sweep) == 101
     assert sweep["t10"][:2] == ["10", "11"] and sweep["t20"][:2] == ["20", "20"]
+    v6, v5 = ({comment for _, _, _, comment in read_tape(slug)}
+              for slug in ("w11-color-v6-eth15", "w11-color-v5-eth15"))
+    assert v6 - v5 == {"n2 242,54,69,0|178,181,190,0|8,153,129,0|255,255,255,0|253,216,53,0"}
+    assert v5 - v6 == {"n2 255,82,82,0|178,181,190,0|0,137,123,0|255,255,255,0|255,235,59,0"}
 
 
 @pytest.mark.parametrize("slug", TAPES)
@@ -116,6 +142,15 @@ def test_every_exit_reads_like_the_tape(slug: str, replays) -> None:
         f"[{slug}] {sum(missing.values())} of {len(tape)} tape trades differ; "
         f"tape {sorted(missing)[:3]}, engine {sorted(extra)[:3]}")
     print(f"colors {slug}: {len(tape)} exit comments == TradingView's")
+
+
+def test_the_v5_twin_itself_is_refused() -> None:
+    """Needs no engine: a //@version=5 strategy is refused before any
+    lowering, so no v5 script's colors reach the C++."""
+    result = transpile_json(FIXTURES / "w11-color-v5-eth15" / "strategy.pine")
+    assert not result["ok"]
+    (message,) = [d["message"] for d in result["diagnostics"]]
+    assert message.startswith("PineForge supports PineScript v6 only (found //@version=5)."), message
 
 
 def test_a_fractional_transparency_reaches_color_hpp_unrounded(tmp_path: Path) -> None:
