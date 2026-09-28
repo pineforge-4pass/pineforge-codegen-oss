@@ -155,9 +155,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_infos: list[FuncInfo] = []
         self._fixnan_sites: list[FixnanCallSite] = []
         self._strategy_params: dict = {}
-        # The warnings of the passes between the support checker and here.
-        self._diagnostics: list[Diagnostic] = list(
-            (ast.annotations or {}).get(PASS_WARNINGS_ANNOTATION, ()))
+        # The warnings of the passes between the support checker and here,
+        # held on the Program as (message, hint, location).
+        self._diagnostics: list[Diagnostic] = [
+            Diagnostic(level=Level.WARNING, phase=Phase.ANALYZER, location=loc,
+                       message=message, hint=hint)
+            for message, hint, loc in (ast.annotations or {}).get(PASS_WARNINGS_ANNOTATION, ())]
         self._global_var_decls: list[tuple[str, PineType]] = []
         # Top-level ordinary bindings are lexical global state even when a
         # same-named callable history reference has already polluted the

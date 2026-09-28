@@ -51,11 +51,13 @@ from .errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from .builtin_keywords import POSITIONAL_BUILTINS
 from .pine_spelling import expr_start
 from .external_requests import (
-    FEED_LOWERING, FOOTPRINT_COLUMN_ANNOTATION, LOWERING_ANNOTATION, NO_DATA_REQUEST_FUNCS,
+    FEED_LOWERING, FEED_WARNING_ANNOTATION, FOOTPRINT_COLUMN_ANNOTATION, LOWERING_ANNOTATION,
+    NO_DATA_REQUEST_FUNCS,
     RECORDED_LOWERING, FootprintValues, TradeSlice, footprint_column, recorded_key,
     spell_call,
 )
 from .external_requests import _nodes as _walk_nodes
+from .security_contexts import ticker_symbol_arg
 from . import signatures as sigs
 from .tv_input_choices import INPUT_SOURCE_SERIES_IDS
 from .analyzer import TA_CLASS_MAP
@@ -623,6 +625,8 @@ class SupportChecker:
         self._footprints: FootprintValues | bool | None = None
         # Built on the first request with no data: which values reach a trade.
         self._trade_slice: TradeSlice | None = None
+        # The helpers a request expression calls (_in_request_expression).
+        self._payload_funcs: set[str] | None = None
         # id()s of Identifier/MemberAccess nodes that are the *callee* of a
         # FuncCall. A divergent built-in NAME used as a call target (e.g. the
         # session-aware ``time_close("D")`` function, which is distinct from the
@@ -2193,8 +2197,8 @@ class SupportChecker:
                 reason=reason)
             return
         self._mark_feed(node)
-        self._warn(
-            symbol_node,
+        self._feed_warning(
+            node, symbol_node,
             f"{spell_call(node)}: another symbol's bars, read from the feed the requests "
             "manifest pins for it; with none installed, the run stops with an error where "
             "its value is read.",
@@ -2202,6 +2206,22 @@ class SupportChecker:
                   "and syminfo.* in its context) and merges them by time as TradingView "
                   "does; a symbol equal to the chart's reads the chart."),
         )
+
+    def _feed_warning(self, node: FuncCall, at: ASTNode, message: str, hint: str) -> None:
+        """Warn that ``node`` reads a feed -- or, when its symbol or
+        timeframe reaches it through a helper's parameters, leave the warning
+        to ``security_contexts``, which keys it on every call path or keeps
+        its earlier lowering (``FEED_WARNING_ANNOTATION``)."""
+        index = self._trade_slice.index
+        symbol, tf = node.args[:2] if len(node.args) >= 2 else (
+            node.args[0] if node.args else node.kwargs.get("symbol"),
+            node.kwargs.get("timeframe"))
+        if index.depends_on_scope(symbol) or index.depends_on_scope(tf):
+            node.annotations = {**node.annotations,
+                                FEED_WARNING_ANNOTATION: (message, hint,
+                                                          _loc(at, self._filename))}
+            return
+        self._warn(at, message, hint=hint)
 
     def _mark_feed(self, node: FuncCall) -> None:
         node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: FEED_LOWERING}
@@ -2296,6 +2316,8 @@ class SupportChecker:
         back there), with no other request in its expression."""
         if _qualified_name(node.callee) != ("request", "security"):
             return "it is request.security"
+        if self._in_request_expression(node):
+            return "it is outside another request's expression"
         index = self._trade_slice.index
         if index.depends_on_scope(symbol_node):
             owner = index.owner.get(id(node))
@@ -2305,6 +2327,10 @@ class SupportChecker:
                 return "registration computes its symbol before the first bar"
         elif not index.registration_value(symbol_node):
             return "registration computes its symbol before the first bar"
+        tf = node.args[1] if len(node.args) > 1 else node.kwargs.get("timeframe")
+        if (tf is not None and not index.depends_on_scope(tf)
+                and not index.registers_timeframe(tf)):
+            return "registration computes its timeframe before the first bar"
         ignore = node.kwargs.get("ignore_invalid_symbol")
         if ignore is not None and not index.registration_value(ignore):
             return "registration computes its ignore_invalid_symbol before the first bar"
@@ -2317,10 +2343,44 @@ class SupportChecker:
                 return ("its request.footprint states ticks_per_row and va_percent as "
                         "literal whole numbers")
             return None
-        for inner in _walk_nodes(payload):
+        helpers = self._helpers_called(payload)
+        for inner in _walk_nodes([payload, *(index.funcs[name] for name in helpers)]):
             if isinstance(inner, FuncCall) and _qualified_name(inner.callee)[0] == "request":
                 return "its expression holds no request of its own"
         return None
+
+    def _helpers_called(self, value) -> set[str]:
+        """The helpers ``value`` calls, directly or through further helpers."""
+        index = self._trade_slice.index
+
+        def callees(item) -> set[str]:
+            return {n.callee.name for n in _walk_nodes(item)
+                    if isinstance(n, FuncCall) and id(n) in index.call_ids}
+
+        found: set[str] = set()
+        pending = callees(value)
+        while pending:
+            name = pending.pop()
+            if name not in found:
+                found.add(name)
+                pending |= callees(index.funcs[name]) - found
+        return found
+
+    def _in_request_expression(self, node: FuncCall) -> bool:
+        """``node`` is evaluated inside a request's expression: written in it
+        (a request's arguments are its only children the checker visits
+        under ``_security_payload_depth``), or in a helper that expression
+        calls, whose body runs inside the request's evaluator."""
+        if self._security_payload_depth:
+            return True
+        if self._trade_slice is None:
+            self._trade_slice = TradeSlice(self._ast)
+        index = self._trade_slice.index
+        if self._payload_funcs is None:
+            self._payload_funcs = self._helpers_called([
+                request.args[2] if len(request.args) > 2 else request.kwargs.get("expression")
+                for requests in index.requests.values() for request in requests])
+        return index.owner.get(id(node)) in self._payload_funcs
 
     def _visit_request_arguments(self, node: FuncCall) -> None:
         """A no-data request's arguments: ``barmerge.*`` and its field
@@ -2559,23 +2619,21 @@ class SupportChecker:
         chain = _resolve_member_chain(node)
         if chain in SECURITY_CURRENT_SYMBOL_NAMES:
             return True
-        # ticker.inherit(symbol, ...) / ticker.standard(symbol) are passthrough,
-        # and ticker.heikinashi(symbol) is the chart's OWN symbol with a causal
-        # Heikin-Ashi candle transform (the engine applies it inside the security
-        # eval via register_security_eval's heikinashi flag — no alternate symbol
-        # is loaded). All allow a current-symbol first argument; a non-current
-        # arg is genuine cross-symbol construction and still falls through.
+        # ticker.inherit(from_tickerid, symbol) / ticker.standard(symbol) are
+        # passthrough of their symbol (ticker_symbol_arg: inherit names it
+        # second), and ticker.heikinashi(symbol) is the chart's OWN symbol with
+        # a causal Heikin-Ashi candle transform (the engine applies it inside
+        # the security eval via register_security_eval's heikinashi flag — no
+        # alternate symbol is loaded). All allow a current-symbol symbol
+        # argument; a non-current one is genuine cross-symbol construction and
+        # still falls through.
         if isinstance(node, FuncCall):
             ns, fname = _qualified_name(node.callee)
             if ns == "ticker" and fname in ("inherit", "standard", "heikinashi"):
-                if node.args and self._is_current_symbol_expr(
-                    node.args[0], _seen, require_all_paths=require_all_paths,
+                symbol = ticker_symbol_arg(node)
+                if symbol is not None and self._is_current_symbol_expr(
+                    symbol, _seen, require_all_paths=require_all_paths,
                     legacy_names=legacy_names,
-                ):
-                    return True
-                if "symbol" in node.kwargs and self._is_current_symbol_expr(
-                    node.kwargs["symbol"], _seen,
-                    require_all_paths=require_all_paths, legacy_names=legacy_names,
                 ):
                     return True
         # Preserve admission for a working script with an unreachable alternate

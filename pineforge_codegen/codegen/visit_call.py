@@ -146,6 +146,7 @@ from ..ast_nodes import (
     VarDecl,
 )
 from ..external_requests import RECORDED_KEY_ANNOTATION
+from ..security_contexts import ticker_symbol_arg
 from ..symbols import TypeSpec, method_receiver_type_name
 from ..method_binding import (
     MethodBindError,
@@ -1856,16 +1857,16 @@ class CallVisitor:
 
         # ticker.* calls
         if namespace == "ticker":
-            # ticker.inherit(symbol, ...) / ticker.standard(symbol) — passthrough,
-            # and ticker.heikinashi(symbol) — same-symbol HA: emit the symbol
+            # ticker.inherit(from_tickerid, symbol) / ticker.standard(symbol) —
+            # passthrough of the symbol (inherit names it second), and
+            # ticker.heikinashi(symbol) — same-symbol HA: emit the symbol
             # argument unchanged. The runtime HA candle transform is applied by
             # the engine via register_security_eval's heikinashi flag, so the
             # ticker value itself just needs to be the (string) chart symbol.
             if func_name in ("inherit", "standard", "heikinashi"):
-                if node.args:
-                    return self._visit_expr(node.args[0])
-                if "symbol" in node.kwargs:
-                    return self._visit_expr(node.kwargs["symbol"])
+                symbol = ticker_symbol_arg(node)
+                if symbol is not None:
+                    return self._visit_expr(symbol)
             # All other ticker.* calls are hard-rejected by support_checker;
             # emit empty string as safe fallback if they somehow reach codegen.
             return 'std::string("")'

@@ -100,6 +100,7 @@ from ..ast_nodes import (
     WhileStmt,
 )
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
+from ..external_requests import UNPINNED_ANNOTATION
 from .tables import (
     ARRAY_NEW_CTORS,
     DRAWING_TYPE_TO_CPP,
@@ -1412,7 +1413,12 @@ class StmtVisitor:
         if isinstance(node.value, FuncCall):
             func_name, namespace = self._resolve_callee(node.value.callee)
             if namespace == "request" and func_name == "security":
-                call_expr = self._visit_func_call(node.value)
+                # A request whose names are reassigned is read where it is
+                # evaluated (external_requests): its data-missing stop.
+                if UNPINNED_ANNOTATION in (node.value.annotations or {}):
+                    call_expr = self._unpinned_read(node.value)
+                else:
+                    call_expr = self._visit_func_call(node.value)
                 emit_call_tuple(call_expr)
                 return
             if func_name and namespace is None and func_name in self._func_names:

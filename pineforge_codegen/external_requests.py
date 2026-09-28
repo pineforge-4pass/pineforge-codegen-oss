@@ -40,7 +40,7 @@ from .ast_nodes import (
     MemberAccess, MethodDef, NaLiteral, NumberLiteral, Program, StringLiteral, Subscript,
     SwitchStmt, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
 )
-from .errors import Diagnostic, Level, Phase, SourceLocation
+from .errors import SourceLocation
 from .security_contexts import ScriptIndex, replace_nodes
 
 
@@ -81,6 +81,11 @@ _RECORDED_PARAMS = {
 # request that carries the same ref (``REQUEST_REF_ANNOTATION``).
 UNPINNED_ANNOTATION = "pf_request_unpinned"
 REQUEST_REF_ANNOTATION = "pf_request_ref"
+# On a request of another symbol whose symbol or timeframe reaches it through
+# a helper's parameters: the support checker's warning, which
+# ``security_contexts`` reports once every call path keys a feed (else it
+# reports why the request keeps its earlier lowering).
+FEED_WARNING_ANNOTATION = "pf_request_feed_warning"
 # On a ``request.footprint`` that is the whole expression of a request of
 # another symbol reading its feed: the feed column its delta is read from.
 FOOTPRINT_COLUMN_ANNOTATION = "pf_footprint_column"
@@ -761,6 +766,13 @@ def lower_no_data_requests(program: Program) -> Program:
     return program
 
 
+def pass_warning(node: ASTNode, message: str, hint: str) -> tuple:
+    """A warning of a pass between the support checker and the analyzer,
+    held on the AST as plain data (the analyzer makes it a ``Diagnostic``:
+    AST walkers recurse into annotation values, and an enum cycles)."""
+    return (message, hint, node.loc or SourceLocation(file="<input>", line=1, col=1, end_col=1))
+
+
 def unpin_requests(program: Program, reasons: dict[int, str]) -> None:
     """Give each request ``reasons`` names (by id: a request of another
     symbol whose symbol registration cannot compute before the first bar)
@@ -780,13 +792,12 @@ def unpin_requests(program: Program, reasons: dict[int, str]) -> None:
             lowered.annotations = {**(lowered.annotations or {}),
                                    UNPINNED_ANNOTATION: marker["message"]}
         swaps[request_id] = lowered
-        warnings.append(Diagnostic(
-            level=Level.WARNING, phase=Phase.ANALYZER,
-            location=request.loc or SourceLocation(file="<input>", line=1, col=1, end_col=1),
-            message=(f"{spell_call(request)}: no data is pinned for this request; the run "
-                     "stops with an error where its value is read."),
-            hint=(f"PineForge reads another symbol's feed only for a symbol registration "
-                  f"computes before the first bar; {reasons[request_id]}.")))
+        warnings.append(pass_warning(
+            request,
+            f"{spell_call(request)}: no data is pinned for this request; the run stops with "
+            "an error where its value is read.",
+            f"PineForge reads another symbol's feed only for a symbol and timeframe "
+            f"registration computes before the first bar; {reasons[request_id]}."))
     for node in _nodes(program):
         marker = (node.annotations or {}).get(UNPINNED_ANNOTATION)
         if isinstance(marker, dict) and id(marker["ref"]) in refs:

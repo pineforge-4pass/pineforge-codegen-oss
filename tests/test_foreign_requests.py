@@ -137,6 +137,46 @@ def test_unresolvable_symbol_keeps_the_deferred_refusal():
     assert f'pine_runtime_error(std::string("request.security(sym, \\"60\\", ...) at line 3: {PINNED}"))' in result["cpp"]
 
 
+@pytest.mark.parametrize("body, hint", [
+    ('var string tf = "60"\nif bar_index > 10\n    tf := "240"\n'
+     'c = request.security("PF:A", tf, close)\n', None),
+    ('tf = close > open ? "60" : "240"\nc = request.security("PF:A", tf, close)\n', None),
+    ('f(s, t) => request.security(s, t, close)\nvar string tf = "60"\n'
+     'if bar_index > 10\n    tf := "240"\nc = f("PF:A", tf)\n',
+     "its timeframe tf on the call path f() is not a value registration computes before "
+     "the first bar"),
+])
+def test_timeframe_registration_cannot_compute_keeps_the_deferred_refusal(body, hint):
+    """Registration reads the timeframe before the first bar, where a
+    ``var`` or reassigned name holds its default: such a request registered
+    on the chart's timeframe. It stays a deferred refusal."""
+    result = transpile_full(HEAD + body + TRADE)
+    (warning,) = [d for d in result["diagnostics"] if "no data is pinned" in d.message]
+    assert hint is None or hint in warning.hint, warning.hint
+    assert "_pf_symbol" not in result["cpp"]
+
+
+def test_nested_request_through_a_helper_keeps_the_deferred_refusal():
+    """A request in a helper another request's expression calls runs inside
+    that request's evaluator, like one written in the expression: neither
+    reads a feed (the outer one did, the direct spelling being refused)."""
+    result = transpile_full(HEAD + 'g() => request.security("PF:B", "60", close)\n'
+                            'c = request.security("PF:A", "240", g())\n' + TRADE)
+    assert sum("no data is pinned" in d.message for d in result["diagnostics"]) == 2
+    assert "_pf_symbol" not in result["cpp"]
+
+
+def test_ticker_inherit_names_its_symbol_second():
+    """``ticker.inherit(from_tickerid, symbol)`` is ``symbol``'s ticker: it
+    was read as the chart's, its first argument."""
+    cpp = transpile(HEAD + 'c = request.security(ticker.inherit(syminfo.tickerid, "PF:A"), '
+                    '"60", close)\n' + TRADE)
+    assert 'const std::string _pf_symbol = std::string("PF:A");' in cpp
+    cpp = transpile(HEAD + 'c = request.security(ticker.inherit(syminfo.tickerid), "60", close)\n'
+                    + TRADE)
+    assert "_pf_symbol" not in cpp
+
+
 # ---------------------------------------------------------------------------
 # The payload runs in the requested context
 # ---------------------------------------------------------------------------
@@ -273,6 +313,33 @@ def test_helper_contexts_read_like_direct_requests(tmp_path_factory):
     assert runs["xe-helpers"].trades == runs["xe-direct"].trades
 
 
+def test_helper_copies_keep_their_locals_history_apart(tmp_path_factory):
+    """A helper copied per symbol copies its locals too (``v`` is
+    ``v__pfctx1`` in the copy): the analyzer keeps one history buffer per
+    callable local name, and refused the copy's ``v[1]``."""
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("xe_copies")
+    feed_path, opens = _chart(engine, base)
+    feeds = [hourly(sym, opens[0] + i * 7 * M15, 70) for i, sym in enumerate(("PF:A", "PF:B"))]
+    helper = _traced("c", 'f(sym) =>\n    v = request.security(sym, "60", close)\n'
+                          '    w = close * 2\n    v - v[1] + w[1]\n'
+                          'c = f("PF:A") - f("PF:B")\n' + TRADE)
+    direct = _traced("c", 'a = request.security("PF:A", "60", close)\n'
+                          'b = request.security("PF:B", "60", close)\nw = close * 2\n'
+                          'c = (a - a[1] + w[1]) - (b - b[1] + w[1])\n' + TRADE)
+    runs = {}
+    for key, source in (("xe-copies", helper), ("xe-copies-direct", direct)):
+        build(source, base / key)
+        runs[key] = run(engine, base / key, feed_path,
+                        write_root(base, key, "BINANCE:ETHUSDT", "15", feeds))
+        assert runs[key].ok, runs[key].error
+    for chart_open in opens:
+        assert same(runs["xe-copies"].trace[chart_open]["pf_c"],
+                    runs["xe-copies-direct"].trace[chart_open]["pf_c"]), chart_open
+    assert sum(v["pf_c"] == v["pf_c"] for v in runs["xe-copies"].trace.values()) > 100
+    assert runs["xe-copies"].trades == runs["xe-copies-direct"].trades
+
+
 def test_chart_symbol_string_reads_the_chart(tmp_path_factory):
     """A literal equal to the chart's ticker id reads the chart, as
     ``syminfo.tickerid`` does: no feed is needed."""
@@ -373,3 +440,21 @@ def test_symbol_that_can_select_another_never_reads_the_chart_for_it(tmp_path_fa
     for chart_open in opens:
         i = _visible(other, chart_open, False)
         assert same(fed.trace[chart_open]["pf_c"], float("nan") if i is None else closes[i])
+
+
+def test_reassigned_tuple_request_stops_where_it_is_evaluated(tmp_path_factory):
+    """``[a, b] = request.security(...)`` with ``a := a * 2``: evaluating the
+    request is its read. The tuple emitter never visited the request, so a
+    missing feed read na silently."""
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("xe_tuple_reassigned")
+    feed_path, opens = _chart(engine, base)
+    work = base / "xe-tuple"
+    build(HEAD + '[a, b] = request.security("PF:A", "60", [close, open])\na := a * 2\n'
+          'c = a - b\n' + TRADE, work)
+    result = run(engine, work, feed_path, None)
+    assert not result.ok
+    assert f'request.security("PF:A", "60", ...) at line 3: {PINNED}' in result.error
+    fed = run(engine, work, feed_path, write_root(base, "xe-tuple", "BINANCE:ETHUSDT", "15",
+                                                 [hourly("PF:A", opens[0], 70)]), tag="fed")
+    assert fed.ok, fed.error

@@ -111,6 +111,7 @@ PASS_WARNINGS_ANNOTATION = "pf_pass_warnings"
 # here too: that module imports this one.
 _LOWERING_ANNOTATION = "pf_request_lowering"
 _FEED_LOWERING = "feed"
+_FEED_WARNING_ANNOTATION = "pf_request_feed_warning"
 _REQUEST_FUNCS = ("security", "security_lower_tf")
 # Instances (a helper under one set of parameter values) the pass may build
 # before it refuses the script: diamond-shaped helper graphs multiply paths.
@@ -174,6 +175,18 @@ def _request_name(node) -> str | None:
             and node.callee.member in _REQUEST_FUNCS):
         return node.callee.member
     return None
+
+
+def ticker_symbol_arg(node: FuncCall):
+    """The symbol argument of ``ticker.inherit`` / ``standard`` /
+    ``heikinashi``: ``ticker.inherit(from_tickerid, symbol)`` names the
+    symbol second (a one-argument spelling keeps its only one)."""
+    if "symbol" in node.kwargs:
+        return node.kwargs["symbol"]
+    if (isinstance(node.callee, MemberAccess) and node.callee.member == "inherit"
+            and len(node.args) > 1):
+        return node.args[1]
+    return node.args[0] if node.args else node.kwargs.get("from_tickerid")
 
 
 def _request_args(node: FuncCall) -> tuple[object, object]:
@@ -274,6 +287,20 @@ def _spell(node) -> str:
         return f"{_spell(node.callee)}({', '.join(args)})"
     if isinstance(node, NumberLiteral):
         return str(node.value)
+    if isinstance(node, BoolLiteral):
+        return "true" if node.value else "false"
+    if isinstance(node, NaLiteral):
+        return "na"
+    if isinstance(node, BinOp):
+        return f"{_spell(node.left)} {node.op} {_spell(node.right)}"
+    if isinstance(node, UnaryOp):
+        return f"{node.op} {_spell(node.operand)}" if node.op == "not" else (
+            f"{node.op}{_spell(node.operand)}")
+    if isinstance(node, Ternary):
+        return (f"{_spell(node.condition)} ? {_spell(node.true_val)} : "
+                f"{_spell(node.false_val)}")
+    if isinstance(node, Subscript):
+        return f"{_spell(node.object)}[{_spell(node.index)}]"
     return type(node).__name__
 
 
@@ -543,6 +570,27 @@ class ScriptIndex:
                                     "call_arg_order": ArgOrder([*order, title])}
         return fresh
 
+    def registers_timeframe(self, expr, seen: frozenset = frozenset()) -> bool:
+        """``expr``, a request's timeframe, has the run's value where
+        registration reads it, before the first bar: it reads no bar series,
+        and no name the script reassigns or declares ``var`` (there it holds
+        its type's default), through globals too."""
+        if reads_bar_series(expr) is not None:
+            return False
+        for node in _walk(expr):
+            if not isinstance(node, Identifier):
+                continue
+            binding = self.refs.get(id(node))
+            if binding is None or binding in seen:
+                continue
+            if binding[0] != "global" or binding in self.unstable:
+                return False
+            decl = self.decls.get(binding)
+            if decl is not None and decl.value is not None and not self.registers_timeframe(
+                    decl.value, seen | {binding}):
+                return False
+        return True
+
     def registration_value(self, expr, seen: frozenset = frozenset()) -> bool:
         """``expr`` is a value registration computes before the first bar:
         literals, inputs (TradingView takes constant arguments), the chart's
@@ -572,8 +620,8 @@ class ScriptIndex:
             if callee.object.name == "input":
                 return callee.member in _REGISTRATION_INPUTS
             if callee.object.name == "ticker" and callee.member in ("inherit", "standard"):
-                first = expr.args[0] if expr.args else expr.kwargs.get("symbol")
-                return first is not None and self.registration_value(first, seen)
+                symbol = ticker_symbol_arg(expr)
+                return symbol is not None and self.registration_value(symbol, seen)
             return False
         if isinstance(expr, BinOp):
             return (expr.op in ("+", "==", "!=", "and", "or")
@@ -657,6 +705,21 @@ def _specialize(program: Program, filename: str) -> Program:
                                   or id(r) in payload_reads])}
     _type_context_params(prog, owned, leads)
 
+    # Every call path keys each request of another symbol this pass owns: the
+    # support checker's warning that it reads a feed now holds.
+    warnings = []
+    for requests in owned.values():
+        for request in requests:
+            notes = request.annotations or {}
+            if _FEED_WARNING_ANNOTATION in notes:
+                warnings.append(notes[_FEED_WARNING_ANNOTATION])
+                request.annotations = {k: v for k, v in notes.items()
+                                       if k != _FEED_WARNING_ANNOTATION}
+    if warnings:
+        pass_notes = program.annotations = dict(program.annotations or {})
+        pass_notes[PASS_WARNINGS_ANNOTATION] = [
+            *pass_notes.get(PASS_WARNINGS_ANNOTATION, ()), *warnings]
+
     # A request no top-level statement reaches never runs: one owned for its
     # context keeps the chart timeframe, and no read of a parameter of its
     # helper warns.
@@ -670,6 +733,7 @@ def _specialize(program: Program, filename: str) -> Program:
     # Name every instance and build its definition: a helper's first
     # signature keeps its own, every other one is a copy of it.
     taken = {n.name for n in _walk(program) if isinstance(n, Identifier)} | set(prog.funcs)
+    taken |= {name for n in _walk(program) for name in _declared_names(n)}
     names: dict[tuple, str] = {}
     defs: dict[tuple, tuple[FuncDef, dict | None]] = {}
     new_defs: dict[str, list[FuncDef]] = {}
@@ -688,6 +752,7 @@ def _specialize(program: Program, filename: str) -> Program:
             memo: dict = {}
             clone = copy.deepcopy(original, memo)
             clone.name = names[signature]
+            _rename_locals(prog, original, memo, names[signature][len(func):], taken)
             defs[signature] = (clone, memo)
             new_defs.setdefault(func, []).append(clone)
 
@@ -809,6 +874,11 @@ def _plan(prog: ScriptIndex, owned: dict, context_owned: set[int],
                     raise _FeedFallback({id(request): (
                         f"its symbol {_spell(values[-1])} on the call path {chain} is not "
                         "a value registration computes before the first bar")})
+                if (what == "timeframe" and _is_feed(request) and values[-1] is not None
+                        and not prog.registers_timeframe(values[-1])):
+                    raise _FeedFallback({id(request): (
+                        f"its timeframe {_spell(values[-1])} on the call path {chain} is "
+                        "not a value registration computes before the first bar")})
             payload = ()
             if id(request) in payload_reads:
                 try:
@@ -851,6 +921,59 @@ def _plan(prog: ScriptIndex, owned: dict, context_owned: set[int],
     if errors:
         raise CompileError(list(errors.values()))
     return leads, instances, detail, top
+
+
+def _declared_names(node) -> list[str]:
+    """The names a declaration or a loop binds."""
+    if isinstance(node, VarDecl):
+        return [node.name] if node.name else []
+    if isinstance(node, TupleAssign):
+        return list(node.names)
+    if isinstance(node, ForStmt):
+        return [node.var]
+    if isinstance(node, ForInStmt):
+        return [node.var] if node.var else list(node.vars or ())
+    return []
+
+
+def _rename_locals(prog: ScriptIndex, original: FuncDef, memo: dict, suffix: str,
+                   taken: set[str]) -> None:
+    """Give a helper copy's locals and loop variables names of their own
+    (``v`` becomes ``v__pfctx1``): the analyzer keeps a callable local's
+    history in one buffer per name, which a copy's ``v[1]`` would share with
+    the original's, and refuses the script."""
+    fresh: dict[tuple, str] = {}
+
+    def rename(binding: tuple, name: str) -> str:
+        if name == "_" or binding is None:
+            return name
+        if binding not in fresh:
+            candidate, n = f"{name}{suffix}", 0
+            while candidate in taken:
+                n += 1
+                candidate = f"{name}{suffix}_{n}"
+            taken.add(candidate)
+            fresh[binding] = candidate
+        return fresh[binding]
+
+    for node in _walk(original.body):
+        clone = memo[id(node)]
+        if isinstance(node, VarDecl) and node.name:
+            clone.name = rename(prog.decl_binding.get((id(node), node.name)), node.name)
+        elif isinstance(node, TupleAssign):
+            clone.names = [rename(prog.decl_binding.get((id(node), name)), name)
+                           for name in node.names]
+        elif isinstance(node, ForStmt):
+            clone.var = rename(("bound", id(node), node.var), node.var)
+        elif isinstance(node, ForInStmt):
+            if node.var:
+                clone.var = rename(("bound", id(node), node.var), node.var)
+            else:
+                clone.vars = [rename(("bound", id(node), name), name)
+                              for name in node.vars or ()]
+    for node in _walk(original.body):
+        if isinstance(node, Identifier) and prog.refs.get(id(node)) in fresh:
+            memo[id(node)].name = fresh[prog.refs[id(node)]]
 
 
 def _payload_params(prog: ScriptIndex, func: str, request: FuncCall) -> list[Identifier]:

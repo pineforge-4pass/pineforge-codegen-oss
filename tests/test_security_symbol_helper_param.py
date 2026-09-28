@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
+from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.errors import Level
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
@@ -79,10 +79,13 @@ FEED = ("another symbol's bars, read from the feed the requests manifest pins fo
 ])
 def test_alternate_symbol_through_helpers_is_another_symbol(body):
     # Another symbol whose value reaches a trade reads the feed pinned for
-    # it, its symbol resolved per call path (tests/test_foreign_requests.py).
+    # it, its symbol resolved per call path (tests/test_foreign_requests.py):
+    # security_contexts reports the warning once every path is keyed.
     src = PRELUDE + body + 'if b > close\n    strategy.entry("L", strategy.long)\n'
     assert _messages(src, Level.ERROR) == []
-    assert any(m.endswith(FEED) for m in _messages(src, Level.WARNING))
+    warnings = [d.message for d in transpile_full(src)["diagnostics"]
+                if d.level == Level.WARNING]
+    assert sum(m.endswith(FEED) for m in warnings) == 1, warnings
 
 
 def test_alternate_symbol_through_a_method_is_deferred():
