@@ -963,9 +963,11 @@ class ExprVisitor:
                     # timeframe gets no such fact (script_tf_ is empty); there
                     # the session calendar answers at the bar's open
                     # (codegen/session_market.py). The time-of-day predicates
-                    # test each instant's own weekday and window: ismarket
-                    # missed the Sunday-evening open of a ":23456" session and
-                    # every "0000-2400" bar (tests/test_e2e_session_ismarket.py).
+                    # read the instant alone: ismarket's reads a bar that
+                    # opens in a break out of market, and until engine lane
+                    # W11-ENG-TIME-COLOR it also missed the Sunday-evening
+                    # open of a ":23456" session and every "0000-2400" bar
+                    # (tests/test_e2e_session_ismarket.py).
                     # A bar in market is in neither extended session; off it,
                     # the engine's windows decide. A request.security payload
                     # runs on its own bars, whose timeframe the chart's facts
@@ -976,24 +978,25 @@ class ExprVisitor:
                     if self._security_payload_depth:
                         if id(node) not in self._warned_security_session_sites:
                             self._warned_security_session_sites.add(id(node))
-                            constant = ("always true" if node.member == "ismarket"
-                                        else "always false")
                             # A bar that opens in a break and holds the reopen
                             # is in market (the chart's reading); pre- and
-                            # post-market read a break as neither.
-                            opens = (" (a bar that opens in a session break and "
-                                     "holds the reopen reads as out of market)"
+                            # post-market read a break as neither. A D/W/M bar
+                            # holds whole session days, where the predicate
+                            # reads its open's time of day.
+                            daily = {"ismarket": "always in market",
+                                     "ispremarket": "never pre-market",
+                                     "ispostmarket": "never post-market"}[node.member]
+                            opens = ("a bar that opens in a session break and holds "
+                                     "the reopen reads as out of market, and "
                                      if node.member == "ismarket" else "")
                             self._codegen_warning(
                                 node,
                                 f"session.{node.member} inside request.security keeps "
-                                "the time-of-day predicate, which can differ from "
-                                "TradingView: on an intraday chart it tests the "
-                                f"security bar's open time{opens}, a session's day "
-                                "mask on that instant's own weekday, and does not read "
-                                f"\"2400\"; on a D/W/M chart it is {constant}. The "
-                                "chart's own session flags read the engine's session "
-                                "facts.",
+                                "the time-of-day predicate at the security bar's open "
+                                f"time, which can differ from TradingView: {opens}"
+                                f"a D/W/M bar, {daily} on TradingView, reads its "
+                                "open's time of day. The chart's own session flags "
+                                "read the engine's session facts.",
                             )
                         return predicate
                     self._uses_session_market = True

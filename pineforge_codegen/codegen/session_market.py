@@ -20,8 +20,10 @@ at the bar's open, on the calendar the kernel builds for the run from the same
 session and timezone (the adapter reads an empty session as ``24x7`` and an
 empty timezone as ``UTC``), resolved once per session day and read as the
 kernel reads it (a day the calendar cannot resolve is out of session). The
-time-of-day predicate ``pine_session_*`` tests the instant's own weekday and
-does not parse ``2400``.
+time-of-day predicate ``pine_session_ismarket`` is a second reading of the
+session string, which the kernel does not run (until engine lane
+W11-ENG-TIME-COLOR it tested a day mask on the instant's own weekday and did
+not parse ``2400``).
 
 ``SESSION_MARKET_CPP`` precedes the strategy class; each strategy holds one
 ``SESSION_MARKET_MEMBER`` after its checkpointed script state (a cache of an

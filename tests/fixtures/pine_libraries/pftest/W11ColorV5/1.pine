@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: Apache-2.0
+// Clean-room synthetic v5 library for PineForge's color tests (lane
+// CG-SESSION-REPIN). Not a published TradingView library. Its exported
+// functions hold the color reads of the synthetic v5 strategy
+// w11-color-v5-eth15 (fixtures/color_tv), whose TradingView tape pins what
+// v5 reads for every named color and a transparency sweep.
+
+//@version=5
+library("W11ColorV5")
+
+q(color c) =>
+    str.tostring(color.r(c)) + "," + str.tostring(color.g(c)) + "," + str.tostring(color.b(c)) + "," + str.tostring(color.t(c))
+
+// @function color.t of color.new / color.rgb at the transparencies k and k + 0.5.
+export sweep(int k) =>
+    "t" + str.tostring(k) + ":" + str.tostring(color.t(color.new(color.red, k))) + "," + str.tostring(color.t(color.new(color.red, k + 0.5))) + "," + str.tostring(color.t(color.rgb(10, 20, 30, k))) + "," + str.tostring(color.t(color.new(#123456, k))) + "," + str.tostring(color.t(color.new(color.new(color.blue, 50), k)))
+
+// @function r,g,b,t of aqua, black, blue, fuchsia, gray and green.
+export n0() =>
+    q(color.aqua) + "|" + q(color.black) + "|" + q(color.blue) + "|" + q(color.fuchsia) + "|" + q(color.gray) + "|" + q(color.green)
+
+// @function r,g,b,t of lime, maroon, navy, olive, orange and purple.
+export n1() =>
+    q(color.lime) + "|" + q(color.maroon) + "|" + q(color.navy) + "|" + q(color.olive) + "|" + q(color.orange) + "|" + q(color.purple)
+
+// @function r,g,b,t of red, silver, teal, white and yellow.
+export n2() =>
+    q(color.red) + "|" + q(color.silver) + "|" + q(color.teal) + "|" + q(color.white) + "|" + q(color.yellow)

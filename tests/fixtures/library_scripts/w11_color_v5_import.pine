@@ -1,0 +1,24 @@
+//@version=6
+// SPDX-License-Identifier: Apache-2.0
+// The global code of the synthetic v5 strategy w11-color-v5-eth15
+// (fixtures/color_tv), its color reads in the synthetic v5 library
+// pftest/W11ColorV5/1.
+strategy("w11 color v5 library", overlay=true, initial_capital=100000000, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=4, margin_long=0, margin_short=0)
+import pftest/W11ColorV5/1 as L
+
+k = math.floor(bar_index / 2) % 101
+sw = L.sweep(k)
+n0 = L.n0()
+n1 = L.n1()
+n2 = L.n2()
+
+if bar_index % 2 == 0
+    strategy.entry("A", strategy.long)
+    strategy.entry("B", strategy.long)
+    strategy.entry("C", strategy.long)
+    strategy.entry("D", strategy.long)
+else
+    strategy.close("A", comment=sw)
+    strategy.close("B", comment="n0 " + n0)
+    strategy.close("C", comment="n1 " + n1)
+    strategy.close("D", comment="n2 " + n2)

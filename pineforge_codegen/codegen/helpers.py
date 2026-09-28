@@ -167,21 +167,25 @@ def pine_truth_cast(value_cpp: str) -> str:
     )
 
 
-def color_alpha_cast(value_cpp: str) -> str:
+def color_alpha_cast(value_cpp: str, whole: bool = False) -> str:
     """Convert Pine transparency without feeding ``na<int>()`` to color.hpp.
 
-    The engine's color helper performs integer arithmetic on transparency;
-    passing the integer ``na`` sentinel there would overflow before the color
-    is built.  TradingView's ``color.new``/``color.rgb`` treat a missing
-    transparency as 100 (fully transparent); a finite value keeps its
-    truncating conversion.
+    color.hpp's ``new_color`` takes the transparency as a double and stores
+    the alpha byte nearest 255 * (100 - t) / 100, as TradingView does, so a
+    finite value passes through unrounded: ``color.new(c, 10.5)`` reads back
+    11 (tests/test_e2e_color_tapes.py). TradingView's
+    ``color.new``/``color.rgb`` treat a missing transparency as 100 (fully
+    transparent); the integer ``na`` sentinel would read as a transparency
+    far below 0. ``whole`` marks an integer literal from 0 to 100, which keeps
+    the historic ``(int)`` conversion: it leaves the value as it is.
     """
+    value = "(int)_pf_color_v" if whole else "(double)_pf_color_v"
     return (
         f"[&](){{ auto _pf_color_v = ({value_cpp}); "
         f"using _pf_color_t = std::decay_t<decltype(_pf_color_v)>; "
         f"if constexpr (std::is_same_v<_pf_color_t, bool>) "
         f"return _pf_color_v ? 1 : 0; "
-        f"else return is_na(_pf_color_v) ? 100 : (int)_pf_color_v; }}()"
+        f"else return is_na(_pf_color_v) ? 100 : {value}; }}()"
     )
 
 
