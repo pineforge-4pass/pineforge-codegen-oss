@@ -6037,6 +6037,13 @@ class SecurityEmitter:
                     for side in (expr_node.left, expr_node.right)
                 ):
                     return f"((double)({left}) / (double)({right}))"
+                # A global is expanded into its declaration and a helper
+                # parameter into its argument here, so ``400 * step`` over
+                # ``step = 2 * 60 * 60 * 1000`` is C++ ``int`` literal
+                # arithmetic: a result beyond int32 is a 64-bit Pine int.
+                folded_cpp = self._fold_int32_overflow_cpp(expr_node.op, left, right)
+                if folded_cpp is not None:
+                    return folded_cpp
                 # KI-71: honour Pine's falsy-on-na relational rule inside
                 # request.security expressions too (this builder is a second
                 # relational emission site independent of _visit_binop).

@@ -42,6 +42,7 @@ from ..ast_nodes import (
     Subscript, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..errors import Phase
+from ..external_requests import UNPINNED_ANNOTATION
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .helpers import (
     NA_PRESERVING_INT_TYPES,
@@ -320,8 +321,14 @@ class TypeInferer:
     def _int_fits_int32(value: int) -> bool:
         return -(1 << 31) <= value < (1 << 31)
 
-    def _pure_int_literal_value(self, node) -> int | None:
-        """Exact value of an expression built only from int literals and
+    @staticmethod
+    def _int_fits_int64(value: int) -> bool:
+        return -(1 << 63) <= value < (1 << 63)
+
+    def _pure_int_literal_value(self, node, names: bool = True,
+                                global_scope: bool = False) -> int | None:
+        """Exact value of an expression built only from int literals, the
+        int constants ``_visit_ident`` inlines as literals (``names``), and
         ``+ - *`` / unary minus, else ``None``.
 
         Pine ``int`` is 64-bit: ``90 * 24 * 60 * 60 * 1000`` (three months in
@@ -329,21 +336,30 @@ class TypeInferer:
         literal arithmetic the same product overflows (wraps to -813 934 592),
         so a ``(time - t0) > threeMonths`` expiry fires on every bar (round 8
         family U: latibonit15 execution-signals-confluence, six lanes; lab tv
-        u-lati-levels-nq15 vs the engine, 2026-09-05). Folding the literal
-        subtree in Python keeps the exact value; the caller emits it as a
+        u-lati-levels-nq15 vs the engine, 2026-09-05). ``400 * MS`` over
+        ``const int MS = 7200000`` is 2 880 000 000 too (lab tv
+        pf-cgs-int64-const, 2026-09-28): the constant is emitted as its
+        literal, so the product was the same C++ ``int`` overflow. Folding
+        the subtree in Python keeps the exact value; the caller emits it as a
         64-bit literal only when it does not fit ``int32`` so every in-range
-        expression is byte-identical to before.
+        expression is byte-identical to before. ``global_scope`` reads names
+        as the script's top level binds them, whatever is being emitted.
         """
         if isinstance(node, NumberLiteral):
             return node.value if isinstance(node.value, int) and not isinstance(node.value, bool) else None
+        if isinstance(node, Identifier):
+            if not names:
+                return None
+            return (self._global_int_constant(node.name) if global_scope
+                    else self._inlined_int_constant(node))
         if isinstance(node, UnaryOp) and node.op == "-":
-            inner = self._pure_int_literal_value(node.operand)
+            inner = self._pure_int_literal_value(node.operand, names, global_scope)
             return -inner if inner is not None else None
         if isinstance(node, BinOp) and node.op in ("+", "-", "*"):
-            left = self._pure_int_literal_value(node.left)
+            left = self._pure_int_literal_value(node.left, names, global_scope)
             if left is None:
                 return None
-            right = self._pure_int_literal_value(node.right)
+            right = self._pure_int_literal_value(node.right, names, global_scope)
             if right is None:
                 return None
             if node.op == "+":
@@ -353,9 +369,142 @@ class TypeInferer:
             return left * right
         return None
 
-    def _literal_overflows_int32(self, node) -> bool:
-        value = self._pure_int_literal_value(node)
+    def _inlined_int_constant(self, node: Identifier) -> int | None:
+        """The int a name is emitted as when ``_visit_ident`` inlines it as a
+        literal (a never-reassigned constant: ``const int MS = 7200000``,
+        ``int step = 2 * 60 * 60 * 1000``), else None. Every read that
+        ``_visit_expr`` / ``_visit_ident`` renders otherwise is None: a
+        dropped no-data request, a ``request.security`` fallback frame, a
+        parameter, a bar field or built-in, an input, and a local that
+        shadows the constant."""
+        if node.annotations and UNPINNED_ANNOTATION in node.annotations:
+            return None
+        if getattr(self, "_security_fallback_frame", None) is not None:
+            return None
+        name = node.name
+        if name == "na" or name in getattr(self, "_pending_decl_outer_alias", {}):
+            return None
+        if (name in getattr(self, "_current_func_series_params", ())
+                or name in getattr(self, "_current_func_param_types", ())
+                or name in BAR_FIELDS or name in BAR_BUILTINS):
+            return None
+        known = getattr(self, "_known_vars", {})
+        if (name not in known
+                or name in getattr(self, "_input_backed_vars", ())
+                or self._known_var_is_lexically_shadowed(name)):
+            return None
+        value = known[name]
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value
+
+    def _global_int_constant(self, name: str) -> int | None:
+        """The int constant a top-level name is inlined as (``_known_vars``,
+        not an input, a bar field or a built-in), read at the top level."""
+        if name == "na" or name in BAR_FIELDS or name in BAR_BUILTINS:
+            return None
+        known = getattr(self, "_known_vars", {})
+        if name not in known or name in getattr(self, "_input_backed_vars", ()):
+            return None
+        value = known[name]
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value
+
+    def _literal_overflows_int32(self, node, names: bool = False) -> bool:
+        value = self._pure_int_literal_value(node, names)
         return value is not None and not self._int_fits_int32(value)
+
+    def _literal_wide_global(self, name: str, decl=None) -> bool:
+        """Whether the top-level declaration of ``name`` gives it an int
+        constant past int32 -- a literal (``g = 3000000000``) or constant
+        arithmetic (``var int e = 300 * MS``): its slot is ``int64_t``,
+        reassigned or not. Only that slot: the width is not a provenance
+        that travels by spelling through copies, parameters, arrays and
+        helper state (``_wide_int_provenance``), whose consumers keep their
+        types; a callable's or a block's declaration keeps its type too, and
+        so does a callable's local or parameter of that name where it is in
+        scope. With ``decl``, only when ``decl`` is that declaration."""
+        widths = getattr(self, "_top_level_constant_widths", None)
+        if widths is None:
+            widths = self._top_level_constant_widths = {}
+            ast = getattr(self.ctx, "ast", None)
+            for stmt in getattr(ast, "body", None) or ():
+                if (isinstance(stmt, VarDecl) and stmt.value is not None
+                        and stmt.name not in widths):
+                    value = self._pure_int_literal_value(stmt.value, global_scope=True)
+                    widths[stmt.name] = (
+                        stmt, value is not None and not self._int_fits_int32(value))
+        top = widths.get(name)
+        if top is None or not top[1]:
+            return False
+        if decl is not None:
+            return decl is top[0]
+        return not (
+            self._known_var_is_lexically_shadowed(name)
+            or name in getattr(self, "_current_func_param_types", ())
+            or name in getattr(self, "_current_func_series_params", ())
+            or name in getattr(self, "_current_func_locals", ())
+            or name in getattr(self, "_current_func_local_types", {})
+        )
+
+    # C++ text of an ``int`` expression built from decimal literals only.
+    _INT_LITERAL_CPP = re.compile(r"[\s()0-9+\-*]+")
+
+    @classmethod
+    def _int32_literal_cpp_value(cls, cpp: str) -> int | None:
+        """Exact value of C++ text built from decimal literals, ``+ - *`` and
+        parentheses that C++ evaluates in ``int`` (every literal and every
+        partial result fits int32), else None."""
+        if not cls._INT_LITERAL_CPP.fullmatch(cpp or ""):
+            return None
+        import ast as _ast
+        try:
+            tree = _ast.parse(cpp.strip(), mode="eval")
+        except SyntaxError:
+            return None
+
+        def value(node):
+            if isinstance(node, _ast.Constant) and type(node.value) is int:
+                result = node.value
+            elif isinstance(node, _ast.UnaryOp) and isinstance(node.op, (_ast.USub, _ast.UAdd)):
+                inner = value(node.operand)
+                if inner is None:
+                    return None
+                result = -inner if isinstance(node.op, _ast.USub) else inner
+            elif isinstance(node, _ast.BinOp) and isinstance(
+                    node.op, (_ast.Add, _ast.Sub, _ast.Mult)):
+                left, right = value(node.left), value(node.right)
+                if left is None or right is None:
+                    return None
+                result = (left + right if isinstance(node.op, _ast.Add)
+                          else left - right if isinstance(node.op, _ast.Sub)
+                          else left * right)
+            else:
+                return None
+            return result if cls._int_fits_int32(result) else None
+
+        return value(tree.body)
+
+    def _fold_int32_overflow_cpp(self, op: str, left_cpp: str, right_cpp: str) -> str | None:
+        """``left op right`` as a 64-bit literal when both sides are C++
+        ``int`` literal arithmetic whose exact result leaves int32 (Pine's
+        ``int`` is 64-bit; C++ would overflow), else None. The emitted text
+        is what decides: a name inlined as its literal, a global expanded
+        into its declaration or a helper parameter bound to a literal all
+        read as literals here."""
+        if op not in ("+", "-", "*"):
+            return None
+        left = self._int32_literal_cpp_value(left_cpp)
+        if left is None:
+            return None
+        right = self._int32_literal_cpp_value(right_cpp)
+        if right is None:
+            return None
+        result = left + right if op == "+" else left - right if op == "-" else left * right
+        if self._int_fits_int32(result):
+            return None
+        return f"static_cast<int64_t>({result}LL)"
 
     def _array_receiver_and_value(self, call):
         """``(receiver_name, value_node)`` of an element-writing array call in
@@ -1337,7 +1486,7 @@ class TypeInferer:
                 owner,
                 set(),
                 getattr(self, "_active_call_site_idx", None),
-            ) or self._is_int64_builtin_init(node.name):
+            ) or self._is_int64_builtin_init(node.name, node):
                 return "int64_t"
             return cpp_type
 
@@ -1989,7 +2138,7 @@ class TypeInferer:
             return "int64_t"
         return cpp_type
 
-    def _is_int64_builtin_init(self, name: str) -> bool:
+    def _is_int64_builtin_init(self, name: str, decl=None) -> bool:
         """True if ``name``'s initializer OR any ``:=``/``=`` reassignment has an
         RHS that is a top-level int64-returning builtin (``time``, ``time_close``,
         ``timenow``, ``timestamp``, ``time_tradingday``). The Pine type system
@@ -2006,6 +2155,10 @@ class TypeInferer:
             or self.ctx.var_member_init_exprs.get(name)
         )
         if self._expr_is_int64_builtin(expr):
+            return True
+        # A script-level int constant past int32 (``_literal_wide_global``;
+        # ``decl`` restricts it to that declaration).
+        if self._literal_wide_global(name, decl):
             return True
         return name in self._wide_int_provenance()[0]
 

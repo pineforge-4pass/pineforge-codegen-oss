@@ -1247,7 +1247,8 @@ class ExprVisitor:
         # C++ ``int`` literal arithmetic would wrap it. Fold it here and spell
         # the value as a 64-bit literal. In-range trees are emitted as before.
         folded = self._pure_int_literal_value(node)
-        if folded is not None and not self._int_fits_int32(folded):
+        if (folded is not None and not self._int_fits_int32(folded)
+                and self._int_fits_int64(folded)):
             return f"static_cast<int64_t>({folded}LL)"
         left = self._visit_expr(node.left)
         right = self._visit_expr(node.right)
@@ -1468,6 +1469,13 @@ class ExprVisitor:
         if node.op in ("==", "!=") and self._pine_v5_body:
             self._refuse_v5_bool_na_observer(
                 node, f"'{node.op}'", (node.left, node.right))
+        # Operands that render as C++ ``int`` literal arithmetic although
+        # the tree above did not fold (a name spelled otherwise than
+        # ``_inlined_int_constant`` reads it): a result beyond int32 is a
+        # 64-bit Pine int, never a C++ overflow.
+        folded_cpp = self._fold_int32_overflow_cpp(node.op, left, right)
+        if folded_cpp is not None:
+            return folded_cpp
         return self._lower_relational(op, node.left, node.right, left, right)
 
     def _refuse_v5_bool_na_observer(self, node, what: str, operands) -> None:

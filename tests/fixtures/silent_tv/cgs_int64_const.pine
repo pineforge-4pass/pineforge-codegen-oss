@@ -1,0 +1,27 @@
+//@version=6
+// CG-SILENT item 1: integer arithmetic past 32 bits. 400 * 7200000 is
+// 2880000000 in Pine: literal x literal, literal x const int, literal x a
+// never-reassigned int, a var initializer, a declared int, a literal past
+// int32, a sum past int32, a negative product, and a time window as wide.
+// Each close's comment spells what the script reads on that bar.
+strategy("CGS int64 const", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+const int MS = 7200000
+int step = 2 * 60 * 60 * 1000
+a = 400 * 7200000
+b = 400 * MS
+c = 400 * step
+int d = 300 * MS
+var int e = 300 * MS
+g = 3000000000
+h = 2000000000 + 2000000000
+k = -300 * MS
+t0 = timestamp("UTC", 2025, 4, 1, 0, 0)
+rel = time - t0
+inWin = rel >= 0 and rel < 400 * step
+w = time + 400 * MS - time
+s(x) => str.tostring(x)
+m = minute(time, "UTC")
+if inWin and (m == 0 or m == 30)
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(a) + "|" + s(b) + "|" + s(c) + "|" + s(d) + "|" + s(e) + "|" + s(g) + "|" + s(h) + "|" + s(k) + "|" + s(w))
