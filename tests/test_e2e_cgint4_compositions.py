@@ -39,6 +39,16 @@ missed:
   A foreign site now sets the member from the context, a chart site keeps
   41c5e4f's count of requested bars: ``bar_index`` and ``bar_index[1]`` of
   the foreign payload are the feed's own index and the one before it.
+* A foreign helper's source parameter: CG-XSYM-A2 e44a7c8 puts a helper
+  parameter bound to an ``input.source`` in its place (``security_contexts``),
+  XSYM-E copies that helper per symbol, and CG-W9-SEC's builder (on main)
+  reads the source on the requested bar -- here each symbol's own feed bar:
+  ``f(sym, v) => request.security(sym, "60", ta.sma(v, 3))`` called for two
+  symbols with ``src`` equals the SMA of each feed's selected series, under
+  the default and under an override (main gave a deferred refusal).
+  CG-XSYM-A2 9964233 also names a helper the analyzer emits once in its
+  calls, which closes XSYM-E's open ``f_cs0`` item: a helper fed a ternary
+  symbol compiles.
 * A payload's series TA length over ``bar_index``: K-TA-DYNLEN windows
   ``ta.highest(high, bar_index % 5 + 1)`` every call
   (``pineforge::source::SeriesHighest``), and 41c5e4f counts the requested
@@ -60,6 +70,10 @@ missed:
   them. Inlined on every pass, a library function reading a flag at an
   offset gets a clone per call site (``_session_call_*``), and a keyword
   ``nz`` in library code is its positional twin byte for byte.
+* CG-XSYM-A2 a2cab6f names each ``_`` of a structured binding
+  ``_tuple_unused_N``; CG-OPEN-ITEMS d3e086b keeps script names out of the
+  emitter's temporaries, which now include those: a script variable
+  ``_tuple_unused_0`` is escaped, where the block's binding captured it.
 * CG-OPEN-ITEMS d504053 parenthesizes a lambda history offset; CG-SESSION-2's
   flag histories and CG-W9-FN's function histories index through
   ``pine_index_int_cast``. A fractional runtime offset on every emitter
@@ -351,6 +365,81 @@ def test_a_foreign_payloads_bar_index_is_its_contexts(tmp_path_factory) -> None:
     # The chart symbol's request counts its own requested bars (41c5e4f).
     finite = [x for x in counts if x == x]
     assert finite and finite == sorted(finite) and max(finite) < len(opens) // 3
+
+
+# ---------------------------------------------------------------------------
+# A foreign helper's source parameter (CG-XSYM-A2 e44a7c8 x XSYM-E x
+# CG-W9-SEC), and a ternary symbol through a helper (CG-XSYM-A2 9964233)
+# ---------------------------------------------------------------------------
+
+FOREIGN_SOURCE = HEAD + '''src = input.source(close, "S")
+f(sym, v) => request.security(sym, "60", ta.sma(v, 3))
+a = f("PF:A", src)
+b = f("PF:B", src)
+if a > b
+    strategy.entry("L", strategy.long)
+// @pf-trace pf_a=a
+// @pf-trace pf_b=b
+'''
+
+
+def test_a_foreign_helpers_source_parameter_reads_each_symbols_bars(tmp_path_factory) -> None:
+    from tests._requests import build, hourly, run, write_root
+    from tests.test_foreign_requests import H1, _chart, _visible
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("cgint4_foreign_source_param")
+    feed_path, opens = _chart(engine, base)
+    feeds = {"a": hourly("PF:A", opens[0] - 3 * H1, 70),
+             "b": hourly("PF:B", opens[0] - 3 * H1, 70, skip=frozenset({10, 11}))}
+    work = base / "cgint4-foreign-source"
+    cpp = build(FOREIGN_SOURCE, work)["cpp"]
+    assert len(re.findall(r"register_security_eval\(\d+, _pf_symbol", cpp)) == 2
+    root = write_root(base, "cgint4-foreign-source", "BINANCE:ETHUSDT", "15", list(feeds.values()))
+    nan = float("nan")
+    for overrides, shift in ((None, 0.0), ({"S": "high"}, 1.0)):
+        result = run(engine, work, feed_path, root, inputs=overrides,
+                     tag="high" if overrides else "run")
+        assert result.ok, result.error
+        for name, feed in feeds.items():
+            series = [bar[2] + shift for bar in feed.bars]   # high = close + 1
+            for chart_open in opens:
+                i = _visible(feed, chart_open, False)
+                want = nan if i is None or i < 2 else sum(series[i - 2:i + 1]) / 3
+                got = result.trace[chart_open][f"pf_{name}"]
+                assert same(got, want) or abs(got - want) < 1e-9, (overrides, name, chart_open)
+
+
+def test_main_refused_the_foreign_helpers_source_parameter(tmp_path: Path) -> None:
+    result = _main_transpiled(tmp_path, FOREIGN_SOURCE)
+    assert any("no data is pinned for this request" in d["message"]
+               for d in result["diagnostics"])
+
+
+def test_a_ternary_symbol_through_a_helper_compiles() -> None:
+    # XSYM-E's open item: the analyzer numbered f's call sites (f_cs0) where
+    # it emitted f once, so the call named a function nothing defined.
+    cpp = transpile(HEAD + (
+        'f(s) => request.security(s, "60", close)\n'
+        'a = f(close > open ? "PF:A" : syminfo.tickerid)\n'
+        'if a > close\n    strategy.entry("L", strategy.long)\n'))
+    for name in set(re.findall(r"\b(\w+_cs\d+)\(", cpp)):
+        assert re.search(rf"\b\w+ {name}\(", cpp), name
+    compile_env.compile_cpp(cpp, label="cgint4-ternary-symbol-helper")
+
+
+def test_a_script_name_spelled_like_a_placeholder_binding_is_escaped() -> None:
+    cpp = transpile(HEAD + (
+        'f() => [close, open, high]\n'
+        '_tuple_unused_0 = close * 2\n'
+        'if close > open\n'
+        '    [a, _, _] = f()\n'
+        '    if a > _tuple_unused_0\n'
+        '        strategy.entry("L", strategy.long)\n'))
+    assert "auto [a, _tuple_unused_0, _tuple_unused_1] = f();" in cpp
+    assert "pf_safe__tuple_unused_0 = (current_bar_.close * 2);" in cpp
+    assert re.search(r"\(a\) > \(pf_safe__tuple_unused_0\)|a > pf_safe__tuple_unused_0|"
+                     r"\ba\b.*pf_safe__tuple_unused_0", cpp)
+    compile_env.compile_cpp(cpp, label="cgint4-placeholder-name")
 
 
 # ---------------------------------------------------------------------------
