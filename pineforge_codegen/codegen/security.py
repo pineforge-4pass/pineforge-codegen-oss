@@ -2556,6 +2556,24 @@ class SecurityEmitter:
         )
         return f'{store}["{series_name}"]'
 
+    def _security_helper_var_state_type(self, stmt: VarDecl) -> str:
+        """The type family of a helper ``var`` whose declaration reads
+        ``int64_t``. Its state is a double series (``_security_helper_series_``),
+        which holds a 64-bit integer arithmetic value exactly, so a width only
+        such arithmetic gives -- the ``var``'s own or a same-spelled name's in
+        another callable, since ``_wide_int_provenance`` is keyed by spelling
+        (``g() => n = days * 86400000`` beside a helper's ``var int n``) --
+        keeps the ``int`` family it compiled with (the width of constants does
+        not reach helper state either: ``_literal_wide_global``). Only an
+        epoch reaching it (the lane's epoch-only reading) reads ``int64_t``,
+        which stays refused as it always was."""
+        saved = getattr(self, "_wide_int_epoch_only", False)
+        self._wide_int_epoch_only = True
+        try:
+            return self._type_for_decl(stmt)
+        finally:
+            self._wide_int_epoch_only = saved
+
     def _security_store_string_series(self, node, series_name: str) -> None:
         """Keep a string helper series (and its ``var`` seed) in the string
         map, which ``_security_needs_string_series`` declared."""
@@ -2771,6 +2789,8 @@ class SecurityEmitter:
                     cpp_type = None
                     if is_persistent_var or self._security_string_series_declared:
                         cpp_type = self._type_for_decl(stmt)
+                    if is_persistent_var and cpp_type == "int64_t":
+                        cpp_type = self._security_helper_var_state_type(stmt)
                     if cpp_type == "std::string":
                         self._security_store_string_series(stmt, series_name)
                         if stmt.value is None or isinstance(stmt.value, NaLiteral):

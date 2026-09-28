@@ -1,0 +1,51 @@
+//@version=6
+// CGINT6: where lane CG-SILENT-2 meets codegen main's rules. Each close's
+// comment spells what the script reads on that bar (entries from 12:00 UTC
+// on, when every requested window lies inside the tape's range):
+//   ca, cb, cc: a keyword transparency, fractional or not, through
+//     color.new / color.rgb (CG-SILENT-2 item 1 x the double transparency
+//     of CG-SESSION-REPIN);
+//   a0, a1: the same inside array.from of colors (item 5a);
+//   w: a run-time product past int32 beside a constant one (item 3 x the
+//     64-bit constant fold of CGINT5a);
+//   p: the same in a request.security payload;
+//   hh: a helper called on its own result whose var TA length is a value of
+//     each requested bar (item 5c x CGINT5a's helper var lengths);
+//   cnt, gv: a helper var counter whose name another function binds to a
+//     64-bit product (item 3 x CGINT5a's helper state width).
+strategy("CGINT6 compositions", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+const int MS = 7200000
+int step = 2 * 60 * 60 * 1000
+days = input.int(30)
+k = bar_index % 50
+ca = color.t(color.new(color.red, transp = k + 0.5))
+cb = color.t(color.rgb(10, 20, 30, transp = k + 0.5))
+cc = color.t(color.new(transp = k, color = #336699))
+var array<color> A = array.from(color.new(color.red, transp = 10.5), color.rgb(1, 2, 3, transp = 20.5))
+a0 = color.t(array.get(A, 0))
+a1 = color.t(array.get(A, 1))
+var int q = 400
+q += 1
+w = q * 7200000 + 400 * MS
+p = request.security(syminfo.tickerid, "60", bar_index * 7200000 + 400 * step)
+u(_x) =>
+    var int c = 1
+    c := math.min(c + 1, 5)
+    ta.highest(_x, c)
+hh = request.security(syminfo.tickerid, "60", u(u(close)))
+h() =>
+    var int n = 0
+    n += 1
+    n
+g() =>
+    n = days * 86400000
+    n
+cnt = request.security(syminfo.tickerid, "60", h())
+gv = g()
+s(x) => str.tostring(x)
+live = time >= timestamp("UTC", 2025, 4, 1, 12, 0)
+m = minute(time, "UTC")
+if live and (m == 0 or m == 30)
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(ca) + "|" + s(cb) + "|" + s(cc) + "|" + s(a0) + "|" + s(a1) + "|" + s(w) + "|" + s(p) + "|" + str.tostring(hh, "#.####") + "|" + s(cnt) + "|" + s(gv))
