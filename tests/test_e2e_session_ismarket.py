@@ -29,8 +29,13 @@ before it the windows also held an overnight session's in-market bars from
 04:00 to its open and from its close to 20:00). The pre-lane lowering,
 time-of-day predicates such as
 ``pine_session_ismarket(syminfo_.session, syminfo_.timezone, time)``, tests
-each instant's own weekday and window: it reads every Sunday-evening open of a
-``:23456`` session and every bar of ``0000-2400`` as out of market.
+the instant alone. Until engine lane W11-ENG-TIME-COLOR
+``pine_session_ismarket`` also tested a day mask on the instant's own weekday
+and skipped a ``2400`` clock, and read every Sunday-evening open of a
+``:23456`` session and every bar of ``0000-2400`` as out of market; the engine
+now reads its mask by each window's session day and ``2400`` as the day's end
+(its ``session_clock`` tapes), and the pre-lane build reads those bars as
+TradingView does.
 session.isfirstbar / islastbar read the kernel's session-day facts, which the
 engine widens to the chart's day on an extended-hours chart, and their
 ``_regular`` twins the regular day's facts (see ``EXTENDED``).
@@ -97,7 +102,6 @@ class Case:
     timezone: str
     # flag letter -> bars where the pre-lane build was not TradingView's flag
     legacy: dict[str, int] = field(hash=False)
-    legacy_sunday: int = 0  # of its session.ismarket misses, those on a local Sunday
     # flag letter -> bars where this build is not TradingView's (see EXTENDED)
     pinned: dict[str, int] = field(default_factory=dict, hash=False)
 
@@ -106,10 +110,9 @@ class Case:
         return f"{self.slug}@{self.session}"
 
 
-def _cases(chart: str, session: str, timezone: str, legacy: dict[str, int],
-           sunday: int = 0) -> list[Case]:
-    return [Case(f"hm-g236-{chart}", session, timezone, legacy, sunday),
-            Case(f"cgim-flags-{chart}", session, timezone, legacy, sunday)]
+def _cases(chart: str, session: str, timezone: str, legacy: dict[str, int]) -> list[Case]:
+    return [Case(f"hm-g236-{chart}", session, timezone, legacy),
+            Case(f"cgim-flags-{chart}", session, timezone, legacy)]
 
 
 CASES = tuple(case for cases in (
@@ -120,16 +123,21 @@ CASES = tuple(case for cases in (
     _cases("eurusd-60-dst-mar", "1700-1700", "America/New_York", {}),
     _cases("xauusd-60-dst-mar", "1800-1700", "America/New_York", {}),
     _cases("eth-60-24x7", "24x7", "UTC", {}),
-    # The same sessions with TradingView's weekday mask: the time-of-day
-    # predicate missed every Sunday-evening open.
-    _cases("es1-60-dst-mar", "1700-1600:23456", "America/Chicago", {"M": 14}, 14),
-    _cases("es1-60-dst-nov", "1700-1600:23456", "America/Chicago", {"M": 14}, 14),
-    _cases("es1-60-thanksgiving", "1700-1600:23456", "America/Chicago", {"M": 14}, 14),
-    _cases("eurusd-60-dst-mar", "1700-1700:23456", "America/New_York", {"M": 14}, 14),
-    _cases("xauusd-60-dst-mar", "1800-1700:23456", "America/New_York", {"M": 12}, 12),
-    # A 24-hour day: "0000-2400" (the predicate: never in market) and
-    # TradingView's spelling "0000-0000" (both: always).
-    _cases("eth-60-24x7", "0000-2400", "UTC", {"M": 97}, 24),
+    # The same sessions with TradingView's weekday mask, which admits each
+    # window on its session day: the Sunday-evening open is Monday's. The
+    # time-of-day predicate tested the instant's own weekday and missed every
+    # Sunday-evening open (14/14/14/14/12 bars, all on a local Sunday) until
+    # engine lane W11-ENG-TIME-COLOR (its tapes w11-sessmask{,2,3}-btc15).
+    _cases("es1-60-dst-mar", "1700-1600:23456", "America/Chicago", {}),
+    _cases("es1-60-dst-nov", "1700-1600:23456", "America/Chicago", {}),
+    _cases("es1-60-thanksgiving", "1700-1600:23456", "America/Chicago", {}),
+    _cases("eurusd-60-dst-mar", "1700-1700:23456", "America/New_York", {}),
+    _cases("xauusd-60-dst-mar", "1800-1700:23456", "America/New_York", {}),
+    # A 24-hour day: "0000-2400", whose "2400" is the day's end, and
+    # TradingView's spelling "0000-0000": always in market. The predicate
+    # skipped the "2400" window and missed all 97 bars until engine lane
+    # W11-ENG-TIME-COLOR (its tapes w11-sess2400-{btc15,btc1d,xau15}).
+    _cases("eth-60-24x7", "0000-2400", "UTC", {}),
     _cases("eth-60-24x7", "0000-0000", "UTC", {}),
 ) for case in cases) + (
     # NASDAQ:AAPL's regular session, whose extended hours TradingView reads as
@@ -311,11 +319,6 @@ def _misses(case: Case, replay: Replay, prefix: str = "") -> dict[str, list[int]
     return misses
 
 
-def _on_sunday(stamps: list[int], timezone: str) -> int:
-    zone = ZoneInfo(timezone)
-    return sum(dt.datetime.fromtimestamp(ts / 1000, zone).isoweekday() == 7 for ts in stamps)
-
-
 def test_tapes_are_the_recorded_exports() -> None:
     """Every fixture is its export byte for byte. TradingView flagged every one
     of each six-chart set's 1,138 bars in market and none pre- or post-market,
@@ -377,16 +380,20 @@ def test_session_flags_are_tradingviews(case: Case, replays) -> None:
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.key)
 def test_legacy_predicates_missed_the_pinned_bars(case: Case, replays) -> None:
+    """The pre-lane build reads session.ismarket, ispremarket and
+    ispostmarket through the time-of-day predicates a request.security
+    payload still reads, and misses exactly the pinned bars: on these tapes
+    only the extended-hours chart's _regular pair, which it read from the
+    chart's day (see EXTENDED)."""
     if ("legacy", case.slug) not in replays:
         pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
     replay = replays[("legacy", case.slug)]
     assert "_pf_session_market_(" not in replay.cpp
     misses = _misses(case, replay)
     assert {letter: len(bars) for letter, bars in misses.items() if bars} == case.legacy, case.key
-    assert _on_sunday(misses["M"], case.timezone) == case.legacy_sunday, case.key
     missed = {FLAGS[k]: v for k, v in case.legacy.items()}
-    print(f"session flags {case.key}: pre-lane build missed {missed} of "
-          f"{len(read_tape(case.slug))} bars ({case.legacy_sunday} ismarket on a local Sunday)")
+    print(f"session flags {case.key}: pre-lane build missed {missed or 'none'} of "
+          f"{len(read_tape(case.slug))} bars")
 
 
 def test_security_payload_keeps_its_own_bars_predicates(replays) -> None:
@@ -419,7 +426,7 @@ SUNDAY_OPEN = 1740956400000  # 2025-03-02 17:00 America/Chicago: Monday's sessio
 
 
 @pytest.fixture(scope="session")
-def one_bar(tmp_path_factory) -> dict[str, tuple[bytes, list[dict]]]:
+def one_bar(tmp_path_factory) -> dict[str, tuple[bytes, list[dict], str]]:
     """The probe on a single bar given no timeframe, per build: the engine
     detects none and presents no session-day facts for such a run."""
     engine = skip_unless_e2e_env()
@@ -441,7 +448,7 @@ def one_bar(tmp_path_factory) -> dict[str, tuple[bytes, list[dict]]]:
         overrides = {"runtime_overrides": {"session": "1700-1600:23456",
                                            "timezone": "America/Chicago"}}
         trades, records, _ = run_strategy(engine, work, feed, overrides, "one", trace=True)
-        runs[label] = (trades, records or [])
+        runs[label] = (trades, records or [], transpiled["cpp"])
     return runs
 
 
@@ -451,18 +458,23 @@ def test_one_bar_without_timeframe_reads_the_calendar(one_bar) -> None:
     The kernel presents no session-day facts to such a run, so a run without a
     timeframe keeps the calendar's answer; its isfirstbar reads false, where
     TradingView's tapes flag that bar its day's first (a divergence of such a
-    run, pinned)."""
-    trades, records = one_bar["current"]
+    run, pinned). The pre-lane build's predicate reads the bar in market too:
+    it tested the Sunday instant's own weekday against the mask, and read it
+    out of market, until engine lane W11-ENG-TIME-COLOR."""
+    assert read_tape("hm-g236-es1-60-dst-mar")[0] == (SUNDAY_OPEN, {"M": True})
+    trades, records, cpp = one_bar["current"]
+    assert "_pf_session_market_(" in cpp
     assert traced(records, "ismarket") == [(SUNDAY_OPEN, True)]
     assert traced(records, "isfirstbar") == [(SUNDAY_OPEN, False)]
     assert engine_entry_times(trades) == [SUNDAY_OPEN]
     if "legacy" not in one_bar:
         pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
-    legacy_trades, legacy_records = one_bar["legacy"]
-    assert traced(legacy_records, "ismarket") == [(SUNDAY_OPEN, False)]
-    assert engine_entry_times(legacy_trades) == []
-    print("session.ismarket on one Sunday-open bar without a timeframe: in market "
-          "(pre-lane build: out)")
+    legacy_trades, legacy_records, legacy_cpp = one_bar["legacy"]
+    assert "_pf_session_market_(" not in legacy_cpp
+    assert traced(legacy_records, "ismarket") == [(SUNDAY_OPEN, True)]
+    assert engine_entry_times(legacy_trades) == [SUNDAY_OPEN]
+    print("session.ismarket on one Sunday-open bar without a timeframe: in market, "
+          "as TradingView's tape (pre-lane build: in market)")
 
 
 def test_pine_names_of_the_emitted_helpers_stay_distinct(tmp_path: Path) -> None:
@@ -556,11 +568,16 @@ def test_security_payload_session_read_warns_once_per_site(tmp_path: Path) -> No
     message = next(d["message"] for d in result["diagnostics"]
                    if "inside request.security" in d["message"])
     assert "a bar that opens in a session break" in message
+    assert "a D/W/M bar, always in market on TradingView, reads its open's time of day" in message
+    # The predicate reads a day mask by each window's session day and "2400"
+    # as the day's end (engine lane W11-ENG-TIME-COLOR): neither is named.
+    assert "own weekday" not in message and "2400" not in message
 
 
 def test_security_payload_prepost_warning_names_no_break(tmp_path: Path) -> None:
     """Needs no engine: the pre- and post-market predicates read a session
-    break as neither, as TradingView does, so their warning does not name it."""
+    break as neither, as TradingView does, so their warning names only the
+    D/W/M bar."""
     result = _transpiled(tmp_path,
                          'p = request.security(syminfo.tickerid, "60", session.ispremarket)\n'
                          "if p\n"
@@ -569,4 +586,6 @@ def test_security_payload_prepost_warning_names_no_break(tmp_path: Path) -> None
                    if "inside request.security" in d["message"])
     assert message.startswith("session.ispremarket inside request.security")
     assert "session break" not in message
+    assert "a D/W/M bar, never pre-market on TradingView, reads its open's time of day" in message
+    assert "own weekday" not in message and "2400" not in message
 
