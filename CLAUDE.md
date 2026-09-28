@@ -820,6 +820,24 @@ user function lives in the global scope typed by its return, while Pine
 keeps functions and variables apart: `types._variable_symbol` resolves a
 variable spelled like a user function in its own function's scope
 (`tests/test_e2e_function_local_name.py`).
+An untyped function parameter takes each written call's type, as
+TradingView compiles such a function once per argument type: a plain
+function whose untyped scalar parameter receives two primitive families
+at its written calls (anything but an int where the shared body holds a
+float) is emitted once per call site like a stateful one, each variant
+typed from its own call, and so is a function it forwards that parameter
+to (`_untyped_param_family_conflicts`). One body typed from the first
+call narrowed a later float into an `int` (`s(2.5)` read "2"). Two
+textual calls one variant shares keep the first type and warn. Each such
+function is emitted once per call path through the functions it makes
+stateful, so where the copies would outgrow the script, more than 64 and
+four per written call in all (a diamond of forwarding helpers: 2**depth
+copies of its leaf; a deep forwarding chain called many times), the
+function gaining the most copies and the functions it is reached from keep
+one body each, typed from the first call, and warn; flat calls, forwarded
+or not, keep their variants (`_bounded_family_polymorphism`;
+`tests/test_e2e_untyped_param_families.py`, tape
+`fixtures/silent2_tv/cgs2_untyped_params`).
 - **Errors.** Use `errors.CompileError` for fatal issues raised from
 the transpiler. Carry `SourceLocation` so users can map back to the
 Pine line/col. Diagnostics inside the support checker use
