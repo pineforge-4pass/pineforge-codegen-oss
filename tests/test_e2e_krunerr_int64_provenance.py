@@ -97,7 +97,10 @@ def test_chart_type_reads_spell_true(runs):
     engine, feed, base, outcomes = runs
     ok(outcomes, "env")
     # The other two entries spell the lane's syminfo (the harness runs the
-    # engine defaults); the chart-type entry depends on nothing else.
+    # engine defaults); the chart-type entry depends on nothing else. The
+    # probe declares its 0.01 size: at the Pine v6 default of 100% of equity
+    # TradingView fills all three entries and margin-calls them, where the
+    # engine refuses the second and third (fixtures/krunerr_tv/README.md).
     tape = [s for s in _entry_signals("env_facts_tv_trades.csv") if s.startswith("tf=")]
     assert tape == ["tf=15|m=15|min=true|d=false|std=true"]
     engine_ids = [t["entry_id"] for t in closed_trades(engine, base / "env", feed)

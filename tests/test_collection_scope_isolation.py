@@ -834,8 +834,11 @@ matrix_result = matrix_probe()
 
 
 def test_unique_local_collection_output_hash_is_stable() -> None:
+    # Re-pinned once by lane TV-DEFAULTS (was 14200 bytes, 95d691b8...): the
+    # probe's strategy() declares no capital or quantity, so its constructor
+    # now carries TradingView's three Pine v6 defaults and nothing else moved.
     cpp = transpile(_IDENTITY_SOURCE)
-    assert len(cpp) == 14200
+    assert len(cpp) == 14356
     assert sha256(cpp.encode()).hexdigest() == (
-        "95d691b847e65641f38a89c387d5e6638f1061b0c0486e93d50b31bb22219184"
+        "db0f5383d1d03c10a06ff8bb164777e9a98e48dc0777a2dac02839d4f70ac488"
     )

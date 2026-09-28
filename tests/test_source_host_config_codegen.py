@@ -231,3 +231,46 @@ def test_a_non_literal_declaration_warns_that_the_host_runs_without_it():
     assert "strategy_declares_bar_magnifier" not in result["cpp"]
     messages = [d.message for d in result["diagnostics"]]
     assert any("not a literal bool" in m and "without one" in m for m in messages), messages
+
+
+# TradingView's Pine v6 defaults for an omitted initial_capital,
+# default_qty_type and default_qty_value (tests/fixtures/strategy_defaults):
+# the constructor declares them, because the source host's own
+# PineStrategyConfig defaults are the pre-2026-09-24 values.
+_V6_CAPITAL = "cfg.initial_capital = 100000.0;"
+_V6_PERCENT = "cfg.default_qty_type = static_cast<int>(QtyType::PERCENT_OF_EQUITY);"
+_V6_VALUE = "cfg.default_qty_value = 100.0;"
+
+
+def _sizing_lines(declaration: str) -> list[str]:
+    constructor = _constructor(transpile(f'//@version=6\n{declaration}\n'))
+    return [line.strip() for line in constructor.splitlines()
+            if line.strip().startswith(("cfg.initial_capital", "cfg.default_qty_"))]
+
+
+def test_an_omitted_capital_and_quantity_are_tradingviews_v6_defaults():
+    assert _sizing_lines('strategy("omits all three")') == [
+        _V6_CAPITAL, _V6_PERCENT, _V6_VALUE]
+
+
+def test_each_omitted_parameter_takes_its_own_v6_default():
+    # Only the omitted parameter is defaulted; a declared one is emitted as is.
+    assert _sizing_lines('strategy("x", initial_capital=5000)') == [
+        "cfg.initial_capital = 5000.0;", _V6_PERCENT, _V6_VALUE]
+    # default_qty_value is 100 whatever the type: 100 contracts, or 100 cash.
+    assert _sizing_lines('strategy("x", default_qty_type=strategy.fixed)') == [
+        _V6_CAPITAL, "cfg.default_qty_type = static_cast<int>(QtyType::FIXED);", _V6_VALUE]
+    assert _sizing_lines('strategy("x", default_qty_type=strategy.cash)') == [
+        _V6_CAPITAL, "cfg.default_qty_type = static_cast<int>(QtyType::CASH);", _V6_VALUE]
+    # An omitted type sizes the declared value as a percent of equity.
+    assert _sizing_lines('strategy("x", default_qty_value=1)') == [
+        _V6_CAPITAL, _V6_PERCENT, "cfg.default_qty_value = 1.0;"]
+
+
+def test_a_declaration_of_all_three_is_emitted_exactly_as_declared():
+    assert _sizing_lines('strategy("x", initial_capital=1000000, '
+                         'default_qty_type=strategy.fixed, default_qty_value=1)') == [
+        "cfg.initial_capital = 1000000.0;",
+        "cfg.default_qty_type = static_cast<int>(QtyType::FIXED);",
+        "cfg.default_qty_value = 1.0;",
+    ]

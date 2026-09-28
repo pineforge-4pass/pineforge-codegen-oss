@@ -389,7 +389,7 @@ observed = scalar
     # Whole-output pin includes the generated source-host constructor and
     # lifecycle reset. The ordinary non-map lowering remains unchanged.
     assert sha256(cpp.encode()).hexdigest() == (
-        "5979a0d3a4465192b456635c5dfb590358c353d547ec80de368e54629b807afb"
+        "d2f2406c9f1fbd77606156781bb9c9899c248ad725058049ac874f3da9b3cbb3"
     )
     assert '#include <pineforge/map.hpp>' not in cpp
     assert "_PFCheckpointTraits" not in cpp

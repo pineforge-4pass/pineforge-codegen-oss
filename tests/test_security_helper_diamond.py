@@ -120,9 +120,16 @@ def test_a_script_name_spelled_like_a_lambda_is_escaped():
     assert "const auto _pf_shared_0_0 = " in _evaluator(cpp)
 
 
+# The sizing is declared so that the run books the entry every half hour
+# that the counts below expect: at TradingView's Pine v6 defaults for an
+# omitted initial_capital / default_qty_type / default_qty_value (100% of
+# equity, lane TV-DEFAULTS, test_e2e_strategy_defaults) v6's 100% margin
+# refuses the entries whose fill price rose above the price they were sized
+# at, and the payloads are compared on fewer exits.
 PROBE = "\n".join([
     "//@version=6",
-    'strategy("PF diamond payload", overlay = true)',
+    'strategy("PF diamond payload", overlay = true, initial_capital = 1000000, '
+    'default_qty_type = strategy.fixed, default_qty_value = 1)',
     *_diamond("f", 22, "x * 2 - open"),
     *_diamond("g", 16, "x > open ? x - open : open - x"),
     "method m(float x) => f22(x)",

@@ -91,6 +91,7 @@ from ..errors import Phase
 from ..external_requests import UNPINNED_ANNOTATION
 from ..ast_nodes import (
     ASTNode,
+    Assignment,
     BinOp,
     BoolLiteral,
     ColorLiteral,
@@ -106,6 +107,7 @@ from ..ast_nodes import (
     UnaryOp,
 )
 from .helpers import pine_index_int_cast
+from .types import COLLECTION_MUTATING_METHODS
 from .tables import (
     ADJUSTMENT_MAP,
     ALERT_FREQ_VALUES,
@@ -183,6 +185,50 @@ _RELATIONAL_OPS: frozenset[str] = frozenset({"==", "!=", "<", ">", "<=", ">="})
 # overload for ``bool``/``std::string``/vector/UDT-value operands, and Pine's
 # na-bool is engine-indistinguishable from ``false`` (na<bool>() == false).
 _NA_SCALAR_CPP: frozenset[str] = frozenset({"int", "int64_t", "double"})
+
+# What a binary operand no effect of the other operand can change is built
+# from (``_binop_operand_is_order_free``): literals and variables, these
+# calls, and operators over them.
+_ORDER_FREE_LITERALS = (
+    NumberLiteral, StringLiteral, BoolLiteral, NaLiteral, ColorLiteral,
+)
+_ORDER_FREE_CALL_NAMESPACES = frozenset({"str", "math", "color", "ta"})
+_ORDER_FREE_CALLS = frozenset({"nz", "na", "int", "float", "bool", "string"})
+# Builtin calls with an effect whose order is observable
+# (``_expr_has_ordered_effect``): an order, a log line, a script stop.
+_ORDERED_EFFECT_CALLS: frozenset[tuple[str, str]] = frozenset({
+    ("strategy", "entry"), ("strategy", "order"), ("strategy", "exit"),
+    ("strategy", "close"), ("strategy", "close_all"),
+    ("strategy", "cancel"), ("strategy", "cancel_all"),
+    ("log", "info"), ("log", "warning"), ("log", "error"),
+    ("runtime", "error"),
+})
+# Every call of these namespaces but a ``get_*`` getter creates, copies,
+# changes or deletes a drawing; the method forms are ``set_*``,
+# ``cell_set_*`` and these.
+_DRAWING_EFFECT_NAMESPACES = frozenset({
+    "label", "line", "box", "table", "polyline", "linefill",
+})
+_DRAWING_EFFECT_METHODS = frozenset({"delete", "cell", "merge_cells"})
+
+
+def _ast_children(node):
+    """The AST nodes directly under ``node``: its fields, lists, tuples (a
+    ``switch`` case) and dicts (keyword arguments), not its annotations."""
+    for name, value in vars(node).items():
+        if name not in ("loc", "annotations"):
+            yield from _ast_nodes_in(value)
+
+
+def _ast_nodes_in(value):
+    if isinstance(value, ASTNode):
+        yield value
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _ast_nodes_in(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _ast_nodes_in(item)
 
 
 class ExprVisitor:
@@ -1160,6 +1206,23 @@ class ExprVisitor:
             f"({compare}); }}())"
         )
 
+    def _relational_wrapper(self, op: str, left_node, right_node) -> str | None:
+        """The wrapper ``_lower_relational`` gives a relational: ``"float"``
+        (the fixed-band comparator), ``"int"`` (the KI-71 na comparator) or
+        None (the plain C++ operator). Both wrappers bind each operand once,
+        the left one first."""
+        if op in _RELATIONAL_OPS:
+            lt = self._infer_type(left_node)
+            rt = self._infer_type(right_node)
+            if lt in _NA_SCALAR_CPP and rt in _NA_SCALAR_CPP:
+                if "double" in (lt, rt):
+                    return "float"
+                lk = self._operand_na_kind(left_node, lt)
+                rk = self._operand_na_kind(right_node, rt)
+                if "int" in (lk, rk):
+                    return "int"
+        return None
+
     def _lower_relational(self, op: str, left_node, right_node,
                           left_cpp: str, right_cpp: str) -> str:
         """Lower a Pine relational with Pine's na and float-precision rules.
@@ -1171,17 +1234,11 @@ class ExprVisitor:
         KI-71 wrapper only when an operand can carry the INT_MIN ``na`` sentinel.
         Non-relational operators and nonnumeric operands fall through unchanged.
         """
-        if op in _RELATIONAL_OPS:
-            lt = self._infer_type(left_node)
-            rt = self._infer_type(right_node)
-            if lt in _NA_SCALAR_CPP and rt in _NA_SCALAR_CPP:
-                if "double" in (lt, rt):
-                    return self._emit_float_relational(op, left_cpp, right_cpp)
-                lk = self._operand_na_kind(left_node, lt)
-                rk = self._operand_na_kind(right_node, rt)
-                int_na = "int" in (lk, rk)
-                if int_na:
-                    return self._emit_na_relational(op, left_cpp, right_cpp)
+        wrapper = self._relational_wrapper(op, left_node, right_node)
+        if wrapper == "float":
+            return self._emit_float_relational(op, left_cpp, right_cpp)
+        if wrapper == "int":
+            return self._emit_na_relational(op, left_cpp, right_cpp)
         return f"({left_cpp} {op} {right_cpp})"
 
     def _visit_binop(self, node: BinOp) -> str:
@@ -1194,6 +1251,184 @@ class ExprVisitor:
             return f"static_cast<int64_t>({folded}LL)"
         left = self._visit_expr(node.left)
         right = self._visit_expr(node.right)
+        return self._left_operand_first(
+            node, left, right,
+            lambda left, right: self._lower_binop(node, left, right),
+        )
+
+    def _left_operand_first(self, node: BinOp, left: str, right: str, lower) -> str:
+        """``lower(left, right)``: the C++ of ``node`` over its rendered
+        operands, with the left one evaluated first when
+        ``_binop_operands_need_order(node)``.
+
+        Pine evaluates the left operand first. C++ leaves the order of the
+        operands of + - * / % and of an overloaded operator (std::string's
+        + and ==, std::fmod's arguments) unspecified; GCC on x86-64 evaluates
+        std::string's operator+ right operand first. Bind the left operand's
+        value (a bool as bool: a std::vector<bool> element reads through a
+        proxy), then evaluate the right operand. Shared by ``_visit_binop``
+        and the ``request.security`` expression builder."""
+        if not self._binop_operands_need_order(node):
+            return lower(left, right)
+        occupied = f"{left}\n{right}"
+        counter = getattr(self, "_binop_lhs_counter", 0)
+        while True:
+            token = f"__pf_binop_lhs_{counter}"
+            counter += 1
+            if token not in occupied:
+                break
+        self._binop_lhs_counter = counter
+        decl = "bool" if self._infer_type(node.left) == "bool" else "auto"
+        return f"[&]{{ {decl} {token} = ({left}); return {lower(token, right)}; }}()"
+
+    def _binop_operands_need_order(self, node: BinOp) -> bool:
+        """Whether the C++ of ``node`` must evaluate its left operand first:
+        one operand has an effect (``_expr_has_ordered_effect``) the other
+        one can observe (it is not ``_binop_operand_is_order_free``), and the
+        lowering does not already order them (``&&`` / ``||`` and the
+        relational wrappers do)."""
+        if node.op in ("and", "or"):
+            return False
+        if not (
+            (self._expr_has_ordered_effect(node.left)
+             and not self._binop_operand_is_order_free(node.right))
+            or (self._expr_has_ordered_effect(node.right)
+                and not self._binop_operand_is_order_free(node.left))
+        ):
+            return False
+        return self._relational_wrapper(node.op, node.left, node.right) is None
+
+    def _binop_operand_is_order_free(self, node) -> bool:
+        """Whether no effect of the other operand can change ``node``'s value:
+        a literal, a variable (a Pine function cannot assign a script
+        variable, and no collection is an operand of a binary operator), or a
+        ``str.*`` / ``math.*`` / ``color.*`` / ``ta.*`` call, ``nz`` / ``na``
+        / a cast, or a unary, binary or conditional operation over such
+        operands (a TA call's state is its call site's own)."""
+        pending = [node]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, (*_ORDER_FREE_LITERALS, Identifier)):
+                continue
+            if isinstance(current, UnaryOp):
+                pending.append(current.operand)
+            elif isinstance(current, BinOp):
+                pending.extend((current.left, current.right))
+            elif isinstance(current, Ternary):
+                pending.extend(
+                    (current.condition, current.true_val, current.false_val)
+                )
+            elif isinstance(current, FuncCall) and self._call_is_order_free(current):
+                pending.extend(current.args)
+                pending.extend(current.kwargs.values())
+            else:
+                return False
+        return True
+
+    def _call_is_order_free(self, node: FuncCall) -> bool:
+        callee = node.callee
+        if isinstance(callee, Identifier):
+            return (callee.name in _ORDER_FREE_CALLS
+                    and callee.name not in self._func_info_map)
+        return (isinstance(callee, MemberAccess)
+                and isinstance(callee.object, Identifier)
+                and callee.object.name in _ORDER_FREE_CALL_NAMESPACES)
+
+    def _expr_has_ordered_effect(self, node) -> bool:
+        """Whether evaluating ``node`` changes what another operand of the same
+        expression can read, or does something whose order is observable: it
+        mutates an array, map or matrix (``COLLECTION_MUTATING_METHODS``),
+        creates, changes or deletes a drawing, places or cancels an order,
+        writes a log line or an alert, stops the script, or calls a user
+        function or method that does one of these or assigns a UDT field.
+
+        TA state and ``var`` state belong to their own call site and
+        ``math.random`` draws from its call site's own stream, so none of
+        them is such an effect. A method call is judged by its name alone
+        (every UDT method of that name counts), since the receiver's type is
+        not resolved here.
+
+        The walk is iterative (it adds no recursion depth to the visitor
+        that asks) and reuses the answer of every expression asked before:
+        an operator chain asks each of its operands once."""
+        memo = getattr(self, "_ordered_effect_memo", None)
+        if memo is None:
+            memo = self._ordered_effect_memo = {}
+        hit = memo.get(id(node))
+        if hit is not None and hit[0] is node:
+            return hit[1]
+        result = False
+        pending = [node]
+        while pending:
+            current = pending.pop()
+            hit = memo.get(id(current))
+            if hit is not None and hit[0] is current:
+                if hit[1]:
+                    result = True
+                    break
+                continue
+            if (isinstance(current, FuncCall)
+                    and self._call_has_ordered_effect(current)) or (
+                    isinstance(current, Assignment)
+                    and isinstance(current.target, MemberAccess)):
+                result = True
+                break
+            pending.extend(_ast_children(current))
+        memo[id(node)] = (node, result)
+        return result
+
+    def _call_has_ordered_effect(self, node: FuncCall) -> bool:
+        """The call itself (not its arguments) is an ordered effect."""
+        callee = node.callee
+        if isinstance(callee, Identifier):
+            if callee.name in self._func_info_map:
+                return self._callable_has_ordered_effect(callee.name)
+            return callee.name == "alert"
+        if not isinstance(callee, MemberAccess):
+            return False
+        member = callee.member
+        owner = callee.object
+        if member in COLLECTION_MUTATING_METHODS:
+            return True
+        if isinstance(owner, Identifier):
+            if (owner.name, member) in _ORDERED_EFFECT_CALLS:
+                return True
+            if (owner.name in _DRAWING_EFFECT_NAMESPACES
+                    and not member.startswith("get_")):
+                return True
+        if (isinstance(owner, MemberAccess) and owner.member == "risk"
+                and isinstance(owner.object, Identifier)
+                and owner.object.name == "strategy"):
+            return True
+        if (member.startswith(("set_", "cell_set_"))
+                or member in _DRAWING_EFFECT_METHODS):
+            return True
+        methods = getattr(self, "_udt_method_keys_by_name", None)
+        if methods is None:
+            methods = self._udt_method_keys_by_name = {}
+            for key, info in self._func_info_map.items():
+                if getattr(info, "is_udt_method", False):
+                    methods.setdefault(key.rsplit(".", 1)[-1], []).append(key)
+        return any(
+            self._callable_has_ordered_effect(key)
+            for key in methods.get(member, ())
+        )
+
+    def _callable_has_ordered_effect(self, key: str) -> bool:
+        """Whether a user function or method's body has an ordered effect."""
+        memo = getattr(self, "_callable_effect_memo", None)
+        if memo is None:
+            memo = self._callable_effect_memo = {}
+        if key not in memo:
+            memo[key] = False  # while its body is walked
+            func_node = getattr(self._func_info_map.get(key), "node", None)
+            memo[key] = func_node is not None and any(
+                self._expr_has_ordered_effect(stmt) for stmt in func_node.body
+            )
+        return memo[key]
+
+    def _lower_binop(self, node: BinOp, left: str, right: str) -> str:
+        """The C++ of ``node`` over its rendered operands."""
         cpp_ops = {"and": "&&", "or": "||"}
         op = cpp_ops.get(node.op, node.op)
         if node.op in ("and", "or"):

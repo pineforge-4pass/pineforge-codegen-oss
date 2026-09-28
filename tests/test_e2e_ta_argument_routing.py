@@ -79,7 +79,12 @@ from tests._e2e import (
 )
 
 
-HEADER = '//@version=6\nstrategy("e2e-c5-ta-arguments", overlay=true)\n'
+# The sizing is declared so that a comparison with an older build (PRE_C5) is
+# one of TA arguments alone: that build left an omitted initial_capital /
+# default_qty_type / default_qty_value to the host's defaults, which are not
+# TradingView's Pine v6 defaults (lane TV-DEFAULTS, test_e2e_strategy_defaults).
+HEADER = ('//@version=6\nstrategy("e2e-c5-ta-arguments", overlay=true, initial_capital=1000000, '
+          'default_qty_type=strategy.fixed, default_qty_value=1)\n')
 
 
 def _trade(a: str, b: str, exit_on: str | None = None) -> str:

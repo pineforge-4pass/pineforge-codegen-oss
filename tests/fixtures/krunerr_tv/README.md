@@ -2,9 +2,10 @@
 
 Public probes written for lane K-RUNERR and their unedited TradingView trade
 exports. They contain no closed or scraped source. Exported on 2026-09-26 with
-`lab tv --no-note` on `BINANCE:ETHUSDT.P`, 15-minute chart; `rangeProof`
-`covered` for both. The tapes' `Date and time` column is the exporting
-account's chart timezone, Asia/Taipei (UTC+8).
+`lab tv --no-note` on `BINANCE:ETHUSDT.P`, 15-minute chart (`env_facts` again
+on 2026-09-27, lane CG-LINUX-RED); `rangeProof` `covered` for each. The tapes'
+`Date and time` column is the exporting account's chart timezone, Asia/Taipei
+(UTC+8).
 
 ```bash
 lab tv --pine int64_provenance.pine --no-note \
@@ -26,8 +27,8 @@ lab tv --pine env_facts.pine --no-note \
 | `array_negative_index.pine` | `e933c70282c0f1de83e9357a357f62246b871dad18d110c5f37089c29b0f7821` |
 | `array_negative_index_tv_trades.csv` (6 trades) | `37381433214bd5be03a12116dd6e200de44ef61fe1b398c912cf4a146a6d58e7` |
 | `array_negative_index_verdicts.json` | `7fb6cb4804d98fef0a7b59a8764457a4041f9b372c10e37ceddff94fecf66a33` |
-| `env_facts.pine` | `6e24ea158478b7823d1fbef5ea30b075a18a86ab08f9bfd3c11b5c30ce1e8b90` |
-| `env_facts_tv_trades.csv` (3 trades) | `a5dca61a04f13e56b323c8fd2c8b9761e9822830b27c05a0014c798870bf50fc` |
+| `env_facts.pine` | `5e40491653a205dcb81b1840852930232314d35028fb531e1bceb7dcf435fa2c` |
+| `env_facts_tv_trades.csv` (3 trades) | `2ca208c664a828979ceadfb7a42264affde15886c293cbdb390069997fc76939` |
 
 `int64_provenance` spells Pine `int`s that hold an epoch into its entry ids on
 bar_index 3 (2025-04-01 00:45 UTC, TradingView's range starting at 00:00): a
@@ -61,5 +62,10 @@ stop its script (PineForge evaluates it).
 `env_facts` spells the chart facts the environment-gated oracle probes read.
 TradingView's entry ids: `tz=Etc/UTC|tid=BINANCE:ETHUSDT.P`,
 `tf=15|m=15|min=true|d=false|std=true` and
-`tk=ETHUSDT.P|pre=BINANCE|type=crypto`. Its entries fill at 100% of equity
-each, so TradingView closes them by margin call on the fill bar.
+`tk=ETHUSDT.P|pre=BINANCE|type=crypto`, each 0.01 contract, closed by the
+`close_all` two bars later. It declares that size: the 2026-09-26 export of
+the same probe without it (`6e24ea15...`, tape `a5dca61a...`) ran after
+TradingView's 2026-09-24 change of the Pine v6 `strategy()` defaults, so each
+entry was 100% of the 100000 default capital and TradingView closed all three
+by margin call on their fill bar, where the engine, sized the same way since
+TV-DEFAULTS, fills the first and refuses the other two.
