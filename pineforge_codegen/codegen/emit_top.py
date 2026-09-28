@@ -1383,14 +1383,20 @@ class TopLevelEmitter:
             ignore = "true" if ignore_node.value else "false"
         else:
             ignore = f"static_cast<bool>({self._security_tf_runtime_expr(ignore_node)})"
+        # A footprint is read from a feed's column, which the chart's bars do
+        # not carry: its site reads a feed even for the chart's own symbol.
+        chart = [] if column else [
+            "            if (_pf_symbol_is_chart(_pf_symbol)) {",
+            f"                {RUNTIME_REGISTER_SECURITY_EVAL_FN}({sec_id}, {tf_expr}, input_tf_, {la}, {go});",
+            f"                _pf_sec_missing_{sec_id} = false;",
+        ]
+        feed = f"if (_pf_symbol_data_installed(_pf_symbol, {tf_expr}{column})) {{"
         lines.extend([
             "#ifdef PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1",
             "        {",
             f"            const std::string _pf_symbol = {symbol};",
-            "            if (_pf_symbol_is_chart(_pf_symbol)) {",
-            f"                {RUNTIME_REGISTER_SECURITY_EVAL_FN}({sec_id}, {tf_expr}, input_tf_, {la}, {go});",
-            f"                _pf_sec_missing_{sec_id} = false;",
-            f"            }} else if (_pf_symbol_data_installed(_pf_symbol, {tf_expr}{column})) {{",
+            *chart,
+            ("            } else " if chart else "            ") + feed,
             f"                {RUNTIME_REGISTER_SECURITY_EVAL_FN}({sec_id}, _pf_symbol, {tf_expr}, "
             f"input_tf_, {la}, {go}, {ignore});",
             f"                _pf_sec_missing_{sec_id} = false;",

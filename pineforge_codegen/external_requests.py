@@ -224,18 +224,43 @@ def _footprint_payload(request) -> FuncCall | None:
 
 
 class FootprintValues:
-    """The script's footprint values: declarations typed ``footprint`` or
-    holding a ``request.footprint`` (inside a ``request.security`` or not),
-    as ``ScriptIndex`` bindings. PineForge reads a footprint's ``delta()``
-    only, so a footprint value is its delta."""
+    """The script's footprint values, as ``ScriptIndex`` bindings:
+    declarations and helper parameters typed ``footprint``, declarations
+    holding a ``request.footprint`` (inside a ``request.security`` or not) or
+    a helper's call returning one, and the parameters a helper's calls pass
+    one to. PineForge reads a footprint's ``delta()`` only, so a footprint
+    value is its delta."""
 
     def __init__(self, index: ScriptIndex) -> None:
         self.index = index
-        self.bindings = {
-            binding for key, binding in index.decl_binding.items()
-            if isinstance((decl := index.decls.get(binding)), VarDecl)
-            and (str(decl.type_hint or "").strip() == "footprint"
-                 or self.is_request(decl.value))}
+        self.bindings: set[tuple] = {
+            ("param", name, param) for name, fdef in index.funcs.items()
+            for param, hint in zip(fdef.params, _param_type_hints(fdef))
+            if str(hint or "").strip() == "footprint"}
+        self.returns: set[str] = set()  # helpers returning a footprint
+        decls = [(binding, decl) for binding, decl in index.decls.items()
+                 if isinstance(decl, VarDecl)]
+        changed = True
+        while changed:
+            changed = False
+            for binding, decl in decls:
+                if binding not in self.bindings and (
+                        str(decl.type_hint or "").strip() == "footprint"
+                        or self.holds(decl.value)):
+                    self.bindings.add(binding)
+                    changed = True
+            for name, fdef in index.funcs.items():
+                last = fdef.body[-1] if fdef.body else None
+                if (name not in self.returns and isinstance(last, ExprStmt)
+                        and self.holds(last.expr)):
+                    self.returns.add(name)
+                    changed = True
+                for param in fdef.params:
+                    if ("param", name, param) not in self.bindings and any(
+                            self.holds(index.param_arg(name, call, param))
+                            for call in index.calls.get(name, ())):
+                        self.bindings.add(("param", name, param))
+                        changed = True
 
     @staticmethod
     def is_request(expr) -> bool:
@@ -246,6 +271,9 @@ class FootprintValues:
         """``expr`` is a footprint value."""
         if isinstance(expr, Identifier):
             return self.index.refs.get(id(expr)) in self.bindings
+        if (isinstance(expr, FuncCall) and id(expr) in self.index.call_ids
+                and expr.callee.name in self.returns):
+            return True
         return self.is_request(expr)
 
     def member(self, call: FuncCall) -> tuple[str, ASTNode | None, bool] | None:
@@ -267,6 +295,10 @@ class FootprintValues:
         return None
 
 
+def _param_type_hints(fdef: FuncDef) -> list:
+    return list((fdef.annotations or {}).get("param_type_hints") or ())
+
+
 def read_footprint_deltas(program: Program) -> None:
     """``fp.delta()`` and ``footprint.delta(fp)`` read the footprint's
     delta, which is the value a footprint lowers to: each becomes ``fp``, and
@@ -286,6 +318,11 @@ def read_footprint_deltas(program: Program) -> None:
                 swaps[id(node)] = read[1]
         elif isinstance(node, VarDecl) and str(node.type_hint or "").strip() == "footprint":
             node.type_hint = "float"
+        elif isinstance(node, FuncDef) and any(
+                str(hint or "").strip() == "footprint" for hint in _param_type_hints(node)):
+            node.annotations = {**node.annotations, "param_type_hints": [
+                "float" if str(hint or "").strip() == "footprint" else hint
+                for hint in _param_type_hints(node)]}
     if swaps:
         replace_nodes(program, swaps)
 

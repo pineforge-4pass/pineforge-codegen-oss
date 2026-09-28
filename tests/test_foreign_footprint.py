@@ -94,3 +94,44 @@ def test_footprint_delta_on_the_requested_bars(tmp_path_factory):
     assert not result.ok
     # Line 4: the trace pragma is line 1.
     assert (f'request.security("PF:A", "15", ...) at line 4: {PINNED}') in result.error
+
+
+@pytest.mark.parametrize("body", [
+    'getfp() => request.security("PF:A", "15", request.footprint(100, 70))\n'
+    'fp = getfp()\nd = fp.delta()\n',
+    REQUEST + 'f(footprint x) => x.delta()\nd = f(fp)\n',
+    REQUEST + 'g(x) => footprint.delta(x)\nd = g(fp)\n',
+])
+def test_footprint_through_a_helper_or_a_parameter(body):
+    """A helper returning a footprint, and a parameter a footprint is passed
+    to (typed ``footprint`` or not), are footprint values: ``.delta()`` on
+    them emitted a member call on a double, which did not compile."""
+    cpp = transpile(HEAD + body + TRADE)
+    assert ".delta()" not in cpp and '_pf_symbol_column(0, "fp_delta_100_70")' in cpp
+    compile_cpp(cpp, label="footprint-helper")
+
+
+def test_footprint_of_the_charts_own_symbol_reads_its_feed(tmp_path_factory):
+    """The chart's bars carry no footprint: a footprint request of the
+    chart's own symbol reads that symbol's feed column too. It registered on
+    the chart, where the column reads na, and silently took no trades."""
+    source = (HEAD + 'footprint fp = request.security("BINANCE:ETHUSDT", "15", '
+              'request.footprint(100, 70))\nfloat d = not na(fp) ? fp.delta() : na\n' + TRADE)
+    assert "_pf_symbol_is_chart(_pf_symbol)" not in transpile(source)
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("xe_footprint_chart")
+    feed_path = chart_feed_head(engine, base, 160)
+    opens = [int(line.split(",", 1)[0]) for line in feed_path.read_text().splitlines()[1:]]
+    own = hourly("BINANCE:ETHUSDT", opens[0] - 2 * M15, 170, 15)
+    deltas = [round(((i * 41) % 31) - 15.5 + i * 0.001, 6) for i in range(len(own.bars))]
+    own.columns["fp_delta_100_70"] = deltas
+    work = base / "xe-footprint-chart"
+    build("// @pf-trace pf_d=d\n" + source, work)
+    result = run(engine, work, feed_path, write_root(base, "xe-footprint-chart",
+                                                    "BINANCE:ETHUSDT", "15", [own]))
+    assert result.ok, result.error
+    for chart_open in opens:
+        visible = [i for i, bar in enumerate(own.bars) if bar[1] <= chart_open + M15]
+        assert same(result.trace[chart_open]["pf_d"], deltas[visible[-1]]), chart_open
+    result = run(engine, work, feed_path, None, tag="none")
+    assert not result.ok and PINNED in result.error
