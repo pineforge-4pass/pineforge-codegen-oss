@@ -10,8 +10,10 @@ lowered. The selection now runs inside the block, the flag set after it, as
 a persistent map or matrix initializer's already did; a history-referenced
 one (a callable's ``var`` read at ``[1]``) selects into a local of the
 member's own element type (string, int, drawing) and replaces its current
-slot. A top-level ``var`` read at ``[k]`` keeps the legacy first-bar
-preamble, whose analyzer spelling of a selection (``<?>``) never compiled.
+slot. A top-level ``var`` read at ``[k]`` kept the legacy first-bar
+preamble, whose analyzer spelling of a selection (``<?>``) never compiled;
+since CG-SILENT item 4 it runs at its declaration too
+(``tests/test_e2e_cgint5_compositions.py``).
 
 TradingView's tape of ``xa2_var_selection`` (``fixtures/xsym_a2_tv``,
 BINANCE:ETHUSDT.P 15) spells every such ``var`` on each close.
