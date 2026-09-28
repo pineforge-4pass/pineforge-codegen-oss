@@ -1942,6 +1942,12 @@ class TypeInferer:
             sym is None
             or sym.pine_type not in (PineType.FLOAT, PineType.BOOL, PineType.STRING)
         ):
+            # So does a function's local, which the global scope does not
+            # hold: ``float x = time`` is a float series (``x - x[1]`` is na
+            # on the first bar, not a difference with the integer sentinel).
+            local = self._callable_series_local_symbol(name) if sym is None else None
+            if local is not None and local.pine_type == PineType.FLOAT:
+                return "double"
             return "int64_t"
         if sym is not None:
             return PINE_TYPE_TO_CPP.get(sym.pine_type, "double")
@@ -1975,6 +1981,26 @@ class TypeInferer:
             if scope.name in scope_names and name in scope.symbols:
                 return scope.symbols[name]
         return sym
+
+    def _callable_series_local_symbol(self, name: str):
+        """The symbol of the function-local series ``name``: the one every
+        function or method keeping it as a series (``func_series_vars``)
+        declares in its scope, else None when they disagree or none does."""
+        scope_names = {
+            # A method ``Type.name`` scopes its body as ``method_Type_name``.
+            f"method_{owner.replace('.', '_', 1)}" if "." in owner
+            else f"func_{owner}"
+            for owner, names in getattr(self.ctx, "func_series_vars", {}).items()
+            if name in names
+        }
+        found = [
+            scope.symbols[name]
+            for scope in self.ctx.symbols.all_scopes
+            if scope.name in scope_names and name in scope.symbols
+        ]
+        if not found or any(s.pine_type != found[0].pine_type for s in found):
+            return None
+        return found[0]
 
     def _series_param_element_cpp_type(
         self,

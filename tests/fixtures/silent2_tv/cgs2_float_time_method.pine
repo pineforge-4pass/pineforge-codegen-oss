@@ -1,0 +1,29 @@
+//@version=6
+// CG-SILENT-2 item 4 follow-up: a method's local float assigned time keeps
+// float's na, as a function's does. On the first bar xm[1] is na, so
+// xm - xm[1] is na; afterwards it is the bar spacing. Each close's comment
+// spells what the script reads on that bar. (TradingView refuses a method
+// that does not read its first argument, hence the this.v * 0 terms.)
+strategy("CGS2 float time method", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+type U
+    float v
+method dt(U this) =>
+    float xm = time
+    xm - xm[1] + this.v * 0
+method dc(U this) =>
+    float ym = time_close
+    na(ym[1]) ? -1.0 : ym - ym[1] + this.v * 0
+u = U.new(1.0)
+d = u.dt()
+e = u.dc()
+var float firstD = -2.0
+var float firstE = -2.0
+if barstate.isfirst
+    firstD := d
+    firstE := e
+s(v) => na(v) ? "na" : str.tostring(v)
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = s(firstD) + "|" + s(firstE) + "|" + s(d) + "|" + s(e))

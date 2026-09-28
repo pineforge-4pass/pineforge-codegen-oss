@@ -26,6 +26,8 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `cgs2_int64_products` | `4d9d562f85b4c71c1c834f9f05e224167b025d8e5c6b2044edd59bc9c470aaa7` | `722e13660813c2f2f1c77681e859a4d6bd4fc638b80f3cc0149382e2197411fc` |
 | `cgs2_int64_followup` | `0a10d5b45a2399d6c98f30f9bf7381f1e151457b6d7987e593d7ba057a303ef7` | `0a274b52b4bad2cac32ba8053d46f0905586817839d4ee55390a0583d6c322d9` |
 | `cgs2_int64_followup2` | `4b94979a31143cb9a24d7c8adcd236bf4dbc20320983931e0caad8c313b5030e` | `b9f4759b0b330aca7b12762a9100d5e36735805b8aa17e400191823951701ca2` |
+| `cgs2_float_time_local` | `f0dc91a0e879e824cdfd27d6d64aec9ac204b355db7a2cf31e7d1004906913fe` | `81a90b86cc23133dae6ab1e7313aecbf7363adb7603317b2ce714765fb9c051e` |
+| `cgs2_float_time_method` | `8e6fd4cf5ddf2bf55a74bd244e9fcb951d088f686864bae20ef9c786ea884b82` | `81a90b86cc23133dae6ab1e7313aecbf7363adb7603317b2ce714765fb9c051e` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -34,6 +36,8 @@ Each exit Signal joins these fields with `|`, in this order:
 - `cgs2_int64_products`: `a`, `e`, `bar_index`, `b`, `cd`, `f`, `p`, `q`, `u.v`, `u.big()`, `u.konst()`
 - `cgs2_int64_followup`: `s1`, `ms`, `x / 1000000000`, `x < 0` (`neg` / `nonneg`), `e / 86400000`, `yq / 1000000` (`na` for an na value)
 - `cgs2_int64_followup2`: `s1 / 10**9`, `s3 / 10**9`, `e / 86400000`, `x - 3000000000`, `y / 10**9`
+- `cgs2_float_time_local`: `firstD`, `firstE` (the first bar's `f()` and `g()`), `d`, `e`
+- `cgs2_float_time_method`: the same of the methods `u.dt()` and `u.dc()`
 
 What each tape shows:
 
@@ -68,3 +72,9 @@ What each tape shows:
   `int d = days` times a day (30), a helper's `n * 1000` over 3000000 read
   in a function whose float parameter is also `n` (1.5 over 3*10**9), and a
   60-minute request of `int hh = hour(time, "UTC")` times 10**9 (the hour).
+- `cgs2_float_time_local`: `f() => float x = time; x - x[1]` is na on the
+  first bar (`firstD`), where `x[1]` does not exist, and the bar spacing
+  (900000) afterwards; `g()`'s explicit `na(y[1])` test reads -1 there.
+- `cgs2_float_time_method`: the same of a method's locals (its tape is
+  byte for byte `cgs2_float_time_local`'s). TradingView refuses a method
+  that does not read its first argument, hence the probe's `this.v * 0`.
