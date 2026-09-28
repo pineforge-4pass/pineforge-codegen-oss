@@ -84,6 +84,7 @@ from ..external_requests import (
 )
 from ..external_requests import _nodes as walk_request_nodes
 from ..limits import iter_ast_nodes
+from .helpers import unary_sign_cpp
 from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION
 from ..symbols import PineType, method_receiver_type_name
 from .tables import (
@@ -6245,7 +6246,7 @@ class SecurityEmitter:
             )
             if expr_node.op == "not":
                 return f"!({self._coerce_bool_expr(operand, expr_node.operand)})"
-            return f"({expr_node.op}{operand})"
+            return unary_sign_cpp(expr_node.op, operand)
 
         if isinstance(expr_node, Ternary):
             cond = self._build_security_expr(

@@ -1,0 +1,14 @@
+//@version=6
+// CG-SILENT-2 item 5b: a sign applied to a negative constant. Each close's
+// comment spells the values.
+strategy("CGS2 negated constants", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+NEG = -5
+FNEG = -2.5
+y = -NEG * 2
+z = +NEG
+w = -FNEG
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(y) + "|" + str.tostring(z) + "|" + str.tostring(w) + "|" + str.tostring(-NEG))

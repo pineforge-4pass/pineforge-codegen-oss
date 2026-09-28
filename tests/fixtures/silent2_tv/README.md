@@ -29,6 +29,7 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `cgs2_float_time_local` | `f0dc91a0e879e824cdfd27d6d64aec9ac204b355db7a2cf31e7d1004906913fe` | `81a90b86cc23133dae6ab1e7313aecbf7363adb7603317b2ce714765fb9c051e` |
 | `cgs2_float_time_method` | `8e6fd4cf5ddf2bf55a74bd244e9fcb951d088f686864bae20ef9c786ea884b82` | `81a90b86cc23133dae6ab1e7313aecbf7363adb7603317b2ce714765fb9c051e` |
 | `cgs2_color_arrays` | `1eed73a34e1bddf73e0272a7cf5b5fb1b00cf72e5986a4c9b694e1ff0f422a15` | `3210a6c6870137852c358d123a6c6a5fa535aab0b7a15922bddb5e54351598fa` |
+| `cgs2_negated_constants` | `82ce0a41a9c6fecd10d5877aa17a6e45b310d447192c4f568cb63d5eaa2137a1` | `1f68c782f58f08ba3492b1bc1fed6188a73b79a28349b5c9dc346119b8758a46` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -40,6 +41,7 @@ Each exit Signal joins these fields with `|`, in this order:
 - `cgs2_float_time_local`: `firstD`, `firstE` (the first bar's `f()` and `g()`), `d`, `e`
 - `cgs2_float_time_method`: the same of the methods `u.dt()` and `u.dc()`
 - `cgs2_color_arrays`: `A[0]`, `A[1]`, `B[0]`, `D[0]`, `E[0]`, `F[0]` (each `red,green,blue,transparency`), the four sizes' sum
+- `cgs2_negated_constants`: `-NEG * 2`, `+NEG`, `-FNEG`, `-NEG`
 
 What each tape shows:
 
@@ -84,3 +86,5 @@ What each tape shows:
   `array<color>` or not, from literals, `color.new` / `color.rgb` calls,
   color variables and a conditional color, hold every element's channels
   and transparency.
+- `cgs2_negated_constants`: a sign over a negative constant (`NEG = -5`,
+  `FNEG = -2.5`) reads 10, -5, 2.5 and 5.

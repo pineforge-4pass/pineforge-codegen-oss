@@ -106,7 +106,7 @@ from ..ast_nodes import (
     TupleLiteral,
     UnaryOp,
 )
-from .helpers import pine_index_int_cast
+from .helpers import pine_index_int_cast, unary_sign_cpp
 from .types import COLLECTION_MUTATING_METHODS
 from .tables import (
     ADJUSTMENT_MAP,
@@ -1513,7 +1513,7 @@ class ExprVisitor:
         operand = self._visit_expr(node.operand)
         if node.op == "not":
             return f"!({self._coerce_bool_expr(operand, node.operand)})"
-        return f"({node.op}{operand})"
+        return unary_sign_cpp(node.op, operand)
 
     def _visit_session_history(self, node: Subscript, series_idx: str) -> str:
         """``session.<flag>[k]``: the value the flag had k bars ago at the top

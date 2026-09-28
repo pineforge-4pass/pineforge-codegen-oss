@@ -167,6 +167,16 @@ def pine_truth_cast(value_cpp: str) -> str:
     )
 
 
+def unary_sign_cpp(op: str, operand_cpp: str) -> str:
+    """``(-x)`` / ``(+x)``, the operand parenthesized when its text starts
+    with a sign: a negative constant inlined as its literal (``NEG = -5``)
+    under ``-`` was ``(--5)``, a decrement of a literal, which does not
+    compile. Every other operand keeps its spelling."""
+    if operand_cpp[:1] in ("-", "+"):
+        return f"({op}({operand_cpp}))"
+    return f"({op}{operand_cpp})"
+
+
 def color_alpha_cast(value_cpp: str, whole: bool = False) -> str:
     """Convert Pine transparency without feeding ``na<int>()`` to color.hpp.
 

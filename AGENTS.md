@@ -843,6 +843,11 @@ the transpiler. Carry `SourceLocation` so users can map back to the
 Pine line/col. Diagnostics inside the support checker use
 `Level.WARNING` for divergences-but-not-broken, `Level.ERROR`
 otherwise.
+- **Unary signs.** A never-reassigned numeric name is inlined as its
+literal, so a sign's operand text can start with one: `unary_sign_cpp`
+(`codegen/helpers.py`) parenthesizes it there (`-NEG` over `NEG = -5` is
+`(-(-5))`; it was `(--5)`, a decrement of a literal), on the chart and in
+a `request.security` payload (`tests/test_e2e_negated_constants.py`).
 - **Comments in emitted C++.** When emitting a fallback / unsupported
 stub, include a `/* unsupported: ... */` marker in the source so a
 later compile error has context. Avoid emitting bare empty literals.
