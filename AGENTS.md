@@ -847,6 +847,13 @@ the transpiler. Carry `SourceLocation` so users can map back to the
 Pine line/col. Diagnostics inside the support checker use
 `Level.WARNING` for divergences-but-not-broken, `Level.ERROR`
 otherwise.
+- **TA tuple request helpers.** A helper whose value is a
+`request.security` of a TA tuple (`htf() => request.security(t, "D",
+ta.macd(...))`) returns the request's stored result struct
+(`ta::MACDResult`, ...: `_security_helper_request_struct`, the chart's
+`_ta_return_type`), which
+`[m, s, h] = htf()` decomposes; it returned a `double`, which did not
+compile (`tests/test_e2e_ta_tuple_request_helper.py`).
 - **Methods on scalars.** A typed method called on a script scalar
 (`s5.m()` over `s5 = ta.ema(close, 5)`) resolves through the receiver's
 own type (`_scalar_receiver_spec`): a global scalar's UDT tombstone hid

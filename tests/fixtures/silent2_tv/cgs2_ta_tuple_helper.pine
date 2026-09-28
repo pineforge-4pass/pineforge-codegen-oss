@@ -1,0 +1,16 @@
+//@version=6
+// CG-SILENT-2 item 5h: a helper whose value is a request.security of a TA
+// tuple, destructured by its caller. Each close's comment spells the
+// requested bands (from 08:00 UTC on, when every requested window lies
+// inside the tape's range).
+strategy("CGS2 TA tuple helper", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+bands() => request.security(syminfo.tickerid, "60", ta.bb(close, 5, 2))
+bandsOf(src, len) => request.security(syminfo.tickerid, "60", ta.bb(src, len, 1.5))
+[mid, up, lo] = bands()
+[m2, u2, l2] = bandsOf(high, 4)
+live = time >= timestamp("UTC", 2025, 4, 1, 8, 0)
+mn = minute(time, "UTC")
+if live and (mn == 0 or mn == 30)
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(mid, "#.####") + "|" + str.tostring(up, "#.####") + "|" + str.tostring(lo, "#.####") + "|" + str.tostring(m2, "#.####") + "|" + str.tostring(u2 - l2, "#.####"))

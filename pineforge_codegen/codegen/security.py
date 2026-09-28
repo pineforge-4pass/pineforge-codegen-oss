@@ -1886,6 +1886,33 @@ class SecurityEmitter:
                         candidates[0])
         return candidates[0] if candidates else None
 
+    # The stored result struct of a request whose payload is a TA tuple.
+    def _security_helper_request_struct(self, func_node) -> str | None:
+        """The C++ result struct a helper returns when its value is a
+        ``request.security`` of a TA tuple (``htf() => request.security(t,
+        "D", ta.macd(close, 12, 26, 9))``): the request stores that struct
+        (``_req_sec_N``), which the helper returned as a ``double`` or a
+        ``std::tuple`` that cannot hold it, so ``[m, s, h] = htf()`` did not
+        compile. None for any other helper."""
+        body = getattr(func_node, "body", None) or []
+        if not body:
+            return None
+        terminal = body[-1].expr if isinstance(body[-1], ExprStmt) else body[-1]
+        if not (isinstance(terminal, FuncCall)
+                and self._resolve_callee(terminal.callee) == ("security", "request")):
+            return None
+        item = self._security_call_for_request(terminal)
+        if item is None or not item.get("returns_tuple"):
+            return None
+        payload = item.get("expr_node")
+        if not isinstance(payload, FuncCall):
+            return None
+        site = self._get_ta_site(payload)
+        if site is None or not getattr(site, "returns_tuple", False):
+            return None
+        # The chart's result type of the same TA call (``TA_TUPLE_RESULT_TYPES``).
+        return self._ta_return_type(site)
+
     def _request_data_missing(self, ref) -> str:
         """C++ that is true when the pinned data of the request carrying
         ``ref`` (``external_requests.RequestRef``) is missing: another

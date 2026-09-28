@@ -2202,7 +2202,13 @@ class TopLevelEmitter:
         # data/validation/udt-method-probe-20-udt-return-from-func.
         return_udt_name = getattr(fi, "udt_return_type", None)
         return_udt = bool(return_udt_name and return_udt_name in self._udt_defs)
-        if fi.returns_tuple:
+        request_struct = self._security_helper_request_struct(node)
+        if request_struct is not None:
+            # A helper whose value is a request of a TA tuple
+            # (``request.security(..., ta.macd(...))``) returns the request's
+            # stored result struct, which ``[m, s, h] = htf()`` decomposes.
+            ret_type = request_struct
+        elif fi.returns_tuple:
             # Infer actual tuple element types from function body's last expression
             tuple_types_list = self._infer_tuple_types(node, fi.tuple_element_count)
             ret_type = f"std::tuple<{', '.join(tuple_types_list)}>"
@@ -2482,7 +2488,9 @@ class TopLevelEmitter:
         # Always emit a default return if no explicit return was emitted,
         # to avoid non-void function without return value.
         if not emitted_return:
-            if fi.returns_tuple:
+            if request_struct is not None:
+                lines.append(f"        return {request_struct}{{}};")
+            elif fi.returns_tuple:
                 default_vals = ", ".join(["0.0"] * fi.tuple_element_count)
                 lines.append(f"        return std::make_tuple({default_vals});")
             else:

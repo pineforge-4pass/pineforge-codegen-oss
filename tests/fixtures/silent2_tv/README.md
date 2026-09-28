@@ -35,6 +35,7 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `cgs2_array_loop_bool_copy` | `8b0a48a00b91167b5c4266f223d400e8dc583accd5a25d290a0dd2689bb6c8f8` | `55ae0bec42e7f29f28b700c3b8314a6e8a2d8735ff37e65f59dbe88e22fd5088` |
 | `cgs2_scalar_method_global` | `50d1dfd04fb43e8052c1361a0adc7948a4453cb8e9b92e7a75257764144d925f` | `3284114b6da48ee4a7aae5172773c8c9ff84cf67eddf5643c67907507a2b565e` |
 | `cgs2_tostring_tuple_payload` | `d14e232de9881e366653d2f2236b147c85bc5fa8fb1579ff5347c326b8e56e88` | `db5a7bad218e919ecc9d69272bf172c479c06cb337324468f485c24309c4e016` |
+| `cgs2_ta_tuple_helper` | `6c51333093ea1e3f6fc9248cb3906f4141b9aa4f88610960b762d77ba092774a` | `eb3e95ddd22413e859f8eae701b7a4d09ceae52fc25ea2617e38462a1c8ba8d4` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -52,6 +53,7 @@ Each exit Signal joins these fields with `|`, in this order:
 - `cgs2_array_loop_bool_copy`: `cnt`, `after`
 - `cgs2_scalar_method_global`: `y`, `h`, `a` (4 decimals)
 - `cgs2_tostring_tuple_payload`: `x`, `y` (`up` / `down`), `p`, `q`
+- `cgs2_ta_tuple_helper`: `mid`, `up`, `lo`, `m2`, `u2 - l2` (4 decimals)
 
 What each tape shows:
 
@@ -116,3 +118,7 @@ What each tape shows:
 - `cgs2_tostring_tuple_payload`: `str.tostring` and `str.format` inside
   a `request.security` tuple payload at 60 minutes format the requested
   bar's values (entries from 02:00 UTC on; 332 trades).
+- `cgs2_ta_tuple_helper`: helpers whose value is a `request.security` of
+  `ta.bb` at 60 minutes, destructured by their callers (entries from 08:00
+  UTC on; 320 trades). `ta.bb` keeps a finite window, so its bands do not
+  depend on history before the tape's range.
