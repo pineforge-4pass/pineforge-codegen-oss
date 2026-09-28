@@ -4608,6 +4608,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # registered: its reads stop the run while it is set.
                 lines.append(f"    bool _pf_sec_missing_{sec_id} = true;")
 
+        # A recorded request's missing-data flag, set where it is evaluated.
+        for n in range(len(self._recorded_sites())):
+            lines.append(f"    bool _pf_rec_missing_{n} = true;")
         if self._security_calls:
             lines.append('    std::unordered_map<std::string, Series<double>> _security_helper_series_;')
             self._security_string_series_declared = self._security_needs_string_series()

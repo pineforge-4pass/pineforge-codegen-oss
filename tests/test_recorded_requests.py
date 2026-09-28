@@ -52,8 +52,10 @@ PINNED = "no data is pinned for this request, and its value was read"
 ])
 def test_recorded_key_spellings(call, key):
     cpp = transpile(HEAD + f'v = {call}\n' + TRADE)
-    assert f"v = _pf_recorded((std::string({key})));" in cpp
-    assert f"if (_pf_recorded_missing((std::string({key})))) pine_runtime_error" in cpp
+    # The key is computed where the request is evaluated, which sets the
+    # request's flag; its reads test the flag.
+    assert f"v = _pf_recorded((std::string({key})), _pf_rec_missing_0);" in cpp
+    assert "if (_pf_rec_missing_0) pine_runtime_error" in cpp
     compile_cpp(cpp, label="recorded-key")
 
 
@@ -139,3 +141,48 @@ def test_missing_tape_stops_the_run_only_where_read(tmp_path_factory):
     result = run(engine, work, feed, None, inputs={"EPS": "true"}, tag="eps")
     assert not result.ok
     assert ("request.earnings(syminfo.tickerid) at line 4: " + PINNED) in result.error
+
+
+@pytest.mark.parametrize("body", [
+    # A helper's parameter, then a local, shadowing the global the key reads.
+    'g(sym) => e > sym\nif g(1.0)\n    strategy.entry("L", strategy.long)\n',
+    'f() =>\n    sym = 5.0\n    e > sym\nif f()\n    strategy.entry("L", strategy.long)\n',
+])
+def test_key_is_computed_where_the_request_is_evaluated(body):
+    """A read of ``e`` tests the flag the request set where it was evaluated:
+    it re-rendered the key in the read's scope, where ``sym`` named a float
+    (the C++ did not compile)."""
+    cpp = transpile(HEAD + 'sym = "NASDAQ:AAPL"\ne = request.earnings(sym)\n' + body)
+    assert cpp.count('std::string("earnings|")') == 1
+    compile_cpp(cpp, label="recorded-key-scope")
+
+
+def test_read_in_a_helper_reads_the_key_the_request_was_evaluated_with(tmp_path_factory):
+    """``f(sym) => e > 0 and sym != ""`` called with another symbol: the read
+    of ``e`` checked that symbol's key, a false stop without its series."""
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("xe_recorded_scope")
+    feed, opens = _chart(engine, base)
+    key = "earnings|PF:A|actual|-|gaps_off|lookahead_off"
+    work = base / "xe-recorded-scope"
+    build(HEAD + 'sym = "PF:A"\ne = request.earnings(sym)\nf(sym) => e > 0 and sym != ""\n'
+          'if bar_index % 2 == 0 and f("PF:B")\n    strategy.entry("L", strategy.long)\n'
+          'if bar_index % 2 == 1\n    strategy.close("L")\n', work)
+    rows = [(t, 1.0) for t in opens[::2]]
+    result = run(engine, work, feed, write_root(base, "xe-recorded-scope", "BINANCE:ETHUSDT",
+                                               "15", recorded={key: rows}))
+    assert result.ok, result.error
+    assert result.trades.count(b"Entry long") > 0
+    result = run(engine, work, feed, None, tag="none")
+    assert not result.ok and PINNED in result.error
+
+
+def test_request_in_a_helper_a_request_expression_calls_keeps_the_deferred_refusal():
+    """The payload evaluator runs the helper on the requested bars, where no
+    chart bar's recorded value is: as when written in the expression."""
+    result = transpile_full(HEAD + 'g() => request.earnings(syminfo.tickerid)\n'
+                            'v = request.security(syminfo.tickerid, "D", g())\n' + TRADE)
+    assert any(d.message.endswith("no data is pinned for this request; the run stops with an "
+                                  "error where its value is read.")
+               for d in result["diagnostics"]), [d.message for d in result["diagnostics"]]
+    assert "_pf_recorded(" not in result["cpp"]

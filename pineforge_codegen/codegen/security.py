@@ -1860,8 +1860,9 @@ class SecurityEmitter:
 
     def _request_data_missing(self, ref) -> str:
         """C++ that is true when the pinned data of the request carrying
-        ``ref`` (``external_requests.RequestRef``) was missing when the run
-        began: another symbol's site the run did not register."""
+        ``ref`` (``external_requests.RequestRef``) is missing: another
+        symbol's site the run did not register, or the recorded series of
+        the key the request was last evaluated with."""
         requests = getattr(self, "_pf_request_refs", None)
         if requests is None:
             requests = self._pf_request_refs = {
@@ -1871,7 +1872,7 @@ class SecurityEmitter:
                 and REQUEST_REF_ANNOTATION in (node.annotations or {})}
         request = requests.get(id(ref))
         if request is not None and RECORDED_KEY_ANNOTATION in (request.annotations or {}):
-            return f"_pf_recorded_missing({self._recorded_key_expr(request)})"
+            return f"_pf_rec_missing_{self._recorded_site(request)}"
         item = self._security_call_for_request(request) if request is not None else None
         if item is None or not item.get("foreign"):
             return "true"
@@ -1886,9 +1887,24 @@ class SecurityEmitter:
         return (f'(std::string("{parts["fn"]}|") + {self._visit_expr(request.args[0])} + '
                 f'std::string("{tail}"))')
 
+    def _recorded_sites(self) -> dict[int, int]:
+        """Each recorded request's index N: ``_pf_recorded`` sets its
+        ``_pf_rec_missing_N`` where the request is evaluated, from the key
+        computed there, and its reads test that flag."""
+        sites = getattr(self, "_pf_recorded_site_ids", None)
+        if sites is None:
+            sites = self._pf_recorded_site_ids = {
+                id(node): n for n, node in enumerate(
+                    node for node in walk_request_nodes(self.ctx.ast)
+                    if isinstance(node, FuncCall)
+                    and RECORDED_KEY_ANNOTATION in (node.annotations or {}))}
+        return sites
+
+    def _recorded_site(self, request) -> int:
+        return self._recorded_sites()[id(request)]
+
     def _uses_recorded_requests(self) -> bool:
-        return any(RECORDED_KEY_ANNOTATION in (node.annotations or {})
-                   for node in walk_request_nodes(self.ctx.ast) if isinstance(node, FuncCall))
+        return bool(self._recorded_sites())
 
     def _security_footprint_column(self, sec_id: int) -> str | None:
         """The feed column another symbol's site reads when its whole

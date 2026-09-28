@@ -1851,7 +1851,8 @@ class CallVisitor:
             # request.earnings / dividends / splits / financial reading the
             # series recorded under their key (external_requests).
             if RECORDED_KEY_ANNOTATION in (node.annotations or {}):
-                return f"_pf_recorded({self._recorded_key_expr(node)})"
+                return (f"_pf_recorded({self._recorded_key_expr(node)}, "
+                        f"_pf_rec_missing_{self._recorded_site(node)})")
             # All other request.* functions
             return "na<double>()"
 

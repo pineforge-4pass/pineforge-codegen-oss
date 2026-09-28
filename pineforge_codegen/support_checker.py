@@ -2264,7 +2264,7 @@ class SupportChecker:
             self._trade_slice = TradeSlice(self._ast)
         reason = self._trade_slice.reason(node)
         parts, blocker = recorded_key(node) if reason is not None else (None, None)
-        if reason is not None and blocker is None and self._security_payload_depth:
+        if reason is not None and blocker is None and self._in_request_expression(node):
             blocker = "it is read outside a request.security expression"
         if reason is None or blocker is not None:
             self._lower_no_data_request(

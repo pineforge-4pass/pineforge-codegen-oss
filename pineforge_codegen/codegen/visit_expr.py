@@ -438,7 +438,7 @@ class ExprVisitor:
         (``external_requests``): the run stops with the request named, and
         the value the expression would have is only there for its type. A
         request lowered onto pinned data stops the run so only when its data
-        was missing when the run began (``_request_data_missing``)."""
+        is missing (``_request_data_missing``)."""
         notes = node.annotations
         marker = notes[UNPINNED_ANNOTATION]
         node.annotations = {k: v for k, v in notes.items() if k != UNPINNED_ANNOTATION}
@@ -447,10 +447,13 @@ class ExprVisitor:
         finally:
             node.annotations = notes
         if isinstance(marker, dict):
+            # Evaluated first: a recorded request sets its flag where it is
+            # evaluated, which may be this read.
             stop = (f'pine_runtime_error(std::string('
                     f'"{self._cpp_string_escape(marker["message"])}"))')
-            return (f"([&]() {{ if ({self._request_data_missing(marker['ref'])}) {stop}; "
-                    f"return {value}; }}())")
+            return (f"([&]() {{ auto _pf_read = {value}; "
+                    f"if ({self._request_data_missing(marker['ref'])}) {stop}; "
+                    f"return _pf_read; }}())")
         return (f'([&]() {{ pine_runtime_error(std::string("{self._cpp_string_escape(marker)}")); '
                 f"return {value}; }}())")
 

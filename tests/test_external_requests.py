@@ -165,7 +165,7 @@ def test_trade_relevant_request_of_another_symbol_reads_its_feed():
     message = 'request.security(\\"BINANCE:BTCUSDT\\", timeframe.period, ...) at line 3: ' + PINNED
     stop = f'if (_pf_sec_missing_0) pine_runtime_error(std::string("{message}"));'
     assert cpp.count(stop) == 2
-    assert "return other[0]; }())" in cpp and "return other[1]; }())" in cpp
+    assert "auto _pf_read = other[0]; " in cpp and "auto _pf_read = other[1]; " in cpp
     assert 'const std::string _pf_symbol = std::string("BINANCE:BTCUSDT");' in cpp
     assert ("register_security_eval(0, _pf_symbol, script_tf_, input_tf_, false, false, false);"
             in cpp)
