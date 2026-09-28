@@ -354,9 +354,12 @@ def test_session_history_under_a_builtin_is_the_direct_read(session_runs):
 
 def test_session_history_beside_a_chart_read_is_still_refused(tmp_path: Path) -> None:
     # CG-SECURITY-2 keeps this evaluator on the chart's terms (the builtin
-    # also reads the global g); there CG-SESSION-2 has no requested history.
+    # also reads the per-run global g); there CG-SESSION-2 has no requested
+    # history. A global the builder re-evaluates on the requested bar
+    # (``g = close``, CG-OPEN-ITEMS 5b3791d) no longer keeps it there:
+    # tests/test_e2e_cgint4_compositions.py runs that one.
     pine = tmp_path / "strategy.pine"
-    pine.write_text(HEAD + 'g = close\n'
+    pine.write_text(HEAD + 'g = timeframe.multiplier * 1.0\n'
                     'x = request.security(syminfo.tickerid, "60", nz(session.ismarket[1] ? g : na)) > 0\n'
                     'if x\n    strategy.entry("L", strategy.long)\n', encoding="utf-8")
     result = transpile_json(pine)

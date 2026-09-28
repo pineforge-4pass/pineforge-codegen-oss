@@ -214,7 +214,7 @@ def skip_if_no_compile_env() -> None:
 
 
 def compile_cpp(cpp_source: str, *, label: str = "snippet",
-                standard: str = "c++17") -> None:
+                standard: str = "c++17", extra_flags: tuple[str, ...] = ()) -> None:
     """Run ``-fsyntax-only`` on ``cpp_source``; raise AssertionError on failure.
 
     This intentionally does NOT link or run anything. The single failure
@@ -227,6 +227,7 @@ def compile_cpp(cpp_source: str, *, label: str = "snippet",
     ``pineforge-engine/CMakeLists.txt``): C++17, -fno-exceptions disabled
     (the runtime throws std::runtime_error from a few hot paths), warnings
     promoted to errors so a malformed emit cannot quietly succeed.
+    ``extra_flags`` go on the command line before the source.
     """
     skip_if_no_compile_env()
 
@@ -247,6 +248,7 @@ def compile_cpp(cpp_source: str, *, label: str = "snippet",
             # Supplies the CMake-generated <pineforge/version.h> (absent from a
             # fresh source checkout's include/).
             cmd += ["-I", str(_GENERATED_INC)]
+        cmd += list(extra_flags)
         cmd.append(cpp_path)
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=60,

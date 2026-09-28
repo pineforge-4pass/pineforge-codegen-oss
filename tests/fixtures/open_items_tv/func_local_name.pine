@@ -1,0 +1,26 @@
+//@version=6
+strategy("pf-open-items-func-local-name", overlay = true)
+
+// Functions and other functions' local series that share a name: g returns
+// a string and h1 keeps a float series g; k returns an int and h2 keeps a
+// float series k; h3 keeps an int series m and the float function m is
+// defined after it.
+g(x) => str.tostring(x, "#.####")
+h1(float v) =>
+    float g = 0.0
+    g := 0.5 * nz(g[1]) + v
+k(x) => x > 0 ? 1 : 0
+h2(float v) =>
+    float k = na
+    k := nz(k[1]) + v * 0.1
+h3(float v) =>
+    int m = 0
+    m := nz(m[1]) + (v > 0 ? 1 : 0)
+m(x) => x * 3.0
+a = h1(close)
+b = h2(close)
+c = h3(close)
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = g(a) + "|" + g(b) + "|" + str.tostring(c) + "|" + str.tostring(k(close)) + "|" + g(m(close)) + "|" + g(close))

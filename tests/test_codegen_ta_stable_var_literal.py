@@ -407,7 +407,7 @@ observed = requested(p)
             "        out := ta.sma(close, q)\n"
             "    out"
         ),
-        "    [q, z] = [7, 8]\n    ta.sma(close, q)",
+        "    [q, z] = if true\n        [7, 8]\n    else\n        [8, 7]\n    ta.sma(close, q)",
     ],
     ids=["loop-binder", "block-local", "tuple-binder"],
 )

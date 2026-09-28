@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
+from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.errors import Level
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
@@ -67,20 +67,36 @@ def test_chart_symbol_through_helpers_is_accepted(body):
     assert not any(ALTERNATE in m for m in _messages(src, Level.WARNING))
 
 
+FEED = ("another symbol's bars, read from the feed the requests manifest pins for it; "
+        "with none installed, the run stops with an error where its value is read.")
+
+
 @pytest.mark.parametrize("body", [
     'f(s) => request.security(s, "60", close)\n'
     'a = f(syminfo.tickerid)\nb = f("BINANCE:BTCUSDT")\n',
     'g(s) => request.security(s, "60", close)\nh(s) => g(s)\n'
     'b = h(input.symbol("BINANCE:BTCUSDT", "Sym"))\n',
-    # A method's parameter: its calls are not followed.
-    'type P\n    float v\n'
-    'method pull(P self, string s) => request.security(s, "60", close)\n'
-    'p = P.new(1.0)\nb = p.pull(syminfo.tickerid)\n',
 ])
 def test_alternate_symbol_through_helpers_is_another_symbol(body):
-    # Another symbol has no data: a value that reaches a trade is a deferred
-    # refusal, its first read stopping the run (tests/test_external_requests.py).
+    # Another symbol whose value reaches a trade reads the feed pinned for
+    # it, its symbol resolved per call path (tests/test_foreign_requests.py):
+    # security_contexts reports the warning once every path is keyed.
     src = PRELUDE + body + 'if b > close\n    strategy.entry("L", strategy.long)\n'
+    assert _messages(src, Level.ERROR) == []
+    warnings = [d.message for d in transpile_full(src)["diagnostics"]
+                if d.level == Level.WARNING]
+    assert sum(m.endswith(FEED) for m in warnings) == 1, warnings
+
+
+def test_alternate_symbol_through_a_method_is_deferred():
+    # A method's parameter: its calls are not followed, so no feed is keyed
+    # by it and a value that reaches a trade is a deferred refusal, its first
+    # read stopping the run (tests/test_external_requests.py).
+    src = PRELUDE + (
+        'type P\n    float v\n'
+        'method pull(P self, string s) => request.security(s, "60", close)\n'
+        'p = P.new(1.0)\nb = p.pull(syminfo.tickerid)\n'
+        'if b > close\n    strategy.entry("L", strategy.long)\n')
     assert _messages(src, Level.ERROR) == []
     assert any(m.endswith(DEFERRED) for m in _messages(src, Level.WARNING))
 

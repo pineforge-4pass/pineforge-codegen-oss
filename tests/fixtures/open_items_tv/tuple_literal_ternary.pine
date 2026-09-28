@@ -1,0 +1,9 @@
+//@version=6
+strategy("pf-open-items-tuple-literal-ternary", overlay = true)
+
+// A tuple declaration whose value is a ternary of tuple literals.
+[a, b] = close > open ? [close, open] : [open, close]
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = str.tostring(a, "#.####") + "|" + str.tostring(b, "#.####"))

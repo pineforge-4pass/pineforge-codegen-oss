@@ -1,0 +1,17 @@
+//@version=6
+// request.security helpers whose symbol or timeframe parameter every call
+// passes one value, with no TA of their own: each call reads its request.
+// Each exit comment spells what every call read on the bar the close was sent.
+strategy("PF xa2 single context", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 0.01)
+f(string sym) => request.security(sym, "60", close[1])
+g(tf) => request.security(syminfo.tickerid, tf, close)
+h(string tf, int n) => request.security(syminfo.tickerid, tf, high[1]) + n
+a = f(syminfo.tickerid)
+b = g("240")
+c = h("60", 1)
+s(x) => na(x) ? "na" : str.tostring(x, "#.####")
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(a) + "|" + s(b) + "|" + s(c))

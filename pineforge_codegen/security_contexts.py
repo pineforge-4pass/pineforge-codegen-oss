@@ -59,10 +59,30 @@ its call-site clones for differing timeframes built every clone from the
 first call's length. Only a value the request builder lowers on the
 requested bars in the read's place is put in (``_Lowered``); any other keeps
 the earlier lowering, never a refusal: a reassigned or ``var`` name, a loop
-variable, a name the helper declares, a user call, an ``input.source``, a
-global declared after the helper (read on the chart's terms there), a
-history object other than an OHLCV series, a ``ta.*`` call or an inline
-operator expression, a global under a builtin rendered on the chart's terms.
+variable, a name the helper declares, a user call, a global declared after
+the helper (read on the chart's terms there), a history object other than
+a bar or price series, a ``ta.*`` call, an ``input.source`` or an inline
+operator expression, a global under a builtin rendered on the chart's
+terms.
+
+A request of another symbol that reads that symbol's pinned feed
+(``external_requests``: the support checker's ``feed`` lowering) is keyed by
+its symbol as well, so this pass owns every one whose symbol or timeframe
+reaches it through a helper's parameters, the analyzer's call-site clones
+included (they tell call sites apart by their timeframe only)::
+
+    f_htfPack(sym, tf) => request.security(sym, tf, f_packConfirmed())
+    f_symbolState(sym, tf) => f_htfPack(sym, tf)
+    f_tfRegime(sym) => [f_symbolState(sym, mainTf), f_symbolState(sym, confirmTf)]
+    [v1, v2] = f_tfRegime(vixSymbol)
+    [d1, d2] = f_tfRegime(dxySymbol)
+
+is six contexts. Registration reads a symbol before the first bar, so one
+that is not a value registration computes there on some call path (a
+series, a reassigned name, a user call: ``ScriptIndex.registration_value``)
+does not refuse the script: that request keeps the lowering it had before
+it read a feed, a deferred refusal whose first read stops the run
+(``external_requests.unpin_requests``), with a warning naming the path.
 """
 
 from __future__ import annotations
@@ -85,6 +105,18 @@ DEAD_ANNOTATION = "pf_security_dead"
 # On a payload's read of a parameter of a helper no top-level statement
 # reaches: the codegen does not warn that it reads na.
 UNREACHED_ANNOTATION = "pf_security_unreached"
+# On the Program: the warnings of the passes that run between the support
+# checker and the analyzer, which the analyzer reports as its own.
+PASS_WARNINGS_ANNOTATION = "pf_pass_warnings"
+# ``external_requests.LOWERING_ANNOTATION`` and its ``feed`` lowering, spelled
+# here too: that module imports this one.
+_LOWERING_ANNOTATION = "pf_request_lowering"
+_FEED_LOWERING = "feed"
+_FEED_WARNING_ANNOTATION = "pf_request_feed_warning"
+# On a global's read a payload parameter's value put in a helper's copy:
+# the global may be declared after the helper, where the analyzer binds
+# no name, and the codegen reads it as the global all the same.
+GLOBAL_ANNOTATION = "pf_security_global"
 _REQUEST_FUNCS = ("security", "security_lower_tf")
 # Instances (a helper under one set of parameter values) the pass may build
 # before it refuses the script: diamond-shaped helper graphs multiply paths.
@@ -93,6 +125,13 @@ _MAX_INSTANCES = 512
 # helpers (``h(x) => g(x + x)``) keeps the earlier lowering.
 _MAX_PAYLOAD_NODES = 256
 _LITERALS = (StringLiteral, NumberLiteral, BoolLiteral, NaLiteral, ColorLiteral)
+# The chart's own symbol strings, and the inputs, registration reads
+# (``ScriptIndex.registration_value``).
+_REGISTRATION_MEMBERS = frozenset({
+    ("syminfo", "tickerid"), ("syminfo", "ticker"), ("syminfo", "prefix"),
+    ("syminfo", "currency"), ("syminfo", "basecurrency"),
+})
+_REGISTRATION_INPUTS = frozenset({"symbol", "string", "bool"})
 # Built-in series a context cannot be computed from before the first bar.
 _BAR_SERIES = frozenset({
     "open", "high", "low", "close", "volume", "hl2", "hlc3", "ohlc4", "hlcc4",
@@ -112,6 +151,19 @@ class _Fallback(Exception):
         self.requests = set(requests)
 
 
+class _FeedFallback(Exception):
+    """Requests of another symbol that read no feed: request id -> why."""
+
+    def __init__(self, reasons: dict[int, str]) -> None:
+        super().__init__()
+        self.reasons = dict(reasons)
+
+
+def _is_feed(request) -> bool:
+    """``request`` reads another symbol's pinned feed."""
+    return (request.annotations or {}).get(_LOWERING_ANNOTATION) == _FEED_LOWERING
+
+
 def reads_bar_series(expr) -> str | None:
     """The built-in bar series ``expr`` reads, if any: a context computed
     from it has no value before the first bar."""
@@ -128,6 +180,18 @@ def _request_name(node) -> str | None:
             and node.callee.member in _REQUEST_FUNCS):
         return node.callee.member
     return None
+
+
+def ticker_symbol_arg(node: FuncCall):
+    """The symbol argument of ``ticker.inherit`` / ``standard`` /
+    ``heikinashi``: ``ticker.inherit(from_tickerid, symbol)`` names the
+    symbol second (a one-argument spelling keeps its only one)."""
+    if "symbol" in node.kwargs:
+        return node.kwargs["symbol"]
+    if (isinstance(node.callee, MemberAccess) and node.callee.member == "inherit"
+            and len(node.args) > 1):
+        return node.args[1]
+    return node.args[0] if node.args else node.kwargs.get("from_tickerid")
 
 
 def _request_args(node: FuncCall) -> tuple[object, object]:
@@ -228,6 +292,20 @@ def _spell(node) -> str:
         return f"{_spell(node.callee)}({', '.join(args)})"
     if isinstance(node, NumberLiteral):
         return str(node.value)
+    if isinstance(node, BoolLiteral):
+        return "true" if node.value else "false"
+    if isinstance(node, NaLiteral):
+        return "na"
+    if isinstance(node, BinOp):
+        return f"{_spell(node.left)} {node.op} {_spell(node.right)}"
+    if isinstance(node, UnaryOp):
+        return f"{node.op} {_spell(node.operand)}" if node.op == "not" else (
+            f"{node.op}{_spell(node.operand)}")
+    if isinstance(node, Ternary):
+        return (f"{_spell(node.condition)} ? {_spell(node.true_val)} : "
+                f"{_spell(node.false_val)}")
+    if isinstance(node, Subscript):
+        return f"{_spell(node.object)}[{_spell(node.index)}]"
     return type(node).__name__
 
 
@@ -480,6 +558,11 @@ class ScriptIndex:
         memo: dict = {}
         fresh = copy.deepcopy(expr, memo)
         replace_nodes(fresh, {id(memo[key]): value for key, value in swaps.items()})
+        for node in _walk(expr):
+            if (isinstance(node, Identifier)
+                    and self.refs.get(id(node), ("",))[0] == "global"):
+                read = memo[id(node)]
+                read.annotations = {**(read.annotations or {}), GLOBAL_ANNOTATION: True}
         if sum(1 for _ in _walk(fresh)) > _MAX_PAYLOAD_NODES:
             raise _Unresolvable("its value is too large")
         # An untitled input is keyed by the declaration holding it, which its
@@ -497,6 +580,70 @@ class ScriptIndex:
                                     "call_arg_order": ArgOrder([*order, title])}
         return fresh
 
+    def registers_timeframe(self, expr, seen: frozenset = frozenset()) -> bool:
+        """``expr``, a request's timeframe, has the run's value where
+        registration reads it, before the first bar: it reads no bar series,
+        and no name the script reassigns or declares ``var`` (there it holds
+        its type's default), through globals too."""
+        if reads_bar_series(expr) is not None:
+            return False
+        for node in _walk(expr):
+            if not isinstance(node, Identifier):
+                continue
+            binding = self.refs.get(id(node))
+            if binding is None or binding in seen:
+                continue
+            if binding[0] != "global" or binding in self.unstable:
+                return False
+            decl = self.decls.get(binding)
+            if decl is not None and decl.value is not None and not self.registers_timeframe(
+                    decl.value, seen | {binding}):
+                return False
+        return True
+
+    def registration_value(self, expr, seen: frozenset = frozenset()) -> bool:
+        """``expr`` is a value registration computes before the first bar:
+        literals, inputs (TradingView takes constant arguments), the chart's
+        own symbol strings, and operators and ternaries over them, read
+        through globals never reassigned. A request of another symbol is
+        registered with its symbol string and ``ignore_invalid_symbol`` so."""
+        if isinstance(expr, (StringLiteral, NumberLiteral, BoolLiteral)):
+            return True
+        if isinstance(expr, Identifier):
+            binding = self.refs.get(id(expr))
+            if (binding is None or binding[0] != "global" or binding in self.unstable
+                    or binding in seen):
+                return False
+            decl = self.decls.get(binding)
+            return (decl is not None and decl.value is not None
+                    and self.registration_value(decl.value, seen | {binding}))
+        if isinstance(expr, MemberAccess):
+            return (isinstance(expr.object, Identifier) and id(expr.object) not in self.refs
+                    and (expr.object.name, expr.member) in _REGISTRATION_MEMBERS)
+        if isinstance(expr, FuncCall):
+            callee = expr.callee
+            if isinstance(callee, Identifier):
+                return callee.name == "input" and id(callee) not in self.refs
+            if not (isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier)
+                    and id(callee.object) not in self.refs):
+                return False
+            if callee.object.name == "input":
+                return callee.member in _REGISTRATION_INPUTS
+            if callee.object.name == "ticker" and callee.member in ("inherit", "standard"):
+                symbol = ticker_symbol_arg(expr)
+                return symbol is not None and self.registration_value(symbol, seen)
+            return False
+        if isinstance(expr, BinOp):
+            return (expr.op in ("+", "==", "!=", "and", "or")
+                    and self.registration_value(expr.left, seen)
+                    and self.registration_value(expr.right, seen))
+        if isinstance(expr, UnaryOp):
+            return expr.op == "not" and self.registration_value(expr.operand, seen)
+        if isinstance(expr, Ternary):
+            return all(self.registration_value(part, seen)
+                       for part in (expr.condition, expr.true_val, expr.false_val))
+        return False
+
 
 def _error(node, message: str, filename: str) -> Diagnostic:
     loc = getattr(node, "loc", None) or SourceLocation(file=filename, line=1, col=1, end_col=1)
@@ -507,6 +654,17 @@ def _error(node, message: str, filename: str) -> Diagnostic:
 
 def specialize_security_contexts(program: Program, filename: str = "<input>") -> Program:
     """Resolve the context of every helper request (module docstring)."""
+    while True:
+        try:
+            return _specialize(program, filename)
+        except _FeedFallback as exc:
+            # Nothing is rewritten before the plan holds: these requests keep
+            # their deferred refusal, and the pass starts over without them.
+            from .external_requests import unpin_requests
+            unpin_requests(program, exc.reasons)
+
+
+def _specialize(program: Program, filename: str) -> Program:
     prog = ScriptIndex(program)
     _mark_unreached(prog, _reached(prog))
     # The requests whose context this pass owns, by helper; those owned for
@@ -515,14 +673,24 @@ def specialize_security_contexts(program: Program, filename: str = "<input>") ->
     owned: dict[str, list[FuncCall]] = {}
     context_owned: set[int] = set()
     payload_reads: dict[int, list[Identifier]] = {}
+    # Another symbol's request whose symbol or timeframe reads a name this
+    # pass does not resolve (a method's parameter, a block's local) reads no
+    # feed: the support checker keeps those, this is its backstop.
+    stray = {id(request): "its symbol or timeframe reads a name of a method or a block"
+             for owner, requests in prog.requests.items() if owner not in prog.funcs
+             for request in requests if _is_feed(request)
+             and any(prog.depends_on_scope(arg) for arg in _request_args(request))}
+    if stray:
+        raise _FeedFallback(stray)
     for owner, requests in prog.requests.items():
         if owner not in prog.funcs:
             continue
         for request in requests:
             symbol, tf = _request_args(request)
-            if (prog.depends_on_scope(symbol) or prog.depends_on_scope(tf)) and not (
-                    _request_name(request) == "security"
-                    and _analyzer_resolves(prog, owner, symbol, tf)):
+            if (prog.depends_on_scope(symbol) or prog.depends_on_scope(tf)) and (
+                    _is_feed(request) or not (
+                        _request_name(request) == "security"
+                        and _analyzer_resolves(prog, owner, symbol, tf))):
                 context_owned.add(id(request))
             reads = _payload_params(prog, owner, request)
             if reads and not _analyzer_binds_payload(prog, owner, request, reads):
@@ -547,6 +715,21 @@ def specialize_security_contexts(program: Program, filename: str = "<input>") ->
                                   or id(r) in payload_reads])}
     _type_context_params(prog, owned, leads)
 
+    # Every call path keys each request of another symbol this pass owns: the
+    # support checker's warning that it reads a feed now holds.
+    warnings = []
+    for requests in owned.values():
+        for request in requests:
+            notes = request.annotations or {}
+            if _FEED_WARNING_ANNOTATION in notes:
+                warnings.append(notes[_FEED_WARNING_ANNOTATION])
+                request.annotations = {k: v for k, v in notes.items()
+                                       if k != _FEED_WARNING_ANNOTATION}
+    if warnings:
+        pass_notes = program.annotations = dict(program.annotations or {})
+        pass_notes[PASS_WARNINGS_ANNOTATION] = [
+            *pass_notes.get(PASS_WARNINGS_ANNOTATION, ()), *warnings]
+
     # A request no top-level statement reaches never runs: one owned for its
     # context keeps the chart timeframe, and no read of a parameter of its
     # helper warns.
@@ -560,6 +743,7 @@ def specialize_security_contexts(program: Program, filename: str = "<input>") ->
     # Name every instance and build its definition: a helper's first
     # signature keeps its own, every other one is a copy of it.
     taken = {n.name for n in _walk(program) if isinstance(n, Identifier)} | set(prog.funcs)
+    taken |= {name for n in _walk(program) for name in _declared_names(n)}
     names: dict[tuple, str] = {}
     defs: dict[tuple, tuple[FuncDef, dict | None]] = {}
     new_defs: dict[str, list[FuncDef]] = {}
@@ -578,6 +762,7 @@ def specialize_security_contexts(program: Program, filename: str = "<input>") ->
             memo: dict = {}
             clone = copy.deepcopy(original, memo)
             clone.name = names[signature]
+            _rename_locals(prog, original, memo, names[signature][len(func):], taken)
             defs[signature] = (clone, memo)
             new_defs.setdefault(func, []).append(clone)
 
@@ -648,6 +833,10 @@ def _plan(prog: ScriptIndex, owned: dict, context_owned: set[int],
         if problem is None:
             continue
         reach = {func} | _reachable(prog, func, leads)
+        feeds = {id(r): f"helper '{func}' {problem}"
+                 for g in reach for r in owned.get(g, ()) if _is_feed(r)}
+        if feeds:
+            raise _FeedFallback(feeds)
         # The request a helper leads to, for the message.
         target = context_first.get(func) or next(
             (context_first[g] for g in sorted(context_first) if g in reach), None)
@@ -675,16 +864,31 @@ def _plan(prog: ScriptIndex, owned: dict, context_owned: set[int],
             symbol, tf = _request_args(request)
             values = []
             for what, arg in (("symbol", symbol), ("timeframe", tf)):
+                chain = " -> ".join(f"{name}()" for name, _ in here)
                 try:
                     values.append(prog.resolve(arg, env) if arg is not None else None)
                 except _Unresolvable as exc:
                     if id(request) not in context_owned:
                         raise _Fallback([id(request)]) from exc
-                    chain = " -> ".join(f"{name}()" for name, _ in here)
+                    if _is_feed(request):
+                        raise _FeedFallback({id(request): (
+                            f"its {what} cannot be resolved before the first bar on the "
+                            f"call path {chain}: {exc}")}) from exc
                     refuse(request, f"request.{_request_name(request)} {what} cannot be "
                                     f"resolved before the first bar on the call path "
                                     f"{chain}: {exc}")
                     values.append(None)
+                    continue
+                if (what == "symbol" and _is_feed(request) and values[-1] is not None
+                        and not prog.registration_value(values[-1])):
+                    raise _FeedFallback({id(request): (
+                        f"its symbol {_spell(values[-1])} on the call path {chain} is not "
+                        "a value registration computes before the first bar")})
+                if (what == "timeframe" and _is_feed(request) and values[-1] is not None
+                        and not prog.registers_timeframe(values[-1])):
+                    raise _FeedFallback({id(request): (
+                        f"its timeframe {_spell(values[-1])} on the call path {chain} is "
+                        "not a value registration computes before the first bar")})
             payload = ()
             if id(request) in payload_reads:
                 try:
@@ -716,6 +920,10 @@ def _plan(prog: ScriptIndex, owned: dict, context_owned: set[int],
                        for p in prog.funcs[name].params}
                 top.append((call, instantiate(name, env, ())))
     except _Unresolvable as exc:
+        feeds = {id(r): str(exc) for requests in owned.values() for r in requests
+                 if _is_feed(r)}
+        if feeds:
+            raise _FeedFallback(feeds) from exc
         if payload_reads:
             raise _Fallback(list(payload_reads)) from exc
         request = next(iter(owned.values()))[0]
@@ -723,6 +931,59 @@ def _plan(prog: ScriptIndex, owned: dict, context_owned: set[int],
     if errors:
         raise CompileError(list(errors.values()))
     return leads, instances, detail, top
+
+
+def _declared_names(node) -> list[str]:
+    """The names a declaration or a loop binds."""
+    if isinstance(node, VarDecl):
+        return [node.name] if node.name else []
+    if isinstance(node, TupleAssign):
+        return list(node.names)
+    if isinstance(node, ForStmt):
+        return [node.var]
+    if isinstance(node, ForInStmt):
+        return [node.var] if node.var else list(node.vars or ())
+    return []
+
+
+def _rename_locals(prog: ScriptIndex, original: FuncDef, memo: dict, suffix: str,
+                   taken: set[str]) -> None:
+    """Give a helper copy's locals and loop variables names of their own
+    (``v`` becomes ``v__pfctx1``): the analyzer keeps a callable local's
+    history in one buffer per name, which a copy's ``v[1]`` would share with
+    the original's, and refuses the script."""
+    fresh: dict[tuple, str] = {}
+
+    def rename(binding: tuple, name: str) -> str:
+        if name == "_" or binding is None:
+            return name
+        if binding not in fresh:
+            candidate, n = f"{name}{suffix}", 0
+            while candidate in taken:
+                n += 1
+                candidate = f"{name}{suffix}_{n}"
+            taken.add(candidate)
+            fresh[binding] = candidate
+        return fresh[binding]
+
+    for node in _walk(original.body):
+        clone = memo[id(node)]
+        if isinstance(node, VarDecl) and node.name:
+            clone.name = rename(prog.decl_binding.get((id(node), node.name)), node.name)
+        elif isinstance(node, TupleAssign):
+            clone.names = [rename(prog.decl_binding.get((id(node), name)), name)
+                           for name in node.names]
+        elif isinstance(node, ForStmt):
+            clone.var = rename(("bound", id(node), node.var), node.var)
+        elif isinstance(node, ForInStmt):
+            if node.var:
+                clone.var = rename(("bound", id(node), node.var), node.var)
+            else:
+                clone.vars = [rename(("bound", id(node), name), name)
+                              for name in node.vars or ()]
+    for node in _walk(original.body):
+        if isinstance(node, Identifier) and prog.refs.get(id(node)) in fresh:
+            memo[id(node)].name = fresh[prog.refs[id(node)]]
 
 
 def _payload_params(prog: ScriptIndex, func: str, request: FuncCall) -> list[Identifier]:
@@ -809,12 +1070,12 @@ def _payload_positions(prog: ScriptIndex, request: FuncCall) -> tuple[set[int], 
     return objects, lengths, rendered
 
 
-# The chart's own series a payload lowers on the requested bars: all of them
-# as a value, the ones with requested-bar history as a history object.
+# The chart's own series a payload lowers on the requested bars, as a value
+# and as a history object.
 _VALUE_SERIES = frozenset({
     "open", "high", "low", "close", "volume", "hl2", "hlc3", "ohlc4", "hlcc4",
 })
-_HISTORY_SERIES = frozenset({"open", "high", "low", "close", "volume"})
+_HISTORY_SERIES = _VALUE_SERIES
 _VALUE_CALLS = frozenset({"nz", "int", "float"})
 _CONSTANT_INPUTS = frozenset({"int", "float", "bool", "string"})
 
@@ -822,9 +1083,14 @@ _CONSTANT_INPUTS = frozenset({"int", "float", "bool", "string"})
 class _Lowered:
     """Whether the request builder lowers a payload parameter's value on the
     requested bars in the read's place, never on the chart's terms or into
-    C++ that does not compile. It reads a global only when the global is
-    declared before the helper (a later one reads the chart's value), not
-    reassigned or ``var``, and its value is itself lowered."""
+    C++ that does not compile. It reads a global only when the global is not
+    reassigned or ``var`` and its value is itself lowered. A call's argument
+    names globals declared before the call, which may follow the helper: the
+    copy's read carries ``GLOBAL_ANNOTATION`` (``resolve_payload``), which
+    the builder takes for the binding the analyzer cannot give it there. The
+    analyzer types such a name a float, so a global declared after the
+    helper is put in only when its value is a number or a bool (``_numeric``):
+    a later string input typed the request a double, which did not compile."""
 
     def __init__(self, prog: ScriptIndex, func: str) -> None:
         from .analyzer.tables import TA_TUPLE_RETURNS
@@ -834,27 +1100,65 @@ class _Lowered:
         # (rule, global name, globals_ok) -> verdict: a global's value is
         # judged once however many reads share it.
         self.memo: dict = {}
-        self.before: dict = {}
-        for stmt in prog.program.body[:prog.program.body.index(prog.funcs[func])]:
-            if isinstance(stmt, VarDecl) and stmt.name:
-                self.before.setdefault(stmt.name, stmt.value)
-            elif isinstance(stmt, TupleAssign):
-                for name in stmt.names:
-                    self.before.setdefault(name, None)
+        self.declared: dict = {}
+        # The globals declared after the helper.
+        self.later: set[str] = set()
+        helper = prog.program.body.index(prog.funcs[func])
+        for index, stmt in enumerate(prog.program.body):
+            names = ([stmt.name] if isinstance(stmt, VarDecl) and stmt.name
+                     else list(stmt.names) if isinstance(stmt, TupleAssign) else [])
+            for name in names:
+                if name in self.declared:
+                    continue
+                self.declared[name] = stmt.value if isinstance(stmt, VarDecl) else None
+                if index > helper:
+                    self.later.add(name)
 
     def _global(self, node, seen):
-        """A stable global's value declared before the helper, else None."""
-        if (node.name in seen or self.before.get(node.name) is None
+        """A stable global's declared value, else None."""
+        if (node.name in seen or self.declared.get(node.name) is None
                 or ("global", node.name) in self.prog.unstable):
             return None
-        return self.before[node.name]
+        if node.name in self.later and not self._numeric(self.declared[node.name], seen):
+            return None
+        return self.declared[node.name]
+
+    def _numeric(self, node, seen: frozenset) -> bool:
+        """``node`` is a number or a bool: literals, bar series, ``ta.*`` and
+        ``math.*`` calls, numeric inputs and ``input.source``, and operators
+        and ternaries over them, through stable globals."""
+        if isinstance(node, (NumberLiteral, BoolLiteral, NaLiteral)):
+            return True
+        if isinstance(node, Identifier):
+            if node.name in self.prog.program_names:
+                value = self.declared.get(node.name)
+                return (node.name not in seen and value is not None
+                        and ("global", node.name) not in self.prog.unstable
+                        and self._numeric(value, seen | {node.name}))
+            return node.name in _VALUE_SERIES
+        if isinstance(node, FuncCall):
+            kind = self._call(node)
+            if kind == "input":
+                return node.callee.member in ("int", "float", "bool")
+            if kind == "value":
+                return bool(node.args) and all(self._numeric(a, seen) for a in node.args)
+            return kind in ("ta", "math", "source")
+        if isinstance(node, BinOp):
+            return self._numeric(node.left, seen) and self._numeric(node.right, seen)
+        if isinstance(node, UnaryOp):
+            return self._numeric(node.operand, seen)
+        if isinstance(node, Ternary):
+            return self._numeric(node.true_val, seen) and self._numeric(node.false_val, seen)
+        if isinstance(node, Subscript):
+            return self._numeric(node.object, seen)
+        return False
 
     def _call(self, node) -> str | None:
-        """``ta``, ``math``, ``input`` or ``value`` for a call the builder
-        lowers, else None."""
+        """``ta``, ``math``, ``input``, ``source`` or ``value`` for a call the
+        builder lowers, else None."""
         callee = node.callee
         if (isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier)
-                and callee.object.name not in self.before
+                and callee.object.name not in self.declared
                 and id(callee.object) not in self.prog.refs):
             space, member = callee.object.name, callee.member
             if space == "ta" and member not in self.tuple_ta:
@@ -863,9 +1167,19 @@ class _Lowered:
                 return "math"
             if space == "input" and member in _CONSTANT_INPUTS:
                 return "input"
+            if space == "input" and member == "source":
+                # The series it selects, read on the requested bars.
+                return "source"
             return None
+        if (isinstance(callee, Identifier) and callee.name == "input"
+                and callee.name not in self.declared and callee.name not in self.prog.funcs
+                and node.args and isinstance(node.args[0], Identifier)
+                and node.args[0].name in _VALUE_SERIES
+                and id(node.args[0]) not in self.prog.refs):
+            # ``input(close)``, the source overload.
+            return "source"
         if (isinstance(callee, Identifier) and callee.name in _VALUE_CALLS
-                and callee.name not in self.before and callee.name not in self.prog.funcs):
+                and callee.name not in self.declared and callee.name not in self.prog.funcs):
             return "value"
         return None
 
@@ -891,7 +1205,7 @@ class _Lowered:
             # render on the chart's terms: no global below them.
             kind = self._call(node)
             inner_ok = globals_ok and kind != "value"
-            return kind == "input" or (kind is not None and all(
+            return kind in ("input", "source") or (kind is not None and all(
                 self.value(a, seen, inner_ok) for a in (*node.args, *node.kwargs.values())))
         if isinstance(node, BinOp):
             return self.value(node.left, seen, globals_ok) and self.value(
@@ -908,9 +1222,10 @@ class _Lowered:
 
     def history(self, node, seen: frozenset = frozenset(), globals_ok: bool = True) -> bool:
         """``node`` is a history object: a series with requested-bar history,
-        a ``ta.*`` call (inline, or a global's value), an inline operator
-        expression. Not a literal, ``na``, another history read, ``hl2`` and
-        its family, or a global holding an operator expression."""
+        a ``ta.*`` call (inline, or a global's value), an ``input.source``
+        (the series it selects), an inline operator expression. Not a
+        literal, ``na``, another history read, or a global holding an
+        operator expression."""
         if isinstance(node, Identifier):
             if node.name in self.prog.program_names:
                 return globals_ok and self._judged(
@@ -919,7 +1234,8 @@ class _Lowered:
                     and self.history(declared, inner, globals_ok))
             return node.name in _HISTORY_SERIES
         if isinstance(node, FuncCall):
-            return self._call(node) == "ta" and self.value(node, seen, globals_ok)
+            kind = self._call(node)
+            return kind == "source" or (kind == "ta" and self.value(node, seen, globals_ok))
         if isinstance(node, (BinOp, UnaryOp, Ternary)):
             return self.value(node, seen, globals_ok)
         return False

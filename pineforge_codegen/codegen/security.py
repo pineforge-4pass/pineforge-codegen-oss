@@ -79,7 +79,11 @@ from ..analyzer import (
 )
 from .. import signatures as sigs
 from ..errors import CompileError
-from ..security_contexts import UNREACHED_ANNOTATION
+from ..external_requests import (
+    FOOTPRINT_COLUMN_ANNOTATION, RECORDED_KEY_ANNOTATION, REQUEST_REF_ANNOTATION,
+)
+from ..external_requests import _nodes as walk_request_nodes
+from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION
 from ..symbols import PineType, method_receiver_type_name
 from .tables import (
     BAR_BUILTINS, MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_BAR_FIELDS,
@@ -126,6 +130,16 @@ _SECURITY_REQUESTED_NAMES = frozenset(
 # computes that site, but every earlier build computed it where the helper
 # was inlined (``_security_check_tuple_element_history``).
 _SECURITY_THROUGH_GLOBAL = "@through-global"
+
+
+# The requested bar's fields a pure helper body may read
+# (``_security_pure_body``): the builder spells each from the evaluator's
+# ``bar``.
+_SECURITY_SHARED_BAR_FIELDS = frozenset(SECURITY_BAR_FIELD_EXPRS) | {"hl2", "hlc3", "ohlc4"}
+# A pure call whose inlined text reaches this length is computed once, where
+# the evaluator opens (``_security_share_pure_call``); a shorter text is
+# inlined at every reach, as every earlier build inlined it.
+_SECURITY_SHARED_CALL_MIN_CHARS = 256
 
 
 def _security_tuple_binding(func_name: str, name: str) -> str:
@@ -845,6 +859,9 @@ class SecurityEmitter:
                 "callsite_idx": getattr(item, "callsite_idx", None),
                 "string_result": bool(getattr(item, "string_result", False)),
                 "dead": bool(getattr(item, "dead", False)),
+                "foreign": bool(getattr(item, "foreign", False)),
+                "symbol_node": getattr(item, "symbol", None),
+                "ignore_invalid_node": getattr(item, "ignore_invalid", None),
             }
         return {
             "sec_id": item[0],
@@ -1236,9 +1253,15 @@ class SecurityEmitter:
         ``global_expr_map`` is keyed only by spelling.  Consulting it without
         node provenance lets a UDF parameter, block local, or loop iterator
         capture a same-named global input after analysis scopes have unwound.
+        A global's read that ``security_contexts`` put in a helper's copy is
+        one too where the analyzer bound nothing: the global is declared
+        after the helper (``GLOBAL_ANNOTATION``).
         """
         scopes = getattr(self.ctx, "identifier_binding_scopes", {}) or {}
-        return scopes.get(id(node)) == "global"
+        scope = scopes.get(id(node))
+        return scope == "global" or (
+            scope is None and bool((node.annotations or {}).get(GLOBAL_ANNOTATION))
+        )
 
     def _security_warn_unbound_param(self, node: Identifier) -> None:
         """Warn once that a payload reads the history of a parameter of the
@@ -1714,6 +1737,8 @@ class SecurityEmitter:
             if isinstance(n, FuncCall):
                 func_name = self._security_user_call_key(n)
                 if func_name is not None:
+                    if self._security_shared_call_key(n, bindings) is not None:
+                        return
                     call_key = f"func:{func_name}"
                     if call_key in resolving:
                         return
@@ -1825,15 +1850,100 @@ class SecurityEmitter:
     def _security_bar_hist_type(self, field: str) -> str:
         return SECURITY_BAR_FIELD_TYPES.get(field, "double")
 
+    def _security_call_for_request(self, node) -> dict | None:
+        """The ``request.security`` site ``node`` registered, as the value
+        read (``visit_call``) finds it: by its expression, and among the
+        analyzer's call-site clones by the call site being emitted."""
+        payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+        candidates = [item for item in self._security_calls
+                      if not item.get("is_lower_tf_array") and payload is not None
+                      and item["expr_node"] is payload]
+        if len(candidates) > 1:
+            return next((c for c in candidates
+                         if c.get("callsite_idx") == self._active_call_site_idx),
+                        candidates[0])
+        return candidates[0] if candidates else None
+
+    def _request_data_missing(self, ref) -> str:
+        """C++ that is true when the pinned data of the request carrying
+        ``ref`` (``external_requests.RequestRef``) is missing: another
+        symbol's site the run did not register, or the recorded series of
+        the key the request was last evaluated with."""
+        requests = getattr(self, "_pf_request_refs", None)
+        if requests is None:
+            requests = self._pf_request_refs = {
+                id(node.annotations[REQUEST_REF_ANNOTATION]): node
+                for node in walk_request_nodes(self.ctx.ast)
+                if isinstance(node, FuncCall)
+                and REQUEST_REF_ANNOTATION in (node.annotations or {})}
+        request = requests.get(id(ref))
+        if request is not None and RECORDED_KEY_ANNOTATION in (request.annotations or {}):
+            return f"_pf_rec_missing_{self._recorded_site(request)}"
+        item = self._security_call_for_request(request) if request is not None else None
+        if item is None or not item.get("foreign"):
+            return "true"
+        return f"_pf_sec_missing_{item['sec_id']}"
+
+    def _recorded_key_expr(self, request) -> str:
+        """The run-time key of a recorded request: its constant parts around
+        its symbol string (``fn|symbol|field|period|gaps_*|lookahead_*``)."""
+        parts = request.annotations[RECORDED_KEY_ANNOTATION]
+        tail = (f"|{parts['field']}|{parts['period']}|gaps_{parts['gaps']}"
+                f"|lookahead_{parts['lookahead']}")
+        return (f'(std::string("{parts["fn"]}|") + {self._visit_expr(request.args[0])} + '
+                f'std::string("{tail}"))')
+
+    def _recorded_sites(self) -> dict[int, int]:
+        """Each recorded request's index N: ``_pf_recorded`` sets its
+        ``_pf_rec_missing_N`` where the request is evaluated, from the key
+        computed there, and its reads test that flag."""
+        sites = getattr(self, "_pf_recorded_site_ids", None)
+        if sites is None:
+            sites = self._pf_recorded_site_ids = {
+                id(node): n for n, node in enumerate(
+                    node for node in walk_request_nodes(self.ctx.ast)
+                    if isinstance(node, FuncCall)
+                    and RECORDED_KEY_ANNOTATION in (node.annotations or {}))}
+        return sites
+
+    def _recorded_site(self, request) -> int:
+        return self._recorded_sites()[id(request)]
+
+    def _uses_recorded_requests(self) -> bool:
+        return bool(self._recorded_sites())
+
+    def _security_footprint_column(self, sec_id: int) -> str | None:
+        """The feed column another symbol's site reads when its whole
+        expression is ``request.footprint(...)`` (``fp_delta_100_70``)."""
+        if not self._security_foreign(sec_id):
+            return None
+        item = next((i for i in self._security_calls if i["sec_id"] == sec_id), None)
+        payload = item.get("expr_node") if item is not None else None
+        return (getattr(payload, "annotations", None) or {}).get(FOOTPRINT_COLUMN_ANNOTATION)
+
+    def _security_foreign(self, sec_id: int | None) -> bool:
+        """The site reads another symbol's feed: its bars close when the
+        feed says they do, and the host answers for its context."""
+        return (sec_id is not None and 0 <= sec_id < len(self._security_eval_info)
+                and bool(self._security_eval_info[sec_id].get("foreign")))
+
     def _security_bar_field_expr(self, field: str, sec_id: int | None = None) -> str:
         if field == "time_close" and sec_id is not None:
             # The requested bar's close on the requested timeframe, as the
             # chart's ``time_close()`` reads its own bar on the chart's.
-            return (
+            chart = (
                 "pine_time_close(bar.timestamp, "
                 f"{self._security_timeframe_expr(sec_id)}, "
                 "syminfo_.session, syminfo_.timezone, script_tf_)"
             )
+            if self._security_foreign(sec_id):
+                # Another symbol's bar closes when its feed says it does: the
+                # host's time_close() while that symbol's payload runs (a
+                # generated time_close member would shadow the plain name).
+                # A symbol string equal to the chart's registers on the chart.
+                return ("(foreign_context_ != nullptr ? "
+                        f"pineforge::source::PineStrategyHost::time_close() : {chart})")
+            return chart
         for call, source_field in self._security_source_hist_fields.values():
             if source_field == field:
                 return self._security_source_input_expr(call)
@@ -2052,6 +2162,8 @@ class SecurityEmitter:
             if isinstance(n, FuncCall):
                 func_name = self._security_user_call_key(n)
                 if func_name is not None:
+                    if self._security_shared_call_key(n, bindings) is not None:
+                        return
                     call_key = f"func:{func_name}"
                     if call_key in resolving:
                         return
@@ -2163,7 +2275,12 @@ class SecurityEmitter:
     def _collect_security_expr_hist_subscripts(
         self, node, resolving: set[str] | None = None
     ) -> list[Subscript]:
-        """Subscripted helper-call results needing security-context history."""
+        """Subscripted helper-call results needing security-context history:
+        in the payload, the globals it reads, and the bodies of the user
+        functions it calls (``h() => nz(g()[1])``). One inside a helper body
+        is kept only where the payload reaches it once: two inlines of it
+        (``h() + h()``) would each need their own history, and are refused
+        where lowered, as every earlier build refused them."""
         if node is None:
             return []
         if resolving is None:
@@ -2171,9 +2288,15 @@ class SecurityEmitter:
 
         out: list[Subscript] = []
         seen: set[int] = set()
+        in_helper: set[int] = set()
+        reached: dict[int, int] = {}
+        helpers: list[str] = []
 
         def add(n: Subscript) -> None:
             key = id(n)
+            if helpers:
+                in_helper.add(key)
+                reached[key] = reached.get(key, 0) + 1
             if key not in seen:
                 seen.add(key)
                 out.append(n)
@@ -2188,6 +2311,15 @@ class SecurityEmitter:
                     walk(global_expr_map[n.name])
                     resolving.remove(n.name)
                 return
+            if (isinstance(n, FuncCall) and isinstance(n.callee, Identifier)
+                    and n.callee.name in self._func_names
+                    and n.callee.name not in helpers):
+                info = self._func_info_map.get(n.callee.name)
+                if (info is not None and getattr(info, "node", None) is not None
+                        and not self._security_pure_body(info.node)):
+                    helpers.append(n.callee.name)
+                    walk(info.node.body)
+                    helpers.pop()
             if (
                 isinstance(n, Subscript)
                 and (
@@ -2210,7 +2342,7 @@ class SecurityEmitter:
                             walk(x)
 
         walk(node)
-        return out
+        return [n for n in out if id(n) not in in_helper or reached[id(n)] == 1]
 
     def _security_expr_hist_series_names(self, sec_id: int) -> list[str]:
         names = []
@@ -2222,6 +2354,11 @@ class SecurityEmitter:
     def _emit_security_expr_hist_members(
         self, sec_id: int, expr_node, lines: list[str], mbb_suffix: str
     ) -> None:
+        if self._security_reads_bar_index(expr_node):
+            # The requested bar's ``bar_index``: one count per requested bar,
+            # advanced where the evaluator opens its slot.
+            self._security_bar_index_secs.add(sec_id)
+            lines.append(f"    int {self._security_bar_index_member(sec_id)} = -1;")
         for idx, node in enumerate(self._collect_security_expr_hist_subscripts(expr_node)):
             # A session.* flag is a bool: its history reads false, not na,
             # before the first requested bar.
@@ -3066,6 +3203,133 @@ class SecurityEmitter:
         return (info is not None and info.node is not None
                 and self._security_body_is_expression(info.node))
 
+    def _security_pure_body(self, func_node) -> bool:
+        """Whether a user function's body is one expression over its
+        parameters, the requested bar's fields and literals, through operators
+        and positional calls of such functions only. Its value is then the
+        same wherever the payload reaches it with the same arguments, and no
+        prepass finds anything in it: no TA call, history, ``var`` state,
+        global or builtin call. Decided once per definition; a body reached
+        again through its own calls is not pure."""
+        cache = getattr(self, "_security_pure_body_cache", None)
+        if cache is None:
+            cache = self._security_pure_body_cache = {}
+        key = id(func_node)
+        if key not in cache:
+            cache[key] = False
+            body = getattr(func_node, "body", None) or []
+            cache[key] = (
+                len(body) == 1
+                and isinstance(body[0], ExprStmt)
+                and self._security_pure_expr(body[0].expr, set(func_node.params))
+            )
+        return cache[key]
+
+    def _security_pure_expr(self, expr, params: set[str]) -> bool:
+        """``_security_pure_body``'s test of one expression."""
+        stack = [expr]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (NumberLiteral, BoolLiteral, NaLiteral)):
+                continue
+            if isinstance(n, Identifier):
+                if self._security_identifier_is_global_binding(n):
+                    # A builtin name the builder spells from ``bar``.
+                    if n.name in _SECURITY_SHARED_BAR_FIELDS:
+                        continue
+                elif n.name in params:
+                    continue
+                return False
+            if isinstance(n, BinOp):
+                stack.extend((n.left, n.right))
+            elif isinstance(n, UnaryOp):
+                stack.append(n.operand)
+            elif isinstance(n, Ternary):
+                stack.extend((n.condition, n.true_val, n.false_val))
+            elif isinstance(n, FuncCall) and self._security_pure_call(n):
+                stack.extend(n.args)
+            else:
+                return False
+        return True
+
+    def _security_pure_call(self, node: FuncCall) -> bool:
+        """A positional call binding every parameter of a pure user function
+        (``_security_pure_body``)."""
+        callee = node.callee
+        if (not isinstance(callee, Identifier) or node.kwargs
+                or callee.name not in self._func_names):
+            return False
+        info = self._func_info_map.get(callee.name)
+        return (info is not None and info.node is not None
+                and len(node.args) == len(info.node.params)
+                and self._security_pure_body(info.node))
+
+    def _security_shared_call_key(self, node, helper_binding_stack) -> tuple | None:
+        """What a pure call (``_security_pure_call``) evaluates on the
+        requested bar: its function and the canonical value of each argument
+        (``_security_canonical_value``); two calls with one key inline one
+        text. None for any other call, or an argument that reads anything
+        else."""
+        if not isinstance(node, FuncCall) or not self._security_pure_call(node):
+            return None
+        values = []
+        for arg in node.args:
+            value = self._security_canonical_value(arg, helper_binding_stack or ())
+            if value is None:
+                return None
+            values.append(value)
+        return (id(self._func_info_map[node.callee.name].node), tuple(values))
+
+    def _security_canonical_value(self, node, helper_binding_stack) -> tuple | None:
+        """A pure call's argument as the builder reads it, as a hashable tree:
+        literals, the requested bar's fields, operators and pure calls, each
+        name read through the helper bindings the way the builder reads it
+        and each operator with its inferred type. None for anything else: a
+        TA call, history, a global, an evaluator local."""
+        if isinstance(node, NumberLiteral):
+            return ("number", type(node.value).__name__, repr(node.value))
+        if isinstance(node, BoolLiteral):
+            return ("bool", bool(node.value))
+        if isinstance(node, NaLiteral):
+            return ("na",)
+        if isinstance(node, Identifier):
+            if node.name in self._security_raw_cpp:
+                return None
+            if not self._security_identifier_is_global_binding(node):
+                binding = self._security_lookup_helper_binding_context(
+                    node.name, helper_binding_stack
+                )
+                if binding is not None:
+                    bound, bound_stack = binding
+                    if isinstance(bound, str):
+                        return None
+                    value = self._security_canonical_value(bound, bound_stack)
+                    return None if value is None else ("argument", self._infer_type(node), value)
+            if node.name in _SECURITY_SHARED_BAR_FIELDS:
+                return ("bar", node.name)
+            return None
+        if isinstance(node, BinOp):
+            left = self._security_canonical_value(node.left, helper_binding_stack)
+            right = self._security_canonical_value(node.right, helper_binding_stack)
+            if left is None or right is None:
+                return None
+            return ("binary", node.op, self._infer_type(node), left, right)
+        if isinstance(node, UnaryOp):
+            operand = self._security_canonical_value(node.operand, helper_binding_stack)
+            if operand is None:
+                return None
+            return ("unary", node.op, self._infer_type(node), operand)
+        if isinstance(node, Ternary):
+            parts = [
+                self._security_canonical_value(part, helper_binding_stack)
+                for part in (node.condition, node.true_val, node.false_val)
+            ]
+            if any(part is None for part in parts):
+                return None
+            return ("ternary", self._infer_type(node), *parts)
+        key = self._security_shared_call_key(node, helper_binding_stack)
+        return None if key is None else ("call", self._infer_type(node), key)
+
     def _security_user_call_site(self, node) -> bool:
         """Whether ``node`` calls a user function or typed user method,
         whether or not a payload can inline it."""
@@ -3389,6 +3653,8 @@ class SecurityEmitter:
                 for side in (node.left, node.right)
             )
         if self._security_user_call_key(node) is not None:
+            if self._security_shared_call_key(node, helper_binding_stack) is not None:
+                return False
             try:
                 plan = self._security_helper_call_plan(node, helper_binding_stack)
             except CompileError:
@@ -3418,7 +3684,8 @@ class SecurityEmitter:
                     if name in call_stack:
                         return
                     fi = self._func_info_map.get(name)
-                    if fi is not None and fi.node is not None:
+                    if (fi is not None and fi.node is not None
+                            and not self._security_pure_body(fi.node)):
                         call_stack.add(name)
                         for stmt in fi.node.body:
                             visit_stmt(stmt, conditional)
@@ -3536,6 +3803,8 @@ class SecurityEmitter:
         if isinstance(expr_node, FuncCall):
             func_name = self._security_user_call_key(expr_node)
             if func_name is not None:
+                if self._security_shared_call_key(expr_node, helper_binding_stack) is not None:
+                    return False
                 call_key = f"func:{func_name}"
                 if call_key in resolving:
                     return False
@@ -3961,6 +4230,8 @@ class SecurityEmitter:
         if isinstance(expr_node, FuncCall):
             func_name = self._security_user_call_key(expr_node)
             if func_name is not None:
+                if self._security_shared_call_key(expr_node, helper_binding_stack) is not None:
+                    return collected
                 call_key = f"func:{func_name}"
                 if call_key in resolving:
                     return collected
@@ -4440,6 +4711,8 @@ class SecurityEmitter:
             if isinstance(node, FuncCall):
                 func_name = self._security_user_call_key(node)
                 if func_name is not None:
+                    if self._security_shared_call_key(node, binding_stack) is not None:
+                        return
                     call_key = f"func:{func_name}"
                     if call_key in resolving:
                         return
@@ -4688,7 +4961,231 @@ class SecurityEmitter:
             ta_indices=[idx for idx in info.get("ta_indices") or [] if variants.get(idx)],
         )
 
+    def _emit_security_prologue_ta(
+        self,
+        sec_id: int,
+        idx: int,
+        variant: dict,
+        ta_results: dict,
+        security_mutable_names: set[str],
+        lines: list[str],
+    ) -> None:
+        """One TA variant's committed value in an evaluator's prologue."""
+        compute_args = self._security_ta_compute_args_for_site(
+            sec_id,
+            self.ctx.ta_call_sites[idx],
+            ta_results,
+            security_mutable_names,
+            variant.get("binding_stack", ()),
+            emitted_lines=lines,
+        )
+        var_name = variant["result_name"]
+        sec_name = variant["member_name"]
+        lines.append(f"        auto {var_name} = security_series_slot_is_new({sec_id}) "
+                     f"? {sec_name}.compute({compute_args}) "
+                     f": {sec_name}.recompute({compute_args});")
+        ta_results[(idx, variant["signature"])] = var_name
+
+    def _security_note_ta_read(self, key: tuple) -> None:
+        """Record a read of a TA variant's committed value while
+        ``_security_prologue_order`` builds a variant's arguments."""
+        reads = getattr(self, "_security_ta_reads", None)
+        if reads is not None:
+            reads.add(key)
+
+    def _security_ta_sites_reached(self, site: TACallSite, binding_stack) -> set[int]:
+        """Every TA site index a site's compute arguments can reach -- through
+        helper bindings, globals' values, mutable globals' statements and
+        user calls' bodies -- with no side effect: a superset of the
+        variants building those arguments reads."""
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        reached: set[int] = set()
+        seen: set[int] = set()
+        stack = [(arg, binding_stack or ()) for arg in site.compute_args or []]
+        while stack:
+            node, frames = stack.pop()
+            if isinstance(node, (list, tuple)):
+                stack.extend((child, frames) for child in node)
+                continue
+            if not isinstance(node, ASTNode) or id(node) in seen:
+                continue
+            seen.add(id(node))
+            ta_site = self._get_ta_site(node)
+            if ta_site is not None:
+                index = self._ta_index_by_site_id.get(id(ta_site))
+                if index is not None:
+                    reached.add(index)
+            if isinstance(node, Identifier):
+                for frame in frames:
+                    bound = frame.get(node.name) if isinstance(frame, dict) else None
+                    if isinstance(bound, ASTNode):
+                        stack.append((bound, getattr(frame, "caller_stack", frames)))
+                if node.name in global_expr_map:
+                    stack.append((global_expr_map[node.name], ()))
+                info = self._global_mutable_infos.get(node.name)
+                if info is not None:
+                    stack.extend((stmt, ()) for stmt in getattr(info, "source_stmts", []) or [])
+            elif isinstance(node, FuncCall):
+                key = self._security_user_call_key(node)
+                info = self._func_info_map.get(key) if key is not None else None
+                if info is not None and info.node is not None:
+                    stack.append((info.node.body, frames))
+            stack.extend((value, frames) for name, value in vars(node).items()
+                         if name not in ("annotations", "loc"))
+        return reached
+
+    def _security_prologue_order(
+        self,
+        sec_id: int,
+        entries: list[tuple[int, dict]],
+        ta_results: dict,
+        security_mutable_names: set[str],
+    ) -> list[tuple[int, dict]]:
+        """A prologue phase's variants, each after the variants of the phase
+        its compute arguments read, in their order otherwise. The top-level
+        statement of the evaluator computes each once, before any reader: a
+        variant reached through a global declared after the helper whose TA
+        reads it (``u(_x) => ta.sma(_x, 3)``, a later ``s5 = ta.sma(close,
+        5)``, ``u(s5)``) was computed inline in its reader's arguments and
+        again in the prologue, advancing twice a bar.
+
+        The order follows ``_security_ta_sites_reached``, a superset of the
+        reads with no side effect: a phase none of whose variants reaches a
+        later one keeps its order, and any other is sorted by that graph,
+        whose every order respects the reads. Only where it has a cycle are
+        the reads themselves learnt, by building each variant's arguments
+        once with every side effect undone (``_security_prologue_reads``)."""
+        keys = [(idx, variant["signature"]) for idx, variant in entries]
+        if len(keys) < 2:
+            return entries
+        by_index: dict[int, list[tuple]] = {}
+        for key in keys:
+            by_index.setdefault(key[0], []).append(key)
+        reach = {
+            key: {
+                other
+                for reached in self._security_ta_sites_reached(
+                    self.ctx.ta_call_sites[idx], variant.get("binding_stack", ())
+                )
+                for other in by_index.get(reached, ())
+                if other != key
+            }
+            for (idx, variant), key in zip(entries, keys)
+        }
+        position = {key: n for n, key in enumerate(keys)}
+        if not any(position[other] > position[key]
+                   for key, others in reach.items() for other in others):
+            return entries
+        order = self._security_topological_order(keys, reach)
+        if order is None:
+            order = self._security_topological_order(
+                keys,
+                self._security_prologue_reads(
+                    sec_id, entries, keys, ta_results, security_mutable_names
+                ),
+                keep_cycles=True,
+            )
+        by_key = dict(zip(keys, entries))
+        return [by_key[key] for key in order]
+
+    @staticmethod
+    def _security_topological_order(keys: list, edges: dict, keep_cycles: bool = False):
+        """``keys``, each after the keys ``edges`` gives it, stably; None on a
+        cycle unless ``keep_cycles`` (a cycle then keeps its order)."""
+        order: list = []
+        state: dict = {}
+
+        def visit(key) -> bool:
+            if state.get(key) == 2:
+                return True
+            if state.get(key) == 1:
+                return keep_cycles
+            state[key] = 1
+            for dep in keys:
+                if dep in edges.get(key, ()) and not visit(dep):
+                    return False
+            state[key] = 2
+            order.append(key)
+            return True
+
+        for key in keys:
+            if not visit(key):
+                return None
+        return order
+
+    def _security_prologue_reads(
+        self,
+        sec_id: int,
+        entries: list[tuple[int, dict]],
+        keys: list[tuple],
+        ta_results: dict,
+        security_mutable_names: set[str],
+    ) -> dict[tuple, set]:
+        """The phase's variants each variant's compute arguments read: its
+        arguments built once, with every side effect undone
+        (``_security_state_snapshot``) and every other variant standing in
+        as computed, so no read of one raises before the reads after it are
+        seen (``s5[1] + r``). Arguments that raise keep what they read."""
+        reads: dict[tuple, set] = {}
+        snapshot = self._security_state_snapshot()
+        try:
+            for (idx, variant), key in zip(entries, keys):
+                self._security_ta_reads = set()
+                computed = dict(ta_results)
+                computed.update(
+                    (other, f"_pf_prologue_{n}")
+                    for n, other in enumerate(keys) if other != key
+                )
+                try:
+                    self._security_ta_compute_args_for_site(
+                        sec_id,
+                        self.ctx.ta_call_sites[idx],
+                        computed,
+                        security_mutable_names,
+                        variant.get("binding_stack", ()),
+                        emitted_lines=[],
+                    )
+                except Exception as exc:  # noqa: BLE001 -- the real emission reports it
+                    if getattr(exc, "limit", False):
+                        raise
+                reads[key] = self._security_ta_reads - {key}
+        finally:
+            self._security_state_restore(snapshot)
+        return reads
+
     def _emit_security_evaluator(self, item: dict, lines: list[str]) -> None:
+        """Emit one ``_eval_security_N`` method
+        (``_emit_security_evaluator_body``), with the values of its long pure
+        calls (``_security_share_pure_call``) computed where it opens."""
+        start = len(lines)
+        outer = (getattr(self, "_security_shared_calls", None),
+                 getattr(self, "_security_shared_definitions", None))
+        self._security_shared_calls = {}
+        self._security_shared_definitions = definitions = []
+        try:
+            self._emit_security_evaluator_body(item, lines)
+        finally:
+            self._security_shared_calls, self._security_shared_definitions = outer
+        lines[start + 1:start + 1] = definitions
+
+    def _security_share_pure_call(self, sec_id: int, text: str) -> str:
+        """What a pure call (``_security_shared_call_key``) reads, at this
+        reach and at every later one with the same arguments: the text it
+        inlined, or, once that text is ``_SECURITY_SHARED_CALL_MIN_CHARS``
+        long, ``_pf_shared_<N>_<k>``, its value computed where the evaluator
+        opens. The text reads only the requested bar, literals and earlier
+        such values, and evaluates nothing else: computed once, eagerly, it
+        is the value every reach would compute. A diamond of helpers
+        (``f1(x) => f0(x) + f0(x)``, ``f2(x) => f1(x) + f1(x)``, ...) inlined
+        its leaf once per path, doubling the payload per level."""
+        if len(text) < _SECURITY_SHARED_CALL_MIN_CHARS:
+            return text
+        definitions = self._security_shared_definitions
+        name = f"_pf_shared_{sec_id}_{len(definitions)}"
+        definitions.append(f"        const auto {name} = {text};")
+        return name
+
+    def _emit_security_evaluator_body(self, item: dict, lines: list[str]) -> None:
         """Emit one ``_eval_security_N`` method."""
         sec_id = item["sec_id"]
         expr_node = item["expr_node"]
@@ -4708,6 +5205,22 @@ class SecurityEmitter:
             ]
 
         lines.append(f"    void _eval_security_{sec_id}(const Bar& bar, bool is_complete) {{")
+        if sec_id in self._security_bar_index_secs:
+            member = self._security_bar_index_member(sec_id)
+            if self._security_foreign(sec_id):
+                # Another symbol's context answers its own bar_index
+                # (XSYM-D: the feed's bars handed over so far).
+                lines.append("#ifdef PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1")
+                lines.append(f"        {member} = pine_bar_index();")
+                lines.append("#else")
+                lines.append(f"        if (security_series_slot_is_new({sec_id})) ++{member};")
+                lines.append("#endif")
+            else:
+                lines.append(f"        if (security_series_slot_is_new({sec_id})) ++{member};")
+        if self._security_foreign(sec_id):
+            lines.append("#ifdef PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1")
+            lines.append("        _PFForeignEmaSeeding _pf_ema_seeding;")
+            lines.append("#endif")
 
         ta_results = {}
         pre_rebind_ta_indices: list[int] = []
@@ -4752,33 +5265,23 @@ class SecurityEmitter:
                 pre_rebind_ta_indices.append(idx)
 
         def emit_security_ta(indices: list[int]) -> None:
-            for idx in indices:
-                site = self.ctx.ta_call_sites[idx]
-                for variant in prologue_variants(idx):
-                    if (idx, variant["signature"]) in lazy_ta_keys:
-                        # Pine only reaches this site through a
-                        # short-circuited operand or an untaken ternary
-                        # branch. Leave it out of the eager prologue:
-                        # _build_security_expr emits its
-                        # compute()/recompute() inline in expression
-                        # position, where C++'s &&/||/?: short-circuit
-                        # advances the series exactly on the bars Pine does.
-                        continue
-                    helper_binding_stack = variant.get("binding_stack", ())
-                    compute_args = self._security_ta_compute_args_for_site(
-                        sec_id,
-                        site,
-                        ta_results,
-                        security_mutable_names,
-                        helper_binding_stack,
-                        emitted_lines=lines,
-                    )
-                    var_name = variant["result_name"]
-                    sec_name = variant["member_name"]
-                    lines.append(f"        auto {var_name} = security_series_slot_is_new({sec_id}) "
-                                 f"? {sec_name}.compute({compute_args}) "
-                                 f": {sec_name}.recompute({compute_args});")
-                    ta_results[(idx, variant["signature"])] = var_name
+            # Pine only reaches a lazy site through a short-circuited operand
+            # or an untaken ternary branch. Leave it out of the eager
+            # prologue: _build_security_expr emits its compute()/recompute()
+            # inline in expression position, where C++'s &&/||/?:
+            # short-circuit advances the series exactly on the bars Pine does.
+            entries = [
+                (idx, variant)
+                for idx in indices
+                for variant in prologue_variants(idx)
+                if (idx, variant["signature"]) not in lazy_ta_keys
+            ]
+            for idx, variant in self._security_prologue_order(
+                sec_id, entries, ta_results, security_mutable_names,
+            ):
+                self._emit_security_prologue_ta(
+                    sec_id, idx, variant, ta_results, security_mutable_names, lines,
+                )
 
         emit_security_ta(pre_rebind_ta_indices)
 
@@ -4807,6 +5310,11 @@ class SecurityEmitter:
                     security_mutable_names=security_mutable_names,
                     emitted_lines=lines,
                 )
+                if (self._security_foreign(sec_id)
+                        and self._infer_cpp_type_for_security_elem(el) == "int"):
+                    # Held as a double (base.py): the integer's na stays na.
+                    el_cpp = ("[](auto _pf_v) { return is_na(_pf_v) ? na<double>() "
+                              f": static_cast<double>(_pf_v); }}({el_cpp})")
                 lines.append(f"        _req_sec_{sec_id}_{i} = {el_cpp};")
             self._emit_security_ohlc_hist_pushes(sec_id, lines)
             self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
@@ -4871,6 +5379,9 @@ class SecurityEmitter:
             expr_node = item["expr_node"]
             returns_tuple = item.get("returns_tuple", False)
             tuple_size = item.get("tuple_size", 0)
+            if self._security_foreign(sec_id):
+                self._emit_foreign_security_clear(item, lines)
+                continue
             if item.get("is_lower_tf_array"):
                 # The accumulator is reset on each sub-bar 0 inside the
                 # eval method itself, so ``clear_security`` only needs to
@@ -4969,6 +5480,53 @@ class SecurityEmitter:
         lines.append("        }")
         lines.append("    }")
 
+    def _emit_foreign_security_clear(self, item: dict, lines: list[str]) -> None:
+        """``clear_security`` of another symbol's site: the engine calls it
+        under gaps_on on a chart bar the feed handed nothing, so the value
+        reads na there. The requested context's own history (``close[1]``,
+        ``ta.*``) is that symbol's and carries on at its next bar."""
+        sec_id = item["sec_id"]
+        expr_node = item["expr_node"]
+        returns_tuple = item.get("returns_tuple", False)
+        tuple_size = item.get("tuple_size", 0)
+        lines.append(f"            case {sec_id}:")
+        if returns_tuple and tuple_size and tuple_size > 0 and isinstance(expr_node, TupleLiteral):
+            for i, el in enumerate(expr_node.elements):
+                ctype = self._infer_cpp_type_for_security_elem(el)
+                value = {
+                    "double": "na<double>()",
+                    "bool": "false",
+                    "int": "na<double>()",
+                    "std::string": 'std::string("")',
+                }.get(ctype)
+                if ctype == "std::vector<double>":
+                    lines.append(f"                _req_sec_{sec_id}_{i}.clear();")
+                else:
+                    lines.append(f"                _req_sec_{sec_id}_{i} = "
+                                 f"{value or self._default_for_type(ctype)};")
+        elif returns_tuple and tuple_size and tuple_size > 0:
+            site = self._get_ta_site(expr_node)
+            ta_name = self._ta_name_from_site(site) if site is not None else ""
+            ctype = {
+                "macd": "ta::MACDResult",
+                "supertrend": "ta::SupertrendResult",
+                "dmi": "ta::DMIResult",
+                "bb": "ta::BBResult",
+                "kc": "ta::KCResult",
+                "vwap_bands": "ta::VWAPBandsResult",
+            }.get(
+                ta_name,
+                self._security_helper_tuple_cpp_type(
+                    tuple_size, item.get("tuple_element_types", ())),
+            )
+            default = self._security_tuple_result_default(
+                ctype, tuple_size, item.get("tuple_element_types", ()))
+            lines.append(f"                _req_sec_{sec_id} = {default};")
+        else:
+            na_cpp = "na<std::string>()" if item.get("string_result") else "na<double>()"
+            lines.append(f"                _req_sec_{sec_id} = {na_cpp};")
+        lines.append("                break;")
+
     def _build_security_expr(
         self,
         sec_id: int,
@@ -4983,6 +5541,11 @@ class SecurityEmitter:
         """Build C++ expression for a security evaluator."""
         if expr_node is None:
             return "na<double>()"
+        column = (getattr(expr_node, "annotations", None) or {}).get(FOOTPRINT_COLUMN_ANNOTATION)
+        if column is not None and self._security_foreign(sec_id):
+            # request.footprint(...) of another symbol: the delta its feed
+            # records for the requested bar (the value its delta() reads).
+            return f'_pf_symbol_column({sec_id}, "{column}")'
 
         if resolving is None:
             resolving = set()
@@ -5035,6 +5598,16 @@ class SecurityEmitter:
                     return f"{state_name}[0]"
                 return state_name
 
+            if self._security_is_bar_index(expr_node) and sec_id in self._security_bar_index_secs:
+                return self._security_bar_index_member(sec_id)
+
+            var_input = self._security_var_input_call(expr_node)
+            if var_input is not None:
+                return self._build_security_expr(
+                    sec_id, var_input, ta_range, ta_results, resolving,
+                    security_mutable_names, (), emitted_lines,
+                )
+
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
             if (
                 self._security_identifier_is_global_binding(expr_node)
@@ -5082,6 +5655,19 @@ class SecurityEmitter:
             resolved = self._build_security_timeframe_member(sec_id, expr_node.member)
             if resolved is not None:
                 return resolved
+
+        if (isinstance(expr_node, Subscript)
+                and self._security_is_bar_index(expr_node.object)
+                and sec_id in self._security_bar_index_secs):
+            # ``bar_index[k]``: k requested bars back, na before the first.
+            member = self._security_bar_index_member(sec_id)
+            offset = self._build_security_expr(
+                sec_id, expr_node.index, ta_range, ta_results, resolving,
+                security_mutable_names, helper_binding_stack, emitted_lines,
+            )
+            return (f"([&]() -> double {{ auto _pf_bar_back = ({offset}); "
+                    f"if (is_na(_pf_bar_back) || {member} - _pf_bar_back < 0) "
+                    f"return na<double>(); return (double)({member} - _pf_bar_back); }}())")
 
         if isinstance(expr_node, Subscript):
             if isinstance(expr_node.object, Identifier):
@@ -5365,6 +5951,7 @@ class SecurityEmitter:
                         index_cpp, expr_node.index, "int"
                     )
                     result_key = (idx, sig)
+                    self._security_note_ta_read(result_key)
                     if result_key not in ta_results:
                         self._codegen_error(
                             expr_node,
@@ -5410,6 +5997,7 @@ class SecurityEmitter:
                         ta_binding_stack,
                         emitted_lines,
                     )
+                self._security_note_ta_read((idx, sig))
                 if (idx, sig) not in ta_results:
                     self._codegen_error(
                         expr_node,
@@ -5524,6 +6112,14 @@ class SecurityEmitter:
                         expr_node,
                         "request.security helper functions must not recurse while building a security context",
                     )
+                shared = getattr(self, "_security_shared_calls", None)
+                share_key = None
+                if shared is not None:
+                    # A pure call reached again with the same arguments reads
+                    # what its first reach spelled (``_security_share_pure_call``).
+                    share_key = self._security_shared_call_key(expr_node, helper_binding_stack)
+                    if share_key is not None and share_key in shared:
+                        return shared[share_key]
                 resolving.add(call_key)
                 plan = self._security_helper_call_plan(
                     expr_node,
@@ -5555,6 +6151,10 @@ class SecurityEmitter:
                         resolving,
                     )
                 resolving.remove(call_key)
+                if share_key is not None:
+                    resolved = shared[share_key] = self._security_share_pure_call(
+                        sec_id, resolved
+                    )
                 return resolved
 
         if (
@@ -5574,6 +6174,8 @@ class SecurityEmitter:
             if math_site is not None:
                 math_idx = self._ta_index_by_site_id.get(id(math_site))
                 math_sig = self._security_binding_stack_signature(helper_binding_stack)
+                if math_idx is not None:
+                    self._security_note_ta_read((math_idx, math_sig))
                 if math_idx is not None and (math_idx, math_sig) in ta_results:
                     return ta_results[(math_idx, math_sig)]
             if math_site is None:
@@ -5597,6 +6199,7 @@ class SecurityEmitter:
             sig = self._security_binding_stack_signature(helper_binding_stack)
             if idx is not None:
                 result_key = (idx, sig)
+                self._security_note_ta_read(result_key)
                 if result_key in ta_results:
                     return ta_results[result_key]
             sec_name = self._security_ta_variant_names.get(
@@ -5636,6 +6239,7 @@ class SecurityEmitter:
         self._security_check_tuple_element_history(expr_node, sec_id, helper_binding_stack)
         chart: set[int] = set()
         if self._security_requested_calls:
+            self._security_warn_global_history(expr_node, helper_binding_stack, sec_id)
             chart_read = self._security_root_chart_read(
                 expr_node, helper_binding_stack, sec_id, security_mutable_names
             )
@@ -5934,6 +6538,18 @@ class SecurityEmitter:
                         global_expr_map[node.name], (), depth + 1
                     )
         if isinstance(node, FuncCall) and self._security_user_call_key(node) is not None:
+            share_key = self._security_shared_call_key(node, helper_binding_stack)
+            if share_key is not None:
+                # A pure call's answer follows from its arguments' values.
+                memo = getattr(self, "_security_emits_double_memo", None)
+                if memo is None:
+                    memo = self._security_emits_double_memo = {}
+                if (share_key, depth) not in memo:
+                    plan = self._security_helper_call_plan(node, helper_binding_stack)
+                    memo[(share_key, depth)] = self._security_emits_double(
+                        plan["expr"], plan["binding_stack"], depth + 1
+                    )
+                return memo[(share_key, depth)]
             try:
                 plan = self._security_helper_call_plan(node, helper_binding_stack)
             except CompileError:
@@ -5997,7 +6613,13 @@ class SecurityEmitter:
         if isinstance(node, FuncCall):
             return self._security_call_inlinable(node)
         if isinstance(node, Identifier):
-            return self._security_fallback_owns_name(node, helper_binding_stack)
+            return (self._security_fallback_owns_name(node, helper_binding_stack)
+                    or self._security_fallback_owns_global(node)
+                    or (self._security_is_bar_index(node)
+                        and sec_id in self._security_bar_index_secs))
+        if (isinstance(node, Subscript) and self._security_is_bar_index(node.object)
+                and sec_id in self._security_bar_index_secs):
+            return True
         if isinstance(node, Subscript):
             obj = node.object
             if isinstance(obj, Identifier):
@@ -6109,3 +6731,140 @@ class SecurityEmitter:
                 out.add(id(n))
                 stack.extend(v for k, v in vars(n).items() if k != "annotations")
         return out
+
+    def _security_fallback_owns_global(self, node: Identifier) -> bool:
+        """A global the builder spells on the requested bar under a builtin
+        call (``nz(s)``) as it spells the bare payload global: one the
+        expression map holds (declared once, not ``var``), not replayed
+        state, not a per-run value (an input or constant reads the same on
+        either bar). The visitor used to render it from the chart's member,
+        silently (P6 of lane CG-SECURITY-2). Its history (``nz(s[1])``) stays
+        the visitor's, and a payload that reads it beside a name the builder
+        owns falls back whole (``_emit_security_evaluator_requested``)."""
+        if not self._security_identifier_is_global_binding(node):
+            return False
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        return (
+            node.name in global_expr_map
+            and node.name not in self._global_mutable_infos
+            and node.name not in _SECURITY_REQUESTED_NAMES
+            and not self._expr_is_stable(node)
+        )
+
+    def _security_warn_global_history(
+        self,
+        root,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...],
+        sec_id: int,
+    ) -> None:
+        """Warn where an argument of a builtin call in a payload reads a
+        global's history (``nz(s[1])``): the visitor renders it from the
+        chart's series, while TradingView evaluates it on the requested bar,
+        and the builder keeps no requested history of a global's expression.
+        The global's value is the builder's (``_security_fallback_owns_global``)."""
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        warned = getattr(self, "_security_warned_global_history", None)
+        if warned is None:
+            warned = self._security_warned_global_history = set()
+        for n in self._walk_ast(root):
+            if (n is not root
+                    and isinstance(n, Subscript) and isinstance(n.object, Identifier)
+                    and self._security_identifier_is_global_binding(n.object)
+                    and n.object.name in global_expr_map
+                    and n.object.name not in self._global_mutable_infos
+                    and not self._security_fallback_owns(n, helper_binding_stack, sec_id)
+                    and id(n) not in warned):
+                warned.add(id(n))
+                self._codegen_warning(
+                    n,
+                    f"request.security payload reads the history of '{n.object.name}' "
+                    "under a builtin call on the chart's bar; TradingView evaluates "
+                    "it on the requested bar.",
+                )
+
+    def _security_var_input_call(self, node: Identifier):
+        """The input call of a never-reassigned ``var v = input.*()`` read
+        while a TA constructor argument or history index is lowered, or None.
+
+        Such a ``v`` holds the input's value on every bar, and there it is
+        read through its getter, as a plain input is (the plain one inlines
+        through the expression map, which holds no ``var``):
+        ``evaluate_security`` resets the TA object before ``on_bar`` has
+        initialized the member, so ``g(close, int(vf))`` built
+        ``ta::SMA((int)vf)`` from an ``na`` member, a length of INT_MIN, and
+        the run crashed (P1 of lane CG-SECURITY-2's review)."""
+        if not (self._security_index_inputs
+                and self._security_identifier_is_global_binding(node)):
+            return None
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        if node.name in global_expr_map:
+            return None
+        return self._input_var_to_call.get(node.name)
+
+    @staticmethod
+    def _security_bar_index_member(sec_id: int) -> str:
+        return f"_sec{sec_id}_bar_index_"
+
+    def _security_is_bar_index(self, node) -> bool:
+        """The built-in ``bar_index``, where no declaration binds the name."""
+        return (isinstance(node, Identifier) and node.name == "bar_index"
+                and "bar_index" not in getattr(self, "_safe_name_bound", ()))
+
+    def _security_reads_bar_index(self, expr_node) -> bool:
+        """Whether a payload reads ``bar_index``: in itself, the globals it
+        reads or the user functions it calls. TradingView evaluates it on
+        the requested bar -- the count of requested bars before it -- where
+        the evaluator used to read the chart's (``pine_bar_index()``)."""
+        from ..limits import iter_ast_nodes
+
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        seen: set[tuple[str, str]] = set()
+        pending = [expr_node]
+        while pending:
+            root = pending.pop()
+            if not isinstance(root, ASTNode):
+                continue
+            for n, _depth in iter_ast_nodes(root):
+                if self._security_is_bar_index(n):
+                    return True
+                if (isinstance(n, Identifier) and n.name in global_expr_map
+                        and ("global", n.name) not in seen
+                        and self._security_identifier_is_global_binding(n)):
+                    seen.add(("global", n.name))
+                    pending.append(global_expr_map[n.name])
+                if (isinstance(n, FuncCall) and isinstance(n.callee, Identifier)
+                        and n.callee.name in self._func_names
+                        and ("func", n.callee.name) not in seen):
+                    seen.add(("func", n.callee.name))
+                    info = self._func_info_map.get(n.callee.name)
+                    if info is not None and getattr(info, "node", None) is not None:
+                        pending.extend(info.node.body)
+        return False
+
+    def _security_variant_order_key(self, signature: tuple, binding_stack) -> tuple:
+        """The order of a TA site's requested-context variants (``_v0``,
+        ``_v1``, ...): where each argument binding's value is written in the
+        source, then the signature. The signature names a bound node by its
+        ``id()``, so ordering by its ``repr`` followed memory addresses, and
+        the same script could number its variants differently from run to
+        run or between CPython and Pyodide."""
+        frames = []
+        for idx, frame in enumerate(binding_stack or ()):
+            if idx == 0 or isinstance(frame, _SecurityHelperArgumentFrame):
+                items = []
+                for name, node in sorted(frame.items(), key=lambda item: item[0]):
+                    if isinstance(node, str):
+                        items.append((name, 0, 0, 0, node))
+                    else:
+                        loc = getattr(node, "loc", None)
+                        items.append((
+                            name,
+                            getattr(loc, "line", 0) or 0,
+                            getattr(loc, "col", 0) or 0,
+                            getattr(loc, "end_col", 0) or 0,
+                            type(node).__name__,
+                        ))
+                frames.append(("arguments", tuple(items)))
+            else:
+                frames.append(("locals", tuple(sorted(frame.keys()))))
+        return tuple(frames), repr(signature)

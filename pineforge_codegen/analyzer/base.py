@@ -30,7 +30,7 @@ from ..symbols import (
 )
 from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes
-from ..security_contexts import context_key, reads_bar_series
+from ..security_contexts import PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series
 from ..session_reads import emitted_session_reads
 from ..method_binding import (
     BoundMethodArgs,
@@ -155,7 +155,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_infos: list[FuncInfo] = []
         self._fixnan_sites: list[FixnanCallSite] = []
         self._strategy_params: dict = {}
-        self._diagnostics: list[Diagnostic] = []
+        # The warnings of the passes between the support checker and here,
+        # held on the Program as (message, hint, location).
+        self._diagnostics: list[Diagnostic] = [
+            Diagnostic(level=Level.WARNING, phase=Phase.ANALYZER, location=loc,
+                       message=message, hint=hint)
+            for message, hint, loc in (ast.annotations or {}).get(PASS_WARNINGS_ANNOTATION, ())]
         self._global_var_decls: list[tuple[str, PineType]] = []
         # Top-level ordinary bindings are lexical global state even when a
         # same-named callable history reference has already polluted the
@@ -244,6 +249,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._func_tuple_element_count: dict[str, int] = {}
         self._func_tuple_element_types: dict[str, tuple[PineType, ...]] = {}
         self._tuple_element_types_by_node: dict[int, tuple[PineType, ...]] = {}
+        # request.security call id -> its tuple's size (``call_handlers``).
+        self._security_tuple_shapes: dict[int, int] = {}
         # Track user-defined functions whose body returns a UDT instance —
         # maps func_name -> UDT type name. Detected from the body's final
         # expression (``=> Sample.new(...)`` or last stmt ``Sample.new(...)``).
@@ -2232,8 +2239,14 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     out |= self._collect_security_mutable_globals(arg, resolving)
                 for value in node.kwargs.values():
                     out |= self._collect_security_mutable_globals(value, resolving)
-                for stmt in self._func_defs[func_name].body:
-                    out |= self._collect_security_mutable_globals(stmt, resolving)
+                # One walk of a body holds every global it reads, and the walk
+                # returns their union: a helper reached again (``f(x) + f(x)``,
+                # a diamond of such helpers) is not walked once per path.
+                walked = f"walked:{func_name}"
+                if walked not in resolving:
+                    resolving.add(walked)
+                    for stmt in self._func_defs[func_name].body:
+                        out |= self._collect_security_mutable_globals(stmt, resolving)
                 resolving.remove(call_key)
                 return out
 
@@ -3482,8 +3495,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         continue  # shouldn't happen: has_ta/has_series tracks ALL call sites
                     cs_idx = cs_info[1]
                 else:
+                    # Numbered in func_call_cs_map only if the request is
+                    # cloned below: a call mapped to ``f_cs0`` while one
+                    # context left ``f`` uncloned named a function nothing
+                    # emits (``f(string sym) => request.security(sym, "60",
+                    # close[1])`` did not compile).
                     cs_idx = i
-                    self._func_call_cs_map.setdefault(id(call), (containing, cs_idx))
                 key: list = []
                 timeframe = tf_node
                 if tf_param is not None:
@@ -3532,6 +3549,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 # func_security_clone_only) actually clones its body, with
                 # self._active_call_site_idx set to each of our cs_idx values
                 # in turn while it does.
+                for cs_idx, call in enumerate(calls):
+                    self._func_call_cs_map.setdefault(id(call), (containing, cs_idx))
                 self._func_call_site_count[containing] = len(calls)
                 self._func_security_clone_only.add(containing)
             # Clone: one SecurityCallInfo per call site, each registered with
@@ -3557,6 +3576,8 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     callsite_idx=cs_idx,
                     string_result=sec.string_result,
                     symbol=sec.symbol,
+                    foreign=sec.foreign,
+                    ignore_invalid=sec.ignore_invalid,
                 )
                 new_calls.append(clone)
                 next_sec_id += 1
@@ -3729,7 +3750,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     def _visit_ImportStmt(self, node: ImportStmt) -> PineType:
         # Imported here: the support checker imports the analyzer package.
-        from ..support_checker import import_is_builtin_namespace_no_op, import_spelling
+        from ..support_checker import import_is_builtin_namespace_no_op, import_refusal
         if import_is_builtin_namespace_no_op(self._ast, node):
             return PineType.VOID
         loc = node.loc or SourceLocation(file=self._filename, line=1, col=1, end_col=1)
@@ -3737,7 +3758,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             level=Level.ERROR,
             phase=Phase.ANALYZER,
             location=loc,
-            message=f"Import is not supported: '{import_spelling(node)}'",
+            message=import_refusal(node),
         )
         raise CompileError([diag])
 
@@ -4662,6 +4683,20 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     self._func_tuple_element_types[node.name] = (
                         self._func_tuple_element_types.get(terminal_callee, ())
                     )
+            elif (
+                isinstance(terminal_ret_expr, FuncCall)
+                and id(terminal_ret_expr) in self._security_tuple_shapes
+            ):
+                # ``htf(sym, tf) => request.security(sym, tf, pack())``
+                # returns the requested tuple: it was typed a double, which
+                # did not compile, and its callers destructure it.
+                self._func_returns_tuple[node.name] = True
+                self._func_tuple_element_count[node.name] = (
+                    self._security_tuple_shapes[id(terminal_ret_expr)]
+                )
+                self._func_tuple_element_types[node.name] = (
+                    self._tuple_element_types_by_node.get(id(terminal_ret_expr), ())
+                )
 
         # Re-run direct-wrapper propagation to a fixed point whenever a new
         # definition is analyzed. This makes ``outer()=>inner()`` source-order
@@ -5630,6 +5665,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     self._visit(arg)
                 return PineType.COLOR
 
+            # string(x): Pine's cast to string, usually of na
+            # (``[string(na), string(na)]`` arms of a string tuple). It fell
+            # to the unknown-builtin default FLOAT, which untyped a selection
+            # tuple whose other arm carries strings.
+            if func_name == "string":
+                for arg in node.args:
+                    self._visit(arg)
+                for val in node.kwargs.values():
+                    self._visit(val)
+                return PineType.STRING
+
             # User-defined function call
             if func_name in self._func_defs:
                 return self._handle_user_func_call(func_name, node)
@@ -5896,6 +5942,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         """Re-run map-history safety after untyped callable args are known."""
         if owner in visiting:
             return
+        # The same owner, specs and path check the same nodes again, so a
+        # helper that a diamond of callers reaches (``f1(x) => f0(x) +
+        # f0(x)``, ...) is validated once, not once per path. A failed check
+        # raises, so only a passed validation is remembered.
+        key = (
+            owner, visiting, tuple(sorted(parameter_specs.items())),
+            len(self._deferred_param_history_refs.get(owner, [])),
+            len(self._deferred_param_call_edges.get(owner, [])),
+        )
+        validated = self.__dict__.setdefault("_deferred_param_history_validated", set())
+        if key in validated:
+            return
         next_visiting = visiting | {owner}
         for node, parameter_nodes in self._deferred_param_history_refs.get(
             owner, []
@@ -5944,6 +6002,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 callee_specs,
                 next_visiting,
             )
+        validated.add(key)
 
     def _propagate_deferred_map_callable_specs(
         self,

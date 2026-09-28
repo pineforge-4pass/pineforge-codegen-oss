@@ -321,6 +321,43 @@ CPP_RESERVED = set(
     CPP_STANDARD_MACROS | CPP_EMITTER_NAMES | HOST_MEMBER_NAMES
 )
 
+# Temporaries the emitter declares in the C++ it generates around a user's
+# expression: nz's ``[&]{ auto _nz_v = (x); ... }()``, a comparison's
+# ``_pna_l`` / ``_pna_r``, a history read's ``_hv``, a switch's
+# ``__switch_val_N``, timestamp()'s calendar fields, the str.* / array.*
+# templates' locals (``__pf_s``, ``__pf_it``, ...). An authored identifier
+# spelled like one was captured: the generated local shadowed it where the
+# user's expression read it (``nz(x, _nz_v)`` read the lambda's own
+# ``_nz_v``) or initialized itself from itself (``_pna_l > close`` did not
+# compile). ``_safe_name`` escapes an authored spelling of any of them. A
+# temporary whose name the emitter allocates against the authored spellings
+# itself (``__pf_map_iter_N``, ``_pf_udt_Item__pf2``) is not listed.
+CPP_TEMPORARY_NAMES = frozenset("""
+    _nz_v _nz_y _fixnan_v _pna_l _pna_r _pfc_l _pfc_r _pfc_eq _hv _hidx _sv
+    _out _func_ret _pf_v _pf_idx_v _pf_idx_t _pf_bool_v _pf_bool_t
+    _pf_color_v _pf_color_t _pf_color_base _pf_color_alpha _pf_sign_v
+    _pf_series_raw _pf_raw _pf_val_t _pf_out _pf_prior
+    _pf_hist_offset_raw _pf_hist_offset_numeric _pf_hist_offset _pf_hist_bar
+    _pf_calendar_ts _pf_calendar_tz
+    _tz _yr _mo _dy _hr _min _sc _res _old _old_tz _had_old _secs
+    _last_tz _last_yr _last_mo _last_dy _last_hr _last_min _last_sc
+    _last_res
+    __pf_s __pf_r __pf_p __pf_i __pf_j __pf_t __pf_it __pf_m __pf_c __pf_n
+    __pf_k __pf_b __pf_ma __pf_mb __pf_f __pf_d __pf_best __pf_bc __pf_rank
+    __pf_idx __pf_occ
+""".split())
+_CPP_TEMPORARY_PATTERN = re.compile(
+    r"_v\d+|_secval_\d+(?:_v\d+)?|_tuple_result_\d+|_tuple_unused_\d+|__switch_val_\d+"
+    r"|_for_(?:start|end|end_eval)_\d+|_pf_(?:str|array|round)_a\d+"
+    r"|_pf_every_bar_ta_\d+|_pf_shared_\d+_\d+|__pf_array\w*|__pf_raw_\w+"
+)
+
+
+def is_emitter_temporary(name: str) -> bool:
+    """Whether ``name`` is spelled like a temporary of the emitter's."""
+    return (name in CPP_TEMPORARY_NAMES
+            or _CPP_TEMPORARY_PATTERN.fullmatch(name) is not None)
+
 
 # Bare C++ identifiers that ``strategy.*`` (and a few other) read-only
 # accessors lower to as zero-arg free-function calls — e.g.
@@ -418,7 +455,8 @@ class NamingHelper:
         self._safe_name_occupied = authored
         self._safe_name_bound = bound
         for name in sorted(bound):
-            if name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES:
+            if (name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES
+                    or is_emitter_temporary(name)):
                 self._allocate_safe_name(name)
 
     def _allocate_safe_name(self, name: str) -> str:
@@ -430,7 +468,8 @@ class NamingHelper:
         candidate = base
         suffix = 2
         while (candidate in occupied or candidate in CPP_RESERVED
-               or candidate in BUILTIN_ACCESSOR_NAMES):
+               or candidate in BUILTIN_ACCESSOR_NAMES
+               or is_emitter_temporary(candidate)):
             candidate = f"{base}_{suffix}"
             suffix += 1
         self._safe_name_map[name] = candidate
@@ -444,7 +483,8 @@ class NamingHelper:
             return mapping[name]
         if mapping is not None and name not in self._safe_name_bound:
             return name
-        if name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES:
+        if (name in CPP_RESERVED or name in BUILTIN_ACCESSOR_NAMES
+                or is_emitter_temporary(name)):
             if mapping is None:
                 return (f"_{name}_" if name in LEGACY_CPP_RESERVED
                         or name in BUILTIN_ACCESSOR_NAMES

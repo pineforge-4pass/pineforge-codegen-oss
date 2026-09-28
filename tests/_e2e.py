@@ -88,10 +88,12 @@ _GLUE_MAIN = (
 )
 
 
-def transpile_json(pine: Path, root: Path = REPO_ROOT) -> dict:
+def transpile_json(pine: Path, root: Path = REPO_ROOT,
+                   extra_env: dict[str, str] | None = None) -> dict:
     """``transpile_json`` of the glue and codegen under ``root`` (this checkout
-    by default, or a ``reference_codegen`` tree)."""
-    env = dict(os.environ, PYTHONPATH=str(root))
+    by default, or a ``reference_codegen`` tree), with ``extra_env`` (e.g. the
+    library environment ``pine_libraries`` reads) in its environment."""
+    env = dict(os.environ, PYTHONPATH=str(root), **(extra_env or {}))
     proc = subprocess.run(
         [sys.executable, "-c", _GLUE_MAIN, str(root / "gate"), str(pine)],
         capture_output=True, text=True, timeout=300, env=env, cwd=root)
@@ -215,6 +217,8 @@ class Build:
     overrides: dict | None = None
     trace: bool = False
     codegen: Path | None = None
+    # (name, value) pairs added to the transpile's environment.
+    env: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -233,7 +237,8 @@ def execute(engine_root: Path, feed: Path, workdir: Path, build: Build) -> Outco
     pine = workdir / "strategy.pine"
     pine.write_text(build.source, encoding="utf-8")
     try:
-        outcome.transpiled = transpile_json(pine, build.codegen or REPO_ROOT)
+        outcome.transpiled = transpile_json(pine, build.codegen or REPO_ROOT,
+                                            dict(build.env))
         if not outcome.transpiled.get("ok"):
             outcome.error = "transpile_json refused it:\n" + json.dumps(
                 outcome.transpiled.get("diagnostics"), indent=1, ensure_ascii=False)

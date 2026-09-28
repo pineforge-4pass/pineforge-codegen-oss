@@ -1,0 +1,27 @@
+//@version=6
+strategy("pf-open-items-untyped-collections", overlay = true)
+
+// Collection-returning calls bound to untyped variables: matrix rows and
+// columns, eigenvalues, and array methods that return a new array, in the
+// namespace and the method form.
+w = close % 7
+m = matrix.new<float>(2, 2, 1.0)
+matrix.set(m, 0, 1, w)
+matrix.set(m, 1, 0, 2.0)
+r1 = matrix.row(m, 0)
+r2 = m.row(1)
+c1 = matrix.col(m, 1)
+e1 = matrix.eigenvalues(m)
+a = array.from(3.0, -1.0, 2.0, w)
+s1 = array.standardize(a)
+s2 = a.standardize()
+b1 = array.abs(a)
+b2 = a.abs()
+i1 = array.sort_indices(a)
+i2 = a.sort_indices()
+
+fmt(v) => str.tostring(v, "#.####")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = fmt(array.sum(r1)) + "|" + fmt(array.sum(r2)) + "|" + fmt(array.sum(c1)) + "|" + fmt(array.max(e1)) + "|" + fmt(array.get(s1, 0)) + "|" + fmt(array.get(s2, 3)) + "|" + fmt(array.sum(b1)) + "|" + fmt(array.min(b2)) + "|" + str.tostring(array.get(i1, 0)) + "|" + str.tostring(array.get(i2, 3)) + "|" + fmt(w))

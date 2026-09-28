@@ -48,10 +48,16 @@ from .ast_nodes import (
     TypeDecl, EnumDecl, MethodDef,
 )
 from .errors import SourceLocation, Diagnostic, CompileError, Level, Phase
+from .builtin_keywords import POSITIONAL_BUILTINS
 from .pine_spelling import expr_start
 from .external_requests import (
-    LOWERING_ANNOTATION, NO_DATA_REQUEST_FUNCS, TradeSlice, spell_call,
+    ABSENT_LOWERING, CHART_FALLBACK_ANNOTATION, FEED_LOWERING, FEED_WARNING_ANNOTATION,
+    FOOTPRINT_COLUMN_ANNOTATION, LOWERING_ANNOTATION, NO_DATA_REQUEST_FUNCS,
+    RECORDED_LOWERING, FootprintValues, TradeSlice, footprint_column, recorded_key,
+    spell_call,
 )
+from .external_requests import _nodes as _walk_nodes
+from .security_contexts import ticker_symbol_arg
 from . import signatures as sigs
 from .tv_input_choices import INPUT_SOURCE_SERIES_IDS
 from .analyzer import TA_CLASS_MAP
@@ -125,8 +131,9 @@ _VISUAL_CONTAINER_TYPES: frozenset[str] = _DRAWING_TYPE_NAMES | frozenset({"tabl
 SUPPORTED_COLOR_CONST: frozenset[str] = frozenset(COLOR_CONST_MAP)
 SUPPORTED_COLOR_FUNC: frozenset[str] = frozenset({"new", "rgb", "r", "g", "b", "t"})
 # Cosmetic color builders with no backtest-logic effect. Warned (not rejected);
-# codegen emits a benign default color (0 = na color). color.from_gradient is a
-# charting/plot helper that only tints visual output.
+# codegen evaluates the arguments (their side effects and history are
+# TradingView's) and emits a benign default color (0 = na color).
+# color.from_gradient is a charting/plot helper that only tints visual output.
 COSMETIC_COLOR_FUNC: frozenset[str] = frozenset({"from_gradient"})
 SUPPORTED_TIMEFRAME_FUNC: frozenset[str] = frozenset({"change", "in_seconds"})
 SUPPORTED_RUNTIME_FUNC: frozenset[str] = frozenset({"error"})
@@ -139,7 +146,8 @@ SUPPORTED_LOG: frozenset[str] = frozenset({"info", "warning", "error"})
 # Requests PineForge has no data for (``external_requests``): refused only
 # when their value can reach a trade; one that reaches display and alert sinks
 # only is lowered to na with a warning. ``request.security`` on another
-# symbol follows the same rule.
+# symbol follows the same rule when it reads no feed; ``request.footprint``
+# as its whole expression reads the feed's delta column.
 NO_DATA_REQUEST_FUNC: dict[str, str] = {
     "request.financial":         "External fundamentals data not available in PineForge.",
     "request.dividends":         "External corporate-action data not available in PineForge.",
@@ -387,10 +395,10 @@ UNSUPPORTED_NAMESPACE_VARS: dict[str, str] = {
 # Codegen supports symbol/timeframe/expression plus gaps/lookahead (read in
 # _eval_security_* emission and forwarded to register_security_eval).
 # `currency` is still rejected loudly (it changes the returned values via FX
-# conversion, which codegen drops — silently wrong). `ignore_invalid_symbol` is
-# a guaranteed no-op here: codegen forces request.security onto the current
-# chart symbol (see the "symbol must reference current chart symbol" check),
-# which is always valid, so the flag can never change the result — accept+ignore.
+# conversion, which codegen drops — silently wrong). `ignore_invalid_symbol`
+# is registered with a request of another symbol that reads its pinned feed
+# (na for a symbol its facts say is invalid); the chart's own symbol is always
+# valid, where the flag changes nothing.
 SECURITY_ALLOWED_PARAMS: frozenset[str] = frozenset(
     {"symbol", "timeframe", "expression", "gaps", "lookahead",
      "ignore_invalid_symbol",
@@ -437,6 +445,15 @@ BUILTIN_NAMESPACE_IMPORT_MEMBERS: dict[str, frozenset[str]] = {
 def import_spelling(node: ImportStmt) -> str:
     """The import as the refusal names it: ``user/name/version [as alias]``."""
     return f"{node.path} as {node.alias}" if node.alias else node.path
+
+
+def import_refusal(node: ImportStmt) -> str:
+    """The refusal of an import PineForge did not inline, with the reason the
+    library inliner recorded when library sources were configured but none
+    applies to the script (``pine_libraries``)."""
+    message = f"Import is not supported: '{import_spelling(node)}'"
+    reason = (node.annotations or {}).get("unresolved_reason")
+    return f"{message}: {reason}" if reason else message
 
 
 def import_is_builtin_namespace_no_op(program: Program, node: ImportStmt) -> bool:
@@ -600,8 +617,16 @@ class SupportChecker:
         # Inside the arguments of a request PineForge has no data for, whose
         # field constants (``earnings.actual``) name what it would read.
         self._request_field_ctx_depth: int = 0
+        # request.footprint calls that are the whole expression of a request
+        # of another symbol reading its feed (_lower_foreign_request).
+        self._feed_footprints: set[int] = set()
+        # Inside a request.security call's arguments (its expression).
+        self._security_payload_depth: int = 0
+        self._footprints: FootprintValues | bool | None = None
         # Built on the first request with no data: which values reach a trade.
         self._trade_slice: TradeSlice | None = None
+        # The helpers a request expression calls (_in_request_expression).
+        self._payload_funcs: set[str] | None = None
         # id()s of Identifier/MemberAccess nodes that are the *callee* of a
         # FuncCall. A divergent built-in NAME used as a call target (e.g. the
         # session-aware ``time_close("D")`` function, which is distinct from the
@@ -1281,9 +1306,10 @@ class SupportChecker:
 
     def _visit_ImportStmt(self, node: ImportStmt) -> None:
         if not import_is_builtin_namespace_no_op(self._ast, node):
-            self._err(node, f"Import is not supported: '{import_spelling(node)}'")
+            self._err(node, import_refusal(node))
 
     def _visit_VarDecl(self, node: VarDecl) -> None:
+        self._check_tuple_literal_value(node.value)
         if node.name and node.value is not None:
             self._scalar_defs.setdefault(node.name, node.value)
         if node.name and (node.is_var or node.is_varip):
@@ -1331,6 +1357,7 @@ class SupportChecker:
             )
             self._visit_children(node)
             return
+        self._check_tuple_literal_value(node.value)
         # ``_scalar_defs`` records only the DECLARATION, so a later ``:=``
         # rebind used to be invisible to the request.security symbol check.
         # (``check`` also pre-collects these; recording here keeps the visit
@@ -1338,7 +1365,50 @@ class SupportChecker:
         self._record_scalar_rebind(node)
         self._visit_children(node)
 
+    def _check_tuple_literal_value(self, value) -> None:
+        """Refuse a tuple literal or a ternary of tuples as a declaration's
+        or reassignment's value.
+
+        TradingView takes a tuple literal only as a function's or an
+        if/switch arm's value and as a request.security expression:
+        ``[a, b] = [close, open]`` and ``t = [close, open]`` are "Syntax
+        error at input '['" (CE10156), ``[a, b] = c ? [x, y] : [y, x]`` is
+        "Ternary operations cannot return tuples" (lab tv --no-note). The
+        tuple declarations reached the C++ as a dropped statement ("/*
+        unsupported tuple assignment */", their names left at 0), the plain
+        declaration a tuple assigned to a double.
+        """
+        if isinstance(value, TupleLiteral):
+            self._err(
+                value,
+                "A tuple literal [..] cannot be a variable's value: TradingView "
+                "rejects it here (Syntax error at input '[', CE10156). A tuple "
+                "is only a function's or an if/switch arm's value or a "
+                "request.security expression.",
+                hint="Declare each variable on its own line (a = x, b = y), or "
+                     "return the tuple from a function: f() => [x, y], then "
+                     "[a, b] = f().",
+            )
+        elif isinstance(value, Ternary) and self._ternary_yields_tuple(value):
+            self._err(
+                value,
+                "A ternary cannot return a tuple: TradingView rejects "
+                "[a, b] = c ? [..] : [..] (\"Ternary operations cannot return "
+                "tuples\").",
+                hint="Select the tuple with an if or switch: [a, b] = if c, "
+                     "each arm ending in its tuple.",
+            )
+
+    @classmethod
+    def _ternary_yields_tuple(cls, node) -> bool:
+        return any(
+            isinstance(arm, TupleLiteral)
+            or (isinstance(arm, Ternary) and cls._ternary_yields_tuple(arm))
+            for arm in (node.true_val, node.false_val)
+        )
+
     def _visit_TupleAssign(self, node: TupleAssign) -> None:
+        self._check_tuple_literal_value(node.value)
         drawing_mask = self._tuple_assign_drawing_mask(node.value)
         if drawing_mask:
             for idx, name in enumerate(node.names):
@@ -1403,11 +1473,40 @@ class SupportChecker:
 
         full = f"{ns}.{name}" if ns else name
 
-        # A request PineForge has no data for: na when its value reaches
-        # display sinks only, else a deferred refusal.
-        if ns == "request" and name in NO_DATA_REQUEST_FUNCS:
-            self._lower_no_data_request(node, node, NO_DATA_REQUEST_FUNC[full])
+        # The footprint another symbol's feed carries: the column of the
+        # request.security whose whole expression this is.
+        if id(node) in self._feed_footprints:
+            node.annotations = {**(node.annotations or {}),
+                                FOOTPRINT_COLUMN_ANNOTATION: footprint_column(node)}
             self._visit_request_arguments(node)
+            return
+
+        # A request PineForge has no data for: na when its value reaches
+        # display sinks only, else its recorded series, or a deferred
+        # refusal when no key names it.
+        if ns == "request" and name in NO_DATA_REQUEST_FUNCS:
+            if name == "footprint":
+                self._lower_no_data_request(node, node, NO_DATA_REQUEST_FUNC[full])
+            else:
+                self._lower_recorded_request(node, NO_DATA_REQUEST_FUNC[full])
+            self._visit_request_arguments(node)
+            return
+
+        # A footprint value is its delta (external_requests.read_footprint_deltas):
+        # every other member is refused by name.
+        footprint = self._footprint_member(node)
+        if footprint is not None:
+            if footprint != "delta":
+                self._err(
+                    node, f"footprint.{footprint}(...) is not supported.",
+                    hint=("PineForge reads a footprint's delta() only: the "
+                          "fp_delta_<ticks>_<va> column of the feed a requests manifest pins "
+                          "for the symbol requested."))
+            receiver = node.callee.object
+            if not (isinstance(receiver, Identifier) and receiver.name == "footprint"):
+                self._visit(receiver)
+            for arg in (*node.args, *node.kwargs.values()):
+                self._visit(arg)
             return
 
         # Hard rejects by full name.
@@ -1453,6 +1552,10 @@ class SupportChecker:
             return
         if ns is not None and name in NOT_YET_FUNC:
             self._err(node, f"{name}(...) is not implemented yet.", hint=NOT_YET_FUNC[name])
+            self._visit_children(node)
+            return
+        if (ns is None and name in POSITIONAL_BUILTINS
+                and not self._check_builtin_arguments(node, name)):
             self._visit_children(node)
             return
 
@@ -1562,13 +1665,18 @@ class SupportChecker:
         # validated above by _check_request_security and consumed by codegen.
         if full == "request.security":
             self._check_request_security(node)
-            self._visit_children_const_ok(node)
+            self._security_payload_depth += 1
+            try:
+                self._visit_children_const_ok(node)
+            finally:
+                self._security_payload_depth -= 1
             return
         # request.security_lower_tf — analyzer/codegen handle parameter validation
         # and element-type rejection (UDT/color/string). Still validate the
         # timeframe literal here so codegen catches malformed TF strings early.
         if full == "request.security_lower_tf":
             self._check_request_security_lower_tf_tf(node)
+            self._check_request_security_lower_tf_symbol(node)
             self._visit_children_const_ok(node)
             return
         if ns == "request":
@@ -1653,7 +1761,8 @@ class SupportChecker:
             self._warn(
                 node,
                 f"color.{name}(...) has no effect in PineForge backtests "
-                f"(visual only); it emits a default color.",
+                f"(visual only); it evaluates its arguments and emits a "
+                f"default color.",
             )
             self._visit_children(node)
             return
@@ -1972,20 +2081,18 @@ class SupportChecker:
             scoped_safe = self._is_current_symbol_expr(symbol_node)
             legacy_safe = self._is_current_symbol_expr(symbol_node, legacy_names=True)
             if not scoped_safe and not legacy_safe:
-                # Another symbol: PineForge has no data for it.
-                self._lower_no_data_request(
-                    node, symbol_node,
-                    "PineForge backtests load the chart's symbol only "
-                    "(syminfo.tickerid, syminfo.ticker).")
+                # Another symbol: its pinned feed, when one can be read.
+                self._lower_foreign_request(node, symbol_node)
             elif not scoped_safe or not self._is_current_symbol_expr(
                 symbol_node, require_all_paths=True
             ):
-                self._warn(
-                    symbol_node,
-                    "request.security symbol can select an alternate symbol, but "
-                    "PineForge always loads the current chart symbol.",
-                    hint="Every reachable symbol value must resolve to syminfo.tickerid or syminfo.ticker for exact results.",
-                )
+                if not self._lower_alternate_symbol(node, symbol_node):
+                    self._warn(
+                        symbol_node,
+                        "request.security symbol can select an alternate symbol, but "
+                        "PineForge always loads the current chart symbol.",
+                        hint="Every reachable symbol value must resolve to syminfo.tickerid or syminfo.ticker for exact results.",
+                    )
 
         # timeframe literal-format check (positional [1] or kwarg).
         tf_node = node.kwargs.get("timeframe")
@@ -2043,14 +2150,17 @@ class SupportChecker:
         # wrong-result bug. See SECURITY_ADJUSTMENT_ALLOWED_VALUES.
         self._check_security_adjustment_kwargs(node)
 
-    def _lower_no_data_request(self, node: FuncCall, at: ASTNode, why: str) -> None:
+    def _lower_no_data_request(self, node: FuncCall, at: ASTNode, why: str,
+                               reason: str | None | object = ...) -> None:
         """A request PineForge has no data for: lowered to na, with a
         warning, when its value reaches display and alert sinks only; else a
         deferred refusal whose first read stops the run
-        (``external_requests``)."""
+        (``external_requests``). ``reason`` is the trade slice's, when the
+        caller has it."""
         if self._trade_slice is None:
             self._trade_slice = TradeSlice(self._ast)
-        reason = self._trade_slice.reason(node)
+        if reason is ...:
+            reason = self._trade_slice.reason(node)
         lowering = "inert" if reason is None else "unpinned"
         node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: lowering}
         if reason is None:
@@ -2067,6 +2177,217 @@ class SupportChecker:
                 "stops with an error where its value is read.",
                 hint=f"{why} Its value can reach a trade: {reason}.",
             )
+
+    def _lower_foreign_request(self, node: FuncCall, symbol_node: ASTNode) -> None:
+        """``request.security`` of another symbol. Its value reaches display
+        and alert sinks only: na, as before. Otherwise it reads the feed the
+        probe's requests manifest pins for the symbol (``FEED_LOWERING``),
+        with its first read stopping the run when none is installed; a shape
+        registration cannot key keeps the deferred refusal."""
+        if self._trade_slice is None:
+            self._trade_slice = TradeSlice(self._ast)
+        reason = self._trade_slice.reason(node)
+        blocker = None if reason is None else self._foreign_feed_blocker(node, symbol_node)
+        if reason is None or blocker is not None:
+            self._lower_no_data_request(
+                node, symbol_node,
+                "PineForge backtests load the chart's symbol only "
+                "(syminfo.tickerid, syminfo.ticker)"
+                + (f", and reads another symbol's feed only when {blocker}." if blocker
+                   else "."),
+                reason=reason)
+            return
+        self._mark_feed(node)
+        self._feed_warning(
+            node, symbol_node,
+            f"{spell_call(node)}: another symbol's bars, read from the feed the requests "
+            "manifest pins for it; with none installed, the run stops with an error where "
+            "its value is read.",
+            hint=("PineForge runs the expression on that symbol's own bars (history, ta.* "
+                  "and syminfo.* in its context) and merges them by time as TradingView "
+                  "does; a symbol equal to the chart's reads the chart."),
+        )
+
+    def _feed_warning(self, node: FuncCall, at: ASTNode, message: str, hint: str) -> None:
+        """Warn that ``node`` reads a feed -- or, when its symbol or
+        timeframe reaches it through a helper's parameters, leave the warning
+        to ``security_contexts``, which keys it on every call path or keeps
+        its earlier lowering (``FEED_WARNING_ANNOTATION``)."""
+        index = self._trade_slice.index
+        symbol, tf = node.args[:2] if len(node.args) >= 2 else (
+            node.args[0] if node.args else node.kwargs.get("symbol"),
+            node.kwargs.get("timeframe"))
+        if index.depends_on_scope(symbol) or index.depends_on_scope(tf):
+            node.annotations = {**node.annotations,
+                                FEED_WARNING_ANNOTATION: (message, hint,
+                                                          _loc(at, self._filename))}
+            return
+        self._warn(at, message, hint=hint)
+
+    def _mark_feed(self, node: FuncCall) -> None:
+        node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: FEED_LOWERING}
+        payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+        if footprint_column(payload) is not None:
+            self._feed_footprints.add(id(payload))
+
+    def _lower_alternate_symbol(self, node: FuncCall, symbol_node: ASTNode) -> bool:
+        """A symbol that can select the chart's or another symbol's, and
+        whose value can reach a trade: registered by the string the run
+        computes, the chart's reading the chart and another's its pinned feed
+        (never the chart's bars in its place). False, keeping the chart's
+        lowering with its warning, for one whose value reaches display sinks
+        only or that registration cannot key."""
+        if self._trade_slice is None:
+            self._trade_slice = TradeSlice(self._ast)
+        if (self._trade_slice.reason(node) is None
+                or self._foreign_feed_blocker(node, symbol_node) is not None):
+            return False
+        self._mark_feed(node)
+        node.annotations = {**node.annotations, CHART_FALLBACK_ANNOTATION: True}
+        payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+        reads = ("a footprint reads the feed the requests manifest pins for each symbol, the "
+                 "chart's too (the chart's bars carry no footprint)"
+                 if footprint_column(payload) is not None else
+                 "the chart's reads the chart and another symbol's the feed the requests "
+                 "manifest pins for it")
+        self._feed_warning(
+            node, symbol_node,
+            f"{spell_call(node)}: its symbol can select another symbol: registered by the "
+            f"string the run computes, {reads}; with none installed, the run stops with an "
+            "error where its value is read.",
+            hint=("It read the chart's bars for every symbol: another symbol's value never "
+                  "comes from the chart."),
+        )
+        return True
+
+    def _lower_recorded_request(self, node: FuncCall, why: str) -> None:
+        """``request.earnings`` / ``dividends`` / ``splits`` / ``financial``.
+        Its value reaches display and alert sinks only: na, as before.
+        Otherwise it reads the series TradingView returned per chart bar,
+        which the probe's requests manifest records under the request's key
+        (``RECORDED_LOWERING``), its reads stopping the run when no series
+        is installed; a spelling no key names keeps the deferred refusal."""
+        if self._trade_slice is None:
+            self._trade_slice = TradeSlice(self._ast)
+        reason = self._trade_slice.reason(node)
+        parts, blocker = recorded_key(node) if reason is not None else (None, None)
+        if reason is not None and blocker is None and self._in_request_expression(node):
+            blocker = "it is read outside a request.security expression"
+        if reason is None or blocker is not None:
+            self._lower_no_data_request(
+                node, node, why + (f" A recorded series is read when {blocker}." if blocker
+                                   else ""),
+                reason=reason)
+            return
+        node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: RECORDED_LOWERING}
+        key = (f"{parts['fn']}|<its symbol>|{parts['field']}|{parts['period']}|"
+               f"gaps_{parts['gaps']}|lookahead_{parts['lookahead']}")
+        self._warn(
+            node,
+            f"{spell_call(node)}: TradingView's values per chart bar, read from the series the "
+            f"requests manifest records under {key}; with none installed, the run stops "
+            "with an error where its value is read.",
+            hint=("PineForge replays the values TradingView returned on the chart's own bars "
+                  "(chart_open_ms,value): a bar the tape has no row for reads na."),
+        )
+
+    def _footprint_member(self, node: FuncCall) -> str | None:
+        """The member ``node`` calls on a footprint value (``fp.delta()``,
+        ``footprint.poc(fp)``), else None."""
+        if not isinstance(node.callee, MemberAccess):
+            return None
+        if self._footprints is None:
+            # Most scripts name no footprint: index none for them.
+            mentions = any(
+                (isinstance(n, Identifier) and n.name == "footprint")
+                or (isinstance(n, MemberAccess) and n.member == "footprint")
+                or (isinstance(n, VarDecl) and str(n.type_hint or "").strip() == "footprint")
+                for n in _walk_nodes(self._ast))
+            if not mentions:
+                self._footprints = False
+            else:
+                if self._trade_slice is None:
+                    self._trade_slice = TradeSlice(self._ast)
+                self._footprints = FootprintValues(self._trade_slice.index)
+        if self._footprints is False:
+            return None
+        read = self._footprints.member(node)
+        return read[0] if read is not None else None
+
+    def _foreign_feed_blocker(self, node: FuncCall, symbol_node: ASTNode) -> str | None:
+        """Why ``node`` cannot read another symbol's feed, or None: the
+        engine registers a feed site for ``request.security`` alone, keyed by
+        the symbol string and ``ignore_invalid_symbol`` as registration
+        computes them before the first bar (a symbol reaching the request
+        through a helper's parameters is resolved per call path, and falls
+        back there), with no other request in its expression."""
+        if _qualified_name(node.callee) != ("request", "security"):
+            return "it is request.security"
+        if self._in_request_expression(node):
+            return "it is outside another request's expression"
+        index = self._trade_slice.index
+        if index.depends_on_scope(symbol_node):
+            owner = index.owner.get(id(node))
+            if owner not in index.funcs or owner in index.overloaded:
+                # A method's parameter, a block's local: no call path to
+                # resolve it through (``security_contexts``).
+                return "registration computes its symbol before the first bar"
+        elif not index.registration_value(symbol_node):
+            return "registration computes its symbol before the first bar"
+        tf = node.args[1] if len(node.args) > 1 else node.kwargs.get("timeframe")
+        if (tf is not None and not index.depends_on_scope(tf)
+                and not index.registers_timeframe(tf)):
+            return "registration computes its timeframe before the first bar"
+        ignore = node.kwargs.get("ignore_invalid_symbol")
+        if ignore is not None and not index.registration_value(ignore):
+            return "registration computes its ignore_invalid_symbol before the first bar"
+        payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
+        if isinstance(payload, FuncCall) and _qualified_name(payload.callee) == (
+                "request", "footprint"):
+            # The feed's footprint column: its name spells the literal ticks
+            # per row and value-area percent.
+            if footprint_column(payload) is None:
+                return ("its request.footprint states ticks_per_row and va_percent as "
+                        "literal whole numbers")
+            return None
+        helpers = self._helpers_called(payload)
+        for inner in _walk_nodes([payload, *(index.funcs[name] for name in helpers)]):
+            if isinstance(inner, FuncCall) and _qualified_name(inner.callee)[0] == "request":
+                return "its expression holds no request of its own"
+        return None
+
+    def _helpers_called(self, value) -> set[str]:
+        """The helpers ``value`` calls, directly or through further helpers."""
+        index = self._trade_slice.index
+
+        def callees(item) -> set[str]:
+            return {n.callee.name for n in _walk_nodes(item)
+                    if isinstance(n, FuncCall) and id(n) in index.call_ids}
+
+        found: set[str] = set()
+        pending = callees(value)
+        while pending:
+            name = pending.pop()
+            if name not in found:
+                found.add(name)
+                pending |= callees(index.funcs[name]) - found
+        return found
+
+    def _in_request_expression(self, node: FuncCall) -> bool:
+        """``node`` is evaluated inside a request's expression: written in it
+        (a request's arguments are its only children the checker visits
+        under ``_security_payload_depth``), or in a helper that expression
+        calls, whose body runs inside the request's evaluator."""
+        if self._security_payload_depth:
+            return True
+        if self._trade_slice is None:
+            self._trade_slice = TradeSlice(self._ast)
+        index = self._trade_slice.index
+        if self._payload_funcs is None:
+            self._payload_funcs = self._helpers_called([
+                request.args[2] if len(request.args) > 2 else request.kwargs.get("expression")
+                for requests in index.requests.values() for request in requests])
+        return index.owner.get(id(node)) in self._payload_funcs
 
     def _visit_request_arguments(self, node: FuncCall) -> None:
         """A no-data request's arguments: ``barmerge.*`` and its field
@@ -2156,6 +2477,32 @@ class SupportChecker:
             noun = "arguments" if len(missing) > 1 else "argument"
             return (0, len(missing)), f"is missing its {noun} {listed}", None
         return None
+
+    def _check_builtin_arguments(self, node: FuncCall, name: str) -> bool:
+        """Refuse an ``nz`` / ``fixnan`` call whose arguments bind to none of
+        TradingView's signatures -- ``nz(source)``, ``nz(source,
+        replacement)``, ``fixnan(source)`` -- as TradingView does ("The nz
+        function does not have an argument with the name x"). A call that
+        binds is rewritten positionally by ``builtin_keywords``; before, a
+        keyword crashed the codegen (IndexError) or was dropped. Returns True
+        when the arguments bind.
+        """
+        func = sigs.BUILTIN_FUNCTIONS[name]
+        problems = []
+        for sig in func.signatures:
+            problem = self._ta_binding_problem(sig, node)
+            if problem is None:
+                return True
+            problems.append((problem[0], -len(sig.params), problem[1], problem[2]))
+        _rank, _width, message, at = min(problems, key=lambda p: (p[0], p[1]))
+        spelled = " or ".join(
+            f"{name}({', '.join(p.name for p in sig.params)})" for sig in func.signatures)
+        self._err(
+            expr_start(at if at is not None else node),
+            f"{name} {message} (TradingView: {spelled}).",
+            hint="Use the parameters of TradingView's signature.",
+        )
+        return False
 
     def _check_ta_arguments(self, node: FuncCall, name: str) -> bool:
         """Refuse a ``ta.*`` call whose arguments bind to none of TradingView's
@@ -2279,23 +2626,21 @@ class SupportChecker:
         chain = _resolve_member_chain(node)
         if chain in SECURITY_CURRENT_SYMBOL_NAMES:
             return True
-        # ticker.inherit(symbol, ...) / ticker.standard(symbol) are passthrough,
-        # and ticker.heikinashi(symbol) is the chart's OWN symbol with a causal
-        # Heikin-Ashi candle transform (the engine applies it inside the security
-        # eval via register_security_eval's heikinashi flag — no alternate symbol
-        # is loaded). All allow a current-symbol first argument; a non-current
-        # arg is genuine cross-symbol construction and still falls through.
+        # ticker.inherit(from_tickerid, symbol) / ticker.standard(symbol) are
+        # passthrough of their symbol (ticker_symbol_arg: inherit names it
+        # second), and ticker.heikinashi(symbol) is the chart's OWN symbol with
+        # a causal Heikin-Ashi candle transform (the engine applies it inside
+        # the security eval via register_security_eval's heikinashi flag — no
+        # alternate symbol is loaded). All allow a current-symbol symbol
+        # argument; a non-current one is genuine cross-symbol construction and
+        # still falls through.
         if isinstance(node, FuncCall):
             ns, fname = _qualified_name(node.callee)
             if ns == "ticker" and fname in ("inherit", "standard", "heikinashi"):
-                if node.args and self._is_current_symbol_expr(
-                    node.args[0], _seen, require_all_paths=require_all_paths,
+                symbol = ticker_symbol_arg(node)
+                if symbol is not None and self._is_current_symbol_expr(
+                    symbol, _seen, require_all_paths=require_all_paths,
                     legacy_names=legacy_names,
-                ):
-                    return True
-                if "symbol" in node.kwargs and self._is_current_symbol_expr(
-                    node.kwargs["symbol"], _seen,
-                    require_all_paths=require_all_paths, legacy_names=legacy_names,
                 ):
                     return True
         # Preserve admission for a working script with an unreachable alternate
@@ -2431,6 +2776,39 @@ class SupportChecker:
             "Expected Pine TF format like '1', '15', '1H', '1D', '15S'.",
             hint=err,
         )
+
+    def _check_request_security_lower_tf_symbol(self, node: FuncCall) -> None:
+        """``request.security_lower_tf`` reads the chart's intrabars: the
+        engine loads no other symbol's. For another symbol whose value can
+        reach a trade, evaluating the request stops the run with it named
+        (``ABSENT_LOWERING``), never reading the chart's bars in its place;
+        one reaching display and alert sinks only, or that can select the
+        chart's symbol, keeps its lowering and warns."""
+        symbol_node = node.args[0] if node.args else node.kwargs.get("symbol")
+        if symbol_node is None or self._is_current_symbol_expr(
+                symbol_node, require_all_paths=True):
+            return
+        if self._trade_slice is None:
+            self._trade_slice = TradeSlice(self._ast)
+        reason = self._trade_slice.reason(node)
+        hint = "PineForge loads no other symbol's lower-timeframe bars."
+        if (reason is not None and not self._is_current_symbol_expr(symbol_node)
+                and not self._is_current_symbol_expr(symbol_node, legacy_names=True)):
+            node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: ABSENT_LOWERING}
+            self._warn(
+                symbol_node,
+                f"{spell_call(node)}: no data is pinned for this request; the run stops with "
+                "an error where it is evaluated.",
+                hint=f"{hint} Its value can reach a trade: {reason}.")
+            return
+        self._warn(
+            symbol_node,
+            f"{spell_call(node)}: its symbol can be another symbol's, whose lower-timeframe "
+            "bars PineForge reads from the chart"
+            + ("; its value reaches only display/alert sinks, so trades are unaffected."
+               if reason is None else "."),
+            hint=hint + " Every reachable symbol value must resolve to syminfo.tickerid or "
+                        "syminfo.ticker for exact results.")
 
     def _check_request_security_lower_tf_tf(self, node: FuncCall) -> None:
         """Validate the ``timeframe`` argument literal for

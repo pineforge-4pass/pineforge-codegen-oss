@@ -1,0 +1,17 @@
+//@version=6
+// bar_index in request.security payloads on coarser timeframes, bare, under
+// a builtin, in an expression and through a helper, beside the chart's own.
+strategy("PF oi sec bar_index", overlay = true)
+f() => bar_index * 2
+a1 = request.security(syminfo.tickerid, "60", bar_index)
+a2 = request.security(syminfo.tickerid, "240", bar_index)
+a3 = request.security(syminfo.tickerid, "60", nz(bar_index) + 1)
+a4 = request.security(syminfo.tickerid, "60", f())
+a5 = request.security(syminfo.tickerid, "60", bar_index[1])
+a6 = request.security(syminfo.tickerid, "15", bar_index)
+x(v) => na(v) ? "na" : str.tostring(v)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = x(a1) + "|" + x(a2) + "|" + x(a3) + "|" + x(a4) + "|" + x(a5) + "|" + x(a6) + "|" + str.tostring(bar_index))

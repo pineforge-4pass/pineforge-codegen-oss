@@ -614,13 +614,14 @@ def _checked_array_range_prelude(*, reject_inverted: bool = True) -> str:
     )
 
 
-def _checked_array_insert(a: str, args: list[str]) -> str:
+def _checked_array_insert(a: str, args: list[str], normalize_negative: bool = True) -> str:
     """``array.insert(id, index, value)`` — index is an INSERTION point.
 
     ``index == size`` appends, so the bound is ``index <= size``; a negative
     index is end-relative, exactly as for ``get``/``set``/``remove``.
     """
-    check = _checked_array_index_prelude(allow_size=True)
+    check = _checked_array_index_prelude(allow_size=True,
+                                         normalize_negative=normalize_negative)
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_value){ "
@@ -666,8 +667,8 @@ def checked_array_slice(a: str, args: list[str], *, result_type: str) -> str:
     )
 
 
-def _checked_array_get(a: str, args: list[str]) -> str:
-    check = _checked_array_index_prelude()
+def _checked_array_get(a: str, args: list[str], normalize_negative: bool = True) -> str:
+    check = _checked_array_index_prelude(normalize_negative=normalize_negative)
     return (
         "[&](auto&& __pf_array)->decltype(auto){ "
         "return [&](auto&& __pf_raw_index_value)->decltype(auto){ "
@@ -681,8 +682,8 @@ def _checked_array_get(a: str, args: list[str]) -> str:
     )
 
 
-def _checked_array_set(a: str, args: list[str]) -> str:
-    check = _checked_array_index_prelude()
+def _checked_array_set(a: str, args: list[str], normalize_negative: bool = True) -> str:
+    check = _checked_array_index_prelude(normalize_negative=normalize_negative)
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_value){ "
@@ -693,8 +694,8 @@ def _checked_array_set(a: str, args: list[str]) -> str:
     )
 
 
-def _checked_array_remove(a: str, args: list[str]) -> str:
-    check = _checked_array_index_prelude()
+def _checked_array_remove(a: str, args: list[str], normalize_negative: bool = True) -> str:
+    check = _checked_array_index_prelude(normalize_negative=normalize_negative)
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_value){ "
@@ -759,6 +760,17 @@ def _checked_array_percentrank(a: str, args: list[str]) -> str:
     )
 
 
+# Pine v5 raises a runtime error on a negative index to these (TradingView:
+# "Index -1 is out of bounds"); v6 counts from the array's end. The v5 forms
+# lower a v5 library's body (``library_v5``).
+V5_ARRAY_INDEX_METHODS = {
+    "get": lambda a, args: _checked_array_get(a, args, normalize_negative=False),
+    "set": lambda a, args: _checked_array_set(a, args, normalize_negative=False),
+    "insert": lambda a, args: _checked_array_insert(a, args, normalize_negative=False),
+    "remove": lambda a, args: _checked_array_remove(a, args, normalize_negative=False),
+}
+
+
 # Methods called as ``array.method(arr, ...)`` or ``arr.method(...)``.
 ARRAY_METHODS = {
     "get":       _checked_array_get,
@@ -776,8 +788,8 @@ ARRAY_METHODS = {
     "fill":      lambda a, args: f"std::fill({a}.begin(), {a}.end(), {args[0]})" if len(args) == 1
                                  else _checked_array_fill_range(a, args),
     "includes":  lambda a, args: f"(std::find({a}.begin(), {a}.end(), {args[0]}) != {a}.end())",
-    "indexof":   lambda a, args: f"[&](){{ auto it=std::find({a}.begin(),{a}.end(),{args[0]}); return it!={a}.end()?(double)(it-{a}.begin()):-1.0; }}()",
-    "lastindexof": lambda a, args: f"[&](){{ for(int i=(int){a}.size()-1;i>=0;i--)if({a}[i]=={args[0]})return(double)i; return -1.0; }}()",
+    "indexof":   lambda a, args: f"[&](){{ auto __pf_it=std::find({a}.begin(),{a}.end(),{args[0]}); return __pf_it!={a}.end()?(double)(__pf_it-{a}.begin()):-1.0; }}()",
+    "lastindexof": lambda a, args: f"[&](){{ for(int __pf_i=(int){a}.size()-1;__pf_i>=0;__pf_i--)if({a}[__pf_i]=={args[0]})return(double)__pf_i; return -1.0; }}()",
     "sort":      lambda a, args: (
         f"[&](){{ if (({args[0]}) == \"descending\") std::sort({a}.begin(), {a}.end(), std::greater<>()); else std::sort({a}.begin(), {a}.end()); }}()"
         if args else f"std::sort({a}.begin(), {a}.end())"
@@ -796,32 +808,32 @@ ARRAY_METHODS = {
     # stdev/variance honor the optional 2nd ``biased`` arg (Pine v6:
     # biased=true → population (default), false → sample / n-1).
     "stdev":     lambda a, args: (
-        f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); "
-        f"double _d=({_pine_bool_arg(args[0])})?(double){a}.size():((double){a}.size()-1.0); "
-        f"return _d>0?std::sqrt(s/_d):na<double>(); }}()"
+        f"[&](){{ if({a}.empty()) return na<double>(); double __pf_m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double __pf_s=0; for(auto v:{a})__pf_s+=(v-__pf_m)*(v-__pf_m); "
+        f"double __pf_d=({_pine_bool_arg(args[0])})?(double){a}.size():((double){a}.size()-1.0); "
+        f"return __pf_d>0?std::sqrt(__pf_s/__pf_d):na<double>(); }}()"
         if args else
-        f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); return std::sqrt(s/{a}.size()); }}()"
+        f"[&](){{ if({a}.empty()) return na<double>(); double __pf_m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double __pf_s=0; for(auto v:{a})__pf_s+=(v-__pf_m)*(v-__pf_m); return std::sqrt(__pf_s/{a}.size()); }}()"
     ),
     "variance":  lambda a, args: (
-        f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); "
-        f"double _d=({_pine_bool_arg(args[0])})?(double){a}.size():((double){a}.size()-1.0); "
-        f"return _d>0?s/_d:na<double>(); }}()"
+        f"[&](){{ if({a}.empty()) return na<double>(); double __pf_m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double __pf_s=0; for(auto v:{a})__pf_s+=(v-__pf_m)*(v-__pf_m); "
+        f"double __pf_d=({_pine_bool_arg(args[0])})?(double){a}.size():((double){a}.size()-1.0); "
+        f"return __pf_d>0?__pf_s/__pf_d:na<double>(); }}()"
         if args else
-        f"[&](){{ if({a}.empty()) return na<double>(); double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); return s/{a}.size(); }}()"
+        f"[&](){{ if({a}.empty()) return na<double>(); double __pf_m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double __pf_s=0; for(auto v:{a})__pf_s+=(v-__pf_m)*(v-__pf_m); return __pf_s/{a}.size(); }}()"
     ),
-    "median":    lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); int n=c.size(); return n%2?c[n/2]:(c[n/2-1]+c[n/2])/2.0; }}()",
-    "mode":      lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); std::unordered_map<double,int> m; for(auto v:{a})m[v]++; double best=0; int bc=0; for(auto&[v,c]:m)if(c>bc||(c==bc&&v<best)){{bc=c;best=v;}} return best; }}()",
-    "percentile_linear_interpolation": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); double k=({args[0]}/100.0)*c.size()-0.5; if(!std::isfinite(k)) return na<double>(); if(k>=c.size()-1.0) return (double)c.back(); int i=k<=0.0?0:(int)k; double f=k-i; return c[i]*(1-f)+c[i+1]*f; }}()",
-    "percentile_nearest_rank": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto c={a}; std::sort(c.begin(),c.end()); double p=({args[0]}); if(is_na(p)) return (double)c.front(); double rank=std::ceil((p/100.0)*c.size()); if(!std::isfinite(rank)) return na<double>(); int r=(int)std::clamp(rank,1.0,(double)c.size()); return (double)c[r-1]; }}()",
+    "median":    lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto __pf_c={a}; std::sort(__pf_c.begin(),__pf_c.end()); int __pf_n=__pf_c.size(); return __pf_n%2?__pf_c[__pf_n/2]:(__pf_c[__pf_n/2-1]+__pf_c[__pf_n/2])/2.0; }}()",
+    "mode":      lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); std::unordered_map<double,int> __pf_m; for(auto v:{a})__pf_m[v]++; double __pf_best=0; int __pf_bc=0; for(auto&[v,c]:__pf_m)if(c>__pf_bc||(c==__pf_bc&&v<__pf_best)){{__pf_bc=c;__pf_best=v;}} return __pf_best; }}()",
+    "percentile_linear_interpolation": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto __pf_c={a}; std::sort(__pf_c.begin(),__pf_c.end()); double __pf_k=({args[0]}/100.0)*__pf_c.size()-0.5; if(!std::isfinite(__pf_k)) return na<double>(); if(__pf_k>=__pf_c.size()-1.0) return (double)__pf_c.back(); int __pf_i=__pf_k<=0.0?0:(int)__pf_k; double __pf_f=__pf_k-__pf_i; return __pf_c[__pf_i]*(1-__pf_f)+__pf_c[__pf_i+1]*__pf_f; }}()",
+    "percentile_nearest_rank": lambda a, args: f"[&](){{ if({a}.empty()) return na<double>(); auto __pf_c={a}; std::sort(__pf_c.begin(),__pf_c.end()); double __pf_p=({args[0]}); if(is_na(__pf_p)) return (double)__pf_c.front(); double __pf_rank=std::ceil((__pf_p/100.0)*__pf_c.size()); if(!std::isfinite(__pf_rank)) return na<double>(); int __pf_r=(int)std::clamp(__pf_rank,1.0,(double)__pf_c.size()); return (double)__pf_c[__pf_r-1]; }}()",
     "percentrank": _checked_array_percentrank,
-    "abs":       lambda a, args: f"[&](){{ std::vector<double> r; for(auto v:{a})r.push_back(std::abs(v)); return r; }}()",
-    "join":      lambda a, args: "[&](){{ std::string r; for(size_t i=0;i<{arr}.size();i++){{ if(i>0)r+={sep}; r+=std::to_string({arr}[i]); }} return r; }}()".format(arr=a, sep=args[0] if args else 'std::string(",")'),
-    "standardize": lambda a, args: f"[&](){{ double m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double s=0; for(auto v:{a})s+=(v-m)*(v-m); s=std::sqrt(s/{a}.size()); std::vector<double> r; for(auto v:{a})r.push_back(s==0?1.0:(v-m)/s); return r; }}()",
-    "covariance": lambda a, args: f"[&](){{ auto&&b=({args[0]}); int n=std::min({a}.size(),b.size()); if(n<=0) return na<double>(); double ma=0,mb=0; for(int i=0;i<n;i++){{ma+={a}[i];mb+=b[i];}} ma/=n;mb/=n; double c=0; for(int i=0;i<n;i++)c+=({a}[i]-ma)*(b[i]-mb); return c/n; }}()",
-    "binary_search": lambda a, args: f"[&](){{ auto it=std::lower_bound({a}.begin(),{a}.end(),{args[0]}); return (it!={a}.end()&&*it=={args[0]})?(double)(it-{a}.begin()):-1.0; }}()",
-    "binary_search_leftmost": lambda a, args: f"[&](){{ auto it=std::lower_bound({a}.begin(),{a}.end(),{args[0]}); return (it!={a}.end()&&*it=={args[0]})?(double)(it-{a}.begin()):(double)(it-{a}.begin()-1); }}()",
-    "binary_search_rightmost": lambda a, args: f"[&](){{ auto it=std::upper_bound({a}.begin(),{a}.end(),{args[0]}); return (it!={a}.begin()&&*(it-1)=={args[0]})?(double)(it-{a}.begin()-1):(double)(it-{a}.begin()); }}()",
-    "sort_indices": lambda a, args: f"[&](){{ std::vector<double> idx({a}.size()); std::iota(idx.begin(),idx.end(),0); std::sort(idx.begin(),idx.end(),[&](int i,int j){{return {a}[i]<{a}[j];}}); return idx; }}()",
+    "abs":       lambda a, args: f"[&](){{ std::vector<double> __pf_r; for(auto v:{a})__pf_r.push_back(std::abs(v)); return __pf_r; }}()",
+    "join":      lambda a, args: "[&](){{ std::string __pf_r; for(size_t __pf_i=0;__pf_i<{arr}.size();__pf_i++){{ if(__pf_i>0)__pf_r+={sep}; __pf_r+=std::to_string({arr}[__pf_i]); }} return __pf_r; }}()".format(arr=a, sep=args[0] if args else 'std::string(",")'),
+    "standardize": lambda a, args: f"[&](){{ double __pf_m=std::accumulate({a}.begin(),{a}.end(),0.0)/{a}.size(); double __pf_s=0; for(auto v:{a})__pf_s+=(v-__pf_m)*(v-__pf_m); __pf_s=std::sqrt(__pf_s/{a}.size()); std::vector<double> __pf_r; for(auto v:{a})__pf_r.push_back(__pf_s==0?1.0:(v-__pf_m)/__pf_s); return __pf_r; }}()",
+    "covariance": lambda a, args: f"[&](){{ auto&&__pf_b=({args[0]}); int __pf_n=std::min({a}.size(),__pf_b.size()); if(__pf_n<=0) return na<double>(); double __pf_ma=0,__pf_mb=0; for(int __pf_i=0;__pf_i<__pf_n;__pf_i++){{__pf_ma+={a}[__pf_i];__pf_mb+=__pf_b[__pf_i];}} __pf_ma/=__pf_n;__pf_mb/=__pf_n; double __pf_c=0; for(int __pf_i=0;__pf_i<__pf_n;__pf_i++)__pf_c+=({a}[__pf_i]-__pf_ma)*(__pf_b[__pf_i]-__pf_mb); return __pf_c/__pf_n; }}()",
+    "binary_search": lambda a, args: f"[&](){{ auto __pf_it=std::lower_bound({a}.begin(),{a}.end(),{args[0]}); return (__pf_it!={a}.end()&&*__pf_it=={args[0]})?(double)(__pf_it-{a}.begin()):-1.0; }}()",
+    "binary_search_leftmost": lambda a, args: f"[&](){{ auto __pf_it=std::lower_bound({a}.begin(),{a}.end(),{args[0]}); return (__pf_it!={a}.end()&&*__pf_it=={args[0]})?(double)(__pf_it-{a}.begin()):(double)(__pf_it-{a}.begin()-1); }}()",
+    "binary_search_rightmost": lambda a, args: f"[&](){{ auto __pf_it=std::upper_bound({a}.begin(),{a}.end(),{args[0]}); return (__pf_it!={a}.begin()&&*(__pf_it-1)=={args[0]})?(double)(__pf_it-{a}.begin()-1):(double)(__pf_it-{a}.begin()); }}()",
+    "sort_indices": lambda a, args: f"[&](){{ std::vector<double> __pf_idx({a}.size()); std::iota(__pf_idx.begin(),__pf_idx.end(),0); std::sort(__pf_idx.begin(),__pf_idx.end(),[&](int __pf_i,int __pf_j){{return {a}[__pf_i]<{a}[__pf_j];}}); return __pf_idx; }}()",
 }
 
 # The ARRAY_METHODS arguments (receiver excluded) a template reads more than
@@ -1089,17 +1101,17 @@ STR_FUNC_MAP = {
     "contains":    lambda args: f"({args[0]}.find({args[1]}) != std::string::npos)",
     "startswith":  lambda args: f"({args[0]}.substr(0, {args[1]}.length()) == {args[1]})",
     "endswith":    lambda args: f"({args[0]}.length() >= {args[1]}.length() && {args[0]}.compare({args[0]}.length() - {args[1]}.length(), {args[1]}.length(), {args[1]}) == 0)",
-    "pos":         lambda args: f"[&](){{ auto p={args[0]}.find({args[1]}); return p!=std::string::npos?(int)p:-1; }}()",
+    "pos":         lambda args: f"[&](){{ auto __pf_p={args[0]}.find({args[1]}); return __pf_p!=std::string::npos?(int)__pf_p:-1; }}()",
     "substring":   None,  # handled separately (2 vs 3 args)
-    "replace_all": lambda args: f"[&](){{ std::string s={args[0]}; size_t p=0; while((p=s.find({args[1]},p))!=std::string::npos){{ s.replace(p,{args[1]}.length(),{args[2]}); p+={args[2]}.length(); }} return s; }}()",
+    "replace_all": lambda args: f"[&](){{ std::string __pf_s={args[0]}; size_t __pf_p=0; while((__pf_p=__pf_s.find({args[1]},__pf_p))!=std::string::npos){{ __pf_s.replace(__pf_p,{args[1]}.length(),{args[2]}); __pf_p+={args[2]}.length(); }} return __pf_s; }}()",
     "replace":     None,  # handled separately (3 vs 4 args)
-    "lower":       lambda args: f"[&](){{ std::string s={args[0]}; std::transform(s.begin(),s.end(),s.begin(),::tolower); return s; }}()",
-    "upper":       lambda args: f"[&](){{ std::string s={args[0]}; std::transform(s.begin(),s.end(),s.begin(),::toupper); return s; }}()",
-    "trim":        lambda args: f'[&](){{ std::string s={args[0]}; s.erase(0,s.find_first_not_of(" \\t\\n\\r")); s.erase(s.find_last_not_of(" \\t\\n\\r")+1); return s; }}()',
+    "lower":       lambda args: f"[&](){{ std::string __pf_s={args[0]}; std::transform(__pf_s.begin(),__pf_s.end(),__pf_s.begin(),::tolower); return __pf_s; }}()",
+    "upper":       lambda args: f"[&](){{ std::string __pf_s={args[0]}; std::transform(__pf_s.begin(),__pf_s.end(),__pf_s.begin(),::toupper); return __pf_s; }}()",
+    "trim":        lambda args: f'[&](){{ std::string __pf_s={args[0]}; __pf_s.erase(0,__pf_s.find_first_not_of(" \\t\\n\\r")); __pf_s.erase(__pf_s.find_last_not_of(" \\t\\n\\r")+1); return __pf_s; }}()',
     "repeat":      lambda args: (
-        f"[&](){{ std::string r; for(int i=0;i<{na_preserving_int_cast(args[1])};i++) r+={args[0]}; return r; }}()"
+        f"[&](){{ std::string __pf_r; for(int __pf_i=0;__pf_i<{na_preserving_int_cast(args[1])};__pf_i++) __pf_r+={args[0]}; return __pf_r; }}()"
         if len(args) < 3 else
-        f"[&](){{ std::string r; for(int i=0;i<{na_preserving_int_cast(args[1])};i++){{ if(i>0) r+={args[2]}; r+={args[0]}; }} return r; }}()"
+        f"[&](){{ std::string __pf_r; for(int __pf_i=0;__pf_i<{na_preserving_int_cast(args[1])};__pf_i++){{ if(__pf_i>0) __pf_r+={args[2]}; __pf_r+={args[0]}; }} return __pf_r; }}()"
     ),
     "match":       lambda args: f'pine_str_match({args[0]}, {args[1]})',
     "split":       lambda args: f'pine_str_split({args[0]}, {args[1]})',

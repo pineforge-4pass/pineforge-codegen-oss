@@ -55,6 +55,7 @@ from .tables import (
     ARRAY_ARGS_READ_REPEATEDLY,
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_METHODS,
+    V5_ARRAY_INDEX_METHODS,
     BAR_BUILTINS,
     BAR_FIELDS,
     DRAWING_NS,
@@ -90,6 +91,10 @@ _BOOL_RESULT_BINOPS = frozenset({
     "==", "!=", "<", ">", "<=", ">=", "and", "or", "&&", "||",
 })
 
+
+# Array methods whose result is a new array (a vector of doubles, as their
+# ``ARRAY_METHODS`` templates emit it).
+ARRAY_RESULT_METHODS = frozenset({"abs", "standardize", "sort_indices"})
 
 class TypeInferer:
     """Type-spec / C++-type inference helpers shared across visitor mixins.
@@ -957,6 +962,23 @@ class TypeInferer:
                 receiver_spec = self._type_spec_from_expr(receiver_node)
                 if receiver_spec is not None and receiver_spec.kind == "matrix":
                     return receiver_spec
+            # ``matrix.row(m, i)`` / ``matrix.col`` / ``matrix.eigenvalues``
+            # return arrays, as their method forms below do; an untyped
+            # ``r = matrix.row(m, 0)`` was declared a double.
+            if namespace == "matrix" and func_name in ("row", "col", "eigenvalues"):
+                receiver_node = node.args[0] if node.args else node.kwargs.get("id")
+                receiver_spec = self._type_spec_from_expr(receiver_node)
+                if receiver_spec is not None and receiver_spec.kind == "matrix":
+                    if func_name == "eigenvalues":
+                        return TypeSpec.array(TypeSpec.primitive("float"))
+                    return TypeSpec.array(receiver_spec.element)
+            # array.abs / standardize / sort_indices build a new array, which
+            # their templates (``ARRAY_METHODS``) emit as a vector of doubles.
+            if namespace == "array" and func_name in ARRAY_RESULT_METHODS:
+                receiver_node = node.args[0] if node.args else node.kwargs.get("id")
+                receiver_spec = self._type_spec_from_expr(receiver_node)
+                if receiver_spec is not None and receiver_spec.kind == "array":
+                    return TypeSpec.array(TypeSpec.primitive("float"))
             if namespace == "map" and func_name == "new":
                 key = self._type_spec_from_hint_name(targs[0]) if len(targs) > 0 else TypeSpec.primitive("string")
                 val = self._type_spec_from_hint_name(targs[1]) if len(targs) > 1 else TypeSpec.primitive("float")
@@ -995,6 +1017,8 @@ class TypeInferer:
                         return recv_spec.element
                     if member_name in ("copy", "slice"):
                         return recv_spec
+                    if member_name in ARRAY_RESULT_METHODS:
+                        return TypeSpec.array(TypeSpec.primitive("float"))
                 if recv_spec is not None and recv_spec.kind == "map":
                     if member_name in ("put", "get", "remove"):
                         return recv_spec.value
@@ -1186,7 +1210,7 @@ class TypeInferer:
             join_args = list(args) or ['std::string(",")']
             lower_receiver = lambda recv: evaluate_args_once(
                 join_args, ARRAY_ARGS_READ_REPEATEDLY["join"],
-                lambda a: f"[&](){{ std::string r; for(size_t i=0;i<{recv}.size();i++){{ if(i>0)r+={a[0]}; r+={recv}[i]; }} return r; }}()",
+                lambda a: f"[&](){{ std::string __pf_r; for(size_t __pf_i=0;__pf_i<{recv}.size();__pf_i++){{ if(__pf_i>0)__pf_r+={a[0]}; __pf_r+={recv}[__pf_i]; }} return __pf_r; }}()",
                 "_pf_array_a",
             )
         else:
@@ -1239,10 +1263,14 @@ class TypeInferer:
                 arg_bindings.append((token, args[arg_index]))
             self._array_arg_counter = counter
 
+            table = (V5_ARRAY_INDEX_METHODS
+                     if self._pine_v5_body and method in V5_ARRAY_INDEX_METHODS
+                     else ARRAY_METHODS)
+
             def lower_receiver(recv: str) -> str:
                 lowered = evaluate_args_once(
                     bound_args, ARRAY_ARGS_READ_REPEATEDLY.get(method, ()),
-                    lambda a: ARRAY_METHODS[method](recv, a), "_pf_array_a",
+                    lambda a: table[method](recv, a), "_pf_array_a",
                 )
                 for token, original in reversed(arg_bindings):
                     lowered = (
@@ -1372,7 +1400,7 @@ class TypeInferer:
         # init RHS is such a builtin, so also match the builtin name directly.
         if name in INT64_BUILTINS:
             return "int64_t"
-        sym = self.ctx.symbols.resolve(name)
+        sym = self._variable_symbol(name)
         # A float or bool an epoch reaches keeps its type: the analyzer types
         # every request.security value float (a double holds an epoch
         # exactly), and a name is keyed by spelling across scopes.
@@ -1384,6 +1412,35 @@ class TypeInferer:
         if sym is not None:
             return PINE_TYPE_TO_CPP.get(sym.pine_type, "double")
         return "double"
+
+    def _variable_symbol(self, name: str):
+        """The symbol the variable ``name`` resolves to.
+
+        The symbol table keeps one name per scope, and a user function is
+        defined in the global scope under its name, typed by what it
+        returns. A function-local variable of the same spelling -- the
+        ``float f`` series of another function beside ``f(x) =>
+        str.tostring(x)`` -- resolved there once the analyzer had left its
+        scope. Inside a function the variable is that function's own
+        symbol; outside one, a series is the symbol of the function that
+        keeps it (``func_series_vars``).
+        """
+        sym = self.ctx.symbols.resolve(name)
+        if name not in getattr(self, "_func_names", ()):
+            return sym
+        active = getattr(self, "_active_func_name", None)
+        if active:
+            scope_names = {f"func_{active}"}
+        else:
+            scope_names = {
+                f"func_{owner}"
+                for owner, names in getattr(self.ctx, "func_series_vars", {}).items()
+                if name in names
+            }
+        for scope in self.ctx.symbols.all_scopes:
+            if scope.name in scope_names and name in scope.symbols:
+                return scope.symbols[name]
+        return sym
 
     def _series_param_element_cpp_type(
         self,
@@ -2615,7 +2672,7 @@ class TypeInferer:
                 return self._current_func_local_types[node.name]
             if node.name in getattr(self, "_current_loop_vars", set()):
                 return "double"
-            sym = self.ctx.symbols.resolve(node.name)
+            sym = self._variable_symbol(node.name)
             if sym is not None and getattr(sym, "type_spec", None) is not None:
                 return self._type_spec_to_cpp(sym.type_spec)
             if sym is not None and sym.pine_type != PineType.UNKNOWN:
@@ -2869,6 +2926,20 @@ class TypeInferer:
             expr = last_stmt.expr
         elif isinstance(last_stmt, TupleLiteral):
             expr = last_stmt
+        request = last_stmt.expr if isinstance(last_stmt, ExprStmt) else last_stmt
+        if (isinstance(request, FuncCall)
+                and self._resolve_callee(request.callee) == ("security", "request")):
+            # A helper returning a request's tuple returns it as the value
+            # read stores it (``_req_sec_N`` or its per-element members).
+            item = self._security_call_for_request(request)
+            if item is not None and item.get("returns_tuple"):
+                payload = item["expr_node"]
+                if isinstance(payload, TupleLiteral):
+                    return ["double" if item.get("foreign") and cpp_t == "int" else cpp_t
+                            for cpp_t in map(self._infer_cpp_type_for_security_elem,
+                                             payload.elements)]
+                return self._security_tuple_element_cpp_types(
+                    count, item.get("tuple_element_types", ()))
         if expr is not None:
             result: list[str] = []
             for e in expr.elements:

@@ -100,6 +100,7 @@ from ..ast_nodes import (
     WhileStmt,
 )
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
+from ..external_requests import UNPINNED_ANNOTATION
 from .tables import (
     ARRAY_NEW_CTORS,
     DRAWING_TYPE_TO_CPP,
@@ -544,6 +545,37 @@ class StmtVisitor:
                         lines.append(f"{pad}    {flag_expr} = true;")
                         lines.append(f"{pad}}}")
                         return
+                    if isinstance(node.value, (IfStmt, SwitchStmt)):
+                        # Any other ``var`` whose initializer is an if/switch
+                        # expression: the selection, once, at first reach. It
+                        # rendered as ``/* unknown */``, which did not compile
+                        # (``var string dashPos = switch dashPosInput``). A
+                        # history-referenced one replaces its current slot.
+                        selection_cpp_type = (
+                            target_cpp_type or self._int_slot_cpp_type(member_name)
+                        )
+                        indent = len(pad) // 4 + 1
+                        lines.append(f"{pad}if (!{flag_expr}) {{")
+                        if info.get("is_series"):
+                            # The member's own element type (string, drawing
+                            # or number), from its current slot: the carry
+                            # has pushed the var's na there before its first
+                            # reach, which an arm no case selects keeps.
+                            selected = f"_pf_selection_{flag}"
+                            lines.append(f"{pad}    auto {selected} = {target_expr}[0];")
+                            self._visit_if_switch_expr(
+                                node.value, selected, lines, indent,
+                                target_cpp_type=selection_cpp_type,
+                            )
+                            lines.append(f"{pad}    {target_expr}.update({selected});")
+                        else:
+                            self._visit_if_switch_expr(
+                                node.value, target_expr, lines, indent,
+                                target_cpp_type=selection_cpp_type,
+                            )
+                        lines.append(f"{pad}    {flag_expr} = true;")
+                        lines.append(f"{pad}}}")
+                        return
                     if target_cpp_type is not None:
                         init_cpp = self._visit_rhs_value(
                             node.value,
@@ -838,12 +870,16 @@ class StmtVisitor:
                 lines.append(f"{pad}{cpp_type} {safe} = {default};")
                 remember_local_type(cpp_type)
             indent = len(pad) // 4
-            self._visit_if_switch_expr(
+            self._visit_selection_value(
                 node.value,
                 safe,
                 lines,
                 indent,
                 target_cpp_type=selection_cpp_type,
+                slot_cpp_type=(
+                    cpp_type if cpp_type is not None
+                    else self._infer_type(Identifier(name=node.name))
+                ),
             )
             return
 
@@ -1034,12 +1070,13 @@ class StmtVisitor:
             if selection_cpp_type is None:
                 selection_cpp_type = self._int_slot_cpp_type(target_name)
             indent = len(pad) // 4
-            self._visit_if_switch_expr(
+            self._visit_selection_value(
                 node.value,
                 safe,
                 lines,
                 indent,
                 target_cpp_type=selection_cpp_type,
+                slot_cpp_type=self._infer_type(node.target),
             )
             return
 
@@ -1302,6 +1339,10 @@ class StmtVisitor:
             the tuple once whenever either case applies; ordinary lexical scalar
             elements remain locals, Series elements advance their remapped
             members, and top-level scalars assign their class storage.
+            Pine's ``_`` binds nothing, but a structured binding declares
+            every name: C++17 has no placeholder, and GCC rejects a second
+            ``_`` in one scope (``[a, _, _] = f()``, or two tuples of one
+            block) as a redeclaration. Each ``_`` gets a name of its own.
             """
             series_names = {
                 name
@@ -1311,7 +1352,9 @@ class StmtVisitor:
             }
             if not series_names and not global_targets.intersection(node.names):
                 binding_names = ", ".join(
-                    self._safe_name(name) for name in node.names
+                    self._tuple_placeholder_name() if name == "_"
+                    else self._safe_name(name)
+                    for name in node.names
                 )
                 lines.append(f"{pad}auto [{binding_names}] = {call_expr};")
                 return
@@ -1407,7 +1450,12 @@ class StmtVisitor:
         if isinstance(node.value, FuncCall):
             func_name, namespace = self._resolve_callee(node.value.callee)
             if namespace == "request" and func_name == "security":
-                call_expr = self._visit_func_call(node.value)
+                # A request whose names are reassigned is read where it is
+                # evaluated (external_requests): its data-missing stop.
+                if UNPINNED_ANNOTATION in (node.value.annotations or {}):
+                    call_expr = self._unpinned_read(node.value)
+                else:
+                    call_expr = self._visit_func_call(node.value)
                 emit_call_tuple(call_expr)
                 return
             if func_name and namespace is None and func_name in self._func_names:
@@ -1440,6 +1488,13 @@ class StmtVisitor:
                         return
 
         lines.append(f"{pad}/* unsupported tuple assignment */")
+
+    def _tuple_placeholder_name(self) -> str:
+        """A fresh C++ name for one ``_`` of a tuple declaration's structured
+        binding, which must name every element."""
+        index = getattr(self, "_tuple_placeholder_counter", 0)
+        self._tuple_placeholder_counter = index + 1
+        return f"_tuple_unused_{index}"
 
     def _tuple_binding_cpp_types(self, node: TupleAssign) -> list[str]:
         """Exact supported tuple element types for later lexical operations."""
@@ -1692,12 +1747,15 @@ class StmtVisitor:
             f"!is_na({s_var}) && !is_na({e_var}) && !is_na({step_var}) && "
             if na_capable else ""
         )
+        # Pine v6 evaluates ``to`` before every iteration; v5 (a v5 library's
+        # body) fixes it before the first one.
+        refresh = "" if self._pine_v5_body else f", {e_var} = {end_expr}"
         lines.append(
             f"{pad}for (int {var} = {s_var}; "
             f"{na_guard}"
             f"({down_var} ? ({var} >= {e_var}) : ({var} <= {e_var})); "
-            f"{var} += ({down_var} ? -{step_var} : {step_var}), "
-            f"{e_var} = {end_expr}) {{"
+            f"{var} += ({down_var} ? -{step_var} : {step_var})"
+            f"{refresh}) {{"
         )
         # Register the loop counter so reads of it inside the body resolve (the
         # unknown-identifier guard in _visit_ident would otherwise flag it).
@@ -1894,11 +1952,11 @@ class StmtVisitor:
             return
         target, target_cpp_type = value_target
         value_cpp = self._block_value_cpp_type(body, target_cpp_type)
-        saved = getattr(self, "_loop_value_na", None)
+        saved = getattr(self, "_unmatched_value_na", None)
         # TradingView: an if without else (a switch without default) is na
         # when no arm runs, so a loop whose body ends in one is na after an
         # iteration that ran none (lab tv probe pf-w2-f04_if_tails).
-        self._loop_value_na = (
+        self._unmatched_value_na = (
             (target, self._na_value_for_type(value_cpp))
             if value_cpp is not None else None
         )
@@ -1907,7 +1965,7 @@ class StmtVisitor:
                 body, target, lines, indent, target_cpp_type=target_cpp_type,
             )
         finally:
-            self._loop_value_na = saved
+            self._unmatched_value_na = saved
 
     def _emit_loop_with_assign(
         self,
@@ -1941,13 +1999,52 @@ class StmtVisitor:
             lines.append(f"{pad}{target} = {self._na_value_for_type(value_cpp)};")
         visit(node, lines, indent, value_target=(target, target_cpp_type))
 
-    def _loop_value_unmatched_na(self, target: str) -> str | None:
-        """The na a loop's value ``target`` takes when its last if/switch runs
-        no arm, or None outside a loop's value position."""
-        active = getattr(self, "_loop_value_na", None)
+    def _unmatched_arm_na(self, target: str) -> str | None:
+        """The na a value ``target`` takes when an if/switch assigning it runs
+        no arm (a loop's value, ``_visit_selection_value``), or None outside
+        such a value position."""
+        active = getattr(self, "_unmatched_value_na", None)
         if active is not None and active[0] == target:
             return active[1]
         return None
+
+    _UNMATCHED_NA_SLOTS = ("double", "int", "int64_t", "std::string", "bool")
+
+    def _visit_selection_value(
+        self,
+        node,
+        target: str,
+        lines: list[str],
+        indent: int,
+        target_cpp_type: str | None = None,
+        slot_cpp_type: str | None = None,
+    ) -> None:
+        """An if/switch whose value a declaration, a reassignment or a
+        function's last statement takes.
+
+        TradingView: an if without else, an else-if chain without a final
+        else or a switch without default is na when no arm runs -- a numeric
+        or string na, false for a bool -- as a function's last statement,
+        nested in a taken arm, and as the value a global, reassigned or local
+        variable takes, which does not keep its previous bar's value (lab tv
+        probe pf-oi-if-tail-na). ``slot_cpp_type`` is the target's C++ type;
+        a handle or collection slot keeps its existing lowering. An ``int``
+        an epoch reaches is stored ``int64_t`` (``target_cpp_type``, the
+        slot's integer width), and its na is the 64-bit sentinel: ``na<int>()``
+        widened there is a value, not na (quirk 9).
+        """
+        saved = getattr(self, "_unmatched_value_na", None)
+        if slot_cpp_type == "int" and target_cpp_type == "int64_t":
+            slot_cpp_type = "int64_t"
+        if slot_cpp_type in self._UNMATCHED_NA_SLOTS:
+            self._unmatched_value_na = (
+                target, self._na_value_for_type(slot_cpp_type))
+        try:
+            self._visit_if_switch_expr(
+                node, target, lines, indent, target_cpp_type=target_cpp_type,
+            )
+        finally:
+            self._unmatched_value_na = saved
 
     def _na_value_for_type(self, cpp_type: str | None) -> str:
         """``na`` of a value slot: a numeric or string na, else its default."""
@@ -2237,9 +2334,9 @@ class StmtVisitor:
                 # non-var globals and reassignments: retaining the prior bar's
                 # map/matrix ID would turn the expression into implicit state.
                 emit_implicit_na_fallback()
-            elif self._loop_value_unmatched_na(target) is not None:
+            elif self._unmatched_arm_na(target) is not None:
                 lines.append(f"{pad}else {{")
-                lines.append(f"{pad}    {target} = {self._loop_value_unmatched_na(target)};")
+                lines.append(f"{pad}    {target} = {self._unmatched_arm_na(target)};")
                 lines.append(f"{pad}}}")
         elif isinstance(node, SwitchStmt):
             if node.expr:
@@ -2299,8 +2396,8 @@ class StmtVisitor:
                     lines.append(
                         f"{pad}{target} = {target_cpp_type}{{}};"
                     )
-            elif self._loop_value_unmatched_na(target) is not None:
-                na_value = self._loop_value_unmatched_na(target)
+            elif self._unmatched_arm_na(target) is not None:
+                na_value = self._unmatched_arm_na(target)
                 if node.cases:
                     lines.append(f"{pad}else {{")
                     lines.append(f"{pad}    {target} = {na_value};")

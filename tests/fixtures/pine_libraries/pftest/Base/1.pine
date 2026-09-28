@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+// Clean-room synthetic library for PineForge's library inliner tests
+// (lane XSYM-C). Not a published TradingView library.
+
+//@version=6
+library("Base")
+
+// @function Twice a value.
+export twice(float x) => x * 2
+
+// @type A point.
+export type Pt
+    float x
+    float y = 0.0
+
+// A private helper.
+half(float x) => x / 2
+
+// @function The midpoint of a point's coordinates.
+export mid(Pt p) => half(p.x + p.y)
+
+plot(twice(close))

@@ -1,0 +1,29 @@
+//@version=6
+strategy("pf-open-items-temp-names-array2", overlay = true)
+
+// Arrays spelled like the locals of PineForge's array.* templates, each passed
+// to the method whose template declares that local.
+w = close % 7
+c = array.from(3.0, 1.0, 2.0, w)
+m = array.from(2.0, 2.0, 5.0, w)
+it = array.from(1.0, 4.0, 9.0)
+n = array.from(1.0, 2.0, 3.0, w)
+b = array.from(2.0, 4.0, 1.0, w)
+idx = array.from(9.0, 1.0, 5.0, w)
+c1 = array.median(c)
+c2 = array.mode(m)
+c3 = array.indexof(it, 4.0)
+c4 = array.stdev(m)
+c5 = array.variance(m, false)
+c6 = array.percentile_nearest_rank(c, 50)
+c7 = array.percentile_linear_interpolation(c, 50)
+c8 = array.covariance(n, b)
+c9 = array.binary_search(it, 4.0)
+c10 = array.get(array.sort_indices(idx), 0)
+c12 = array.get(array.standardize(m), 2)
+
+fmt(v) => str.tostring(v, "#.####")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = fmt(c1) + "|" + fmt(c2) + "|" + str.tostring(c3) + "|" + fmt(c4) + "|" + fmt(c5) + "|" + fmt(c6) + "|" + fmt(c7) + "|" + fmt(c8) + "|" + str.tostring(c9) + "|" + fmt(c10) + "|" + fmt(c12) + "|" + fmt(w))

@@ -1,0 +1,20 @@
+//@version=6
+strategy("pf-open-items-kw-order2", overlay = true)
+
+// The order TradingView evaluates nz's keyword arguments in, written in
+// either order: the source probe logs 1 and the replacement probe 2, so a
+// call that runs its source first reads 12.
+var order = array.new_int()
+tag(int t, float v) =>
+    array.push(order, t)
+    v
+array.clear(order)
+a = nz(replacement = tag(2, -1.0), source = tag(1, close > open ? na : close))
+o1 = array.get(order, 0) * 10 + array.get(order, 1)
+array.clear(order)
+b = nz(source = tag(1, close > open ? na : close), replacement = tag(2, -1.0))
+o2 = array.get(order, 0) * 10 + array.get(order, 1)
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = str.tostring(o1) + "|" + str.tostring(o2) + "|" + str.tostring(a) + "|" + str.tostring(b))

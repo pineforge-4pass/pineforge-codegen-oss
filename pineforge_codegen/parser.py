@@ -65,12 +65,16 @@ COMPOUND_ASSIGN_OPS = {
 
 class Parser:
     def __init__(self, tokens: list[Token], *, source: str = "", filename: str = "<input>",
-                 budget: TimeBudget | None = None) -> None:
+                 budget: TimeBudget | None = None, library: bool = False) -> None:
         self.tokens = tokens
         self.pos = 0
         self._source = source
         self._filename = filename
         self._budget = budget
+        # A Pine library module (``library_modules``): its ``library()``
+        # declaration and ``export`` declarations parse instead of being
+        # refused, and a ``const`` qualifier is recorded on its declaration.
+        self._library = library
         # Syntax levels around the parse position, and the depth of each
         # operator/postfix chain subtree measured so far (held by id; the
         # parser never discards a node it built, so ids stay unique).
@@ -302,6 +306,8 @@ class Parser:
         # parsing it as a standalone expression and reporting its function
         # name as an unrelated trailing token.
         if cur.type == TokenType.IDENT and cur.value == "export":
+            if self._library:
+                return self._parse_export_decl()
             raise ParseError(
                 "'export' declarations belong to Pine libraries; "
                 "PineForge transpiles strategies only", cur,
@@ -347,6 +353,11 @@ class Parser:
                     # ``series`` makes TradingView re-window the call.
                     stmt.annotations = {**(stmt.annotations or {}),
                                         "qualifier": qualifier}
+                if self._library and qualifier == "const" and isinstance(stmt, VarDecl):
+                    # A library's ``const`` declaration: the only globals an
+                    # exported function may read, and a v5 const operand.
+                    stmt.annotations = {**(stmt.annotations or {}),
+                                        "declared_const": True}
                 return stmt
 
         # Type-annotated declaration: float x = ..., int x = ...
@@ -394,6 +405,9 @@ class Parser:
 
             # strategy() / indicator() declaration
             if cur.value in ("strategy", "indicator") and self._peek().type == TokenType.LPAREN:
+                return self._parse_strategy_decl()
+            if (self._library and cur.value == "library"
+                    and self._peek().type == TokenType.LPAREN):
                 return self._parse_strategy_decl()
 
             # Check for function definition: name(params) =>
@@ -527,6 +541,33 @@ class Parser:
             "call_arg_order": call_arg_order,
         }
         return self._set_loc(node, start_tok)
+
+    def _parse_export_decl(self):
+        """Parse a library's ``export`` declaration: a function, a method, a
+        type, an enum or a ``const`` variable, annotated ``exported``."""
+        export_tok = self._advance()  # consume 'export'
+        cur = self._current()
+        node = None
+        if cur.type == TokenType.METHOD:
+            node = self._parse_method_def()
+        elif cur.type == TokenType.IDENT:
+            if (cur.value in ("type", "enum")
+                    and self._peek().type == TokenType.IDENT
+                    and self._peek(2).type == TokenType.NEWLINE):
+                node = self._parse_type_or_enum_decl()
+            elif cur.value == "const":
+                node = self._parse_single_statement()
+                if not isinstance(node, VarDecl):
+                    node = None
+            elif self._is_func_def():
+                node = self._parse_func_def()
+        if node is None:
+            raise ParseError(
+                "'export' must precede a function, method, type, enum or "
+                "const declaration", export_tok,
+            )
+        node.annotations = {**(node.annotations or {}), "exported": True}
+        return node
 
     def _parse_import_stmt(self) -> ImportStmt:
         """Parse: import <user>/<name>/<version> [as <alias>]"""
@@ -805,10 +846,13 @@ class Parser:
         """
         TYPE_TOKENS = {TokenType.TYPE_INT, TokenType.TYPE_FLOAT,
                        TokenType.TYPE_BOOL, TokenType.TYPE_STRING}
-        # Optional qualifiers — they do not affect the C++ param type.
-        while self._check(TokenType.IDENT) and self._current().value in (
-            "series", "simple", "const",
-        ):
+        # Optional qualifiers — they do not affect the C++ param type. A
+        # qualifier word followed by ``,`` ``)`` or ``=`` is the parameter's
+        # own name.
+        while (self._check(TokenType.IDENT)
+               and self._current().value in ("series", "simple", "const")
+               and self._peek().type not in (
+                   TokenType.COMMA, TokenType.RPAREN, TokenType.EQUALS)):
             self._advance()
         # Is there a type annotation before the parameter name? A builtin type
         # token always is; an IDENT is a type only if followed by another IDENT
@@ -824,6 +868,19 @@ class Parser:
             nxt = self._peek().type
             if nxt in (TokenType.IDENT, TokenType.LBRACKET, TokenType.LT):
                 has_type = True
+            elif nxt == TokenType.DOT:
+                # A library type qualified by its import alias:
+                # ``lib.Type name`` / ``lib.Type[] names``.
+                i = self.pos + 1
+                while (i + 1 < len(self.tokens)
+                       and self.tokens[i].type == TokenType.DOT
+                       and self.tokens[i + 1].type == TokenType.IDENT):
+                    i += 2
+                has_type = (
+                    i < len(self.tokens)
+                    and self.tokens[i].type in (
+                        TokenType.IDENT, TokenType.LBRACKET, TokenType.LT)
+                )
         if not has_type:
             return None
         return self._parse_type_hint_string()
@@ -952,14 +1009,10 @@ class Parser:
         # args. See data/validation/udt-method-probe-04-default-param.
         param_defaults: list = [None]
         while self._match(TokenType.COMMA):
-            # Skip optional type annotations
-            param_type = None
-            if self._current().type in TYPE_KEYWORDS:
-                param_type = self._parse_type_hint_string()
-            elif (self._current().type == TokenType.IDENT
-                  and self._peek().type in (TokenType.IDENT, TokenType.LBRACKET, TokenType.LT)):
-                # ``line ln`` / ``float[] arr`` / ``array<float> xs`` typed param.
-                param_type = self._parse_type_hint_string()
+            # Optional ``series``/``simple``/``const`` qualifiers and type
+            # annotation: ``line ln`` / ``float[] arr`` / ``array<float> xs``
+            # / ``series float x`` / ``lib.Type t``.
+            param_type = self._parse_param_type_annotation()
             p = self._consume(TokenType.IDENT).value
             pdefault = None
             if self._check(TokenType.EQUALS):

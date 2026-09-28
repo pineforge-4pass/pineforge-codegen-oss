@@ -71,6 +71,7 @@ from ..ast_nodes import (
     Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
 from ..method_binding import bind_function_defaults
+from ..external_requests import FEED_LOWERING, LOWERING_ANNOTATION
 from ..security_contexts import CONTEXT_ANNOTATION, DEAD_ANNOTATION
 from ..symbols import PineType
 from .. import signatures as sigs
@@ -847,6 +848,11 @@ class CallHandlers:
             containing_func = scope_name[5:] if scope_name.startswith("func_") else ""
             if returns_tuple and tuple_element_types:
                 self._tuple_element_types_by_node[id(node)] = tuple_element_types
+            # A helper whose value is this request returns its tuple
+            # (``htf(sym, tf) => request.security(sym, tf, pack())``); a TA
+            # tuple's result struct is not one.
+            if returns_tuple and (isinstance(expr_node, TupleLiteral) or tuple_element_types):
+                self._security_tuple_shapes[id(node)] = tuple_size
             # A string payload returns a string (TradingView's na string reads
             # empty); every other scalar keeps the historical float result.
             string_result = not returns_tuple and expr_type == PineType.STRING
@@ -868,6 +874,8 @@ class CallHandlers:
                 symbol=symbol_node,
                 context_resolved=context is not None,
                 dead=bool(notes.get(DEAD_ANNOTATION)),
+                foreign=notes.get(LOWERING_ANNOTATION) == FEED_LOWERING,
+                ignore_invalid=node.kwargs.get("ignore_invalid_symbol"),
             ))
 
             return PineType.STRING if string_result else PineType.FLOAT

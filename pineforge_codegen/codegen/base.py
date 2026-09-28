@@ -194,6 +194,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     because the chain shares the constructor constant folder.
     """
 
+    # True while emitting the body of a function or method inlined from a
+    # v5 library (``library_v5``): and/or evaluate both operands, a for
+    # loop's end is fixed before its first iteration, a negative array
+    # index stops the run, and an observer of v5's na bool is refused.
+    _pine_v5_body = False
+
     def __init__(self, ctx: AnalyzerContext,
                  budget: TimeBudget | None = None) -> None:
         self.ctx = ctx
@@ -359,6 +365,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # it reads is its override-aware getter, since the evaluator can run
         # before on_bar initializes the input members.
         self._security_index_inputs: bool = False
+        # A source input's selected series read at a history offset in a
+        # payload (``_security_bar_history_field``): the payload-method
+        # pre-pass below reads it before generate() starts the run's own.
+        self._security_source_hist_fields: dict[tuple[str, str], tuple] = {}
         # Set when a chart expression calls ``_pf_session_market_``; its type
         # and member are emitted once the whole TU is lowered.
         self._uses_session_market: bool = False
@@ -980,7 +990,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for idx in sorted(ta_indices):
                 site = self.ctx.ta_call_sites[idx]
                 binding_map = ta_binding_stacks.get(idx) or {(): ()}
-                signatures = sorted(binding_map.keys(), key=repr)
+                signatures = sorted(
+                    binding_map.keys(),
+                    key=lambda sig: self._security_variant_order_key(sig, binding_map[sig]),
+                )
                 use_base_name = len(signatures) == 1
                 variants: list[dict] = []
                 for variant_idx, signature in enumerate(signatures):
@@ -1024,6 +1037,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "depends_on_mutable_globals": item.get("depends_on_mutable_globals", False),
                 "mutable_globals": list(item.get("mutable_globals", [])),
                 "is_lower_tf_array": bool(item.get("is_lower_tf_array", False)),
+                # Another symbol's feed (``_emit_foreign_security_registration``);
+                # a helper nothing reaches keeps the chart registration.
+                "foreign": bool(item.get("foreign")) and not item.get("dead"),
+                "symbol_node": item.get("symbol_node"),
+                "ignore_invalid_node": item.get("ignore_invalid_node"),
             })
         self._register_global_aggregate_member_types()
         self._uses_map = self._detect_map_usage()
@@ -3126,6 +3144,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         against recursion cycles (Pine forbids recursion, but a malformed source
         must be refused, not looped forever).
         """
+        if getattr(self, "_arith_udf_memo", None) is None:
+            self._arith_udf_memo = {}
+            try:
+                return self._arith_expr_to_str(node, _udf_stack, _depth)
+            finally:
+                self._arith_udf_memo = None
         if isinstance(node, NumberLiteral):
             v = node.value
             if isinstance(v, float) and v == int(v):
@@ -3173,10 +3197,20 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return spell_input_call(node, title=self._input_spelling_title(node))
             fn, ns = self._resolve_callee(node.callee)
             if ns is None and fn is not None and self._get_udf_def(fn) is not None:
-                inlined = self._inline_single_expr_udf(node, _udf_stack, _depth)
-                if inlined is None:
-                    return None
-                return self._arith_expr_to_str(inlined, _udf_stack | {fn}, _depth + 1)
+                # A call of the same function on the same argument nodes (a
+                # caller's inlined body calling it twice, a diamond of such
+                # helpers) is spelled once; the entry keeps the arguments
+                # alive, so their ids stay theirs until the outermost call.
+                key = (fn, _depth, _udf_stack, tuple(id(a) for a in node.args), bool(node.kwargs))
+                memo = self._arith_udf_memo
+                if key not in memo:
+                    inlined = self._inline_single_expr_udf(node, _udf_stack, _depth)
+                    memo[key] = (
+                        None if inlined is None
+                        else self._arith_expr_to_str(inlined, _udf_stack | {fn}, _depth + 1),
+                        node.args,
+                    )
+                return memo[key][0]
             callee = self._arith_expr_to_str(node.callee, _udf_stack, _depth)
             if callee is None:
                 return None
@@ -3999,6 +4033,16 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         key = (kind, *source_key, self._current_instance_name)
         member = self._inline_history_member_by_key.get(key)
         if member is None:
+            if getattr(self, "_security_fallback_frame", None) is not None:
+                # A builtin call in a request.security payload reads history
+                # the evaluator keeps no series for (a helper call's inside a
+                # helper body the payload inlines twice): refused as the bare
+                # read is, where this used to crash the transpiler.
+                self._codegen_error(
+                    node,
+                    "request.security helper call history is only supported in "
+                    "the payload itself",
+                )
             raise AssertionError(
                 "missing pre-registered inline history member for "
                 f"{kind} at {getattr(node, 'loc', None)} in context "
@@ -4170,6 +4214,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # request.security helper-call results read at a history offset
         # (``myHelper()[k]``). Maps (sec_id, node-id) -> backing Series metadata.
         self._security_expr_hist_by_node: dict[tuple[int, int], dict] = {}
+        # request.security ids whose payload reads the requested bar_index.
+        self._security_bar_index_secs: set[int] = set()
         self._prepare_lazy_source_clock_sites()
 
         lines: list[str] = []
@@ -4505,6 +4551,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 self._security_ohlc_hist_fields_by_sec[sec_id] = hist_fields
                 for i, el in enumerate(expr_node.elements):
                     ctype = self._infer_cpp_type_for_security_elem(el)
+                    if ctype == "int" and item.get("foreign"):
+                        # Another symbol's int element (its time, time_close,
+                        # bar_index) is held as a double: a millisecond
+                        # stamp overflows an int, and it reads na until the
+                        # symbol's first bar.
+                        ctype = "double"
                     if ctype == "std::vector<double>":
                         lines.append(f"    {ctype} _req_sec_{sec_id}_{i}{{}};")
                     else:
@@ -4555,7 +4607,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for name in self._security_ta_hist_series_names(sec_id):
                 lines.append(f"    Series<double> {name}{_mbb};")
             self._emit_security_expr_hist_members(sec_id, expr_node, lines, _mbb)
+            if item.get("foreign"):
+                # configure_security_evaluators() clears it when the site is
+                # registered: its reads stop the run while it is set.
+                lines.append(f"    bool _pf_sec_missing_{sec_id} = true;")
 
+        # A recorded request's missing-data flag, set where it is evaluated.
+        for n in range(len(self._recorded_sites())):
+            lines.append(f"    bool _pf_rec_missing_{n} = true;")
         if self._security_calls:
             lines.append('    std::unordered_map<std::string, Series<double>> _security_helper_series_;')
             self._security_string_series_declared = self._security_needs_string_series()
@@ -4871,6 +4930,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     and name in self._security_tuple_binding_names()
                 ):
                     # A string element of a request.security helper tuple.
+                    cpp_type = "std::string"
+                elif (
+                    ptype == PineType.STRING
+                    and isinstance(expr, (IfStmt, SwitchStmt))
+                ):
+                    # A string element of an if/switch selection tuple
+                    # (``[a, b] = if c ... f() else [string(na), string(na)]``):
+                    # the whole selection infers as double, which a
+                    # std::string element could not be assigned to.
                     cpp_type = "std::string"
                 else:
                     cpp_type = (

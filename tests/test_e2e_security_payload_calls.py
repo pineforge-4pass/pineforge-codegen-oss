@@ -325,26 +325,29 @@ plot(a + b + c)
 
 
 def test_a_call_beside_a_chart_read_keeps_the_chart_call():
-    # ``g`` stays the chart member under a builtin, so the evaluator keeps
-    # ``f(g)`` beside it the chart call; alone, ``f(g)`` is inlined with ``g``
-    # re-evaluated on the requested bar, as a bare payload reads it.
+    # ``g[1]`` stays the chart series under a builtin, so the evaluator keeps
+    # ``f(g)`` beside it the chart call; ``g`` itself is re-evaluated on the
+    # requested bar under a builtin as in a bare payload (P6), so ``f(g) - g``
+    # and ``f(g)`` alone are inlined.
     src = """//@version=6
 strategy("call beside a global")
 g = close - open
 f(x) => x * 2
-a = request.security(syminfo.tickerid, "60", nz(f(g) - g))
+a = request.security(syminfo.tickerid, "60", nz(f(g) - g[1]))
 b = request.security(syminfo.tickerid, "60", nz(f(g)))
-plot(a + b)
+c = request.security(syminfo.tickerid, "60", nz(f(g) - g))
+plot(a + b + c)
 """
     result = _transpiled(src)
     body = _eval_bodies(result["cpp"])
     first = body[:body.index("void _eval_security_1(")]
-    second = body[body.index("void _eval_security_1("):]
-    assert re.search(r"\bf\(g\) - g\b", first), first
+    second = body[body.index("void _eval_security_1("):body.index("void _eval_security_2(")]
+    third = body[body.index("void _eval_security_2("):]
+    assert re.search(r"\bf\(g(\[0\])?\) - g\[1\]", first), first
     assert "((bar.close - bar.open) * 2)" in second, second
+    assert "((bar.close - bar.open) * 2) - (bar.close - bar.open)" in third, third
     assert [d.message for d in result["diagnostics"]
-            if "function 'f' on the chart's bar" in d.message and "'g'" in d.message], \
-        result["diagnostics"]
+            if "function 'f' on the chart's bar" in d.message], result["diagnostics"]
     compile_env.compile_cpp(result["cpp"], label="security-call-beside-global")
 
 
@@ -369,8 +372,7 @@ plot(v + w)
 
 
 @pytest.mark.parametrize("declaration, read", [
-    ("g = close - open", "g"),
-    ("", "bar_index"),
+    ("g = close - open", "g[1]"),
     # Per run, yet a requested context reads its own timeframe.
     ("tfm = timeframe.multiplier * 1", "tfm"),
     ("", "(session.isfirstbar ? 1 : 0)"),
@@ -396,13 +398,13 @@ plot(v)
 
 def test_an_evaluator_mixing_bars_keeps_every_earlier_lowering():
     # A method inlined at the payload's top level beside a builtin that reads
-    # the chart's ``g`` would subtract the chart's value from a requested one:
-    # the whole evaluator keeps the lowering every earlier build emitted.
+    # the chart's ``g[1]`` would subtract the chart's value from a requested
+    # one: the whole evaluator keeps the lowering every earlier build emitted.
     src = """//@version=6
 strategy("mixed evaluator")
 float g = close - open
 method m(float x) => x * 2
-v = request.security(syminfo.tickerid, "60", g.m() - nz(g))
+v = request.security(syminfo.tickerid, "60", g.m() - nz(g[1]))
 w = request.security(syminfo.tickerid, "60", g.m() - g)
 plot(v + w)
 """
@@ -410,7 +412,7 @@ plot(v + w)
     body = _eval_bodies(result["cpp"])
     first = body[:body.index("void _eval_security_1(")]
     second = body[body.index("void _eval_security_1("):]
-    assert re.search(r"_udt_float_m(_cs\d+)?\(g\)", first), first
+    assert re.search(r"_udt_float_m(_cs\d+)?\(g(\[0\])?\)", first), first
     assert "((bar.close - bar.open) * 2) - (bar.close - bar.open)" in second, second
     assert any("keeps its user calls under builtin calls and its methods on the chart's bar"
                in d.message for d in result["diagnostics"])

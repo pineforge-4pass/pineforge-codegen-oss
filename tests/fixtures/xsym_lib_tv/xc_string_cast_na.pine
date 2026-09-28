@@ -1,0 +1,18 @@
+//@version=6
+// SPDX-License-Identifier: Apache-2.0
+// Synthetic probe (lane XSYM-C): string(na), the typed string na, as a
+// tuple's arms type it; each value spelled in an exit comment.
+strategy("xc string cast na", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=2)
+
+sig(string s) => na(s) ? "-" : s
+[a, b] = if close > open
+    ["UP", "x"]
+else
+    [string(na), string(na)]
+s = string(na)
+t = close > close[1] ? "HI" : string(na)
+
+if bar_index % 2 == 0
+    strategy.entry("A", strategy.long)
+else
+    strategy.close("A", comment=sig(a) + sig(b) + sig(s) + sig(t))

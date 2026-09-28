@@ -1,0 +1,19 @@
+//@version=6
+// Globals read under builtin calls in a request.security payload: each is
+// evaluated on the requested bar, as the bare global is.
+strategy("PF oi sec global under builtin", overlay = true)
+s = close - open
+g = ta.sma(close, 3)
+f() => close * 2
+a1 = request.security(syminfo.tickerid, "60", nz(s))
+a2 = request.security(syminfo.tickerid, "60", nz(g))
+a3 = request.security(syminfo.tickerid, "60", nz(s, -1.0) + 1)
+a4 = request.security(syminfo.tickerid, "60", math.max(nz(s), 0.0))
+a5 = request.security(syminfo.tickerid, "60", nz(s) + nz(f()))
+a6 = request.security(syminfo.tickerid, "60", s)
+x(v) => na(v) ? "na" : str.tostring(v)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = x(a1) + "|" + x(a2) + "|" + x(a3) + "|" + x(a4) + "|" + x(a5) + "|" + x(a6))

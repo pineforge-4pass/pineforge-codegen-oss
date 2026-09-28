@@ -85,8 +85,8 @@ from __future__ import annotations
 import re
 
 from ..ast_nodes import (
-    ExprStmt, ForInStmt, ForStmt, FuncCall, Identifier, IfStmt, MemberAccess,
-    SwitchStmt, TupleAssign, TupleLiteral, VarDecl, WhileStmt,
+    BoolLiteral, ExprStmt, ForInStmt, ForStmt, FuncCall, Identifier, IfStmt,
+    MemberAccess, SwitchStmt, TupleAssign, TupleLiteral, VarDecl, WhileStmt,
 )
 from ..analyzer import FuncInfo
 from ..symbols import PineType, method_receiver_cpp_token
@@ -1237,8 +1237,30 @@ class TopLevelEmitter:
         lines.append("        pineforge::source::PineStrategyHost::set_strategy_override(overrides);")
         lines.append("    }")
 
+        if self._uses_recorded_requests():
+            lines.extend([
+                "",
+                "#ifdef PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1",
+                "    // request.earnings / dividends / splits / financial: the series the requests",
+                "    // manifest records under the request's key, TradingView's value on the chart",
+                "    // bar opening at this bar's time (na where it has no row). A key nobody",
+                "    // installed reads na here and sets the request's flag, which its reads",
+                "    // test to stop the run.",
+                "    double _pf_recorded(const std::string& key, bool& missing) const {",
+                "        missing = recorded_series_.count(key) == 0;",
+                "        return missing ? na<double>() : recorded_series_value(key);",
+                "    }",
+                "#else",
+                "    double _pf_recorded(const std::string&, bool& missing) const {",
+                "        missing = true;",
+                "        return na<double>();",
+                "    }",
+                "#endif",
+            ])
         if self._security_eval_info:
             lines.append("")
+            if any(info.get("foreign") for info in self._security_eval_info):
+                self._emit_foreign_security_lookups(lines)
             lines.append("    void configure_security_evaluators() override {")
             lines.append("        security_eval_states_.clear();")
             lines.extend(self._security_tf_replay_prologue())
@@ -1275,12 +1297,117 @@ class TopLevelEmitter:
                             f"        {RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN}"
                             f"({sec_id}, {tf_expr}, input_tf_);"
                         )
+                    elif info.get("foreign"):
+                        self._emit_foreign_security_registration(info, tf_expr, la, go, lines)
                     else:
                         lines.append(
                             f"        {RUNTIME_REGISTER_SECURITY_EVAL_FN}"
                             f"({sec_id}, {tf_expr}, "
                             f"input_tf_, {la}, {go}{ha_arg});")
             lines.append("    }")
+
+    def _emit_foreign_security_lookups(self, lines: list[str]) -> None:
+        """The run-time lookups of another symbol's request (lane XSYM-E):
+        whether its symbol string is the chart's, and whether its data is
+        installed (``strategy_set_symbol_feed`` / ``_facts``). An engine
+        without the symbol-keyed registration has neither."""
+        lines.extend([
+            "#ifdef PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1",
+            "    // A request of another symbol reads the chart when its symbol string is the",
+            "    // chart's: the one the requests manifest resolves it to, else the chart's",
+            "    // ticker id or ticker (syminfo.ticker reads the chart).",
+            "    bool _pf_symbol_is_chart(const std::string& symbol) const {",
+            "        const auto facts = symbol_facts_.find(symbol);",
+            "        if (facts != symbol_facts_.end() && !facts->second.canonical.empty())",
+            "            return facts->second.canonical == syminfo_.tickerid;",
+            "        return symbol == syminfo_.tickerid || symbol == syminfo_.ticker;",
+            "    }",
+            "    // Otherwise it reads the feed installed for (symbol, timeframe), in the",
+            "    // engine's timeframe spelling (\"D\" is \"1D\"), holding the named",
+            "    // column it reads (a footprint's), or the symbol's facts say it is",
+            "    // invalid (na under ignore_invalid_symbol, a stopped run without it).",
+            "    bool _pf_symbol_data_installed(const std::string& symbol,",
+            "                                   const std::string& timeframe,",
+            "                                   const char* column = nullptr) const {",
+            "        const auto facts = symbol_facts_.find(symbol);",
+            "        if (facts != symbol_facts_.end() && facts->second.valid && !*facts->second.valid)",
+            "            return true;",
+            "        std::string tf = timeframe.empty() ? script_tf_ : timeframe;",
+            "        if (tf.size() == 1 && (tf[0] == 'D' || tf[0] == 'W' || tf[0] == 'M' || tf[0] == 'S'))",
+            "            tf = \"1\" + tf;",
+            "        for (const auto& feed : symbol_feeds_) {",
+            "            if (feed.instrument != symbol || feed.tf != tf) continue;",
+            "            if (column == nullptr) return true;",
+            "            for (const auto& named : feed.columns) {",
+            "                if (named.name == column) return true;",
+            "            }",
+            "        }",
+            "        return false;",
+            "    }",
+            "    // Its payload seeds ta.ema as TradingView does in the requested context:",
+            "    // na until `length` values, then their mean (EmaSeeding::SimpleAverage).",
+            "    struct _PFForeignEmaSeeding {",
+            "        bool prior_ = ta::ema_na_warmup_flag();",
+            "        _PFForeignEmaSeeding() { ta::ema_na_warmup_flag() = true; }",
+            "        ~_PFForeignEmaSeeding() { ta::ema_na_warmup_flag() = prior_; }",
+            "        _PFForeignEmaSeeding(const _PFForeignEmaSeeding&) = delete;",
+            "        _PFForeignEmaSeeding& operator=(const _PFForeignEmaSeeding&) = delete;",
+            "    };",
+        ])
+        if any(self._security_footprint_column(info["sec_id"]) for info in self._security_eval_info):
+            lines.extend([
+                "    // A footprint's delta: the named column of the requested bar.",
+                "    double _pf_symbol_column(int sec_id, const char* name) const {",
+                "        return security_column_value(sec_id, name);",
+                "    }",
+                "#else",
+                "    double _pf_symbol_column(int, const char*) const { return na<double>(); }",
+            ])
+        lines.append("#endif")
+
+    def _emit_foreign_security_registration(
+            self, info: dict, tf_expr: str, la: str, go: str, lines: list[str]) -> None:
+        """Register a request of another symbol by its symbol string as the
+        run computes it before the first bar: on the chart when the string
+        is the chart's, on the symbol's installed feed otherwise, and not at
+        all without one -- its reads then stop the run
+        (``_pf_sec_missing_N``), never reading the chart instead."""
+        sec_id = info["sec_id"]
+        symbol = self._security_tf_runtime_expr(info["symbol_node"])
+        column = self._security_footprint_column(sec_id)
+        column = f', "{column}"' if column else ""
+        ignore_node = info.get("ignore_invalid_node")
+        if ignore_node is None:
+            ignore = "false"
+        elif isinstance(ignore_node, BoolLiteral):
+            ignore = "true" if ignore_node.value else "false"
+        else:
+            ignore = f"static_cast<bool>({self._security_tf_runtime_expr(ignore_node)})"
+        # A footprint is read from a feed's column, which the chart's bars do
+        # not carry: its site reads a feed even for the chart's own symbol.
+        chart = [] if column else [
+            "            if (_pf_symbol_is_chart(_pf_symbol)) {",
+            f"                {RUNTIME_REGISTER_SECURITY_EVAL_FN}({sec_id}, {tf_expr}, input_tf_, {la}, {go});",
+            f"                _pf_sec_missing_{sec_id} = false;",
+        ]
+        feed = f"if (_pf_symbol_data_installed(_pf_symbol, {tf_expr}{column})) {{"
+        lines.extend([
+            "#ifdef PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1",
+            "        {",
+            f"            const std::string _pf_symbol = {symbol};",
+            *chart,
+            ("            } else " if chart else "            ") + feed,
+            f"                {RUNTIME_REGISTER_SECURITY_EVAL_FN}({sec_id}, _pf_symbol, {tf_expr}, "
+            f"input_tf_, {la}, {go}, {ignore});",
+            f"                _pf_sec_missing_{sec_id} = false;",
+            "            } else {",
+            f"                _pf_sec_missing_{sec_id} = true;",
+            "            }",
+            "        }",
+            "#else",
+            f"        _pf_sec_missing_{sec_id} = true;",
+            "#endif",
+        ])
 
     # Map strategy series member name to push expression
     _STRAT_SERIES_PUSH = {
@@ -1820,6 +1947,22 @@ class TopLevelEmitter:
 
     def _emit_func_def(self, fi: FuncInfo, lines: list[str], call_site_idx: int | None = None,
                        instance: dict | None = None) -> None:
+        """Emit a user-defined function as a class method, under v5's rules
+        when it was inlined from a v5 library (``library_v5``)."""
+        node = fi.node
+        previous = self._pine_v5_body
+        self._pine_v5_body = (
+            node is not None
+            and (getattr(node, "annotations", None) or {}).get("pine_version") == 5
+        )
+        try:
+            self._emit_func_def_body(fi, lines, call_site_idx, instance)
+        finally:
+            self._pine_v5_body = previous
+
+    def _emit_func_def_body(self, fi: FuncInfo, lines: list[str],
+                            call_site_idx: int | None = None,
+                            instance: dict | None = None) -> None:
         """Emit a user-defined function as a class method.
 
         If call_site_idx is not None, emit a per-call-site variant with
@@ -2248,7 +2391,7 @@ class TopLevelEmitter:
                     else:
                         default_ret = self._default_for_type(ret_type)
                     lines.append(f"        {ret_type} _func_ret = {default_ret};")
-                    self._visit_if_switch_expr(
+                    self._visit_selection_value(
                         s,
                         "_func_ret",
                         lines,
@@ -2258,6 +2401,7 @@ class TopLevelEmitter:
                             if rhs_return_cpp_type is not None
                             else self._int_slot_cpp_type(None, ret_type)
                         ),
+                        slot_cpp_type=None if fi.returns_tuple else ret_type,
                     )
                     lines.append("        return _func_ret;")
                     emitted_return = True

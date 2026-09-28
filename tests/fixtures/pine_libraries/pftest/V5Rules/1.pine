@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: Apache-2.0
+// Clean-room synthetic v5 library for PineForge's library inliner tests
+// (lane XSYM-C). Not a published TradingView library. Its exported functions
+// hold the code of the synthetic v5 strategy xc_v5_lib (fixtures/xsym_lib_tv),
+// whose TradingView tape pins each v5 rule PineForge implements.
+
+//@version=5
+library("V5Rules")
+
+int C5 = 5
+
+// @function Divisions of ints, by their v5 qualifiers.
+export divs(float src) =>
+    k = 9
+    var m = 7
+    m += 2
+    q = 9
+    if src < 0
+        q := 1
+    str.tostring(5 / 2) + "," + str.tostring(-7 / 2) + "," + str.tostring(7 / -2) + "," + str.tostring(C5 / 2) + "," + str.tostring(1 / 3 * 3) + "," + str.tostring(k / 2) + "," + str.tostring(m / 2) + "," + str.tostring(q / 2) + "," + str.tostring(bar_index / 2) + "," + str.tostring(int(5 / 2)) + "," + str.tostring(-C5 / 2) + "," + str.tostring(C5 % 3 / 2)
+
+// @function Divisions of built-ins of consts.
+export divs2() =>
+    str.tostring(math.max(5, 7) / 2) + "," + str.tostring(math.round(5.0) / 2) + "," + str.tostring(math.abs(-5) / 2) + "," + str.tostring((true ? 5 : 7) / 2) + "," + str.tostring(str.length("abcde") / 2) + "," + str.tostring(nz(7) / 2) + "," + str.tostring(math.sign(-5) / 2) + "," + str.tostring(math.min(7, 9) / 2) + "," + str.tostring(math.floor(7.9) / 2) + "," + str.tostring(math.ceil(6.1) / 2) + "," + str.tostring(int(7.9) / 2) + "," + str.tostring(7 / 2 * 2) + "," + str.tostring(7 % 3 / 2)
+
+// @function Divisions of typed parameters.
+export typedDiv(int x, simple int y, series int z) =>
+    str.tostring(x / 2) + "," + str.tostring(y / 2) + "," + str.tostring(z / 2)
+
+// @function Counts one evaluation.
+export bump(array<int> cnt, int i) =>
+    array.set(cnt, i, array.get(cnt, i) + 1)
+    true
+
+// @function and / or / ?: evaluation.
+export evals(array<int> cnt, bool gate) =>
+    c1 = gate and bump(cnt, 0)
+    c2 = gate or bump(cnt, 1)
+    c3 = gate ? bump(cnt, 2) : false
+    if gate and bump(cnt, 3)
+        array.set(cnt, 4, array.get(cnt, 4))
+    c5 = not gate and bump(cnt, 4)
+    str.tostring(array.get(cnt, 0)) + "," + str.tostring(array.get(cnt, 1)) + "," + str.tostring(array.get(cnt, 2)) + "," + str.tostring(array.get(cnt, 3)) + "," + str.tostring(array.get(cnt, 4))
+
+bumpRet(array<int> cnt) =>
+    array.set(cnt, 5, array.get(cnt, 5) + 1)
+    2
+
+// @function A for loop's end boundary.
+export loops(array<int> cnt) =>
+    lim = 3
+    int it = 0
+    for i = 0 to lim
+        lim := lim - 1
+        it += 1
+    int it2 = 0
+    for i = 0 to bumpRet(cnt)
+        it2 += 1
+    str.tostring(it) + "," + str.tostring(it2)
+
+// @function Color constants.
+export colors() =>
+    str.tostring(color.r(color.red)) + "," + str.tostring(color.g(color.red)) + "," + str.tostring(color.b(color.red)) + "|" + str.tostring(color.r(color.teal)) + "," + str.tostring(color.g(color.teal)) + "," + str.tostring(color.b(color.teal)) + "|" + str.tostring(color.r(color.yellow)) + "," + str.tostring(color.g(color.yellow)) + "," + str.tostring(color.b(color.yellow))
+
+// @function Numbers as conditions.
+export truthy(float fnan) =>
+    (bar_index % 3 ? "T" : "F") + (fnan ? "T" : "F") + ((close - close) ? "T" : "F") + (close ? "T" : "F")
+
+// @function A bool na where v5 reads it as a bool.
+export boolna(float fnan) =>
+    bool bn = fnan > 1
+    bool bl = na
+    (not bn ? "T" : "F") + (bl and true ? "T" : "F") + (bl or true ? "T" : "F") + (bl or false ? "T" : "F") + (bl ? "T" : "F")
+
+// @function A comparison that can be na, returned.
+export above(float x, float level) => x > level
+
+// @function The chart's timeframe as v5 spells it.
+export tf() => timeframe.period
+
+// @function An array element by index: v5 stops the run on a negative one
+// (TradingView's RE10045 "Index -1 is out of bounds"), v6 counts from the end.
+export at(array<int> a, int i) => array.get(a, i)

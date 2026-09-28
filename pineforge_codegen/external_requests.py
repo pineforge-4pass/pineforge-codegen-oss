@@ -1,8 +1,15 @@
-"""Requests PineForge has no data for.
+"""Requests PineForge has no data for, and the reads of requests lowered
+onto data a run is given.
 
 ``request.security`` on another symbol and ``request.financial`` /
 ``earnings`` / ``dividends`` / ``splits`` / ``footprint`` read data the
-engine does not load. ``TradeSlice`` follows such a request's value forward
+engine does not load itself: a probe's requests manifest pins it
+(``PINEFORGE_REQUESTS_ROOT``). A request of another symbol the support checker
+lowers onto that symbol's pinned feed (``FEED_LOWERING``), and a fundamentals
+request lowered onto the series recorded under its key (``RECORDED_LOWERING``,
+``recorded_key``), stay; their reads are marked like a deferred refusal's
+below, and stop the run only when the run began with no data for them.
+``TradeSlice`` follows such a request's value forward
 through the script: when it reaches display and alert sinks only -- the
 backward slice of every trade sink holds no part of it -- the request is
 lowered to ``na`` with a warning (``lower_no_data_requests``). Every other one
@@ -30,15 +37,73 @@ from __future__ import annotations
 from .ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, BreakStmt, ContinueStmt,
     ExprStmt, ForInStmt, ForStmt, FuncCall, FuncDef, Identifier, IfStmt,
-    MemberAccess, MethodDef, NaLiteral, Program, StringLiteral, Subscript,
+    MemberAccess, MethodDef, NaLiteral, NumberLiteral, Program, StringLiteral, Subscript,
     SwitchStmt, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
 )
+from .errors import SourceLocation
 from .security_contexts import ScriptIndex, replace_nodes
 
 
 LOWERING_ANNOTATION = "pf_request_lowering"
-# On a node whose evaluation stops the run: the message it stops with.
+# The lowering of a request of another symbol that reads the feed a requests
+# manifest pins for it (``request.security``; the engine's instrument feeds).
+FEED_LOWERING = "feed"
+# The lowering of ``request.earnings`` / ``dividends`` / ``splits`` /
+# ``financial``: the series TradingView returned per chart bar, recorded under
+# its key (``recorded_key``) by the requests manifest.
+RECORDED_LOWERING = "recorded"
+# Lowerings whose data is looked up at run time: the request stays, and its
+# reads stop the run only where the data is missing.
+DATA_LOWERINGS = frozenset({FEED_LOWERING, RECORDED_LOWERING})
+# The lowering of a ``request.security_lower_tf`` of another symbol whose
+# value can reach a trade: the engine reads no other symbol's intrabars, and
+# the request read the chart's. It stays (its array type flows on), and
+# evaluating it stops the run with the request named.
+ABSENT_LOWERING = "absent"
+# On a recorded request once lowered: its key's parts but the symbol, which
+# stays the call's only argument (``lower_no_data_requests``).
+RECORDED_KEY_ANNOTATION = "pf_recorded_key"
+# Pine's field constants per recorded function, and each default; the
+# financial periods (the requests manifest's key grammar, workflow
+# campaign/src/probe-requests.mjs formatRecordedKey).
+RECORDED_FIELDS = {
+    "earnings": (("actual", "estimate", "standardized"), "actual"),
+    "dividends": (("gross", "net"), "gross"),
+    "splits": (("denominator", "numerator"), "denominator"),
+}
+FINANCIAL_PERIODS = ("FQ", "FY", "FH", "TTM")
+# Each recorded function's parameters, in order.
+_RECORDED_PARAMS = {
+    "earnings": ("ticker", "field", "gaps", "lookahead", "ignore_invalid_symbol", "currency"),
+    "dividends": ("ticker", "field", "gaps", "lookahead", "ignore_invalid_symbol", "currency"),
+    "splits": ("ticker", "field", "gaps", "lookahead", "ignore_invalid_symbol", "currency"),
+    "financial": ("symbol", "financial_id", "period", "gaps", "ignore_invalid_symbol",
+                  "currency"),
+}
+# On a node whose evaluation stops the run: the message it stops with, or,
+# for a request lowered onto pinned data, ``{"message": ..., "ref":
+# RequestRef}``: the run stops there only when no data is installed for the
+# request that carries the same ref (``REQUEST_REF_ANNOTATION``).
 UNPINNED_ANNOTATION = "pf_request_unpinned"
+REQUEST_REF_ANNOTATION = "pf_request_ref"
+# On a request whose symbol can select the chart's or another symbol's: it
+# read the chart before it read a feed, and keeps that lowering where no feed
+# can be keyed (``unpin_requests``).
+CHART_FALLBACK_ANNOTATION = "pf_request_chart_fallback"
+# On a request of another symbol whose symbol or timeframe reaches it through
+# a helper's parameters: the support checker's warning, which
+# ``security_contexts`` reports once every call path keys a feed (else it
+# reports why the request keeps its earlier lowering).
+FEED_WARNING_ANNOTATION = "pf_request_feed_warning"
+# On a ``request.footprint`` that is the whole expression of a request of
+# another symbol reading its feed: the feed column its delta is read from.
+FOOTPRINT_COLUMN_ANNOTATION = "pf_footprint_column"
+
+
+class RequestRef:
+    """Names a request lowered onto pinned data from the reads marked for
+    it. A plain object, not a node, so no AST walk follows it; a helper copy
+    (``security_contexts``) copies it once for the request and its reads."""
 # request.* calls whose data PineForge never has.
 NO_DATA_REQUEST_FUNCS = frozenset({"financial", "earnings", "dividends", "splits", "footprint"})
 
@@ -75,6 +140,200 @@ def _call_name(node: FuncCall) -> tuple[str | None, str | None]:
             parts.append(obj.name)
             return ".".join(reversed(parts)), callee.member
     return None, None
+
+
+def recorded_key(request: FuncCall) -> tuple[dict | None, str | None]:
+    """``(parts, None)`` of a recorded request's key but its symbol --
+    ``{"fn", "symbol", "field", "period", "gaps", "lookahead"}``, the symbol
+    the argument node -- or ``(None, why)`` for a spelling no key names: a
+    field constant of another namespace or none, a financial id or period
+    that is not a literal of the grammar, a ``gaps``/``lookahead`` that is
+    not a ``barmerge`` constant, a ``currency`` (the tape records no
+    conversion)."""
+    ns, fn = _call_name(request)
+    if ns != "request" or fn not in _RECORDED_PARAMS:
+        return None, "it is no recorded request"
+    params = _RECORDED_PARAMS[fn]
+    if len(request.args) > len(params):
+        return None, "it has more arguments than the request takes"
+    args = dict(zip(params, request.args))
+    for name, value in request.kwargs.items():
+        if name not in params or name in args:
+            return None, f"its argument {name} is not one the key names"
+        args[name] = value
+    if "currency" in args:
+        return None, "it converts to a currency, which no recorded key names"
+    symbol = args.get(params[0])
+    if symbol is None:
+        return None, "it names no symbol"
+
+    def flag(name: str, kind: str) -> str | None:
+        value = args.get(name)
+        if value is None:
+            return "off"
+        if (isinstance(value, MemberAccess) and isinstance(value.object, Identifier)
+                and value.object.name == "barmerge"
+                and value.member in (f"{kind}_on", f"{kind}_off")):
+            return value.member.rsplit("_", 1)[1]
+        return None
+
+    gaps = flag("gaps", "gaps")
+    lookahead = flag("lookahead", "lookahead") if fn != "financial" else "off"
+    if gaps is None or lookahead is None:
+        return None, "its gaps and lookahead are barmerge constants"
+    if fn == "financial":
+        fid, period = args.get("financial_id"), args.get("period")
+        if not (isinstance(fid, StringLiteral) and fid.value[:1].isalpha()
+                and fid.value.replace("_", "").isalnum() and fid.value == fid.value.upper()):
+            return None, "its financial_id is a literal TradingView financial id"
+        if not (isinstance(period, StringLiteral) and period.value in FINANCIAL_PERIODS):
+            return None, f"its period is one of the literals {', '.join(FINANCIAL_PERIODS)}"
+        field_text, period_text = fid.value, period.value
+    else:
+        fields, default = RECORDED_FIELDS[fn]
+        value = args.get("field")
+        if value is None:
+            field_text = default
+        elif (isinstance(value, MemberAccess) and isinstance(value.object, Identifier)
+                and value.object.name == fn and value.member in fields):
+            field_text = value.member
+        else:
+            return None, f"its field is one of the {fn}.* constants"
+        period_text = "-"
+    return {"fn": fn, "symbol": symbol, "field": field_text, "period": period_text,
+            "gaps": gaps, "lookahead": lookahead}, None
+
+
+def footprint_column(request) -> str | None:
+    """``fp_delta_<ticks>_<va>``: the feed column a ``request.footprint``
+    call with literal ticks per row and value-area percent reads its delta
+    from (the requests manifest's column names), else None."""
+    if not (isinstance(request, FuncCall) and _call_name(request) == ("request", "footprint")):
+        return None
+    ticks = request.args[0] if request.args else request.kwargs.get("ticks_per_row")
+    va = (request.args[1] if len(request.args) > 1 else request.kwargs.get("va_percent",
+                                                                            NumberLiteral(value=70)))
+    values = []
+    for arg in (ticks, va):
+        if not (isinstance(arg, NumberLiteral) and float(arg.value).is_integer()
+                and int(arg.value) > 0):
+            return None
+        values.append(int(arg.value))
+    return f"fp_delta_{values[0]}_{values[1]}"
+
+
+def _footprint_payload(request) -> FuncCall | None:
+    """The ``request.footprint`` call that is ``request``'s whole
+    expression (``request.security(sym, tf, request.footprint(100, 70))``)."""
+    if isinstance(request, FuncCall) and _call_name(request) == ("request", "security"):
+        payload = request.args[2] if len(request.args) > 2 else request.kwargs.get("expression")
+        if isinstance(payload, FuncCall) and _call_name(payload) == ("request", "footprint"):
+            return payload
+    return None
+
+
+class FootprintValues:
+    """The script's footprint values, as ``ScriptIndex`` bindings:
+    declarations and helper parameters typed ``footprint``, declarations
+    holding a ``request.footprint`` (inside a ``request.security`` or not) or
+    a helper's call returning one, and the parameters a helper's calls pass
+    one to. PineForge reads a footprint's ``delta()`` only, so a footprint
+    value is its delta."""
+
+    def __init__(self, index: ScriptIndex) -> None:
+        self.index = index
+        self.bindings: set[tuple] = {
+            ("param", name, param) for name, fdef in index.funcs.items()
+            for param, hint in zip(fdef.params, _param_type_hints(fdef))
+            if str(hint or "").strip() == "footprint"}
+        self.returns: set[str] = set()  # helpers returning a footprint
+        decls = [(binding, decl) for binding, decl in index.decls.items()
+                 if isinstance(decl, VarDecl)]
+        changed = True
+        while changed:
+            changed = False
+            for binding, decl in decls:
+                if binding not in self.bindings and (
+                        str(decl.type_hint or "").strip() == "footprint"
+                        or self.holds(decl.value)):
+                    self.bindings.add(binding)
+                    changed = True
+            for name, fdef in index.funcs.items():
+                last = fdef.body[-1] if fdef.body else None
+                if (name not in self.returns and isinstance(last, ExprStmt)
+                        and self.holds(last.expr)):
+                    self.returns.add(name)
+                    changed = True
+                for param in fdef.params:
+                    if ("param", name, param) not in self.bindings and any(
+                            self.holds(index.param_arg(name, call, param))
+                            for call in index.calls.get(name, ())):
+                        self.bindings.add(("param", name, param))
+                        changed = True
+
+    @staticmethod
+    def is_request(expr) -> bool:
+        return (isinstance(expr, FuncCall) and _call_name(expr) == ("request", "footprint")
+                or _footprint_payload(expr) is not None)
+
+    def holds(self, expr) -> bool:
+        """``expr`` is a footprint value."""
+        if isinstance(expr, Identifier):
+            return self.index.refs.get(id(expr)) in self.bindings
+        if (isinstance(expr, FuncCall) and id(expr) in self.index.call_ids
+                and expr.callee.name in self.returns):
+            return True
+        return self.is_request(expr)
+
+    def member(self, call: FuncCall) -> tuple[str, ASTNode | None, bool] | None:
+        """``(member, footprint, only argument)`` of ``fp.member(...)`` or
+        ``footprint.member(fp, ...)``, else None; the flag says the footprint
+        is the call's only argument."""
+        callee = call.callee
+        if not isinstance(callee, MemberAccess):
+            return None
+        arity = len(call.args) + len(call.kwargs)
+        if (isinstance(callee.object, Identifier) and callee.object.name == "footprint"
+                and id(callee.object) not in self.index.refs):
+            first = call.args[0] if call.args else call.kwargs.get("id")
+            if first is None or not self.holds(first):
+                return None
+            return callee.member, first, arity == 1
+        if self.holds(callee.object):
+            return callee.member, callee.object, arity == 0
+        return None
+
+
+def _param_type_hints(fdef: FuncDef) -> list:
+    return list((fdef.annotations or {}).get("param_type_hints") or ())
+
+
+def read_footprint_deltas(program: Program) -> None:
+    """``fp.delta()`` and ``footprint.delta(fp)`` read the footprint's
+    delta, which is the value a footprint lowers to: each becomes ``fp``, and
+    a declaration typed ``footprint`` a float. The support checker refuses
+    every other footprint member."""
+    if not any((isinstance(n, Identifier) and n.name == "footprint")
+               or (isinstance(n, MemberAccess) and n.member == "footprint")
+               or (isinstance(n, VarDecl) and str(n.type_hint or "").strip() == "footprint")
+               for n in _nodes(program)):
+        return  # most scripts name no footprint: index none for them
+    values = FootprintValues(ScriptIndex(program))
+    swaps: dict[int, ASTNode] = {}
+    for node in _nodes(program):
+        if isinstance(node, FuncCall):
+            read = values.member(node)
+            if read is not None and read[0] == "delta" and read[2]:
+                swaps[id(node)] = read[1]
+        elif isinstance(node, VarDecl) and str(node.type_hint or "").strip() == "footprint":
+            node.type_hint = "float"
+        elif isinstance(node, FuncDef) and any(
+                str(hint or "").strip() == "footprint" for hint in _param_type_hints(node)):
+            node.annotations = {**node.annotations, "param_type_hints": [
+                "float" if str(hint or "").strip() == "footprint" else hint
+                for hint in _param_type_hints(node)]}
+    if swaps:
+        replace_nodes(program, swaps)
 
 
 def no_data_request(node) -> str | None:
@@ -473,51 +732,146 @@ def unpinned_message(node: FuncCall) -> str:
     return f"{spell_call(node)}: no data is pinned for this request, and its value was read"
 
 
+def _na_of(request: FuncCall, funcs: dict[str, FuncDef]) -> ASTNode:
+    """The ``na`` a request lowers to when no data is read for it."""
+    payload = None if no_data_request(request) else (
+        request.args[2] if len(request.args) > 2 else request.kwargs.get("expression"))
+    return _na_like(payload, funcs) if payload is not None else NaLiteral(loc=request.loc)
+
+
+def _mark_reads(program: Program, index: ScriptIndex, declarations: dict,
+                request: FuncCall, evaluated: ASTNode, marker) -> None:
+    """Mark where ``request``'s value is read with ``marker``: the reads of
+    the names of a declaration holding the whole request, those names never
+    reassigned (binding it is no read); else ``evaluated``, the node the
+    request is evaluated as."""
+    stmt = declarations.get(id(request))
+    names = ([stmt.name] if isinstance(stmt, VarDecl) else
+             list(stmt.names) if isinstance(stmt, TupleAssign) else [])
+    bindings = {index.decl_binding.get((id(stmt), name)) for name in names} - {None}
+    if stmt is None or not bindings or bindings & index.reassigned:
+        evaluated.annotations = {**(evaluated.annotations or {}), UNPINNED_ANNOTATION: marker}
+        return
+    for node in _nodes(program):
+        if isinstance(node, Subscript) and isinstance(node.object, Identifier):
+            reads = node.object
+        elif isinstance(node, Identifier):
+            reads = node
+        else:
+            continue
+        if index.refs.get(id(reads)) in bindings:
+            node.annotations = {**(node.annotations or {}), UNPINNED_ANNOTATION: marker}
+
+
 def lower_no_data_requests(program: Program) -> Program:
     """Replace each request the support checker lowered
     (``annotations[LOWERING_ANNOTATION]``) by its ``na``: an inert one's
     plainly, and an unpinned one's so that its first read stops the run.
     When the request is the whole value of a declaration whose names are
     never reassigned, those names' reads stop it; otherwise evaluating the
-    request does."""
+    request does. A request lowered onto pinned data (``DATA_LOWERINGS``)
+    stays, and the same reads stop the run only when its data is missing
+    when the run begins."""
+    read_footprint_deltas(program)
     funcs = {s.name: s for s in program.body if isinstance(s, FuncDef)}
     swaps: dict[int, ASTNode] = {}
     unpinned: list[FuncCall] = []
+    backed: list[FuncCall] = []
     for node in _nodes(program):
         lowering = (node.annotations or {}).get(LOWERING_ANNOTATION)
         if lowering is None or not isinstance(node, FuncCall):
             continue
-        payload = None if no_data_request(node) else (
-            node.args[2] if len(node.args) > 2 else node.kwargs.get("expression"))
-        swaps[id(node)] = (_na_like(payload, funcs) if payload is not None
-                           else NaLiteral(loc=node.loc))
+        if lowering in DATA_LOWERINGS:
+            backed.append(node)
+            continue
+        if lowering == ABSENT_LOWERING:
+            node.annotations = {**node.annotations, UNPINNED_ANNOTATION: unpinned_message(node)}
+            continue
+        swaps[id(node)] = _na_of(node, funcs)
         if lowering == "unpinned":
             unpinned.append(node)
-    if unpinned:
+    if unpinned or backed:
         index = ScriptIndex(program)
         declarations = {id(stmt.value): stmt for stmt in _nodes(program)
                         if isinstance(stmt, (VarDecl, TupleAssign))}
         for request in unpinned:
-            message = unpinned_message(request)
-            stmt = declarations.get(id(request))
-            names = ([stmt.name] if isinstance(stmt, VarDecl) else
-                     list(stmt.names) if isinstance(stmt, TupleAssign) else [])
-            bindings = {index.decl_binding.get((id(stmt), name)) for name in names} - {None}
-            if stmt is None or not bindings or bindings & index.reassigned:
-                lowered = swaps[id(request)]
-                lowered.annotations = {**(lowered.annotations or {}),
-                                       UNPINNED_ANNOTATION: message}
-                continue
-            for node in _nodes(program):
-                if isinstance(node, Subscript) and isinstance(node.object, Identifier):
-                    reads = node.object
-                elif isinstance(node, Identifier):
-                    reads = node
-                else:
-                    continue
-                if index.refs.get(id(reads)) in bindings:
-                    node.annotations = {**(node.annotations or {}),
-                                        UNPINNED_ANNOTATION: message}
+            _mark_reads(program, index, declarations, request, swaps[id(request)],
+                        unpinned_message(request))
+        for request in backed:
+            ref = RequestRef()
+            request.annotations = {**(request.annotations or {}), REQUEST_REF_ANNOTATION: ref}
+            _mark_reads(program, index, declarations, request, request,
+                        {"message": unpinned_message(request), "ref": ref})
+            if request.annotations.get(LOWERING_ANNOTATION) == RECORDED_LOWERING:
+                # The key's other parts are constants: the call keeps its
+                # symbol, the one part the run computes.
+                parts, _ = recorded_key(request)
+                symbol = parts.pop("symbol")
+                request.args, request.kwargs = [symbol], {}
+                notes = {k: v for k, v in request.annotations.items() if k != "call_arg_order"}
+                request.annotations = {**notes, RECORDED_KEY_ANNOTATION: parts}
     if swaps:
         replace_nodes(program, swaps)
     return program
+
+
+def pass_warning(node: ASTNode, message: str, hint: str) -> tuple:
+    """A warning of a pass between the support checker and the analyzer,
+    held on the AST as plain data (the analyzer makes it a ``Diagnostic``:
+    AST walkers recurse into annotation values, and an enum cycles)."""
+    return (message, hint, node.loc or SourceLocation(file="<input>", line=1, col=1, end_col=1))
+
+
+def unpin_requests(program: Program, reasons: dict[int, str]) -> None:
+    """Give each request ``reasons`` names (by id: a request of another
+    symbol whose symbol registration cannot compute before the first bar)
+    the lowering it had before it read a feed: its ``na``, whose reads stop
+    the run with the request named; or, for one whose symbol can select the
+    chart's (``CHART_FALLBACK_ANNOTATION``), the chart's bars, with the
+    warning it had. Each is reported with its reason."""
+    from .security_contexts import PASS_WARNINGS_ANNOTATION
+
+    funcs = {s.name: s for s in program.body if isinstance(s, FuncDef)}
+    requests = {id(node): node for node in _nodes(program) if id(node) in reasons}
+    refs = {id((node.annotations or {}).get(REQUEST_REF_ANNOTATION)) for node in requests.values()}
+    chart_refs = {id(node.annotations.get(REQUEST_REF_ANNOTATION)) for node in requests.values()
+                  if (node.annotations or {}).get(CHART_FALLBACK_ANNOTATION)}
+    swaps: dict[int, ASTNode] = {}
+    warnings = []
+    for request_id, request in list(requests.items()):
+        if (request.annotations or {}).get(CHART_FALLBACK_ANNOTATION):
+            request.annotations = {
+                k: v for k, v in request.annotations.items()
+                if k not in (LOWERING_ANNOTATION, REQUEST_REF_ANNOTATION, UNPINNED_ANNOTATION,
+                             CHART_FALLBACK_ANNOTATION, FEED_WARNING_ANNOTATION)}
+            warnings.append(pass_warning(
+                request,
+                f"{spell_call(request)}: request.security symbol can select an alternate "
+                "symbol, but PineForge always loads the current chart symbol.",
+                f"It reads no feed of another symbol: {reasons[request_id]}. Every reachable "
+                "symbol value must resolve to syminfo.tickerid or syminfo.ticker for exact "
+                "results."))
+            continue
+        lowered = _na_of(request, funcs)
+        marker = (request.annotations or {}).get(UNPINNED_ANNOTATION)
+        if isinstance(marker, dict):
+            lowered.annotations = {**(lowered.annotations or {}),
+                                   UNPINNED_ANNOTATION: marker["message"]}
+        swaps[request_id] = lowered
+        warnings.append(pass_warning(
+            request,
+            f"{spell_call(request)}: no data is pinned for this request; the run stops with "
+            "an error where its value is read.",
+            f"PineForge reads another symbol's feed only for a symbol and timeframe "
+            f"registration computes before the first bar; {reasons[request_id]}."))
+    for node in _nodes(program):
+        marker = (node.annotations or {}).get(UNPINNED_ANNOTATION)
+        if isinstance(marker, dict) and id(marker["ref"]) in chart_refs:
+            node.annotations = {k: v for k, v in node.annotations.items()
+                                if k != UNPINNED_ANNOTATION}
+        elif isinstance(marker, dict) and id(marker["ref"]) in refs:
+            node.annotations = {**node.annotations, UNPINNED_ANNOTATION: marker["message"]}
+    if swaps:
+        replace_nodes(program, swaps)
+    notes = program.annotations = dict(program.annotations or {})
+    notes[PASS_WARNINGS_ANNOTATION] = [*notes.get(PASS_WARNINGS_ANNOTATION, ()), *warnings]

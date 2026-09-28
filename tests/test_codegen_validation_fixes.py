@@ -1045,7 +1045,10 @@ def test_ta_precalc_skips_and_rhs_sma_in_tuple_assignment():
     """Top-level TupleAssign/TupleLiteral payloads participate in classification."""
     cpp = _cpp(
         "pred = close > open\n"
-        "[a, b] = [pred and ta.sma(close, 3) > close, close]\n"
+        "[a, b] = if true\n"
+        "    [pred and ta.sma(close, 3) > close, close]\n"
+        "else\n"
+        "    [false, close]\n"
         "plot(a ? b : close)"
     )
     assert "std::vector<double> _precalc__ta_sma" not in cpp

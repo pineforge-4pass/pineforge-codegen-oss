@@ -1,0 +1,53 @@
+//@version=6
+strategy("pf-open-items-if-tail-na2", overlay = true)
+
+// An if without else (a switch without default, an else-if chain without a
+// final else) whose arms do not run: as a function's last statement, nested
+// in a taken arm, typed float / int / string / bool, and as the value of a
+// global declaration, a reassignment and a function-local declaration.
+fIf(float v) =>
+    if v > 1e9
+        v
+fNested(float v) =>
+    if v > 0
+        if v > 1e9
+            v
+    else
+        2.0
+fSwitch(int k) =>
+    switch k
+        1 => 1.0
+fElseIf(float v) =>
+    if v > 1e9
+        1.0
+    else if v < 0
+        2.0
+fInt(float v) =>
+    if v > 1e9
+        1
+fStr(float v) =>
+    if v > 1e9
+        "big"
+fBool(float v) =>
+    if v > 1e9
+        true
+fLocal(float v) =>
+    y = if v > 1e9
+        v
+    nz(y, -7.0)
+
+up = close > open
+g = if up
+    close
+gs = switch
+    up => close
+var float z = 0.0
+z := if up
+    close
+
+fmt(x) => str.tostring(x, "#.####")
+sv = fStr(close)
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if hour(time, "UTC") % 6 == 0 and minute(time, "UTC") == 15
+    strategy.close("L", comment = fmt(fIf(close)) + "|" + fmt(fNested(close)) + "|" + fmt(fSwitch(2)) + "|" + fmt(fElseIf(close)) + "|" + (na(fInt(close)) ? "na" : "v") + "|" + (na(sv) ? "na" : "[" + sv + "]") + "|" + (fBool(close) ? "T" : "F") + "|" + fmt(fLocal(close)) + "|" + (up ? "up" : "dn") + "|" + fmt(g) + "|" + fmt(gs) + "|" + fmt(z) + "|" + fmt(close))

@@ -244,7 +244,7 @@ plot(x + pf_ta_length_choice_1_selected() + pf_ta_length_choice_1_true() + pf_ta
         "n = close > open ? -1 : 4\nx = ta.lowest(low, n)",
         # A non-VarDecl authored binder is not an external/builtin name and
         # cannot be forward-referenced through the bounded dependency model.
-        "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\nn = flag and close > open ? a : b\n[flag, other] = [true, false]\nx = ta.lowest(low, n)",
+        "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\nn = flag and close > open ? a : b\n[flag, other] = if true\n    [true, false]\nelse\n    [false, true]\nx = ta.lowest(low, n)",
         # Explicit non-int annotations cannot be erased by synthetic lowering.
         "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\nfloat n = close > open ? a : b\nx = ta.lowest(low, n)",
         "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\nbool n = close > open ? a : b\nx = ta.lowest(low, n)",
@@ -270,8 +270,8 @@ plot(x + pf_ta_length_choice_1_selected() + pf_ta_length_choice_1_true() + pf_ta
         "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\nn = high > open ? a : b\nclose = ta.lowest(low, n)\nx = close",
         # A direct top-level TupleAssign binder colliding with the extrema
         # result is another duplicate target, regardless of source order.
-        "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\nn = close > open ? a : b\n[x, z] = [1.0, 2.0]\nx = ta.lowest(low, n)",
-        "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\nn = close > open ? a : b\nx = ta.lowest(low, n)\n[x, z] = [1.0, 2.0]",
+        "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\nn = close > open ? a : b\n[x, z] = if true\n    [1.0, 2.0]\nelse\n    [2.0, 1.0]\nx = ta.lowest(low, n)",
+        "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\nn = close > open ? a : b\nx = ta.lowest(low, n)\n[x, z] = if true\n    [1.0, 2.0]\nelse\n    [2.0, 1.0]",
         # Extrema are float-valued; incompatible result annotations must retain
         # the original constructor/type failure rather than being converted by
         # a synthetic ternary assignment.
@@ -424,8 +424,8 @@ plot(x)
         "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\nn = close > open ? a : b\nx = ta.highest(open, n)",
         "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\nsrc = low\nn = close > open ? a : b\nx = ta.lowest(src, n)",
         "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\nlow = close\nn = close > open ? a : b\nx = ta.lowest(low, n)",
-        "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\n[low, other] = [close, open]\nn = close > open ? a : b\nx = ta.lowest(low, n)",
-        "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\n[high, other] = [close, open]\nn = close > open ? a : b\nx = ta.highest(high, n)",
+        "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\n[low, other] = if true\n    [close, open]\nelse\n    [open, close]\nn = close > open ? a : b\nx = ta.lowest(low, n)",
+        "a = input.int(2, \"A\", minval=1)\nb = input.int(4, \"B\", minval=1)\n[high, other] = if true\n    [close, open]\nelse\n    [open, close]\nn = close > open ? a : b\nx = ta.highest(high, n)",
     ],
 )
 def test_unbounded_or_out_of_scope_lengths_take_the_series_route(source: str) -> None:

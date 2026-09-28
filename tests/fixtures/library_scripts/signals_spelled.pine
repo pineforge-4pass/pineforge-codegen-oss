@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: Apache-2.0
+// Synthetic script (lane XSYM-C): signals_import.pine with pftest/Signals/1 and
+// pftest/Base/1 spelled out as user code, renamed by hand.
+//@version=6
+strategy("xc lib twin", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=2, margin_long=0, margin_short=0)
+
+type Filter
+    bool on
+Filter filter = Filter.new(true)
+trSmooth = ta.sma(close, 3)
+secret = "main"
+
+// pftest/Base/1, spelled out.
+b_twice(float x) => x * 2
+type Pt
+    float x
+    float y = 0.0
+b_half(float x) => x / 2
+b_mid(Pt p) => b_half(p.x + p.y)
+
+// pftest/Signals/1, spelled out.
+s_wicks() =>
+    rng = high - low
+    up = rng > 0 ? (high - math.max(open, close)) / rng : na
+    lo = rng > 0 ? (math.min(open, close) - low) / rng : na
+    [up, lo]
+s_dirAt(series int off) =>
+    close[off] > open[off] ? 1 : close[off] < open[off] ? -1 : 0
+s_secret = "s3"
+s_pin(simple float frac = 0.6, simple bool strict = true) =>
+    [up, lo] = s_wicks()
+    bull = not na(lo) and lo >= frac and (not strict or up <= 0.2)
+    bear = not na(up) and up >= frac and (not strict or lo <= 0.2)
+    bull ? "BUY" : bear ? "SELL" : na
+s_dir(series int off = 0) => s_dirAt(off)
+s_tag(string side) => s_secret + ":" + side
+s_counter(simple int len) =>
+    var int n = 0
+    n += 1
+    [n, ta.sma(close, len)]
+s_smooth(series float src, simple int len) =>
+    float flt = na
+    flt := nz(flt[1], src) + (src - nz(flt[1], src)) / len
+    trs = 0.0
+    trs := nz(trs[1]) + flt
+    flt
+s_span(series float hi, series float lo) => hi - lo
+type Bar2
+    float lo
+    float hi
+method width(Bar2 self) => self.hi - self.lo
+enum Side
+    long = "Long"
+    short = "Short"
+S_RATIO = 1.5
+s_scaled(float x) => b_twice(x) * S_RATIO
+s_ptMid(float a, float b) => b_mid(Pt.new(a, b))
+
+sig(string s) => na(s) ? "-" : s
+pin = s_pin()
+pin2 = s_pin(frac = 0.5, strict = false)
+[n1, s1] = s_counter(5)
+[n2, s2] = s_counter(9)
+sm = s_smooth(close, 4)
+sp = s_span(high, low)
+b = Bar2.new(low, high)
+w = b.width()
+w2 = b.width()
+Side side = close > open ? Side.long : Side.short
+sc = s_scaled(close)
+pm = s_ptMid(high, low)
+tg = s_tag("x")
+d1 = s_dir(1)
+f2(float v) => str.tostring(v, "#.##")
+sA = sig(pin) + sig(pin2) + "," + str.tostring(n1) + "," + str.tostring(n2) + "," + f2(s1) + "," + f2(s2) + "," + f2(sm) + "," + f2(sp) + "," + f2(w) + "," + f2(w2)
+sB = (side == Side.long ? "L" : "S") + "," + f2(sc) + "," + f2(pm) + "," + tg + "," + secret + "," + (filter.on ? "1" : "0") + "," + f2(trSmooth) + "," + str.tostring(d1) + "," + str.tostring(S_RATIO)
+if bar_index % 2 == 0
+    strategy.entry("A", strategy.long)
+    strategy.entry("B", strategy.long)
+else
+    strategy.close("A", comment="a " + sA)
+    strategy.close("B", comment="b " + sB)

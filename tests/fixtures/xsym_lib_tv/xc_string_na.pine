@@ -1,0 +1,19 @@
+//@version=6
+// SPDX-License-Identifier: Apache-2.0
+// Synthetic probe (lane XSYM-C): string ternaries with an na arm, each
+// value spelled in an exit comment.
+strategy("xc string na", overlay=true, initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=2)
+
+sig(string s) => na(s) ? "-" : s
+side() => close > open ? "UP" : close < open ? "DN" : na
+pair() => [close > close[1] ? "HI" : na, close < close[1] ? "LO" : na]
+up = close > open ? "UP" : na
+dn = na(up) ? (close < open ? "DN" : na) : na
+[hi, lo] = pair()
+eq = up == "UP" ? "1" : "0"
+far = high - low > 2 ? na : "NEAR"
+
+if bar_index % 2 == 0
+    strategy.entry("A", strategy.long)
+else
+    strategy.close("A", comment=sig(side()) + sig(up) + sig(dn) + sig(hi) + sig(lo) + eq + sig(far))
