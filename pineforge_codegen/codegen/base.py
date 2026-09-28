@@ -5846,16 +5846,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                             and lowered_variant
                             and not self._is_compile_time_value(resolved)
                         ):
-                            self._codegen_error(
-                                getattr(site, "node", None),
-                                f"Unsupported requested-context TA constructor "
-                                f"{'flag' if self._ta_ctor_arg_is_bool(site, arg_pos) else 'length'} "
-                                f"'{a}' for {site.class_name}: the "
-                                "helper-bound expression is not a stable "
-                                "per-run scalar.",
-                                hint=("Use a literal, an input.*() value, "
-                                      "timeframe.* metadata, or arithmetic "
-                                      "over those for TA lengths."),
+                            arg_nodes = self._security_ta_ctor_arg_nodes(site)
+                            self._refuse_security_ta_ctor_arg(
+                                site, arg_pos, a,
+                                arg_nodes[arg_pos] if arg_pos < len(arg_nodes) else None,
+                                variant.get("binding_stack", ()),
                             )
                         if rt is not None:
                             rendered = rt

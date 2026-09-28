@@ -20,10 +20,12 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | Probe | sha256 of the `.pine` | Tape sha256 |
 |---|---|---|
 | `cgs_int64_const` | `1f34842025040d843af4f9ceeffdb0ac511be7709caa46671d0ed069a8eaf423` | `248797fe3664df23238beb09bf99dfccb54068036b6ed69010912bbe6b0c9b16` |
+| `cgs_sec_var_len` | `bbfd2f23bf0e2afba662436a49a92990eaee9844f76b9f9e09a92bd873c2a4e6` | `b6d62e8aa55f93bccbf5651e6babe900fff22ccaa09cb25e502623a156b968db` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
 - `cgs_int64_const`: `a`, `b`, `c`, `d`, `e`, `g`, `h`, `k`, `w`
+- `cgs_sec_var_len`: `h60`, `l60`, `k60`, `p60`, `q60`, `h240`, `hon`, `hChart`
 
 What each tape shows:
 
@@ -34,3 +36,12 @@ What each tape shows:
   (`k`) and `time + 400 * MS - time` (`w`) read 2880000000, 2160000000,
   3000000000, 4000000000 and -2160000000 on every bar, and the window `rel <
   400 * step` holds on every bar of the week, so every entry is placed.
+- `cgs_sec_var_len`: a helper-local `var` read as the length of `ta.highest`
+  / `ta.lowest` inside `request.security` holds its own value on each call
+  site's requested bars: `var int c = -1; c += 1` with `c % 5 + 1` on the
+  60- and 240-minute bars (`h60`, `h240`) and on the chart (`hChart`), `n :=
+  n + 1` (`l60`), a `var` never reassigned (`k60`), `p += 2` over `int p = 3`
+  (`p60`, a length of 5) and a local an if arm rebinds on the requested bars'
+  candles (`q60`). With `lookahead_on` (`hon`) TradingView reads the completed
+  requested bar from its first chart bar, which the engine reproduces under
+  its `historical_security_lookahead_projection` run flag.

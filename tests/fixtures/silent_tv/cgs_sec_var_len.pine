@@ -1,0 +1,40 @@
+//@version=6
+// CG-SILENT item 2: a helper-local var (or a reassigned local) as the length
+// of ta.highest / ta.lowest inside request.security. Each call site keeps its
+// own var state on its own bars; the length is read on every requested bar.
+// Each close's comment spells what the script reads on that bar.
+strategy("CGS sec var len", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+tw() =>
+    var int c = -1
+    c += 1
+    ta.highest(high, c % 5 + 1)
+tn() =>
+    var int n = 0
+    n := n + 1
+    ta.lowest(low, n % 4 + 2)
+tk() =>
+    var int k = 3
+    ta.highest(high, k)
+tp() =>
+    int p = 3
+    p += 2
+    ta.lowest(low, p)
+tq() =>
+    int q = 2
+    if close > open
+        q := 6
+    ta.highest(high, q)
+h60 = request.security(syminfo.tickerid, "60", tw())
+l60 = request.security(syminfo.tickerid, "60", tn())
+k60 = request.security(syminfo.tickerid, "60", tk())
+p60 = request.security(syminfo.tickerid, "60", tp())
+q60 = request.security(syminfo.tickerid, "60", tq())
+h240 = request.security(syminfo.tickerid, "240", tw())
+hon = request.security(syminfo.tickerid, "60", tw(), lookahead = barmerge.lookahead_on)
+hChart = tw()
+s(x) => na(x) ? "na" : str.tostring(x)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = s(h60) + "|" + s(l60) + "|" + s(k60) + "|" + s(p60) + "|" + s(q60) + "|" + s(h240) + "|" + s(hon) + "|" + s(hChart))
