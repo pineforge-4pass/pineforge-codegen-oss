@@ -1668,6 +1668,13 @@ class TopLevelEmitter:
                             break
                     continue
                 if name in self._runtime_scalar_var_init_members:
+                    if runtime_info is not None and runtime_info.get("is_series"):
+                        # A history-read var whose initializer reads what the
+                        # body computes (``_series_var_init_keeps_preamble``):
+                        # the first bar's slot holds its na until the
+                        # declaration replaces it (``_visit_var_decl``).
+                        na_cpp = self._typed_na_init("na<double>()", name, ptype)
+                        lines.append(f"            {safe}.push({na_cpp});")
                     continue
                 # Persistent authored UDT variables initialize from their full
                 # source RHS, not only from ``Type.new``.  In particular,

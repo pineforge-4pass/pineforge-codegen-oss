@@ -1,0 +1,17 @@
+//@version=6
+// CG-SILENT item 4: a var read with history declared in a block initializes on
+// the first bar that runs the block; before it, its history is na. The block
+// first runs on the 03:15 UTC bar. Each close's comment spells what the
+// script reads on that bar.
+strategy("CGS block var init", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+m = minute(time, "UTC")
+started = time >= timestamp("UTC", 2025, 4, 1, 3, 15)
+sf(float x) => na(x) ? "na" : str.tostring(x)
+if started
+    var float fc = close
+    var float k = 1.5
+    k := k + 1
+    if m == 15 or m == 45
+        strategy.close("L", comment = sf(fc[1]) + "|" + sf(k[1]) + "|" + sf(fc) + "|" + sf(k))
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)

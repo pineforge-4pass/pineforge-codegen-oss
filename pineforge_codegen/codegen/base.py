@@ -1104,10 +1104,36 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 return True
         return False
 
+    def _series_var_init_keeps_preamble(self, init_str: str, init_ast,
+                                        top_level: bool = True) -> bool:
+        """Whether a history-read ``var``'s first value can be pushed in the
+        first-bar preamble, ahead of the script body: a top-level declaration
+        of a constant, a string literal, ``na`` or a bar field (the bar is in
+        place by then). Any other initializer reads what the body computes
+        before the declaration on the first bar -- a global (``b = close *
+        2``), a UDT field (``direction.neutral``), a call, an input's
+        override -- which the preamble read before it was assigned, or
+        spelled as raw Pine that did not compile
+        (``signal.push(direction.neutral)``); and a declaration in a block
+        initializes on the first bar that reaches it, which the preamble's
+        bar 0 is not."""
+        if not top_level:
+            return False
+        if init_ast is None:
+            return True
+        if self._scalar_var_init_depends_on_runtime_input(init_ast):
+            return False
+        if isinstance(init_ast, StringLiteral):
+            return True
+        if isinstance(init_ast, Identifier) and init_ast.name in BAR_FIELDS:
+            return True
+        return self._is_compile_time_value(self._resolve_known(init_str))
+
     def _is_runtime_scalar_var_initializer(
             self, name: str, ptype, init_str: str, init_ast,
             drawing_cpp: str | None = None,
-            is_series: bool = False) -> bool:
+            is_series: bool = False,
+            top_level: bool = True) -> bool:
         """Return True for a persistent primitive that must init in execution.
 
         Global Series and aggregate state keep their specialized preamble
@@ -1131,7 +1157,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 is_series
                 or not self._is_na_expr(init_ast)
             )
-        if is_series and name in self.ctx.series_vars:
+        if is_series and self._series_var_init_keeps_preamble(init_str, init_ast, top_level):
             return False
         udt_type = self._member_udt_type(name)
         if udt_type in self._udt_defs:
@@ -1147,6 +1173,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         return (
             not self._is_compile_time_value(ctor_val)
             or self._scalar_var_init_depends_on_runtime_input(init_ast)
+            # A history-read var in a block (its member may be renamed,
+            # ``k__blk1``): its history is na until the first bar that
+            # reaches it (``_series_var_init_keeps_preamble``).
+            or (is_series and not top_level)
         )
 
     def _prepare_runtime_scalar_var_initializers(self) -> None:
@@ -1332,7 +1362,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     nullable_collection_selection_decl_site
                     or self._is_runtime_scalar_var_initializer(
                         member_name, ptype, init_str, stmt.value, drawing_cpp,
-                        is_series
+                        is_series, node_id in top_level_node_ids
                     )
                 )
             )
