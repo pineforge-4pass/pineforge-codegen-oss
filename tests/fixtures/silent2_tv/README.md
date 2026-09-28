@@ -33,6 +33,7 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `cgs2_nested_helper_payload` | `866e32079b4293c151344a0135084936ee47c9e8e26887c993d8a84e75a02261` | `af162ce74797836ddc007d9951674f2d303ebbb3c44f55feb3519aeee18efba9` |
 | `cgs2_array_index_loop` | `a78a4a551c94e3e6ab3cf951c430171774c0baeba0eeceedf7381b39a6dc2654` | `c3adfbefef8d27c40eac8094589d5a163a4a399f0a092c666736db0835fea02b` |
 | `cgs2_array_loop_bool_copy` | `8b0a48a00b91167b5c4266f223d400e8dc583accd5a25d290a0dd2689bb6c8f8` | `55ae0bec42e7f29f28b700c3b8314a6e8a2d8735ff37e65f59dbe88e22fd5088` |
+| `cgs2_scalar_method_global` | `50d1dfd04fb43e8052c1361a0adc7948a4453cb8e9b92e7a75257764144d925f` | `3284114b6da48ee4a7aae5172773c8c9ff84cf67eddf5643c67907507a2b565e` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -48,6 +49,7 @@ Each exit Signal joins these fields with `|`, in this order:
 - `cgs2_nested_helper_payload`: `a`, `b` (4 decimals)
 - `cgs2_array_index_loop`: `s`, `weights(arr)` (4 decimals), `n`, `t`
 - `cgs2_array_loop_bool_copy`: `cnt`, `after`
+- `cgs2_scalar_method_global`: `y`, `h`, `a` (4 decimals)
 
 What each tape shows:
 
@@ -105,3 +107,7 @@ What each tape shows:
   reads each element as its iteration found it: `flags.set(i, not v)` in the
   body leaves `v` alone, so `cnt` counts the set flags before the flip (3,
   or 2 when `close <= open`) and a second loop the flipped ones (0 or 1).
+- `cgs2_scalar_method_global`: typed methods on a global float,
+  `s5.m()` (`ta.sma(x, 3)`) and `s5.half()`, on the chart and requested at
+  60 minutes (entries from 08:00 UTC on, when every requested window lies
+  inside the tape's range; 320 trades).

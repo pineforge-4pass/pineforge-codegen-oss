@@ -843,6 +843,11 @@ the transpiler. Carry `SourceLocation` so users can map back to the
 Pine line/col. Diagnostics inside the support checker use
 `Level.WARNING` for divergences-but-not-broken, `Level.ERROR`
 otherwise.
+- **Methods on scalars.** A typed method called on a script scalar
+(`s5.m()` over `s5 = ta.ema(close, 5)`) resolves through the receiver's
+own type (`_scalar_receiver_spec`): a global scalar's UDT tombstone hid
+it, and the call was emitted raw, a member call on a double, on the chart
+and in a payload (`tests/test_e2e_scalar_method_global.py`).
 - **Array index loops.** `for [i, v] in <array>` binds the array once and
 indexes it (`__pf_array_iter_N` / `__pf_array_index_N`), the index an
 `int`, the element a copy of its value (`value_type`: a `std::vector<bool>`

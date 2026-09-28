@@ -1,0 +1,18 @@
+//@version=6
+// CG-SILENT-2 item 5f: a typed method called on a global float, on the
+// chart and inside a request.security payload. Each close's comment spells
+// the values (from 08:00 UTC on, when every requested window lies inside the
+// tape's range).
+strategy("CGS2 scalar method global", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+method m(float x) => ta.sma(x, 3)
+method half(float x) => x / 2
+s5 = ta.sma(close, 5)
+y = s5.m()
+h = s5.half()
+a = request.security(syminfo.tickerid, "60", s5.m() + s5.half())
+live = time >= timestamp("UTC", 2025, 4, 1, 8, 0)
+mn = minute(time, "UTC")
+if live and (mn == 0 or mn == 30)
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(y, "#.####") + "|" + str.tostring(h, "#.####") + "|" + str.tostring(a, "#.####"))

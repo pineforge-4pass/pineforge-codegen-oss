@@ -321,6 +321,8 @@ class CallVisitor:
     def _typed_user_method_info(self, receiver, member: str):
         """Resolve an exact typed user method before any builtin method."""
         receiver_spec = self._type_spec_from_expr(receiver)
+        if receiver_spec is None and isinstance(receiver, Identifier):
+            receiver_spec = self._scalar_receiver_spec(receiver.name, member)
         receiver_name = method_receiver_type_name(receiver_spec)
         if receiver_name is None:
             return receiver_spec, None
@@ -331,6 +333,33 @@ class CallVisitor:
         ):
             return receiver_spec, None
         return receiver_spec, method_info
+
+    _SCALAR_RECEIVER_TYPES = {
+        "double": ("float",), "int": ("int",), "bool": ("bool",),
+        "std::string": ("string",), "int64_t": ("int", "color"),
+    }
+
+    def _scalar_receiver_spec(self, name: str, member: str):
+        """The primitive spec of a scalar a typed method is called on, where
+        ``_type_spec_from_expr`` has only its tombstone: a global scalar is
+        recorded as bound to no user type, which hid its own primitive type
+        (``s5 = ta.ema(close, 5)``; ``s5.m()`` was emitted raw, as a member
+        call on a double). A local or parameter reads its C++ type, a global
+        its symbol; an ``int64_t`` is whichever of ``int`` and ``color`` has
+        the method."""
+        cpp = (getattr(self, "_current_func_local_types", {}).get(name)
+               or getattr(self, "_current_func_param_types", {}).get(name))
+        if cpp is not None:
+            candidates = self._SCALAR_RECEIVER_TYPES.get(cpp, ())
+        else:
+            if getattr(self, "_global_udt_types", {}).get(name, "absent") is not None:
+                return None
+            sym = self._variable_symbol(name)
+            candidates = (sym.pine_type.value,) if sym is not None else ()
+        found = [kind for kind in candidates
+                 if kind in ("float", "int", "bool", "string", "color")
+                 and f"{kind}.{member}" in self._func_info_map]
+        return TypeSpec.primitive(found[0]) if len(found) == 1 else None
 
     def _check_time_bars_back(self, func_name: str, node: FuncCall) -> FuncCall:
         """Refuse ``time()`` / ``time_close()`` reading another bar.
