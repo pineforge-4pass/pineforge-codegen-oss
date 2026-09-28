@@ -32,6 +32,13 @@ missed:
   41c5e4f a payload's ``bar_index`` on the requested bars
   (``_sec<N>_bar_index_``). One function called on irregular chart bars and
   inside a request equals, on each clock, its own twin.
+* Another symbol's payload reads its context's ``bar_index``: XSYM-E 96b4939
+  runs that payload on the symbol's own feed, where the engine answers
+  ``pine_bar_index()`` with the context's bar index (XSYM-D), and 41c5e4f
+  keeps a payload's ``bar_index`` in ``_sec<N>_bar_index_`` for its history.
+  A foreign site now sets the member from the context, a chart site keeps
+  41c5e4f's count of requested bars: ``bar_index`` and ``bar_index[1]`` of
+  the foreign payload are the feed's own index and the one before it.
 * A payload's series TA length over ``bar_index``: K-TA-DYNLEN windows
   ``ta.highest(high, bar_index % 5 + 1)`` every call
   (``pineforge::source::SeriesHighest``), and 41c5e4f counts the requested
@@ -308,6 +315,42 @@ def test_a_payload_series_length_counts_the_requested_bars(runs):
     # The requested count is not the chart's: 16 chart bars per 240 bar.
     rc, cc = _values(records, "rc"), _values(records, "cc")
     assert max(x for x in rc if x == x) < max(cc) // 8
+
+
+# ---------------------------------------------------------------------------
+# Another symbol's payload reads its context's bar_index
+# (XSYM-E 96b4939 x CG-OPEN-ITEMS 41c5e4f)
+# ---------------------------------------------------------------------------
+
+def test_a_foreign_payloads_bar_index_is_its_contexts(tmp_path_factory) -> None:
+    from tests._requests import build, hourly, run, write_root
+    from tests.test_foreign_requests import H1, TRADE, _chart, _traced, _visible
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("cgint4_foreign_bar_index")
+    feed_path, opens = _chart(engine, base)
+    # Two requested bars before the chart's first: the context's own history.
+    other = hourly("PF:A", opens[0] - 2 * H1, 70, skip=frozenset({20, 21}))
+    source = _traced("bi,bi1,rc", (
+        '[c, bi, bi1] = request.security("PF:A", "60", [close, bar_index, bar_index[1]])\n'
+        'rc = request.security(syminfo.tickerid, "60", bar_index)\n' + TRADE))
+    work = base / "cgint4-foreign-bi"
+    cpp = build(source, work)["cpp"]
+    assert re.search(r"_sec\d+_bar_index_ = pine_bar_index\(\);", cpp)
+    assert re.search(r"if \(security_series_slot_is_new\(\d+\)\) \+\+_sec\d+_bar_index_;", cpp)
+    result = run(engine, work, feed_path,
+                 write_root(base, "cgint4-foreign-bi", "BINANCE:ETHUSDT", "15", [other]))
+    assert result.ok, result.error
+    nan = float("nan")
+    counts = []
+    for chart_open in opens:
+        got = result.trace[chart_open]
+        i = _visible(other, chart_open, False)
+        assert same(got["pf_bi"], nan if i is None else float(i)), (chart_open, got)
+        assert same(got["pf_bi1"], nan if i is None or i < 1 else float(i - 1)), (chart_open, got)
+        counts.append(got["pf_rc"])
+    # The chart symbol's request counts its own requested bars (41c5e4f).
+    finite = [x for x in counts if x == x]
+    assert finite and finite == sorted(finite) and max(finite) < len(opens) // 3
 
 
 # ---------------------------------------------------------------------------
