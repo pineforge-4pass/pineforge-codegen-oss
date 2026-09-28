@@ -32,6 +32,21 @@ missed:
   41c5e4f a payload's ``bar_index`` on the requested bars
   (``_sec<N>_bar_index_``). One function called on irregular chart bars and
   inside a request equals, on each clock, its own twin.
+* A payload's series TA length over ``bar_index``: K-TA-DYNLEN windows
+  ``ta.highest(high, bar_index % 5 + 1)`` every call
+  (``pineforge::source::SeriesHighest``), and 41c5e4f counts the requested
+  bars, where K-TA-DYNLEN's pin spelled the chart's ``pine_bar_index()``
+  (none of its tapes reads ``bar_index`` in a payload). The window equals
+  its spelled-out ``math.max`` over the requested bars' highs.
+* A flag's history beside a global under a payload's builtin: CG-SESSION-2
+  keeps ``session.<flag>[k]`` on the requested clock only where the
+  evaluator is on the requested bar's terms, and CG-SECURITY-2 kept an
+  evaluator whose builtin also read a global on the chart's (CGINT2 pinned
+  ``nz(session.ismarket[1] ? g : na)`` with ``g = close`` as refused).
+  CG-OPEN-ITEMS 5b3791d re-evaluates such a global on the requested bar, so
+  the read now runs and equals its spelling with ``close``; a per-run global
+  (``timeframe.*``) still keeps the chart's terms and the refusal
+  (``tests/test_e2e_lane_compositions.py``).
 * CG-OPEN-ITEMS d504053 parenthesizes a lambda history offset; CG-SESSION-2's
   flag histories and CG-W9-FN's function histories index through
   ``pine_index_int_cast``. A fractional runtime offset on every emitter
@@ -51,6 +66,7 @@ from tests._e2e import (
     Build, chart_feed_head, execute_all, ok, reference_codegen, same,
     skip_unless_e2e_env, transpile_json,
 )
+from tests.test_e2e_session_history import EXTENDED, _replay, _replay_stamps
 
 # The integration base: codegen main before the CGINT4 picks.
 MAIN = "9361dbb3927cb6a545e97ba0cf5a5574e3c9fc28"
@@ -186,6 +202,22 @@ chart = bar_index[1]
 
 
 # ---------------------------------------------------------------------------
+# A series TA length over a payload's bar_index
+# (K-TA-DYNLEN x CG-OPEN-ITEMS 41c5e4f)
+# ---------------------------------------------------------------------------
+
+DYN_BAR_INDEX = HEAD + '''w = request.security(syminfo.tickerid, "240", ta.highest(high, bar_index % 5 + 1))
+twin = request.security(syminfo.tickerid, "240", bar_index % 5 == 0 ? high : bar_index % 5 == 1 ? math.max(high, high[1]) : bar_index % 5 == 2 ? math.max(high, high[1], high[2]) : bar_index % 5 == 3 ? math.max(high, high[1], high[2], high[3]) : math.max(high, high[1], high[2], high[3], high[4]))
+rc = request.security(syminfo.tickerid, "240", bar_index)
+cc = bar_index
+// @pf-trace w=w
+// @pf-trace twin=twin
+// @pf-trace rc=rc
+// @pf-trace cc=cc
+'''
+
+
+# ---------------------------------------------------------------------------
 # Chart-feed runs, the integrated tree beside main
 # ---------------------------------------------------------------------------
 
@@ -198,6 +230,7 @@ def runs(tmp_path_factory):
         "func_local": Build(FUNC_LOCAL, trace=True),
         "if_na": Build(IF_NA, trace=True),
         "bar_clocks": Build(BAR_CLOCKS, trace=True),
+        "dyn_bar_index": Build(DYN_BAR_INDEX, trace=True),
     }
     main = reference_codegen(MAIN)
     if main is not None:
@@ -251,6 +284,24 @@ def test_one_function_reads_each_clocks_own_history(runs):
     for name in ("a", "b"):
         got = _values(records, name)
         assert any(not same(x, y) for x, y in zip(got, chart)), name
+
+
+def test_a_payload_series_length_counts_the_requested_bars(runs):
+    outcome = ok(runs, "dyn_bar_index")
+    cpp = outcome.transpiled["cpp"]
+    member = re.search(r"pineforge::source::SeriesHighest (_sec\d+__ta_highest_\d+);", cpp)
+    assert member, "the payload's series length windows every call"
+    compute = next(line for line in cpp.splitlines()
+                   if f"{member.group(1)}.compute(" in line)
+    assert re.search(r"_sec\d+_bar_index_", compute) and "pine_bar_index()" not in compute
+    records = outcome.traces["default"]
+    got, want = _values(records, "w"), _values(records, "twin")
+    assert len(got) == len(want) == BARS
+    assert all(same(x, y) for x, y in zip(got, want))
+    assert len({x for x in got if x == x}) > 10
+    # The requested count is not the chart's: 16 chart bars per 240 bar.
+    rc, cc = _values(records, "rc"), _values(records, "cc")
+    assert max(x for x in rc if x == x) < max(cc) // 8
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +364,49 @@ def test_a_keyword_call_is_its_positional_twin(case: str) -> None:
 def test_main_crashed_on_the_keyword_call(tmp_path: Path, case: str) -> None:
     with pytest.raises(RuntimeError, match="IndexError"):
         _main_transpiled(tmp_path, KEYWORD_TWINS[case][0])
+
+
+# ---------------------------------------------------------------------------
+# A flag's history beside a global under a payload's builtin
+# (CG-SESSION-2 x CG-SECURITY-2 x CG-OPEN-ITEMS 5b3791d), on the session
+# tapes' bars
+# ---------------------------------------------------------------------------
+
+SESSION_GLOBAL = '''//@version=6
+strategy("a flag's history beside a global under a builtin", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1)
+g = close
+a = request.security(syminfo.tickerid, "60", nz(session.ismarket[1] ? g : na))
+a_ref = request.security(syminfo.tickerid, "60", nz(session.ismarket[1] ? close : na))
+if a > a_ref
+    strategy.entry("L", strategy.long)
+// @pf-trace a=a
+// @pf-trace a_ref=a_ref
+'''
+
+
+@pytest.fixture(scope="module")
+def session_global_run(tmp_path_factory):
+    engine = skip_unless_e2e_env()
+    base = tmp_path_factory.mktemp("cgint4_session_global")
+    return _replay(engine, base / "session_global", SESSION_GLOBAL, _replay_stamps(EXTENDED))
+
+
+def test_a_flags_history_beside_a_requested_global(session_global_run):
+    replay = session_global_run
+    assert re.search(r"Series<bool> _sec\d+_expr_hist_\d+", replay.cpp)
+    n = len(_replay_stamps(EXTENDED))
+    got, want = _values(replay.traces, "a"), _values(replay.traces, "a_ref")
+    assert len(got) == len(want) == n
+    assert all(same(x, y) for x, y in zip(got, want))
+    # The flag's history is live: off-market bars read nz's 0, the others g.
+    assert 0.0 in got and any(x > 0 for x in got)
+
+
+def test_main_refused_the_flags_history_beside_the_global(tmp_path: Path) -> None:
+    result = _main_transpiled(tmp_path, SESSION_GLOBAL)
+    assert not result["ok"]
+    assert any("session.ismarket[...] cannot be read here" in d["message"]
+               for d in result["diagnostics"])
 
 
 # ---------------------------------------------------------------------------

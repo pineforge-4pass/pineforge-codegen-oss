@@ -284,7 +284,9 @@ def test_helper_bound_security_copies_are_planned_per_call(series_first: bool) -
         "pineforge::source::FirstCallBound<ta::Highest>"
     assert _member_type(cpp, f"_sec{series_sec}__ta_highest_1") == \
         "pineforge::source::SeriesHighest"
-    assert "pine_bar_index()" in _compute_line(cpp, f"_sec{series_sec}__ta_highest_1")
+    # A payload's bar_index is the requested bar's count (CG-OPEN-ITEMS
+    # 41c5e4f; tests/test_e2e_cgint4_compositions.py runs the window).
+    assert f"_sec{series_sec}_bar_index_" in _compute_line(cpp, f"_sec{series_sec}__ta_highest_1")
     assert '"crypto"' in _compute_line(cpp, f"_sec{simple_sec}__ta_highest_1")
     compile_cpp(cpp, label=f"helper_copies_{series_first}")
 

@@ -158,7 +158,8 @@ def test_script_names_of_host_members_are_renamed(tmp_path: Path) -> None:
                     "syminfo_ = input.float(2.0)\n"
                     "trades_ = 3\n"
                     "session_islastbar_regular_ = close > open\n"
-                    "[_src_close_, _src_open_] = [close, open]\n"
+                    "[_src_close_, _src_open_] = if true\n    [close, open]\n"
+                    "else\n    [open, close]\n"
                     "total = 0\n"
                     "for security_eval_states_ = 0 to 1\n"
                     "    total += security_eval_states_\n"
@@ -231,7 +232,10 @@ type Holder
 {sm} = 4.0
 {it}(x) => x * 2
 f({pb}) => {pb} + 1
-[{sc}, {so}] = [close, open]
+[{sc}, {so}] = if true
+    [close, open]
+else
+    [open, close]
 total = 0
 for {se} = 0 to 1
     total += {se}
