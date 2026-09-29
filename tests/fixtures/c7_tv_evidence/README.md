@@ -10,7 +10,7 @@ the next period as `Anchor-O`.
 Export command:
 
 ```text
-source /Users/haoliangwen/code/pineforge-workflow/campaign/env.sh
+source <pineforge-workflow checkout>/campaign/env.sh   # private maintainers' tooling
 lab tv --pine tests/fixtures/c7_tv_evidence/pivot_levels_probe.pine \
   --slug c7-pivot-levels-formula-4 --symbol BINANCE:ETHUSDT.P --interval 15 \
   --from 2025-04-01 --to 2025-04-08 --out /tmp/c7-tv-pivot4 --no-note --json

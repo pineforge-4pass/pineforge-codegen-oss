@@ -109,10 +109,10 @@ def transpile(pine_source: str, *, check_support: bool = True, filename: str = "
 
     Before analysis, :func:`support_checker.check_support_or_raise` rejects
     scripts that use language constructs PineForge cannot faithfully execute
-    (e.g. ``indicator()`` declarations, prohibited variables such as
-    ``bar_index``, disallowed ``request.security`` parameters). Pass
-    ``check_support=False`` to bypass this gate (intended for tests of legacy
-    fixtures only).
+    (e.g. ``indicator()`` declarations, ``request.seed``, disallowed
+    ``request.security`` parameters) and warns about approximated ones (e.g.
+    ``bar_index``). Pass ``check_support=False`` to bypass this gate
+    (experimental; intended for tests of legacy fixtures only).
 
     ``// @pf-trace name=expr`` pragmas are extracted from ``pine_source``
     via a pre-pass (the lexer strips comments before the parser sees them)
@@ -156,8 +156,9 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
     cloud Studio needs to auto-build a backtest "override params" form:
 
     - ``cpp``: the generated C++ source (identical to :func:`transpile`).
-    - ``inputs``: a list of ``InputDef`` dicts (one per top-level
-      ``var = input.*(...)`` declaration). Each has ``title`` / ``type`` /
+    - ``inputs``: a list of ``InputDef`` dicts (one per global-scope
+      ``input(...)`` / ``input.*(...)`` call, inline calls included, in
+      source order). Each has ``title`` / ``type`` /
       ``default`` and optionally ``min`` / ``max`` / ``step`` / ``options``
       (omitted when the corresponding signature argument is absent or
       references a non-const value). See

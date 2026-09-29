@@ -20,27 +20,45 @@ npm ci
 ```
 
 Build the paired engine outside its source checkout if you need compile and
-runtime tests. This example enables the source layer and limits the build to
-four jobs:
+runtime tests. This example enables the source layer (the default) and limits
+the build to four jobs:
 
 ```bash
 cmake -S ../pineforge-engine -B /tmp/pineforge-engine-build \
-  -DCMAKE_BUILD_TYPE=Release -DPINEFORGE_BUILD_TESTS=OFF
+  -DCMAKE_BUILD_TYPE=Release -DPINEFORGE_BUILD_TESTS=OFF \
+  -DPINEFORGE_BUILD_SOURCE_LAYER=ON
 cmake --build /tmp/pineforge-engine-build -j4
 ```
 
 If CMake fetches Eigen, its headers are under the build tree's
-`_deps/eigen-src`; a system Eigen install is also fine. The engine corpus is a
-separate checkout/submodule in some environments. The corpus test skips when
-it cannot find that tree, so inspect skip reasons before treating a run as
-complete.
+`_deps/eigen-src`; a system Eigen install is also fine. The engine corpus is
+the engine's `corpus` submodule
+([`pineforge-corpus`](https://github.com/pineforge-4pass/pineforge-corpus)),
+and the 1m feed the E2E tests replay is stored in Git LFS:
+
+```bash
+git -C ../pineforge-engine submodule update --init corpus
+git -C ../pineforge-engine/corpus lfs pull
+```
+
+The corpus test skips when it cannot find that tree, and the E2E tests skip
+when the feed is missing or still an LFS pointer, so inspect skip reasons
+before treating a run as complete.
 
 ## Engine pairing
 
-A released codegen `X.Y.Z` is supported only with engine tag `vX.Y.Z`, using
-that release's generated headers and `libpineforge.a`. Prereleases match
-exactly too: codegen `1.0.0-rc.1` requires engine `v1.0.0-rc.1`. Do not pair
-different patch or prerelease tags, even if `PF_ABI_VERSION` is equal.
+Codegen `main` is developed and tested against engine `main`; its generated
+C++ does not compile against any engine release yet. On the 0.x line the two
+version lineages are independent: the released codegen 0.10.4 pairs with
+engine `v0.13.1`, the pair the
+[`pineforge-release`](https://github.com/pineforge-4pass/pineforge-release)
+image `v0.1.25` ships.
+
+From 1.0.0 on, a released codegen `X.Y.Z` is supported only with engine tag
+`vX.Y.Z`, using that release's generated headers and `libpineforge.a`.
+Prereleases match exactly too: codegen `1.0.0-rc.1` requires engine
+`v1.0.0-rc.1`. Do not pair different patch or prerelease tags, even if
+`PF_ABI_VERSION` is equal.
 
 On **every** pair change, rerun codegen on the Pine source, then rebuild and
 relink each generated strategy translation unit against the new pair's headers
@@ -96,3 +114,6 @@ publishing is a separate release operation.
   engine.
 - Keep [CHANGELOG.md](CHANGELOG.md) current for user-visible changes. Its
   release-note policy applies to both stable and prerelease tags.
+- The README describes `main` against the latest release and becomes the PyPI
+  page of the next one: when a version is tagged, update its "Releases and
+  this README" section, its engine-pairing table and its release markers.
