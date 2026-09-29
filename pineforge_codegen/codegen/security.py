@@ -2515,9 +2515,12 @@ class SecurityEmitter:
 
     def _security_call_has_state(self, call) -> bool:
         """Whether lowering the user call ``call`` in a payload advances
-        state: a TA site, a ``var`` / ``varip`` or a request in its body or
-        in the bodies of the user functions it calls."""
-        seen: set[str] = set()
+        state: a TA site, a ``var`` / ``varip`` or a request in its body, in
+        the bodies of the user functions it calls or in the declarations of
+        the globals they read; a method call counts as state (its body is
+        not followed)."""
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        seen: set = set()
         stack = [call]
         while stack:
             node = stack.pop()
@@ -2529,6 +2532,10 @@ class SecurityEmitter:
                 if (isinstance(sub, FuncCall)
                         and self._resolve_callee(sub.callee)[1] == "request"):
                     return True
+                if (isinstance(sub, FuncCall) and isinstance(sub.callee, MemberAccess)
+                        and any(isinstance(key, str) and key.endswith("." + sub.callee.member)
+                                for key in self._func_info_map)):
+                    return True  # a user method (``close.sm(5)``): not followed
                 if (isinstance(sub, FuncCall) and isinstance(sub.callee, Identifier)
                         and sub.callee.name in self._func_names
                         and sub.callee.name not in seen):
@@ -2536,15 +2543,59 @@ class SecurityEmitter:
                     info = self._func_info_map.get(sub.callee.name)
                     for stmt in getattr(getattr(info, "node", None), "body", None) or ():
                         stack.append(stmt)
+                if (isinstance(sub, Identifier)
+                        and self._security_identifier_is_global_binding(sub)
+                        and sub.name in global_expr_map
+                        and ("global", sub.name) not in seen):
+                    seen.add(("global", sub.name))
+                    stack.append(global_expr_map[sub.name])
         return False
 
-    def _security_open_scope(self) -> tuple:
+    def _security_check_double_lowering(self, node, sec_id: int, name: str) -> None:
+        """Refuse a user-call global the payload reads with history on the
+        requested clock when two of its lowerings can run on one requested
+        bar and its call has state: that state would advance twice a bar.
+        Lowerings in two arms of one if never run together. Every earlier
+        build refused the history read (``_security_global_history_value``)."""
+        if name not in getattr(self, "_security_global_hist_names", {}).get(sec_id, ()):
+            return
+        entry = (getattr(self, "_security_shared_globals", None) or {}).get((sec_id, name))
+        if entry is None:
+            return
+        paths = entry["paths"]
+        together = any(not self._security_scopes_exclusive(a, b)
+                       for i, a in enumerate(paths) for b in paths[i + 1:])
+        if together and entry.get("state") is None:
+            entry["state"] = self._security_call_has_state(entry["value"])
+        if together and entry["state"]:
+            self._codegen_error(
+                node,
+                f"request.security payload reads '{name}' with history and outside "
+                "the helper block its call is lowered in: its state would advance "
+                "twice a bar",
+                hint=f"Read '{name}' once at the helper's top level and use that "
+                     "local in the block.",
+            )
+
+    @staticmethod
+    def _security_scopes_exclusive(a: tuple, b: tuple) -> bool:
+        """Whether two block paths (``_security_open_scope``) are in two arms
+        of one if, which never run on the same requested bar."""
+        for x, y in zip(a, b):
+            if x == y:
+                continue
+            return (x[1] is not None and y[1] is not None
+                    and x[1][0] == y[1][0] and x[1][1] != y[1][1])
+        return False
+
+    def _security_open_scope(self, arm=None) -> tuple:
         """Enter a C++ block of a payload's lowering (a helper's if branch or
         loop body): the locals a lowering emits there are its own
-        (``_security_shared_globals``). Returns the path to restore."""
+        (``_security_shared_globals``). ``arm`` is ``(if node id, "then" |
+        "else")`` for an if branch. Returns the path to restore."""
         saved = getattr(self, "_security_scope_path", ())
         self._security_scope_seq = getattr(self, "_security_scope_seq", 0) + 1
-        self._security_scope_path = saved + (self._security_scope_seq,)
+        self._security_scope_path = saved + ((self._security_scope_seq, arm),)
         return saved
 
     def _security_reads_global_history(self, sec_id: int, node) -> bool:
@@ -2572,9 +2623,6 @@ class SecurityEmitter:
             # A session.* flag is a bool: its history reads false, not na,
             # before the first requested bar.
             value = self._security_global_history_value(node)
-            if value is not None:
-                self._security_global_hist_names.setdefault(sec_id, set()).add(
-                    node.object.name)
             if self._is_session_flag(node.object):
                 cpp_t = "bool"
             elif value is not None:
@@ -2584,6 +2632,8 @@ class SecurityEmitter:
                 # integer (``g = bar_index * 86400000``:
                 # ``_int_arith_leaves_int32``, or an epoch) wrapped.
                 cpp_t = "bool" if self._infer_type(value) == "bool" else "double"
+                if cpp_t == "double":
+                    self._security_double_hist_nodes.add(id(node))
             else:
                 cpp_t = self._infer_type(node.object)
             if cpp_t not in ("double", "int", "bool"):
@@ -3134,7 +3184,7 @@ class SecurityEmitter:
                 self._array_vars = set(self._array_vars)
                 self._map_vars = set(self._map_vars)
                 self._matrix_specs = dict(self._matrix_specs)
-                saved_scope = self._security_open_scope()
+                saved_scope = self._security_open_scope((id(stmt), "then"))
                 try:
                     for child in stmt.body:
                         emit_stmt(child, body_bindings, indent + 1)
@@ -3169,7 +3219,7 @@ class SecurityEmitter:
                     self._array_vars = set(self._array_vars)
                     self._map_vars = set(self._map_vars)
                     self._matrix_specs = dict(self._matrix_specs)
-                    saved_scope = self._security_open_scope()
+                    saved_scope = self._security_open_scope((id(stmt), "else"))
                     try:
                         for child in stmt.else_body:
                             emit_stmt(child, else_bindings, indent + 1)
@@ -4425,29 +4475,11 @@ class SecurityEmitter:
         variable such as ``ta.accdist`` too), a global its declaration, whose
         user calls are inlined there (``cs = sm(close)``) while its own TA
         sites are computed once, before the payload. A name in
-        ``bound_locals`` is a C++ local computed before the loop, and one a
-        loop statement declares is the loop's own from its declaration on."""
+        ``bound_locals`` is a C++ local computed before the loop; a name a
+        loop statement declares is the loop's own in its block, after its
+        declaration (its initializer reads the enclosing name)."""
         local_series = set(plan.get("local_series_names", ()))
         global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
-        skip = set(bound_locals or ())
-        if isinstance(loop, ForStmt) and loop.var:
-            skip.add(loop.var)
-        # Where the loop declares each of its locals: a read after it is the
-        # local's, a read before it the enclosing name's.
-        declared: dict[str, tuple] = {}
-        for stmt in loop.body:
-            for sub, _depth in iter_ast_nodes(stmt):
-                if isinstance(sub, VarDecl) and sub.loc is not None:
-                    at = (sub.loc.line, sub.loc.col)
-                    declared[sub.name] = min(declared.get(sub.name, at), at)
-
-        def is_local(node) -> bool:
-            if node.name in skip:
-                return True
-            at = declared.get(node.name)
-            return (at is not None and node.loc is not None
-                    and (node.loc.line, node.loc.col) > at)
-
         expanded: set[int] = set()
 
         def refuse(node, what: str, via) -> None:
@@ -4459,55 +4491,89 @@ class SecurityEmitter:
                 hint="Compute it before the loop, on the requested bar.",
             )
 
-        header, _ = self._security_loop_parts(loop)
-        # (node, the name it was reached through, the lexical stack its
-        # names resolve in, whether it is part of a global's declaration)
-        stack: list = [(n, None, plan["binding_stack"], False) for n in (*header, *loop.body)]
-        while stack:
-            n, via, lexical, in_global = stack.pop()
-            if isinstance(n, (list, tuple)):
-                stack.extend((x, via, lexical, in_global) for x in n)
-                continue
-            if not isinstance(n, ASTNode) or isinstance(n, (FuncDef, MethodDef)):
-                continue
-            if isinstance(n, (FuncCall, MemberAccess)) and self._get_ta_site(n) is not None:
-                if in_global:
-                    continue  # computed once, before the payload
-                refuse(n, "a TA call", via)
-            if isinstance(n, VarDecl):
-                if n.is_var or n.is_varip:
-                    refuse(n, "a var declaration", via)
-                if via is None and n.name in local_series:
-                    refuse(n, f"the local '{n.name}', which is read with history", None)
-            if isinstance(n, Identifier) and not (via is None and is_local(n)):
-                bound = self._security_lookup_helper_binding_context(n.name, lexical)
-                if bound is not None:
-                    value, value_lexical = bound
-                    if id(value) not in expanded:
-                        expanded.add(id(value))
-                        stack.append((value, via or (f"the parameter '{n.name}'", n),
-                                      value_lexical, in_global))
-                elif (self._security_identifier_is_global_binding(n)
-                        and n.name in global_expr_map
-                        and id(global_expr_map[n.name]) not in expanded):
-                    expanded.add(id(global_expr_map[n.name]))
-                    stack.append((global_expr_map[n.name],
-                                  via or (f"the global '{n.name}'", n), (), True))
-            if isinstance(n, FuncCall):
-                callee = n.callee
-                namespace = (
-                    callee.object.name
-                    if isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier)
-                    else None
-                )
-                if namespace == "ta" and not in_global:
+        def walk_expr(root, scopes) -> None:
+            # (node, the name it was reached through, the lexical stack its
+            # names resolve in, whether it is part of a global's declaration)
+            stack: list = [(root, None, plan["binding_stack"], False)]
+            while stack:
+                n, via, lexical, in_global = stack.pop()
+                if isinstance(n, (list, tuple)):
+                    stack.extend((x, via, lexical, in_global) for x in n)
+                    continue
+                if not isinstance(n, ASTNode) or isinstance(n, (FuncDef, MethodDef)):
+                    continue
+                if isinstance(n, (FuncCall, MemberAccess)) and self._get_ta_site(n) is not None:
+                    if in_global:
+                        continue  # computed once, before the payload
                     refuse(n, "a TA call", via)
-                if namespace in ("request", "strategy"):
-                    refuse(n, f"a {namespace}.* call", via)
-                if self._security_user_call_key(n) is not None:
-                    refuse(n, "a user function call", via)
-            stack.extend((v, via, lexical, in_global) for k, v in vars(n).items()
-                         if k not in ("loc", "annotations"))
+                if isinstance(n, VarDecl):
+                    if n.is_var or n.is_varip:
+                        refuse(n, "a var declaration", via)
+                    if via is None and n.name in local_series:
+                        refuse(n, f"the local '{n.name}', which is read with history", None)
+                if isinstance(n, Identifier) and not (
+                        via is None and any(n.name in scope for scope in scopes)):
+                    bound = self._security_lookup_helper_binding_context(n.name, lexical)
+                    if bound is not None:
+                        value, value_lexical = bound
+                        if id(value) not in expanded:
+                            expanded.add(id(value))
+                            stack.append((value, via or (f"the parameter '{n.name}'", n),
+                                          value_lexical, in_global))
+                    elif (n.name in global_expr_map
+                            and (via is None or self._security_identifier_is_global_binding(n))
+                            and id(global_expr_map[n.name]) not in expanded):
+                        # A name of the loop that no scope of it declares and
+                        # no helper binds reads the global (a block local of
+                        # the same name ends at its block).
+                        expanded.add(id(global_expr_map[n.name]))
+                        stack.append((global_expr_map[n.name],
+                                      via or (f"the global '{n.name}'", n), (), True))
+                if isinstance(n, FuncCall):
+                    callee = n.callee
+                    namespace = (
+                        callee.object.name
+                        if isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier)
+                        else None
+                    )
+                    if namespace == "ta" and not in_global:
+                        refuse(n, "a TA call", via)
+                    if namespace in ("request", "strategy"):
+                        refuse(n, f"a {namespace}.* call", via)
+                    if self._security_user_call_key(n) is not None:
+                        refuse(n, "a user function call", via)
+                stack.extend((v, via, lexical, in_global) for k, v in vars(n).items()
+                             if k not in ("loc", "annotations"))
+
+        def walk_block(stmts, scopes) -> None:
+            # A block's declarations are its own, from each declaration on.
+            scope: set[str] = set()
+            scopes = scopes + (scope,)
+            for stmt in stmts or ():
+                if isinstance(stmt, VarDecl):
+                    walk_expr(stmt, scopes)
+                    scope.add(stmt.name)
+                elif isinstance(stmt, TupleAssign):
+                    walk_expr(stmt, scopes)
+                    scope.update(name for name in getattr(stmt, "names", ()) or ()
+                                 if isinstance(name, str))
+                elif isinstance(stmt, IfStmt):
+                    walk_expr(stmt.condition, scopes)
+                    walk_block(stmt.body, scopes)
+                    walk_block(stmt.else_body, scopes)
+                elif isinstance(stmt, (ForStmt, WhileStmt)):
+                    header, counter = self._security_loop_parts(stmt)
+                    for part in header:
+                        walk_expr(part, scopes)
+                    walk_block(stmt.body, scopes + ({counter} if counter else set(),))
+                else:
+                    walk_expr(stmt, scopes)
+
+        outer = (set(bound_locals or ()),)
+        header, counter = self._security_loop_parts(loop)
+        for part in header:
+            walk_expr(part, outer)
+        walk_block(loop.body, outer + ({counter} if counter else set(),))
 
     @staticmethod
     def _security_arm_reassigned_names(body) -> set[str]:
@@ -6011,11 +6077,19 @@ class SecurityEmitter:
                     security_mutable_names=security_mutable_names,
                     emitted_lines=lines,
                 )
-                if (self._security_foreign(sec_id)
-                        and self._infer_cpp_type_for_security_elem(el) == "int"):
+                elem_t = self._infer_cpp_type_for_security_elem(el)
+                if self._security_foreign(sec_id) and elem_t == "int":
                     # Held as a double (base.py): the integer's na stays na.
                     el_cpp = ("[](auto _pf_v) { return is_na(_pf_v) ? na<double>() "
                               f": static_cast<double>(_pf_v); }}({el_cpp})")
+                elif elem_t in ("int", "int64_t") and any(
+                        isinstance(sub, Subscript)
+                        and id(sub) in self._security_double_hist_nodes
+                        for sub, _depth in iter_ast_nodes(el)):
+                    # A global's history is a double (``_emit_security_expr_hist_
+                    # members``): it narrows na-preserving into the integer
+                    # element (quirk 9).
+                    el_cpp = na_preserving_int_cast(el_cpp, elem_t)
                 lines.append(f"        _req_sec_{sec_id}_{i} = {el_cpp};")
             self._emit_security_ohlc_hist_pushes(sec_id, lines)
             self._emit_security_ta_hist_pushes(sec_id, info, ta_results, lines)
@@ -6330,22 +6404,9 @@ class SecurityEmitter:
                 if shares and share_key in shared_globals:
                     # The lowering reads the locals it emitted, which only the
                     # block it was emitted in (and blocks inside it) can see.
-                    cached, built_in = shared_globals[share_key]
-                    if scope[:len(built_in)] == built_in:
-                        return cached
-                    if (expr_node.name in self._security_global_hist_names.get(sec_id, ())
-                            and self._security_call_has_state(value)):
-                        # Lowered again here, the call's state would advance
-                        # twice on a bar that runs both reads; every earlier
-                        # build refused its history read.
-                        self._codegen_error(
-                            expr_node,
-                            f"request.security payload reads '{expr_node.name}' with "
-                            "history and outside the helper block its call is lowered "
-                            "in: its state would advance twice a bar",
-                            hint=f"Read '{expr_node.name}' once at the helper's top "
-                                 "level and use that local in the block.",
-                        )
+                    entry = shared_globals[share_key]
+                    if scope[:len(entry["path"])] == entry["path"]:
+                        return entry["text"]
                 resolving.add(expr_node.name)
                 emitted_before = len(emitted_lines) if emitted_lines is not None else 0
                 resolved = self._build_security_expr(
@@ -6366,9 +6427,13 @@ class SecurityEmitter:
                     # call again (as every earlier build did at each read).
                     built_in = (scope if emitted_lines is not None
                                 and len(emitted_lines) > emitted_before else ())
-                    prior = shared_globals.get(share_key)
-                    if prior is None or len(built_in) < len(prior[1]):
-                        shared_globals[share_key] = (resolved, built_in)
+                    entry = shared_globals.setdefault(
+                        share_key, {"text": resolved, "path": built_in, "paths": [],
+                                    "value": value})
+                    entry["paths"].append(scope)
+                    if len(built_in) < len(entry["path"]):
+                        entry["text"], entry["path"] = resolved, built_in
+                    self._security_check_double_lowering(expr_node, sec_id, expr_node.name)
                 field = self._security_ta_tuple_element_field(expr_node.name)
                 if field is None and expr_node.name in self._direct_program_tuple_binding_names:
                     # The whole tuple value, not the element (a user
@@ -6609,6 +6674,13 @@ class SecurityEmitter:
                 index_cpp = self._coerce_int_slot_with_cast(
                     index_cpp, expr_node.index, "int"
                 )
+                if self._security_reads_global_history(sec_id, expr_node):
+                    # Read with history on the requested clock (a read under a
+                    # builtin keeps the chart's series and never gets here).
+                    self._security_global_hist_names.setdefault(sec_id, set()).add(
+                        expr_node.object.name)
+                    self._security_check_double_lowering(
+                        expr_node, sec_id, expr_node.object.name)
                 inner = self._build_security_expr(
                     sec_id,
                     expr_node.object,
@@ -7363,6 +7435,11 @@ class SecurityEmitter:
         ``float g = 1`` global is re-emitted as ``1``)."""
         if node is None or depth > 64:
             return False
+        if (isinstance(node, Subscript)
+                and id(node) in getattr(self, "_security_double_hist_nodes", ())):
+            # A global's history read on the requested clock is a double
+            # (``_emit_security_expr_hist_members``).
+            return True
         if isinstance(node, Identifier):
             if not self._security_identifier_is_global_binding(node):
                 binding = self._security_lookup_helper_binding_context(

@@ -2917,6 +2917,11 @@ class TypeInferer:
         if isinstance(node, (BoolLiteral, StringLiteral, ColorLiteral)):
             # A colour literal lowers to a packed-ARGB ``int64_t`` literal.
             return False
+        if (isinstance(node, Subscript)
+                and id(node) in getattr(self, "_security_double_hist_nodes", ())):
+            # A request.security payload's history of a global is a double
+            # (``_emit_security_expr_hist_members``).
+            return True
         if isinstance(node, Subscript) and isinstance(node.object, Identifier):
             # A history read keeps the series' element type.
             base = node.object.name

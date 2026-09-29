@@ -4347,6 +4347,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # request.security id -> the globals its payload reads with history
         # (``_security_global_history_value``).
         self._security_global_hist_names: dict[int, set[str]] = {}
+        # ids of the global history reads kept in a double (``_security_emits_double``).
+        self._security_double_hist_nodes: set[int] = set()
         # request.security ids whose payload reads the requested bar_index.
         self._security_bar_index_secs: set[int] = set()
         self._prepare_lazy_source_clock_sites()

@@ -151,16 +151,53 @@ def test_a_payload_global_history_is_a_double():
     assert _history_series("f() => bar_index * 3\n", "f()[1]") == integer
 
 
-def test_a_stateful_global_read_with_history_is_lowered_in_one_block():
-    """A history read inside a helper's if branch and a read after it would
-    lower the call twice, its SMA advancing twice a bar on bars that run the
-    branch; main refused the history read."""
+SM = "sm(len) =>\n    a = ta.sma(close, len)\n    a * 1\nrng = sm(5)\n"
+METHOD_SM = ("method sm(float x, int len) => ta.sma(x, len) * 1\n"
+             "f() =>\n    a = close.sm(5)\n    a * 1\nrng = f()\n")
+
+
+def _pick(decl: str, body: str) -> str:
+    return (HEAD + decl + "pick(c) =>\n    float s = 0.0\n" + body
+            + 'p = request.security(syminfo.tickerid, "240", pick(close > open))\n'
+            'if p > 0\n    strategy.entry("L", strategy.long)\n')
+
+
+@pytest.mark.parametrize("decl, body", [
+    (SM, "    if c\n        s := rng[1]\n    s + rng\n"),
+    (SM, "    if c\n        s := rng\n    s + rng[1]\n"),
+    (METHOD_SM, "    if c\n        s := rng[1]\n    s + rng\n"),
+])
+def test_a_stateful_global_read_with_history_is_lowered_where_it_runs_once(decl, body):
+    """A history read on the requested clock and a read in another block
+    that runs on the same bar would lower the call twice, its SMA advancing
+    twice a bar; main refused the history read."""
     with pytest.raises(CompileError) as err:
-        transpile(HEAD + "sm(len) =>\n    a = ta.sma(close, len)\n    a * 1\nrng = sm(5)\n"
-                  "pick(c) =>\n    float s = 0.0\n    if c\n        s := rng[1]\n    s + rng\n"
-                  'p = request.security(syminfo.tickerid, "240", pick(close > open))\n'
-                  'if p > 0\n    strategy.entry("L", strategy.long)\n')
+        transpile(_pick(decl, body))
     assert "reads 'rng' with history and outside the helper block" in str(err.value)
+
+
+@pytest.mark.parametrize("body", [
+    # A read under a builtin keeps the chart's series, as on main.
+    "    if c\n        s := rng\n    s + rng + nz(rng[1])\n",
+    "    if c\n        s := rng\n    s + rng + (na(rng[1]) ? 1.0 : 0.0)\n",
+    # Two arms of one if never run on the same bar.
+    "    if c\n        s := rng[1]\n    else\n        s := rng\n    s\n",
+])
+def test_a_stateful_global_lowered_twice_where_main_compiled_or_never_twice_a_bar(body):
+    compile_cpp(transpile(_pick(SM, body)), label="stateful global lowered twice")
+
+
+def test_an_int_slot_narrows_a_global_history_na_preserving():
+    cpp = transpile(HEAD + "f() => bar_index * 3\ng = f()\n"
+                    "h() =>\n    int x = g[1]\n    na(x) ? -1 : x\n"
+                    'p = request.security(syminfo.tickerid, "60", h())\n'
+                    '[a, b] = request.security(syminfo.tickerid, "60", [g[1], close])\n'
+                    'if p > 0 and a > 0\n    strategy.entry("L", strategy.long)\n')
+    local = [ln for ln in cpp.splitlines() if "int _sec0_h_1_x = " in ln]
+    assert local and "is_na(_pf_v) ? na<int>()" in local[0]
+    element = [ln for ln in cpp.splitlines() if "_req_sec_1_0 = [&]" in ln]
+    assert element and "is_na(_pf_v) ? na<int>()" in element[0]
+    compile_cpp(cpp, label="int slots of a global history")
 
 
 def test_a_shared_payload_global_read_outside_its_block_compiles():
@@ -189,6 +226,15 @@ def test_a_shared_payload_global_read_outside_its_block_compiles():
      "h(n) =>\n    float s = 0.0\n    for i = 0 to n\n        s += cs\n        cs = 1.0\n"
      "        s += cs\n    s\n",
      "h(3)", "a user function call (through the global 'cs')"),
+    # A block's local ends at its block, and an initializer reads the
+    # enclosing name.
+    ("sm(x) =>\n    a = ta.sma(x, 3)\n    a + 1\ncs = sm(close)\n",
+     "h(n) =>\n    float s = 0.0\n    for i = 0 to n\n        if i > 100\n            cs = 1.0\n"
+     "            s += cs\n        s += cs\n    s\n",
+     "h(3)", "a user function call (through the global 'cs')"),
+    ("",
+     "h(v, n) =>\n    float s = 0.0\n    for i = 0 to n\n        v = v + 0.0\n        s += v\n    s\n",
+     "h(ta.sma(close, 3), 3)", "a TA call (through the parameter 'v')"),
 ])
 def test_a_helper_loop_refuses_state_reached_through_a_name(decl, helper, call, via):
     with pytest.raises(CompileError) as err:
