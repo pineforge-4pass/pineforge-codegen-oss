@@ -445,7 +445,13 @@ SYMINFO_MEMBER_MAP = {
     "currency": "syminfo_.currency",
     "basecurrency": "syminfo_.basecurrency",
     "type": "syminfo_.type",
-    "timezone": "syminfo_.timezone",
+    # TradingView spells a UTC exchange zone "Etc/UTC" (lab tv tapes
+    # te_syminfo_timezone on BINANCE:ETHUSDT.P 15 and BINANCE:BTCUSDT 1D:
+    # syminfo.timezone == "UTC" is false there); the engine names that zone
+    # "UTC", its SymInfo default. The Pine read spells it TradingView's way;
+    # the engine calls taking the symbol's zone keep reading syminfo_.timezone.
+    "timezone": ('(syminfo_.timezone.empty() || syminfo_.timezone == "UTC"'
+                 ' ? std::string("Etc/UTC") : syminfo_.timezone)'),
     "session": "syminfo_.session",
     "volumetype": "syminfo_.volumetype",
     "description": "syminfo_.description",
