@@ -1858,6 +1858,18 @@ class SecurityEmitter:
                                         )
                                     )
                                 return
+                            if isinstance(stmt, (ForStmt, WhileStmt)):
+                                header, counter = self._security_loop_parts(stmt)
+                                for part in header:
+                                    if part is not None:
+                                        walk(part, local_stack)
+                                body_bindings = dict(current)
+                                if counter:
+                                    body_bindings[counter] = (
+                                        self._security_loop_counter_binding(plan, counter))
+                                for child in stmt.body:
+                                    walk_stmt(child, body_bindings)
+                                return
                             if isinstance(stmt, ExprStmt):
                                 walk(stmt.expr, local_stack)
 
@@ -2313,6 +2325,18 @@ class SecurityEmitter:
                                             plan["func_info"].name, name
                                         )
                                     )
+                                return
+                            if isinstance(stmt, (ForStmt, WhileStmt)):
+                                header, counter = self._security_loop_parts(stmt)
+                                for part in header:
+                                    if part is not None:
+                                        walk(part, local_stack)
+                                body_bindings = dict(current)
+                                if counter:
+                                    body_bindings[counter] = (
+                                        self._security_loop_counter_binding(plan, counter))
+                                for child in stmt.body:
+                                    walk_stmt(child, body_bindings)
                                 return
                             if isinstance(stmt, ExprStmt):
                                 walk(stmt.expr, local_stack)
@@ -3169,6 +3193,14 @@ class SecurityEmitter:
                     active_bindings[name] = local_name
                 return
 
+            if isinstance(stmt, (ForStmt, WhileStmt)):
+                emit_loop(stmt, active_bindings, indent)
+                return
+
+            if isinstance(stmt, (BreakStmt, ContinueStmt)) and loop_depth[0] > 0:
+                lines.append(f"{pad}{'break' if isinstance(stmt, BreakStmt) else 'continue'};")
+                return
+
             if isinstance(stmt, ExprStmt) and isinstance(stmt.expr, _SECURITY_BLOCK_VALUES):
                 # A block's trailing value (``lastHigh := ph`` then
                 # ``lastHigh``): no effect to lower. A call statement stays
@@ -3179,6 +3211,80 @@ class SecurityEmitter:
                 stmt,
                 "request.security multi-statement helpers may only use local declarations, assignments, and if-branches before the final expression",
             )
+
+        loop_depth = [0]
+
+        def emit_loop(stmt, active_bindings: dict[str, str], indent: int) -> None:
+            """A ``for`` / ``while`` loop of the helper, run on the requested
+            bar as TradingView runs it there: every iteration reads the
+            requested context (``o[i]`` is the requested bar's open ``i``
+            requested bars back). Pine's ``for`` infers its direction from
+            the first ``from`` / ``to`` values, steps by the magnitude of
+            ``by`` and re-reads ``to`` before every iteration (``_visit_for``).
+            A loop body holds plain locals only: the evaluator computes each
+            TA call once per requested bar, before the body runs, and pushes
+            each history-read local once, so neither can repeat per
+            iteration."""
+            pad = "    " * indent
+            self._security_check_loop_body(stmt, plan)
+            runtime_stack_local = plan["binding_stack"] + (active_bindings,)
+
+            def build(expr) -> tuple[str, bool]:
+                before = len(lines)
+                cpp = self._build_security_expr(
+                    sec_id, expr, None, ta_results, resolving,
+                    security_mutable_names, runtime_stack_local, lines,
+                )
+                return cpp, len(lines) == before
+
+            body_bindings = dict(active_bindings)
+            if isinstance(stmt, ForStmt):
+                start_cpp, _ = build(stmt.start)
+                end_cpp, end_inline = build(stmt.end)
+                step_cpp = build(stmt.step)[0] if stmt.step is not None else "1"
+                start_cpp = self._coerce_int_slot(f"({start_cpp})", stmt.start, "int")
+                end_cpp = self._coerce_int_slot(f"({end_cpp})", stmt.end, "int")
+                step_cpp = self._coerce_int_slot(f"({step_cpp})", stmt.step, "int")
+                base = self._security_next_inline_name(
+                    sec_id, plan["func_info"].name, "for")
+                s_var, e_var, st_var, dn_var = (
+                    f"{base}_start", f"{base}_end", f"{base}_step", f"{base}_down")
+                var = self._security_next_inline_name(
+                    sec_id, plan["func_info"].name, stmt.var or "i")
+                lines.append(f"{pad}int {s_var} = {start_cpp};")
+                lines.append(f"{pad}int {e_var} = {end_cpp};")
+                lines.append(f"{pad}int {st_var} = {step_cpp};")
+                lines.append(f"{pad}if (!is_na({st_var}) && {st_var} < 0) {st_var} = -{st_var};")
+                lines.append(f"{pad}if ({st_var} == 0) {st_var} = 1;")
+                lines.append(f"{pad}const bool {dn_var} = ({s_var} > {e_var});")
+                refresh = f", {e_var} = {end_cpp}" if end_inline else ""
+                lines.append(
+                    f"{pad}for (int {var} = {s_var}; "
+                    f"!is_na({s_var}) && !is_na({e_var}) && !is_na({st_var}) && "
+                    f"({dn_var} ? ({var} >= {e_var}) : ({var} <= {e_var})); "
+                    f"{var} += ({dn_var} ? -{st_var} : {st_var}){refresh}) {{"
+                )
+                if stmt.var:
+                    body_bindings[stmt.var] = var
+                    self._security_local_cpp_types[var] = "int"
+            else:
+                cond_cpp, cond_inline = build(stmt.condition)
+                if not cond_inline:
+                    self._codegen_error(
+                        stmt,
+                        "request.security helper while-loop conditions must be "
+                        "plain expressions of the helper's values",
+                    )
+                lines.append(
+                    f"{pad}while ({self._coerce_bool_expr(cond_cpp, stmt.condition)}) {{"
+                )
+            loop_depth[0] += 1
+            try:
+                for child in stmt.body:
+                    emit_stmt(child, body_bindings, indent + 1)
+            finally:
+                loop_depth[0] -= 1
+            lines.append(f"{pad}}}")
 
         for stmt in plan["body"]:
             emit_stmt(stmt, local_cpp_bindings, indent=2)
@@ -3687,10 +3793,11 @@ class SecurityEmitter:
                 "request.security multi-statement helpers must end with a final expression result",
             )
 
+        # ``for`` / ``while`` loops lower in the requested context
+        # (``_emit_security_linear_helper_call_scoped``); a ``for ... in``
+        # loop and a bare ``switch`` statement stay refused.
         unsupported_control_flow = (
-            ForStmt,
             ForInStmt,
-            WhileStmt,
             SwitchStmt,
             BreakStmt,
             ContinueStmt,
@@ -3702,6 +3809,8 @@ class SecurityEmitter:
                     "request.security does not support multi-statement helpers with control flow",
                     hint="Inline a straight-line helper body or hoist the control-flow helper outside request.security().",
                 )
+            if isinstance(stmt, (ForStmt, WhileStmt)):
+                continue
             if not isinstance(stmt, _SECURITY_HELPER_STMTS) or (
                     isinstance(stmt, ExprStmt)
                     and not isinstance(stmt.expr, _SECURITY_BLOCK_VALUES)):
@@ -4232,6 +4341,64 @@ class SecurityEmitter:
         return reads(stmt.value)
 
     @staticmethod
+    def _security_loop_parts(stmt) -> tuple[list, str | None]:
+        """A helper loop's header expressions and its counter's name."""
+        if isinstance(stmt, ForStmt):
+            return [stmt.start, stmt.end, stmt.step], stmt.var or None
+        return [stmt.condition], None
+
+    def _security_loop_counter_binding(self, plan: dict, name: str) -> str:
+        """What the prepasses bind a helper loop's counter to: a local whose
+        value is the requested bar's run-time one, never a folded constant,
+        so ``o[i]`` reads the requested history at a run-time offset."""
+        return self._security_series_binding(f"{plan['func_info'].name}:{name}@loop")
+
+    def _security_check_loop_body(self, loop, plan: dict) -> None:
+        """Refuse what a request.security helper loop cannot repeat per
+        iteration. The evaluator computes a TA call once per requested bar
+        at its place in the helper, pushes a local read with history once
+        per requested bar and keeps a ``var`` local's state across requested
+        bars, so none of them can sit in a loop's header or body; a user
+        function call there would inline them too."""
+        local_series = set(plan.get("local_series_names", ()))
+
+        def refuse(node, what: str) -> None:
+            self._codegen_error(
+                node,
+                f"request.security helper loops cannot hold {what}",
+                hint="Compute it before the loop, on the requested bar.",
+            )
+
+        header, _ = self._security_loop_parts(loop)
+        stack: list = [*header, *loop.body]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (list, tuple)):
+                stack.extend(n)
+                continue
+            if not isinstance(n, ASTNode) or isinstance(n, (FuncDef, MethodDef)):
+                continue
+            if isinstance(n, VarDecl):
+                if n.is_var or n.is_varip:
+                    refuse(n, "a var declaration")
+                if n.name in local_series:
+                    refuse(n, f"the local '{n.name}', which is read with history")
+            if isinstance(n, FuncCall):
+                callee = n.callee
+                namespace = (
+                    callee.object.name
+                    if isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier)
+                    else None
+                )
+                if self._get_ta_site(n) is not None or namespace == "ta":
+                    refuse(n, "a TA call")
+                if namespace in ("request", "strategy"):
+                    refuse(n, f"a {namespace}.* call")
+                if self._security_user_call_key(n) is not None:
+                    refuse(n, "a user function call")
+            stack.extend(v for k, v in vars(n).items() if k not in ("loc", "annotations"))
+
+    @staticmethod
     def _security_arm_reassigned_names(body) -> set[str]:
         """The enclosing locals an if arm's statements reassign (``:=`` and
         the compound assignments), in nested blocks too; a name the arm
@@ -4664,6 +4831,34 @@ class SecurityEmitter:
                                 self._security_arm_reassigned_names(stmt.body)
                                 | self._security_arm_reassigned_names(stmt.else_body)
                             )
+                            for name in sorted(reassigned & set(active_bindings)):
+                                active_bindings[name] = self._security_series_binding(
+                                    f"{plan['func_info'].name}:{name}"
+                                )
+                            return
+
+                        if isinstance(stmt, (ForStmt, WhileStmt)):
+                            header, counter = self._security_loop_parts(stmt)
+                            for part in header:
+                                if part is not None:
+                                    self._collect_security_ta_binding_stacks(
+                                        part,
+                                        resolving,
+                                        local_stack,
+                                        collected,
+                                        inline_ta_indices,
+                                        True,
+                                    )
+                            body_bindings = dict(active_bindings)
+                            if counter:
+                                body_bindings[counter] = (
+                                    self._security_loop_counter_binding(plan, counter))
+                            for child in stmt.body:
+                                collect_stmt(child, body_bindings)
+                            # A local the loop reassigns holds the value its
+                            # last iteration left on each requested bar, as an
+                            # if arm's does: never one expression.
+                            reassigned = self._security_arm_reassigned_names(stmt.body)
                             for name in sorted(reassigned & set(active_bindings)):
                                 active_bindings[name] = self._security_series_binding(
                                     f"{plan['func_info'].name}:{name}"

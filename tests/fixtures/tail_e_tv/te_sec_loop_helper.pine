@@ -1,0 +1,44 @@
+//@version=6
+// request.security over helpers with control flow. tally() scores the
+// requested bar's close against its last n opens in a for loop, then smooths
+// the score twice through smooth(), whose if/else chain picks the TA call.
+// streak() counts falling closes in a while loop that breaks on a rise. Read
+// on the hour with lookahead off and on, and on the chart's own timeframe.
+// Every bar spells the values it reads: flat bars as the entry's name, bars
+// holding the position as the close's comment.
+strategy("PF te security loop helper", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+kind = input.string("EMA", "Kind", options = ["EMA", "SMA", "RMA"])
+smooth(string k, float src, int len) =>
+    float r = na
+    if k == "EMA"
+        r := ta.ema(src, len)
+    else if k == "SMA"
+        r := ta.sma(src, len)
+    else
+        r := ta.rma(src, len)
+    r
+tally(float o, float c, int n, string k) =>
+    s = 0.0
+    for i = 0 to n
+        s := s + (c > o[i] ? 1 : c < o[i] ? -1 : 0)
+    m = smooth(k, s, 4)
+    g = smooth(k, m, 3)
+    [s, m, g]
+streak(float c, int cap) =>
+    int n = 0
+    while n < cap
+        if c[n] >= c[n + 1]
+            break
+        n += 1
+    n
+[hs, hm, hg] = request.security(syminfo.tickerid, "60", tally(open, close, 6, kind), barmerge.gaps_off, barmerge.lookahead_off)
+[ls, lm, lg] = request.security(syminfo.tickerid, "60", tally(open, close, 6, kind), barmerge.gaps_off, barmerge.lookahead_on)
+[cs, cm, cg] = request.security(syminfo.tickerid, "15", tally(open, close, 6, kind), barmerge.gaps_off, barmerge.lookahead_off)
+hk = request.security(syminfo.tickerid, "60", streak(close, 8))
+f(x) => na(x) ? "na" : str.tostring(x, "#.####")
+v = f(hs) + "|" + f(hm) + "|" + f(hg) + "|" + f(ls) + "|" + f(lm) + "|" + f(lg)
+     + "|" + f(cs) + "|" + f(cm) + "|" + f(cg) + "|" + f(hk)
+if strategy.position_size == 0
+    strategy.entry(v, strategy.long)
+else
+    strategy.close_all(comment = v)
