@@ -3567,7 +3567,9 @@ class TypeInferer:
                 return "int64_t"
             if func_name == "na":
                 return "bool"
-            if namespace == "input" or (namespace is None and func_name == "input"):
+            if namespace is None and func_name == "input":
+                return self._generic_input_cpp_type(node)
+            if namespace == "input":
                 if func_name in ("string", "timeframe", "session", "symbol", "text_area"):
                     return "std::string"
                 if func_name == "bool":

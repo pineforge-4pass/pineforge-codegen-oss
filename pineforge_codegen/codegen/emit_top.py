@@ -1610,7 +1610,7 @@ class TopLevelEmitter:
                         default = self._get_input_default(stmt.value)
                         default_cpp = self._visit_expr(default) if default is not None else "0"
                         title = self._get_input_title(stmt.value, var_name=stmt.name)
-                        getter = self._input_type_to_getter(func_name_i, namespace_i)
+                        getter = self._input_getter_for_call(stmt.value, func_name_i, namespace_i)
                         default_cpp = self._coerce_string_input_default(getter, default_cpp)
                         cpp_val = f'{getter}({self._input_key_literal(title)}, {default_cpp})'
                         static_vars.append(f"{safe} = {cpp_val};")
