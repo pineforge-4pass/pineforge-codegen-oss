@@ -87,6 +87,7 @@ from ..limits import iter_ast_nodes
 from .helpers import na_preserving_int_cast, unary_sign_cpp
 from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION
 from ..symbols import PineType, method_receiver_type_name
+from .helpers import na_preserving_int_cast
 from .tables import (
     BAR_BUILTINS, MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_BAR_FIELDS,
     SECURITY_BAR_FIELD_EXPRS, SECURITY_BAR_FIELD_TYPES, TA_TUPLE_FIELDS,
@@ -2405,6 +2406,7 @@ class SecurityEmitter:
                     (isinstance(n.object, FuncCall)
                      and self._get_ta_site(n.object) is None)
                     or self._is_compound_history_object(n.object)
+                    or self._security_global_history_value(n) is not None
                 )
             ):
                 add(n)
@@ -2422,6 +2424,77 @@ class SecurityEmitter:
 
         walk(node)
         return [n for n in out if id(n) not in in_helper or reached[id(n)] == 1]
+
+    def _security_global_history_value(self, node) -> ASTNode | None:
+        """The value of ``g`` in a payload's ``g[k]`` when ``g`` is a global
+        bound to a user function call or an operator expression, else None.
+
+        TradingView evaluates ``g`` on every requested bar and ``g[k]`` reads
+        it ``k`` requested bars back. Such a value has no series on the
+        requested clock, so the payload keeps one, like an inline call's
+        (``_collect_security_expr_hist_subscripts``), pushed with what the
+        payload reads as ``g`` on each completed requested bar. The builder
+        used to put the global's value under a subscript of its own, which no
+        prepass had sized: a user call was refused ("helper call history is
+        only supported in the payload itself") and an operator expression
+        was indexed as a C++ scalar, which did not compile."""
+        if not (isinstance(node, Subscript) and isinstance(node.object, Identifier)):
+            return None
+        name = node.object.name
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        if (
+            not self._security_identifier_is_global_binding(node.object)
+            or name not in global_expr_map
+            or name in self._direct_program_tuple_binding_names
+            or name in self._global_mutable_infos
+        ):
+            return None
+        value = global_expr_map[name]
+        if (isinstance(value, FuncCall) and isinstance(value.callee, Identifier)
+                and self._security_user_call_key(value) is not None):
+            return value
+        if isinstance(value, (BinOp, UnaryOp, Ternary)) and self._is_compound_history_object(value):
+            return value
+        return None
+
+    def _security_reads_helper_binding(self, node, helper_binding_stack) -> bool:
+        """Whether ``node`` reads a name a helper binds on ``helper_binding_stack``
+        (its parameter or local)."""
+        stack = [node]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, Identifier):
+                if (not self._security_identifier_is_global_binding(n)
+                        and self._security_lookup_helper_binding_context(
+                            n.name, helper_binding_stack) is not None):
+                    return True
+                continue
+            if isinstance(n, ASTNode):
+                stack.extend(v for k, v in vars(n).items()
+                             if k not in ("annotations", "loc") and isinstance(v, ASTNode))
+                stack.extend(x for v in vars(n).values() if isinstance(v, (list, tuple))
+                             for x in v if isinstance(x, ASTNode))
+        return False
+
+    def _security_nested_heikinashi_request(self, node) -> bool:
+        """Whether ``node``, met while lowering a request's payload, is a
+        ``request.security`` of Heikin-Ashi bars: a ``ticker.heikinashi(...)``
+        symbol, written in the call or held by a global."""
+        if not isinstance(node, FuncCall):
+            return False
+        if self._resolve_callee(node.callee) != ("security", "request"):
+            return False
+        symbol = node.args[0] if node.args else node.kwargs.get("symbol")
+        if isinstance(symbol, Identifier) and self._security_identifier_is_global_binding(symbol):
+            symbol = (getattr(self.ctx, "global_expr_map", {}) or {}).get(symbol.name, symbol)
+        return (isinstance(symbol, FuncCall)
+                and self._resolve_callee(symbol.callee) == ("heikinashi", "ticker"))
+
+    def _security_reads_global_history(self, sec_id: int, node) -> bool:
+        """Whether ``node`` is a ``g[k]`` whose requested-clock history the
+        evaluator of ``sec_id`` keeps (``_security_global_history_value``)."""
+        return ((sec_id, id(node)) in self._security_expr_hist_by_node
+                and self._security_global_history_value(node) is not None)
 
     def _security_expr_hist_series_names(self, sec_id: int) -> list[str]:
         names = []
@@ -5463,13 +5536,31 @@ class SecurityEmitter:
         calls (``_security_share_pure_call``) computed where it opens."""
         start = len(lines)
         outer = (getattr(self, "_security_shared_calls", None),
-                 getattr(self, "_security_shared_definitions", None))
+                 getattr(self, "_security_shared_definitions", None),
+                 getattr(self, "_security_shared_globals", None),
+                 getattr(self, "_security_global_hist_pushes", None))
         self._security_shared_calls = {}
         self._security_shared_definitions = definitions = []
+        self._security_shared_globals = {}
+        self._security_global_hist_pushes = pushes = []
         try:
             self._emit_security_evaluator_body(item, lines)
         finally:
-            self._security_shared_calls, self._security_shared_definitions = outer
+            (self._security_shared_calls, self._security_shared_definitions,
+             self._security_shared_globals, self._security_global_hist_pushes) = outer
+        if pushes:
+            # The history of a global the payload reads at an offset
+            # (``_security_global_history_value``): the value its reads keep,
+            # pushed once on a completed requested bar.
+            close = max(i for i in range(start, len(lines)) if lines[i] == "    }")
+            lines[close:close] = (
+                ["        if (is_complete) {"]
+                + [f"            if ({hist}_set) {hist}.push({hist}_next);"
+                   for hist, _cpp_t in pushes]
+                + ["        }"])
+            definitions = [
+                f"        {cpp_t} {hist}_next = na<{cpp_t}>(); bool {hist}_set = false;"
+                for hist, cpp_t in pushes] + definitions
         lines[start + 1:start + 1] = definitions
 
     def _security_share_pure_call(self, sec_id: int, text: str) -> str:
@@ -5918,10 +6009,22 @@ class SecurityEmitter:
                 and expr_node.name in global_expr_map
                 and expr_node.name not in resolving
             ):
+                value = global_expr_map[expr_node.name]
+                # A global bound to a user call is one value per requested
+                # bar, however many reads the payload makes (``g - g[1]``):
+                # every read inlined the call again, which advanced its TA
+                # state once per read.
+                shared_globals = getattr(self, "_security_shared_globals", None)
+                shares = (shared_globals is not None
+                          and isinstance(value, FuncCall)
+                          and isinstance(value.callee, Identifier)
+                          and self._security_user_call_key(value) is not None)
+                if shares and (sec_id, expr_node.name) in shared_globals:
+                    return shared_globals[(sec_id, expr_node.name)]
                 resolving.add(expr_node.name)
                 resolved = self._build_security_expr(
                     sec_id,
-                    global_expr_map[expr_node.name],
+                    value,
                     ta_range,
                     ta_results,
                     resolving,
@@ -5930,6 +6033,8 @@ class SecurityEmitter:
                     emitted_lines,
                 )
                 resolving.remove(expr_node.name)
+                if shares:
+                    shared_globals[(sec_id, expr_node.name)] = resolved
                 field = self._security_ta_tuple_element_field(expr_node.name)
                 if field is None and expr_node.name in self._direct_program_tuple_binding_names:
                     # The whole tuple value, not the element (a user
@@ -6119,6 +6224,7 @@ class SecurityEmitter:
                     self._security_identifier_is_global_binding(expr_node.object)
                     and expr_node.object.name in global_expr_map
                     and expr_node.object.name not in resolving
+                    and not self._security_reads_global_history(sec_id, expr_node)
                 ):
                     resolving.add(expr_node.object.name)
                     resolved = self._build_security_expr(
@@ -6141,6 +6247,10 @@ class SecurityEmitter:
                 # requested bar, like a helper call result.
                 or (self._is_compound_history_object(expr_node.object)
                     and (sec_id, id(expr_node)) in self._security_expr_hist_by_node)
+                # ``g[1]`` of a global bound to a user call or an operator
+                # expression: the history of the value the payload reads as
+                # ``g`` (``_security_global_history_value``).
+                or self._security_reads_global_history(sec_id, expr_node)
             ):
                 meta = self._security_expr_hist_by_node.get((sec_id, id(expr_node)))
                 if meta is None:
@@ -6175,6 +6285,23 @@ class SecurityEmitter:
                     helper_binding_stack,
                     emitted_lines,
                 )
+                pushes = getattr(self, "_security_global_hist_pushes", None)
+                if pushes is not None and self._security_reads_global_history(sec_id, expr_node):
+                    # A helper inlines its argument at every read of its
+                    # parameter, so this read can be emitted more than once:
+                    # each keeps the value, and the evaluator pushes it once
+                    # where it closes (``_emit_security_evaluator``), after
+                    # every read has seen the history before this bar.
+                    if (hist, cpp_t) not in pushes:
+                        pushes.append((hist, cpp_t))
+                    return (
+                        f"([&]() -> {cpp_t} {{ "
+                        f"{cpp_t} _hv = ({inner}); "
+                        f"if (is_complete) {{ {hist}_next = _hv; {hist}_set = true; }} "
+                        f"int _hidx = {index_cpp}; "
+                        f"if (is_na(_hidx)) return na<{cpp_t}>(); "
+                        f"return (_hidx <= 0) ? _hv : {hist}[_hidx - 1]; }}())"
+                    )
                 return (
                     f"([&]() -> {cpp_t} {{ "
                     f"{cpp_t} _hv = ({inner}); "
@@ -6538,6 +6665,43 @@ class SecurityEmitter:
                 )
             # A reducer the prologue left to a multi-statement helper (math.sum)
             # is computed where the helper is inlined, as any TA site below.
+
+        if (isinstance(expr_node, FuncCall) and not expr_node.kwargs
+                and len(expr_node.args) == 1
+                and self._resolve_callee(expr_node.callee) in (("int", None), ("float", None))
+                and expr_node.callee.name not in self._func_names
+                and not self._security_requested_calls
+                and self._security_reads_helper_binding(expr_node.args[0], helper_binding_stack)):
+            # ``int(math.round(_len / 2.0))``, a helper local a TA length reads:
+            # its argument names a helper's parameter or local, which the
+            # expression visitor below renders as an unknown variable where it
+            # hands no name back to this builder (``_security_fallback_owns``).
+            x = self._build_security_expr(
+                sec_id, expr_node.args[0], ta_range, ta_results, resolving,
+                security_mutable_names, helper_binding_stack, emitted_lines,
+            )
+            if expr_node.callee.name == "float":
+                return f"(double)({x})"
+            return na_preserving_int_cast(x)
+
+        if self._security_nested_heikinashi_request(expr_node):
+            # TradingView reads a request inside another request's payload in
+            # the requested context: Heikin-Ashi bars of the requested
+            # timeframe, which this evaluator does not build. Rendering the
+            # call read the chart's own request instead. Evaluating it stops
+            # the run, so a selection that never takes it
+            # (``useHA ? request.security(ticker.heikinashi(...), ...) :
+            # close`` at its default) runs on the requested bars.
+            cpp_t = self._infer_type(expr_node)
+            if cpp_t not in ("double", "int", "bool"):
+                cpp_t = "double"
+            na_value = "false" if cpp_t == "bool" else f"na<{cpp_t}>()"
+            message = self._cpp_string_escape(
+                "request.security: a Heikin-Ashi request inside another request's "
+                "expression reads that request's Heikin-Ashi bars, which PineForge "
+                "does not build")
+            return (f'([&]() -> {cpp_t} {{ pine_runtime_error(std::string("{message}")); '
+                    f"return {na_value}; }}())")
 
         site = self._get_ta_site(expr_node)
         if site:

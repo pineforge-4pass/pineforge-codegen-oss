@@ -1,0 +1,51 @@
+//@version=6
+// Synthetic probe (lane TAIL-A). A request.security payload reading the
+// history of a global bound to a multi-statement user function, reached
+// through two helpers' parameters (the chart symbol, an N-day bucket), and
+// the same payload written at the top level. The smoothed series is fed by a
+// global selecting a nested request (never taken at the defaults) or the bar
+// field. Each close's comment spells what the requests read on its bar.
+strategy("PF taila nested bucket", overlay = true, process_orders_on_close = true, pyramiding = 2, initial_capital = 1000000000, default_qty_type = strategy.fixed, default_qty_value = 1)
+kind = input.string("ALMA", "Kind", options = ["TEMA", "HULL", "ALMA"])
+len = input.int(2, "Len")
+sigma = input.int(5, "Sigma")
+offs = input.float(0.85, "Offset")
+lag = input.int(0, "Lag")
+useHeikin = input.bool(false, "Heikin")
+mult = input.int(8, "Mult")
+
+smoother(_kind, _src, _len, _sigma, _offs) =>
+    m1 = ta.ema(_src, _len)
+    m2 = ta.ema(m1, _len)
+    m3 = ta.ema(m2, _len)
+    triple = 3.0 * (m1 - m2) + m3
+    half = math.max(1, int(math.round(_len / 2.0)))
+    root = math.max(1, int(math.round(math.sqrt(_len))))
+    hull = ta.wma(2.0 * ta.wma(_src, half) - ta.wma(_src, _len), root)
+    arnaud = ta.alma(_src, _len, _offs, _sigma)
+    _kind == "TEMA" ? triple : _kind == "HULL" ? hull : arnaud
+
+held(_sym, _tf, _x) => request.security(_sym, _tf, _x[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+pick(_x, _on, _tf) => _on ? held(syminfo.tickerid, _tf, _x) : _x
+
+bucket = timeframe.isdaily ? str.tostring(timeframe.multiplier * mult) + "D" : str.tostring(timeframe.multiplier * mult)
+cSrc = useHeikin ? request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, close, lookahead = barmerge.lookahead_off) : close
+oSrc = useHeikin ? request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, open, lookahead = barmerge.lookahead_off) : open
+cs = smoother(kind, cSrc[lag], len, sigma, offs)
+os = smoother(kind, oSrc[lag], len, sigma, offs)
+
+a = pick(cs, true, bucket)
+b = pick(os, true, bucket)
+c = request.security(syminfo.tickerid, bucket, cs[1], gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+t0 = request.security(syminfo.tickerid, bucket, time, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+t1 = request.security(syminfo.tickerid, bucket, time_close, gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on)
+
+s(x) => na(x) ? "na" : str.tostring(x, "#.######")
+d(x) => na(x) ? "na" : str.tostring(x / 86400000.0, "#.####")
+msg = s(a) + "|" + s(b) + "|" + s(c) + "|" + d(t0) + "|" + d(t1)
+if bar_index % 2 == 0
+    strategy.entry("A", strategy.long)
+    strategy.close("B", comment = msg)
+else
+    strategy.entry("B", strategy.long)
+    strategy.close("A", comment = msg)
