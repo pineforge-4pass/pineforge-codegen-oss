@@ -1,0 +1,16 @@
+{
+  "title": "tg lazy call history",
+  "slug": "tg-lazyhist-btc15",
+  "source": "pineforge-workflow campaign lab tv",
+  "channel": "ws-report-v1",
+  "exportedAt": "2026-09-29T00:26:18.463Z",
+  "chart": {
+    "symbol": "BINANCE:BTCUSDT",
+    "interval": "15",
+    "from": "2025-04-07",
+    "to": "2025-04-10"
+  },
+  "pine_sha256": "851818cc26186edc7a2ece28d8b8b6ba6b1bb1c6ef946989bd924a5b308464fc",
+  "tv_trades_sha256": "cf258e419e30230e1a2c617badeda8cff61d082dea83f5db7fdd336cbfa9d964",
+  "tv_trades_rows": 576
+}

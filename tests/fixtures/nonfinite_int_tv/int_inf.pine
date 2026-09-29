@@ -1,0 +1,35 @@
+//@version=6
+// TAIL-C synthetic (lane TAIL-C, written from scratch): what a Pine int holding math.floor(100 / 0)
+// reads as, and what strategy.entry does with a non-finite quantity.
+// Export: BINANCE:ETHUSDT.P 15, 2025-04-01 -> 2025-04-04. Stateless: one leg per UTC hour (hour % 9),
+// entered at the close of the hh:00 bar (process_orders_on_close) and closed by close_all at the close
+// of the hh:15 bar, whose comment reads out the ints' comparisons against -5, 0 and 5, str.tostring,
+// na() and nz(). The default quantity (0.01 fixed) is far from what the capital buys, so a row's size
+// tells the default rule apart. z is a SERIES zero, so no division is folded at compile time.
+strategy("tailc-a-int-inf-eth", overlay = true, process_orders_on_close = true, default_qty_type = strategy.fixed, default_qty_value = 0.01, initial_capital = 1000000)
+z = close - close
+float fInf = 100 / z
+int iInf = math.floor(100 / z)
+float fNegInf = -100 / z
+int iNa = na
+int iNaF = math.floor(z / z)
+slot = minute(time) == 0 ? hour(time, "UTC") % 9 : -1
+ro = "i=" + (iInf > -5 ? "1" : "0") + (iInf > 0 ? "1" : "0") + (iInf > 5 ? "1" : "0") + (iInf >= 5 ? "1" : "0") + (iInf < 5 ? "1" : "0") + (iInf <= 5 ? "1" : "0") + (iInf == 0 ? "1" : "0") + (iInf != 0 ? "1" : "0") + "," + str.tostring(iInf) + "," + str.tostring(na(iInf)) + "," + str.tostring(nz(iInf, -1)) + "|n=" + (iNaF > -5 ? "1" : "0") + (iNaF < 5 ? "1" : "0") + (iNaF == 0 ? "1" : "0") + (iNaF != 0 ? "1" : "0") + "," + str.tostring(iNaF) + "," + str.tostring(na(iNaF)) + "," + str.tostring(nz(iNaF, -1))
+if strategy.position_size != 0
+    strategy.close_all(comment = ro)
+if slot == 0
+    strategy.entry("C", strategy.long, qty = 0.02)
+if slot == 1
+    strategy.entry("FINF", strategy.long, qty = fInf)
+if slot == 2
+    strategy.entry("IINF", strategy.long, qty = iInf)
+if slot == 3 and iInf > 0
+    strategy.entry("GINF", strategy.long, qty = iInf)
+if slot == 4
+    strategy.entry("FNA", strategy.long, qty = na)
+if slot == 5
+    strategy.entry("INA", strategy.long, qty = iNa)
+if slot == 6
+    strategy.entry("INAF", strategy.long, qty = iNaF)
+if slot == 7
+    strategy.entry("NINF", strategy.long, qty = fNegInf)

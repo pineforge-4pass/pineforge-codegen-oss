@@ -74,9 +74,10 @@ if close > l
     assert "(void)" not in body  # the trailing ``last`` has no effect to keep
 
 
-def test_helper_loops_remain_refused_loudly():
-    # Not a TradingView refusal: a loop in a helper is still outside the
-    # linear emitter, and says so instead of miscompiling.
+def test_helper_loops_lower_in_the_requested_context():
+    # A loop in a helper runs on the requested bar
+    # (tests/test_e2e_security_helper_loops.py, TradingView's tapes
+    # te_sec_loop_*): close[i] reads the requested close i bars back.
     src = """//@version=6
 strategy("helper loop")
 f() =>
@@ -87,8 +88,10 @@ f() =>
 x = request.security(syminfo.tickerid, "60", f())
 plot(x)
 """
-    with pytest.raises(CompileError, match="multi-statement helpers with control flow"):
-        transpile(src)
+    cpp = transpile(src)
+    evaluator = cpp[cpp.index("void _eval_security_0("):cpp.index("void evaluate_security(")]
+    assert "for (int _sec0_f_" in evaluator
+    assert "_sec0_hist_close[_hidx - 1]" in evaluator
 
 
 @pytest.mark.parametrize("statement", ["g()", "array.push(hist, close)"])

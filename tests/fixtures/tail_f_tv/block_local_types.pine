@@ -1,0 +1,26 @@
+//@version=6
+strategy("pf-tail-f-block-local-types", overlay = true)
+
+// Two blocks declare `k` with different types: a loop counter, and a string
+// read from an array. Every exit comment spells what each block computed.
+var names = array.from("A", "B", "C")
+float acc = 0.0
+string tag = ""
+m = minute(time, "UTC")
+if m == 0 or m == 15
+    k = 0
+    while k < 3
+        b = k * 10
+        acc += b
+        k += 1
+if m == 15
+    i = 0
+    while i < names.size()
+        k = names.get(i)
+        tag += k + str.tostring(i)
+        i += 1
+
+if m == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if m == 15
+    strategy.close("L", comment = str.tostring(acc) + "|" + tag)

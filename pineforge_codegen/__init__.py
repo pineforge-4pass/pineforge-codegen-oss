@@ -14,6 +14,7 @@ from .library_inline import inline_libraries
 from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
 from .pragmas import extract_pf_trace_pragmas
 from .security_contexts import specialize_security_contexts
+from .block_locals import rename_block_locals
 from .support_checker import check_support as _support_diagnostics
 from .support_checker import check_support_or_raise
 
@@ -47,15 +48,19 @@ def _generate(pine_source: str, check_support: bool, filename: str,
     call tree grow with every path to it).
 
     Each pass inlines the libraries the script imports before the support
-    check (``library_inline``).
+    check (``library_inline``). A declaration in a top-level block whose type
+    the member of its name cannot hold gets a name of its own, and the
+    pipeline runs again (``block_locals``).
 
     Returns ``(codegen, ctx, cpp, support_diagnostics)``."""
     budget = None
     clones: frozenset[str] = frozenset()
+    renamed: frozenset = frozenset()
     while True:
         ast, pragmas, budget = _parse_bounded(pine_source, filename, budget)
         ast = inline_libraries(ast, pine_source, libraries=libraries,
                                filename=filename, budget=budget)
+        rename_block_locals(ast, renamed)
         support_diagnostics = []
         if check_support:
             support_diagnostics = _support_diagnostics(ast, filename=filename)
@@ -78,6 +83,11 @@ def _generate(pine_source: str, check_support: bool, filename: str,
         gen = CodeGen(ctx, budget=budget)
         cpp = gen.generate()
         budget.check(phase=Phase.CODEGEN)
+        apart = gen.block_locals_needing_names - renamed
+        if apart:
+            renamed |= apart
+            del ast, ctx, gen, cpp
+            continue
         needed = gen.session_functions_needing_clones
         if not needed:
             return gen, ctx, cpp, support_diagnostics

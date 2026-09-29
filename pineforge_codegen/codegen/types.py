@@ -3041,11 +3041,132 @@ class TypeInferer:
             if (gptype == PineType.STRING
                     and name in self._security_tuple_binding_names()):
                 return "std::string"
+            if name in self._nonfinite_int_names():
+                return "double"
             expr = getattr(self.ctx, "global_expr_map", {}).get(name)
             if expr is not None:
                 return self._infer_type(expr)
             return PINE_TYPE_TO_CPP.get(gptype, "double")
         return None
+
+    # ------------------------------------------------------------------
+    # A Pine int TradingView holds as +-Infinity
+    # ------------------------------------------------------------------
+
+    _NONFINITE_INT_READ_OPS = frozenset({"<", ">", "<=", ">=", "==", "!="})
+    NONFINITE_INT_ORDERING_OPS = frozenset({"<", ">", "<=", ">="})
+
+    def _nonfinite_int_names(self) -> frozenset[str]:
+        """Plain global ``int`` names stored as ``double`` to keep an infinity.
+
+        ``math.floor(100 / 0)`` is +Infinity in TradingView, even in an ``int``
+        variable: ``>``/``>=`` against any number hold and ``<``/``<=`` do not,
+        while ``na()`` reads it as na, ``==``/``!=`` are false, ``str.tostring``
+        prints NaN and ``strategy.entry(qty = ...)`` trades the default quantity
+        (lab tv tailc-a-na-compare, tailc-a-divzero-readout,
+        tailc-a-qty-nonfinite2; R5 lane TAIL-C). A C++ ``int`` narrows it to
+        ``na<int>()``, which orders as na. So a name is stored as the ``double``
+        its value already is when every binding of it -- a global declaration
+        or ``:=`` -- is a one-argument ``math.floor``/``math.ceil``/
+        ``math.round``, some read of it is an ordering comparison's operand --
+        the one read whose answer an infinity changes -- and every read of it
+        is an operand of a comparison, the argument of ``na``/``nz``/
+        ``str.tostring`` or the quantity of ``strategy.entry``/
+        ``strategy.order``. Its reads keep the int's old answers
+        (``_nonfinite_int_read``): an infinity reads na, except as the operand
+        of an ordering comparison, which reads it as the number.
+        """
+        cached = getattr(self, "_nonfinite_int_names_cache", None)
+        if cached is not None:
+            return cached
+        self._nonfinite_int_names_cache = frozenset()
+        ast = getattr(self.ctx, "ast", None)
+        if ast is None:
+            return self._nonfinite_int_names_cache
+        # Read off the program and the analyzer alone, so every pass of the
+        # emitter, the first included, gets the same answer.
+        candidates = {
+            name for name, _ptype in self.ctx.global_var_decls
+            if name not in self.ctx.series_vars
+        }
+        if not candidates:
+            return self._nonfinite_int_names_cache
+        bound: set[str] = set()
+        rejected: set[str] = set()
+        ordered: set[str] = set()
+
+        def floor_call(value) -> bool:
+            if not isinstance(value, FuncCall) or value.kwargs or len(value.args) != 1:
+                return False
+            func_name, namespace = self._resolve_callee(value.callee)
+            return (namespace, func_name) in self._DOUBLE_EMITTING_INT_CALLS
+
+        def allowed_read(parent, slot: str, index: int) -> bool:
+            if isinstance(parent, BinOp):
+                return parent.op in self._NONFINITE_INT_READ_OPS
+            if not isinstance(parent, FuncCall):
+                return False
+            func_name, namespace = self._resolve_callee(parent.callee)
+            if slot == "args" and index == 0 and (
+                    (namespace is None and func_name in ("na", "nz"))
+                    or (namespace, func_name) == ("str", "tostring")):
+                return True
+            return (namespace == "strategy" and func_name in ("entry", "order")
+                    and (slot == "kwargs:qty" or (slot == "args" and index == 2)))
+
+        def children(node):
+            for slot, value in vars(node).items():
+                if isinstance(value, ASTNode):
+                    yield slot, 0, value
+                elif isinstance(value, dict):
+                    for key, item in value.items():
+                        if isinstance(item, ASTNode):
+                            yield f"{slot}:{key}", 0, item
+                elif isinstance(value, (list, tuple)):
+                    for index, item in enumerate(value):
+                        if isinstance(item, ASTNode):
+                            yield slot, index, item
+                        elif isinstance(item, (list, tuple)):
+                            for inner in item:
+                                if isinstance(inner, ASTNode):
+                                    yield slot, index, inner
+                                elif isinstance(inner, list):
+                                    for leaf in inner:
+                                        if isinstance(leaf, ASTNode):
+                                            yield slot, index, leaf
+
+        pending = [(ast, False)]
+        while pending:
+            node, in_callable = pending.pop()
+            if isinstance(node, (FuncDef, MethodDef)):
+                # A parameter or a local of that spelling would read through
+                # the global's rule.
+                rejected.update(set(getattr(node, "params", None) or ()) & candidates)
+                in_callable = True
+            if isinstance(node, VarDecl) and node.name in candidates:
+                if (in_callable or node.is_var or node.is_varip
+                        or node.type_hint not in (None, "int")
+                        or not floor_call(node.value)):
+                    rejected.add(node.name)
+                bound.add(node.name)
+            elif isinstance(node, TupleAssign):
+                rejected.update(set(node.names) & candidates)
+            elif (isinstance(node, Assignment) and isinstance(node.target, Identifier)
+                    and node.target.name in candidates):
+                if node.op != ":=" or not floor_call(node.value):
+                    rejected.add(node.target.name)
+                bound.add(node.target.name)
+            for slot, index, child in children(node):
+                if isinstance(child, Identifier) and child.name in candidates:
+                    binding_target = (isinstance(node, Assignment) and slot == "target")
+                    if not binding_target and not allowed_read(node, slot, index):
+                        rejected.add(child.name)
+                    if (isinstance(node, BinOp)
+                            and node.op in self.NONFINITE_INT_ORDERING_OPS):
+                        ordered.add(child.name)
+                pending.append((child, in_callable))
+        self._nonfinite_int_names_cache = frozenset((bound & ordered) - rejected)
+        return self._nonfinite_int_names_cache
 
     def _global_color_hint(self, name: str) -> bool:
         """A top-level ``color`` declaration must keep its 64-bit na sentinel."""
@@ -3567,7 +3688,9 @@ class TypeInferer:
                 return "int64_t"
             if func_name == "na":
                 return "bool"
-            if namespace == "input" or (namespace is None and func_name == "input"):
+            if namespace is None and func_name == "input":
+                return self._generic_input_cpp_type(node)
+            if namespace == "input":
                 if func_name in ("string", "timeframe", "session", "symbol", "text_area"):
                     return "std::string"
                 if func_name == "bool":

@@ -333,13 +333,30 @@ class InputHelper:
             return f'get_input_source({self._input_key_literal(title)}, {base})[0]'
         default = self._get_input_default(node)
         default_cpp = self._visit_expr(default) if default is not None else "0"
+        getter = self._input_getter_for_call(node, func_name, namespace)
+        default_cpp = self._coerce_string_input_default(getter, default_cpp)
+        return f'{getter}({self._input_key_literal(title)}, {default_cpp})'
+
+    _GETTER_CPP_TYPE = {
+        "get_input_bool": "bool", "get_input_int": "int",
+        "get_input_string": "std::string", "get_input_double": "double",
+    }
+
+    def _input_getter_for_call(self, node: FuncCall, func_name: str | None,
+                               namespace: str | None) -> str:
+        """The scalar getter an ``input`` call reads through.
+
+        The generic ``input(...)`` overload is typed by its defval in Pine
+        v6: ``input("x")`` is a string input, ``input(3)`` an int one and
+        ``input(true)`` a bool one (lab tv tape te_generic_input: its
+        ``str.tostring(n / 2)`` reads "1.5" and its string input spells the
+        order comments). The static getter table cannot see the default, so
+        the getter follows the default's literal type here. This matters for
+        TA lengths too: ``input(15)`` must route to ``get_input_int`` so the
+        RMA/EMA ctor receives an int."""
         getter = self._input_type_to_getter(func_name, namespace)
-        # The generic ``input(...)`` overload is typed by its defval in Pine
-        # v6 (an int default yields an int input). The static getter table
-        # cannot see the default, so infer the getter from the default's
-        # literal type here. This matters for TA lengths: ``input(15)`` must
-        # route to ``get_input_int`` so the RMA/EMA ctor receives an int.
         if func_name == "input" and namespace is None:
+            default = self._get_input_default(node)
             if isinstance(default, BoolLiteral):
                 getter = "get_input_bool"
             elif isinstance(default, NumberLiteral):
@@ -351,8 +368,14 @@ class InputHelper:
                     getter = "get_input_double"
             elif isinstance(default, StringLiteral):
                 getter = "get_input_string"
-        default_cpp = self._coerce_string_input_default(getter, default_cpp)
-        return f'{getter}({self._input_key_literal(title)}, {default_cpp})'
+        return getter
+
+    def _generic_input_cpp_type(self, node: FuncCall) -> str:
+        """The C++ storage of a generic ``input(...)`` value: its getter's
+        type (``_input_getter_for_call``), a source input's double."""
+        if self._is_source_input(node):
+            return "double"
+        return self._GETTER_CPP_TYPE[self._input_getter_for_call(node, "input", None)]
 
     def _input_key_literal(self, title: str) -> str:
         """``title`` as the C++ string literal the input getters key it by.

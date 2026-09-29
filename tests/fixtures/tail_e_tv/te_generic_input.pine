@@ -1,0 +1,14 @@
+//@version=6
+// Generic input() calls typed by their defaults: a string, an int, a bool and
+// a float. Each order comment spells the string input and the int input, the
+// order size is int * float.
+strategy("PF te generic input", overlay = true)
+tag = input("pf-tag", "Tag")
+n = input(3, "N")
+flag = input(true, "Flag")
+x = input(0.5, "X")
+note = tag + "|" + str.tostring(n) + "|" + str.tostring(n / 2) + "|" + str.tostring(x)
+if flag and bar_index % 2 == 0
+    strategy.entry("L", strategy.long, qty = n * x, comment = note)
+else
+    strategy.close("L", comment = tag + "|" + str.tostring(n + 1))

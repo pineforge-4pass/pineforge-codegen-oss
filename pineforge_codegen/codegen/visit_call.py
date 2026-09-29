@@ -134,18 +134,22 @@ from __future__ import annotations
 
 from ..ast_nodes import (
     ASTNode,
+    Assignment,
     BoolLiteral,
     ColorLiteral,
+    ExprStmt,
     FuncCall,
     Identifier,
     MemberAccess,
     NaLiteral,
     NumberLiteral,
+    Ternary,
     TupleLiteral,
     StringLiteral,
     VarDecl,
 )
 from ..external_requests import RECORDED_KEY_ANNOTATION
+from ..limits import iter_ast_nodes
 from ..security_contexts import ticker_symbol_arg
 from ..symbols import TypeSpec, method_receiver_type_name
 from ..method_binding import (
@@ -361,41 +365,96 @@ class CallVisitor:
                  and f"{kind}.{member}" in self._func_info_map]
         return TypeSpec.primitive(found[0]) if len(found) == 1 else None
 
-    def _check_time_bars_back(self, func_name: str, node: FuncCall) -> FuncCall:
-        """Refuse ``time()`` / ``time_close()`` reading another bar.
+    _TIME_PARAMS = ("timeframe", "session", "timezone", "bars_back", "timeframe_bars_back")
 
-        Pine v6's ``time(timeframe, session, bars_back, timeframe_bars_back)``
-        overloads take the bar offset where the timezone form has its string
-        (``time("", "", -1)`` is the next bar's open). The engine has no API
-        for another chart bar's time, above all a future one; the offset used
-        to be passed as the timezone, C++ that does not compile.
-        """
-        offsets = [node.kwargs[name] for name in ("bars_back", "timeframe_bars_back")
-                   if name in node.kwargs]
-        offsets += [arg for arg in node.args[2:]
-                    if self._infer_type(arg) in ("int", "int64_t", "double")]
-        for offset in offsets:
-            if isinstance(offset, NumberLiteral) and offset.value == 0:
-                continue
+    def _bind_time_call(self, node: FuncCall) -> dict:
+        """``time()`` / ``time_close()`` bound to Pine v6's overloads:
+        ``(timeframe, bars_back, timeframe_bars_back)``, ``(timeframe,
+        session, bars_back, timeframe_bars_back)`` and ``(timeframe,
+        session, timezone, bars_back, timeframe_bars_back)``. An offset sits
+        where the longer form has a string, so a numeric second or third
+        argument names the shorter form (``time("", "", -1)`` is the next
+        bar's open, ``time("60", -1)`` the hour of the next bar)."""
+        def numeric(arg) -> bool:
+            return self._infer_type(arg) in ("int", "int64_t", "double")
+
+        bound = dict.fromkeys(self._TIME_PARAMS)
+        positional = list(node.args)
+        if positional:
+            bound["timeframe"] = positional[0]
+        rest = positional[1:]
+        if rest and numeric(rest[0]):
+            order = ("bars_back", "timeframe_bars_back")
+        elif len(rest) >= 2 and numeric(rest[1]):
+            order = ("session", "bars_back", "timeframe_bars_back")
+        else:
+            order = ("session", "timezone", "bars_back", "timeframe_bars_back")
+        for name, arg in zip(order, rest):
+            bound[name] = arg
+        for name, arg in node.kwargs.items():
+            if name in bound:
+                bound[name] = arg
+        return bound
+
+    def _time_offset_call(self, func_name: str, node: FuncCall) -> str | None:
+        """Lower ``time()`` / ``time_close()`` reading another bar.
+
+        A ``bars_back`` / ``timeframe_bars_back`` that is not a literal 0 reads
+        another bar's time: the host's ``pine_time_offset`` steps the chart's
+        bars and the requested timeframe's (a future bar included, as
+        TradingView reads it: lab tv tapes te_time_bb_chart / te_time_bb_tf,
+        tests/fixtures/time_bars_back). None when the call reads the current
+        bar -- no offset, or literal-0 offsets -- for the plain lowering."""
+        bound = self._bind_time_call(node)
+        offsets = [bound[name] for name in ("bars_back", "timeframe_bars_back")
+                   if bound[name] is not None]
+        if all(isinstance(o, NumberLiteral) and o.value == 0 for o in offsets):
+            return None
+        if self._security_payload_depth:
             self._codegen_error(
                 node,
-                f"{func_name}() with bars_back / timeframe_bars_back is not "
-                "supported: the engine exposes no other chart bar's time, "
-                "including a future bar's.",
-                hint=f"Read a past bar's value with {func_name}(...)[k].",
+                f"{func_name}() with bars_back / timeframe_bars_back inside "
+                "request.security is not supported",
+                hint=f"Read {func_name}() with its offset outside request.security().",
             )
-        if not offsets:
-            return node
-        # Every offset is a literal 0, the current bar: drop it.
-        positional = list(node.args)
-        while len(positional) > 2 and any(positional[-1] is o for o in offsets):
-            positional.pop()
-        return FuncCall(
-            callee=node.callee, args=positional,
-            kwargs={k: v for k, v in node.kwargs.items()
-                    if k not in ("bars_back", "timeframe_bars_back")},
-            loc=node.loc, annotations=node.annotations,
+
+        def text(name: str, default: str) -> str:
+            arg = bound[name]
+            return self._visit_expr(arg) if arg is not None else default
+
+        def offset(name: str) -> str:
+            arg = bound[name]
+            if arg is None:
+                return "0"
+            return self._coerce_int_slot(f"({self._visit_expr(arg)})", arg, "int")
+
+        close = "true" if func_name == "time_close" else "false"
+        empty = 'std::string("")'
+        return (
+            f"pine_time_offset(current_bar_.timestamp, {offset('bars_back')}, "
+            f"{text('timeframe', 'script_tf_')}, {text('session', empty)}, "
+            f"{text('timezone', empty)}, {offset('timeframe_bars_back')}, {close})"
         )
+
+    def _check_time_bars_back(self, func_name: str, node: FuncCall) -> FuncCall:
+        """``time()`` / ``time_close()`` reading the current bar, spelled for
+        the plain lowering: its timeframe, session and timezone in order,
+        literal-0 offsets dropped (``time_close("", 0)`` read the 0 as its
+        session)."""
+        bound = self._bind_time_call(node)
+        if all(bound[name] is None for name in ("bars_back", "timeframe_bars_back")):
+            return node
+        positional = []
+        kwargs = {}
+        for name in ("timeframe", "session", "timezone"):
+            if bound[name] is None:
+                continue
+            if len(positional) == ("timeframe", "session", "timezone").index(name):
+                positional.append(bound[name])
+            else:
+                kwargs[name] = bound[name]
+        return FuncCall(callee=node.callee, args=positional, kwargs=kwargs,
+                        loc=node.loc, annotations=node.annotations)
 
     def _user_call_args_with_defaults(self, func_name: str, node: FuncCall):
         """A plain user-function call's arguments with omitted parameters
@@ -514,7 +573,7 @@ class CallVisitor:
                 receiver_node,
                 *binding.evaluation_order,
             ],
-            force_stage=receiver_is_temporary and (
+            force_stage=(receiver_is_temporary and (
                 receiver_passes_by_reference
                 or any(
                     not isinstance(arg, (
@@ -523,7 +582,8 @@ class CallVisitor:
                     ))
                     for arg in rest_nodes
                 )
-            ),
+            )) or self._binds_fresh_array_to_reference(
+                method_info, rest_nodes, first_param=1),
         )
 
     def _callable_target_callsite_idx(self, fi, node: FuncCall) -> int | None:
@@ -1130,6 +1190,122 @@ class CallVisitor:
         result.update(self._func_collection_types.get(func_info.name, {}))
         return result
 
+    # Builtins that return an array no variable holds: ``matrix.row(m, i)``
+    # is a copy of the row, ``array.copy(a)`` of the array.
+    _FRESH_ARRAY_CALLS = frozenset({
+        ("array", "from"), ("array", "copy"), ("array", "sort_indices"),
+        ("array", "abs"), ("array", "standardize"), ("matrix", "row"),
+        ("matrix", "col"), ("matrix", "eigenvalues"), ("str", "split"),
+        ("map", "keys"), ("map", "values"),
+    })
+    _FRESH_ARRAY_METHODS = {
+        "array": frozenset({"copy", "sort_indices", "abs", "standardize"}),
+        "matrix": frozenset({"row", "col", "eigenvalues"}),
+        "map": frozenset({"keys", "values"}),
+    }
+
+    def _array_arg_kind(self, node, depth: int = 0) -> str:
+        """``"fresh"`` for an argument that is an array no variable holds (a
+        new or copied array, a matrix row, a user function's new array),
+        ``"alias"`` for a user function's array that a variable may hold (it
+        returns its argument or a global) or a selection of a held and a
+        fresh array, and ``"keep"`` for every other argument, which keeps the
+        lowering it had: a variable, a field, ``na``, any other built-in."""
+        if isinstance(node, Ternary):
+            kinds = {self._array_arg_kind(node.true_val, depth),
+                     self._array_arg_kind(node.false_val, depth)}
+            if "alias" in kinds or len(kinds) > 1:
+                # A C++ conditional of a held and a fresh array copies the
+                # held one; TradingView passes that array itself.
+                return "alias"
+            return kinds.pop()
+        if not isinstance(node, FuncCall) or depth > 8:
+            return "keep"
+        callee = node.callee
+        if isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier):
+            key = (callee.object.name, callee.member)
+            if key in self._FRESH_ARRAY_CALLS or (
+                    key[0] == "array" and key[1].startswith("new")):
+                return "fresh"
+        info = None
+        if isinstance(callee, Identifier):
+            info = self._func_info_map.get(callee.name)
+        elif isinstance(callee, MemberAccess):
+            spec = self._type_spec_from_expr(callee.object)
+            fresh = self._FRESH_ARRAY_METHODS.get(spec.kind if spec is not None else "")
+            if fresh is not None:
+                return "fresh" if callee.member in fresh else "keep"
+            receiver = method_receiver_type_name(spec) if spec is not None else None
+            info = self._func_info_map.get(f"{receiver}.{callee.member}") if receiver else None
+        if info is None:
+            return "keep"
+        return self._returned_array_kind(info, depth + 1)
+
+    def _returned_array_kind(self, func_info, depth: int) -> str:
+        """``"fresh"`` when a user function returns an array it creates: its
+        value is a fresh array, or a local declared as one and never
+        reassigned; ``"alias"`` otherwise (a user function's array reaches
+        its caller as a C++ temporary, which no ``T&`` took)."""
+        fdef = getattr(func_info, "node", None)
+        body = list(getattr(fdef, "body", None) or ())
+        if not body:
+            return "alias"
+        last = body[-1]
+        value = (last.expr if isinstance(last, ExprStmt)
+                 else last.value if isinstance(last, VarDecl) else None)
+        if isinstance(value, Identifier):
+            decls = [s for s in body if isinstance(s, VarDecl) and s.name == value.name]
+            reassigned = any(
+                isinstance(n, Assignment) and isinstance(n.target, Identifier)
+                and n.target.name == value.name
+                for stmt in body for n, _depth in iter_ast_nodes(stmt))
+            if (len(decls) != 1 or reassigned
+                    or value.name in (getattr(fdef, "params", None) or ())):
+                return "alias"
+            value = decls[0].value
+        if not isinstance(value, (FuncCall, Ternary)):
+            return "alias"
+        return "fresh" if self._array_arg_kind(value, depth) == "fresh" else "alias"
+
+    def _binds_fresh_array_to_reference(self, func_info, arg_nodes: list,
+                                        first_param: int = 0) -> bool:
+        """Whether a call passes a fresh array to a parameter its callee takes
+        as ``std::vector<T>&``. Pine arrays are references: a callee's
+        changes to a variable's array reach the caller, so the parameter stays
+        a reference. A fresh array is a C++ temporary, which binds to no
+        ``T&``; staging the call (``_ordered_user_call_expr``) binds it to a
+        named forwarding reference, and the callee's changes vanish with it,
+        as TradingView's do. An array a variable may hold that reaches the
+        call as a temporary (a function returning the array it was given) is
+        refused: PineForge would pass a copy of it, and it never compiled."""
+        if func_info is None:
+            return False
+        specs = list(getattr(func_info, "param_type_specs", ()) or ())
+        params = (list(func_info.node.params)
+                  if getattr(func_info, "node", None) is not None else [])
+        series = self.ctx.func_series_vars.get(func_info.name, set())
+        stage = False
+        for offset, arg in enumerate(arg_nodes):
+            index = first_param + offset
+            spec = specs[index] if index < len(specs) else None
+            if (arg is None or spec is None or spec.kind != "array"
+                    or (index < len(params) and params[index] in series)):
+                continue
+            kind = self._array_arg_kind(arg)
+            if kind == "alias":
+                param = params[index] if index < len(params) else f"#{index + 1}"
+                self._codegen_error(
+                    arg,
+                    f"an array a call returns is passed to parameter '{param}' of "
+                    f"'{func_info.name}', which takes the array itself: PineForge "
+                    "would pass a copy of it",
+                    hint="TradingView passes the array a function returns as itself, so "
+                         "the callee's changes to it reach every variable holding it; "
+                         "pass a variable holding the array instead.",
+                )
+            stage = stage or kind == "fresh"
+        return stage
+
     def _ordered_user_call_expr(
         self,
         call_head: str,
@@ -1371,7 +1547,9 @@ class CallVisitor:
                         # function-return receiver is a C++ rvalue; bind it to a
                         # named forwarding-reference lambda parameter first so
                         # the method sees a valid lvalue for the full call.
-                        force_stage=stage_receiver,
+                        force_stage=stage_receiver
+                        or self._binds_fresh_array_to_reference(
+                            fi_u, rest_nodes, first_param=1),
                     )
 
         # Drawing method dispatch (spec §4.3 / L.1). A KNOWN drawing method on a
@@ -1612,6 +1790,8 @@ class CallVisitor:
                                     obj,
                                     *binding.evaluation_order,
                                 ],
+                                force_stage=self._binds_fresh_array_to_reference(
+                                    fi_u, rest_nodes, first_param=1),
                             )
                     args = ", ".join(self._visit_expr(a) for a in node.args)
                     recv = self._visit_expr(obj)
@@ -2133,6 +2313,9 @@ class CallVisitor:
         #
         if (func_name in ("time", "time_close") and namespace is None
                 and (node.args or node.kwargs)):
+            lowered = self._time_offset_call(func_name, node)
+            if lowered is not None:
+                return lowered
             node = self._check_time_bars_back(func_name, node)
         if func_name == "time" and namespace is None and (node.args or node.kwargs):
             args = _merge_kwargs(node.args, node.kwargs, sigs.get_param_names(None, "time"), self._visit_expr)
@@ -2774,6 +2957,8 @@ class CallVisitor:
                 ordered_arg_nodes,
                 all_args,
                 source_order_nodes=[*node.args, *node.kwargs.values()],
+                force_stage=self._binds_fresh_array_to_reference(
+                    self._func_info_map.get(func_name), ordered_arg_nodes),
             )
         return f"{call_head}({', '.join(all_args)})"
 

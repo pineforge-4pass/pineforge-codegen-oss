@@ -1,0 +1,19 @@
+//@version=6
+strategy("pf-tail-f-barmerge-values", overlay = true)
+
+// barmerge constants held and compared as values, and one passed as the gaps
+// of a request of another symbol that a gate never evaluates. Every exit
+// comment spells the comparisons and whether the gated value is na.
+gapsIn = input.bool(false, "Gaps")
+useDxy = input.bool(false, "Use DXY")
+var gs = gapsIn ? barmerge.gaps_on : barmerge.gaps_off
+m = minute(time, "UTC")
+la = m == 0 ? barmerge.lookahead_on : barmerge.lookahead_off
+isOff = gs == barmerge.gaps_off
+isOn = la == barmerge.lookahead_on
+dxy = useDxy ? request.security("TVC:DXY", "60", close, gs) : na
+
+if m == 0 and isOff
+    strategy.entry("L", strategy.long, comment = "E")
+if m == 15
+    strategy.close("L", comment = str.tostring(isOff) + "|" + str.tostring(isOn) + "|" + str.tostring(na(dxy)))

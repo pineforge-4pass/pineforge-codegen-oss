@@ -1,0 +1,59 @@
+//@version=6
+strategy("pf-tail-f-arm-commas", overlay = true)
+
+// An arm written on its `=>` line may join several statements with commas.
+// Every exit comment spells what each form produced on the exit bar.
+var int seq = 0
+var int seq2 = 0
+var int cntA = 0
+var int cntB = 0
+var array<int> buf = array.new<int>()
+h = hour(time, "UTC")
+m = minute(time, "UTC")
+
+// (1) order and value: the statements run left to right, the arm yields the last
+int r1 = switch h % 3
+    0 => seq := seq * 10 + 1, seq := seq % 1000, seq * 2
+    1 => seq += 7, seq
+    => seq
+
+// (2) a default arm that stops the script, never taken, then a string value
+string tag = switch (h % 2 == 0 ? "even" : "odd")
+    "even" => "E"
+    "odd"  => "O"
+    => runtime.error("unreachable " + str.tostring(h)), ""
+
+// (3) the same with an na value
+string tag2 = switch m
+    0  => "m0"
+    15 => "m15"
+    30 => "m30"
+    45 => "m45"
+    => runtime.error("no such minute"), na
+
+// (4) a method call's effect, then a read of it
+int r4 = switch m
+    0 => buf.push(h), buf.push(m + 1), buf.size()
+    => buf.size()
+
+// (5) a switch statement: every statement of the taken arm runs
+switch m
+    0  => cntA += 1, cntB += 10
+    15 => cntA += 2
+    => cntB += 1
+
+// (6) the arm's value is its last statement's, an assignment's too
+int r6 = switch h % 2
+    0 => cntA := cntA + 0, cntB := cntB + 0
+    => -1
+
+// (7) an if arm whose block line joins statements
+float r7 = if h % 2 == 0
+    seq2 := seq2 + 1, seq2 * 100.0
+else
+    seq2 := seq2 + 2, -seq2 * 1.0
+
+if m == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if m == 15
+    strategy.close("L", comment = str.tostring(r1) + "|" + tag + "|" + tag2 + "|" + str.tostring(r4) + "|" + str.tostring(buf.last()) + "|" + str.tostring(cntA) + "|" + str.tostring(cntB) + "|" + str.tostring(r6) + "|" + str.tostring(r7))

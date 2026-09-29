@@ -1,0 +1,38 @@
+//@version=6
+strategy("pf-tail-f-array-ref-fresh", overlay = true)
+
+// Arrays passed to a method's and a function's array parameter, each pushed
+// to inside the callee. Every exit comment spells what each call returned
+// and what the caller's arrays hold afterwards.
+type Box
+    float w = 1.0
+    array<float> arr
+method grow(Box self, array<float> a) =>
+    a.push(self.w)
+    a.size()
+addTwo(array<float> a) =>
+    a.push(2.0)
+    a.sum()
+mk() =>
+    array.from(10.0)
+
+var Box bx = Box.new(3.0, array.new_float(0))
+var array<float> held = array.new_float(0)
+var matrix<float> mat = matrix.new<float>(2, 3, 1.0)
+m = minute(time, "UTC")
+
+// (1) a variable's array and an object's field: the push reaches them
+r1 = bx.grow(held)
+r2 = bx.grow(bx.arr)
+// (2) a matrix row: the push stays in the row
+r3 = bx.grow(mat.row(0))
+r4 = bx.grow(matrix.row(mat, 1))
+// (3) a copy, a literal array and a function's new array
+r5 = addTwo(array.copy(held))
+r6 = addTwo(array.from(1.0, 2.0, 3.0))
+r7 = addTwo(mk())
+
+if m == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if m == 15
+    strategy.close("L", comment = str.tostring(r1) + "|" + str.tostring(r2) + "|" + str.tostring(r3) + "|" + str.tostring(r4) + "|" + str.tostring(r5) + "|" + str.tostring(r6) + "|" + str.tostring(r7) + "|" + str.tostring(held.size()) + "|" + str.tostring(bx.arr.size()) + "|" + str.tostring(mat.row(0).size()))

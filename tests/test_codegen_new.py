@@ -1220,7 +1220,8 @@ def test_input_bare_uses_runtime():
 strategy("Test")
 val = input(14, "Value")
 """)
-    assert 'get_input_double("Value", 14)' in cpp
+    # An int default makes an int input (tests/test_codegen_input_getters.py).
+    assert 'get_input_int("Value", 14)' in cpp
 
 
 def test_input_title_kwarg():

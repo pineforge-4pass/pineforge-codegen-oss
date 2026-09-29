@@ -1,0 +1,15 @@
+//@version=6
+// Each order comment spells the exchange-zone facts the script reads:
+// syminfo.timezone, syminfo.tickerid, the chart timeframe, chart.is_standard,
+// and whether the zone compares equal to "Etc/UTC" and to "UTC".
+strategy("PF te syminfo timezone", overlay = true)
+facts = syminfo.timezone + "|" + syminfo.tickerid + "|" + timeframe.period
+     + "|" + str.tostring(timeframe.isminutes) + "|" + str.tostring(timeframe.multiplier)
+     + "|" + str.tostring(chart.is_standard)
+     + "|" + (syminfo.timezone == "Etc/UTC" ? "etc" : "-")
+     + "|" + (syminfo.timezone == "UTC" ? "utc" : "-")
+     + "|" + str.tostring(hour(time, syminfo.timezone)) + ":" + str.tostring(dayofweek(time, syminfo.timezone))
+if bar_index % 2 == 0
+    strategy.entry("L", strategy.long, comment = facts)
+else
+    strategy.close("L", comment = facts)

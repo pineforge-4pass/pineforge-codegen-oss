@@ -1,0 +1,23 @@
+//@version=6
+strategy("pf-tail-f-overload-qualifiers", overlay = true)
+
+// fixtures/tail_f_tv/overload_qualifiers.pine with `pick` read from
+// pftest/Overloads/1, and a request of another symbol a gate never
+// evaluates, whose gaps is a barmerge constant the library holds.
+import pftest/Overloads/1 as ov
+
+lenIn = input.int(3, "Length")
+useOther = input.bool(false, "Use other")
+fixedLen = lenIn * 2
+m = minute(time, "UTC")
+r1 = ov.pick(7)
+r2 = ov.pick(lenIn)
+r3 = ov.pick(fixedLen)
+r4 = ov.pick(bar_index % 5)
+r5 = ov.pick(m)
+other = useOther ? ov.gated("BINANCE:BTCUSDT") : na
+
+if m == 0 and na(other)
+    strategy.entry("L", strategy.long, comment = "E")
+if m == 15
+    strategy.close("L", comment = str.tostring(r1) + "|" + str.tostring(r2) + "|" + str.tostring(r3) + "|" + str.tostring(r4) + "|" + str.tostring(r5))

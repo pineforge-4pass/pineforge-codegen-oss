@@ -120,9 +120,8 @@ def test_bare_reads_used_to_be_unknown_variables(payload, lowered):
     # An overloaded helper on the path.
     'g(float _e) => request.security(syminfo.tickerid, "D", _e[1])\n'
     'h(float x) => g(x)\nh(float x, float y) => x * y\nx = h(close)\n',
-    # A global holding an operator expression or a math call.
-    'mid = (high + low) / 2\n'
-    'g(_e) => request.security(syminfo.tickerid, "D", _e[1])\nx = g(mid)\n',
+    # A global holding a math call (one holding an operator expression is
+    # put in: tests/test_security_global_history.py).
     'am = math.abs(close - open)\n'
     'g(_e) => request.security(syminfo.tickerid, "D", _e[1])\nx = g(am)\n',
     # A global under a cast, which renders on the chart's terms.

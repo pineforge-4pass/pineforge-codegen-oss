@@ -1,0 +1,23 @@
+//@version=6
+// ta.roc, ta.change and ta.mom called inside if blocks -- one nested, one in
+// an else-if -- run only on the bars their block runs. Every bar spells the
+// last values they returned: flat bars as the entry's name, bars holding the
+// position as the close's comment.
+strategy("PF te lazy if source", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+var float r = na
+var float c = na
+var float m = na
+var float r2 = na
+if bar_index % 7 == 3
+    r := ta.roc(close, 3)
+    c := ta.change(close, 3)
+    if close > open
+        m := ta.mom(close, 2)
+else if bar_index % 5 == 1
+    r2 := ta.roc(close, 1)
+f(x) => na(x) ? "na" : str.tostring(x, "#.######")
+v = str.tostring(bar_index) + "|" + f(r) + "|" + f(c) + "|" + f(m) + "|" + f(r2)
+if strategy.position_size == 0
+    strategy.entry(v, strategy.long)
+else
+    strategy.close_all(comment = v)

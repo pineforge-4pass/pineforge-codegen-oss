@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: Apache-2.0
+// Clean-room synthetic library for PineForge's library inliner tests
+// (lane TAIL-F). Not a published TradingView library. Its switch arms are
+// written on their `=>` lines, several statements joined by commas, as the
+// open TradingView/Request/3 library writes `=> runtime.error(...), ""`: a
+// default arm that stops the script, never taken, then the arm's value.
+
+//@version=6
+library("ArmLine")
+
+// The statements run left to right; the arm's value is the last one's.
+export stepped(int h) =>
+    var int seq = 0
+    int r = switch h % 3
+        0 => seq := seq * 10 + 1, seq := seq % 1000, seq * 2
+        1 => seq += 7, seq
+        => seq
+    r
+
+export parity(int h) =>
+    string tag = switch (h % 2 == 0 ? "even" : "odd")
+        "even" => "E"
+        "odd"  => "O"
+        => runtime.error("unreachable " + str.tostring(h)), ""
+    tag
+
+export quarter(int m) =>
+    string tag = switch m
+        0  => "m0"
+        15 => "m15"
+        30 => "m30"
+        45 => "m45"
+        => runtime.error("no such minute"), na
+    tag

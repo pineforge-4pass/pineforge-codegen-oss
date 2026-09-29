@@ -193,6 +193,8 @@ def test_shadowed_close_and_other_sources_route_too():
 
 
 def test_non_top_level_and_eager_shapes_keep_the_existing_route():
+    # A call in a top-level if block takes the clock too: TradingView's tape
+    # te_lazy_if_source (tests/test_e2e_lazy_if_source_clock.py).
     cases = {
         "eager": "x = ta.roc(close, 3) > 0",
         "eager_ternary_condition": "x = ta.change(close, 3) > 0 ? 1 : 0",
@@ -204,11 +206,6 @@ def test_non_top_level_and_eager_shapes_keep_the_existing_route():
         "security": (
             'x = close > open and request.security(syminfo.tickerid, "60", '
             "close > open and ta.roc(close, 3) > 0)"
-        ),
-        "if_body": (
-            "x = false\n"
-            "if close > open\n"
-            "    x := high > low and ta.roc(close, 3) > 0"
         ),
         "loop_body": (
             "x = false\n"

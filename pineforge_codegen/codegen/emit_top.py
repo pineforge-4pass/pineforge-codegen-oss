@@ -1610,7 +1610,7 @@ class TopLevelEmitter:
                         default = self._get_input_default(stmt.value)
                         default_cpp = self._visit_expr(default) if default is not None else "0"
                         title = self._get_input_title(stmt.value, var_name=stmt.name)
-                        getter = self._input_type_to_getter(func_name_i, namespace_i)
+                        getter = self._input_getter_for_call(stmt.value, func_name_i, namespace_i)
                         default_cpp = self._coerce_string_input_default(getter, default_cpp)
                         cpp_val = f'{getter}({self._input_key_literal(title)}, {default_cpp})'
                         static_vars.append(f"{safe} = {cpp_val};")
@@ -1805,9 +1805,11 @@ class TopLevelEmitter:
 
         # d. Visit each statement. A stateful ``ta.*`` site below a lazy
         #    ``and``/``or`` RHS or ternary arm of a top-level statement is
-        #    evaluated every bar BEFORE the statement (TV rule, see ``ta.py``).
+        #    evaluated every bar BEFORE the statement, and so is a pure user
+        #    call read at an offset there (TV rules, see ``ta.py``).
         for stmt in self.ctx.ast.body:
             self._emit_lazy_edge_ta_hoists(stmt, lines, indent=2)
+            self._emit_lazy_call_history_hoists(stmt, lines, indent=2)
             try:
                 self._visit_stmt(stmt, lines, indent=2)
             finally:
@@ -2024,6 +2026,12 @@ class TopLevelEmitter:
         node = fi.node
         if node is None:
             return
+        # The written call whose argument types type this emission: the
+        # variant's own, or the one a fresh nested instance runs.
+        type_call_site_idx = (
+            call_site_idx if call_site_idx is not None
+            else (instance or {}).get("type_call_site_idx")
+        )
 
         # Collection registries historically used raw variable names for the
         # whole translation unit.  Emit each callable against copy-on-write
@@ -2077,9 +2085,9 @@ class TopLevelEmitter:
         )
         variant_param_types = (
             getattr(self.ctx, "func_callsite_param_types", {}).get(
-                (fi.name, call_site_idx), ()
+                (fi.name, type_call_site_idx), ()
             )
-            if call_site_idx is not None
+            if type_call_site_idx is not None
             else ()
         )
         for i, p in enumerate(node.params):
@@ -2256,14 +2264,14 @@ class TopLevelEmitter:
             # values and their na sentinel cannot narrow at the return edge.
             ret_type = "int64_t"
         elif (
-            call_site_idx is not None
+            type_call_site_idx is not None
             and self._callsite_callable_return_pine_type(
-                fi, call_site_idx
+                fi, type_call_site_idx
             ) != PineType.UNKNOWN
         ):
             ret_type = PINE_TYPE_TO_CPP.get(
                 self._callsite_callable_return_pine_type(
-                    fi, call_site_idx
+                    fi, type_call_site_idx
                 ),
                 "double",
             )
@@ -2394,7 +2402,11 @@ class TopLevelEmitter:
                 self._emit_history_series_write(lines, "        ", member, value)
 
         emitted_return = False
+        # A pure call read at an offset below a lazy edge runs once per call
+        # of this function, before its statement (``ta.py``).
+        hoisted: list[int] = []
         if node.is_single_expr and node.body:
+            hoisted = self._emit_lazy_call_history_hoists(node.body[0], lines, indent=2)
             expr = node.body[0].expr if isinstance(node.body[0], ExprStmt) else None
             if expr and self._call_is_void(expr):
                 # void setter as the sole body expr — emit as statement, fall
@@ -2412,6 +2424,8 @@ class TopLevelEmitter:
                 emitted_return = True
         else:
             for i, s in enumerate(node.body):
+                self._clear_lazy_call_history_hoists(hoisted)
+                hoisted = self._emit_lazy_call_history_hoists(s, lines, indent=2)
                 if i == len(node.body) - 1 and isinstance(s, ExprStmt):
                     # A void drawing setter / delete / visual-noop, or a dropped
                     # table/polyline method call (``panel.cell(...)``), used as
@@ -2512,6 +2526,7 @@ class TopLevelEmitter:
                     emitted_return = True
                 else:
                     self._visit_stmt(s, lines, indent=2)
+        self._clear_lazy_call_history_hoists(hoisted)
 
         # Always emit a default return if no explicit return was emitted,
         # to avoid non-void function without return value.

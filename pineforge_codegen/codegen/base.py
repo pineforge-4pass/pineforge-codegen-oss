@@ -32,6 +32,7 @@ from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from ..limits import TimeBudget, iter_ast_nodes
 from ..session_reads import emitted_session_reads
+from ..block_locals import block_declarations, decl_key
 from ..pine_spelling import (
     blank_string_literals, input_call_spans, pine_string_literal,
     spell_input_call, sub_identifiers,
@@ -414,6 +415,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Subscript id -> ``_hist_call_*`` member (see ``ta.py``).
         self._hoisted_ta_values: dict[int, str] = {}
         self._hoisted_hist_reads: dict[int, str] = {}
+        # ``*`` nodes a ``%`` or ``/`` reads: an int product among them is
+        # computed in 64 bits (visit_expr._lower_binop).
+        self._wide_int_products: set[int] = set()
         # Names of ``var`` members that live in a callable scope (not global).
         # Their exact declaration statements own initialization; they must not
         # be initialized by the constructor or the global on_bar preamble.
@@ -830,6 +834,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # The uncloned functions whose reads the emitted C++ holds: another
         # analysis clones them (pineforge_codegen._generate).
         self.session_functions_needing_clones: frozenset[str] = frozenset()
+        # The top-level block declarations whose type the member of their name
+        # cannot hold (``block_locals``): transpile() names each apart and
+        # runs again.
+        self.block_locals_needing_names: frozenset = frozenset()
         # Track global-scope non-var declarations (emitted as class members)
         self._global_member_vars: set[str] = set()
         for name, _ in ctx.global_var_decls:
@@ -1800,6 +1808,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         "name": inst_name,
                         "fresh": True,
                         "call_site_idx": None,
+                        # The written call this instance runs, for its
+                        # parameter and return types: an untyped parameter
+                        # takes the argument that call passes, as the
+                        # call's own cs{j} clone does.
+                        "type_call_site_idx": j,
                         "ta_remap": composed_ta,
                         "var_remap": fvar_remap,
                         "fixnan_remap": ffixnan_remap,
@@ -3319,6 +3332,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     self._input_backed_vars.add(node.name)
                     if node.value.name in self._input_var_to_call:
                         self._input_var_to_call[node.name] = self._input_var_to_call[node.value.name]
+            # A plain alias of a derived stable scalar (``emaLen = calcEmaLen``
+            # over ``calcEmaLen = swingLen * emaRatio``) holds that scalar on
+            # every bar. Recorded as a derived expression of the name it
+            # copies, the TA runtime reset re-expands it to the inputs'
+            # getter reads; unrecorded, the reset spelled the alias's own
+            # member, which the body has not assigned yet on the first bar
+            # (0: ``ta.ema(close, emaLen)`` ran as an EMA of length 0).
+            src = node.value.name
+            if (src in self._derived_input_expr
+                    and src not in self._input_var_to_call
+                    and self._expr_is_stable(node.value)):
+                self._derived_input_expr[node.name] = src
+                self._stable_runtime_vars.add(node.name)
+                if src in self._input_backed_vars:
+                    self._input_backed_vars.add(node.name)
             if node.value.name in self._timeframe_period_vars:
                 self._timeframe_period_vars.add(node.name)
         elif (isinstance(node.value, MemberAccess)
@@ -4251,6 +4279,41 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self._udt_arena_member_names[type_name] = allocated
             self._all_member_names.add(allocated)
 
+    # C++ types one member holds for every declaration of a name.
+    _SHARED_MEMBER_TYPES = frozenset({"int", "int64_t", "double", "bool"})
+
+    def _block_locals_needing_names(self) -> frozenset:
+        """The declarations in the script's top-level blocks whose type the
+        member of their name cannot hold (``block_locals``). The member has
+        the type of the name's direct top-level declaration, else of its
+        first declaration; a string, a collection or an object beside another
+        type did not compile. Numbers and bools share one member, as before."""
+        decls = [(decl, nested) for decl, nested in block_declarations(self.ctx.ast.body)
+                 if not decl.is_var and not decl.is_varip and decl.value is not None]
+        member: dict[str, str | None] = {}
+        for decl, nested in decls:
+            if not nested:
+                member.setdefault(decl.name, self._declared_cpp_type(decl))
+        needing: set = set()
+        for decl, nested in decls:
+            cpp = self._declared_cpp_type(decl)
+            first = member.setdefault(decl.name, cpp)
+            if (nested and first is not None and cpp is not None and first != cpp
+                    and not {first, cpp} <= self._SHARED_MEMBER_TYPES
+                    and decl_key(decl) is not None):
+                needing.add(decl_key(decl))
+        return frozenset(needing)
+
+    def _declared_cpp_type(self, decl: VarDecl) -> str | None:
+        """The C++ type of a declaration's value (its hint's, when typed)."""
+        if decl.type_hint:
+            spec = self._type_spec_from_hint_name(decl.type_hint)
+            return self._type_spec_to_cpp(spec) if spec is not None else None
+        try:
+            return self._infer_type(decl.value)
+        except Exception:
+            return None
+
     def generate(self) -> str:
         """Generate C++ source from the AnalyzerContext."""
         # Every input is keyed by its title: refuse a non-constant one first,
@@ -4281,9 +4344,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # request.security helper-call results read at a history offset
         # (``myHelper()[k]``). Maps (sec_id, node-id) -> backing Series metadata.
         self._security_expr_hist_by_node: dict[tuple[int, int], dict] = {}
+        # request.security id -> the globals its payload reads with history
+        # (``_security_global_history_value``).
+        self._security_global_hist_names: dict[int, set[str]] = {}
+        # ids of the global history reads kept in a double (``_security_emits_double``).
+        self._security_double_hist_nodes: set[int] = set()
         # request.security ids whose payload reads the requested bar_index.
         self._security_bar_index_secs: set[int] = set()
         self._prepare_lazy_source_clock_sites()
+        self.block_locals_needing_names = self._block_locals_needing_names()
 
         lines: list[str] = []
 
@@ -5023,6 +5092,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     # (``_wide_int_provenance``) is stored in 64 bits too.
                     if cpp_type == "int" and self._is_int64_builtin_init(name):
                         cpp_type = "int64_t"
+                    # An int that can hold TradingView's infinity
+                    # (``_nonfinite_int_names``) keeps its double.
+                    elif cpp_type == "int" and name in self._nonfinite_int_names():
+                        cpp_type = "double"
                 default = self._default_for_type(cpp_type)
                 lines.append(f"    {cpp_type} {safe} = {default};")
 

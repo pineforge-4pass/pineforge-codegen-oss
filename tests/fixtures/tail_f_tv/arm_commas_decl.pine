@@ -1,0 +1,17 @@
+//@version=6
+strategy("pf-tail-f-arm-commas-decl", overlay = true)
+
+// Declarations inside an arm written on its `=>` line.
+h = hour(time, "UTC")
+m = minute(time, "UTC")
+int rA = switch h % 2
+    0 => int t = h * 2, t + 1
+    => 0
+float rB = switch h % 3
+    0 => x = close, x * 0 + 5.0
+    => 1.0
+
+if m == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if m == 15
+    strategy.close("L", comment = str.tostring(rA) + "|" + str.tostring(rB))

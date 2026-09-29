@@ -1,0 +1,49 @@
+//@version=6
+// CGINT7: where lane TAIL-F's rule for an int product a % or / reads, and
+// lane TAIL-A's history of a payload global, meet codegen main's 64-bit
+// integer arithmetic (CGINT6). Each close's comment spells what the script
+// reads on that bar (entries from 12:00 UTC on, when every requested window
+// lies inside the tape's range):
+//   pm: a Park-Miller step over a var int (both rules);
+//   ag: the same over an int array's element (TAIL-F's rule alone);
+//   w: a product past int32 no % or / reads (main's rule alone);
+//   r: a product past int32 over a script variable that a % reads (both);
+//   dv: a product that fits int32 that a / reads (TAIL-F's rule alone);
+//   dd: an input's product past int32 that a / reads (both);
+//   zz: an na operand's product that a % reads (main's na-aware form);
+//   fl: a function parameter's product that a % reads (both);
+//   p: a payload's history of a global past int32 (TAIL-A x main);
+//   q2: a payload's history of a script variable's product (TAIL-A x main's
+//     na-aware form);
+//   pr: a payload's product past int32 that a % reads (main's rule).
+strategy("CGINT7 int products", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+var int s = 42
+s := (s * 48271) % 2147483647
+var int[] st = array.new_int(1, 42)
+array.set(st, 0, (array.get(st, 0) * 48271) % 2147483647)
+ag = array.get(st, 0)
+var int n = 400
+n += 1
+w = n * 7200000
+r = (n * 7200000) % 1000000007
+dv = (n * 3) / 2
+days = input.int(30)
+dd = (days * 86400000) / 1000
+var int z = na
+zz = (z * 48271) % 2147483647
+f(int x) => (x * 48271) % 2147483647
+fl = f(bar_index + 7)
+g = bar_index * 86400000
+p = request.security(syminfo.tickerid, "60", g[1])
+var int k = 0
+k += 1
+g2 = k * 86400000
+q2 = request.security(syminfo.tickerid, "60", g2 - g2[1])
+pr = request.security(syminfo.tickerid, "60", (bar_index * 86400000) % 1000000007)
+t(x) => str.tostring(x)
+live = time >= timestamp("UTC", 2025, 4, 1, 12, 0)
+m = minute(time, "UTC")
+if live and (m == 0 or m == 30)
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = t(s) + "|" + t(ag) + "|" + t(w) + "|" + t(r) + "|" + t(dv) + "|" + t(dd) + "|" + t(zz) + "|" + t(fl) + "|" + t(p) + "|" + t(q2) + "|" + t(pr))

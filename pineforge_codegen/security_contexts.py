@@ -59,11 +59,12 @@ its call-site clones for differing timeframes built every clone from the
 first call's length. Only a value the request builder lowers on the
 requested bars in the read's place is put in (``_Lowered``); any other keeps
 the earlier lowering, never a refusal: a reassigned or ``var`` name, a loop
-variable, a name the helper declares, a user call, a global declared after
-the helper (read on the chart's terms there), a history object other than
-a bar or price series, a ``ta.*`` call, an ``input.source`` or an inline
-operator expression, a global under a builtin rendered on the chart's
-terms.
+variable, a name the helper declares, a user call other than a global's
+value the builder inlines whole (``_inlined_function``), a global declared
+after the helper (read on the chart's terms there), a history object other
+than a bar or price series, a ``ta.*`` call, an ``input.source``, an inline
+operator expression or a global holding a numeric one or such a call, a
+global under a builtin rendered on the chart's terms.
 
 A request of another symbol that reads that symbol's pinned feed
 (``external_requests``: the support checker's ``feed`` lowering) is keyed by
@@ -91,7 +92,7 @@ import copy
 from dataclasses import replace
 
 from .ast_nodes import (
-    ArgOrder, ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ForInStmt,
+    ArgOrder, ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, ForInStmt,
     ForStmt, FuncCall, FuncDef, Identifier, IfStmt, MemberAccess, MethodDef,
     NaLiteral, NumberLiteral, Program, StringLiteral, Subscript, SwitchStmt,
     Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl, WhileStmt,
@@ -1142,7 +1143,11 @@ class _Lowered:
                 return node.callee.member in ("int", "float", "bool")
             if kind == "value":
                 return bool(node.args) and all(self._numeric(a, seen) for a in node.args)
-            return kind in ("ta", "math", "source")
+            if (kind is None and isinstance(node.callee, Identifier)
+                    and id(node.callee) not in self.prog.refs
+                    and self._inlined_function(node.callee.name)):
+                return self._inlined_numeric(node.callee.name)
+            return kind in ("ta", "math", "source", "stop")
         if isinstance(node, BinOp):
             return self._numeric(node.left, seen) and self._numeric(node.right, seen)
         if isinstance(node, UnaryOp):
@@ -1170,6 +1175,12 @@ class _Lowered:
             if space == "input" and member == "source":
                 # The series it selects, read on the requested bars.
                 return "source"
+            if space == "request" and member == "security" and self._heikinashi_request(node):
+                # A request of Heikin-Ashi bars inside the payload: evaluating
+                # it stops the run (the codegen's
+                # ``_security_nested_heikinashi_request``), so a selection
+                # that never takes it reads the requested bars.
+                return "stop"
             return None
         if (isinstance(callee, Identifier) and callee.name == "input"
                 and callee.name not in self.declared and callee.name not in self.prog.funcs
@@ -1190,6 +1201,137 @@ class _Lowered:
             self.memo[key] = declared is not None and judge(declared, seen | {node.name})
         return self.memo[key]
 
+    def _heikinashi_request(self, node) -> bool:
+        """``node`` (a ``request.security``) requests Heikin-Ashi bars: a
+        ``ticker.heikinashi(...)`` symbol, written there or held by a
+        global."""
+        symbol = node.args[0] if node.args else node.kwargs.get("symbol")
+        if isinstance(symbol, Identifier) and self.prog.refs.get(id(symbol), ("",))[0] == "global":
+            symbol = self.declared.get(symbol.name)
+        return (isinstance(symbol, FuncCall) and isinstance(symbol.callee, MemberAccess)
+                and isinstance(symbol.callee.object, Identifier)
+                and symbol.callee.object.name == "ticker"
+                and id(symbol.callee.object) not in self.prog.refs
+                and symbol.callee.member == "heikinashi")
+
+    def _user_call(self, node, seen: frozenset, globals_ok: bool) -> bool:
+        """``node``, a global's value, is a call of a user function the
+        builder inlines whole on the requested bar (``_inlined_function``)
+        on lowered arguments. The codegen lowers such a global once per
+        evaluator, and keeps its history on the requested clock
+        (``_security_global_history_value``)."""
+        return (isinstance(node, FuncCall) and isinstance(node.callee, Identifier)
+                and id(node.callee) not in self.prog.refs
+                and self._inlined_function(node.callee.name)
+                and all(self.value(a, seen, globals_ok)
+                        for a in (*node.args, *node.kwargs.values())))
+
+    def _inlined_function(self, name: str, seen: frozenset = frozenset()) -> bool:
+        """``name`` is a user function the builder inlines whole on the
+        requested bar: one definition whose body declares plain locals and
+        ends in an expression, reading its parameters, its locals, bar series
+        and literals through operators, ternaries, single-valued ``ta.*``,
+        ``math.*``, ``int`` / ``float`` / ``nz`` and calls of such functions.
+        No ``var``, reassignment, branch or loop statement, history read,
+        global, request or order."""
+        if name in seen or name in self.prog.overloaded or name not in self.prog.funcs:
+            return False
+        key = ("function", name)
+        if key not in self.memo:
+            self.memo[key] = False  # a recursive helper is not one
+            body = self.prog.funcs[name].body
+            ok = bool(body)
+            for index, stmt in enumerate(body):
+                last = index == len(body) - 1
+                if isinstance(stmt, VarDecl) and stmt.name:
+                    ok = (not (stmt.is_var or stmt.is_varip)
+                          and ("local", id(stmt)) not in self.prog.unstable)
+                    expr = stmt.value
+                elif last:
+                    expr = stmt.expr if isinstance(stmt, ExprStmt) else stmt
+                else:
+                    ok = False
+                if not ok or not self._inlined_expr(name, expr, seen | {name}):
+                    ok = False
+                    break
+            self.memo[key] = ok
+        return self.memo[key]
+
+    def _inlined_numeric(self, name: str, node=None, seen: frozenset = frozenset()) -> bool:
+        """The result of ``_inlined_function`` ``name`` (or ``node`` in its
+        body) is a number or a bool: numeric literals, bar series, ``ta.*``,
+        ``math.*``, ``int`` / ``float``, comparisons and logic, arithmetic
+        and ternaries over them, its numeric locals and such calls. A
+        parameter or a string is not."""
+        if node is None:
+            if name in seen:
+                return False
+            last = self.prog.funcs[name].body[-1]
+            node = (last.value if isinstance(last, VarDecl)
+                    else last.expr if isinstance(last, ExprStmt) else last)
+            seen = seen | {name}
+        if isinstance(node, (NumberLiteral, BoolLiteral, NaLiteral)):
+            return True
+        if isinstance(node, Identifier):
+            ref = self.prog.refs.get(id(node))
+            if ref is None:
+                return node.name in _VALUE_SERIES
+            decl = self.prog.decls.get(ref) if ref[0] == "local" else None
+            return decl is not None and self._inlined_numeric(name, decl.value, seen)
+        if isinstance(node, BinOp):
+            if node.op in ("==", "!=", "<", ">", "<=", ">=", "and", "or"):
+                return True
+            return (self._inlined_numeric(name, node.left, seen)
+                    and self._inlined_numeric(name, node.right, seen))
+        if isinstance(node, UnaryOp):
+            return node.op == "not" or self._inlined_numeric(name, node.operand, seen)
+        if isinstance(node, Ternary):
+            return (self._inlined_numeric(name, node.true_val, seen)
+                    and self._inlined_numeric(name, node.false_val, seen))
+        if isinstance(node, FuncCall):
+            callee = node.callee
+            if isinstance(callee, MemberAccess):
+                return True  # ``_inlined_expr`` admits ``ta.*`` and ``math.*`` only
+            if callee.name in ("int", "float"):
+                return True
+            if callee.name == "nz":
+                return bool(node.args) and self._inlined_numeric(name, node.args[0], seen)
+            return self._inlined_numeric(callee.name, None, seen)
+        return False
+
+    def _inlined_expr(self, func: str, node, seen: frozenset) -> bool:
+        if isinstance(node, _LITERALS):
+            return True
+        if isinstance(node, Identifier):
+            ref = self.prog.refs.get(id(node))
+            if ref is None:
+                return node.name in _VALUE_SERIES
+            if ref[0] == "param":
+                return ref[1] == func
+            return ref[0] == "local" and ref not in self.prog.unstable
+        if isinstance(node, BinOp):
+            return (self._inlined_expr(func, node.left, seen)
+                    and self._inlined_expr(func, node.right, seen))
+        if isinstance(node, UnaryOp):
+            return self._inlined_expr(func, node.operand, seen)
+        if isinstance(node, Ternary):
+            return all(self._inlined_expr(func, part, seen)
+                       for part in (node.condition, node.true_val, node.false_val))
+        if isinstance(node, FuncCall):
+            args = (*node.args, *node.kwargs.values())
+            callee = node.callee
+            if isinstance(callee, Identifier) and id(callee) not in self.prog.refs:
+                known = (callee.name in _VALUE_CALLS and callee.name not in self.prog.funcs
+                         or self._inlined_function(callee.name, seen))
+            elif (isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier)
+                  and id(callee.object) not in self.prog.refs):
+                known = (callee.object.name == "math"
+                         or callee.object.name == "ta" and callee.member not in self.tuple_ta)
+            else:
+                known = False
+            return known and all(self._inlined_expr(func, a, seen) for a in args)
+        return False
+
     def value(self, node, seen: frozenset = frozenset(), globals_ok: bool = True) -> bool:
         if isinstance(node, _LITERALS):
             return True
@@ -1197,7 +1339,8 @@ class _Lowered:
             if node.name in self.prog.program_names:
                 return globals_ok and self._judged(
                     "value", node, seen, globals_ok,
-                    lambda declared, inner: self.value(declared, inner, globals_ok))
+                    lambda declared, inner: self.value(declared, inner, globals_ok)
+                    or self._user_call(declared, inner, globals_ok))
             return node.name in _VALUE_SERIES
         if isinstance(node, FuncCall):
             # An input's arguments are constants (TradingView takes const
@@ -1205,7 +1348,7 @@ class _Lowered:
             # render on the chart's terms: no global below them.
             kind = self._call(node)
             inner_ok = globals_ok and kind != "value"
-            return kind in ("input", "source") or (kind is not None and all(
+            return kind in ("input", "source", "stop") or (kind is not None and all(
                 self.value(a, seen, inner_ok) for a in (*node.args, *node.kwargs.values())))
         if isinstance(node, BinOp):
             return self.value(node.left, seen, globals_ok) and self.value(
@@ -1228,10 +1371,18 @@ class _Lowered:
         operator expression."""
         if isinstance(node, Identifier):
             if node.name in self.prog.program_names:
+                # A global holding a user call or an operator expression
+                # keeps its history on the requested clock
+                # (``_security_global_history_value``).
                 return globals_ok and self._judged(
                     "history", node, seen, globals_ok,
-                    lambda declared, inner: isinstance(declared, (Identifier, FuncCall))
-                    and self.history(declared, inner, globals_ok))
+                    lambda declared, inner: (
+                        isinstance(declared, (Identifier, FuncCall))
+                        and self.history(declared, inner, globals_ok))
+                    or self._user_call(declared, inner, globals_ok)
+                    or (isinstance(declared, (BinOp, UnaryOp, Ternary))
+                        and self._numeric(declared, inner)
+                        and self.value(declared, inner, globals_ok)))
             return node.name in _HISTORY_SERIES
         if isinstance(node, FuncCall):
             kind = self._call(node)

@@ -560,6 +560,8 @@ class ExprVisitor:
         safe = self._call_site_var_name(node, self._safe_name(name))
         if self._binding_is_series(name, safe):
             return f"{safe}[0]"
+        if name in self._nonfinite_int_names() and name not in self._current_func_locals:
+            return self._nonfinite_int_read(safe)
         # Safety net: by here the name resolved to none of the builtins,
         # constants, parameters, or declared variables handled above, so
         # ``return safe`` would emit a bare identifier that is an *undeclared
@@ -580,6 +582,14 @@ class ExprVisitor:
                 hint=hint,
             )
         return safe
+
+    def _nonfinite_int_read(self, safe: str) -> str:
+        """A read of a ``_nonfinite_int_names`` name: an infinity reads na, as
+        the int's ``na<int>()`` did, except as the operand of an ordering
+        comparison (``_visit_binop_operand``), which orders it as the number."""
+        if getattr(self, "_nonfinite_int_raw", False):
+            return safe
+        return f"(std::isfinite({safe}) ? {safe} : na<double>())"
 
     def _ident_is_resolvable(self, name: str) -> bool:
         """True when a bare identifier maps to a builtin, constant, parameter,
@@ -950,6 +960,11 @@ class ExprVisitor:
             if ns == "adjustment":
                 # adjustment.none / dividends / splits. Unknown member -> "none" (0).
                 return ADJUSTMENT_MAP.get(node.member, "0")
+            if ns == "barmerge":
+                # A barmerge constant held or compared as a value (the
+                # analyzer types it int): on 1, off 0. A request's gaps or
+                # lookahead reads the constant as written.
+                return "1" if node.member in ("gaps_on", "lookahead_on") else "0"
             if ns == "dayofweek":
                 return DAYOFWEEK_MAP.get(node.member, "0")
             if ns == "session":
@@ -1264,8 +1279,14 @@ class ExprVisitor:
         if (folded is not None and not self._int_fits_int32(folded)
                 and self._int_fits_int64(folded)):
             return f"static_cast<int64_t>({folded}LL)"
-        left = self._visit_expr(node.left)
-        right = self._visit_expr(node.right)
+        if node.op in ("%", "/"):
+            # Both lower through doubles, which hold an int product's exact
+            # value: compute a product operand in 64 bits (``_lower_binop``).
+            for operand in (node.left, node.right):
+                if isinstance(operand, BinOp) and operand.op == "*":
+                    self._wide_int_products.add(id(operand))
+        left = self._visit_binop_operand(node.left, node.op)
+        right = self._visit_binop_operand(node.right, node.op)
         if (self._int_arith_leaves_int32(node)
                 and self._fold_int32_overflow_cpp(node.op, left, right) is None):
             # Both operands are 32-bit C++ ints and the value can leave
@@ -1275,12 +1296,27 @@ class ExprVisitor:
                 node, left, right,
                 lambda left, right: self._wide_int_arith_cpp(
                     node, left, right,
-                    lambda left, right: self._lower_binop(node, left, right)),
+                    lambda left, right: self._lower_binop(node, left, right, widened=True)),
             )
         return self._left_operand_first(
             node, left, right,
             lambda left, right: self._lower_binop(node, left, right),
         )
+
+    def _visit_binop_operand(self, operand, op: str) -> str:
+        """An operand's C++. An ordering comparison reads a
+        ``_nonfinite_int_names`` name's infinity as the number TradingView
+        orders it by (``_nonfinite_int_read``)."""
+        if (op in self.NONFINITE_INT_ORDERING_OPS
+                and isinstance(operand, Identifier)
+                and operand.name in self._nonfinite_int_names()):
+            previous = getattr(self, "_nonfinite_int_raw", False)
+            self._nonfinite_int_raw = True
+            try:
+                return self._visit_expr(operand)
+            finally:
+                self._nonfinite_int_raw = previous
+        return self._visit_expr(operand)
 
     def _left_operand_first(self, node: BinOp, left: str, right: str, lower) -> str:
         """``lower(left, right)``: the C++ of ``node`` over its rendered
@@ -1453,8 +1489,9 @@ class ExprVisitor:
             )
         return memo[key]
 
-    def _lower_binop(self, node: BinOp, left: str, right: str) -> str:
-        """The C++ of ``node`` over its rendered operands."""
+    def _lower_binop(self, node: BinOp, left: str, right: str, widened: bool = False) -> str:
+        """The C++ of ``node`` over its rendered operands; ``widened`` when
+        ``_visit_binop`` computes it in 64 bits already (``left`` cast)."""
         cpp_ops = {"and": "&&", "or": "||"}
         op = cpp_ops.get(node.op, node.op)
         if node.op in ("and", "or"):
@@ -1501,7 +1538,52 @@ class ExprVisitor:
         folded_cpp = self._fold_int32_overflow_cpp(node.op, left, right)
         if folded_cpp is not None:
             return folded_cpp
+        if (node.op == "*" and not widened and id(node) in self._wide_int_products
+                and self._pure_int_literal_value(node) is None
+                and self._emits_int32(node.left) and self._emits_int32(node.right)):
+            # Pine's int is 64-bit. A product a ``%`` or ``/`` reads reaches a
+            # double whole, where the C++ ``int`` product wrapped: the
+            # Park-Miller step ``(s * 48271) % 2147483647``
+            # (``fixtures/tail_f_tv/int_product``). A product that can leave
+            # int32 by its operands' bounds is ``widened`` already, na-aware
+            # (``_visit_binop``, ``_wide_int_arith_cpp``), and keeps that
+            # spelling; this covers the rest a ``%`` or ``/`` reads (an
+            # ``array.get`` operand, which the bounds do not know).
+            return f"((int64_t)({left}) * ({right}))"
         return self._lower_relational(op, node.left, node.right, left, right)
+
+    def _emits_int32(self, node) -> bool:
+        """Whether ``node`` is emitted as a C++ ``int`` for certain: an int
+        literal, a name stored as ``int``, an element of an ``array<int>``
+        (read or iterated), or a sign, sum or difference of those."""
+        if isinstance(node, NumberLiteral):
+            return isinstance(node.value, int) and not isinstance(node.value, bool)
+        if isinstance(node, UnaryOp) and node.op in ("-", "+"):
+            return self._emits_int32(node.operand)
+        if isinstance(node, BinOp) and node.op in ("+", "-"):
+            return self._emits_int32(node.left) and self._emits_int32(node.right)
+        if isinstance(node, Identifier):
+            if node.name in getattr(self, "_current_loop_vars", set()):
+                # A ``for ... in`` element: an int only over an ``array<int>``.
+                spec = getattr(self, "_current_loop_var_specs", {}).get(node.name)
+                return (spec is not None and spec.kind == "primitive"
+                        and self._type_spec_to_cpp(spec) == "int")
+            return (not self._emitted_value_is_double(node)
+                    and self._slot_scalar_cpp_type(node.name) == "int"
+                    and self._infer_type(node) == "int")
+        if isinstance(node, FuncCall):
+            callee = node.callee
+            if not isinstance(callee, MemberAccess) or callee.member != "get":
+                return False
+            receiver = (callee.object if not (
+                isinstance(callee.object, Identifier) and callee.object.name == "array")
+                else (node.args[0] if node.args else None))
+            if not isinstance(receiver, Identifier):
+                return False
+            spec = self._collection_spec_for_name(receiver.name)
+            return (spec is not None and spec.kind == "array" and spec.element is not None
+                    and self._type_spec_to_cpp(spec.element) == "int")
+        return False
 
     def _refuse_v5_bool_na_observer(self, node, what: str, operands) -> None:
         """A v5 bool can be na (a comparison with na, an na literal, a bool's
