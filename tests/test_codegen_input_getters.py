@@ -20,7 +20,8 @@ transpile-and-assert per branch of ``_input_type_to_getter``:
     color                                            -> get_input_int64 (packed ARGB)
     time                                             -> get_input_int64
     enum                                             -> get_input_int
-    bare input(...) / unrecognised (fallback)        -> get_input_double
+    bare input(...)                                  -> its default's getter
+                                                        (int / float / bool / string)
 
 These are additive, test-only assertions — no production behavior is
 exercised that the corpus does not already exercise.
@@ -191,20 +192,25 @@ def test_input_time_getter_routes_to_int64():
 
 # --- fallback branch: bare input(...) -> get_input_double ----------------
 
-def test_bare_input_falls_back_to_double_numeric():
-    # Bare input(...) has func_name="input" (not a short type name), so it
-    # hits the `return "get_input_double"` fallback regardless of defval.
-    assert "get_input_double(" in _emit('input(5, "n")')
+def test_bare_input_takes_its_int_defaults_getter():
+    # Pine v6 types a bare input(...) by its default: input(5) is an int
+    # input (lab tv tape te_generic_input, tests/fixtures/tail_e_tv).
+    cpp = _emit('input(5, "n")')
+    assert 'x = get_input_int("n", 5);' in cpp
+    assert "get_input_double(" not in cpp
 
 
-def test_bare_input_falls_back_to_double_bool_defval():
-    # Even a bool defval routes to double through the bare-input fallback
-    # (the getter table keys on the type *name*, not the value).
-    assert "get_input_double(" in _emit('input(true, "b")')
+def test_bare_input_takes_its_float_defaults_getter():
+    assert 'x = get_input_double("f", 1.5);' in _emit('input(1.5, "f")')
 
 
-def test_bare_input_falls_back_to_double_string_defval():
-    assert "get_input_double(" in _emit('input("a", "s")')
+def test_bare_input_takes_its_bool_defaults_getter():
+    assert 'x = get_input_bool("b", true);' in _emit('input(true, "b")')
+
+
+def test_bare_input_takes_its_string_defaults_getter():
+    # get_input_double(..., std::string("a")) did not compile.
+    assert 'x = get_input_string("s", std::string("a"));' in _emit('input("a", "s")')
 
 
 def test_untitled_var_input_ta_reset_reads_the_member_key():
