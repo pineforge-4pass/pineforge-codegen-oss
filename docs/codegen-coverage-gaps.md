@@ -9,8 +9,9 @@
 > whose value can reach a trade now reads the feed a requests manifest pins for
 > it or stops the run where its value is read (one that reaches only plots,
 > alerts, tables or logs lowers to `na` with a warning), and a `?:` symbol that
-> can reach a trade registers the symbol the run computes (see `CHANGELOG.md`, "Libraries and requests for outside
-> data"). `AGENTS.md` describes the current support contracts.
+> can reach a trade registers the symbol the run computes (see `CHANGELOG.md`,
+> "Libraries and requests for outside data"). `AGENTS.md` describes the current
+> support contracts.
 
 Tracks fallthrough paths in `pineforge_codegen/codegen/visit_call.py` and
 `pineforge_codegen/codegen/visit_expr.py` that emit a literal `"false"` /

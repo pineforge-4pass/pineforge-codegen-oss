@@ -112,6 +112,7 @@ should use the Python exception and return-value contract or the JSON
 Generated C++ has a separate runtime pairing requirement: from 1.0.0 on,
 codegen `X.Y.Z` supports only engine `vX.Y.Z` with that release's generated
 headers and static library; prerelease tags match exactly. (The 0.x releases
-pair by the `pineforge-release` image's record instead; see the README.) Regenerate C++ and relink strategy
-libraries on every pair change. `PF_ABI_VERSION` equality alone is
-insufficient. See [CONTRIBUTING.md](../CONTRIBUTING.md#engine-pairing).
+pair by the `pineforge-release` image's record instead; see the README.)
+Regenerate C++ and relink strategy libraries on every pair change.
+`PF_ABI_VERSION` equality alone is insufficient. See
+[CONTRIBUTING.md](../CONTRIBUTING.md#engine-pairing).
