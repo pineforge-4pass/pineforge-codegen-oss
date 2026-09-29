@@ -1,0 +1,27 @@
+//@version=6
+// CG-SILENT-2 item 2: an untyped function parameter called with an int and
+// with a float. TradingView compiles such a function once per argument
+// type, so the float keeps its fraction. Each close's comment spells what
+// the script reads on that bar.
+strategy("CGS2 untyped params", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+s(x) => str.tostring(x)
+twice(x) => x * 2
+pad(x) => (x < 10 ? "0" : "") + str.tostring(x)
+frac(x) => x - math.floor(x)
+wrap(y) => twice(y) + 1
+r = close / 1000.0
+a = s(5)
+b = s(2.5)
+c = twice(3)
+d = twice(1.25)
+e = pad(7)
+f = pad(r)
+g = frac(4)
+h = frac(r)
+k = wrap(2)
+w = wrap(0.75)
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = a + "|" + b + "|" + str.tostring(c) + "|" + str.tostring(d) + "|" + e + "|" + f + "|" + str.tostring(g) + "|" + str.tostring(h, "#.####") + "|" + str.tostring(k) + "|" + str.tostring(w))

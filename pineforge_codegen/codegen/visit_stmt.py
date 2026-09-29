@@ -710,6 +710,9 @@ class StmtVisitor:
                 )
                 elem_spec = spec.element or elem_spec
                 cpp_type = self._type_spec_to_cpp(spec)
+                if len(node.value.args) > 2:
+                    self._warn_narrow_int_element(
+                        node.value, spec, node.value.args[2])
                 if len(node.value.args) >= 2:
                     r = self._visit_expr(node.value.args[0])
                     c = self._visit_expr(node.value.args[1])
@@ -1110,7 +1113,14 @@ class StmtVisitor:
                 node.value, target_cpp_type=target_cpp_type
             )
             field_int = self._udt_field_int_cpp_type(node.target)
-            if node.op == ":=":
+            array_field = self._udt_array_field_target(node.target)
+            if node.op == ":=" and array_field is not None:
+                # The field rebinds to the array: an alias of a stable
+                # script var array, else the value moved or copied in.
+                lines.append(
+                    f"{pad}{target_cpp} = "
+                    f"{self._udt_array_field_value(array_field, node.value, val_cpp)};")
+            elif node.op == ":=":
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, field_int)
                 lines.append(f"{pad}{target_cpp} = {val_cpp};")
             else:
@@ -1761,11 +1771,14 @@ class StmtVisitor:
         # unknown-identifier guard in _visit_ident would otherwise flag it).
         saved_loop = self._current_loop_vars
         saved_loop_specs = self._current_loop_var_specs
+        saved_counted = self._current_counted_loop_vars
         self._current_loop_vars = set(self._current_loop_vars)
         self._current_loop_var_specs = dict(self._current_loop_var_specs)
+        self._current_counted_loop_vars = set(self._current_counted_loop_vars)
         if node.var:
             self._current_loop_vars.add(node.var)
             self._current_loop_var_specs[node.var] = TypeSpec.primitive("int")
+            self._current_counted_loop_vars.add(node.var)
         _blk_saved = self._push_block_var_remap(node)
         if node.var:
             # The loop counter is a fresh primitive lexical binding.  Keep it
@@ -1780,6 +1793,7 @@ class StmtVisitor:
             self._pop_block_var_remap(_blk_saved)
         self._current_loop_vars = saved_loop
         self._current_loop_var_specs = saved_loop_specs
+        self._current_counted_loop_vars = saved_counted
         lines.append(f"{pad}}}")
 
     def _visit_for_in(self, node, lines: list[str], indent: int,
@@ -1788,8 +1802,12 @@ class StmtVisitor:
         iterable = self._visit_expr(node.iterable)
         saved_loop = self._current_loop_vars
         saved_loop_specs = self._current_loop_var_specs
+        saved_counted = self._current_counted_loop_vars
         self._current_loop_vars = set(self._current_loop_vars)
         self._current_loop_var_specs = dict(self._current_loop_var_specs)
+        # Its binders shadow a counted loop's of the same spelling.
+        self._current_counted_loop_vars = (
+            self._current_counted_loop_vars - {node.var, *(node.vars or ())})
         iterable_spec = self._type_spec_from_expr(node.iterable)
         elem_spec = (
             iterable_spec.element
@@ -1800,16 +1818,23 @@ class StmtVisitor:
             self._current_loop_vars.add(node.var)
             if elem_spec is not None:
                 self._current_loop_var_specs[node.var] = elem_spec
+            else:
+                # An outer binder's spec of the same spelling is not this one's.
+                self._current_loop_var_specs.pop(node.var, None)
         if node.vars:
             tuple_specs: list[TypeSpec | None] = []
             if iterable_spec is not None and iterable_spec.kind == "map":
                 tuple_specs = [iterable_spec.key, iterable_spec.value]
+            elif elem_spec is not None:
+                tuple_specs = [TypeSpec.primitive("int"), elem_spec]
             for idx, v in enumerate(node.vars):
                 if v != "_":
                     self._current_loop_vars.add(v)
                     if (idx < len(tuple_specs)
                             and tuple_specs[idx] is not None):
                         self._current_loop_var_specs[v] = tuple_specs[idx]
+                    else:
+                        self._current_loop_var_specs.pop(v, None)
         map_pair_loop = (
             iterable_spec is not None
             and iterable_spec.kind == "map"
@@ -1875,6 +1900,42 @@ class StmtVisitor:
                 lines.append(
                     f"{pad}    auto {value_cpp} = {map_token}.get({key_cpp});"
                 )
+        elif node.vars and elem_spec is not None and len(node.vars) == 2:
+            # ``for [i, v] in arr``: the index and the element. A vector has
+            # no pairs to decompose (``auto [i, v] : arr`` did not compile);
+            # bind the array once, then index it, reading its size on every
+            # iteration as the single-name loop's element order does.
+            index_name, value_name = node.vars
+            authored_names = (
+                set(self._all_bound_names)
+                | set(self._func_names)
+                | set(self._udt_defs)
+                | set(self._current_func_param_types)
+            )
+            occupied_names = authored_names | {
+                self._safe_name(name) for name in authored_names
+            }
+            while True:
+                fid = self._for_counter
+                self._for_counter += 1
+                array_token = f"__pf_array_iter_{fid}"
+                index_token = f"__pf_array_index_{fid}"
+                if not ({array_token, index_token} & occupied_names):
+                    break
+            lines.append(f"{pad}auto&& {array_token} = {iterable};")
+            lines.append(
+                f"{pad}for (int {index_token} = 0; "
+                f"{index_token} < (int){array_token}.size(); ++{index_token}) {{")
+            if index_name != "_":
+                lines.append(f"{pad}    int {self._safe_name(index_name)} = {index_token};")
+            if value_name != "_":
+                # The element's value, not a reference: a ``std::vector<bool>``
+                # element read through ``auto`` is a proxy that a later
+                # ``arr.set(i, ...)`` in the body would change.
+                lines.append(
+                    f"{pad}    typename std::decay_t<decltype({array_token})>"
+                    f"::value_type {self._safe_name(value_name)} = "
+                    f"{array_token}[(size_t){index_token}];")
         elif node.vars:
             bindings = ", ".join(
                 self._safe_name(name) for name in node.vars
@@ -1927,6 +1988,7 @@ class StmtVisitor:
         lines.append(f"{pad}}}")
         self._current_loop_vars = saved_loop
         self._current_loop_var_specs = saved_loop_specs
+        self._current_counted_loop_vars = saved_counted
 
     def _visit_while(self, node: WhileStmt, lines: list[str], indent: int,
                      value_target: tuple[str, str | None] | None = None) -> None:

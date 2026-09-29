@@ -40,7 +40,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..ast_nodes import (
-    ASTNode, BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier, IfStmt,
+    ASTNode, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, Identifier, IfStmt,
     MemberAccess, NaLiteral, NumberLiteral, StringLiteral, Subscript, Ternary,
     SwitchStmt, TupleLiteral, UnaryOp,
 )
@@ -186,6 +186,10 @@ class TypeHelper:
                 if left.name == "int" and right.name == "int":
                     return TypeSpec.primitive("int")
             return None
+        if self._is_color_constructor(value):
+            # A packed-ARGB color, as codegen's ``_is_color_value`` reads it:
+            # the declaration and the constructor agree on ``int64_t``.
+            return TypeSpec.primitive("color")
         spec = self._type_spec_from_expr(value)
         if spec is not None:
             return spec
@@ -197,6 +201,26 @@ class TypeHelper:
             }:
                 return self._pine_type_to_spec(sym.pine_type)
         return None
+
+    @classmethod
+    def _is_color_constructor(cls, value: ASTNode | None) -> bool:
+        """A color literal, ``color.<name>``, a ``color.new`` / ``rgb`` /
+        ``from_gradient`` call, or a conditional selecting one."""
+        if isinstance(value, ColorLiteral):
+            return True
+        if isinstance(value, MemberAccess):
+            return (isinstance(value.object, Identifier)
+                    and value.object.name == "color")
+        if isinstance(value, FuncCall):
+            callee = value.callee
+            return (isinstance(callee, MemberAccess)
+                    and isinstance(callee.object, Identifier)
+                    and callee.object.name == "color"
+                    and callee.member in ("new", "rgb", "from_gradient"))
+        if isinstance(value, Ternary):
+            return (cls._is_color_constructor(value.true_val)
+                    or cls._is_color_constructor(value.false_val))
+        return False
 
     @staticmethod
     def _selection_terminal_expr(

@@ -99,6 +99,7 @@ from .tables import (
     RUNTIME_REGISTER_SECURITY_EVAL_FN,
     RUNTIME_REGISTER_SECURITY_LOWER_TF_EVAL_FN,
 )
+from ..limits import iter_ast_nodes
 from .drawing import DRAWING_LIFETIME_CPP
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 
@@ -114,13 +115,16 @@ class TopLevelEmitter:
         roots = [self.ctx.ast] + [
             pragma.expr_node for pragma in (self.ctx.pf_trace_pragmas or [])
         ]
+        # Every syntax child (``iter_ast_nodes``): ``_walk_ast`` does not enter
+        # a tuple literal, so ``str.tostring`` in a request.security tuple
+        # payload left ``pine_str_tostring_tv`` undeclared.
         self._uses_tv_number_format = any(
             (namespace == "str" and func_name in {"format", "tostring"})
             or (namespace is None and func_name == "tostring")
             or (namespace == "log" and func_name in {"info", "warning", "error"}
                 and len(node.args) > 1)
             for root in roots
-            for node in self._walk_ast(root)
+            for node, _depth in iter_ast_nodes(root)
             if isinstance(node, FuncCall)
             for func_name, namespace in [self._resolve_callee(node.callee)]
         )
@@ -147,6 +151,8 @@ class TopLevelEmitter:
             lines.append("#include <deque>")
             lines.append("#include <functional>")
             lines.append("#include <limits>")
+            if self._udt_has_array_fields():
+                lines.append("#include <memory>")
         lines.append("#include <tuple>")
         lines.append("#include <optional>")
         lines.append("#include <type_traits>")
@@ -794,6 +800,32 @@ class TopLevelEmitter:
             "};",
             "",
         ])
+
+        if self._udt_has_array_fields():
+            # A UDT array field: its binding, and the contents of an array it
+            # owns (an aliased script array is checkpointed as itself).
+            lines.extend([
+                "template <typename _PFElement>",
+                f"struct {checkpoint_traits}<_PFArrayField<_PFElement>> {{",
+                f"    using vector_traits = {checkpoint_traits}<std::vector<_PFElement>>;",
+                "    struct snapshot_type {",
+                "        std::shared_ptr<std::vector<_PFElement>> owned;",
+                "        std::vector<_PFElement>* data;",
+                "        typename vector_traits::snapshot_type contents;",
+                "    };",
+                "    static snapshot_type take(const _PFArrayField<_PFElement>& value) {",
+                "        snapshot_type snapshot{value.owned(), value.data(), {}};",
+                "        if (value.owned()) snapshot.contents = vector_traits::take(*value.owned());",
+                "        return snapshot;",
+                "    }",
+                "    static void restore(_PFArrayField<_PFElement>& value,",
+                "                        const snapshot_type& snapshot) {",
+                "        value.rebind(snapshot.owned, snapshot.data);",
+                "        if (snapshot.owned) vector_traits::restore(*snapshot.owned, snapshot.contents);",
+                "    }",
+                "};",
+                "",
+            ])
 
         # Snapshot backing records field-by-field.  A nested UDT field is only
         # a numeric handle, so the primary trait copies its ID without recursing
@@ -2198,7 +2230,13 @@ class TopLevelEmitter:
         # data/validation/udt-method-probe-20-udt-return-from-func.
         return_udt_name = getattr(fi, "udt_return_type", None)
         return_udt = bool(return_udt_name and return_udt_name in self._udt_defs)
-        if fi.returns_tuple:
+        request_struct = self._security_helper_request_struct(node)
+        if request_struct is not None:
+            # A helper whose value is a request of a TA tuple
+            # (``request.security(..., ta.macd(...))``) returns the request's
+            # stored result struct, which ``[m, s, h] = htf()`` decomposes.
+            ret_type = request_struct
+        elif fi.returns_tuple:
             # Infer actual tuple element types from function body's last expression
             tuple_types_list = self._infer_tuple_types(node, fi.tuple_element_count)
             ret_type = f"std::tuple<{', '.join(tuple_types_list)}>"
@@ -2478,7 +2516,9 @@ class TopLevelEmitter:
         # Always emit a default return if no explicit return was emitted,
         # to avoid non-void function without return value.
         if not emitted_return:
-            if fi.returns_tuple:
+            if request_struct is not None:
+                lines.append(f"        return {request_struct}{{}};")
+            elif fi.returns_tuple:
                 default_vals = ", ".join(["0.0"] * fi.tuple_element_count)
                 lines.append(f"        return std::make_tuple({default_vals});")
             else:

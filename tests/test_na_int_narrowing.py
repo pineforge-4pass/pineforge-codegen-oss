@@ -180,6 +180,71 @@ h = math.round(ta.sma(close, 20))
 ts = timestamp(2024, 1, 1, h, 0, 0)
 plot(ts > 0 ? 1 : 0)
 """,
+    # A 64-bit product over an int that can be na is a double
+    # (``_wide_int_arith_cpp``); every integer store of it narrows
+    # na-preserving: an epoch array's elements (a braced array.from does not
+    # narrow implicitly at all), a map or matrix int value, and a function's,
+    # method's or history parameter's int.
+    "wide_product_epoch_array": """//@version=6
+strategy("s", overlay=true)
+var int n = na
+if bar_index >= 3
+    n := bar_index
+var ts = array.new_int()
+ts.push(time)
+ts.push(n * 1000000000)
+ts.set(0, n * 1000000000)
+ts.insert(0, n * 1000000000)
+ts.unshift(n * 1000000000)
+ts.fill(n * 1000000000)
+a2 = array.from(time, time + n * 900000)
+a3 = array.new_int(2, time + n * 900000)
+plot(ts.size() + a2.size() + a3.size())
+""",
+    "wide_product_map_matrix": """//@version=6
+strategy("s", overlay=true)
+var int n = na
+if bar_index >= 3
+    n := bar_index
+m = map.new<string, int>()
+m.put("a", n * 1000000000)
+mx = matrix.new<int>(1, 1, n * 1000000000)
+mx.set(0, 0, n * 1000000000)
+mx.fill(n * 1000000000)
+plot(m.size() + mx.rows())
+""",
+    "wide_product_parameters": """//@version=6
+strategy("s", overlay=true)
+type T
+    int v
+method m(T this, int p) => this.v + p
+f(int p) => p + 1
+g(int src) => src - nz(src[1])
+var int n = na
+if bar_index >= 3
+    n := bar_index
+t = T.new(1)
+plot(t.m(n * 1000000000) + f(n * 1000000000) + g(n * 1000000000))
+""",
+    "wide_product_payload_copy": """//@version=6
+strategy("s", overlay=true)
+var int n = 0
+if bar_index >= 3
+    n := bar_index
+var int w = 0
+w := n * 1000000000
+w += n * 1000000000
+x = request.security(syminfo.tickerid, "60", w)
+plot(x)
+""",
+    "wide_product_format_time": """//@version=6
+strategy("s", overlay=true)
+var int n = na
+if bar_index >= 3
+    n := bar_index
+s = str.format_time(time + n * 86400000, "yyyy-MM-dd", "UTC")
+plot(str.length(s))
+""",
 }
 
 

@@ -1,0 +1,31 @@
+//@version=6
+// CG-SILENT-2 item 3, second follow-up: products past int32 of an int
+// for-in element and an int map value, of a function's declared int local
+// (its result type is decided before its locals), of a helper's int result
+// read inside a function with a float parameter of the same name, and of a
+// requested int script variable. Each close's comment spells what the
+// script reads on that bar.
+strategy("CGS2 int64 followup 2", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+toMs(int days) =>
+    int d = days
+    d * 86400000
+f(int n) => n * 1000
+g(float n) => int(f(3000000)) + n
+var a = array.from(3, 5, 7)
+float s1 = 0.0
+for v in a
+    s1 += v * 1000000000
+var m = map.new<string, int>()
+m.put("a", 4)
+float s3 = 0.0
+for [k, w] in m
+    s3 += w * 1000000000
+e = toMs(30)
+x = g(1.5)
+int hh = hour(time, "UTC")
+y = request.security(syminfo.tickerid, "60", hh * 1000000000)
+mm = minute(time, "UTC")
+if mm == 0 or mm == 30
+    strategy.entry("L", strategy.long)
+if mm == 15 or mm == 45
+    strategy.close("L", comment = str.tostring(s1 / 1000000000) + "|" + str.tostring(s3 / 1000000000) + "|" + str.tostring(e / 86400000) + "|" + str.tostring(x - 3000000000) + "|" + (na(y) ? "na" : str.tostring(y / 1000000000)))

@@ -86,6 +86,41 @@ from .tables import (
     _merge_kwargs,
 )
 
+# A UDT field of array type. Pine arrays are references: ``T.new(a)`` holds
+# the array ``a`` itself, not a copy. The field aliases a script ``var``
+# array its record is built from (its storage lives as long as the strategy
+# and keeps its identity across bars), and owns, by move or copy, any other.
+# Copying the field shares what it holds, as Pine's shallow ``copy()`` does.
+UDT_ARRAY_FIELD_CPP = r"""
+template <typename T>
+class _PFArrayField {
+public:
+    _PFArrayField()
+        : owned_(std::make_shared<std::vector<T>>()), data_(owned_.get()) {}
+    _PFArrayField(const std::vector<T>& value)
+        : owned_(std::make_shared<std::vector<T>>(value)), data_(owned_.get()) {}
+    _PFArrayField(std::vector<T>&& value)
+        : owned_(std::make_shared<std::vector<T>>(std::move(value))),
+          data_(owned_.get()) {}
+    static _PFArrayField alias(std::vector<T>& value) {
+        return _PFArrayField(&value);
+    }
+    std::vector<T>& operator*() const { return *data_; }
+    const std::shared_ptr<std::vector<T>>& owned() const { return owned_; }
+    std::vector<T>* data() const { return data_; }
+    void rebind(std::shared_ptr<std::vector<T>> owned, std::vector<T>* data) {
+        owned_ = std::move(owned);
+        data_ = data;
+    }
+
+private:
+    explicit _PFArrayField(std::vector<T>* data) : data_(data) {}
+
+    std::shared_ptr<std::vector<T>> owned_;
+    std::vector<T>* data_ = nullptr;
+};
+"""
+
 TA_TUPLE_RESULT_TYPES = {
     "macd": "ta::MACDResult",
     "supertrend": "ta::SupertrendResult",
@@ -899,6 +934,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # for-in loop iterator names (must resolve member access, not enum fallback)
         self._current_loop_vars: set[str] = set()
         self._current_loop_var_specs: dict[str, "TypeSpec"] = {}
+        # The counted loops' binders among them (``for (int i = ...)``).
+        self._current_counted_loop_vars: set[str] = set()
         # Track array variables for codegen
         self._array_vars: set[str] = set()
         # Track map variables for codegen
@@ -4460,6 +4497,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # the same map.  Authored field defaults are evaluated by ``Type.new``
         # at the call site; record declarations use only inert typed defaults so
         # bar/TA expressions never leak into namespace-scope C++ initializers.
+        if self._udt_has_array_fields():
+            lines.append(UDT_ARRAY_FIELD_CPP)
         for type_name, fields in self._udt_defs.items():
             record_type = self._udt_record_cpp_type(type_name)
             lines.append(f"struct {record_type} {{")
@@ -4469,6 +4508,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if f.name in omitted:
                     continue
                 spec = field_specs.get(f.name) or self._type_spec_from_hint_name(f.type_name)
+                array_field = self._udt_array_field_cpp(spec, type_name)
+                if array_field is not None:
+                    lines.append(f"    {array_field} {self._safe_name(f.name)} = {array_field}();")
+                    continue
                 cpp_type = self._type_spec_to_cpp(spec)
                 if cpp_type == "int":
                     cpp_type = "int64_t"

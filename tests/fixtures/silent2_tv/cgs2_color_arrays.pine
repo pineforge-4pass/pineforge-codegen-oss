@@ -1,0 +1,18 @@
+//@version=6
+// CG-SILENT-2 item 5a: arrays of colors built by array.from, typed or not,
+// from literals, color.new calls, color variables and a conditional color.
+// Each close's comment spells red,green,blue,transparency of the elements.
+strategy("CGS2 color arrays", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+c1 = color.new(#102030, 20)
+color c2 = #405060
+var array<color> A = array.from(#1E90FF, color.new(#102030, 40), #405060)
+B = array.from(color.new(#0A141E, 60), c2)
+D = array.from(c1, c2)
+E = array.from(close > open ? color.new(#0A0B0C, 80) : #0D0E0F, c1)
+array<color> F = array.from(color.rgb(1, 2, 3, 40))
+s(c) => str.tostring(color.r(c)) + "," + str.tostring(color.g(c)) + "," + str.tostring(color.b(c)) + "," + str.tostring(color.t(c))
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = s(A.get(0)) + "|" + s(A.get(1)) + "|" + s(B.get(0)) + "|" + s(D.get(0)) + "|" + s(E.get(0)) + "|" + s(F.get(0)) + "|" + str.tostring(A.size() + B.size() + D.size() + E.size()))

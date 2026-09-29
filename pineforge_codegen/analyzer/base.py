@@ -2855,12 +2855,24 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         changed = True
             return closed
 
+        # A function whose untyped parameter receives two primitive families
+        # at its written calls is TradingView's once per family: one variant
+        # per call site, each typed from its own call.
+        family_polymorphic = self._untyped_param_family_conflicts(
+            func_defs, func_info_by_name, call_edges, _bound_user_call_args)
+        family_polymorphic = self._bounded_family_polymorphism(
+            family_polymorphic,
+            direct_state | set(self._func_global_history_reads),
+            close_over_callers, call_edges, func_info_by_name)
         stateful = close_over_callers(
-            direct_state | set(self._func_global_history_reads)
+            direct_state
+            | set(self._func_global_history_reads)
+            | family_polymorphic
         )
-        # Callables stateful only through a script variable's history: before
-        # that rule they shared one body, so their call-site typing must not
-        # refuse a script that transpiled then (``merge_profile`` below).
+        # Callables stateful only through a script variable's history, or
+        # their parameters' families: before those rules they shared one body,
+        # so their call-site typing must not refuse a script that transpiled
+        # then (``merge_profile`` below).
         self._global_history_only_stateful = (
             stateful - close_over_callers(direct_state)
         )
@@ -3037,6 +3049,200 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             func_info_by_name,
             _bound_user_call_args,
         )
+
+    # The primitive families a written call can pass an untyped parameter.
+    _ARGUMENT_FAMILIES = frozenset({
+        PineType.INT, PineType.FLOAT, PineType.BOOL, PineType.STRING,
+        PineType.COLOR,
+    })
+
+    def _untyped_param_family_conflicts(
+        self, func_defs, func_info_by_name, call_edges, bound_args,
+    ) -> set[str]:
+        """Plain functions TradingView compiles once per argument family.
+
+        An untyped parameter takes the type of each written call's argument:
+        ``s(x) => str.tostring(x)`` spells ``s(5)`` "5" and ``s(2.5)`` "2.5"
+        (lab tv pf-cgs2-untyped-params). One shared body is typed from the
+        first call, so a function whose untyped scalar parameter receives
+        another family -- anything but an int where the body holds a float,
+        which holds it exactly -- narrowed it (a float into an ``int``).
+        Only an argument whose type is known at its call counts: one reading
+        an untyped parameter of the calling function is typed by that
+        function's variant. The set holds each such function and, to a fixed
+        point, every function one of them forwards an untyped parameter to
+        (``wrap(y) => twice(y)``)."""
+
+        def untyped_params(name: str | None) -> dict[int, str]:
+            node = func_defs.get(name) if name is not None else None
+            if node is None:
+                return {}
+            specs = list(self._func_param_type_specs.get(name, ()))
+            return {
+                index: param
+                for index, param in enumerate(node.params)
+                if index >= len(specs) or specs[index] is None
+            }
+
+        def scalar_untyped_params(name: str) -> dict[int, str]:
+            info = func_info_by_name.get(name)
+            if (info is None or getattr(info, "is_udt_method", False)
+                    or not isinstance(func_defs.get(name), FuncDef)):
+                return {}
+            series = self._func_series_vars.get(name, set())
+            return {
+                index: param
+                for index, param in untyped_params(name).items()
+                if param not in series
+            }
+
+        def shared_family(name: str, index: int) -> PineType:
+            info = func_info_by_name[name]
+            specs = list(getattr(info, "param_type_specs", ()) or ())
+            spec = specs[index] if index < len(specs) else None
+            if spec is not None:
+                return self._primitive_pine_type_from_spec(spec)
+            types = list(getattr(info, "param_types", ()) or ())
+            return types[index] if index < len(types) else PineType.UNKNOWN
+
+        def reads(value, names: set[str]) -> bool:
+            return bool(names) and any(
+                isinstance(sub, Identifier) and sub.name in names
+                for sub, _depth in iter_ast_nodes(value)
+            )
+
+        conflicted: set[str] = set()
+        # The first conflicting call of each directly conflicted function:
+        # (parameter index, shared family, call family, call).
+        self._family_conflict_calls = {}
+        for owner, callee, call in call_edges:
+            params = scalar_untyped_params(callee)
+            if not params or callee in conflicted:
+                continue
+            owner_params = set(untyped_params(owner).values())
+            actuals = bound_args(callee, call)
+            recorded = self._callable_bound_param_types_by_node.get(id(call), [])
+            for index in params:
+                if (index >= len(actuals) or index >= len(recorded)
+                        or actuals[index] is None
+                        or reads(actuals[index], owner_params)):
+                    continue
+                family = recorded[index]
+                shared = shared_family(callee, index)
+                if (family in self._ARGUMENT_FAMILIES
+                        and shared in self._ARGUMENT_FAMILIES
+                        and family != shared
+                        and not (family == PineType.INT
+                                 and shared == PineType.FLOAT)):
+                    conflicted.add(callee)
+                    self._family_conflict_calls[callee] = (
+                        index, shared, family, call)
+                    break
+
+        changed = True
+        while changed:
+            changed = False
+            for owner, callee, call in call_edges:
+                if owner not in conflicted or callee in conflicted:
+                    continue
+                params = scalar_untyped_params(callee)
+                owner_params = set(untyped_params(owner).values())
+                actuals = bound_args(callee, call)
+                if any(
+                    index < len(actuals) and actuals[index] is not None
+                    and reads(actuals[index], owner_params)
+                    for index in params
+                ):
+                    conflicted.add(callee)
+                    changed = True
+        return conflicted
+
+    # Copies of one function family polymorphism may add: one per call path
+    # through the functions it makes stateful (``_build_func_instances``).
+    _MAX_FAMILY_VARIANTS = 64
+
+    def _bounded_family_polymorphism(
+        self, family, seed, close_over_callers, call_edges, func_info_by_name,
+    ) -> set[str]:
+        """``family`` without the functions whose variants would outgrow the
+        script: more copies in all than ``_MAX_FAMILY_VARIANTS`` and four per
+        written call, beyond those the functions' own state already makes.
+
+        Each function the family set makes stateful is emitted once per call
+        path from the script through stateful functions, so a diamond of
+        forwarding helpers (``fk(x) => f(k-1)(x) + f(k-1)(x)``) is 2**depth
+        copies of its leaf (42 MB of C++ at depth 16) and a forwarding chain
+        is its depth times its calls. Seventy flat calls are seventy copies,
+        one per written call, and stay, as do those of a helper forwarding
+        the parameter once. Past the bound, the function gaining the most
+        copies and the family functions it is reached from keep the one body
+        every earlier build emitted, typed from the first call, and a
+        conflicting parameter warns; the rest keep their variants."""
+        if not family:
+            return family
+        callers: dict[str, list[str | None]] = {}
+        for owner, callee, _call in call_edges:
+            callers.setdefault(callee, []).append(owner)
+        cap = 1 << 20
+
+        def path_counts(stateful: set[str]) -> dict[str, int]:
+            counts = {name: 0 for name in stateful}
+            for _round in range(len(stateful) + 1):
+                changed = False
+                for name in stateful:
+                    total = min(cap, sum(
+                        counts.get(owner, 0) if owner in stateful else 1
+                        for owner in callers.get(name, ())))
+                    if total != counts[name]:
+                        counts[name] = total
+                        changed = True
+                if not changed:
+                    break
+            return counts
+
+        before = path_counts(close_over_callers(seed))
+        bound = max(self._MAX_FAMILY_VARIANTS, 4 * len(call_edges))
+        kept = set(family)
+        dropped: set[str] = set()
+        while kept:
+            after = path_counts(close_over_callers(seed | kept))
+            added = {name: count - before.get(name, 0)
+                     for name, count in after.items()
+                     if count > before.get(name, 0)}
+            if sum(added.values()) <= bound:
+                break
+            worst = max(sorted(added), key=lambda name: added[name])
+            reached_from: set[str] = set()
+            pending = [worst]
+            while pending:
+                name = pending.pop()
+                if name in reached_from:
+                    continue
+                reached_from.add(name)
+                pending.extend(owner for owner in callers.get(name, ())
+                               if owner is not None)
+            implicated = kept & reached_from
+            if not implicated:
+                break
+            kept -= implicated
+            dropped |= implicated
+        for callee, (index, shared, incoming, call) in sorted(
+                getattr(self, "_family_conflict_calls", {}).items()):
+            info = func_info_by_name.get(callee)
+            if callee not in dropped or info is None or info.node is None:
+                continue
+            self._warn(
+                "Untyped parameter '" + info.node.params[index]
+                + "' of callable '" + callee + "' receives "
+                + shared.value + " and " + incoming.value
+                + " at its written calls; a copy per call path would exceed "
+                + f"{self._MAX_FAMILY_VARIANTS} copies and four per written "
+                + "call, so PineForge types it " + shared.value
+                + ", as its first call, and converts the other argument. "
+                + "Declare the parameter type to choose it.",
+                call.loc,
+            )
+        return kept
 
     @staticmethod
     def _primitive_pine_type_from_spec(spec) -> PineType:

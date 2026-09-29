@@ -1,0 +1,31 @@
+//@version=6
+// CG-SILENT-2 item 5d: for [i, v] in <array> reads each element's index
+// and value, over a script array, a function's array and a string array,
+// and as a function's last statement. Each close's comment spells the sums.
+strategy("CGS2 array index loop", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+var arr = array.new_float(0)
+arr.push(close % 7)
+if arr.size() > 5
+    arr.shift()
+s = 0.0
+for [i, v] in arr
+    s += (i + 1) * v
+weights(a) =>
+    float acc = 0.0
+    for [k, x] in a
+        acc += k * x
+    acc
+names = array.from("a", "bb", "ccc")
+n = 0
+for [j, name] in names
+    n += j * str.length(name)
+tailLoop(a) =>
+    for [k, x] in a
+        k + x
+tailArr = array.from(10.0, 20.0, 30.0)
+t = tailLoop(tailArr)
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(s, "#.####") + "|" + str.tostring(weights(arr), "#.####") + "|" + str.tostring(n) + "|" + str.tostring(t))

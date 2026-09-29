@@ -78,11 +78,13 @@ from ..analyzer import (
     FuncInfo, TACallSite, TA_MULTI_CTOR, TA_NO_CTOR, TA_PERIOD_ARG,
 )
 from .. import signatures as sigs
-from ..errors import CompileError
+from ..errors import CompileError, Phase
 from ..external_requests import (
     FOOTPRINT_COLUMN_ANNOTATION, RECORDED_KEY_ANNOTATION, REQUEST_REF_ANNOTATION,
 )
 from ..external_requests import _nodes as walk_request_nodes
+from ..limits import iter_ast_nodes
+from .helpers import na_preserving_int_cast, unary_sign_cpp
 from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION
 from ..symbols import PineType, method_receiver_type_name
 from .tables import (
@@ -941,7 +943,37 @@ class SecurityEmitter:
     def _security_cpp_type_for_mutable(self, name: str, info) -> str:
         if getattr(info, "is_series", False):
             return self._series_type_for(name)
-        return PINE_TYPE_TO_CPP.get(getattr(info, "pine_type", PineType.FLOAT), "double")
+        cpp_type = PINE_TYPE_TO_CPP.get(getattr(info, "pine_type", PineType.FLOAT), "double")
+        if cpp_type == "int" and self._security_copy_is_arithmetic_wide(name):
+            return "int64_t"
+        return cpp_type
+
+    def _security_copy_is_arithmetic_wide(self, name: str) -> bool:
+        """Whether the chart slot of a script variable a payload re-evaluates
+        is ``int64_t`` only by 64-bit integer arithmetic
+        (``_int_arith_leaves_int32``: ``w := q * 7200000``), whose value the
+        payload's copy must hold too: typed from the analyzer's ``int``, it
+        read the na-aware double form past int32 as undefined behaviour
+        (quirk 9). A name an epoch makes wide keeps the ``int`` copy every
+        earlier build emitted."""
+        if name not in self._wide_int_provenance()[0]:
+            return False
+        with self._int_width_scan(epoch_only=True):
+            return name not in self._wide_int_provenance()[0]
+
+    def _security_copy_store_cpp(self, name: str, info, value_node, value_cpp: str) -> str:
+        """``value_cpp`` stored into a payload's copy of ``name``: the
+        na-aware double form of a 64-bit product narrows na-preserving into
+        an integer copy (quirk 9), as every integer store of it does -- the
+        value's own product, or one the payload expands a global into
+        (``w := a`` over ``a = q * 7200000``), which only the emitted C++
+        shows (``_wide_int_arith_cpp``'s ``_pf_wide_l``)."""
+        cpp_type = self._security_cpp_type_for_mutable(name, info)
+        if (cpp_type in ("int", "int64_t")
+                and (self._holds_na_aware_wide_double(value_node)
+                     or "_pf_wide_l" in value_cpp)):
+            return na_preserving_int_cast(value_cpp, cpp_type)
+        return value_cpp
 
     def _security_relevant_top_level_stmts(self, mutable_globals: list[str]) -> list[ASTNode]:
         if not mutable_globals:
@@ -1020,6 +1052,26 @@ class SecurityEmitter:
             name, helper_binding_stack
         )
         return resolved[0] if resolved is not None else None
+
+    # Depth of the helper-local value re-walks under way in
+    # ``_collect_security_ta_binding_stacks``.
+    _security_local_rewalks = 0
+
+    @staticmethod
+    def _security_binding_is_helper_local(
+        name: str,
+        helper_binding_stack: tuple[dict[str, ASTNode], ...] | None,
+    ) -> bool:
+        """Whether ``name`` resolves (as ``_security_lookup_helper_binding_context``
+        does) to a helper's local, not to a helper's argument."""
+        for frame in reversed(helper_binding_stack or ()):
+            if name not in frame:
+                continue
+            bound = frame[name]
+            if isinstance(bound, Identifier) and bound.name == name:
+                continue
+            return not isinstance(frame, _SecurityHelperArgumentFrame)
+        return False
 
     def _security_lookup_helper_binding_context(
         self,
@@ -1864,6 +1916,33 @@ class SecurityEmitter:
                         candidates[0])
         return candidates[0] if candidates else None
 
+    # The stored result struct of a request whose payload is a TA tuple.
+    def _security_helper_request_struct(self, func_node) -> str | None:
+        """The C++ result struct a helper returns when its value is a
+        ``request.security`` of a TA tuple (``htf() => request.security(t,
+        "D", ta.macd(close, 12, 26, 9))``): the request stores that struct
+        (``_req_sec_N``), which the helper returned as a ``double`` or a
+        ``std::tuple`` that cannot hold it, so ``[m, s, h] = htf()`` did not
+        compile. None for any other helper."""
+        body = getattr(func_node, "body", None) or []
+        if not body:
+            return None
+        terminal = body[-1].expr if isinstance(body[-1], ExprStmt) else body[-1]
+        if not (isinstance(terminal, FuncCall)
+                and self._resolve_callee(terminal.callee) == ("security", "request")):
+            return None
+        item = self._security_call_for_request(terminal)
+        if item is None or not item.get("returns_tuple"):
+            return None
+        payload = item.get("expr_node")
+        if not isinstance(payload, FuncCall):
+            return None
+        site = self._get_ta_site(payload)
+        if site is None or not getattr(site, "returns_tuple", False):
+            return None
+        # The chart's result type of the same TA call (``TA_TUPLE_RESULT_TYPES``).
+        return self._ta_return_type(site)
+
     def _request_data_missing(self, ref) -> str:
         """C++ that is true when the pinned data of the request carrying
         ``ref`` (``external_requests.RequestRef``) is missing: another
@@ -2507,6 +2586,27 @@ class SecurityEmitter:
         )
         return f'{store}["{series_name}"]'
 
+    def _security_helper_var_state_type(self, stmt: VarDecl) -> str:
+        """The type family of a helper ``var`` whose declaration reads
+        ``int64_t``. Its state is a double series (``_security_helper_series_``),
+        which holds a 64-bit integer arithmetic value exactly, so a width only
+        such arithmetic gives -- the ``var``'s own or a same-spelled name's in
+        another callable, since ``_wide_int_provenance`` is keyed by spelling
+        (``g() => n = days * 86400000`` beside a helper's ``var int n``) --
+        keeps the ``int`` family it compiled with (the width of constants does
+        not reach helper state either: ``_literal_wide_global``). Only an
+        epoch reaching it (the lane's epoch-only reading) reads ``int64_t``,
+        which stays refused as it always was. The flag is set directly, not
+        through ``_int_width_scan``, whose depth counter would detach the
+        emitting callable's names (``_narrow_int_name_info``) that an
+        unhinted ``var``'s ``_infer_type`` can still read."""
+        saved = getattr(self, "_wide_int_epoch_only", False)
+        self._wide_int_epoch_only = True
+        try:
+            return self._type_for_decl(stmt)
+        finally:
+            self._wide_int_epoch_only = saved
+
     def _security_store_string_series(self, node, series_name: str) -> None:
         """Keep a string helper series (and its ``var`` seed) in the string
         map, which ``_security_needs_string_series`` declared."""
@@ -2722,6 +2822,8 @@ class SecurityEmitter:
                     cpp_type = None
                     if is_persistent_var or self._security_string_series_declared:
                         cpp_type = self._type_for_decl(stmt)
+                    if is_persistent_var and cpp_type == "int64_t":
+                        cpp_type = self._security_helper_var_state_type(stmt)
                     if cpp_type == "std::string":
                         self._security_store_string_series(stmt, series_name)
                         if stmt.value is None or isinstance(stmt.value, NaLiteral):
@@ -4295,14 +4397,23 @@ class SecurityEmitter:
                 if bind_key in resolving:
                     return collected
                 resolving.add(bind_key)
-                self._collect_security_ta_binding_stacks(
-                    bound,
-                    resolving,
-                    bound_stack,
-                    collected,
-                    inline_ta_indices,
-                    inline_helper,
-                )
+                # A helper local's value was collected at its declaration, and
+                # the evaluator reads the local's C++ variable, never its value
+                # again: its re-walk finds only variants nothing emits.
+                local = self._security_binding_is_helper_local(
+                    expr_node.name, helper_binding_stack)
+                self._security_local_rewalks += local
+                try:
+                    self._collect_security_ta_binding_stacks(
+                        bound,
+                        resolving,
+                        bound_stack,
+                        collected,
+                        inline_ta_indices,
+                        inline_helper,
+                    )
+                finally:
+                    self._security_local_rewalks -= local
                 resolving.discard(bind_key)
                 return collected
 
@@ -4348,10 +4459,27 @@ class SecurityEmitter:
             if func_name is not None:
                 if self._security_shared_call_key(expr_node, helper_binding_stack) is not None:
                     return collected
-                call_key = f"func:{func_name}"
+                # Keyed by the written call: ``u(u(close))`` reaches the inner
+                # call through the outer body's parameter, in the caller's
+                # scope, and its TA site needs a variant of its own (it was
+                # skipped as recursion and read an undeclared base member).
+                call_key = f"func:{func_name}:{id(expr_node)}"
+                name_key = f"func:{func_name}"
                 if call_key in resolving:
                     return collected
+                if self._security_local_rewalks and name_key in resolving:
+                    # Re-walking a helper local's value (``a1 = u(a0)`` over
+                    # ``a0 = u(close)``): a helper already being walked is not
+                    # entered again, as before the call-keyed guard. Entering
+                    # it re-walked every earlier local once per read, 2**n
+                    # walks over a chain of n locals, each adding a variant.
+                    return collected
+                if self._budget is not None:
+                    self._budget.check(expr_node.loc, Phase.CODEGEN)
                 resolving.add(call_key)
+                added_name_key = name_key not in resolving
+                if added_name_key:
+                    resolving.add(name_key)
                 plan = self._security_helper_call_plan(
                     expr_node,
                     helper_binding_stack,
@@ -4515,6 +4643,8 @@ class SecurityEmitter:
                         True,
                     )
                 resolving.remove(call_key)
+                if added_name_key:
+                    resolving.discard(name_key)
                 return collected
 
         site = self._get_ta_site(expr_node)
@@ -4583,6 +4713,7 @@ class SecurityEmitter:
             security_mutable_names=relevant_names,
             emitted_lines=emitted_lines,
         )
+        expr_cpp = self._security_copy_store_cpp(node.name, info, node.value, expr_cpp)
 
         if getattr(info, "is_var", False):
             if getattr(info, "is_series", False):
@@ -4636,16 +4767,33 @@ class SecurityEmitter:
             emitted_lines=emitted_lines,
         )
 
+        def store(cpp: str) -> str:
+            return self._security_copy_store_cpp(target_name, info, node.value, cpp)
+
+        # A compound store of the double form computes as the chart does
+        # (``/`` in double, ``%`` through std::fmod: C++ ``%`` takes no
+        # double) and narrows its result.
+        wide = node.op != ":=" and store(value_cpp) != value_cpp
+
+        def combined(target_read: str) -> str:
+            return (self._compound_assign_rhs(target_read, node.op, value_cpp)
+                    or f"({target_read} {node.op[0]} {value_cpp})")
+
         if getattr(info, "is_series", False):
             if node.op == ":=":
-                lines.append(f"{pad}{state_name}.update({value_cpp});")
+                lines.append(f"{pad}{state_name}.update({store(value_cpp)});")
+            elif wide:
+                lines.append(f"{pad}{state_name}.update("
+                             f"{store(combined(f'{state_name}[0]'))});")
             else:
                 op_char = node.op[0]
                 lines.append(f"{pad}{state_name}.update({state_name}[0] {op_char} {value_cpp});")
             return
 
         if node.op == ":=":
-            lines.append(f"{pad}{state_name} = {value_cpp};")
+            lines.append(f"{pad}{state_name} = {store(value_cpp)};")
+        elif wide:
+            lines.append(f"{pad}{state_name} = {store(combined(state_name))};")
         else:
             lines.append(f"{pad}{state_name} {node.op} {value_cpp};")
 
@@ -6176,6 +6324,31 @@ class SecurityEmitter:
             right = self._build_security_expr(
                 sec_id, expr_node.right, ta_range, ta_results, resolving, security_mutable_names, helper_binding_stack, emitted_lines
             )
+            wide_na = False
+            if (self._int_arith_leaves_int32(expr_node)
+                    # Operands spelled as int literals keep their fold
+                    # (``_fold_int32_overflow_cpp`` in ``lower`` below).
+                    and self._fold_int32_overflow_cpp(expr_node.op, left, right) is None
+                    and not any(
+                        self._security_emits_double(side, helper_binding_stack)
+                        for side in (expr_node.left, expr_node.right))
+                    and not any(
+                        isinstance(sub, Identifier) and any(
+                            sub.name in frame
+                            for frame in helper_binding_stack or ())
+                        for sub, _depth in iter_ast_nodes(expr_node))):
+                # 32-bit int operands whose value can leave int32 (``bar_index
+                # * 7200000``): Pine's int is 64-bit, as on the chart; an
+                # operand that can be na makes the value na (the double form
+                # of ``_wide_int_arith_cpp``: the requested value is a double).
+                # A side the builder re-evaluates as a double (``int n =
+                # math.round(x)``) already computes in double and keeps its
+                # NaN, and a name a helper binds here is its argument, which
+                # the chart's rule does not see.
+                if self._int_operand_may_be_na(expr_node):
+                    wide_na = True
+                else:
+                    left = f"static_cast<int64_t>({left})"
 
             def lower(left: str, right: str) -> str:
                 cpp_ops = {"and": "&&", "or": "||"}
@@ -6206,6 +6379,11 @@ class SecurityEmitter:
                 return self._lower_relational(op, expr_node.left, expr_node.right, left, right)
 
             # The left operand first, as on the chart (``_left_operand_first``).
+            if wide_na:
+                return self._left_operand_first(
+                    expr_node, left, right,
+                    lambda left, right: self._wide_int_arith_cpp(
+                        expr_node, left, right, lower))
             return self._left_operand_first(expr_node, left, right, lower)
 
         if isinstance(expr_node, UnaryOp):
@@ -6214,7 +6392,7 @@ class SecurityEmitter:
             )
             if expr_node.op == "not":
                 return f"!({self._coerce_bool_expr(operand, expr_node.operand)})"
-            return f"({expr_node.op}{operand})"
+            return unary_sign_cpp(expr_node.op, operand)
 
         if isinstance(expr_node, Ternary):
             cond = self._build_security_expr(

@@ -1,0 +1,31 @@
+//@version=6
+// CG-SILENT-2 item 3 follow-up: a for-in element is no 32-bit int (a float
+// element or map value times a constant keeps its fraction), an int operand
+// that is na makes a 64-bit product na (not a large negative number), and a
+// requested product of a global re-evaluated as a double keeps its na. Each
+// close's comment spells what the script reads on that bar.
+strategy("CGS2 int64 followup", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+g(int p) =>
+    int span = p * 86400000
+    span
+var a = array.from(0.5, 1.25, 2.75)
+float s1 = 0.0
+for v in a
+    s1 += v * 1000
+var m = map.new<string, float>()
+m.put("a", 0.25)
+float ms = 0.0
+for [k, w] in m
+    ms += w * 252
+h = hour(time, "UTC")
+var int n = na
+n := h % 3 == 0 ? na : h
+x = n * 1000000000
+e = g(n)
+int q = hour(time, "UTC") % 3 == 0 ? na : hour(time, "UTC")
+yq = request.security(syminfo.tickerid, "60", q * 1000000)
+mm = minute(time, "UTC")
+if mm == 0 or mm == 30
+    strategy.entry("L", strategy.long)
+if mm == 15 or mm == 45
+    strategy.close("L", comment = str.tostring(s1) + "|" + str.tostring(ms) + "|" + (na(x) ? "na" : str.tostring(x / 1000000000)) + "|" + (x < 0 ? "neg" : "nonneg") + "|" + (na(e) ? "na" : str.tostring(e / 86400000)) + "|" + (na(yq) ? "na" : str.tostring(yq / 1000000)))

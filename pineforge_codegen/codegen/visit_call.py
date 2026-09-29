@@ -321,6 +321,8 @@ class CallVisitor:
     def _typed_user_method_info(self, receiver, member: str):
         """Resolve an exact typed user method before any builtin method."""
         receiver_spec = self._type_spec_from_expr(receiver)
+        if receiver_spec is None and isinstance(receiver, Identifier):
+            receiver_spec = self._scalar_receiver_spec(receiver.name, member)
         receiver_name = method_receiver_type_name(receiver_spec)
         if receiver_name is None:
             return receiver_spec, None
@@ -331,6 +333,33 @@ class CallVisitor:
         ):
             return receiver_spec, None
         return receiver_spec, method_info
+
+    _SCALAR_RECEIVER_TYPES = {
+        "double": ("float",), "int": ("int",), "bool": ("bool",),
+        "std::string": ("string",), "int64_t": ("int", "color"),
+    }
+
+    def _scalar_receiver_spec(self, name: str, member: str):
+        """The primitive spec of a scalar a typed method is called on, where
+        ``_type_spec_from_expr`` has only its tombstone: a global scalar is
+        recorded as bound to no user type, which hid its own primitive type
+        (``s5 = ta.ema(close, 5)``; ``s5.m()`` was emitted raw, as a member
+        call on a double). A local or parameter reads its C++ type, a global
+        its symbol; an ``int64_t`` is whichever of ``int`` and ``color`` has
+        the method."""
+        cpp = (getattr(self, "_current_func_local_types", {}).get(name)
+               or getattr(self, "_current_func_param_types", {}).get(name))
+        if cpp is not None:
+            candidates = self._SCALAR_RECEIVER_TYPES.get(cpp, ())
+        else:
+            if getattr(self, "_global_udt_types", {}).get(name, "absent") is not None:
+                return None
+            sym = self._variable_symbol(name)
+            candidates = (sym.pine_type.value,) if sym is not None else ()
+        found = [kind for kind in candidates
+                 if kind in ("float", "int", "bool", "string", "color")
+                 and f"{kind}.{member}" in self._func_info_map]
+        return TypeSpec.primitive(found[0]) if len(found) == 1 else None
 
     def _check_time_bars_back(self, func_name: str, node: FuncCall) -> FuncCall:
         """Refuse ``time()`` / ``time_close()`` reading another bar.
@@ -528,7 +557,8 @@ class CallVisitor:
             + ">(_pf_series_raw); }())"
         )
 
-    def _array_init_value_expr(self, elem_spec: TypeSpec | None, value_node) -> str:
+    def _array_init_value_expr(self, elem_spec: TypeSpec | None, value_node,
+                               store: bool = True) -> str:
         if isinstance(value_node, NaLiteral):
             if elem_spec is not None and elem_spec.kind == "udt":
                 return self._default_for_spec(elem_spec)
@@ -540,6 +570,23 @@ class CallVisitor:
         if (elem_spec is not None and elem_spec.kind == "primitive"
                 and elem_spec.name == "bool"):
             return self._coerce_bool_expr(rendered, value_node)
+        if (store and elem_spec is not None and elem_spec.kind == "primitive"
+                and elem_spec.name == "int"
+                and (self._holds_wide_int_constant(value_node)
+                     or self._expr_returns_wide_int(value_node, None, set(), None))):
+            # A 64-bit value stored in a 32-bit element (an int array only an
+            # epoch widens, ``_wide_int_array_names``; a matrix<int>): the
+            # crossing keeps na (quirk 9), and a braced initializer does not
+            # narrow implicitly.
+            return na_preserving_int_cast(rendered, "int")
+        if (store and elem_spec is not None and elem_spec.kind == "primitive"
+                and elem_spec.name == "int64"
+                and self._holds_na_aware_wide_double(value_node)
+                and self._emitted_value_is_double(value_node)):
+            # A 64-bit product over an operand that can be na is a double
+            # (``_wide_int_arith_cpp``): an epoch array's element narrows it
+            # na-preserving too.
+            return na_preserving_int_cast(rendered, "int64_t")
         return rendered
 
     def _array_method_args(
@@ -563,8 +610,14 @@ class CallVisitor:
             "binary_search_leftmost": {0},
             "binary_search_rightmost": {0},
         }.get(method, set())
+        stores = method in ("set", "push", "unshift", "insert", "fill")
+        if stores:
+            for idx in value_arg_indexes:
+                if idx < len(arg_nodes):
+                    self._warn_narrow_int_element(arg_nodes[idx], spec,
+                                                  arg_nodes[idx])
         return [
-            self._array_init_value_expr(elem_spec, arg)
+            self._array_init_value_expr(elem_spec, arg, stores)
             if idx in value_arg_indexes
             else self._visit_expr(arg)
             for idx, arg in enumerate(arg_nodes)
@@ -582,6 +635,22 @@ class CallVisitor:
         spec: TypeSpec | None,
     ) -> list[str]:
         """Apply Pine truthiness to values stored in ``matrix<bool>``."""
+        value_at = {"set": 2, "fill": 0}.get(method)
+        if value_at is not None and value_at < len(arg_nodes):
+            self._warn_narrow_int_element(arg_nodes[value_at], spec,
+                                          arg_nodes[value_at])
+            if (spec is not None and spec.kind == "matrix"
+                    and spec.element is not None
+                    and spec.element.kind == "primitive"
+                    and spec.element.name == "int"
+                    and value_at < len(args)
+                    and (self._holds_wide_int_constant(arg_nodes[value_at])
+                         or self._expr_returns_wide_int(
+                             arg_nodes[value_at], None, set(), None))):
+                # A 64-bit value (a double where an operand can be na,
+                # ``_wide_int_arith_cpp``) narrows na-preserving into the int
+                # element (quirk 9), as an int array's element does.
+                args[value_at] = na_preserving_int_cast(args[value_at], "int")
         if (spec is None or spec.kind != "matrix"
                 or spec.element is None
                 or spec.element.kind != "primitive"
@@ -778,7 +847,52 @@ class CallVisitor:
                 hint=f"Use the established positional form: {signature}.",
             )
 
+        if method == "put":
+            receiver = (bound[0] if functional
+                        else getattr(node.callee, "object", None))
+            self._warn_narrow_int_element(
+                node, self._type_spec_from_expr(receiver) if receiver is not None
+                else None, bound[-1])
         return bound
+
+    def _warn_narrow_int_element(self, node, spec, value_node) -> None:
+        """Warn once where a ``map<..., int>`` value, a ``matrix<int>``
+        element or an ``array<int>`` element (of an array no epoch widens,
+        ``_wide_int_array_names``) receives a value that can leave int32 (a
+        constant past it, ``_holds_wide_int_constant``, or a 64-bit value,
+        ``_expr_returns_wide_int``): the handle stores a C++ ``int``, where
+        TradingView's ``int`` is 64-bit. The element type also types the
+        handle's parameters and its ``values()`` / ``keys()`` / ``row()`` /
+        ``col()`` arrays (an array's, the declared ``array<int>`` parameters
+        and fields it is passed to), so it keeps the width it compiles
+        with."""
+        if spec is None or value_node is None:
+            return
+        element = (spec.value if spec.kind == "map"
+                   else spec.element if spec.kind in ("matrix", "array")
+                   else None)
+        if (element is None or element.kind != "primitive"
+                or element.name != "int"):
+            return
+        if not (self._holds_wide_int_constant(value_node)
+                or self._expr_returns_wide_int(value_node, None, set(), None)):
+            return
+        warned = getattr(self, "_narrow_int_element_warned", None)
+        if warned is None:
+            warned = self._narrow_int_element_warned = set()
+        if id(node) in warned:
+            return
+        warned.add(id(node))
+        kind = {"map": "map<..., int> value", "matrix": "matrix<int> element",
+                "array": "array<int> element"}[spec.kind]
+        self._codegen_warning(
+            node,
+            f"{'An' if spec.kind == 'array' else 'A'} {kind} is stored as a "
+            "32-bit int in PineForge; this value can "
+            "exceed int32, where TradingView's int is 64-bit, and is truncated "
+            "(or read as na) there.",
+            hint="Declare the values float to keep every digit.",
+        )
 
     def _map_param_method_expr(
         self, map_expr: str, method: str, arg_nodes: list, spec: TypeSpec,
@@ -792,6 +906,15 @@ class CallVisitor:
         extending temporary receiver lifetime through the operation.
         """
         args = [self._visit_expr(arg) for arg in arg_nodes]
+        if (method == "put" and arg_nodes and spec is not None
+                and spec.kind == "map" and spec.value is not None
+                and spec.value.kind == "primitive" and spec.value.name == "int"
+                and (self._holds_wide_int_constant(arg_nodes[-1])
+                     or self._expr_returns_wide_int(arg_nodes[-1], None, set(), None))):
+            # A 64-bit value (a double where an operand can be na,
+            # ``_wide_int_arith_cpp``) narrows na-preserving into the int
+            # value (quirk 9), as an int array's element does.
+            args[-1] = na_preserving_int_cast(args[-1], "int")
         occupied = "\n".join((map_expr, *args))
         counter = getattr(self, "_map_param_arg_counter", 0)
         bindings: list[tuple[str, str]] = []
@@ -1093,7 +1216,17 @@ class CallVisitor:
             )
         method_series = self.ctx.func_series_vars.get(func_info.name, set())
         if param_name not in method_series:
-            return self._visit_expr(arg_node)
+            cpp = self._visit_expr(arg_node)
+            int_cpp = self._func_param_int_cpp_type(
+                func_info, param_index,
+                self._callable_target_callsite_idx(func_info, call_node))
+            if (int_cpp is not None
+                    and self._holds_na_aware_wide_double(arg_node)
+                    and self._emitted_value_is_double(arg_node)):
+                # A double-valued 64-bit product (``_wide_int_arith_cpp``)
+                # narrows na-preserving into an integer parameter (quirk 9).
+                cpp = na_preserving_int_cast(cpp, int_cpp)
+            return cpp
         expected_cpp_type = self._series_param_element_cpp_type(
             func_info,
             param_index,
@@ -1708,6 +1841,8 @@ class CallVisitor:
                 if node.args:
                     size_arg = self._visit_expr(node.args[0])
                     if len(node.args) > 1:
+                        self._warn_narrow_int_element(node.args[1], spec,
+                                                      node.args[1])
                         init_val = self._array_init_value_expr(elem_spec, node.args[1])
                     else:
                         init_val = init_default
@@ -1731,6 +1866,8 @@ class CallVisitor:
                         spec = declared
                     spec = self._widen_array_spec_for_name(target, spec)
                 elem_spec = spec.element
+                for a in node.args:
+                    self._warn_narrow_int_element(a, spec, a)
                 elems = ", ".join(
                     self._array_init_value_expr(elem_spec, a)
                     for a in node.args
@@ -2233,6 +2370,9 @@ class CallVisitor:
                     init = args_e[2] if len(args_e) > 2 else "0.0"
                     return f"PineMatrix::new_({rows}, {cols}, {init})"
                 cpp_t = self._type_spec_to_cpp(elem_spec)
+                if len(node.args) > 2:
+                    self._warn_narrow_int_element(
+                        node, TypeSpec.matrix(elem_spec), node.args[2])
                 init = (
                     self._array_init_value_expr(elem_spec, node.args[2])
                     if len(args_e) > 2 else self._default_for_spec(elem_spec)
@@ -2364,6 +2504,14 @@ class CallVisitor:
                     elif (self._is_nullable_collection_cpp_type(f_cpp_type)
                           and val == "na<double>()"):
                         val = f"{f_cpp_type}{{}}"
+                    array_field = self._udt_array_field_cpp(
+                        field_specs.get(f.name)
+                        or self._type_spec_from_hint_name(f.type_name),
+                        namespace)
+                    if array_field is not None:
+                        val = (f"{array_field}()" if val == "na<double>()"
+                               else self._udt_array_field_value(
+                                   array_field, value_node, val))
                     field_inits.append(f".{self._safe_name(f.name)} = {val}")
             return self._emit_udt_new_expr(namespace, field_inits)
 
@@ -2955,6 +3103,25 @@ class CallVisitor:
     _FROM_GRADIENT_PARAMS = (
         "value", "bottom_value", "top_value", "bottom_color", "top_color",
     )
+    # TradingView's parameter names of the other color.* functions.
+    _COLOR_PARAMS = {
+        "new": ("color", "transp"),
+        "rgb": ("red", "green", "blue", "transp"),
+        "r": ("color",), "g": ("color",), "b": ("color",), "t": ("color",),
+    }
+
+    def _color_arg_nodes(self, func_name: str, node) -> list:
+        """The argument nodes of a ``color.*`` call in parameter order: the
+        positional ones, then each keyword in its parameter's slot, up to the
+        last one given (``color.new(transp = 40, color = c)`` is
+        ``color.new(c, 40)``). A slot nothing fills is None."""
+        params = self._COLOR_PARAMS.get(func_name, ())
+        bound = list(node.args)
+        for index, name in enumerate(params):
+            if index >= len(node.args) and name in node.kwargs:
+                bound += [None] * (index + 1 - len(bound))
+                bound[index] = node.kwargs[name]
+        return bound
 
     # Builtins whose call has no state and no side effect.
     _PURE_CALL_NAMESPACES = frozenset({"color", "math", "str"})
@@ -2995,15 +3162,20 @@ class CallVisitor:
             return ("([&]() -> int64_t { "
                     + " ".join(f"(void)({cpp});" for cpp in effects)
                     + " return 0; }())")
-        args = [self._visit_expr(a) for a in node.args]
+        # Keyword arguments take their parameter's slot; TradingView evaluates
+        # the arguments in parameter order, as the lowerings below do.
+        arg_nodes = self._color_arg_nodes(func_name, node)
+        if any(a is None for a in arg_nodes):
+            return "0"
+        args = [self._visit_expr(a) for a in arg_nodes]
         if func_name == "new":
             if len(args) >= 2:
                 base = self._coerce_int_slot(
-                    args[0], node.args[0] if node.args else None, "int64_t",
+                    args[0], arg_nodes[0], "int64_t",
                 )
-                whole = _whole_transparency(node.args[1])
+                whole = _whole_transparency(arg_nodes[1])
                 alpha = color_alpha_cast(args[1], whole)
-                base_node = node.args[0]
+                base_node = arg_nodes[0]
                 if (isinstance(base_node, ColorLiteral)
                         or (isinstance(base_node, MemberAccess)
                             and isinstance(base_node.object, Identifier)
@@ -3029,10 +3201,10 @@ class CallVisitor:
         if func_name == "rgb":
             if len(args) >= 4:
                 channels = [
-                    self._coerce_int_slot(args[i], node.args[i], "int64_t")
+                    self._coerce_int_slot(args[i], arg_nodes[i], "int64_t")
                     for i in range(3)
                 ]
-                alpha = color_alpha_cast(args[3], _whole_transparency(node.args[3]))
+                alpha = color_alpha_cast(args[3], _whole_transparency(arg_nodes[3]))
                 return (
                     "pine_color::new_color(static_cast<int64_t>("
                     f"(static_cast<uint64_t>({channels[0]}) & 0xFFULL) << 16 | "
@@ -3041,7 +3213,7 @@ class CallVisitor:
                 )
             elif len(args) >= 3:
                 channels = [
-                    self._coerce_int_slot(args[i], node.args[i], "int64_t")
+                    self._coerce_int_slot(args[i], arg_nodes[i], "int64_t")
                     for i in range(3)
                 ]
                 return (
@@ -3142,6 +3314,12 @@ class CallVisitor:
 
         if func_name == "format_time":
             ts = args[0] if args else "0"
+            ts_node = node.args[0] if node.args else node.kwargs.get("time")
+            if (ts_node is not None and self._holds_na_aware_wide_double(ts_node)
+                    and self._emitted_value_is_double(ts_node)):
+                # A double-valued 64-bit product (``_wide_int_arith_cpp``)
+                # narrows na-preserving into the int64_t timestamp (quirk 9).
+                ts = na_preserving_int_cast(ts, "int64_t")
             fmt = args[1] if len(args) > 1 else '"yyyy-MM-dd"'
             tz = args[2] if len(args) > 2 else '"UTC"'
             return f'pine_str_format_time({ts}, {fmt}, {tz})'
