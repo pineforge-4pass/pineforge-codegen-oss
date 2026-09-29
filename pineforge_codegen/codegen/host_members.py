@@ -36,6 +36,7 @@ HOST_MEMBER_NAMES = frozenset({
     "closed_trade_entry_id",
     "closed_trade_entry_price",
     "closed_trade_entry_time",
+    "closed_trade_equity",
     "closed_trade_exit_bar_index",
     "closed_trade_exit_comment",
     "closed_trade_exit_id",
