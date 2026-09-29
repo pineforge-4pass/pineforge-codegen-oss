@@ -904,6 +904,10 @@ class TypeInferer:
             return None
         if name in self._wide_int_provenance()[0]:
             return None
+        if self._literal_wide_global(name):
+            # A top-level int constant past int32 initializes an int64_t
+            # slot (CGINT5a), reassigned or not: it is no 32-bit operand.
+            return None
         return ((runtime, True)
                 if self._slot_scalar_cpp_type(name) == "int" else None)
 
@@ -978,7 +982,10 @@ class TypeInferer:
         for index, key in ((2, "minval"), (3, "maxval")):
             node = (call.args[index] if namespace == "input"
                     and len(call.args) > index else call.kwargs.get(key))
-            value = self._pure_int_literal_value(node) if node is not None else None
+            # An input is a top-level declaration: a named bound reads the
+            # top-level constant, whichever callable is being emitted.
+            value = (self._pure_int_literal_value(node, global_scope=True)
+                     if node is not None else None)
             if value is not None:
                 ends.append(abs(value))
         if len(ends) == 2:

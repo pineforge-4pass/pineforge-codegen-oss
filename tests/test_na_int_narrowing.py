@@ -226,6 +226,17 @@ if bar_index >= 3
 t = T.new(1)
 plot(t.m(n * 1000000000) + f(n * 1000000000) + g(n * 1000000000))
 """,
+    "wide_product_payload_copy": """//@version=6
+strategy("s", overlay=true)
+var int n = 0
+if bar_index >= 3
+    n := bar_index
+var int w = 0
+w := n * 1000000000
+w += n * 1000000000
+x = request.security(syminfo.tickerid, "60", w)
+plot(x)
+""",
     "wide_product_format_time": """//@version=6
 strategy("s", overlay=true)
 var int n = na

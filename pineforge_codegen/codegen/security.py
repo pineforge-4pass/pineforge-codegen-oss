@@ -84,7 +84,7 @@ from ..external_requests import (
 )
 from ..external_requests import _nodes as walk_request_nodes
 from ..limits import iter_ast_nodes
-from .helpers import unary_sign_cpp
+from .helpers import na_preserving_int_cast, unary_sign_cpp
 from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION
 from ..symbols import PineType, method_receiver_type_name
 from .tables import (
@@ -943,7 +943,33 @@ class SecurityEmitter:
     def _security_cpp_type_for_mutable(self, name: str, info) -> str:
         if getattr(info, "is_series", False):
             return self._series_type_for(name)
-        return PINE_TYPE_TO_CPP.get(getattr(info, "pine_type", PineType.FLOAT), "double")
+        cpp_type = PINE_TYPE_TO_CPP.get(getattr(info, "pine_type", PineType.FLOAT), "double")
+        if cpp_type == "int" and self._security_copy_is_arithmetic_wide(name):
+            return "int64_t"
+        return cpp_type
+
+    def _security_copy_is_arithmetic_wide(self, name: str) -> bool:
+        """Whether the chart slot of a script variable a payload re-evaluates
+        is ``int64_t`` only by 64-bit integer arithmetic
+        (``_int_arith_leaves_int32``: ``w := q * 7200000``), whose value the
+        payload's copy must hold too: typed from the analyzer's ``int``, it
+        read the na-aware double form past int32 as undefined behaviour
+        (quirk 9). A name an epoch makes wide keeps the ``int`` copy every
+        earlier build emitted."""
+        if name not in self._wide_int_provenance()[0]:
+            return False
+        with self._int_width_scan(epoch_only=True):
+            return name not in self._wide_int_provenance()[0]
+
+    def _security_copy_store_cpp(self, name: str, info, value_node, value_cpp: str) -> str:
+        """``value_cpp`` stored into a payload's scalar copy of ``name``: the
+        na-aware double form of a 64-bit product narrows na-preserving into
+        an integer copy (quirk 9), as every integer store of it does."""
+        cpp_type = self._security_cpp_type_for_mutable(name, info)
+        if (cpp_type in ("int", "int64_t")
+                and self._holds_na_aware_wide_double(value_node)):
+            return na_preserving_int_cast(value_cpp, cpp_type)
+        return value_cpp
 
     def _security_relevant_top_level_stmts(self, mutable_globals: list[str]) -> list[ASTNode]:
         if not mutable_globals:
@@ -2566,7 +2592,10 @@ class SecurityEmitter:
         keeps the ``int`` family it compiled with (the width of constants does
         not reach helper state either: ``_literal_wide_global``). Only an
         epoch reaching it (the lane's epoch-only reading) reads ``int64_t``,
-        which stays refused as it always was."""
+        which stays refused as it always was. The flag is set directly, not
+        through ``_int_width_scan``, whose depth counter would detach the
+        emitting callable's names (``_narrow_int_name_info``) that an
+        unhinted ``var``'s ``_infer_type`` can still read."""
         saved = getattr(self, "_wide_int_epoch_only", False)
         self._wide_int_epoch_only = True
         try:
@@ -4680,6 +4709,7 @@ class SecurityEmitter:
             security_mutable_names=relevant_names,
             emitted_lines=emitted_lines,
         )
+        expr_cpp = self._security_copy_store_cpp(node.name, info, node.value, expr_cpp)
 
         if getattr(info, "is_var", False):
             if getattr(info, "is_series", False):
@@ -4733,16 +4763,24 @@ class SecurityEmitter:
             emitted_lines=emitted_lines,
         )
 
+        def store(cpp: str) -> str:
+            return self._security_copy_store_cpp(target_name, info, node.value, cpp)
+
         if getattr(info, "is_series", False):
             if node.op == ":=":
-                lines.append(f"{pad}{state_name}.update({value_cpp});")
+                lines.append(f"{pad}{state_name}.update({store(value_cpp)});")
             else:
                 op_char = node.op[0]
-                lines.append(f"{pad}{state_name}.update({state_name}[0] {op_char} {value_cpp});")
+                lines.append(f"{pad}{state_name}.update("
+                             f"{store(f'{state_name}[0] {op_char} {value_cpp}')});")
             return
 
         if node.op == ":=":
-            lines.append(f"{pad}{state_name} = {value_cpp};")
+            lines.append(f"{pad}{state_name} = {store(value_cpp)};")
+        elif store(value_cpp) != value_cpp:
+            # A compound store of the double form narrows its result.
+            lines.append(f"{pad}{state_name} = "
+                         f"{store(f'({state_name} {node.op[0]} {value_cpp})')};")
         else:
             lines.append(f"{pad}{state_name} {node.op} {value_cpp};")
 

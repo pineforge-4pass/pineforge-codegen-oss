@@ -1,7 +1,7 @@
 """Where lane CG-SILENT-2 meets codegen main's rules (integration CGINT6).
 
 CG-SILENT-2 was cut before CGINT5a and CG-SESSION-REPIN reached main, and
-three of its items change a function one of those lanes changed too:
+several of its items meet a rule one of those lanes made:
 
 - item 1 binds ``color.new`` / ``color.rgb`` keyword arguments, and
   CG-SESSION-REPIN hands a transparency that is not an integer literal to the
@@ -11,23 +11,30 @@ three of its items change a function one of those lanes changed too:
   CGINT5a folds one over constants into a 64-bit literal: operands the C++
   spells as int literals keep the fold, on the chart and in a payload, and the
   run-time product applies to the rest (``_visit_binop``, the payload's
-  ``BinOp``);
+  ``BinOp``); a reassigned top-level constant past int32 (CGINT5a's
+  ``int64_t`` slot) is no 32-bit operand (``_narrow_int_name_info``), and an
+  input's named bound reads the top-level constant (``_input_int_bound``);
 - item 3's width is a provenance keyed by spelling, and CGINT5a keeps a
   constant's width out of ``request.security`` helper state: a helper
   ``var``'s state family is read in the epoch-only mode
   (``_security_helper_var_state_type``), so a helper's ``var int n`` beside
   another function's ``n = days * 86400000`` keeps the ``int`` family main
   compiled (both refused it, "helper-local var state currently supports only
-  int, float, bool and string values").
+  int, float, bool and string values");
+- a payload's copy of a script variable only item 3's arithmetic makes wide is
+  ``int64_t``, as its chart slot, and the double form narrows na-preserving
+  into it (``_security_copy_is_arithmetic_wide``): typed ``int``, the copy
+  read that double as undefined behaviour (quirk 9).
 
 TradingView's tape of ``fixtures/cgint6_tv/cgint6_compositions`` spells each
 composition on every close, item 5c's nested helper call over CGINT5a's
 helper ``var`` TA length and item 5a's color arrays included; the probe
 compiles on neither parent (main: a color ``array.from`` braced into doubles;
-the lane: the helper's ``c := math.min(c + 1, 5)`` recursed). Its ``a0``, a
-constant ``color.new`` transparency, is the one divergence, which
-``cgint6_const_transp`` isolates: TradingView truncates a constant
-``color.new`` transparency where main's rule reads it through the alpha byte.
+the lane: the helper's ``c := math.min(c + 1, 5)`` recursed). Two divergences
+of main's rules are pinned, each with its own tape: TradingView truncates a
+constant ``color.new`` transparency (``cgint6_const_transp``; the
+composition tape's ``a0``), and ``ta.sma(src, 5)`` over ``var src =
+input.source(...)`` reads na (``cgint6_var_source``, CG-SILENT-2 item 5e).
 """
 
 from __future__ import annotations
@@ -55,12 +62,19 @@ HEAD = '//@version=6\nstrategy("cgint6")\n'
 
 
 def _field_mismatches(tape: dict[int, str], exits: dict[int, str]) -> dict[int, set]:
-    """Per field index, the (tape, engine) pairs that differ."""
+    """Per field index, the (tape, engine) pairs that differ. Up to the
+    tape's last exit (the replay's feed runs past it) the engine exits at
+    exactly the tape's instants, each with as many fields."""
+    last = max(tape)
+    inside = {ms for ms in exits if ms <= last}
+    assert inside == set(tape), (
+        f"{len(set(tape) - inside)} tape exits missing, "
+        f"{len(inside - set(tape))} engine exits not on the tape")
     out: dict[int, set] = {}
     for ms, signal in tape.items():
-        engine = exits.get(ms)
-        assert engine is not None, f"no engine exit at {ms}"
-        for i, (tv, pf) in enumerate(zip(signal.split("|"), engine.split("|"))):
+        tv_fields, pf_fields = signal.split("|"), exits[ms].split("|")
+        assert len(tv_fields) == len(pf_fields), (signal, exits[ms])
+        for i, (tv, pf) in enumerate(zip(tv_fields, pf_fields)):
             if tv != pf:
                 out.setdefault(i, set()).add((tv, pf))
     return out
@@ -173,8 +187,9 @@ def test_a_helper_var_keeps_its_state_family_beside_a_wide_product(body):
 
 
 def test_a_helper_var_an_epoch_reaches_through_its_spelling_stays_refused():
-    # As on main: the epoch provenance reaches the helper's var, whose state
-    # family holds no int64_t.
+    # Pinned limitation, as on main: the helper's own ``n`` never holds an
+    # epoch, but the epoch provenance is keyed by spelling, so another
+    # function's ``n = time`` types it int64_t, a family its state lacks.
     with pytest.raises(CompileError, match="helper-local var state currently supports only"):
         transpile(HEAD + 'h() =>\n    var int n = 0\n    n += 1\n    n\n'
                   'g() =>\n    n = time\n    n\n'
@@ -191,4 +206,44 @@ def test_a_nested_helper_call_keeps_a_var_length_per_call():
     members = {tok for tok in evaluator.replace("(", " ").replace(".", " ").split()
                if tok.startswith("_sec0__ta_highest_")}
     assert len(members) == 2, sorted(members)
+    compile_cpp(cpp)
+
+
+
+def test_a_reassigned_wide_constant_is_no_32_bit_operand():
+    # CGINT5a types g's slot int64_t (its declaration is past int32): the
+    # product is int64 arithmetic, as on main, not the na-aware double form
+    # of a 32-bit operand (exact to 2**53 only).
+    cpp = transpile(HEAD + "var int g = 3000000001\ng := g + 0\n"
+                    "var int z = 3000000000\nz := g * 30000001\nplot(z)\n")
+    assert "z = (g * 30000001);" in cpp
+    compile_cpp(cpp)
+
+
+def test_an_input_bound_named_by_a_constant_reads_it_everywhere():
+    # maxval = MAXD bounds days * 1000000 past int32 at the top level and in a
+    # function whose parameter shadows MAXD alike.
+    cpp = transpile(HEAD + "MAXD = 3000\ndays = input.int(30, minval = 1, maxval = MAXD)\n"
+                    "a = days * 1000000\nf(MAXD) => days * 1000000 + MAXD\nplot(a + f(1))\n")
+    assert "a = (static_cast<int64_t>(days) * 1000000);" in cpp
+    assert "return ((static_cast<int64_t>(days) * 1000000) + MAXD);" in cpp
+    compile_cpp(cpp)
+
+
+def test_a_payload_copy_of_an_arithmetic_wide_variable_holds_64_bits():
+    cpp = transpile(HEAD + "var int q = 0\nif bar_index > 5\n    q := bar_index\n"
+                    "var int w = 0\nw := q * 7200000\nw += q * 7200000\n"
+                    "var int t0 = 0\nt0 := time\n"
+                    'x = request.security(syminfo.tickerid, "60", w + t0)\nplot(x)\n')
+    # w is wide only by the 64-bit product: its copy is int64_t, and both
+    # stores narrow the na-aware double form na-preserving.
+    assert "int64_t _sec0_w = 0;" in cpp
+    body = cpp[cpp.index("void _eval_security_0"):cpp.index("void evaluate_security")]
+    stores = [l.strip() for l in body.splitlines()
+              if l.strip().startswith("_sec0_w = ") and "_pf_wide_l" in l]
+    assert len(stores) == 2 and all(
+        "return is_na(_pf_v) ? na<int64_t>() : (int64_t)_pf_v; }()" in l for l in stores), stores
+    # t0 is wide by an epoch: its copy keeps the int every earlier build
+    # emitted (a truncation, pinned).
+    assert "int _sec0_t0 = 0;" in cpp
     compile_cpp(cpp)
