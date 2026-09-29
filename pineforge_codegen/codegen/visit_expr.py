@@ -1525,8 +1525,8 @@ class ExprVisitor:
 
     def _emits_int32(self, node) -> bool:
         """Whether ``node`` is emitted as a C++ ``int`` for certain: an int
-        literal, a name or loop variable stored as ``int``, an element of an
-        ``array<int>``, or a sign or product of those."""
+        literal, a name stored as ``int``, an element of an ``array<int>``
+        (read or iterated), or a sign, sum or difference of those."""
         if isinstance(node, NumberLiteral):
             return isinstance(node.value, int) and not isinstance(node.value, bool)
         if isinstance(node, UnaryOp) and node.op in ("-", "+"):
@@ -1535,7 +1535,10 @@ class ExprVisitor:
             return self._emits_int32(node.left) and self._emits_int32(node.right)
         if isinstance(node, Identifier):
             if node.name in getattr(self, "_current_loop_vars", set()):
-                return True
+                # A ``for ... in`` element: an int only over an ``array<int>``.
+                spec = getattr(self, "_current_loop_var_specs", {}).get(node.name)
+                return (spec is not None and spec.kind == "primitive"
+                        and self._type_spec_to_cpp(spec) == "int")
             return (not self._emitted_value_is_double(node)
                     and self._slot_scalar_cpp_type(node.name) == "int"
                     and self._infer_type(node) == "int")

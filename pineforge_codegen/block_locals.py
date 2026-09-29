@@ -31,33 +31,30 @@ def decl_key(node: VarDecl) -> tuple | None:
 
 
 def block_declarations(body: list):
-    """(declaration, in a block) for every declaration of the script's top
-    level, in source order: the direct ones and those in its blocks, the
-    blocks of an ``if`` / ``switch`` value included."""
+    """(declaration, in a block) for every declaration the codegen holds in a
+    class member of the script's top level, in source order: the direct ones
+    and those in its statement blocks (``if`` / loop / ``switch``, nested
+    too), as ``CodeGen`` hoists them. An ``if`` or ``switch`` value's block
+    keeps its declarations to itself."""
     for stmt in body:
         yield from _declarations(stmt, False)
 
 
 def _declarations(node, nested: bool):
-    if isinstance(node, list):
-        for item in node:
-            yield from _declarations(item, nested)
-        return
     if isinstance(node, VarDecl):
         yield node, nested
-        yield from _declarations(node.value, nested)
     elif isinstance(node, IfStmt):
-        yield from _declarations(node.body, True)
-        yield from _declarations(node.else_body, True)
+        for stmt in (*node.body, *node.else_body):
+            yield from _declarations(stmt, True)
     elif isinstance(node, (ForStmt, ForInStmt, WhileStmt)):
-        yield from _declarations(node.body, True)
+        for stmt in node.body:
+            yield from _declarations(stmt, True)
     elif isinstance(node, SwitchStmt):
         for _value, body in node.cases:
-            yield from _declarations(body, True)
-        yield from _declarations(node.default_body, True)
-    elif isinstance(node, (Assignment, ExprStmt, TupleAssign)):
-        value = node.expr if isinstance(node, ExprStmt) else node.value
-        yield from _declarations(value, nested)
+            for stmt in body:
+                yield from _declarations(stmt, True)
+        for stmt in node.default_body:
+            yield from _declarations(stmt, True)
 
 
 def rename_block_locals(program: Program, keys: frozenset) -> None:

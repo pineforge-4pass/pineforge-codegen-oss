@@ -146,11 +146,40 @@ def test_a_request_of_another_symbol_in_an_arm_is_lowered():
     assert len(warned) == 2, warned
 
 
-def test_an_unsupported_call_in_an_arm_is_refused():
-    (err,) = _errors(HEAD + 'k = bar_index % 2\nx = switch k\n'
-                     '    0 => request.seed("seed_crypto_santiment", "BTC", close)\n'
-                     '    => 1.0\n' + TAIL)
-    assert "request.seed" in err.message
+def test_what_the_checker_finds_in_an_arm_warns():
+    """The arms it never visited keep the lowering they compiled to: an
+    unsupported call there transpiled silently, a text constant compiled as
+    its string; each now warns."""
+    out = transpile_full(HEAD + 'k = bar_index % 2\nx = switch k\n'
+                         '    0 => request.seed("seed_crypto_santiment", "BTC", close)\n'
+                         '    => 1.0\n' + TAIL)
+    (seed,) = [d for d in out["diagnostics"] if "request.seed" in d.message]
+    assert seed.level == Level.WARNING
+    out = transpile_full(HEAD + 'm = close > open ? "L" : "R"\nta_ = switch m\n'
+                         '    "L" => text.align_left\n    "R" => text.align_right\n'
+                         'if barstate.islast\n    label.new(bar_index, close, "x", textalign = ta_)\n'
+                         'x = 1\n' + TAIL)
+    assert all(d.level == Level.WARNING for d in out["diagnostics"])
+    assert any("text.align_left" in d.message for d in out["diagnostics"])
+    compile_cpp(out["cpp"], label="text constant in an arm")
+
+
+def test_a_library_keyword_binds_by_its_spelled_name():
+    """A library's own keyword call binds by the parameter's spelled name,
+    whichever function the inliner renamed first: ``f(n = 2)`` read the
+    default 5 once ``f`` was processed, and the choice of an overload moved."""
+    lib = ('//@version=6\nlibrary("Kw")\nexport f(int n = 5) =>\n    n + 1\n'
+           'export g() =>\n    f(n = 2)\n')
+    cpp = transpile(HEAD + 'import pftest/Kw/1 as kw\na = kw.f(1)\nc = kw.g()\nx = a + c\n' + TAIL,
+                    libraries={"pftest/Kw/1": lib})
+    assert "return Kw_v1__f(2);" in cpp
+    ov = ('//@version=6\nlibrary("Ov")\nexport f(simple int n) =>\n    n * 10\n'
+          'export f(series int n) =>\n    n * 100\nexport g() =>\n    f(n = 2)\n')
+    for calls in ('c = ov.g()\nx = c\n', 'a = ov.f(1)\nc = ov.g()\nx = a + c\n',
+                  'a = ov.f(1)\nb = ov.f(bar_index)\nc = ov.g()\nx = a + b + c\n'):
+        cpp = transpile(HEAD + 'import pftest/Ov/1 as ov\n' + calls + TAIL,
+                        libraries={"pftest/Ov/1": ov})
+        assert "return Ov_v1__f(2);" in cpp, calls
 
 
 # -- barmerge constants as values ----------------------------------------------------
@@ -215,6 +244,13 @@ def test_fresh_arrays_bind_to_an_array_parameter():
     compile_cpp(cpp, label="fresh array arguments")
 
 
+def test_a_builtins_array_keeps_its_lowering():
+    """``request.security_lower_tf`` is held in a member: the call compiled."""
+    cpp = transpile(HEAD + 'f(float[] a) => array.size(a)\n'
+                    'x = f(request.security_lower_tf(syminfo.tickerid, "1", close))\n' + TAIL)
+    assert "x = f(_req_sec_lower_tf_0);" in cpp
+
+
 def test_a_selection_of_a_held_and_a_fresh_array_is_refused():
     (err,) = _errors(HEAD + 'f(array<float> a) =>\n    a.push(1.0)\n    a.size()\n'
                      'var v = array.new_float(0)\n'
@@ -239,6 +275,15 @@ def test_a_product_no_modulo_or_division_reads_keeps_its_spelling():
                     'x = m + q\n' + TAIL)
     assert "(n * 7200000)" in cpp
     assert "((int64_t)(n) * (3))" in cpp
+
+
+def test_a_float_for_in_element_keeps_its_product():
+    cpp = transpile(HEAD + 'prices = array.from(1.5, 2.25, 3.75)\nfloat total = 0.0\n'
+                    'for v in prices\n    total += v * 2 / 3\nx = total\n' + TAIL)
+    assert "total += ((double)((v * 2)) / (double)(3));" in cpp
+    cpp = transpile(HEAD + 'counts = array.from(1, 2)\nfloat total = 0.0\n'
+                    'for c in counts\n    total += c * 3 / 2\nx = total\n' + TAIL)
+    assert "((int64_t)(c) * (3))" in cpp
 
 
 def test_a_float_or_rounded_operand_keeps_its_product():

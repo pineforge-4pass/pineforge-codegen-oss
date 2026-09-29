@@ -626,6 +626,9 @@ class SupportChecker:
         self._func_tuple_drawing_returns: dict[str, list[bool]] = {}
         # Track whether we are inside an if/ternary condition expression.
         self._in_conditional_depth: int = 0
+        # Inside a switch's non-default arm, which the checker used to skip:
+        # its findings warn (``_err``).
+        self._switch_arm_depth: int = 0
         # Track whether we are inside an argument subtree that legitimately
         # consumes constant-namespace members: parse-and-skip visual calls
         # (plot, label.new, ...), the strategy() declaration, and
@@ -1141,7 +1144,10 @@ class SupportChecker:
 
     def _err(self, node: ASTNode | None, message: str, hint: str | None = None) -> None:
         self._diagnostics.append(Diagnostic(
-            level=Level.ERROR,
+            # The checker never visited a switch's non-default arms: what it
+            # finds there warns, and the arm keeps the lowering it compiled
+            # to (``_visit_SwitchStmt``).
+            level=Level.WARNING if self._switch_arm_depth else Level.ERROR,
             phase=Phase.ANALYZER,
             location=_loc(node, self._filename),
             message=message,
@@ -1942,16 +1948,22 @@ class SupportChecker:
         its default block. ``cases`` holds ``(condition, block)`` tuples,
         which the generic child walk does not enter, so every arm but the
         default went unchecked: a request of another symbol in one kept no
-        lowering (``TradingView/Request/3``'s ``cryptoDerivativeMetric``)."""
+        lowering (``TradingView/Request/3``'s ``cryptoDerivativeMetric``).
+        Such an arm gets its lowerings now; what the checker would refuse
+        there warns instead, so a script that compiled keeps compiling."""
         self._visit(node.expr)
-        for case_expr, body in node.cases:
-            if node.expr is None:
-                self._in_conditional_depth += 1
-            self._visit(case_expr)
-            if node.expr is None:
-                self._in_conditional_depth -= 1
-            for stmt in body:
-                self._visit(stmt)
+        self._switch_arm_depth += 1
+        try:
+            for case_expr, body in node.cases:
+                if node.expr is None:
+                    self._in_conditional_depth += 1
+                self._visit(case_expr)
+                if node.expr is None:
+                    self._in_conditional_depth -= 1
+                for stmt in body:
+                    self._visit(stmt)
+        finally:
+            self._switch_arm_depth -= 1
         for stmt in node.default_body:
             self._visit(stmt)
 

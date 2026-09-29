@@ -130,6 +130,10 @@ class _Module:
         # An overload after the first of an overloaded function: its
         # callable name (its locals' prefix) and new name, by id().
         self.overloads: dict[int, tuple[str, str]] = {}
+        # Each function's and method's parameters as the library spells them,
+        # by id(): processing renames ``params`` in place, and a keyword
+        # argument binds by the spelled name.
+        self.params: dict[int, tuple[str, ...]] = {}
 
     @property
     def path(self) -> str:
@@ -246,6 +250,9 @@ class _Linker:
                 "to an inlined definition", at.loc, self._filename))
         mod = _Module(lib, self._prefix(lib))
         self._modules[path] = mod
+        for stmt in lib.program.body:
+            if isinstance(stmt, (FuncDef, MethodDef)):
+                mod.params[id(stmt)] = tuple(stmt.params)
         self._load_order.append(path)
         for alias, stmt in lib.imports.items():
             mod.targets[alias] = stmt.path
@@ -317,7 +324,8 @@ class _Linker:
         chosen = self._overload_of.get(id(call))
         if chosen is None:
             return name, self._function_params(mod, name)
-        return self._overload_names(mod, name, chosen)[0], set(chosen.params)
+        return (self._overload_names(mod, name, chosen)[0],
+                set(mod.params.get(id(chosen), chosen.params)))
 
     def _overload(self, mod: _Module, name: str, defs: list, at: ASTNode,
                   site: tuple | None) -> FuncDef:
@@ -336,7 +344,7 @@ class _Linker:
         if not isinstance(at, FuncCall) or site is None:
             raise _LinkError(refusal)
         bound = {d_id: args for d_id, args in
-                 ((id(d), self._bind_arguments(d, at)) for d in defs) if args is not None}
+                 ((id(d), self._bind_arguments(mod, d, at)) for d in defs) if args is not None}
         fits = [d for d in defs if id(d) in bound]
         if len(fits) == 1:
             return fits[0]
@@ -360,11 +368,11 @@ class _Linker:
         return best[0][1]
 
     @staticmethod
-    def _bind_arguments(fdef: FuncDef, call: FuncCall) -> dict[int, ASTNode] | None:
+    def _bind_arguments(mod: _Module, fdef: FuncDef, call: FuncCall) -> dict[int, ASTNode] | None:
         """``call``'s arguments by ``fdef``'s parameter index, or None when
         they do not bind (too many, an unknown keyword, one given twice, a
         parameter without a default left out)."""
-        params = list(fdef.params)
+        params = list(mod.params.get(id(fdef), fdef.params))
         defaults = list((fdef.annotations or {}).get("param_defaults") or ())
         if len(call.args) > len(params):
             return None
@@ -732,10 +740,12 @@ class _Linker:
             }
 
     def _function_params(self, mod: _Module, name: str) -> set[str]:
-        return {p for f in mod.lib.functions.get(name, ()) for p in f.params}
+        return {p for f in mod.lib.functions.get(name, ())
+                for p in mod.params.get(id(f), f.params)}
 
     def _method_params(self, mod: _Module, name: str) -> set[str]:
-        return {p for m in mod.lib.methods.get(name, ()) for p in m.params[1:]}
+        return {p for m in mod.lib.methods.get(name, ())
+                for p in mod.params.get(id(m), m.params)[1:]}
 
     def _call_args(self, owner: _Module | None, node: FuncCall, scope) -> None:
         """Resolve ``node``'s arguments; keep its written argument order."""

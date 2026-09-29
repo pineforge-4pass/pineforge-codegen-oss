@@ -143,7 +143,6 @@ from ..ast_nodes import (
     MemberAccess,
     NaLiteral,
     NumberLiteral,
-    Subscript,
     Ternary,
     TupleLiteral,
     StringLiteral,
@@ -1137,9 +1136,7 @@ class CallVisitor:
         return result
 
     # Builtins that return an array no variable holds: ``matrix.row(m, i)``
-    # is a copy of the row, ``array.copy(a)`` of the array. ``array.concat``
-    # returns its first array and ``array.slice`` a view of its array, so
-    # they do not.
+    # is a copy of the row, ``array.copy(a)`` of the array.
     _FRESH_ARRAY_CALLS = frozenset({
         ("array", "from"), ("array", "copy"), ("array", "sort_indices"),
         ("array", "abs"), ("array", "standardize"), ("matrix", "row"),
@@ -1153,43 +1150,47 @@ class CallVisitor:
     }
 
     def _array_arg_kind(self, node, depth: int = 0) -> str:
-        """``"held"`` for an argument naming an array the caller holds (a
-        variable, a field, a history read), ``"fresh"`` for one no variable
-        holds (a new or copied array, a function's new array), and
-        ``"alias"`` for any other value: a function returning an array it
-        was given returns that array, which TradingView passes on as itself
-        (``tests/fixtures/tail_f_tv``). An ``na`` keeps the lowering it had."""
-        if isinstance(node, (Identifier, MemberAccess, Subscript, NaLiteral)):
-            return "held"
+        """``"fresh"`` for an argument that is an array no variable holds (a
+        new or copied array, a matrix row, a user function's new array),
+        ``"alias"`` for a user function's array that a variable may hold (it
+        returns its argument or a global) or a selection of a held and a
+        fresh array, and ``"keep"`` for every other argument, which keeps the
+        lowering it had: a variable, a field, ``na``, any other built-in."""
         if isinstance(node, Ternary):
             kinds = {self._array_arg_kind(node.true_val, depth),
                      self._array_arg_kind(node.false_val, depth)}
-            # A C++ conditional of a held and a fresh array copies the held one.
-            return kinds.pop() if len(kinds) == 1 else "alias"
+            if "alias" in kinds or len(kinds) > 1:
+                # A C++ conditional of a held and a fresh array copies the
+                # held one; TradingView passes that array itself.
+                return "alias"
+            return kinds.pop()
         if not isinstance(node, FuncCall) or depth > 8:
-            return "alias"
+            return "keep"
         callee = node.callee
         if isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier):
             key = (callee.object.name, callee.member)
             if key in self._FRESH_ARRAY_CALLS or (
                     key[0] == "array" and key[1].startswith("new")):
                 return "fresh"
-        if isinstance(callee, MemberAccess):
+        info = None
+        if isinstance(callee, Identifier):
+            info = self._func_info_map.get(callee.name)
+        elif isinstance(callee, MemberAccess):
             spec = self._type_spec_from_expr(callee.object)
             fresh = self._FRESH_ARRAY_METHODS.get(spec.kind if spec is not None else "")
             if fresh is not None:
-                return "fresh" if callee.member in fresh else "alias"
+                return "fresh" if callee.member in fresh else "keep"
             receiver = method_receiver_type_name(spec) if spec is not None else None
             info = self._func_info_map.get(f"{receiver}.{callee.member}") if receiver else None
-        else:
-            info = (self._func_info_map.get(callee.name)
-                    if isinstance(callee, Identifier) else None)
+        if info is None:
+            return "keep"
         return self._returned_array_kind(info, depth + 1)
 
     def _returned_array_kind(self, func_info, depth: int) -> str:
         """``"fresh"`` when a user function returns an array it creates: its
         value is a fresh array, or a local declared as one and never
-        reassigned; ``"alias"`` otherwise."""
+        reassigned; ``"alias"`` otherwise (a user function's array reaches
+        its caller as a C++ temporary, which no ``T&`` took)."""
         fdef = getattr(func_info, "node", None)
         body = list(getattr(fdef, "body", None) or ())
         if not body:
@@ -1207,10 +1208,9 @@ class CallVisitor:
                     or value.name in (getattr(fdef, "params", None) or ())):
                 return "alias"
             value = decls[0].value
-        if value is None or isinstance(value, (Identifier, MemberAccess, Subscript)):
+        if not isinstance(value, (FuncCall, Ternary)):
             return "alias"
-        kind = self._array_arg_kind(value, depth)
-        return "fresh" if kind == "fresh" else "alias"
+        return "fresh" if self._array_arg_kind(value, depth) == "fresh" else "alias"
 
     def _binds_fresh_array_to_reference(self, func_info, arg_nodes: list,
                                         first_param: int = 0) -> bool:
@@ -1220,9 +1220,9 @@ class CallVisitor:
         a reference. A fresh array is a C++ temporary, which binds to no
         ``T&``; staging the call (``_ordered_user_call_expr``) binds it to a
         named forwarding reference, and the callee's changes vanish with it,
-        as TradingView's do. An array some variable holds that reaches the
-        call as a value (a function returning the array it was given) is
-        refused: PineForge would pass a copy of it."""
+        as TradingView's do. An array a variable may hold that reaches the
+        call as a temporary (a function returning the array it was given) is
+        refused: PineForge would pass a copy of it, and it never compiled."""
         if func_info is None:
             return False
         specs = list(getattr(func_info, "param_type_specs", ()) or ())
