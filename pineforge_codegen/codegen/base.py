@@ -3327,6 +3327,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     self._input_backed_vars.add(node.name)
                     if node.value.name in self._input_var_to_call:
                         self._input_var_to_call[node.name] = self._input_var_to_call[node.value.name]
+            # A plain alias of a derived stable scalar (``emaLen = calcEmaLen``
+            # over ``calcEmaLen = swingLen * emaRatio``) holds that scalar on
+            # every bar. Recorded as a derived expression of the name it
+            # copies, the TA runtime reset re-expands it to the inputs'
+            # getter reads; unrecorded, the reset spelled the alias's own
+            # member, which the body has not assigned yet on the first bar
+            # (0: ``ta.ema(close, emaLen)`` ran as an EMA of length 0).
+            src = node.value.name
+            if (src in self._derived_input_expr
+                    and src not in self._input_var_to_call
+                    and self._expr_is_stable(node.value)):
+                self._derived_input_expr[node.name] = src
+                self._stable_runtime_vars.add(node.name)
+                if src in self._input_backed_vars:
+                    self._input_backed_vars.add(node.name)
             if node.value.name in self._timeframe_period_vars:
                 self._timeframe_period_vars.add(node.name)
         elif (isinstance(node.value, MemberAccess)

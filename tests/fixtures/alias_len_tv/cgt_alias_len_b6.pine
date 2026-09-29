@@ -1,0 +1,23 @@
+//@version=6
+// Lane TAIL-H: a TA length read through a plain alias of an input-derived
+// scalar (len = prod over prod = a * b) and through an alias of that alias
+// is the scalar's value from the first bar: ta.ema, ta.sma, ta.rsi and
+// ta.highest over it. Each close's comment spells what the script reads on
+// that bar.
+strategy("CGT alias len", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+a = input.int(3, "A")
+b = input.int(6, "B")
+prod = a * b
+len = prod
+len2 = len
+e = ta.ema(close, len)
+s = ta.sma(close, len2)
+r = ta.rsi(close, len)
+h = ta.highest(high, len2)
+up = e > e[1]
+sf(float x) => na(x) ? "na" : str.tostring(x, "#.####")
+m = minute(time, "UTC")
+if m == 0 or m == 30
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = sf(e) + "|" + sf(e[1]) + "|" + sf(s) + "|" + sf(r) + "|" + sf(h) + "|" + (up ? "u" : "d") + "|" + str.tostring(len2))
