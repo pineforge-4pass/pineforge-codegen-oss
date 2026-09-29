@@ -15,7 +15,8 @@ The TradingView tapes behind them are replayed in
   cannot hold is its own variable (``block_locals``);
 - a fresh array binds to a callee's array parameter, and an array a call
   returns is refused there;
-- a product of two C++ ``int`` operands is 64-bit, as Pine's ``int`` is.
+- a product of two C++ ``int`` operands that a ``%`` or ``/`` reads is
+  64-bit, as Pine's ``int`` is (every other one keeps its spelling).
 """
 
 from __future__ import annotations
@@ -231,6 +232,13 @@ def test_an_int_product_is_64_bit():
     assert "((int64_t)(s) * (48271))" in cpp
     assert cpp.count("(int64_t)([&](auto&& __pf_array)") == 1
     compile_cpp(cpp, label="int product")
+
+
+def test_a_product_no_modulo_or_division_reads_keeps_its_spelling():
+    cpp = transpile(HEAD + 'var int n = 400\nn += 1\nm = n * 7200000\nq = (n * 3) / 2\n'
+                    'x = m + q\n' + TAIL)
+    assert "(n * 7200000)" in cpp
+    assert "((int64_t)(n) * (3))" in cpp
 
 
 def test_a_float_or_rounded_operand_keeps_its_product():

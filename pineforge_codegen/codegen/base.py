@@ -415,6 +415,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Subscript id -> ``_hist_call_*`` member (see ``ta.py``).
         self._hoisted_ta_values: dict[int, str] = {}
         self._hoisted_hist_reads: dict[int, str] = {}
+        # ``*`` nodes a ``%`` or ``/`` reads: an int product among them is
+        # computed in 64 bits (visit_expr._lower_binop).
+        self._wide_int_products: set[int] = set()
         # Names of ``var`` members that live in a callable scope (not global).
         # Their exact declaration statements own initialization; they must not
         # be initialized by the constructor or the global on_bar preamble.

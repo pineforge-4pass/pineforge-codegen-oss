@@ -1269,6 +1269,12 @@ class ExprVisitor:
         if (folded is not None and not self._int_fits_int32(folded)
                 and self._int_fits_int64(folded)):
             return f"static_cast<int64_t>({folded}LL)"
+        if node.op in ("%", "/"):
+            # Both lower through doubles, which hold an int product's exact
+            # value: compute a product operand in 64 bits (``_lower_binop``).
+            for operand in (node.left, node.right):
+                if isinstance(operand, BinOp) and operand.op == "*":
+                    self._wide_int_products.add(id(operand))
         left = self._visit_expr(node.left)
         right = self._visit_expr(node.right)
         if (self._int_arith_leaves_int32(node)
@@ -1506,11 +1512,14 @@ class ExprVisitor:
         folded_cpp = self._fold_int32_overflow_cpp(node.op, left, right)
         if folded_cpp is not None:
             return folded_cpp
-        if (node.op == "*" and self._emits_int32(node.left)
-                and self._emits_int32(node.right)):
-            # Pine's int is 64-bit: a Park-Miller step ``(s * 48271) %
-            # 2147483647`` over an int ``s`` leaves int32, where the C++
-            # ``int`` product wraps (``tests/test_e2e_int_product.py``).
+        if (node.op == "*" and id(node) in self._wide_int_products
+                and self._pure_int_literal_value(node) is None
+                and self._emits_int32(node.left) and self._emits_int32(node.right)):
+            # Pine's int is 64-bit. A product a ``%`` or ``/`` reads reaches a
+            # double whole, where the C++ ``int`` product wrapped: the
+            # Park-Miller step ``(s * 48271) % 2147483647``
+            # (``fixtures/tail_f_tv/int_product``). An int slot keeps its 32
+            # bits, whose value the product's low bits are either way.
             return f"((int64_t)({left}) * ({right}))"
         return self._lower_relational(op, node.left, node.right, left, right)
 

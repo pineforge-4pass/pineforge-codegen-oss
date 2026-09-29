@@ -1,15 +1,16 @@
 """Loud-rejection sweep for constant-only namespaces (audit items A1-A3, A6).
 
-Constant-namespace members (plot.style_*, text.align_*, shape.*, barmerge.*,
-...) are only legitimate as arguments to parse-and-skip visual calls, inside
-the strategy() declaration, or (barmerge.*) as request.security gaps/lookahead
-values. As FREE EXPRESSIONS they used to fall through codegen to
-``std::string("<member>")`` while the analyzer typed them INT — a silent
+Constant-namespace members (plot.style_*, text.align_*, shape.*, ...) are
+only legitimate as arguments to parse-and-skip visual calls or inside the
+strategy() declaration. As FREE EXPRESSIONS they used to fall through codegen
+to ``std::string("<member>")`` while the analyzer typed them INT — a silent
 mismatch. They must now reject with a clear CompileError, while the
-argument-context uses keep transpiling. ``alert.freq_*`` are the exception:
+argument-context uses keep transpiling. ``alert.freq_*`` are an exception:
 TradingView gives them const string values ("all", "once_per_bar",
 "once_per_bar_close"; tests/test_e2e_alert_freq_values.py), so they are
-ordinary values.
+ordinary values. ``barmerge.*`` are another: a script may hold and compare
+them (on 1, off 0; lane TAIL-F), and a request reads its gaps and lookahead
+as the constants written.
 """
 import pytest
 
@@ -47,13 +48,22 @@ def test_const_namespace_reassignment_rejected():
         transpile(src)
 
 
-@pytest.mark.parametrize("expr", [
-    "barmerge.gaps_on",
-    "barmerge.lookahead_off",
+@pytest.mark.parametrize("expr, value", [
+    ("barmerge.gaps_on", "1"),
+    ("barmerge.lookahead_off", "0"),
 ])
-def test_barmerge_free_expression_rejected(expr):
-    with pytest.raises(CompileError, match="barmerge"):
-        transpile(PRELUDE + f"x = {expr}\n")
+def test_barmerge_free_expression_has_its_value(expr, value):
+    """A barmerge constant is a value a script may hold and compare
+    (TradingView/Request/3's ``var gapStrategy = gaps ? barmerge.gaps_on :
+    barmerge.gaps_off``; lane TAIL-F, ``fixtures/tail_f_tv/barmerge_values``).
+    A request's gaps and lookahead still read the constant as written."""
+    cpp = transpile(PRELUDE + f"x = {expr}\n")
+    assert f"x = {value};" in cpp
+
+
+def test_barmerge_unknown_member_rejected():
+    with pytest.raises(CompileError, match="is not a barmerge constant"):
+        transpile(PRELUDE + "x = barmerge.gaps_maybe\n")
 
 
 def test_alert_freq_free_expression_has_its_value():

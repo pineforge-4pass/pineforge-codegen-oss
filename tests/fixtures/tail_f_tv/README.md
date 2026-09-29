@@ -60,8 +60,8 @@ What each tape shows:
   counter and a string): each is its own variable.
 - `int_product`: Pine's `int` is 64-bit: a Park-Miller step `(s * 48271) %
   2147483647` over a `var int` and over an `array<int>` element reads the
-  exact sequence (2076553157 on the sixth bar), and `3000000 * 1000` reads
-  3000000000.
+  exact sequence (2076553157 on the sixth bar, where a 32-bit product reads
+  -767543190), and `3000000 * 1000` reads 3000000000.
 
 `tests/test_e2e_tail_f_tapes.py` replays every tape but `array_ref_args`
 (whose returned-array call PineForge refuses; the test pins the refusal) on
