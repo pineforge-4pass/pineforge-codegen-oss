@@ -108,6 +108,7 @@ HOST_MEMBER_NAMES = frozenset({
     "pine_session_ismarket",
     "pine_session_ispostmarket",
     "pine_session_ispremarket",
+    "pine_time_offset",
     "position_entry_name",
     "position_entry_price_",
     "prepare_script_run",
