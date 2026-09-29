@@ -1286,7 +1286,7 @@ class ExprVisitor:
                 node, left, right,
                 lambda left, right: self._wide_int_arith_cpp(
                     node, left, right,
-                    lambda left, right: self._lower_binop(node, left, right)),
+                    lambda left, right: self._lower_binop(node, left, right, widened=True)),
             )
         return self._left_operand_first(
             node, left, right,
@@ -1464,8 +1464,9 @@ class ExprVisitor:
             )
         return memo[key]
 
-    def _lower_binop(self, node: BinOp, left: str, right: str) -> str:
-        """The C++ of ``node`` over its rendered operands."""
+    def _lower_binop(self, node: BinOp, left: str, right: str, widened: bool = False) -> str:
+        """The C++ of ``node`` over its rendered operands; ``widened`` when
+        ``_visit_binop`` computes it in 64 bits already (``left`` cast)."""
         cpp_ops = {"and": "&&", "or": "||"}
         op = cpp_ops.get(node.op, node.op)
         if node.op in ("and", "or"):
@@ -1512,14 +1513,17 @@ class ExprVisitor:
         folded_cpp = self._fold_int32_overflow_cpp(node.op, left, right)
         if folded_cpp is not None:
             return folded_cpp
-        if (node.op == "*" and id(node) in self._wide_int_products
+        if (node.op == "*" and not widened and id(node) in self._wide_int_products
                 and self._pure_int_literal_value(node) is None
                 and self._emits_int32(node.left) and self._emits_int32(node.right)):
             # Pine's int is 64-bit. A product a ``%`` or ``/`` reads reaches a
             # double whole, where the C++ ``int`` product wrapped: the
             # Park-Miller step ``(s * 48271) % 2147483647``
-            # (``fixtures/tail_f_tv/int_product``). An int slot keeps its 32
-            # bits, whose value the product's low bits are either way.
+            # (``fixtures/tail_f_tv/int_product``). A product that can leave
+            # int32 by its operands' bounds is ``widened`` already, na-aware
+            # (``_visit_binop``, ``_wide_int_arith_cpp``), and keeps that
+            # spelling; this covers the rest a ``%`` or ``/`` reads (an
+            # ``array.get`` operand, which the bounds do not know).
             return f"((int64_t)({left}) * ({right}))"
         return self._lower_relational(op, node.left, node.right, left, right)
 

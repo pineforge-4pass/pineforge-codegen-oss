@@ -270,10 +270,16 @@ def test_an_int_product_is_64_bit():
     compile_cpp(cpp, label="int product")
 
 
-def test_a_product_no_modulo_or_division_reads_keeps_its_spelling():
+def test_a_product_no_modulo_or_division_reads_takes_mains_rule():
+    """No ``%`` or ``/`` reads ``n * 7200000``: main's 64-bit rule (CGINT6,
+    CG-SILENT-2 item 3; TradingView's tape ``silent2_tv/cgs2_int64_products``)
+    computes it, na-aware, where this lane kept the 32-bit product (CGINT7;
+    ``tests/test_e2e_cgint7_compositions.py``). ``(n * 3) / 2`` fits int32
+    and takes this lane's cast."""
     cpp = transpile(HEAD + 'var int n = 400\nn += 1\nm = n * 7200000\nq = (n * 3) / 2\n'
                     'x = m + q\n' + TAIL)
-    assert "(n * 7200000)" in cpp
+    assert "(n * 7200000)" not in cpp
+    assert "static_cast<double>((static_cast<int64_t>(_pf_wide_l) * _pf_wide_r))" in cpp
     assert "((int64_t)(n) * (3))" in cpp
 
 

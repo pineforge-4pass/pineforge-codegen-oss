@@ -1,0 +1,38 @@
+//@version=6
+// CGINT7: where lane TAIL-E's hold-last clock of a change / mom / roc in a
+// top-level if block meets lane TAIL-G's every-execution history of a pure
+// call read below a lazy edge. Every bar spells what the script read: flat
+// bars as the entry's name, bars holding the position as the close's comment.
+//   r, c: ta.roc / ta.change in an if block whose head reads a call's
+//     history below a lazy `and` (TAIL-G before the if, TAIL-E in it);
+//   v: ta.mom in a value-form if whose head calls a function that reads its
+//     own call's history below a lazy `and` (isNew);
+//   m: ta.mom in a nested if whose head is that function, called only on the
+//     bars its block runs;
+//   b: a ternary whose head reads a call's history below a lazy `and` and
+//     whose arm is ta.change (TAIL-G beside the lazy source clock);
+//   e: how many times the nested if ran.
+strategy("CGINT7 lazy", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+t(int x) => x
+inS(string s) => not na(time(timeframe.period, s))
+isNew(string s) => inS(s) and not inS(s)[1]
+var float r = na
+var float c = na
+var float m = na
+var int e = 0
+if bar_index % 3 == 0 and t(bar_index)[1] == bar_index - 1
+    r := ta.roc(close, 3)
+    c := ta.change(close, 2)
+v = if isNew("0000-0100") or bar_index % 5 == 1
+    ta.mom(close, 2)
+if bar_index % 2 == 0
+    if isNew("0100-0200")
+        m := ta.mom(close, 1)
+        e += 1
+b = bar_index % 4 == 0 and t(bar_index)[1] == bar_index - 1 ? ta.change(close, 3) : -1.0
+f(x) => na(x) ? "na" : str.tostring(x, "#.######")
+sig = str.tostring(bar_index) + "|" + f(r) + "|" + f(c) + "|" + f(v) + "|" + f(m) + "|" + f(b) + "|" + str.tostring(e)
+if strategy.position_size == 0
+    strategy.entry(sig, strategy.long)
+else
+    strategy.close_all(comment = sig)

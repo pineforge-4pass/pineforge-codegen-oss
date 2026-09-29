@@ -2540,6 +2540,14 @@ class SecurityEmitter:
             # before the first requested bar.
             cpp_t = ("bool" if self._is_session_flag(node.object)
                      else self._infer_type(node.object))
+            value = self._security_global_history_value(node)
+            if value is not None and self._expr_returns_wide_int(value, None, set()):
+                # A global holding a 64-bit integer (``g = bar_index *
+                # 7200000``: ``_int_arith_leaves_int32``, or an epoch) keeps
+                # its history in a double, as the same expression read inline
+                # does (``(bar_index * 7200000)[1]``); the global's ``int``
+                # wrapped the value.
+                cpp_t = "double"
             if cpp_t not in ("double", "int", "bool"):
                 cpp_t = "double"
             name = f"_sec{sec_id}_expr_hist_{idx}"
