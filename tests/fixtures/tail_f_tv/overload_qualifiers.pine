@@ -1,0 +1,24 @@
+//@version=6
+strategy("pf-tail-f-overload-qualifiers", overlay = true)
+
+// Two overloads that differ by their parameter's qualifier alone. Every exit
+// comment spells which overload each call ran: the simple one adds 100 to
+// its argument, the series one 900.
+pick(simple int n) =>
+    n + 100
+pick(series int n) =>
+    n + 900
+
+lenIn = input.int(3, "Length")
+fixedLen = lenIn * 2
+m = minute(time, "UTC")
+r1 = pick(7)
+r2 = pick(lenIn)
+r3 = pick(fixedLen)
+r4 = pick(bar_index % 5)
+r5 = pick(m)
+
+if m == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if m == 15
+    strategy.close("L", comment = str.tostring(r1) + "|" + str.tostring(r2) + "|" + str.tostring(r3) + "|" + str.tostring(r4) + "|" + str.tostring(r5))

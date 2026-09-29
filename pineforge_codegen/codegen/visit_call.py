@@ -134,18 +134,23 @@ from __future__ import annotations
 
 from ..ast_nodes import (
     ASTNode,
+    Assignment,
     BoolLiteral,
     ColorLiteral,
+    ExprStmt,
     FuncCall,
     Identifier,
     MemberAccess,
     NaLiteral,
     NumberLiteral,
+    Subscript,
+    Ternary,
     TupleLiteral,
     StringLiteral,
     VarDecl,
 )
 from ..external_requests import RECORDED_KEY_ANNOTATION
+from ..limits import iter_ast_nodes
 from ..security_contexts import ticker_symbol_arg
 from ..symbols import TypeSpec, method_receiver_type_name
 from ..method_binding import (
@@ -514,7 +519,7 @@ class CallVisitor:
                 receiver_node,
                 *binding.evaluation_order,
             ],
-            force_stage=receiver_is_temporary and (
+            force_stage=(receiver_is_temporary and (
                 receiver_passes_by_reference
                 or any(
                     not isinstance(arg, (
@@ -523,7 +528,8 @@ class CallVisitor:
                     ))
                     for arg in rest_nodes
                 )
-            ),
+            )) or self._binds_fresh_array_to_reference(
+                method_info, rest_nodes, first_param=1),
         )
 
     def _callable_target_callsite_idx(self, fi, node: FuncCall) -> int | None:
@@ -1130,6 +1136,121 @@ class CallVisitor:
         result.update(self._func_collection_types.get(func_info.name, {}))
         return result
 
+    # Builtins that return an array no variable holds: ``matrix.row(m, i)``
+    # is a copy of the row, ``array.copy(a)`` of the array. ``array.concat``
+    # returns its first array and ``array.slice`` a view of its array, so
+    # they do not.
+    _FRESH_ARRAY_CALLS = frozenset({
+        ("array", "from"), ("array", "copy"), ("array", "sort_indices"),
+        ("array", "abs"), ("array", "standardize"), ("matrix", "row"),
+        ("matrix", "col"), ("matrix", "eigenvalues"), ("str", "split"),
+        ("map", "keys"), ("map", "values"),
+    })
+    _FRESH_ARRAY_METHODS = {
+        "array": frozenset({"copy", "sort_indices", "abs", "standardize"}),
+        "matrix": frozenset({"row", "col", "eigenvalues"}),
+        "map": frozenset({"keys", "values"}),
+    }
+
+    def _array_arg_kind(self, node, depth: int = 0) -> str:
+        """``"held"`` for an argument naming an array the caller holds (a
+        variable, a field, a history read), ``"fresh"`` for one no variable
+        holds (a new or copied array, a function's new array), and
+        ``"alias"`` for any other value: a function returning an array it
+        was given returns that array, which TradingView passes on as itself
+        (``tests/fixtures/tail_f_tv``). An ``na`` keeps the lowering it had."""
+        if isinstance(node, (Identifier, MemberAccess, Subscript, NaLiteral)):
+            return "held"
+        if isinstance(node, Ternary):
+            kinds = {self._array_arg_kind(node.true_val, depth),
+                     self._array_arg_kind(node.false_val, depth)}
+            # A C++ conditional of a held and a fresh array copies the held one.
+            return kinds.pop() if len(kinds) == 1 else "alias"
+        if not isinstance(node, FuncCall) or depth > 8:
+            return "alias"
+        callee = node.callee
+        if isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier):
+            key = (callee.object.name, callee.member)
+            if key in self._FRESH_ARRAY_CALLS or (
+                    key[0] == "array" and key[1].startswith("new")):
+                return "fresh"
+        if isinstance(callee, MemberAccess):
+            spec = self._type_spec_from_expr(callee.object)
+            fresh = self._FRESH_ARRAY_METHODS.get(spec.kind if spec is not None else "")
+            if fresh is not None:
+                return "fresh" if callee.member in fresh else "alias"
+            receiver = method_receiver_type_name(spec) if spec is not None else None
+            info = self._func_info_map.get(f"{receiver}.{callee.member}") if receiver else None
+        else:
+            info = (self._func_info_map.get(callee.name)
+                    if isinstance(callee, Identifier) else None)
+        return self._returned_array_kind(info, depth + 1)
+
+    def _returned_array_kind(self, func_info, depth: int) -> str:
+        """``"fresh"`` when a user function returns an array it creates: its
+        value is a fresh array, or a local declared as one and never
+        reassigned; ``"alias"`` otherwise."""
+        fdef = getattr(func_info, "node", None)
+        body = list(getattr(fdef, "body", None) or ())
+        if not body:
+            return "alias"
+        last = body[-1]
+        value = (last.expr if isinstance(last, ExprStmt)
+                 else last.value if isinstance(last, VarDecl) else None)
+        if isinstance(value, Identifier):
+            decls = [s for s in body if isinstance(s, VarDecl) and s.name == value.name]
+            reassigned = any(
+                isinstance(n, Assignment) and isinstance(n.target, Identifier)
+                and n.target.name == value.name
+                for stmt in body for n, _depth in iter_ast_nodes(stmt))
+            if (len(decls) != 1 or reassigned
+                    or value.name in (getattr(fdef, "params", None) or ())):
+                return "alias"
+            value = decls[0].value
+        if value is None or isinstance(value, (Identifier, MemberAccess, Subscript)):
+            return "alias"
+        kind = self._array_arg_kind(value, depth)
+        return "fresh" if kind == "fresh" else "alias"
+
+    def _binds_fresh_array_to_reference(self, func_info, arg_nodes: list,
+                                        first_param: int = 0) -> bool:
+        """Whether a call passes a fresh array to a parameter its callee takes
+        as ``std::vector<T>&``. Pine arrays are references: a callee's
+        changes to a variable's array reach the caller, so the parameter stays
+        a reference. A fresh array is a C++ temporary, which binds to no
+        ``T&``; staging the call (``_ordered_user_call_expr``) binds it to a
+        named forwarding reference, and the callee's changes vanish with it,
+        as TradingView's do. An array some variable holds that reaches the
+        call as a value (a function returning the array it was given) is
+        refused: PineForge would pass a copy of it."""
+        if func_info is None:
+            return False
+        specs = list(getattr(func_info, "param_type_specs", ()) or ())
+        params = (list(func_info.node.params)
+                  if getattr(func_info, "node", None) is not None else [])
+        series = self.ctx.func_series_vars.get(func_info.name, set())
+        stage = False
+        for offset, arg in enumerate(arg_nodes):
+            index = first_param + offset
+            spec = specs[index] if index < len(specs) else None
+            if (arg is None or spec is None or spec.kind != "array"
+                    or (index < len(params) and params[index] in series)):
+                continue
+            kind = self._array_arg_kind(arg)
+            if kind == "alias":
+                param = params[index] if index < len(params) else f"#{index + 1}"
+                self._codegen_error(
+                    arg,
+                    f"an array a call returns is passed to parameter '{param}' of "
+                    f"'{func_info.name}', which takes the array itself: PineForge "
+                    "would pass a copy of it",
+                    hint="TradingView passes the array a function returns as itself, so "
+                         "the callee's changes to it reach every variable holding it; "
+                         "pass a variable holding the array instead.",
+                )
+            stage = stage or kind == "fresh"
+        return stage
+
     def _ordered_user_call_expr(
         self,
         call_head: str,
@@ -1371,7 +1492,9 @@ class CallVisitor:
                         # function-return receiver is a C++ rvalue; bind it to a
                         # named forwarding-reference lambda parameter first so
                         # the method sees a valid lvalue for the full call.
-                        force_stage=stage_receiver,
+                        force_stage=stage_receiver
+                        or self._binds_fresh_array_to_reference(
+                            fi_u, rest_nodes, first_param=1),
                     )
 
         # Drawing method dispatch (spec §4.3 / L.1). A KNOWN drawing method on a
@@ -1612,6 +1735,8 @@ class CallVisitor:
                                     obj,
                                     *binding.evaluation_order,
                                 ],
+                                force_stage=self._binds_fresh_array_to_reference(
+                                    fi_u, rest_nodes, first_param=1),
                             )
                     args = ", ".join(self._visit_expr(a) for a in node.args)
                     recv = self._visit_expr(obj)
@@ -2774,6 +2899,8 @@ class CallVisitor:
                 ordered_arg_nodes,
                 all_args,
                 source_order_nodes=[*node.args, *node.kwargs.values()],
+                force_stage=self._binds_fresh_array_to_reference(
+                    self._func_info_map.get(func_name), ordered_arg_nodes),
             )
         return f"{call_head}({', '.join(all_args)})"
 

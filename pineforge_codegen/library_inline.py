@@ -38,11 +38,12 @@ import re
 from collections.abc import Mapping
 
 from .ast_nodes import (
-    ASTNode, ArgOrder, Assignment, BinOp, BreakStmt, ContinueStmt, EnumDecl,
-    ExprStmt, ForInStmt, ForStmt, FuncCall, FuncDef, Identifier, IfStmt,
-    ImportStmt, MemberAccess, MethodDef, Program, StrategyDecl, Subscript,
-    SwitchStmt, Ternary, TupleAssign, TupleLiteral, TypeAnnotation, TypeDecl,
-    TypeField, UnaryOp, VarDecl, WhileStmt,
+    ASTNode, ArgOrder, Assignment, BinOp, BoolLiteral, BreakStmt, ColorLiteral,
+    ContinueStmt, EnumDecl, ExprStmt, ForInStmt, ForStmt, FuncCall, FuncDef,
+    Identifier, IfStmt, ImportStmt, MemberAccess, MethodDef, NaLiteral,
+    NumberLiteral, Program, StrategyDecl, StringLiteral, Subscript, SwitchStmt,
+    Ternary, TupleAssign, TupleLiteral, TypeAnnotation, TypeDecl, TypeField,
+    UnaryOp, VarDecl, WhileStmt,
 )
 from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from .library_modules import LibraryModule, parse_library_module
@@ -72,6 +73,25 @@ _TYPE_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)
 
 # Statement nodes that open a block scope.
 _BLOCK_STATEMENTS = (IfStmt, ForStmt, ForInStmt, WhileStmt, SwitchStmt)
+
+# Pine's qualifiers, weakest first: an argument fits a parameter whose
+# qualifier is at least its own. An unqualified library parameter takes a
+# series argument.
+_CONST, _SIMPLE, _SERIES = 0, 1, 2
+_QUALIFIER_RANKS = {"const": _CONST, "simple": _SIMPLE, "series": _SERIES}
+_LITERALS = (NumberLiteral, StringLiteral, BoolLiteral, NaLiteral, ColorLiteral)
+# Members fixed for the run (``syminfo.*``, ``timeframe.period``), and
+# namespaces of constants.
+_SIMPLE_MEMBER_NAMESPACES = frozenset({"syminfo", "timeframe"})
+_CONST_MEMBER_NAMESPACES = frozenset({
+    "barmerge", "color", "currency", "display", "extend", "font", "format",
+    "location", "order", "position", "scale", "shape", "size", "text", "xloc",
+    "yloc", "adjustment", "backadjustment", "settlement_as_close",
+})
+# Calls whose result is as fixed as their arguments.
+_PURE_CALL_NAMESPACES = frozenset({"str", "ticker"})
+_PURE_CALLS = frozenset({"int", "float", "bool", "string", "color", "na", "nz"})
+_PURE_TIMEFRAME_CALLS = frozenset({"in_seconds", "from_seconds"})
 
 
 def _error(message: str, loc: SourceLocation | None, filename: str,
@@ -107,6 +127,9 @@ class _Module:
         self.targets: dict[str, str] = {}        # own alias -> module path
         self.included: dict[int, object] = {}    # reachable top-level nodes
         self.deps: list[str] = []                # modules its code references
+        # An overload after the first of an overloaded function: its
+        # callable name (its locals' prefix) and new name, by id().
+        self.overloads: dict[int, tuple[str, str]] = {}
 
     @property
     def path(self) -> str:
@@ -129,6 +152,11 @@ class _Linker:
         self._main_targets: dict[str, str] = {}   # main alias -> module path
         self._main_deps: list[str] = []
         self._main_methods: set[str] = set()
+        # The overload each call of an overloaded function binds to, by id().
+        self._overload_of: dict[int, FuncDef] = {}
+        # Qualifier ranks of inlined parameters, by new name.
+        self._param_ranks: dict[str, int] = {}
+        self._main_fixed: dict[str, object] | None = None
 
     # ------------------------------------------------------------------
     # Names
@@ -259,15 +287,171 @@ class _Linker:
             mod.included[id(node)] = node
             self._queue.append((mod, node))
 
-    def _include_function(self, mod: _Module, name: str, at: ASTNode) -> str:
+    def _include_function(self, mod: _Module, name: str, at: ASTNode,
+                          site: tuple | None = None) -> str:
+        """The new name of ``name`` as the call ``at`` reaches it; ``site``
+        is the call's ``(module, scope)`` (module None: the script)."""
         defs = mod.lib.functions[name]
-        if len(defs) > 1:
+        if len(defs) == 1:
+            self._include(mod, defs[0])
+            return mod.names[name]
+        chosen = self._overload(mod, name, defs, at, site)
+        self._overload_of[id(at)] = chosen
+        self._include(mod, chosen)
+        return self._overload_names(mod, name, chosen)[1]
+
+    def _overload_names(self, mod: _Module, name: str, fdef: FuncDef) -> tuple[str, str]:
+        """(callable name, new name) of one of ``name``'s overloads: the first
+        keeps the function's, each later one gets its own."""
+        index = next(i for i, d in enumerate(mod.lib.functions[name]) if d is fdef)
+        if index == 0:
+            return name, mod.names[name]
+        if id(fdef) not in mod.overloads:
+            callable_name = f"{name}_{index + 1}"
+            mod.overloads[id(fdef)] = (callable_name,
+                                       self._alloc(mod.prefix + callable_name))
+        return mod.overloads[id(fdef)]
+
+    def _callable_of(self, mod: _Module, name: str, call: ASTNode) -> tuple[str, set[str]]:
+        """The callable name and parameters a call's keywords bind to."""
+        chosen = self._overload_of.get(id(call))
+        if chosen is None:
+            return name, self._function_params(mod, name)
+        return self._overload_names(mod, name, chosen)[0], set(chosen.params)
+
+    def _overload(self, mod: _Module, name: str, defs: list, at: ASTNode,
+                  site: tuple | None) -> FuncDef:
+        """The overload a call binds to, as TradingView picks it: the
+        overloads its arguments bind to by count and keyword; of those that
+        differ by their parameters' qualifiers alone, the one whose
+        qualifiers are the weakest its arguments fit (TradingView/Request/3
+        overloads ``simple string`` parameters with ``series string`` ones:
+        an input's or a literal's call binds to the ``simple`` one, a series
+        argument to the ``series`` one). Overloads that differ by type are
+        refused by name, as every overload was."""
+        refusal = _error(
+            f"library '{mod.path}' defines '{name}' {len(defs)} times "
+            "(overloads); PineForge does not inline an overloaded library "
+            "function", at.loc, self._filename)
+        if not isinstance(at, FuncCall) or site is None:
+            raise _LinkError(refusal)
+        bound = {d_id: args for d_id, args in
+                 ((id(d), self._bind_arguments(d, at)) for d in defs) if args is not None}
+        fits = [d for d in defs if id(d) in bound]
+        if len(fits) == 1:
+            return fits[0]
+        if not fits:
             raise _LinkError(_error(
-                f"library '{mod.path}' defines '{name}' {len(defs)} times "
-                "(overloads); PineForge does not inline an overloaded library "
-                "function", at.loc, self._filename))
-        self._include(mod, defs[0])
-        return mod.names[name]
+                f"no overload of '{name}' of library '{mod.path}' takes the "
+                "arguments of this call", at.loc, self._filename))
+        hints = {tuple((d.annotations or {}).get("param_type_hints") or ()) for d in fits}
+        if len(hints) > 1:
+            raise _LinkError(refusal)
+        best: list[tuple[int, FuncDef]] = []
+        for fdef in fits:
+            qualifiers = list((fdef.annotations or {}).get("param_qualifiers") or ())
+            ranks = [_QUALIFIER_RANKS.get(q, _SERIES) for q in qualifiers]
+            ranks += [_SERIES] * (len(fdef.params) - len(ranks))
+            if all(self._arg_rank(arg, site) <= ranks[i] for i, arg in bound[id(fdef)].items()):
+                best.append((sum(ranks), fdef))
+        best.sort(key=lambda item: item[0])
+        if not best or (len(best) > 1 and best[0][0] == best[1][0]):
+            raise _LinkError(refusal)
+        return best[0][1]
+
+    @staticmethod
+    def _bind_arguments(fdef: FuncDef, call: FuncCall) -> dict[int, ASTNode] | None:
+        """``call``'s arguments by ``fdef``'s parameter index, or None when
+        they do not bind (too many, an unknown keyword, one given twice, a
+        parameter without a default left out)."""
+        params = list(fdef.params)
+        defaults = list((fdef.annotations or {}).get("param_defaults") or ())
+        if len(call.args) > len(params):
+            return None
+        bound = dict(enumerate(call.args))
+        for key, arg in call.kwargs.items():
+            if key not in params or params.index(key) in bound:
+                return None
+            bound[params.index(key)] = arg
+        for index in range(len(params)):
+            has_default = index < len(defaults) and defaults[index] is not None
+            if index not in bound and not has_default:
+                return None
+        return bound
+
+    def _arg_rank(self, node, site: tuple, seen: frozenset = frozenset()) -> int:
+        """The weakest qualifier ``node`` is known to have: const for a
+        literal or a constant, simple for an input, ``syminfo.*`` /
+        ``timeframe.*`` and a script's declaration of one (never reassigned,
+        not ``var``), their operators and pure calls; series otherwise. A
+        library's parameter has its declared qualifier."""
+        owner, _scope = site
+        if isinstance(node, _LITERALS):
+            return _CONST
+        if isinstance(node, Identifier):
+            if owner is not None:
+                return self._param_ranks.get(node.name, _SERIES)
+            decl = self._main_fixed_decls().get(node.name)
+            if decl is None or node.name in seen:
+                return _SERIES
+            return max(_SIMPLE, self._arg_rank(decl.value, site, seen | {node.name}))
+        if isinstance(node, MemberAccess):
+            if isinstance(node.object, Identifier):
+                if node.object.name in _SIMPLE_MEMBER_NAMESPACES:
+                    return _SIMPLE
+                if node.object.name in _CONST_MEMBER_NAMESPACES:
+                    return _CONST
+            return _SERIES
+        if isinstance(node, BinOp):
+            return max(self._arg_rank(node.left, site, seen),
+                       self._arg_rank(node.right, site, seen))
+        if isinstance(node, UnaryOp):
+            return self._arg_rank(node.operand, site, seen)
+        if isinstance(node, Ternary):
+            return max(self._arg_rank(part, site, seen)
+                       for part in (node.condition, node.true_val, node.false_val))
+        if isinstance(node, FuncCall):
+            callee = node.callee
+            parts = _callee_alias(callee)
+            if parts is not None and parts[0] == "input" or (
+                    isinstance(callee, Identifier) and callee.name == "input"):
+                return _SIMPLE
+            pure = (
+                (parts is not None and (
+                    parts[0] in _PURE_CALL_NAMESPACES
+                    or (parts[0] == "math" and parts[1] != "random")
+                    or (parts[0] == "timeframe" and parts[1] in _PURE_TIMEFRAME_CALLS)))
+                or (isinstance(callee, Identifier) and callee.name in _PURE_CALLS))
+            if not pure:
+                return _SERIES
+            return max((self._arg_rank(arg, site, seen)
+                        for arg in [*node.args, *node.kwargs.values()]), default=_SIMPLE)
+        return _SERIES
+
+    def _main_fixed_decls(self) -> dict[str, object]:
+        """The script's top-level declarations a value is read from once:
+        declared once, never reassigned, neither ``var`` nor ``series``."""
+        if self._main_fixed is None:
+            counts: dict[str, int] = {}
+            decls: dict[str, VarDecl] = {}
+            reassigned: set[str] = set()
+            for node in self._walk(self._program):
+                if isinstance(node, VarDecl):
+                    counts[node.name] = counts.get(node.name, 0) + 1
+                    decls[node.name] = node
+                elif isinstance(node, TupleAssign):
+                    for bound in node.names:
+                        counts[bound] = counts.get(bound, 0) + 2
+                elif isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                    reassigned.add(node.target.name)
+            top = {id(stmt) for stmt in self._program.body}
+            self._main_fixed = {
+                name: decl for name, decl in decls.items()
+                if counts.get(name) == 1 and id(decl) in top and name not in reassigned
+                and not decl.is_var and not decl.is_varip and decl.value is not None
+                and (decl.annotations or {}).get("qualifier") != "series"
+            }
+        return self._main_fixed
 
     def _include_methods(self, mod: _Module, name: str, exported_only: bool) -> bool:
         found = False
@@ -287,16 +471,18 @@ class _Linker:
         self._include(mod, node)
         return mod.names[name]
 
-    def _export(self, owner: _Module | None, alias: str, member: str, at: ASTNode):
+    def _export(self, owner: _Module | None, alias: str, member: str, at: ASTNode,
+                site: tuple | None = None):
         """(kind, module, new name) of ``alias.member`` read from ``owner``,
-        or None when it is the built-in namespace's member."""
+        or None when it is the built-in namespace's member; ``site`` is a
+        call's ``(module, scope)``."""
         builtin = BUILTIN_NAMESPACE_IMPORT_MEMBERS.get(alias)
         if builtin is not None and member in builtin:
             return None
         mod = self._module_of(owner, alias, at)
         lib = mod.lib
         if member in lib.functions and any(lib.exported(f) for f in lib.functions[member]):
-            return "function", mod, self._include_function(mod, member, at)
+            return "function", mod, self._include_function(mod, member, at, site)
         if member in lib.methods and any(lib.exported(m) for m in lib.methods[member]):
             self._include_methods(mod, member, exported_only=True)
             return "method", mod, mod.method_names[member]
@@ -346,8 +532,10 @@ class _Linker:
 
     def _process(self, mod: _Module, node) -> None:
         if isinstance(node, FuncDef):
-            self._process_callable(mod, node, node.name)
-            node.name = mod.names[node.name]
+            callable_name, new_name = mod.overloads.get(
+                id(node), (node.name, mod.names[node.name]))
+            self._process_callable(mod, node, callable_name)
+            node.name = new_name
         elif isinstance(node, MethodDef):
             self._process_callable(mod, node, node.name)
             node.type_name = self._rewrite_type(node.type_name, mod, node)
@@ -383,6 +571,8 @@ class _Linker:
         scope = _Scope(self, mod, callable_name)
         node.params = [scope.declare(p, hints[i] if i < len(hints) else None)
                        for i, p in enumerate(node.params)]
+        for param, qualifier in zip(node.params, notes.get("param_qualifiers") or ()):
+            self._param_ranks[param] = _QUALIFIER_RANKS.get(qualifier, _SERIES)
         self._stmts(mod, node.body, scope)
 
     def _stmts(self, mod: _Module, stmts: list, scope: "_Scope") -> None:
@@ -598,8 +788,9 @@ class _Linker:
         if isinstance(callee, Identifier) and not self._is_local(scope, callee.name):
             name = callee.name
             if name in mod.lib.functions:
-                self._remap_kwargs(mod, node, name, self._function_params(mod, name))
-                callee.name = self._include_function(mod, name, node)
+                new_name = self._include_function(mod, name, node, (mod, scope))
+                self._remap_kwargs(mod, node, *self._callable_of(mod, name, node))
+                callee.name = new_name
                 return node
             if name in mod.lib.methods:
                 # A method called as a function: ``m(recv, ...)``.
@@ -611,12 +802,12 @@ class _Linker:
         if parts is not None and not self._is_object(scope, parts[0]):
             alias, member = parts
             if alias in mod.targets:
-                found = self._export(mod, alias, member, node)
+                found = self._export(mod, alias, member, node, (mod, scope))
                 if found is None:
                     return node
                 kind, target, name = found
                 if kind == "function":
-                    self._remap_kwargs(target, node, member, self._function_params(target, member))
+                    self._remap_kwargs(target, node, *self._callable_of(target, member, node))
                     node.callee = self._named(name, callee)
                     return node
                 if kind == "method":
@@ -699,13 +890,13 @@ class _Linker:
             parts = _callee_alias(callee)
             if parts is not None and parts[0] in self._main_targets:
                 alias, member = parts
-                found = self._export(None, alias, member, node)
+                found = self._export(None, alias, member, node, (None, None))
                 if found is None:
                     self._rewrite_template_args(callee, None)
                     return node
                 kind, target, name = found
                 if kind == "function":
-                    self._remap_kwargs(target, node, member, self._function_params(target, member))
+                    self._remap_kwargs(target, node, *self._callable_of(target, member, node))
                     node.callee = self._named(name, callee)
                     return node
                 if kind == "method":

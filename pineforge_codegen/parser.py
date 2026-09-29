@@ -893,7 +893,9 @@ class Parser:
         params = []
         param_type_hints: list = []
         param_defaults: list = []
+        param_qualifiers: list = []
         while not self._check(TokenType.RPAREN):
+            param_qualifiers.append(self._param_qualifier_ahead())
             # Consume the optional type annotation (builtin / user / drawing /
             # ``T[]``), returning the canonical hint string. Handles ``float[] arr``,
             # ``line[] ln``, ``color c``, ``SDZone z``, ``string tf``, as well as
@@ -930,7 +932,23 @@ class Parser:
             "param_type_hints": param_type_hints,
             "param_defaults": param_defaults,
         }
+        if self._library:
+            # A library may overload a function by its parameters' qualifiers
+            # alone (TradingView/Request/3: ``simple string`` and ``series
+            # string``); ``library_inline`` picks the overload by them.
+            node.annotations["param_qualifiers"] = param_qualifiers
         return self._set_loc(node, start_tok)
+
+    def _param_qualifier_ahead(self) -> str | None:
+        """The ``series`` / ``simple`` / ``const`` word a parameter's
+        annotation starts with (``_parse_param_type_annotation`` consumes
+        it), or None."""
+        cur = self._current()
+        if (cur.type == TokenType.IDENT and cur.value in ("series", "simple", "const")
+                and self._peek().type not in (
+                    TokenType.COMMA, TokenType.RPAREN, TokenType.EQUALS)):
+            return cur.value
+        return None
 
     def _parse_type_or_enum_decl(self):
         """Parse type or enum block declarations."""
@@ -1158,7 +1176,7 @@ class Parser:
                     default_body = self._parse_block()
                     self._consume(TokenType.DEDENT)
                 else:
-                    default_body = [ExprStmt(expr=self._parse_expression())]
+                    default_body = self._parse_arm_line()
             else:
                 # case_expr => body
                 case_expr = self._parse_expression()
@@ -1169,13 +1187,71 @@ class Parser:
                     case_body = self._parse_block()
                     self._consume(TokenType.DEDENT)
                 else:
-                    case_body = [ExprStmt(expr=self._parse_expression())]
+                    case_body = self._parse_arm_line()
                 cases.append((case_expr, case_body))
             self._skip_newlines()
 
         self._consume(TokenType.DEDENT)
         node = SwitchStmt(expr=expr, cases=cases, default_body=default_body)
         return self._set_loc(node, start_tok)
+
+    def _parse_arm_line(self) -> list:
+        """The block of a ``switch`` arm written on its ``=>`` line.
+
+        Pine joins one-line statements with commas, and an arm's line is such
+        a block: TradingView's ``TradingView/Request/3`` library ends an arm
+        in ``=> runtime.error(...), ""``. TradingView runs the statements left
+        to right and the arm's value is the last one's, as for a block written
+        below the arrow; a declaration or an assignment may be one of them
+        (``tests/fixtures/tail_f_tv``). A lone expression is the node an arm
+        always held.
+        """
+        body: list = []
+        while True:
+            if self._arm_line_statement_ahead():
+                self._extend_statement_list(body, self._parse_single_statement())
+            else:
+                start_tok = self._current()
+                expr = self._parse_expression()
+                if self._current().type in COMPOUND_ASSIGN_OPS:
+                    # A field or element target: ``o.f := v``.
+                    op = COMPOUND_ASSIGN_OPS[self._advance().type]
+                    node = Assignment(target=expr, op=op, value=self._parse_expression())
+                    body.append(self._set_loc(node, start_tok))
+                else:
+                    body.append(ExprStmt(expr=expr))
+            if not self._match(TokenType.COMMA):
+                return body
+            if self._check(TokenType.NEWLINE) or self._check(TokenType.DEDENT) or self._at_end():
+                return body
+
+    def _arm_line_statement_ahead(self) -> bool:
+        """Whether an arm line's next statement is one no expression starts:
+        a declaration, an assignment to a name, ``break`` or ``continue``.
+        (A call is never a function definition here, so ``f(a)`` before the
+        next arm's ``=>`` stays a call.)"""
+        cur, nxt = self._current(), self._peek()
+        if cur.type in (TokenType.VAR, TokenType.VARIP,
+                        TokenType.BREAK, TokenType.CONTINUE):
+            return True
+        if cur.type in TYPE_KEYWORDS:
+            return ((nxt.type == TokenType.IDENT
+                     and self._peek(2).type == TokenType.EQUALS)
+                    or (nxt.type == TokenType.LBRACKET
+                        and self._peek(2).type == TokenType.RBRACKET))
+        if cur.type == TokenType.LBRACKET:
+            return self._is_tuple_assign()
+        if cur.type != TokenType.IDENT:
+            return False
+        if cur.value in ("const", "series", "simple") and (
+                nxt.type in TYPE_KEYWORDS
+                or (nxt.type == TokenType.IDENT
+                    and self._is_ident_typed_var_decl(offset=1))):
+            return True
+        return (self._is_ident_typed_var_decl()
+                or (nxt.type == TokenType.EQUALS
+                    and self._peek(2).type != TokenType.EQUALS)
+                or nxt.type in COMPOUND_ASSIGN_OPS)
 
     # -- Block parsing --
 

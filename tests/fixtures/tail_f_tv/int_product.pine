@@ -1,0 +1,18 @@
+//@version=6
+strategy("pf-tail-f-int-product", overlay = true)
+
+// A Park-Miller generator: int products past 32 bits. Every exit comment
+// spells the generator's state, held in a var int and in an int array, and a
+// product of two ints read back.
+var int s = 42
+var int[] st = array.new_int(1, 42)
+s := (s * 48271) % 2147483647
+v = (array.get(st, 0) * 48271) % 2147483647
+array.set(st, 0, v)
+int a = 3000000
+int b = a * 1000
+m = minute(time, "UTC")
+if m == 0
+    strategy.entry("L", strategy.long, comment = "E")
+if m == 15
+    strategy.close("L", comment = str.tostring(s) + "|" + str.tostring(v) + "|" + str.tostring(b) + "|" + str.tostring(v % 995))

@@ -950,6 +950,11 @@ class ExprVisitor:
             if ns == "adjustment":
                 # adjustment.none / dividends / splits. Unknown member -> "none" (0).
                 return ADJUSTMENT_MAP.get(node.member, "0")
+            if ns == "barmerge":
+                # A barmerge constant held or compared as a value (the
+                # analyzer types it int): on 1, off 0. A request's gaps or
+                # lookahead reads the constant as written.
+                return "1" if node.member in ("gaps_on", "lookahead_on") else "0"
             if ns == "dayofweek":
                 return DAYOFWEEK_MAP.get(node.member, "0")
             if ns == "session":
@@ -1501,7 +1506,43 @@ class ExprVisitor:
         folded_cpp = self._fold_int32_overflow_cpp(node.op, left, right)
         if folded_cpp is not None:
             return folded_cpp
+        if (node.op == "*" and self._emits_int32(node.left)
+                and self._emits_int32(node.right)):
+            # Pine's int is 64-bit: a Park-Miller step ``(s * 48271) %
+            # 2147483647`` over an int ``s`` leaves int32, where the C++
+            # ``int`` product wraps (``tests/test_e2e_int_product.py``).
+            return f"((int64_t)({left}) * ({right}))"
         return self._lower_relational(op, node.left, node.right, left, right)
+
+    def _emits_int32(self, node) -> bool:
+        """Whether ``node`` is emitted as a C++ ``int`` for certain: an int
+        literal, a name or loop variable stored as ``int``, an element of an
+        ``array<int>``, or a sign or product of those."""
+        if isinstance(node, NumberLiteral):
+            return isinstance(node.value, int) and not isinstance(node.value, bool)
+        if isinstance(node, UnaryOp) and node.op in ("-", "+"):
+            return self._emits_int32(node.operand)
+        if isinstance(node, BinOp) and node.op in ("+", "-"):
+            return self._emits_int32(node.left) and self._emits_int32(node.right)
+        if isinstance(node, Identifier):
+            if node.name in getattr(self, "_current_loop_vars", set()):
+                return True
+            return (not self._emitted_value_is_double(node)
+                    and self._slot_scalar_cpp_type(node.name) == "int"
+                    and self._infer_type(node) == "int")
+        if isinstance(node, FuncCall):
+            callee = node.callee
+            if not isinstance(callee, MemberAccess) or callee.member != "get":
+                return False
+            receiver = (callee.object if not (
+                isinstance(callee.object, Identifier) and callee.object.name == "array")
+                else (node.args[0] if node.args else None))
+            if not isinstance(receiver, Identifier):
+                return False
+            spec = self._collection_spec_for_name(receiver.name)
+            return (spec is not None and spec.kind == "array" and spec.element is not None
+                    and self._type_spec_to_cpp(spec.element) == "int")
+        return False
 
     def _refuse_v5_bool_na_observer(self, node, what: str, operands) -> None:
         """A v5 bool can be na (a comparison with na, an na literal, a bool's

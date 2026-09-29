@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+// Clean-room synthetic library for PineForge's library inliner tests
+// (lane TAIL-F). Not a published TradingView library. `pick` is overloaded
+// by its parameter's qualifier alone, as the open TradingView/Request/3
+// library overloads `simple string` and `series string` parameters; `gated`
+// holds a barmerge constant it passes as the gaps of a request of another
+// symbol, as that library's `cryptoDerivativeMetric` does.
+
+//@version=6
+library("Overloads")
+
+// The simple overload adds 100 to its argument, the series one 900.
+export pick(simple int n) =>
+    n + 100
+
+export pick(series int n) =>
+    n + 900
+
+export gated(simple string sym, simple bool gaps = false) =>
+    var gapStrategy = gaps ? barmerge.gaps_on : barmerge.gaps_off
+    var string tickerID = str.format("{0}_{1}", ticker.standard(sym), "X")
+    request.security(tickerID, timeframe.period, close, gapStrategy)

@@ -364,15 +364,21 @@ UNSUPPORTED_CONST_NAMESPACES: dict[str, str] = {
     "xloc":     _CONST_NS_VISUAL_MSG,
     "yloc":     _CONST_NS_VISUAL_MSG,
     "barmerge": (
-        "is only valid as the gaps/lookahead argument of "
-        "request.security(...); it has no runtime value as a free "
-        "expression in PineForge."
+        "is not a barmerge constant; only barmerge.gaps_on, "
+        "barmerge.gaps_off, barmerge.lookahead_on and barmerge.lookahead_off "
+        "exist."
     ),
     "alert": (
         "is not a Pine alert constant; only alert.freq_all, "
         "alert.freq_once_per_bar and alert.freq_once_per_bar_close exist."
     ),
 }
+
+# ``barmerge.*`` are constants with a value: a script may hold one
+# (TradingView/Request/3: ``var gapStrategy = gaps ? barmerge.gaps_on :
+# barmerge.gaps_off``) and compare it. As a request's gaps or lookahead only
+# the constant itself is read (``_check_request_security``).
+BARMERGE_MEMBERS = frozenset({"gaps_on", "gaps_off", "lookahead_on", "lookahead_off"})
 
 # ``alert.freq_*`` are const strings with a runtime value ("all",
 # "once_per_bar", "once_per_bar_close" on TradingView's own tape), so they
@@ -509,6 +515,18 @@ def _loc(node: ASTNode | None, fallback_file: str) -> SourceLocation:
     if node is not None and getattr(node, "loc", None) is not None:
         return node.loc
     return SourceLocation(file=fallback_file, line=1, col=1, end_col=1)
+
+
+def _security_gaps_lookahead(node: FuncCall) -> tuple[ASTNode | None, ASTNode | None]:
+    """A ``request.security`` call's gaps and lookahead arguments, positional
+    or keyword (None where it leaves one out)."""
+    gaps = node.kwargs.get("gaps")
+    if gaps is None and len(node.args) > 3:
+        gaps = node.args[3]
+    lookahead = node.kwargs.get("lookahead")
+    if lookahead is None and len(node.args) > 4:
+        lookahead = node.args[4]
+    return gaps, lookahead
 
 
 def _qualified_name(callee: ASTNode) -> tuple[str | None, str | None]:
@@ -1919,6 +1937,24 @@ class SupportChecker:
         for stmt in node.else_body:
             self._visit(stmt)
 
+    def _visit_SwitchStmt(self, node: SwitchStmt) -> None:
+        """Visit a switch: its selector, every arm's condition and block, and
+        its default block. ``cases`` holds ``(condition, block)`` tuples,
+        which the generic child walk does not enter, so every arm but the
+        default went unchecked: a request of another symbol in one kept no
+        lowering (``TradingView/Request/3``'s ``cryptoDerivativeMetric``)."""
+        self._visit(node.expr)
+        for case_expr, body in node.cases:
+            if node.expr is None:
+                self._in_conditional_depth += 1
+            self._visit(case_expr)
+            if node.expr is None:
+                self._in_conditional_depth -= 1
+            for stmt in body:
+                self._visit(stmt)
+        for stmt in node.default_body:
+            self._visit(stmt)
+
     def _visit_Ternary(self, node: Ternary) -> None:
         """Visit ternary; mark the condition expression as conditional context."""
         self._in_conditional_depth += 1
@@ -1995,6 +2031,8 @@ class SupportChecker:
             and isinstance(node.object, Identifier)
             and not (node.object.name == "alert"
                      and node.member in ALERT_FREQ_MEMBERS)
+            and not (node.object.name == "barmerge"
+                     and node.member in BARMERGE_MEMBERS)
             and self._reject_if_in(
                 UNSUPPORTED_CONST_NAMESPACES,
                 node.object.name,
@@ -2100,21 +2138,20 @@ class SupportChecker:
             tf_node = node.args[1]
         self._check_tf_literal(tf_node, "request.security")
 
-        # gaps / lookahead value-shape check (positional or kwarg).
-        gaps_node = node.kwargs.get("gaps")
-        if gaps_node is None and len(node.args) > 3:
-            gaps_node = node.args[3]
-        if gaps_node is not None and not self._is_barmerge_member(gaps_node, "gaps_on", "gaps_off"):
+        # gaps / lookahead value-shape check (positional or kwarg). A request
+        # that reads no data (lowered above) never reads them.
+        reads_data = (node.annotations or {}).get(LOWERING_ANNOTATION) not in (
+            "inert", "unpinned")
+        gaps_node, lookahead_node = _security_gaps_lookahead(node)
+        if (reads_data and gaps_node is not None
+                and not self._is_barmerge_member(gaps_node, "gaps_on", "gaps_off")):
             self._err(
                 gaps_node,
                 "request.security gaps must be barmerge.gaps_on or barmerge.gaps_off.",
                 hint="Codegen only recognizes the barmerge.gaps_* literal; other values are silently treated as gaps_off.",
             )
 
-        lookahead_node = node.kwargs.get("lookahead")
-        if lookahead_node is None and len(node.args) > 4:
-            lookahead_node = node.args[4]
-        if lookahead_node is not None and not self._is_barmerge_member(
+        if reads_data and lookahead_node is not None and not self._is_barmerge_member(
             lookahead_node, "lookahead_on", "lookahead_off"
         ):
             self._err(
@@ -2341,6 +2378,12 @@ class SupportChecker:
         ignore = node.kwargs.get("ignore_invalid_symbol")
         if ignore is not None and not index.registration_value(ignore):
             return "registration computes its ignore_invalid_symbol before the first bar"
+        gaps, lookahead = _security_gaps_lookahead(node)
+        if not (gaps is None or self._is_barmerge_member(gaps, "gaps_on", "gaps_off")) or not (
+                lookahead is None
+                or self._is_barmerge_member(lookahead, "lookahead_on", "lookahead_off")):
+            # Registration reads them as the constants they are written as.
+            return "its gaps and lookahead are barmerge constants"
         payload = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
         if isinstance(payload, FuncCall) and _qualified_name(payload.callee) == (
                 "request", "footprint"):
