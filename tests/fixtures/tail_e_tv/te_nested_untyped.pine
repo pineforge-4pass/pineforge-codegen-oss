@@ -1,0 +1,27 @@
+//@version=6
+// A wrapper called on two written paths, whose nested helper takes an untyped
+// string parameter choosing its TA arm: each path keeps its own EMA / SMA
+// state, and the string reaches the nested helper of both. Every bar spells
+// the values: flat bars as the entry's name, bars holding the position as the
+// close's comment.
+strategy("PF te nested untyped", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+kind = input.string("SMA", "Kind", options = ["EMA", "SMA"])
+f_ma(maType, src, len) =>
+    float result = na
+    if maType == "EMA"
+        result := ta.ema(src, len)
+    else
+        result := ta.sma(src, len)
+    result
+f_two(c, len, t) =>
+    ma = f_ma(t, c, len)
+    sg = f_ma(t, ma, 3)
+    [ma, sg]
+[a1, a2] = f_two(close, 5, kind)
+[b1, b2] = f_two(open, 4, "EMA")
+f(x) => na(x) ? "na" : str.tostring(x, "#.###")
+v = f(a1) + "|" + f(a2) + "|" + f(b1) + "|" + f(b2)
+if strategy.position_size == 0
+    strategy.entry(v, strategy.long)
+else
+    strategy.close_all(comment = v)

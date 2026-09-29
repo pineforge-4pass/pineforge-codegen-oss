@@ -2026,6 +2026,12 @@ class TopLevelEmitter:
         node = fi.node
         if node is None:
             return
+        # The written call whose argument types type this emission: the
+        # variant's own, or the one a fresh nested instance runs.
+        type_call_site_idx = (
+            call_site_idx if call_site_idx is not None
+            else (instance or {}).get("type_call_site_idx")
+        )
 
         # Collection registries historically used raw variable names for the
         # whole translation unit.  Emit each callable against copy-on-write
@@ -2079,9 +2085,9 @@ class TopLevelEmitter:
         )
         variant_param_types = (
             getattr(self.ctx, "func_callsite_param_types", {}).get(
-                (fi.name, call_site_idx), ()
+                (fi.name, type_call_site_idx), ()
             )
-            if call_site_idx is not None
+            if type_call_site_idx is not None
             else ()
         )
         for i, p in enumerate(node.params):
@@ -2258,14 +2264,14 @@ class TopLevelEmitter:
             # values and their na sentinel cannot narrow at the return edge.
             ret_type = "int64_t"
         elif (
-            call_site_idx is not None
+            type_call_site_idx is not None
             and self._callsite_callable_return_pine_type(
-                fi, call_site_idx
+                fi, type_call_site_idx
             ) != PineType.UNKNOWN
         ):
             ret_type = PINE_TYPE_TO_CPP.get(
                 self._callsite_callable_return_pine_type(
-                    fi, call_site_idx
+                    fi, type_call_site_idx
                 ),
                 "double",
             )

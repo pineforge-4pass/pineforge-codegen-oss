@@ -1808,6 +1808,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         "name": inst_name,
                         "fresh": True,
                         "call_site_idx": None,
+                        # The written call this instance runs, for its
+                        # parameter and return types: an untyped parameter
+                        # takes the argument that call passes, as the
+                        # call's own cs{j} clone does.
+                        "type_call_site_idx": j,
                         "ta_remap": composed_ta,
                         "var_remap": fvar_remap,
                         "fixnan_remap": ffixnan_remap,
