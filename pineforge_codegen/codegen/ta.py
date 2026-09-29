@@ -912,6 +912,70 @@ class TaSiteHelper:
             if units:
                 by_stmt[id(stmt)] = units
 
+        # A change / mom / roc call in a top-level if block -- an else-if's
+        # and a nested if's too -- runs only on the bars its block runs, and
+        # reads its own held source history as a lazy operand's call does:
+        # TradingView's tape of te_lazy_if_source reads ta.roc(close, 3) on
+        # its tenth bar from the close its third bar held, where the
+        # executions' own ring is still short (and the stateful ROC oracles
+        # pf-probe-quant-stateful-roc-* read their reached ROC so). Loop and
+        # switch bodies, a var initializer and a call read with history keep
+        # their lowering.
+        def block_sites(node, history_read: bool = False) -> None:
+            if node is None or isinstance(node, (str, int, float, bool)):
+                return
+            if isinstance(node, (list, tuple)):
+                for child in node:
+                    block_sites(child)
+                return
+            if not isinstance(node, ASTNode) or isinstance(
+                    node, (FuncDef, MethodDef, ForStmt, ForInStmt, WhileStmt, SwitchStmt)):
+                return
+            if isinstance(node, VarDecl) and (node.is_var or node.is_varip):
+                return
+            if isinstance(node, Subscript):
+                block_sites(node.object, history_read=True)
+                block_sites(node.index)
+                return
+            if isinstance(node, FuncCall):
+                callee = node.callee
+                is_security = (
+                    isinstance(callee, MemberAccess)
+                    and isinstance(callee.object, Identifier)
+                    and callee.object.name == "request"
+                    and callee.member in ("security", "security_lower_tf")
+                )
+                site = None if history_read else self._get_ta_site(node)
+                if (site is not None
+                        and self._ta_name_from_site(site) in self.LAZY_SOURCE_CLOCK_TA
+                        and self._lazy_source_clock_eligible(site)):
+                    source_clock.setdefault(id(node), {
+                        "node": node,
+                        "site": site,
+                        "length_literal": self._lazy_source_clock_length_literal(
+                            self._lazy_source_clock_length_node(node)
+                        ),
+                    })
+                for idx, arg in enumerate(getattr(node, "args", ()) or ()):
+                    if not (is_security and idx == 2):
+                        block_sites(arg)
+                for key, value in (getattr(node, "kwargs", None) or {}).items():
+                    if not (is_security and key == "expression"):
+                        block_sites(value)
+                return
+            for key, value in vars(node).items():
+                if key not in ("loc", "annotations"):
+                    block_sites(value)
+
+        for stmt in getattr(ast, "body", ()) or ():
+            blocks = [stmt] if isinstance(stmt, IfStmt) else [
+                value for value in (getattr(stmt, "value", None),)
+                if isinstance(stmt, (VarDecl, Assignment)) and isinstance(value, IfStmt)
+            ]
+            for block in blocks:
+                block_sites(block.body)
+                block_sites(block.else_body)
+
         plan = {
             "by_stmt": by_stmt,
             "call_nodes": call_nodes,
