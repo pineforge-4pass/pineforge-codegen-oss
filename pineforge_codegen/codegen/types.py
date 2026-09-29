@@ -904,9 +904,13 @@ class TypeInferer:
             return None
         if name in self._wide_int_provenance()[0]:
             return None
-        if self._literal_wide_global(name):
+        if (getattr(self, "_int_width_scan_depth", 0) == 0
+                and self._literal_wide_global(name)):
             # A top-level int constant past int32 initializes an int64_t
-            # slot (CGINT5a), reassigned or not: it is no 32-bit operand.
+            # slot (CGINT5a), reassigned or not: where it is emitted it is no
+            # 32-bit operand. A width scan keeps it one: it cannot tell the
+            # block local that may shadow it there (``int g = bar_index``),
+            # and a product it reads is 64-bit either way.
             return None
         return ((runtime, True)
                 if self._slot_scalar_cpp_type(name) == "int" else None)

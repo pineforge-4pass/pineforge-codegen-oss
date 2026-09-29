@@ -962,12 +962,16 @@ class SecurityEmitter:
             return name not in self._wide_int_provenance()[0]
 
     def _security_copy_store_cpp(self, name: str, info, value_node, value_cpp: str) -> str:
-        """``value_cpp`` stored into a payload's scalar copy of ``name``: the
+        """``value_cpp`` stored into a payload's copy of ``name``: the
         na-aware double form of a 64-bit product narrows na-preserving into
-        an integer copy (quirk 9), as every integer store of it does."""
+        an integer copy (quirk 9), as every integer store of it does -- the
+        value's own product, or one the payload expands a global into
+        (``w := a`` over ``a = q * 7200000``), which only the emitted C++
+        shows (``_wide_int_arith_cpp``'s ``_pf_wide_l``)."""
         cpp_type = self._security_cpp_type_for_mutable(name, info)
         if (cpp_type in ("int", "int64_t")
-                and self._holds_na_aware_wide_double(value_node)):
+                and (self._holds_na_aware_wide_double(value_node)
+                     or "_pf_wide_l" in value_cpp)):
             return na_preserving_int_cast(value_cpp, cpp_type)
         return value_cpp
 
@@ -4766,21 +4770,30 @@ class SecurityEmitter:
         def store(cpp: str) -> str:
             return self._security_copy_store_cpp(target_name, info, node.value, cpp)
 
+        # A compound store of the double form computes as the chart does
+        # (``/`` in double, ``%`` through std::fmod: C++ ``%`` takes no
+        # double) and narrows its result.
+        wide = node.op != ":=" and store(value_cpp) != value_cpp
+
+        def combined(target_read: str) -> str:
+            return (self._compound_assign_rhs(target_read, node.op, value_cpp)
+                    or f"({target_read} {node.op[0]} {value_cpp})")
+
         if getattr(info, "is_series", False):
             if node.op == ":=":
                 lines.append(f"{pad}{state_name}.update({store(value_cpp)});")
+            elif wide:
+                lines.append(f"{pad}{state_name}.update("
+                             f"{store(combined(f'{state_name}[0]'))});")
             else:
                 op_char = node.op[0]
-                lines.append(f"{pad}{state_name}.update("
-                             f"{store(f'{state_name}[0] {op_char} {value_cpp}')});")
+                lines.append(f"{pad}{state_name}.update({state_name}[0] {op_char} {value_cpp});")
             return
 
         if node.op == ":=":
             lines.append(f"{pad}{state_name} = {store(value_cpp)};")
-        elif store(value_cpp) != value_cpp:
-            # A compound store of the double form narrows its result.
-            lines.append(f"{pad}{state_name} = "
-                         f"{store(f'({state_name} {node.op[0]} {value_cpp})')};")
+        elif wide:
+            lines.append(f"{pad}{state_name} = {store(combined(state_name))};")
         else:
             lines.append(f"{pad}{state_name} {node.op} {value_cpp};")
 

@@ -221,12 +221,36 @@ def test_a_reassigned_wide_constant_is_no_32_bit_operand():
 
 
 def test_an_input_bound_named_by_a_constant_reads_it_everywhere():
-    # maxval = MAXD bounds days * 1000000 past int32 at the top level and in a
-    # function whose parameter shadows MAXD alike.
-    cpp = transpile(HEAD + "MAXD = 3000\ndays = input.int(30, minval = 1, maxval = MAXD)\n"
+    # maxval = MAXD keeps days * 1000000 within int32 at the top level and in
+    # a function whose parameter shadows MAXD alike (inside f the bound read
+    # the parameter, found no constant and widened the product).
+    cpp = transpile(HEAD + "MAXD = 2000\ndays = input.int(30, minval = 1, maxval = MAXD)\n"
                     "a = days * 1000000\nf(MAXD) => days * 1000000 + MAXD\nplot(a + f(1))\n")
-    assert "a = (static_cast<int64_t>(days) * 1000000);" in cpp
-    assert "return ((static_cast<int64_t>(days) * 1000000) + MAXD);" in cpp
+    assert "a = (days * 1000000);" in cpp
+    assert "return ((days * 1000000) + MAXD);" in cpp
+    compile_cpp(cpp)
+
+
+def test_a_compound_modulo_of_a_wide_product_in_a_payload_compiles():
+    # w %= q * 7200000 read in a payload: the double form went into C++
+    # ``%`` on the lane (``invalid operands``), which main compiled; it
+    # computes through std::fmod as the chart does, and narrows.
+    cpp = transpile(HEAD + "var int q = 0\nif bar_index > 5\n    q := bar_index\n"
+                    "var int w = 1\nw %= q * 7200000\n"
+                    'x = request.security(syminfo.tickerid, "60", w)\nplot(x)\n')
+    body = cpp[cpp.index("void _eval_security_0"):cpp.index("void evaluate_security")]
+    store = next(l.strip() for l in body.splitlines()
+                 if l.strip().startswith("_sec0_w = ") and "_pf_wide_l" in l)
+    assert store.startswith("_sec0_w = [&](){ auto _pf_v = (std::fmod((double)(_sec0_w), (double)(")
+    compile_cpp(cpp)
+
+
+def test_a_block_local_shadowing_a_wide_constant_keeps_its_product_64_bit():
+    # The width scan cannot tell the block's int g from the top-level wide g:
+    # z holds the 64-bit product either way (2160000072 at bar 72).
+    cpp = transpile(HEAD + "var int g = 3000000001\ng := g + 0\nvar int z = 0\n"
+                    "if bar_index > 1\n    int g = bar_index\n    z := g * 30000001\nplot(z)\n")
+    assert "int64_t z;" in cpp
     compile_cpp(cpp)
 
 
