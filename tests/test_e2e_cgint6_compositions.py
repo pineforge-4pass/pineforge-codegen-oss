@@ -245,6 +245,21 @@ def test_a_compound_modulo_of_a_wide_product_in_a_payload_compiles():
     compile_cpp(cpp)
 
 
+def test_a_payload_copy_narrows_the_product_of_a_global_it_expands():
+    # w := a over a = q * 7200000: the payload expands a into its product,
+    # the double form, which w's own value does not spell.
+    cpp = transpile(HEAD + "var int q = 0\nif bar_index > 5\n    q := bar_index\n"
+                    "a = q * 7200000\nvar int w = 0\nw := a\n"
+                    'x = request.security(syminfo.tickerid, "60", w)\nplot(x)\n')
+    assert "int64_t _sec0_w = 0;" in cpp
+    body = cpp[cpp.index("void _eval_security_0"):cpp.index("void evaluate_security")]
+    store = next(l.strip() for l in body.splitlines()
+                 if l.strip().startswith("_sec0_w = ") and "_pf_wide_l" in l)
+    assert store.startswith("_sec0_w = [&](){ auto _pf_v = ([&]() -> double { auto _pf_wide_l = (_sec0_q);")
+    assert store.endswith("return is_na(_pf_v) ? na<int64_t>() : (int64_t)_pf_v; }();")
+    compile_cpp(cpp)
+
+
 def test_a_block_local_shadowing_a_wide_constant_keeps_its_product_64_bit():
     # The width scan cannot tell the block's int g from the top-level wide g:
     # z holds the 64-bit product either way (2160000072 at bar 72).
