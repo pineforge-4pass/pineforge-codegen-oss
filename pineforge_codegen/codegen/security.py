@@ -2513,6 +2513,31 @@ class SecurityEmitter:
         return (isinstance(symbol, FuncCall)
                 and self._resolve_callee(symbol.callee) == ("heikinashi", "ticker"))
 
+    def _security_call_has_state(self, call) -> bool:
+        """Whether lowering the user call ``call`` in a payload advances
+        state: a TA site, a ``var`` / ``varip`` or a request in its body or
+        in the bodies of the user functions it calls."""
+        seen: set[str] = set()
+        stack = [call]
+        while stack:
+            node = stack.pop()
+            for sub, _depth in iter_ast_nodes(node):
+                if isinstance(sub, (FuncCall, MemberAccess)) and self._get_ta_site(sub) is not None:
+                    return True
+                if isinstance(sub, VarDecl) and (sub.is_var or sub.is_varip):
+                    return True
+                if (isinstance(sub, FuncCall)
+                        and self._resolve_callee(sub.callee)[1] == "request"):
+                    return True
+                if (isinstance(sub, FuncCall) and isinstance(sub.callee, Identifier)
+                        and sub.callee.name in self._func_names
+                        and sub.callee.name not in seen):
+                    seen.add(sub.callee.name)
+                    info = self._func_info_map.get(sub.callee.name)
+                    for stmt in getattr(getattr(info, "node", None), "body", None) or ():
+                        stack.append(stmt)
+        return False
+
     def _security_open_scope(self) -> tuple:
         """Enter a C++ block of a payload's lowering (a helper's if branch or
         loop body): the locals a lowering emits there are its own
@@ -2547,18 +2572,18 @@ class SecurityEmitter:
             # A session.* flag is a bool: its history reads false, not na,
             # before the first requested bar.
             value = self._security_global_history_value(node)
+            if value is not None:
+                self._security_global_hist_names.setdefault(sec_id, set()).add(
+                    node.object.name)
             if self._is_session_flag(node.object):
                 cpp_t = "bool"
             elif value is not None:
-                # A global's history is typed as the same expression read
-                # inline is (``(bar_index * 3)[1]``: a double, whose na the
-                # request reads as na, where the global's ``int`` read
-                # ``na<int>()`` as -2147483648), and one holding a 64-bit
+                # A global's history is a double (a bool's a bool): its na
+                # reads na, where typed from the global's ``int`` the first
+                # requested bar read ``na<int>()`` as -2147483648, and a 64-bit
                 # integer (``g = bar_index * 86400000``:
-                # ``_int_arith_leaves_int32``, or an epoch) is a double, which
-                # holds it whole (the ``int`` wrapped it).
-                cpp_t = ("double" if self._expr_returns_wide_int(value, None, set())
-                         else self._infer_type(value))
+                # ``_int_arith_leaves_int32``, or an epoch) wrapped.
+                cpp_t = "bool" if self._infer_type(value) == "bool" else "double"
             else:
                 cpp_t = self._infer_type(node.object)
             if cpp_t not in ("double", "int", "bool"):
@@ -4396,17 +4421,33 @@ class SecurityEmitter:
         bars, so none of them can sit in a loop's header or body; a user
         function call there would inline them too. So can none reach the loop
         through a name the lowering expands where it is read: a helper
-        parameter, which reads its argument (``h(ta.sma(close, 3), n)``), or a
-        global, which reads its declaration (``cs = sm(close)``). A name in
-        ``bound_locals`` is a C++ local computed before the loop."""
+        parameter reads its argument (``h(ta.sma(close, 3), n)``, and a TA
+        variable such as ``ta.accdist`` too), a global its declaration, whose
+        user calls are inlined there (``cs = sm(close)``) while its own TA
+        sites are computed once, before the payload. A name in
+        ``bound_locals`` is a C++ local computed before the loop, and one a
+        loop statement declares is the loop's own from its declaration on."""
         local_series = set(plan.get("local_series_names", ()))
         global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
         skip = set(bound_locals or ())
         if isinstance(loop, ForStmt) and loop.var:
             skip.add(loop.var)
-        # The loop's own locals, wherever the walk below meets their reads.
-        skip |= {sub.name for stmt in loop.body for sub, _depth in iter_ast_nodes(stmt)
-                 if isinstance(sub, VarDecl)}
+        # Where the loop declares each of its locals: a read after it is the
+        # local's, a read before it the enclosing name's.
+        declared: dict[str, tuple] = {}
+        for stmt in loop.body:
+            for sub, _depth in iter_ast_nodes(stmt):
+                if isinstance(sub, VarDecl) and sub.loc is not None:
+                    at = (sub.loc.line, sub.loc.col)
+                    declared[sub.name] = min(declared.get(sub.name, at), at)
+
+        def is_local(node) -> bool:
+            if node.name in skip:
+                return True
+            at = declared.get(node.name)
+            return (at is not None and node.loc is not None
+                    and (node.loc.line, node.loc.col) > at)
+
         expanded: set[int] = set()
 
         def refuse(node, what: str, via) -> None:
@@ -4419,33 +4460,39 @@ class SecurityEmitter:
             )
 
         header, _ = self._security_loop_parts(loop)
-        stack: list = [(n, None, plan["binding_stack"]) for n in (*header, *loop.body)]
+        # (node, the name it was reached through, the lexical stack its
+        # names resolve in, whether it is part of a global's declaration)
+        stack: list = [(n, None, plan["binding_stack"], False) for n in (*header, *loop.body)]
         while stack:
-            n, via, lexical = stack.pop()
+            n, via, lexical, in_global = stack.pop()
             if isinstance(n, (list, tuple)):
-                stack.extend((x, via, lexical) for x in n)
+                stack.extend((x, via, lexical, in_global) for x in n)
                 continue
             if not isinstance(n, ASTNode) or isinstance(n, (FuncDef, MethodDef)):
                 continue
+            if isinstance(n, (FuncCall, MemberAccess)) and self._get_ta_site(n) is not None:
+                if in_global:
+                    continue  # computed once, before the payload
+                refuse(n, "a TA call", via)
             if isinstance(n, VarDecl):
                 if n.is_var or n.is_varip:
                     refuse(n, "a var declaration", via)
                 if via is None and n.name in local_series:
                     refuse(n, f"the local '{n.name}', which is read with history", None)
-            if isinstance(n, Identifier) and not (via is None and n.name in skip):
+            if isinstance(n, Identifier) and not (via is None and is_local(n)):
                 bound = self._security_lookup_helper_binding_context(n.name, lexical)
                 if bound is not None:
                     value, value_lexical = bound
                     if id(value) not in expanded:
                         expanded.add(id(value))
                         stack.append((value, via or (f"the parameter '{n.name}'", n),
-                                      value_lexical))
+                                      value_lexical, in_global))
                 elif (self._security_identifier_is_global_binding(n)
                         and n.name in global_expr_map
                         and id(global_expr_map[n.name]) not in expanded):
                     expanded.add(id(global_expr_map[n.name]))
                     stack.append((global_expr_map[n.name],
-                                  via or (f"the global '{n.name}'", n), ()))
+                                  via or (f"the global '{n.name}'", n), (), True))
             if isinstance(n, FuncCall):
                 callee = n.callee
                 namespace = (
@@ -4453,13 +4500,13 @@ class SecurityEmitter:
                     if isinstance(callee, MemberAccess) and isinstance(callee.object, Identifier)
                     else None
                 )
-                if self._get_ta_site(n) is not None or namespace == "ta":
+                if namespace == "ta" and not in_global:
                     refuse(n, "a TA call", via)
                 if namespace in ("request", "strategy"):
                     refuse(n, f"a {namespace}.* call", via)
                 if self._security_user_call_key(n) is not None:
                     refuse(n, "a user function call", via)
-            stack.extend((v, via, lexical) for k, v in vars(n).items()
+            stack.extend((v, via, lexical, in_global) for k, v in vars(n).items()
                          if k not in ("loc", "annotations"))
 
     @staticmethod
@@ -6286,6 +6333,19 @@ class SecurityEmitter:
                     cached, built_in = shared_globals[share_key]
                     if scope[:len(built_in)] == built_in:
                         return cached
+                    if (expr_node.name in self._security_global_hist_names.get(sec_id, ())
+                            and self._security_call_has_state(value)):
+                        # Lowered again here, the call's state would advance
+                        # twice on a bar that runs both reads; every earlier
+                        # build refused its history read.
+                        self._codegen_error(
+                            expr_node,
+                            f"request.security payload reads '{expr_node.name}' with "
+                            "history and outside the helper block its call is lowered "
+                            "in: its state would advance twice a bar",
+                            hint=f"Read '{expr_node.name}' once at the helper's top "
+                                 "level and use that local in the block.",
+                        )
                 resolving.add(expr_node.name)
                 emitted_before = len(emitted_lines) if emitted_lines is not None else 0
                 resolved = self._build_security_expr(

@@ -4344,6 +4344,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # request.security helper-call results read at a history offset
         # (``myHelper()[k]``). Maps (sec_id, node-id) -> backing Series metadata.
         self._security_expr_hist_by_node: dict[tuple[int, int], dict] = {}
+        # request.security id -> the globals its payload reads with history
+        # (``_security_global_history_value``).
+        self._security_global_hist_names: dict[int, set[str]] = {}
         # request.security ids whose payload reads the requested bar_index.
         self._security_bar_index_secs: set[int] = set()
         self._prepare_lazy_source_clock_sites()

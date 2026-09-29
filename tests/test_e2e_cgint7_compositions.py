@@ -137,17 +137,30 @@ def _history_series(decl: str, read: str = "g[1]") -> str:
     return line
 
 
-def test_a_payload_global_history_is_typed_as_its_expression_read_inline():
+def test_a_payload_global_history_is_a_double():
     double, integer = "Series<double> _sec0_expr_hist_0;", "Series<int> _sec0_expr_hist_0;"
     assert _history_series("g = bar_index * 86400000\n") == double
     assert _history_series("var int k = 0\nk += 1\ng = k * 86400000\n") == double
-    # An operator expression's history is a double, read inline or through
-    # a global: its na reads na (a Series<int> read na<int>() as -2147483648).
+    # An int global's history is a double too: its na reads na (a
+    # Series<int> read na<int>() as -2147483648 on the first requested bar),
+    # as an operator expression's read inline does.
     assert _history_series("g = bar_index * 3\n") == double
+    assert _history_series("f() => bar_index * 3\ng = f()\n") == double
     assert _history_series("", "(bar_index * 3)[1]") == double
-    # A call returning an int keeps its int history, as ``f()[1]`` does.
-    assert _history_series("f() => bar_index * 3\ng = f()\n") == integer
+    # Main's inline call history is left as it was.
     assert _history_series("f() => bar_index * 3\n", "f()[1]") == integer
+
+
+def test_a_stateful_global_read_with_history_is_lowered_in_one_block():
+    """A history read inside a helper's if branch and a read after it would
+    lower the call twice, its SMA advancing twice a bar on bars that run the
+    branch; main refused the history read."""
+    with pytest.raises(CompileError) as err:
+        transpile(HEAD + "sm(len) =>\n    a = ta.sma(close, len)\n    a * 1\nrng = sm(5)\n"
+                  "pick(c) =>\n    float s = 0.0\n    if c\n        s := rng[1]\n    s + rng\n"
+                  'p = request.security(syminfo.tickerid, "240", pick(close > open))\n'
+                  'if p > 0\n    strategy.entry("L", strategy.long)\n')
+    assert "reads 'rng' with history and outside the helper block" in str(err.value)
 
 
 def test_a_shared_payload_global_read_outside_its_block_compiles():
@@ -169,6 +182,13 @@ def test_a_shared_payload_global_read_outside_its_block_compiles():
     ("",
      "h(v, n) =>\n    float s = 0.0\n    for i = 0 to n\n        s += v\n    s\n",
      "h(ta.sma(close, 3), 3)", "a TA call (through the parameter 'v')"),
+    ("",
+     "h(v, n) =>\n    float s = 0.0\n    for i = 0 to n\n        s += v\n    s\n",
+     "h(ta.accdist, 3)", "a TA call (through the parameter 'v')"),
+    ("sm(x) =>\n    a = ta.sma(x, 3)\n    a + 1\ncs = sm(close)\n",
+     "h(n) =>\n    float s = 0.0\n    for i = 0 to n\n        s += cs\n        cs = 1.0\n"
+     "        s += cs\n    s\n",
+     "h(3)", "a user function call (through the global 'cs')"),
 ])
 def test_a_helper_loop_refuses_state_reached_through_a_name(decl, helper, call, via):
     with pytest.raises(CompileError) as err:
@@ -178,12 +198,19 @@ def test_a_helper_loop_refuses_state_reached_through_a_name(decl, helper, call, 
     assert f"request.security helper loops cannot hold {via}" in str(err.value)
 
 
-def test_a_helper_loop_reads_a_pure_global_and_a_bar_parameter():
-    cpp = transpile(HEAD + "g = close * 2\n"
-                    "h(src, n) =>\n    float s = 0.0\n    for i = 0 to n\n        s += g + src\n    s\n"
-                    'p = request.security(syminfo.tickerid, "60", h(open, 3))\n'
+@pytest.mark.parametrize("decl, call", [
+    ("g = close * 2\n", "h(open, 3)"),
+    # A global's own TA sites are computed once, before the payload.
+    ("g = ta.sma(close, 3)\n", "h(open, 3)"),
+    ("g = ta.obv\n", "h(open, 3)"),
+    ("g = ta.sma(close, 3)\n", "h(g, 3)"),
+])
+def test_a_helper_loop_reads_globals_computed_before_it(decl, call):
+    cpp = transpile(HEAD + decl
+                    + "h(src, n) =>\n    float s = 0.0\n    for i = 0 to n\n        s += g + src\n    s\n"
+                    + f'p = request.security(syminfo.tickerid, "60", {call})\n'
                     'if p > 0\n    strategy.entry("L", strategy.long)\n')
-    compile_cpp(cpp, label="pure global in a helper loop")
+    compile_cpp(cpp, label="a global computed before a helper loop")
 
 
 def test_the_loop_products_tape_replays(replays):
