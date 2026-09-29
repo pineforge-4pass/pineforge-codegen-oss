@@ -2632,8 +2632,6 @@ class SecurityEmitter:
                 # integer (``g = bar_index * 86400000``:
                 # ``_int_arith_leaves_int32``, or an epoch) wrapped.
                 cpp_t = "bool" if self._infer_type(value) == "bool" else "double"
-                if cpp_t == "double":
-                    self._security_double_hist_nodes.add(id(node))
             else:
                 cpp_t = self._infer_type(node.object)
             if cpp_t not in ("double", "int", "bool"):
@@ -5910,16 +5908,20 @@ class SecurityEmitter:
         outer = (getattr(self, "_security_shared_calls", None),
                  getattr(self, "_security_shared_definitions", None),
                  getattr(self, "_security_shared_globals", None),
-                 getattr(self, "_security_global_hist_pushes", None))
+                 getattr(self, "_security_global_hist_pushes", None),
+                 getattr(self, "_security_double_hist_nodes", set()))
         self._security_shared_calls = {}
         self._security_shared_definitions = definitions = []
         self._security_shared_globals = {}
         self._security_global_hist_pushes = pushes = []
+        # This evaluator's global history reads lowered as doubles.
+        self._security_double_hist_nodes = set()
         try:
             self._emit_security_evaluator_body(item, lines)
         finally:
             (self._security_shared_calls, self._security_shared_definitions,
-             self._security_shared_globals, self._security_global_hist_pushes) = outer
+             self._security_shared_globals, self._security_global_hist_pushes,
+             self._security_double_hist_nodes) = outer
         if pushes:
             # The history of a global the payload reads at an offset
             # (``_security_global_history_value``): the value its reads keep,
@@ -6676,7 +6678,20 @@ class SecurityEmitter:
                 )
                 if self._security_reads_global_history(sec_id, expr_node):
                     # Read with history on the requested clock (a read under a
-                    # builtin keeps the chart's series and never gets here).
+                    # builtin keeps the chart's series and never gets here):
+                    # a double, which an integer slot of this evaluator
+                    # narrows na-preserving (``_security_emits_double``).
+                    if self._infer_type(expr_node.object) == "std::string":
+                        # No string history on the requested clock; every
+                        # earlier build refused the read.
+                        self._codegen_error(
+                            expr_node,
+                            "request.security payload reads the string global "
+                            f"'{expr_node.object.name}' with history, which the "
+                            "requested clock does not keep",
+                        )
+                    if cpp_t == "double":
+                        self._security_double_hist_nodes.add(id(expr_node))
                     self._security_global_hist_names.setdefault(sec_id, set()).add(
                         expr_node.object.name)
                     self._security_check_double_lowering(

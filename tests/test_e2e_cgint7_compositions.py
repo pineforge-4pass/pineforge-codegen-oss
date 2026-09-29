@@ -187,6 +187,30 @@ def test_a_stateful_global_lowered_twice_where_main_compiled_or_never_twice_a_ba
     compile_cpp(transpile(_pick(SM, body)), label="stateful global lowered twice")
 
 
+@pytest.mark.parametrize("payload", [
+    "nz(g[1], 0) / 2",
+    "k(nz(g[1], 0))",
+])
+def test_a_history_read_under_a_builtin_keeps_mains_lowering(payload):
+    """A read under a builtin keeps the chart's int series: the payload's
+    ``/`` still divides in floating point (a double mark on it made it C++
+    integer division)."""
+    cpp = transpile(HEAD + "f() => bar_index * 3\ng = f()\nk(x) => x / 2\n"
+                    f'p = request.security(syminfo.tickerid, "60", {payload})\n'
+                    'if p > 0\n    strategy.entry("L", strategy.long)\n')
+    (line,) = [ln for ln in cpp.splitlines()
+               if ln.strip().startswith("_req_sec_0 = ") and "_nz_v" in ln]
+    assert line.strip().startswith("_req_sec_0 = ((double)(") and "/ (double)(2))" in line
+
+
+def test_a_string_global_history_on_the_requested_clock_is_refused():
+    with pytest.raises(CompileError) as err:
+        transpile(HEAD + "f() => str.tostring(bar_index)\ng = f()\n"
+                  'p = request.security(syminfo.tickerid, "60", g[1])\n'
+                  'if str.length(p) > 1\n    strategy.entry("L", strategy.long)\n')
+    assert "reads the string global 'g' with history" in str(err.value)
+
+
 def test_an_int_slot_narrows_a_global_history_na_preserving():
     cpp = transpile(HEAD + "f() => bar_index * 3\ng = f()\n"
                     "h() =>\n    int x = g[1]\n    na(x) ? -1 : x\n"
