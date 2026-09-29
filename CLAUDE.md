@@ -514,7 +514,18 @@ you delete or weaken the special case, the test will tell you.
    compile-time literals and already-boolean values are proven non-`na` and
    stay native. `tests/test_na_truthiness.py` pins the generated form and
    runtime rows. The integer narrowing and truthiness batteries together are
-   the closed conversion-site check.
+   the closed conversion-site check. A plain global int every binding of
+   which is a one-argument `math.floor` / `ceil` / `round`, read by an
+   ordering comparison and otherwise only by a comparison, `na`, `nz`,
+   `str.tostring` or a `strategy.entry` / `strategy.order` quantity, is
+   stored as the double its value is (`_nonfinite_int_names`, lane
+   TAIL-C): TradingView keeps the +Infinity of a division by zero there,
+   which `>` / `>=` order above every number while `==` / `!=` are false
+   and every other read reads na (`_nonfinite_int_read`), and an entry
+   quantity of it trades the default quantity (the engine's rule). The
+   narrowing made it `na<int>()`, which ordered as na, so `if shares > 0`
+   never held (`tests/test_e2e_nonfinite_int.py`,
+   `fixtures/nonfinite_int_tv`). Any other int keeps its C++ `int`.
 10. **An inline `input.*()` call is one leaf of a TA length.** TA ctor
    args (and derived / user-function lengths) reach the codegen as Pine
    source spellings. `pine_spelling.py` keeps an inline input call whole
