@@ -37,6 +37,7 @@ from ..pine_spelling import blank_string_literals
 from ..symbols import PineType
 from .helpers import pine_index_int_cast
 from .tables import (
+    BAR_SERIES_PUSH,
     TA_CHART_PREV_CLOSE,
     TA_CHART_PREV_CLOSE_ARG,
     TA_IMPLICIT_APPEND,
@@ -903,25 +904,10 @@ class TaSiteHelper:
                 return
             # Literals, identifiers and anything else are leaves.
 
-        def roots(stmt) -> list:
-            if isinstance(stmt, VarDecl):
-                if stmt.is_var or stmt.is_varip:
-                    return []
-                return [stmt.value]
-            if isinstance(stmt, Assignment):
-                return [stmt.target, stmt.value]
-            if isinstance(stmt, TupleAssign):
-                return [stmt.value]
-            if isinstance(stmt, ExprStmt):
-                return [stmt.expr]
-            if isinstance(stmt, IfStmt):
-                return [stmt.condition]
-            return []
-
         ast = getattr(self.ctx, "ast", None)
         for stmt in getattr(ast, "body", ()) or ():
             units: list[dict] = []
-            for root in roots(stmt):
+            for root in self._lazy_edge_statement_roots(stmt):
                 scan(root, False, units)
             if units:
                 by_stmt[id(stmt)] = units
@@ -969,6 +955,214 @@ class TaSiteHelper:
     def _clear_lazy_edge_ta_hoists(self) -> None:
         self._hoisted_ta_values.clear()
         self._hoisted_hist_reads.clear()
+
+    @staticmethod
+    def _lazy_edge_statement_roots(stmt) -> list:
+        """The expressions of one statement a scope runs on every execution:
+        a ``VarDecl`` value (not a ``var``/``varip`` initializer), an
+        ``Assignment``'s target and value, a ``TupleAssign`` value, an
+        ``ExprStmt`` and an ``IfStmt``'s head condition."""
+        if isinstance(stmt, VarDecl):
+            if stmt.is_var or stmt.is_varip:
+                return []
+            return [stmt.value]
+        if isinstance(stmt, Assignment):
+            return [stmt.target, stmt.value]
+        if isinstance(stmt, TupleAssign):
+            return [stmt.value]
+        if isinstance(stmt, ExprStmt):
+            return [stmt.expr]
+        if isinstance(stmt, IfStmt):
+            return [stmt.condition]
+        return []
+
+    # ------------------------------------------------------------------
+    # A pure user call's history below a lazy edge
+    # ------------------------------------------------------------------
+    #
+    # TradingView rule, pinned 2026-09-29 with ``lab tv`` on BINANCE:BTCUSDT
+    # 15 (``tests/fixtures/lazy_call_history``): ``f(...)[k]`` on a user
+    # function's call in the lazily evaluated right operand of ``and``/``or``
+    # or in a ternary's arm reads the call's value k executions of its scope
+    # ago -- k bars at the top level, k calls inside a function -- on all 95
+    # every-third-bar reads of each shape, in a function and at the top level:
+    # the call runs on every execution of its scope, and the lazy edge gates
+    # only the read. So ``isNew(s) => inS(s) and not inS(s)[1]`` is true on
+    # the first bar of every session. The call-local history the Subscript
+    # lowering keeps otherwise (pushed only where the operand runs) reads the
+    # previous time the operand ran: ``[1]`` three bars back on the tape's
+    # reads, and ``isNew`` true once in a whole run.
+    #
+    # Only a call whose value cannot depend on when it runs is hoisted: a
+    # user function whose body is one expression of its parameters, bar
+    # fields, literals, ``timeframe.*``/``syminfo.*`` facts, operators, and
+    # ``na``/``nz``/``time``/``time_close`` or such functions (the tape's
+    # shapes), called positionally with arguments of literals, names and
+    # operators. A stateful or side-effecting callee, a read in an ``if`` or
+    # loop body, a read not below a lazy edge, one in the arguments of an
+    # every-bar ``ta.*`` hoist (already pushed on every bar) and one in a
+    # statement the lowering drops keep their lowering.
+
+    _LAZY_CALL_HISTORY_BUILTINS = frozenset({"na", "nz", "time", "time_close"})
+    _LAZY_CALL_HISTORY_NAMESPACES = frozenset({"timeframe", "syminfo"})
+
+    def _lazy_call_history_pure_expr(self, expr, params: set[str] | None) -> bool:
+        """Whether ``expr`` reads only literals, names and fixed facts through
+        operators -- and, when ``params`` is given (a function body), bar
+        fields, parameters and the calls ``_lazy_call_history_pure_call``
+        admits instead of arbitrary names."""
+        stack = [expr]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (NumberLiteral, BoolLiteral, StringLiteral, NaLiteral,
+                              ColorLiteral)):
+                continue
+            if isinstance(n, Identifier):
+                if (params is None or n.name in params or n.name in BAR_SERIES_PUSH
+                        or n.name in ("bar_index", "time")):
+                    continue
+                return False
+            if isinstance(n, MemberAccess):
+                if (isinstance(n.object, Identifier)
+                        and n.object.name in self._LAZY_CALL_HISTORY_NAMESPACES):
+                    continue
+                return False
+            if isinstance(n, BinOp):
+                stack.extend((n.left, n.right))
+            elif isinstance(n, UnaryOp):
+                stack.append(n.operand)
+            elif isinstance(n, Ternary):
+                stack.extend((n.condition, n.true_val, n.false_val))
+            elif (params is not None and isinstance(n, FuncCall)
+                    and isinstance(n.callee, Identifier) and not n.kwargs
+                    and (n.callee.name in self._LAZY_CALL_HISTORY_BUILTINS
+                         or self._lazy_call_history_pure_call(n))):
+                stack.extend(n.args)
+            else:
+                return False
+        return True
+
+    def _lazy_call_history_pure_call(self, call) -> bool:
+        """A positional call of the one user function of its name whose body
+        is a single ``_lazy_call_history_pure_expr`` of its parameters. A body
+        reached again through its own calls is not pure."""
+        if not isinstance(call, FuncCall) or not isinstance(call.callee, Identifier):
+            return False
+        name = call.callee.name
+        overloads = [fi for fi in self.ctx.func_infos if fi.name == name]
+        if call.kwargs or len(overloads) != 1 or overloads[0].node is None:
+            return False
+        node = overloads[0].node
+        if len(call.args) != len(node.params):
+            return False
+        cache = getattr(self, "_lazy_call_history_pure_cache", None)
+        if cache is None:
+            cache = self._lazy_call_history_pure_cache = {}
+        if id(node) not in cache:
+            cache[id(node)] = False
+            body = getattr(node, "body", None) or []
+            cache[id(node)] = (
+                len(body) == 1 and isinstance(body[0], ExprStmt)
+                and self._lazy_call_history_pure_expr(body[0].expr, set(node.params))
+            )
+        return cache[id(node)]
+
+    def _lazy_call_history_units(self, stmt) -> list:
+        """The ``pure_call(...)[k]`` reads below a lazy edge of ``stmt``'s
+        roots (``_lazy_edge_statement_roots``), in evaluation order, whose
+        arguments are ``_lazy_call_history_pure_expr``. A
+        ``request.security*`` payload, which its own evaluator runs, is not
+        walked."""
+        cache = getattr(self, "_lazy_call_history_units_cache", None)
+        if cache is None:
+            cache = self._lazy_call_history_units_cache = {}
+        if id(stmt) in cache:
+            return cache[id(stmt)]
+        units: list = []
+        # A statement the lowering drops (plot, bgcolor, ...) reads nothing.
+        if isinstance(stmt, ExprStmt) and self._is_skip_expr(stmt.expr):
+            cache[id(stmt)] = units
+            return units
+        hoisted_ta = self._lazy_edge_hoisted_ta_call_nodes()
+
+        def scan(expr, under_lazy: bool) -> None:
+            if expr is None:
+                return
+            if isinstance(expr, Subscript):
+                call = expr.object
+                if (under_lazy and self._lazy_call_history_pure_call(call)
+                        and all(self._lazy_call_history_pure_expr(arg, None)
+                                for arg in call.args)):
+                    units.append(expr)
+                    return
+                scan(expr.object, under_lazy)
+                scan(expr.index, under_lazy)
+            elif isinstance(expr, FuncCall):
+                # An every-bar ta.* hoist evaluates its arguments on every
+                # bar, so a read inside one already pushes on every bar.
+                if id(expr) in hoisted_ta:
+                    return
+                callee = expr.callee
+                is_security = (
+                    isinstance(callee, MemberAccess)
+                    and isinstance(callee.object, Identifier)
+                    and callee.object.name == "request"
+                    and callee.member in ("security", "security_lower_tf")
+                )
+                scan(callee, under_lazy)
+                for idx, arg in enumerate(getattr(expr, "args", ()) or ()):
+                    if not (is_security and idx == 2):
+                        scan(arg, under_lazy)
+                for key, value in (getattr(expr, "kwargs", None) or {}).items():
+                    if not (is_security and key == "expression"):
+                        scan(value, under_lazy)
+            elif isinstance(expr, BinOp):
+                scan(expr.left, under_lazy)
+                scan(expr.right, under_lazy or expr.op in ("and", "or"))
+            elif isinstance(expr, Ternary):
+                scan(expr.condition, under_lazy)
+                scan(expr.true_val, True)
+                scan(expr.false_val, True)
+            elif isinstance(expr, UnaryOp):
+                scan(expr.operand, under_lazy)
+            elif isinstance(expr, MemberAccess):
+                scan(expr.object, under_lazy)
+            elif isinstance(expr, TupleLiteral):
+                for element in expr.elements:
+                    scan(element, under_lazy)
+            elif isinstance(expr, IfStmt):
+                scan(expr.condition, under_lazy)
+            elif isinstance(expr, SwitchStmt):
+                scan(expr.expr, under_lazy)
+
+        for root in self._lazy_edge_statement_roots(stmt):
+            scan(root, False)
+        cache[id(stmt)] = units
+        return units
+
+    def _emit_lazy_call_history_hoists(self, stmt, lines: list[str], indent: int) -> list[int]:
+        """Push each ``_lazy_call_history_units`` read's call once, before
+        ``stmt``, and make the read return its Series. Returns the reads to
+        hand ``_clear_lazy_call_history_hoists`` once ``stmt`` is lowered."""
+        units = self._lazy_call_history_units(stmt)
+        if not units:
+            return []
+        pad = "    " * indent
+        lines.append(
+            f"{pad}// Pine v6 lazy operand: a call read at an offset runs on every "
+            "execution, only the read is gated."
+        )
+        hoisted = []
+        for read in units:
+            member = self._inline_history_member("hist_call", read)
+            self._emit_history_series_write(lines, pad, member, self._visit_expr(read.object))
+            self._hoisted_hist_reads[id(read)] = member
+            hoisted.append(id(read))
+        return hoisted
+
+    def _clear_lazy_call_history_hoists(self, hoisted: list[int]) -> None:
+        for key in hoisted:
+            self._hoisted_hist_reads.pop(key, None)
 
     def _security_ta_compute_args_for_site(
         self,

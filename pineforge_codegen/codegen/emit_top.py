@@ -1805,9 +1805,11 @@ class TopLevelEmitter:
 
         # d. Visit each statement. A stateful ``ta.*`` site below a lazy
         #    ``and``/``or`` RHS or ternary arm of a top-level statement is
-        #    evaluated every bar BEFORE the statement (TV rule, see ``ta.py``).
+        #    evaluated every bar BEFORE the statement, and so is a pure user
+        #    call read at an offset there (TV rules, see ``ta.py``).
         for stmt in self.ctx.ast.body:
             self._emit_lazy_edge_ta_hoists(stmt, lines, indent=2)
+            self._emit_lazy_call_history_hoists(stmt, lines, indent=2)
             try:
                 self._visit_stmt(stmt, lines, indent=2)
             finally:
@@ -2394,7 +2396,11 @@ class TopLevelEmitter:
                 self._emit_history_series_write(lines, "        ", member, value)
 
         emitted_return = False
+        # A pure call read at an offset below a lazy edge runs once per call
+        # of this function, before its statement (``ta.py``).
+        hoisted: list[int] = []
         if node.is_single_expr and node.body:
+            hoisted = self._emit_lazy_call_history_hoists(node.body[0], lines, indent=2)
             expr = node.body[0].expr if isinstance(node.body[0], ExprStmt) else None
             if expr and self._call_is_void(expr):
                 # void setter as the sole body expr — emit as statement, fall
@@ -2412,6 +2418,8 @@ class TopLevelEmitter:
                 emitted_return = True
         else:
             for i, s in enumerate(node.body):
+                self._clear_lazy_call_history_hoists(hoisted)
+                hoisted = self._emit_lazy_call_history_hoists(s, lines, indent=2)
                 if i == len(node.body) - 1 and isinstance(s, ExprStmt):
                     # A void drawing setter / delete / visual-noop, or a dropped
                     # table/polyline method call (``panel.cell(...)``), used as
@@ -2512,6 +2520,7 @@ class TopLevelEmitter:
                     emitted_return = True
                 else:
                     self._visit_stmt(s, lines, indent=2)
+        self._clear_lazy_call_history_hoists(hoisted)
 
         # Always emit a default return if no explicit return was emitted,
         # to avoid non-void function without return value.

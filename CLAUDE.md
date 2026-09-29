@@ -644,6 +644,20 @@ you delete or weaken the special case, the test will tell you.
     their existing lowering. The old "lazy SMA/EMA must not precalc" pins
     (pf-probe-oliver-dual-vol-sma) encoded the refuted per-call clock and were
     re-pinned in `test_codegen_validation_fixes.py`.
+    A user function's call read at an offset below such an edge
+    (`isNew(s) => inS(s) and not inS(s)[1]`) is the call's value k executions
+    of its scope ago -- k bars at the top level, k calls in a function -- as
+    TradingView's BINANCE:BTCUSDT 15 tape shows
+    (`fixtures/lazy_call_history/tg-lazyhist-btc15`,
+    `tests/test_e2e_lazy_call_history.py`): codegen pushes its `_hist_call_*`
+    Series once per execution, before the statement, in a top-level statement
+    and in a statement of a function body (`codegen/ta.py::
+    _lazy_call_history_units`, `_emit_lazy_call_history_hoists`). Only a call
+    of a pure function -- one expression of its parameters, bar fields,
+    literals, `timeframe.*`/`syminfo.*`, operators and `na`/`nz`/`time`/
+    `time_close` or such functions, with arguments of literals, names and
+    operators -- is hoisted; any other keeps the call-local push where the
+    operand runs, which reads the previous time it ran.
 16. **Every call argument is evaluated once.** Pine evaluates each argument
     of a call exactly once per execution; only `and` / `or` and the `?:` arms
     are lazy (a lab tv counting-probe tape, `fixtures/w2_trio_tv/eval_counts`,

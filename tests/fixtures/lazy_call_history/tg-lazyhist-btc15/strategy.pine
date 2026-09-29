@@ -1,0 +1,29 @@
+//@version=6
+// SPDX-License-Identifier: Apache-2.0
+// Synthetic probe (lane TAIL-G): what a history reference on a user
+// function's call reads in the lazily evaluated right operand of `and` (and
+// in the unselected branch of `?:`), inside a function and at the top level,
+// on bars where the operand was not reached on the bar before. Each bar's
+// readings are spelled in the comment of the exit that fills on the next
+// bar's open.
+strategy("tg lazy call history", overlay=true, initial_capital=100000000, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=2, margin_long=0, margin_short=0)
+
+t(int x) => x
+inS(string s) => not na(time(timeframe.period, s))
+isNew(string s) => inS(s) and not inS(s)[1]
+prevIs(int k) => bar_index % 3 == 0 and t(bar_index)[1] == bar_index - k
+prevNa() => bar_index % 3 == 0 and na(t(bar_index)[1])
+tern() => bar_index % 3 == 0 ? t(bar_index)[1] : -1
+b(bool v) => v ? "1" : "0"
+d(int v) => v == -1 ? "-" : na(v) ? "n" : str.tostring(bar_index - v)
+
+topNa = bar_index % 3 == 0 and na(t(bar_index)[1])
+topTern = bar_index % 3 == 0 ? t(bar_index)[1] : -1
+sig = b(isNew("0000-0800")) + b(isNew("0800-1600")) + "|" + b(prevIs(1)) + b(prevIs(3)) + b(prevNa()) + d(tern()) + "|" + b(topNa) + d(topTern)
+
+if bar_index % 2 == 0
+    strategy.entry("A", strategy.long)
+    strategy.close("B", comment=sig)
+else
+    strategy.entry("B", strategy.long)
+    strategy.close("A", comment=sig)
