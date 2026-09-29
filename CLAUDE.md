@@ -57,19 +57,24 @@ finish with the engine-enabled run and inspect its skip reasons.
 ## What this is
 
 PineScript v6 → C++ transpiler that emits source linking against the
-`pineforge-engine` runtime (`<pineforge/engine.hpp>`, `<pineforge/ta.hpp>`,
-…). Public Python entry points are `pineforge_codegen.transpile()` and
+`pineforge-engine` runtime (`<pineforge/source/pine_strategy_host.hpp>`,
+`<pineforge/ta.hpp>`, …; 0.10.4 emitted `<pineforge/engine.hpp>`). Public
+Python entry points are `pineforge_codegen.transpile()` and
 `pineforge_codegen.transpile_full()`; the Pyodide package ships the
 `gate/glue.py` JSON protocol. See `docs/PUBLIC_CONTRACT.md`.
 
 This is the **source-available** half of the PineForge stack (PolyForm
 Noncommercial — see `LICENSE`). The runtime half (`pineforge-engine`,
 Apache-2.0) lives in a sibling repo and is typically checked out at
-`../pineforge-engine`. A released codegen `X.Y.Z` pairs only with engine
-`vX.Y.Z`; prereleases match exactly. Use that release's generated headers and
-static library, and regenerate C++ and relink on every pair change. Equal
-`PF_ABI_VERSION` values are insufficient. Engine main currently uses the
-`engine_script_run_v19` C++ namespace; see `README.md` and `CONTRIBUTING.md`.
+`../pineforge-engine`. From 1.0.0 on, a released codegen `X.Y.Z` pairs only
+with engine `vX.Y.Z`; prereleases match exactly. On the 0.x line the versions
+are independent: the latest release, codegen 0.10.4, pairs with engine
+`v0.13.1` (the `pineforge-release` image `v0.1.25`), and codegen main's C++
+needs engine main (no engine release has `pineforge/source/`). Use the paired
+release's generated headers and static library, and regenerate C++ and relink
+on every pair change. Equal `PF_ABI_VERSION` values are insufficient. Engine
+main currently uses the `engine_script_run_v19` C++ namespace; see `README.md`
+and `CONTRIBUTING.md`.
 
 ## Pipeline
 
@@ -78,7 +83,10 @@ adding work:
 
 1. `pragmas.extract_pf_trace_pragmas` — pulls `// @pf-trace name=expr`
   comments out before the lexer strips comments.
-2. `Lexer` → `Parser` → `Program` AST.
+2. `Lexer` → `Parser` → `Program` AST. Before the support check,
+  `library_inline.inline_libraries` inlines the libraries the script imports
+  and `block_locals.rename_block_locals` names apart the block declarations a
+  previous run asked for.
 3. `support_checker.check_support_or_raise` — rejects any Pine surface
   PineForge cannot faithfully execute (see "Support contracts" below).
 4. `Analyzer.analyze()` → `AnalyzerContext` (type inference, scope
@@ -160,8 +168,13 @@ pineforge_codegen/
 ├── pine_spelling.py                String-literal-safe helpers for the Pine
 │                                   spellings of TA ctor args (inline
 │                                   input calls kept whole; see quirk 10)
+├── finite_ta_length.py             Finite-choice ta.highest / ta.lowest
+│                                   lengths: one fixed extrema history per
+│                                   choice, selected per bar.
+├── method_binding.py               Typed Pine methods inventoried before
+│                                   analysis, bound in source order.
 ├── analyzer/
-│   ├── base.py        (~1.4k loc)  Analyzer class — workhorse.
+│   ├── base.py        (~6.9k loc)  Analyzer class — workhorse.
 │   ├── call_handlers.py            Per-call-namespace lowering helpers.
 │   ├── contracts.py                AnalyzerContext + sub-info dataclasses.
 │   ├── tables.py                   TA_CLASS_MAP, TA_PERIOD_ARG,
@@ -171,7 +184,7 @@ pineforge_codegen/
 │   ├── types.py                    Type-inference utilities.
 │   └── diagnostics.py              Analyzer warning/error emission.
 └── codegen/
-    ├── base.py        (~1.2k loc)  CodeGen class — class-member layout,
+    ├── base.py        (~6.0k loc)  CodeGen class — class-member layout,
     │                               include set, _matrix_vars / _array_vars
     │                               / _map_vars detection.
     ├── emit_top.py                 #include block, extern "C" wrappers,
@@ -185,12 +198,12 @@ pineforge_codegen/
     │                               assign, if/for/while/switch).
     ├── visit_expr.py               Expression-level visitors (literals,
     │                               operators, ternary, member access).
-    ├── visit_call.py   (~1.1k loc) Function-call dispatch — by far the
+    ├── visit_call.py   (~3.6k loc) Function-call dispatch — by far the
     │                               most heavily-special-cased file.
     ├── ta.py                       TA call-site allocation + compute()
     │                               vs recompute() emission.
-    ├── security.py    (~1.5k loc)  request.security / _lower_tf plumbing.
-    ├── tables.py       (~500 loc)  Static dispatch tables: BAR_BUILTINS,
+    ├── security.py    (~7.8k loc)  request.security / _lower_tf plumbing.
+    ├── tables.py      (~1.2k loc)  Static dispatch tables: BAR_BUILTINS,
     │                               TA_*, ARRAY_METHODS, MAP_METHODS,
     │                               MATRIX_METHODS, MATRIX_RETURNING_METHODS,
     │                               MATH_FUNC_MAP, STR_FUNC_MAP, …
@@ -208,6 +221,13 @@ pineforge_codegen/
     │                               cached per strategy (a run with one reads
     │                               the kernel's session_ismarket_).
     ├── input.py                    input.* / `input()` lowering.
+    ├── constant_fold.py            Bounded numeric folding of constructor
+    │                               expressions, without Python execution.
+    ├── drawing.py                  Drawing objects as data (line / box /
+    │                               label / linefill arenas) and their
+    │                               lifetime rule (DRAWING_LIFETIME_CPP).
+    ├── helpers_syminfo.py          C++ helpers deriving syminfo fields
+    │                               from the SymInfo struct.
     ├── host_members.py             GENERATED by scripts/gen_host_members.py:
     │                               the host members the generated class
     │                               reads (reserved script names).
@@ -215,8 +235,10 @@ pineforge_codegen/
 tests/
 ├── _compile.py                     Helper that runs `g++ -fsyntax-only`
 │                                   against the engine headers; reads
-│                                   PINEFORGE_ENGINE_INCLUDE +
-│                                   PINEFORGE_EIGEN_INCLUDE + CXX env vars.
+│                                   PINEFORGE_ENGINE_INCLUDE (else a sibling
+│                                   checkout), PINEFORGE_EIGEN_INCLUDE,
+│                                   PINEFORGE_GENERATED_INCLUDE,
+│                                   PINEFORGE_ENGINE_LIB and CXX.
 │                                   Cleanly skips when env is missing.
 │                                   STRATEGY_FP_FLAGS (-ffp-contract=off,
 │                                   as the engine builds) goes on every
@@ -230,30 +252,36 @@ tests/
 │                                   reference_codegen() transpiles with
 │                                   another commit's codegen (git archive).
 ├── test_compile_smoke.py           Hand-picked Pine snippets that hit
-│                                   every dispatch lane; +3 regression
+│                                   every dispatch lane; 5 regression
 │                                   tests for once-broken paths
 │                                   (year(time), matrix-returning methods,
-│                                    str.format double-wrap).
+│                                    str.format double-wrap, a cloned
+│                                    no-ctor TA through a dead caller,
+│                                    top-level fixnan vs a function's).
 ├── test_compile_corpus.py          Parametrized over every
 │                                   corpus/<bucket>/<strategy>/strategy.pine
 │                                   from a sibling pineforge-engine
 │                                   checkout; collection size follows
-│                                   the checked-out public corpus.
+│                                   the checked-out public corpus (314 of
+│                                   its 325 strategy.pine files at engine
+│                                   main 35db01c8: the 11 in deeper
+│                                   directories are not collected).
 ├── test_official_surface.py        Locks SUPPORTED_* and signatures.* to
 │                                   the Pine v6 official inventory
 │                                   (sourced from user-pinescript-docs MCP).
 ├── test_ta_official_surface.py     Same idea, ta.*-specific (predates
 │                                   the cross-namespace file).
 ├── test_support_checker.py         Per-rule support-checker behaviour.
-├── test_codegen_new.py     (~1k loc)  Substring assertions on emitted C++.
+├── test_codegen_new.py     (~2k loc)  Substring assertions on emitted C++.
 ├── test_signatures.py              Signature-registry unit tests.
 └── test_{lexer,parser,analyzer,symbols,errors,…}.py
 ```
 
 ## Architectural invariants — do not break
 
-1. **Exact engine release pairing.** Bumping `VERSION` requires the
-   matching `pineforge-engine` tag (`X.Y.Z` with `vX.Y.Z`; prereleases exactly).
+1. **Exact engine release pairing.** From 1.0.0 on, bumping `VERSION`
+   requires the matching `pineforge-engine` tag (`X.Y.Z` with `vX.Y.Z`;
+   prereleases exactly); the 0.x releases pair as "What this is" states.
    Use that tag's generated headers and `libpineforge.a`; regenerate every
    strategy TU and relink on a pair change. `PF_ABI_VERSION` equality alone is
    insufficient. The transpiler does not ship a runtime artifact.
@@ -272,7 +300,11 @@ tests/
    one-line rationale right next to the constant.
 5. **Every corpus strategy must transpile + compile.**
   `test_compile_corpus.py` parametrizes over every
-   `corpus/*/*/strategy.pine` file in the checked-out public corpus.
+   `corpus/*/*/strategy.pine` file in the checked-out public corpus. That
+   glob misses the strategies in deeper directories
+   (`special-validation/<market>/<strategy>/`,
+   `validation/symbol-specified/<symbol>/<strategy>/`: 11 of 325 at engine
+   main 35db01c8), which this sweep does not check.
    Per the "REQUIRED before claiming any change is done" block at the top
    of this file, this is a
    mandatory check on every change — not just changes to `analyzer/` or
@@ -323,7 +355,7 @@ taxonomy:
 | Int products | Pine's `int` is 64-bit. A product of two operands emitted as C++ `int` -- int literals, names stored as `int`, loop variables, `array<int>` elements -- that a `%` or `/` reads is computed in 64 bits, `((int64_t)(a) * (b))`: both operators lower through doubles, which hold the product whole, where the C++ `int` product wrapped -- the fruit-fly probes' Park-Miller noise step `(s * 48271) % 2147483647` (`fixtures/tail_f_tv/int_product` reads 2076553157 on the sixth bar; `visit_expr._lower_binop`). A product whose operands' bounds can leave int32 is computed in 64 bits by the "Epoch ints" rule whether a `%` or `/` reads it or not, na-aware, and keeps that form, cast once (`_lower_binop`'s `widened`: this rule cast it a second time); this rule covers the rest a `%` or `/` reads, an operand those bounds do not know (`array.get`) or a product they keep inside int32. A product neither rule reaches keeps its 32-bit spelling (a limit: an `array.get` product past int32 that no `%` or `/` reads wraps, where TradingView reads the 64-bit value). A `request.security` payload's `%` and `/` follow the "Epoch ints" rule alone (`tests/test_e2e_cgint7_compositions.py`, `fixtures/cgint7_tv/cgint7_int_products`). A literal tree is folded as before (see "Epoch ints"); an int emitted as a double (`math.round`) keeps its product. |
 | `time()` / `time_close()` offsets | A `bars_back` / `timeframe_bars_back` that is not a literal 0 (`time("", "", -1)` is the next bar's open) reads another bar's time through the host's `pine_time_offset` (engine lane TAIL-E; the pair must build together): `bars_back` chart bars back, or forward when negative, then the `timeframe` bar holding that chart bar, stepped `timeframe_bars_back` of its own bars, a future bar included, as TradingView reads it (`visit_call._time_offset_call`, which binds the three overloads by their argument types, `_bind_time_call`; `tests/test_time_bar_offsets.py`, tapes `fixtures/tail_e_tv/te_time_bb_chart` / `te_time_bb_tf`). Inside `request.security` it is refused. It was refused everywhere (the engine had no API for another bar's time), and before that reached the C++ as the timezone string. |
 | Version directive                | The first line holding only `//`, `@version`, `=` and ASCII digits, with optional spaces, tabs or form feeds around each, anywhere in the script (inside a multiline string too), lines ending at `\r\n`, `\r` or `\n` -- TradingView's rule on 46 probes (`tests/test_version_directive.py`). `@Version`, `///`, trailing text, code or other comment text before it on the line, a vertical tab or no-break space, `6.0` or a carriage return inside it make it no directive. Lexer gaps, not the directive's: the lexer ends a line only at `\n`, so text after a bare `\r` on a comment line stays comment (TradingView reads it as the next line), and it refuses a form feed before `//` as an unexpected character. Only v6 is supported. |
-| Library imports | `import <user>/<name>/<version> [as <alias>]` parses into its parts (the parser used to join the line: `…/2asml`). An import whose alias -- else the library's name -- is `ta`, `math` or `str`, while every member the script names through it, in a call, a read or a type, is that namespace's built-in, is a no-op: TradingView's pine-facade compile of `import TradingView/ta/7` links no library when only built-in `ta.*` names are called, and links it for a library-only name (`ta.dema`). Every other import is refused, naming it, unless its library's source is at hand: `transpile(..., libraries={"user/name/version": source})`, or with `libraries=None` `$PINEFORGE_PINE_LIBRARIES` (case-wide `libraries.json` + `<user>/<name>/<version>.pine`) through the script's OWN manifest `$PINEFORGE_REQUESTS_ROOT/<slug>/requests.json` (pineforge-workflow `docs/xsym-requests.md`; `pine_libraries`). The verifier calls `transpile(read_text())` with no slug (pineforge-lab 3bac0b7b `scripts/verify-engine-local.py:1698`), so the manifest is the one whose `probe.strategySha256` is the source's sha256, as read or with every LF spelled CRLF or CR (`read_text()` folds both); none or several resolves no library, and a neighbour's pin in the case-wide directory never does. An import the manifest does not pin, a missing source, a sha mismatch or a non-open library is refused by name; with neither the argument nor the variable the refusal is today's (`tests/test_pine_libraries.py`). A resolved library is inlined before the support check (`library_inline`), so its code meets every rule the script's does: only the exports the script reaches and what they reach (transitively, through the library's own imports) enter the program, and library example code (plots, inputs) never does; every inlined top-level name, local and parameter gets a module-qualified name (`HanJinSignals26_v15__pinbar`, `..._pinbar__up`), a keyword argument follows its parameter; `alias.f(...)`, `alias.T.new(...)`, `alias.E.member`, `alias.C` and `alias.T` in a type resolve into the library; an exported method keeps its name (methods bind by receiver type) and `alias.m(recv, ...)` is `recv.m(...)`; an alias equal to `ta`, `math` or `str` reads the built-in member when one exists, else the library's; an inlined function is a user function, so its state is per call site. A library keeps its own `//@version`: a v5 one (the open `jdehorty/MLExtensions/2` and `jdehorty/KernelFunctions/2`) is lowered by v5's rules inside its bodies (`library_v5.V5_RULES` gives every change the migration guide to v6 lists a disposition): two const ints divide as ints, rounded toward zero; `and` / `or` evaluate both operands; a `for` end is fixed before the first iteration; `color.red` / `teal` / `yellow` keep their v5 values; `timeframe.period` reads `D` / `W` / `M` on a 1D / 1W / 1M chart; a negative index to `array.get` / `set` / `insert` / `remove` stops the run; a bool na reads false where v5 casts it and across the call. What v5 reads differently and PineForge does not implement is refused naming the library: an observer of the bool na (`na()`, `nz()`, `fixnan()`, `==`, `!=`, `str.tostring` / `str.format` of a bool), `request.*()`, history of a literal, a built-in constant or a type's field, a reassigned variable as a `ta.*` / `math.sum` length, a division whose constness depends on an untyped parameter, and a v5 function reached from a `request.security` payload (`tests/test_library_v5.py`; `tests/test_e2e_library_v5.py` replays TradingView's 15m and 1D tapes of `xc_v5_lib`, the synthetic `pftest/V5Rules/1` as a v5 strategy, `fixtures/xsym_lib_tv`; `tests/test_e2e_color_tapes.py` the engine's tape of every named color read by a v5 strategy, `w11-color-v5-eth15`, through the synthetic `pftest/W11ColorV5/1`: a `//@version=5` script itself is refused, so a v5 library is the only v5 code the transpiler lowers). An import the script never uses links nothing (TradingView prunes it) and is dropped. An overloaded function binds, per call, as TradingView binds it: of the overloads its arguments fit by count and keyword, those that differ by their parameters' qualifiers alone (`TradingView/Request/3` overloads `cryptoDerivativeMetric` with `simple string` and `series string` parameters) give the one with the weakest qualifiers its arguments fit, an argument being const or simple when it is a literal, an input, a `syminfo.*` / `timeframe.*` member, a script declaration of one (declared once, never reassigned, not `var` or `series`) or a library parameter declared so, and series otherwise; each later overload gets its own name (`Request_v3__cryptoDerivativeMetric_2`, `library_inline._Linker._overload`); a keyword argument binds by the parameter's name as the library spells it, whichever function the inliner renamed first (a library's own `f(n = 2)` read `f`'s default once `f` was processed) (`tests/test_tail_f_rules.py`; `fixtures/tail_f_tv/overload_qualifiers`: a literal, an input and a declaration of an input call the `simple int` overload, `bar_index % 5` and `minute(time)` the `series int` one). Overloads that differ by type, an unexported member, an alias equal to another built-in namespace or to a script name, and a method duplicating a receiver type's method are refused by name (`tests/test_library_inline.py`; `tests/test_e2e_library_inline.py`: a script importing the synthetic `pftest/Signals/1` books as the same code written in). TradingView's tapes of synthetic scripts calling `richardgong1988/HanJinSignals26/15` on NASDAQ:AAPL 15, OANDA:EURUSD 15 and NYSE:F 1D are reproduced exit Signal for exit Signal outside the repository, where the library is pinned as evidence; that of one calling `jdehorty/MLExtensions/2`'s `n_rsi` and `jdehorty/KernelFunctions/2`'s `rationalQuadratic` on BINANCE:BTCUSDT 15 exit for exit, under the verifier's chart EMA warmup candidate, every Signal but its `color.t` field (a transparency the engine rounds up: 91 where TradingView reads 90). TradingView's tape of a script with that import is byte for byte the tape without it (`tests/test_import_builtin_namespace.py`, `fixtures/xsym_tv`). |
+| Library imports | `import <user>/<name>/<version> [as <alias>]` parses into its parts (the parser used to join the line: `…/2asml`). An import whose alias -- else the library's name -- is `ta`, `math` or `str`, while every member the script names through it, in a call, a read or a type, is that namespace's built-in, is a no-op: TradingView's pine-facade compile of `import TradingView/ta/7` links no library when only built-in `ta.*` names are called, and links it for a library-only name (`ta.dema`). Every other import is refused, naming it, unless its library's source is at hand: `transpile(..., libraries={"user/name/version": source})`, or with `libraries=None` `$PINEFORGE_PINE_LIBRARIES` (case-wide `libraries.json` + `<user>/<name>/<version>.pine`) through the script's OWN manifest `$PINEFORGE_REQUESTS_ROOT/<slug>/requests.json` (the private pineforge-workflow repository's `docs/xsym-requests.md`; `pine_libraries`). The verifier calls `transpile(read_text())` with no slug (the private pineforge-lab repository, 3bac0b7b `scripts/verify-engine-local.py:1698`), so the manifest is the one whose `probe.strategySha256` is the source's sha256, as read or with every LF spelled CRLF or CR (`read_text()` folds both); none or several resolves no library, and a neighbour's pin in the case-wide directory never does. An import the manifest does not pin, a missing source, a sha mismatch or a non-open library is refused by name; with neither the argument nor the variable the refusal is today's (`tests/test_pine_libraries.py`). A resolved library is inlined before the support check (`library_inline`), so its code meets every rule the script's does: only the exports the script reaches and what they reach (transitively, through the library's own imports) enter the program, and library example code (plots, inputs) never does; every inlined top-level name, local and parameter gets a module-qualified name (`HanJinSignals26_v15__pinbar`, `..._pinbar__up`), a keyword argument follows its parameter; `alias.f(...)`, `alias.T.new(...)`, `alias.E.member`, `alias.C` and `alias.T` in a type resolve into the library; an exported method keeps its name (methods bind by receiver type) and `alias.m(recv, ...)` is `recv.m(...)`; an alias equal to `ta`, `math` or `str` reads the built-in member when one exists, else the library's; an inlined function is a user function, so its state is per call site. A library keeps its own `//@version`: a v5 one (the open `jdehorty/MLExtensions/2` and `jdehorty/KernelFunctions/2`) is lowered by v5's rules inside its bodies (`library_v5.V5_RULES` gives every change the migration guide to v6 lists a disposition): two const ints divide as ints, rounded toward zero; `and` / `or` evaluate both operands; a `for` end is fixed before the first iteration; `color.red` / `teal` / `yellow` keep their v5 values; `timeframe.period` reads `D` / `W` / `M` on a 1D / 1W / 1M chart; a negative index to `array.get` / `set` / `insert` / `remove` stops the run; a bool na reads false where v5 casts it and across the call. What v5 reads differently and PineForge does not implement is refused naming the library: an observer of the bool na (`na()`, `nz()`, `fixnan()`, `==`, `!=`, `str.tostring` / `str.format` of a bool), `request.*()`, history of a literal, a built-in constant or a type's field, a reassigned variable as a `ta.*` / `math.sum` length, a division whose constness depends on an untyped parameter, and a v5 function reached from a `request.security` payload (`tests/test_library_v5.py`; `tests/test_e2e_library_v5.py` replays TradingView's 15m and 1D tapes of `xc_v5_lib`, the synthetic `pftest/V5Rules/1` as a v5 strategy, `fixtures/xsym_lib_tv`; `tests/test_e2e_color_tapes.py` the engine's tape of every named color read by a v5 strategy, `w11-color-v5-eth15`, through the synthetic `pftest/W11ColorV5/1`: a `//@version=5` script itself is refused, so a v5 library is the only v5 code the transpiler lowers). An import the script never uses links nothing (TradingView prunes it) and is dropped. An overloaded function binds, per call, as TradingView binds it: of the overloads its arguments fit by count and keyword, those that differ by their parameters' qualifiers alone (`TradingView/Request/3` overloads `cryptoDerivativeMetric` with `simple string` and `series string` parameters) give the one with the weakest qualifiers its arguments fit, an argument being const or simple when it is a literal, an input, a `syminfo.*` / `timeframe.*` member, a script declaration of one (declared once, never reassigned, not `var` or `series`) or a library parameter declared so, and series otherwise; each later overload gets its own name (`Request_v3__cryptoDerivativeMetric_2`, `library_inline._Linker._overload`); a keyword argument binds by the parameter's name as the library spells it, whichever function the inliner renamed first (a library's own `f(n = 2)` read `f`'s default once `f` was processed) (`tests/test_tail_f_rules.py`; `fixtures/tail_f_tv/overload_qualifiers`: a literal, an input and a declaration of an input call the `simple int` overload, `bar_index % 5` and `minute(time)` the `series int` one). Overloads that differ by type, an unexported member, an alias equal to another built-in namespace or to a script name, and a method duplicating a receiver type's method are refused by name (`tests/test_library_inline.py`; `tests/test_e2e_library_inline.py`: a script importing the synthetic `pftest/Signals/1` books as the same code written in). TradingView's tapes of synthetic scripts calling `richardgong1988/HanJinSignals26/15` on NASDAQ:AAPL 15, OANDA:EURUSD 15 and NYSE:F 1D are reproduced exit Signal for exit Signal outside the repository, where the library is pinned as evidence; that of one calling `jdehorty/MLExtensions/2`'s `n_rsi` and `jdehorty/KernelFunctions/2`'s `rationalQuadratic` on BINANCE:BTCUSDT 15 exit for exit, under the verifier's chart EMA warmup candidate, every Signal but its `color.t` field (a transparency the engine rounds up: 91 where TradingView reads 90). TradingView's tape of a script with that import is byte for byte the tape without it (`tests/test_import_builtin_namespace.py`, `fixtures/xsym_tv`). |
 | TF literal validation            | `request.security` / `request.security_lower_tf` `timeframe` string literals validated against Pine v6 format at parse time. |
 | `ta.vwap` anchor                 | Omitted-anchor VWAP and its band form keep `ta::VWAP` / `ta::VWAPBands` exactly. Every explicit scalar or band anchor, including `timeframe.change("1D")` / `("D")`, is passed per bar to the TA1 anchored VWAP shim; a TU built against an older engine falls back to the historical session-day lowering. TradingView tapes for both a mid-session and a day-boundary start show the explicit daily form is `na` until the first day change, while omitted-anchor VWAP is finite from bar 0. |
 | Input titles (codegen)           | `_check_input_titles` refuses a title that is not a compile-time string constant (TradingView: `title (const string)`) before generation; PineForge keys every override by the title. |
@@ -992,8 +1024,9 @@ payload's mutable-global scan walk each body once (analyzer), the known-value
 spelling spells a call of the same arguments once (`_arith_expr_to_str`), and
 a payload's walks stop at a pure call (see "`request.security` helpers").
 Across the 325 public corpus sources and
-277 gate fixtures, maxima are 9,869 characters, nesting 10 and 0.03 s
-(2026-09-26).
+277 gate fixtures, maxima are 9,869 characters, nesting 10 and 0.05 s
+(2026-09-29, main 70c2b4a, CPython 3.14 on an Apple M4 Max; 0.03 s on
+2026-09-26).
 
 ## Safety rules for AI agents working in this repo
 
@@ -1006,7 +1039,8 @@ history is intentional.
 - **Always finish with the full engine-enabled `python -m pytest -ra`**
   and the corpus gate shown at the top. A single corpus or compile-smoke
   failure is a regression; inspect skips to confirm the C++ paths ran.
-- **Don't update `VERSION`** without confirming the exact matching engine tag
-  and its generated headers and static library are available.
+- **Don't update `VERSION`** (from 1.0.0 on) without confirming the exact
+  matching engine tag and its generated headers and static library are
+  available.
 - **Don't introduce runtime dependencies.** Pure-Python is the install
 contract. Test extras (pytest) are the only allowed `[project.optional-dependencies]`.

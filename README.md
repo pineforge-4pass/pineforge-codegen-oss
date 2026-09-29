@@ -4,34 +4,70 @@
 
 [![PyPI](https://img.shields.io/pypi/v/pineforge-codegen.svg)](https://pypi.org/project/pineforge-codegen/)
 [![Python](https://img.shields.io/pypi/pyversions/pineforge-codegen.svg)](https://pypi.org/project/pineforge-codegen/)
-[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-orange.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-orange.svg)](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE)
 [![Personal use](https://img.shields.io/badge/personal%20trading-free-22c55e.svg)](#license)
 
 A pure-Python library that turns a PineScript v6 strategy into a complete C++
 source file you can compile against the [`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine)
-runtime. See the engine's [current validation scoreboard](https://github.com/pineforge-4pass/pineforge-engine#validation-scoreboard)
-for the complete TradingView comparison, pinned results, and grading details.
+runtime.
+
+In the maintainers' parity baseline of 2026-09-29
+(`pineforge-parity-baseline-20260929-engine-35db01c8`, evidence snapshot
+`47cec517…`), `main` of this repository (70c2b4a) with engine `main`
+(35db01c8) graded 7,905 of 7,989 TradingView probes excellent and the other 84
+strong, with none below strong and no engine errors; 17 more probes are held
+out as TradingView-side anomalies. A probe is a
+strategy exported from TradingView with its trade list and replayed trade for
+trade on the same bars. These are `main` results, not a release's. The
+engine's [validation scoreboard](https://github.com/pineforge-4pass/pineforge-engine#validation-scoreboard)
+describes how a probe is graded.
 
 It is **source-available and free for personal trading** — research, backtest,
 and trade your own account with your own capital at no cost. See
 [License](#license) for the line between personal and commercial use.
 
-See the [changelog](CHANGELOG.md) for the planned 1.0 release notes and
-release-note policy.
+See the [changelog](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/CHANGELOG.md)
+for the unreleased changes on `main` and the release-note policy.
 
 - **Pure Python, zero runtime dependencies** — `transpile()` and
   `transpile_full()` are the supported Python entry points.
-- **Located diagnostics** — the support checker rejects unsupported Pine
-  before codegen, while `transpile_full()` returns warnings for supported
-  scripts with documented approximations.
-- First complete PineScript v6 → C++ transpiler with a real support checker (to
-  our knowledge).
+- **Located diagnostics** — the support checker rejects unsupported Pine with
+  a `file:line:col` location before any C++ is emitted, and on `main`
+  `transpile_full()` returns warnings for supported scripts with documented
+  approximations.
+
+## Releases and this README
+
+<!-- Release lane: when a version is tagged, update this section, the Install
+note, the Engine pairing table and every "0.10.4" / "on `main`" marker. -->
+
+This README describes `main`, which is ahead of the latest release and not yet
+released. The latest release is **0.10.4** (2026-09-06), on PyPI as
+`pineforge-codegen` and on npm as `@pineforge/codegen-pyodide`. Its README is
+at the [`v0.10.4` tag](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/v0.10.4/README.md).
+A source install of `main` also reports version 0.10.4: the release workflow
+sets the version when it tags a release.
+
+This README marks where 0.10.4 is known to differ from `main`; the changelog is
+the complete list. The differences a user meets first:
+
+- 0.10.4's C++ derives `GeneratedStrategy` from `BacktestEngine` in
+  `<pineforge/engine.hpp>`; `main`'s derives it from
+  `pineforge::source::PineStrategyHost`. The two need different engines (see
+  [Engine pairing](#engine-pairing)).
+- 0.10.4 has no `libraries=` argument, no `diagnostics` key in
+  `transpile_full()`'s result and none of the [input limits](#limits).
+- 0.10.4 recovers from some syntax errors and still returns C++; `main` raises
+  a located `CompileError` instead.
+- Many scripts that 0.10.4 refuses transpile on `main`, and some lower
+  differently; the [changelog](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/CHANGELOG.md)
+  lists them.
 
 ## What this owns
 
 This repository owns **Pine → C++ translation only**. It turns a Pine v6 script
 into a `GeneratedStrategy`: the indicator math plus the `strategy.entry` /
-`exit` / `close` / … calls, emitted on the engine's
+`exit` / `close` / … calls, emitted on `main` on the engine's
 `pineforge::source::PineStrategyHost` with code that attaches the engine's Pine
 execution adapter.
 
@@ -39,9 +75,9 @@ It does **not** own execution semantics. Order lifecycle, bracket legs,
 fill-price and slippage rules, `process_orders_on_close` / `calc_on_order_fills`,
 margin revival and trail/stop behaviour — everything TradingView parity depends
 on at run time — live in the engine's source-adapter runtime
-([`src/source/`](https://github.com/pineforge-4pass/pineforge-engine/tree/main/src/source)),
-which maps them onto the engine's Pine-agnostic kernel. See the engine's
-[architecture notes](https://github.com/pineforge-4pass/pineforge-engine#architecture-kernel-vs-parity).
+([`src/source/`](https://github.com/pineforge-4pass/pineforge-engine/tree/main/src/source)
+on engine `main`), which maps them onto the engine's Pine-agnostic kernel. See
+the engine's [architecture notes](https://github.com/pineforge-4pass/pineforge-engine#architecture-kernel-vs-parity).
 
 ---
 
@@ -51,9 +87,11 @@ which maps them onto the engine's Pine-agnostic kernel. See the engine's
 pip install pineforge-codegen
 ```
 
-Requires Python ≥ 3.11. No runtime dependencies.
+This installs the latest release, 0.10.4. Requires Python ≥ 3.11. No runtime
+dependencies.
 
-From source (development / contributing):
+To get `main`, which this README describes, install from source (this is also
+the development setup):
 
 ```bash
 git clone https://github.com/pineforge-4pass/pineforge-codegen-oss.git
@@ -81,7 +119,12 @@ cpp = transpile(pine)
 print(cpp)          # complete C++ source string
 ```
 
-The output `#include`s `<pineforge/source/pine_strategy_host.hpp>`, `<pineforge/ta.hpp>`, …; its `GeneratedStrategy` derives from `pineforge::source::PineStrategyHost` and compiles into a `.so` exposing the engine's documented C-ABI.
+On `main` the output `#include`s `<pineforge/source/pine_strategy_host.hpp>`,
+`<pineforge/ta.hpp>`, …; its `GeneratedStrategy` derives from
+`pineforge::source::PineStrategyHost` and compiles into a `.so` exposing the
+engine's documented C-ABI. 0.10.4's output includes `<pineforge/engine.hpp>`
+and derives from `BacktestEngine`. [Compile & run against the engine](#compile--run-against-the-engine)
+builds and runs this strategy.
 
 ## Usage
 
@@ -93,13 +136,24 @@ transpile(
     *,
     check_support: bool = True,   # run the support checker before codegen
     filename: str = "<input>",    # name used in error locations
+    libraries: Mapping[str, str] | None = None,   # imported Pine libraries (main only)
 ) -> str
 ```
 
 Returns the generated C++ source as a string. Raises
-`pineforge_codegen.errors.CompileError` on a rejected construct, syntax
-error, or input limit. It does not return nonfatal warnings; use
+`pineforge_codegen.errors.CompileError` on a rejected construct and, on `main`,
+on a syntax error or an input limit (0.10.4 recovers from some syntax errors
+and has no input limits). It does not return nonfatal warnings; on `main`, use
 `transpile_full()` to inspect them.
+
+`libraries` exists on `main` only. It maps an import path to the library's
+source (`{"user/name/version": source_text}`), and each import the script uses
+is inlined from it. With `libraries=None` (the default) the sources are read
+through the script's own requests manifest when the environment names one
+(`$PINEFORGE_PINE_LIBRARIES` with `$PINEFORGE_REQUESTS_ROOT`); otherwise an
+import is refused by name, as in 0.10.4. On `main`, an import whose alias is
+`ta`, `math` or `str` and that names only that namespace's built-ins needs no
+source.
 
 ### The `transpile_full()` function
 
@@ -109,17 +163,20 @@ transpile_full(
     *,
     check_support: bool = True,
     filename: str = "<input>",
+    libraries: Mapping[str, str] | None = None,   # main only
 ) -> dict
 ```
 
-Returns `{"cpp": str, "inputs": list[dict], "strategyParams": dict,
-"diagnostics": list[Diagnostic]}` on success. `inputs` is the input manifest;
-its `title` is the actual override key. `diagnostics` contains nonfatal
-warnings. A rejected script raises `CompileError` with its diagnostics. The
-Pyodide package ships `gate/glue.py`'s `transpile_json(source) -> str`, whose
-JSON success and error envelopes carry the same manifest and warnings. See the
-[1.0 public contract](docs/PUBLIC_CONTRACT.md) for the exact fields, severity
-values, and input key rules. There is no installed CLI or exit-code contract.
+On `main` it returns `{"cpp": str, "inputs": list[dict], "strategyParams": dict,
+"diagnostics": list[Diagnostic]}` on success (0.10.4 returns the first three
+keys). `inputs` is the input manifest; its `title` is the actual override key.
+`diagnostics` contains nonfatal warnings. A rejected script raises
+`CompileError` with its diagnostics. The Pyodide package ships `gate/glue.py`'s
+`transpile_json(source) -> str`, whose JSON success and error envelopes carry
+the same manifest and, on `main`, the same warnings. See the
+[1.0 public contract](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/docs/PUBLIC_CONTRACT.md)
+for the exact fields, severity values, and input key rules. There is no
+installed CLI or exit-code contract.
 
 ### Transpile a file to a `.cpp`
 
@@ -149,10 +206,10 @@ except CompileError as e:
 
 try:
     transpile('//@version=6\nstrategy("x")\n'
-              'x = request.financial("AAPL", "REV", "FQ")\n')
+              'x = request.seed("seed_crypto_santiment", "BTC_SENTIMENT_POSITIVE_TOTAL", close)\n')
 except CompileError as e:
     print(e)
-    # <input>:3:22: request.financial(...) is not supported.
+    # <input>:3:17: request.seed(...) is not supported.
 ```
 
 Pass `filename=` so the location points back at the user's file:
@@ -162,6 +219,12 @@ transpile(src, filename="my_strategy.pine")
 # raises e.g.  my_strategy.pine:12:5: ...
 ```
 
+Not every request for outside data is refused on `main`. A
+`request.financial()` whose value reaches only plots, alerts, tables or logs
+transpiles with a warning and reads `na`; 0.10.4 refuses it. The
+[changelog](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/CHANGELOG.md)
+lists what `main` reads, warns about or refuses for such requests.
+
 ### Skip the support checker
 
 `check_support=False` on either Python function is **experimental**. It
@@ -169,31 +232,48 @@ bypasses the gate and can produce C++ the engine will not accept or execute
 faithfully:
 
 ```python
+from pathlib import Path
+from pineforge_codegen import transpile
+
+src = Path("strategy.pine").read_text()
 cpp = transpile(src, check_support=False)
 ```
 
 ### Trace intermediate expressions (`@pf-trace`)
 
-A `// @pf-trace name=expr` comment makes the engine emit `name`'s per-bar value
-in the backtest report — useful for debugging parity against TradingView:
+A `// @pf-trace name=expr` comment, alone on its line, makes the compiled
+strategy record `name`'s value on every bar when tracing is enabled with the
+engine's `strategy_set_trace_enabled()`; the values come back in the report's
+`trace` array (`pf_report_t::trace`). That is useful for debugging parity
+against TradingView:
 
 ```python
+from pineforge_codegen import transpile
+
 pine = """
 //@version=6
 strategy("traced")
-// @pf-trace rsi=ta.rsi(close, 14)
+// @pf-trace rsi=r
+r = ta.rsi(close, 14)
 e = ta.ema(close, 20)
 if close > e
     strategy.entry("L", strategy.long)
 """
-cpp = transpile(pine)   # emitted on_bar tail records `rsi` each bar
+cpp = transpile(pine)   # emitted on_bar tail records `r` each bar
 ```
+
+Trace a script variable or an expression over script variables and bar
+fields, such as `// @pf-trace gap=close - e` or
+`// @pf-trace body=math.abs(close - open)`. A `ta.*` call written in the
+pragma itself is not computed: `// @pf-trace rsi=ta.rsi(close, 14)` records
+`na` on every bar, and its C++ carries an `/* unsupported: ta.rsi */` marker.
+Both 0.10.4 and `main` behave this way.
 
 ### Advanced: run the pipeline stages directly
 
-`transpile()` is a thin wrapper over five passes. Drive them yourself to inspect
-tokens, the AST, or the analyzer context. These classes are outside the
-[1.0 public contract](docs/PUBLIC_CONTRACT.md):
+Drive the main stages yourself to inspect tokens, the AST, or the analyzer
+context. These classes are outside the
+[1.0 public contract](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/docs/PUBLIC_CONTRACT.md):
 
 ```python
 from pineforge_codegen import (
@@ -211,18 +291,28 @@ ctx.pf_trace_pragmas = pragmas
 cpp     = CodeGen(ctx).generate()
 ```
 
+This skips the library inlining, the AST rewrites and the reruns that
+`transpile()` also performs (see [How it works](#how-it-works)). Its C++ equals
+`transpile()`'s only for scripts those passes leave unchanged, such as the
+quick-start strategy.
+
 ## Limits
 
-The limits turn a crash or a hang on untrusted source into a `CompileError`
-with a Pine `file:line:col` location. Where TradingView documents a limit,
-PineForge's is at least as large. Exceeding one does not return partial C++,
-and `check_support=False` does not bypass them.
+These limits are on `main` only; 0.10.4 has none of them. They turn a crash or
+a hang on untrusted source into a `CompileError` with a Pine `file:line:col`
+location. Where TradingView documents a limit, PineForge's is at least as
+large. Exceeding one does not return partial C++, and `check_support=False`
+does not bypass them.
 
 | Limit | Maximum | TradingView's documented limit | Largest in the 325 public corpus sources and 277 gate fixtures |
 | --- | ---: | --- | ---: |
 | Source size | 5,242,880 characters (5 MiB) | Compilation request of at most 5MB | 9,869 characters |
 | Nesting depth | 512 levels | None | 10 levels |
-| Transpilation time | 120 seconds | Two-minute compilation limit | 0.03 seconds |
+| Transpilation time | 120 seconds | Two-minute compilation limit | 0.05 seconds |
+
+The last column was measured on 2026-09-29 with `main` (70c2b4a) on CPython
+3.14 on an Apple M4 Max, over the engine corpus that engine `main` 35db01c8
+pins and this repository's `tests/gate-corpus`.
 
 Nesting counts brackets, indented blocks, prefix operators, `?:` and
 `else if` chains, and the depth of the parsed syntax tree, in which an
@@ -237,64 +327,115 @@ located error.
 
 ## How it works
 
-`transpile()` runs five passes, in order:
+On `main`, `transpile()` runs these passes, in order:
 
 ```
 pine source
   │
   ├─ 1. extract_pf_trace_pragmas   // @pf-trace comments pulled out first
   ├─ 2. Lexer → Parser             token stream → Pine v6 AST
-  ├─ 3. support_checker            reject anything the engine can't run faithfully
-  ├─ 4. Analyzer                   type inference, scope resolution, TA bookkeeping
-  └─ 5. CodeGen                    → C++ source string
+  ├─ 3. library inlining           imported Pine libraries inlined into the AST
+  ├─ 4. support_checker            reject anything the engine can't run faithfully
+  ├─ 5. AST rewrites               requests with no data, request.security contexts,
+  │                                bounded TA lengths, builtin keyword arguments
+  ├─ 6. Analyzer                   type inference, scope resolution, TA bookkeeping
+  └─ 7. CodeGen                    → C++ source string
 ```
 
-The emitted `GeneratedStrategy` does not execute orders itself: its
+The passes run again, from pass 1, when the generated C++ needs a renamed
+block-local declaration or a per-call-site clone of a function that reads
+`session.<flag>[k]`; `_generate` in `pineforge_codegen/__init__.py` holds the
+loop. 0.10.4 runs passes 1, 2, 4, 6 and 7 once, with only the bounded TA
+length rewrite of pass 5.
+
+On `main`, the emitted `GeneratedStrategy` does not execute orders itself: its
 `strategy.*` calls go to the engine's Pine execution adapter, which it attaches
 in its constructor.
 
 ## Engine pairing
 
-A released codegen `X.Y.Z` is supported only with engine tag `vX.Y.Z`, using
-that release's generated headers and static library. Prereleases match
-exactly: codegen `1.0.0-rc.1` requires engine `v1.0.0-rc.1`. On every pair
-change, regenerate the strategy C++ from Pine and relink it against that
-engine release's headers and `libpineforge.a`. `PF_ABI_VERSION` equality alone
-is insufficient; it does not guarantee the C++ source layout or behavior.
-Development branches can test paired in-progress commits, but they are not
-supported cross-version release pairs. See [CONTRIBUTING.md](CONTRIBUTING.md)
+Generated C++ compiles only against the engine it was generated for:
+
+| Codegen | Engine | Status |
+| --- | --- | --- |
+| 0.10.4 (PyPI, 2026-09-06) | `v0.13.1` | The pair the `pineforge-release` image `v0.1.25` ships. Its C++ does not compile against engine `main`. |
+| `main` (unreleased) | `main` | Its C++ needs `pineforge/source/pine_strategy_host.hpp`, which no engine release has yet (`v0.13.1` does not). |
+| 1.0.0 and later (planned) | `vX.Y.Z` of the same version | See below. |
+
+On the 0.x line the engine and codegen versions are independent, and the
+[`pineforge-release`](https://github.com/pineforge-4pass/pineforge-release)
+image records which pair it ships. From 1.0.0 on, a released codegen `X.Y.Z`
+is supported only with engine tag `vX.Y.Z`, using that release's generated
+headers and static library. Prereleases match exactly: codegen `1.0.0-rc.1`
+requires engine `v1.0.0-rc.1`. On every pair change, regenerate the strategy
+C++ from Pine and relink it against that engine release's headers and
+`libpineforge.a`. `PF_ABI_VERSION` equality alone is insufficient; it does not
+guarantee the C++ source layout or behavior. Development branches can test
+paired in-progress commits, but they are not supported cross-version release
+pairs. See [CONTRIBUTING.md](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/CONTRIBUTING.md#engine-pairing)
 for the setup and checks.
 
 ## Compile & run against the engine
 
-The emitted C++ targets the C-ABI in `<pineforge/pineforge.h>`. To build and run
-a strategy:
+The emitted C++ targets the C-ABI in `<pineforge/pineforge.h>`. The engine's
+[`tutorial/`](https://github.com/pineforge-4pass/pineforge-engine/tree/main/tutorial)
+builds `libpineforge.a` and a strategy `.so` and runs it on 672 frozen
+BTCUSDT 15m bars. To run your transpiled strategy there, save the quick-start
+Pine as `strategy.pine`, write `strategy.generated.cpp` with the
+[file example](#transpile-a-file-to-a-cpp) above, then from the same directory:
 
 ```bash
-# Get the runtime (Apache-2.0) next to this repo
+# main: the engine's main branch. For 0.10.4 add --branch v0.13.1.
 git clone https://github.com/pineforge-4pass/pineforge-engine.git
+cd pineforge-engine
+cp ../strategy.generated.cpp tutorial/macd/generated.cpp   # the tutorial's strategy slot
+bash tutorial/run.sh    # needs cmake, a C++17 compiler and python3
 ```
 
-Follow the engine's [`tutorial/`](https://github.com/pineforge-4pass/pineforge-engine/tree/main/tutorial)
-to build `libpineforge.a`, compile your transpiled `.cpp` into a strategy `.so`,
-feed it OHLCV, and read back the closed-trade list. Use the exact
-[engine pair](#engine-pairing) for the codegen release.
+`run.sh` configures CMake once, builds `libpineforge.a` and
+`tutorial/macd/strategy.so`, and runs `tutorial/run.py`, which loads the `.so`,
+feeds it the bars and reads back the closed trades. For the quick-start SMA
+cross, `main` with engine `main` (35db01c8) prints:
 
-Generated strategies reset persistent Pine state before each new batch or stream
-warmup through the engine's script-run preparation hook. Input settings survive a
-new run, and ticks within one stream preserve accumulated state. Regenerate the
-strategy C++ and rebuild compiled modules with matching engine headers and library
-to use this lifecycle; replacing only the runtime archive does not retrofit
-already compiled modules.
+```
+MACD(12,26,9) on BTCUSDT 15m — 672 bars, 2026-04-29 18:15 → 2026-05-06 18:00 UTC
+  trades:    9  (6W / 3L, 66.7% win)
+  net pnl:   +738.20
+  best/worst:+679.22 / -335.02
+  max dd:    -788.79
+  elapsed:   1.4 ms
+```
 
-Generated constructors do not configure order behavior from the presence of
-`strategy.close` or `strategy.close_all` in the source. Regenerate older C++
-that assigns `script_has_strategy_close_` before compiling with engine headers
-that remove this obsolete member. Reachable close commands keep their ordinary
-runtime lowering.
+The `MACD(12,26,9)` label on the first line is fixed text in `run.py`,
+whatever strategy the `.so` holds, and `elapsed` varies by machine. 0.10.4
+with engine `v0.13.1` books 13 trades on the same bars. The difference is
+order sizing: `main` gives an omitted
+`initial_capital`, `default_qty_type` and `default_qty_value` TradingView's
+Pine v6 defaults (100,000, `strategy.percent_of_equity`, 100), where 0.10.4
+leaves the engine's own (1,000,000 and 1 contract). Declaring those in
+`strategy()` books the same 13 trades on `main`.
 
-Prefer no local build? A hosted transpile API + MCP server is available so AI
-agents can transpile and backtest for you — see <https://www.pineforge.dev>.
+On `main`, generated strategies reset persistent Pine state before each new
+batch or stream warmup through the engine's script-run preparation hook. Input
+settings survive a new run, and ticks within one stream preserve accumulated
+state. Regenerate the strategy C++ and rebuild compiled modules with matching
+engine headers and library to use this lifecycle; replacing only the runtime
+archive does not retrofit already compiled modules.
+
+On `main`, generated constructors do not configure order behavior from the
+presence of `strategy.close` or `strategy.close_all` in the source. Older C++
+(0.10.4's included) assigns `script_has_strategy_close_`, which engine `main`
+has removed; regenerate it before compiling there. Reachable close commands
+keep their ordinary runtime lowering.
+
+Prefer no local build? [pineforge.dev](https://www.pineforge.dev) runs a free
+hosted MCP server, with a weekly backtest quota, whose `backtest_pine` tool
+transpiles and backtests a strategy for an AI agent. The
+[`pineforge-backtest-mcp`](https://github.com/pineforge-4pass/pineforge-backtest-mcp)
+Docker image is a local MCP server with `transpile_pine` and `backtest_pine`
+tools that runs on your machine.
+Both run the latest release pair (codegen 0.10.4 with engine `v0.13.1`), not
+`main`.
 
 ## Running tests
 
@@ -304,22 +445,28 @@ Run `python -m pytest -ra` and then
 `python -m pytest -ra tests/test_compile_corpus.py` with those paths set; check
 the skip reasons so compiler and runtime coverage actually ran. The full
 Pyodide parity gate and npm audit are also required. The exact setup and
-commands are in [CONTRIBUTING.md](CONTRIBUTING.md#required-checks); use
-`python -m pytest --collect-only -q` for the current collection count.
+commands are in [CONTRIBUTING.md](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/CONTRIBUTING.md#required-checks);
+use `python -m pytest --collect-only -q` for the current collection count.
 
 ## License
 
-Source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE), with
-two supplemental terms (the `LICENSE` file is the controlling text):
+Source-available under the [PolyForm Noncommercial License 1.0.0](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE),
+with two supplemental sections (the `LICENSE` file is the controlling text;
+where they conflict with the base license, the supplemental sections control):
 
-- **Personal Trading exception** — free to research, backtest, and trade for your
-  own account with your own capital.
-- **Commercial use** — companies, funds, managing third-party capital, embedding
-  in a product, or operating a hosted / public-facing service requires a
-  commercial license.
+- **Additional Permission — Personal Trading** — a natural person may use the
+  software free of charge to research, develop, backtest and execute trades
+  for their own account, funded solely by their own capital.
+- **Commercial Use** — managing, advising on or trading anyone else's capital;
+  use by, for or on behalf of a company, fund, partnership or other
+  organization (including an individual's work for one); embedding the
+  software or its output in a product or service made available to others; and
+  operating a hosted, software-as-a-service or other public-facing service
+  that uses the software all require a separate commercial license.
+  So does any other use that is neither a permitted purpose under the base
+  license nor covered by the Personal Trading permission.
 
-Competing hosted services are not permitted under the noncommercial terms. This
-is source-available, not OSI open source.
+This is source-available, not OSI open source.
 
 ### Buying a commercial license
 
@@ -328,26 +475,33 @@ hosted/embedded use. Email **luis@4pass.com.tw** with your use case for a quote.
 
 ## Explicit Pine execution attachment
 
-The Pine execution adapter is the engine's full Pine execution runtime
-(`PineExecutionAdapter` and `PineStrategyHost` in the engine's `src/source/`):
-order lifecycle, bracket legs, fill-price and slippage rules, POOC /
-`calc_on_order_fills`, margin revival, trail/stop semantics, the intraday caps
-and the retained-parent priority rule. Codegen's job is to emit the strategy
-that attaches it and the `strategy.*` calls it executes, against a matching
-engine ABI.
+This section describes `main` and engine `main`. The Pine execution adapter is
+the engine's full Pine execution runtime (`PineExecutionAdapter` and
+`PineStrategyHost` in the engine's `src/source/`): order lifecycle, bracket
+legs, fill-price and slippage rules, POOC / `calc_on_order_fills`, margin
+revival, trail/stop semantics, the intraday caps and the retained-parent
+priority rule. Codegen's job is to emit the strategy that attaches it and the
+`strategy.*` calls it executes, against a matching engine ABI.
 
 Generated constructors configure their `PineStrategyConfig` before host
 metadata and select `attach_pine_execution_adapter()` when
-`PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1` is available.
-A guarded `enable_pine_intraday_cap()` fallback supports existing cap-only
-engines; engines with neither capability keep their established defaults.
+`PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1` is available, with a
+guarded `enable_pine_intraday_cap()` fallback for
+`PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1` alone. Every engine header the generated
+C++ can compile against (those with `pineforge/source/pine_strategy_host.hpp`)
+defines both macros, so the adapter branch is the one compiled; see
+[`docs/pine-cap-activation.md`](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/docs/pine-cap-activation.md).
 Risk statements remain in source execution order. This bridge requires matching
 engine headers and runtime; it is not cross-version C++ binary compatibility.
 
-Regenerate old cap-only generated C++ before using the new engine for Pine
-execution. Such old source may still compile but does not attach the priority
-rule, and metadata cannot silently restore it. Rebuild all modules against the
-new matching C++ layout (`engine_script_run_v19`); old fingerprint versions are
-not comparable. The extraction preserves Pine policy under explicit attachment;
-it does not implement the generic native child-activation scheduler or prove
-campaign neutrality. Compile-only corpus checks do not run Pine backtests.
+Regenerate old generated C++ before using a new engine for Pine execution. C++
+generated before the source-layer cut
+([#129](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/129)),
+0.10.4's included, derives from `BacktestEngine` and does not compile against
+engine `main`; old cap-only C++ does not attach the priority rule, and
+metadata cannot silently restore it. Rebuild all modules against the
+new matching C++ layout (`engine_script_run_v19` on engine `main`); old
+fingerprint versions are not comparable. The extraction preserves Pine policy
+under explicit attachment; it does not implement the generic native
+child-activation scheduler or prove campaign neutrality. Compile-only corpus
+checks do not run Pine backtests.

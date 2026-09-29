@@ -1,5 +1,9 @@
 # Public contract for 1.0
 
+This is the contract `main` implements for the planned 1.0 release, which is
+not yet released. The latest release, 0.10.4, has neither the `libraries`
+argument nor the `diagnostics` key described below.
+
 The supported programmatic entry points are the Python functions
 `pineforge_codegen.transpile` and `pineforge_codegen.transpile_full`, plus the
 `gate/glue.py` `transpile_json` protocol shipped in the Pyodide package. The
@@ -10,10 +14,12 @@ are for advanced inspection and are not part of this 1.0 stability promise.
 
 ```python
 transpile(pine_source: str, *, check_support: bool = True,
-          filename: str = "<input>") -> str
+          filename: str = "<input>",
+          libraries: Mapping[str, str] | None = None) -> str
 
 transpile_full(pine_source: str, *, check_support: bool = True,
-               filename: str = "<input>") -> dict
+               filename: str = "<input>",
+               libraries: Mapping[str, str] | None = None) -> dict
 ```
 
 `transpile()` returns one complete C++ source string. It raises
@@ -22,6 +28,14 @@ or generation error; its `diagnostics` attribute carries `Diagnostic` objects.
 `filename` appears in their source locations and in `str(error)`.
 `transpile()` does not return nonfatal warnings.
 
+`libraries` maps a Pine library's import path to its source
+(`{"user/name/version": source_text}`); each import the script uses is inlined
+from it before the support check. With `None`, the default, the sources are
+read through the script's own requests manifest when `$PINEFORGE_PINE_LIBRARIES`
+and `$PINEFORGE_REQUESTS_ROOT` name one. An import with no source is refused by
+name, except one whose alias is `ta`, `math` or `str` and that names only that
+namespace's built-ins, which is a no-op.
+
 `transpile_full()` runs the same translation once and returns these keys on
 success:
 
@@ -29,7 +43,7 @@ success:
 | --- | --- | --- |
 | `cpp` | `str` | The generated source, identical to `transpile()` for the same inputs. |
 | `inputs` | `list[dict]` | Input manifest in global source order, one entry per global-scope input call, including inline calls. |
-| `strategyParams` | `dict` | Values extracted from the `strategy(...)` declaration; a nonliteral value can be `None`. |
+| `strategyParams` | `dict` | Values extracted from the `strategy(...)` declaration; a nonliteral value can be `None`, and an omitted argument is absent even where the C++ applies a default. |
 | `diagnostics` | `list[Diagnostic]` | Nonfatal warnings only, with `Level.WARNING` and source locations. |
 
 An error still raises `CompileError`; there is no partial success dict. The
@@ -95,8 +109,10 @@ process-exit-code promises for a CLI, shell wrapper, or gate script. Consumers
 should use the Python exception and return-value contract or the JSON
 `ok`/`diagnostics` contract.
 
-Generated C++ has a separate runtime pairing requirement: codegen `X.Y.Z`
-supports only engine `vX.Y.Z` with that release's generated headers and static
-library; prerelease tags match exactly. Regenerate C++ and relink strategy
-libraries on every pair change. `PF_ABI_VERSION` equality alone is
-insufficient. See [CONTRIBUTING.md](../CONTRIBUTING.md#engine-pairing).
+Generated C++ has a separate runtime pairing requirement: from 1.0.0 on,
+codegen `X.Y.Z` supports only engine `vX.Y.Z` with that release's generated
+headers and static library; prerelease tags match exactly. (The 0.x releases
+pair by the `pineforge-release` image's record instead; see the README.)
+Regenerate C++ and relink strategy libraries on every pair change.
+`PF_ABI_VERSION` equality alone is insufficient. See
+[CONTRIBUTING.md](../CONTRIBUTING.md#engine-pairing).

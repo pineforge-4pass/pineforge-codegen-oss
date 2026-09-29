@@ -1,25 +1,25 @@
 # @pineforge/codegen-pyodide
 
 Gate-validated Pyodide payload for the PineScript v6 → C++ transpiler. Built and
-published from `pineforge-codegen-oss` by `.github/workflows/publish-pyodide.yml`.
-Stable releases are on the `latest` dist-tag; prereleases (for example `1.0.0-rc.1`)
-are on `next` only (`npm install @pineforge/codegen-pyodide@next`).
+published from `pineforge-codegen-oss` by `.github/workflows/publish-pyodide.yml`,
+with the same version as the matching `pineforge-codegen` release on PyPI.
+Stable releases are on the `latest` dist-tag. A prerelease (for example
+`1.0.0-rc.1`) is published on `next` only.
 
 ## Contents
 - `pineforge_codegen-<version>.tar.gz` — the gate-validated archive (unpack into Pyodide).
 - `pineforge_codegen/` — unpacked Python source (put on `PYTHONPATH` for Node oracle/grammar tooling).
-- `tables.json` — introspected codegen tables (the app renders `tables.generated.ts` from this).
+- `tables.json` — introspected codegen tables (PineForge's web app renders its tables from this).
 - `release.json` — `{ codegen, pyodide, python, emscripten, sha256 }`.
-- `index.mjs` — `release`, `tables`, `archivePath`, `codegenSourceDir`.
+- `glue.py` — the `transpile_json(source)` glue from the repository's `gate/glue.py`; its JSON
+  envelopes are described in the repository's `docs/PUBLIC_CONTRACT.md`.
+- `transpile.worker.mjs` — an ES module worker that runs the glue in Pyodide.
+- `index.mjs` — exports `release`, `tables`, `archivePath`, `sourceRoot`, `codegenSourceDir`,
+  `workerPath` and `glue`.
 
-## One-time bootstrap (maintainer, manual)
-This is a NEW package; npm OIDC Trusted Publishing can only be configured after
-the package exists:
-1. Build locally: `npm run gate:full && node scripts/build-npm-package.mjs`.
-2. From `npm/`, do the first publish with a granular npm token:
-   `npm publish --access=public` (one time).
-3. On npmjs.com, configure the package's Trusted Publisher: GitHub Actions,
-   repo `pineforge-4pass/pineforge-codegen-oss`, workflow `publish-pyodide.yml`.
-4. Thereafter a `v*` tag push publishes via OIDC after the dependency audit and
-   full parity gate pass. A manual `workflow_dispatch` defaults to a dry run;
-   `dry_run=false` is a separate real-publish path.
+## Publishing (maintainers)
+A `v*` tag push, which the release workflow makes, publishes through npm OIDC Trusted
+Publishing after the dependency audit and the full parity gate pass; published versions
+carry npm provenance. A manual `workflow_dispatch` defaults to a dry run; `dry_run=false`
+publishes for real. The one-time bootstrap is done: 0.7.0 was the manual first publish,
+and every version since 0.7.1 carries provenance from this workflow.

@@ -14,7 +14,10 @@ Why a pre-pass?
     :class:`Parser` machinery used for normal Pine expressions. This
     keeps a single source of truth for Pine syntax and ensures pragma
     expressions support the full grammar (logical operators, member
-    access, function calls, ternaries, ...).
+    access, function calls, ternaries, ...). A ``ta.*`` call inside a
+    pragma is not computed, though: no TA state is allocated for it, so
+    the codegen renders it as ``na`` with an ``/* unsupported */`` marker.
+    Trace a script variable that holds the ``ta.*`` value instead.
 
 Pragma syntax (kept deliberately strict so unrelated comments are
 untouched)::

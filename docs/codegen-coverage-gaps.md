@@ -1,5 +1,18 @@
 # Codegen coverage gaps — running follow-up list
 
+> **Historical record.** Each section below is dated and describes the tree of
+> its date, not `main`. The Phase B audit ran on 2026-05-28, before the first
+> public release, so its `file:line` references point into that tree. Since
+> then, `color.from_gradient` has become a visual-only stub that transpiles
+> with a warning (it is no longer rejected), and the 2026-09-25
+> `request.security` follow-up is superseded: a request of another symbol
+> whose value can reach a trade now reads the feed a requests manifest pins for
+> it or stops the run where its value is read (one that reaches only plots,
+> alerts, tables or logs lowers to `na` with a warning), and a `?:` symbol that
+> can reach a trade registers the symbol the run computes (see `CHANGELOG.md`,
+> "Libraries and requests for outside data"). `AGENTS.md` describes the current
+> support contracts.
+
 Tracks fallthrough paths in `pineforge_codegen/codegen/visit_call.py` and
 `pineforge_codegen/codegen/visit_expr.py` that emit a literal `"false"` /
 `"0"` / `"na<double>()"` for an unrecognized construct, and whether the
