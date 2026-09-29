@@ -5087,6 +5087,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     # (``_wide_int_provenance``) is stored in 64 bits too.
                     if cpp_type == "int" and self._is_int64_builtin_init(name):
                         cpp_type = "int64_t"
+                    # An int that can hold TradingView's infinity
+                    # (``_nonfinite_int_names``) keeps its double.
+                    elif cpp_type == "int" and name in self._nonfinite_int_names():
+                        cpp_type = "double"
                 default = self._default_for_type(cpp_type)
                 lines.append(f"    {cpp_type} {safe} = {default};")
 

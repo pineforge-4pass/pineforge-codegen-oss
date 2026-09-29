@@ -560,6 +560,8 @@ class ExprVisitor:
         safe = self._call_site_var_name(node, self._safe_name(name))
         if self._binding_is_series(name, safe):
             return f"{safe}[0]"
+        if name in self._nonfinite_int_names() and name not in self._current_func_locals:
+            return self._nonfinite_int_read(safe)
         # Safety net: by here the name resolved to none of the builtins,
         # constants, parameters, or declared variables handled above, so
         # ``return safe`` would emit a bare identifier that is an *undeclared
@@ -580,6 +582,14 @@ class ExprVisitor:
                 hint=hint,
             )
         return safe
+
+    def _nonfinite_int_read(self, safe: str) -> str:
+        """A read of a ``_nonfinite_int_names`` name: an infinity reads na, as
+        the int's ``na<int>()`` did, except as the operand of an ordering
+        comparison (``_visit_binop_operand``), which orders it as the number."""
+        if getattr(self, "_nonfinite_int_raw", False):
+            return safe
+        return f"(std::isfinite({safe}) ? {safe} : na<double>())"
 
     def _ident_is_resolvable(self, name: str) -> bool:
         """True when a bare identifier maps to a builtin, constant, parameter,
@@ -1275,8 +1285,8 @@ class ExprVisitor:
             for operand in (node.left, node.right):
                 if isinstance(operand, BinOp) and operand.op == "*":
                     self._wide_int_products.add(id(operand))
-        left = self._visit_expr(node.left)
-        right = self._visit_expr(node.right)
+        left = self._visit_binop_operand(node.left, node.op)
+        right = self._visit_binop_operand(node.right, node.op)
         if (self._int_arith_leaves_int32(node)
                 and self._fold_int32_overflow_cpp(node.op, left, right) is None):
             # Both operands are 32-bit C++ ints and the value can leave
@@ -1292,6 +1302,21 @@ class ExprVisitor:
             node, left, right,
             lambda left, right: self._lower_binop(node, left, right),
         )
+
+    def _visit_binop_operand(self, operand, op: str) -> str:
+        """An operand's C++. An ordering comparison reads a
+        ``_nonfinite_int_names`` name's infinity as the number TradingView
+        orders it by (``_nonfinite_int_read``)."""
+        if (op in self.NONFINITE_INT_ORDERING_OPS
+                and isinstance(operand, Identifier)
+                and operand.name in self._nonfinite_int_names()):
+            previous = getattr(self, "_nonfinite_int_raw", False)
+            self._nonfinite_int_raw = True
+            try:
+                return self._visit_expr(operand)
+            finally:
+                self._nonfinite_int_raw = previous
+        return self._visit_expr(operand)
 
     def _left_operand_first(self, node: BinOp, left: str, right: str, lower) -> str:
         """``lower(left, right)``: the C++ of ``node`` over its rendered
