@@ -12,9 +12,19 @@
   left 32 bits wide, and keeps an na operand na where the lane's cast read
   ``na<int>()`` as -2147483648.
 - Lane TAIL-A keeps the history of a global a ``request.security`` payload
-  reads at an offset on the requested bars, typed from the global: a global
-  holding a 64-bit integer (main's rule, or an epoch) keeps it in a double,
-  as the same expression read inline does; the global's ``int`` wrapped it.
+  reads at an offset on the requested bars, typed from the global: it is
+  typed as the same expression read inline is (an operator expression's is a
+  double, whose na reads na), and a global holding a 64-bit integer (main's
+  rule, or an epoch) keeps it in a double; the global's ``int`` wrapped it.
+  TAIL-A lowers a global bound to a user call once per evaluator: a read
+  outside the helper block its locals were emitted in lowers it again (it
+  named locals out of scope, where main compiled).
+- Lane TAIL-E runs a ``request.security`` helper's ``for`` loop on the
+  requested bar: its counter is a counted loop's binder for main's 64-bit
+  rule, as on the chart (a helper-bound name was left 32-bit), and what the
+  loop refuses -- a TA call, a user call -- it refuses through a helper
+  parameter or a global the loop reads too (such a name is expanded where it
+  is read: ``h(ta.sma(close, 3), n)`` computed the SMA once per iteration).
 - Lane TAIL-E reads a ``ta.change`` / ``mom`` / ``roc`` in a top-level if
   block through the hold-last source clock, and lane TAIL-G pushes a pure
   call read at an offset below a lazy edge once per execution of its scope,
@@ -24,7 +34,7 @@
   ``and``, and a ternary whose head reads one beside a lazy ``ta.change``.
 
 TradingView's tapes of ``fixtures/cgint7_tv`` spell every value on every
-sampled bar; both replay whole.
+sampled bar; all three replay whole.
 """
 
 from __future__ import annotations
@@ -36,6 +46,8 @@ from pathlib import Path
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.errors import CompileError
+from tests._compile import compile_cpp
 from tests._e2e import Build, skip_unless_e2e_env
 from tests._security_tapes import TAPE_TZ, replay, source, tape_exits
 from tests._tail_e_tapes import BAR_MS, DAY_MS, START_MS, build, engine_rows, feed, mismatches
@@ -43,7 +55,9 @@ from tests._tail_e_tapes import BAR_MS, DAY_MS, START_MS, build, engine_rows, fe
 FIXTURES = Path(__file__).parent / "fixtures" / "cgint7_tv"
 PRODUCTS = "cgint7_int_products"
 LAZY = "cgint7_lazy"
+LOOPS = "cgint7_loop_products"
 FIELDS = ("pm", "ag", "w", "r", "dv", "dd", "zz", "fl", "p", "q2", "pr")
+LOOP_FIELDS = ("s", "w", "q", "v")
 HEAD = '//@version=6\nstrategy("cgint7")\n'
 
 
@@ -62,26 +76,36 @@ def _rows(name: str) -> dict[tuple[str, int], str]:
 
 
 @pytest.fixture(scope="module")
-def product_exits(tmp_path_factory) -> dict[int, str]:
+def replays(tmp_path_factory) -> dict[str, dict[int, str]]:
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("cgint7")
-    return replay(engine, base, {PRODUCTS: Build(source(PRODUCTS, FIXTURES))})[PRODUCTS]
+    return replay(engine, base, {PRODUCTS: Build(source(PRODUCTS, FIXTURES)),
+                                 LOOPS: Build(source(LOOPS, FIXTURES))})
 
 
-def test_the_int_products_tape_replays(product_exits):
-    tape = tape_exits(PRODUCTS, FIXTURES)
+def _field_differences(name: str, fields: tuple, exits: dict[int, str]) -> dict[str, set]:
+    """Per field, the (TradingView, engine) pairs that differ; up to the
+    tape's last exit the engine exits at exactly the tape's instants."""
+    tape = tape_exits(name, FIXTURES)
     assert len(tape) == 312
     last = max(tape)
-    inside = {ms: signal for ms, signal in product_exits.items() if ms <= last}
+    inside = {ms: signal for ms, signal in exits.items() if ms <= last}
     assert set(inside) == set(tape)
     differ: dict[str, set] = {}
     for ms, signal in tape.items():
         tv_fields, pf_fields = signal.split("|"), inside[ms].split("|")
-        assert len(tv_fields) == len(pf_fields) == len(FIELDS), (signal, inside[ms])
-        for name, tv, pf in zip(FIELDS, tv_fields, pf_fields):
+        assert len(tv_fields) == len(pf_fields) == len(fields), (signal, inside[ms])
+        for field, tv, pf in zip(fields, tv_fields, pf_fields):
             if tv != pf:
-                differ.setdefault(name, set()).add((tv, pf))
+                differ.setdefault(field, set()).add((tv, pf))
+    return differ
+
+
+def test_the_int_products_tape_replays(replays):
+    differ = _field_differences(PRODUCTS, FIELDS, replays[PRODUCTS])
     assert not differ, {name: sorted(v)[:3] for name, v in differ.items()}
+    tape = tape_exits(PRODUCTS, FIXTURES)
+    last = max(tape)
     # The tape's values leave int32 (w, p) and na stays na (zz).
     first = tape[min(tape)].split("|")
     assert int(first[FIELDS.index("w")]) > 2**31 and first[FIELDS.index("zz")] == "NaN"
@@ -105,18 +129,71 @@ def test_a_product_both_rules_reach_keeps_mains_form():
     assert "((int64_t)(n) * (3))" in lines["q"]
 
 
-def test_a_wide_payload_global_keeps_its_history_in_a_double():
-    def history(decl: str) -> str:
-        cpp = transpile(HEAD + decl + 'p = request.security(syminfo.tickerid, "60", g[1])\n'
-                        'if p > 0\n    strategy.entry("L", strategy.long)\n')
-        (line,) = [ln.strip() for ln in cpp.splitlines() if "_sec0_expr_hist_0;" in ln
-                   and ln.strip().startswith("Series<")]
-        return line
+def _history_series(decl: str, read: str = "g[1]") -> str:
+    cpp = transpile(HEAD + decl + f'p = request.security(syminfo.tickerid, "60", {read})\n'
+                    'if p > 0\n    strategy.entry("L", strategy.long)\n')
+    (line,) = [ln.strip() for ln in cpp.splitlines() if "_sec0_expr_hist_0;" in ln
+               and ln.strip().startswith("Series<")]
+    return line
 
-    assert history("g = bar_index * 86400000\n") == "Series<double> _sec0_expr_hist_0;"
-    assert history("var int k = 0\nk += 1\ng = k * 86400000\n") == "Series<double> _sec0_expr_hist_0;"
-    # TAIL-A's own typing where the value fits int32.
-    assert history("g = bar_index * 3\n") == "Series<int> _sec0_expr_hist_0;"
+
+def test_a_payload_global_history_is_typed_as_its_expression_read_inline():
+    double, integer = "Series<double> _sec0_expr_hist_0;", "Series<int> _sec0_expr_hist_0;"
+    assert _history_series("g = bar_index * 86400000\n") == double
+    assert _history_series("var int k = 0\nk += 1\ng = k * 86400000\n") == double
+    # An operator expression's history is a double, read inline or through
+    # a global: its na reads na (a Series<int> read na<int>() as -2147483648).
+    assert _history_series("g = bar_index * 3\n") == double
+    assert _history_series("", "(bar_index * 3)[1]") == double
+    # A call returning an int keeps its int history, as ``f()[1]`` does.
+    assert _history_series("f() => bar_index * 3\ng = f()\n") == integer
+    assert _history_series("f() => bar_index * 3\n", "f()[1]") == integer
+
+
+def test_a_shared_payload_global_read_outside_its_block_compiles():
+    """TAIL-A lowers a global bound to a user call once per evaluator; its
+    first read inside a helper's if branch emitted the call's locals there,
+    and the read outside it named them out of scope (main compiled it)."""
+    cpp = transpile(HEAD + "rangeOf(len) =>\n    hi = ta.highest(high, len)\n"
+                    "    lo = ta.lowest(low, len)\n    hi - lo\nrng = rangeOf(20)\n"
+                    "pick(up) =>\n    float out = 0.0\n    if up\n        out := rng\n    out\n"
+                    'p = request.security(syminfo.tickerid, "240", pick(close > open) + rng)\n'
+                    'if p > 0\n    strategy.entry("L", strategy.long)\n')
+    compile_cpp(cpp, label="shared global read outside its block")
+
+
+@pytest.mark.parametrize("decl, helper, call, via", [
+    ("sm(x) =>\n    a = x * 2\n    a + 1\ncs = sm(close)\n",
+     "h(n) =>\n    float s = 0.0\n    for i = 0 to n\n        s += cs\n    s\n",
+     "h(3)", "a user function call (through the global 'cs')"),
+    ("",
+     "h(v, n) =>\n    float s = 0.0\n    for i = 0 to n\n        s += v\n    s\n",
+     "h(ta.sma(close, 3), 3)", "a TA call (through the parameter 'v')"),
+])
+def test_a_helper_loop_refuses_state_reached_through_a_name(decl, helper, call, via):
+    with pytest.raises(CompileError) as err:
+        transpile(HEAD + decl + helper
+                  + f'p = request.security(syminfo.tickerid, "60", {call})\n'
+                  'if p > 0\n    strategy.entry("L", strategy.long)\n')
+    assert f"request.security helper loops cannot hold {via}" in str(err.value)
+
+
+def test_a_helper_loop_reads_a_pure_global_and_a_bar_parameter():
+    cpp = transpile(HEAD + "g = close * 2\n"
+                    "h(src, n) =>\n    float s = 0.0\n    for i = 0 to n\n        s += g + src\n    s\n"
+                    'p = request.security(syminfo.tickerid, "60", h(open, 3))\n'
+                    'if p > 0\n    strategy.entry("L", strategy.long)\n')
+    compile_cpp(cpp, label="pure global in a helper loop")
+
+
+def test_the_loop_products_tape_replays(replays):
+    differ = _field_differences(LOOPS, LOOP_FIELDS, replays[LOOPS])
+    assert not differ, {name: sorted(v)[:3] for name, v in differ.items()}
+    # The payload's counter products are 64-bit, as the chart's.
+    cpp = transpile(source(LOOPS, FIXTURES))
+    assert "_sec0_h_1_s += (static_cast<int64_t>(_sec0_h_3_i) * 86400000);" in cpp
+    tape = tape_exits(LOOPS, FIXTURES)
+    assert max(int(signal.split("|")[0]) for signal in tape.values()) > 2**31
 
 
 def test_the_lazy_tape_replays(tmp_path):
@@ -136,9 +213,12 @@ def test_the_lazy_tape_replays(tmp_path):
 
 def test_the_lazy_compositions_take_both_rules():
     cpp = transpile(source(LAZY, FIXTURES))
-    # TAIL-E: every change / mom / roc of the if blocks takes the hold-last clock.
-    for n in (1, 2, 3, 4):
+    # TAIL-E: every change / mom / roc of the if blocks takes the hold-last
+    # clock (r, c, v, m), as the ternary arm's ta.change does (b).
+    for n in (1, 2, 3, 4, 5):
         assert f"_pf_lazy_src_clock_{n}." in cpp, n
-    # TAIL-G: the if head's, the ternary's and isNew's reads are pushed before
-    # their statements, once per execution.
-    assert cpp.count("a call read at an offset runs on every execution") >= 3
+    assert "_pf_lazy_src_clock_6" not in cpp
+    # TAIL-G: the if head's, the ternary's and isNew's reads (once per body,
+    # in both of its per-call-site variants) are pushed before their
+    # statements, once per execution.
+    assert cpp.count("a call read at an offset runs on every execution") == 4

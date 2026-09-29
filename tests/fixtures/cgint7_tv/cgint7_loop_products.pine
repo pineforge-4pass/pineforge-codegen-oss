@@ -1,0 +1,36 @@
+//@version=6
+// CGINT7: where lane TAIL-E's request.security helper loops meet codegen
+// main's 64-bit integer arithmetic (CGINT6). Each close's comment spells what
+// the script reads on that bar (entries from 12:00 UTC on, when every
+// requested window lies inside the tape's range):
+//   s: a 60-minute payload's helper loop summing its counter times a day in
+//     milliseconds, over a range the requested bar sets (past int32 from
+//     n = 7);
+//   w: the same helper loop over a counter's product that a % reads;
+//   q, v: the same two loops on the chart.
+strategy("CGINT7 loop products", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+h(n) =>
+    float s = 0.0
+    for i = 0 to n
+        s += i * 86400000
+    s
+hm(n) =>
+    float w = 0.0
+    for i = 0 to n
+        w += (i * 1000000007) % 2147483647
+    w
+s = request.security(syminfo.tickerid, "60", h(bar_index % 40))
+w = request.security(syminfo.tickerid, "60", hm(bar_index % 40))
+float q = 0.0
+for i = 0 to bar_index % 40
+    q += i * 86400000
+float v = 0.0
+for i = 0 to bar_index % 40
+    v += (i * 1000000007) % 2147483647
+t(x) => str.tostring(x)
+live = time >= timestamp("UTC", 2025, 4, 1, 12, 0)
+m = minute(time, "UTC")
+if live and (m == 0 or m == 30)
+    strategy.entry("L", strategy.long)
+if m == 15 or m == 45
+    strategy.close("L", comment = t(s) + "|" + t(w) + "|" + t(q) + "|" + t(v))

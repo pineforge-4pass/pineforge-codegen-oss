@@ -87,7 +87,6 @@ from ..limits import iter_ast_nodes
 from .helpers import na_preserving_int_cast, unary_sign_cpp
 from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION
 from ..symbols import PineType, method_receiver_type_name
-from .helpers import na_preserving_int_cast
 from .tables import (
     BAR_BUILTINS, MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_BAR_FIELDS,
     SECURITY_BAR_FIELD_EXPRS, SECURITY_BAR_FIELD_TYPES, TA_TUPLE_FIELDS,
@@ -2514,6 +2513,15 @@ class SecurityEmitter:
         return (isinstance(symbol, FuncCall)
                 and self._resolve_callee(symbol.callee) == ("heikinashi", "ticker"))
 
+    def _security_open_scope(self) -> tuple:
+        """Enter a C++ block of a payload's lowering (a helper's if branch or
+        loop body): the locals a lowering emits there are its own
+        (``_security_shared_globals``). Returns the path to restore."""
+        saved = getattr(self, "_security_scope_path", ())
+        self._security_scope_seq = getattr(self, "_security_scope_seq", 0) + 1
+        self._security_scope_path = saved + (self._security_scope_seq,)
+        return saved
+
     def _security_reads_global_history(self, sec_id: int, node) -> bool:
         """Whether ``node`` is a ``g[k]`` whose requested-clock history the
         evaluator of ``sec_id`` keeps (``_security_global_history_value``)."""
@@ -2538,16 +2546,21 @@ class SecurityEmitter:
         for idx, node in enumerate(self._collect_security_expr_hist_subscripts(expr_node)):
             # A session.* flag is a bool: its history reads false, not na,
             # before the first requested bar.
-            cpp_t = ("bool" if self._is_session_flag(node.object)
-                     else self._infer_type(node.object))
             value = self._security_global_history_value(node)
-            if value is not None and self._expr_returns_wide_int(value, None, set()):
-                # A global holding a 64-bit integer (``g = bar_index *
-                # 7200000``: ``_int_arith_leaves_int32``, or an epoch) keeps
-                # its history in a double, as the same expression read inline
-                # does (``(bar_index * 7200000)[1]``); the global's ``int``
-                # wrapped the value.
-                cpp_t = "double"
+            if self._is_session_flag(node.object):
+                cpp_t = "bool"
+            elif value is not None:
+                # A global's history is typed as the same expression read
+                # inline is (``(bar_index * 3)[1]``: a double, whose na the
+                # request reads as na, where the global's ``int`` read
+                # ``na<int>()`` as -2147483648), and one holding a 64-bit
+                # integer (``g = bar_index * 86400000``:
+                # ``_int_arith_leaves_int32``, or an epoch) is a double, which
+                # holds it whole (the ``int`` wrapped it).
+                cpp_t = ("double" if self._expr_returns_wide_int(value, None, set())
+                         else self._infer_type(value))
+            else:
+                cpp_t = self._infer_type(node.object)
             if cpp_t not in ("double", "int", "bool"):
                 cpp_t = "double"
             name = f"_sec{sec_id}_expr_hist_{idx}"
@@ -3096,10 +3109,12 @@ class SecurityEmitter:
                 self._array_vars = set(self._array_vars)
                 self._map_vars = set(self._map_vars)
                 self._matrix_specs = dict(self._matrix_specs)
+                saved_scope = self._security_open_scope()
                 try:
                     for child in stmt.body:
                         emit_stmt(child, body_bindings, indent + 1)
                 finally:
+                    self._security_scope_path = saved_scope
                     (
                         self._current_func_collection_specs,
                         self._current_func_collection_shadows,
@@ -3129,10 +3144,12 @@ class SecurityEmitter:
                     self._array_vars = set(self._array_vars)
                     self._map_vars = set(self._map_vars)
                     self._matrix_specs = dict(self._matrix_specs)
+                    saved_scope = self._security_open_scope()
                     try:
                         for child in stmt.else_body:
                             emit_stmt(child, else_bindings, indent + 1)
                     finally:
+                        self._security_scope_path = saved_scope
                         (
                             self._current_func_collection_specs,
                             self._current_func_collection_shadows,
@@ -3234,7 +3251,7 @@ class SecurityEmitter:
             each history-read local once, so neither can repeat per
             iteration."""
             pad = "    " * indent
-            self._security_check_loop_body(stmt, plan)
+            self._security_check_loop_body(stmt, plan, set(active_bindings))
             runtime_stack_local = plan["binding_stack"] + (active_bindings,)
 
             def build(expr) -> tuple[str, bool]:
@@ -3287,10 +3304,19 @@ class SecurityEmitter:
                     f"{pad}while ({self._coerce_bool_expr(cond_cpp, stmt.condition)}) {{"
                 )
             loop_depth[0] += 1
+            saved_scope = self._security_open_scope()
+            # The counter is a counted loop's binder, ``for (int i = ...)``,
+            # as on the chart: never na, and its products past int32 are
+            # 64-bit (``_int_arith_leaves_int32``; the payload's BinOp).
+            saved_counted = self._current_counted_loop_vars
+            if isinstance(stmt, ForStmt) and stmt.var:
+                self._current_counted_loop_vars = saved_counted | {stmt.var}
             try:
                 for child in stmt.body:
                     emit_stmt(child, body_bindings, indent + 1)
             finally:
+                self._current_counted_loop_vars = saved_counted
+                self._security_scope_path = saved_scope
                 loop_depth[0] -= 1
             lines.append(f"{pad}}}")
 
@@ -4361,36 +4387,65 @@ class SecurityEmitter:
         so ``o[i]`` reads the requested history at a run-time offset."""
         return self._security_series_binding(f"{plan['func_info'].name}:{name}@loop")
 
-    def _security_check_loop_body(self, loop, plan: dict) -> None:
+    def _security_check_loop_body(self, loop, plan: dict,
+                                  bound_locals: set[str] | None = None) -> None:
         """Refuse what a request.security helper loop cannot repeat per
         iteration. The evaluator computes a TA call once per requested bar
         at its place in the helper, pushes a local read with history once
         per requested bar and keeps a ``var`` local's state across requested
         bars, so none of them can sit in a loop's header or body; a user
-        function call there would inline them too."""
+        function call there would inline them too. So can none reach the loop
+        through a name the lowering expands where it is read: a helper
+        parameter, which reads its argument (``h(ta.sma(close, 3), n)``), or a
+        global, which reads its declaration (``cs = sm(close)``). A name in
+        ``bound_locals`` is a C++ local computed before the loop."""
         local_series = set(plan.get("local_series_names", ()))
+        global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
+        skip = set(bound_locals or ())
+        if isinstance(loop, ForStmt) and loop.var:
+            skip.add(loop.var)
+        # The loop's own locals, wherever the walk below meets their reads.
+        skip |= {sub.name for stmt in loop.body for sub, _depth in iter_ast_nodes(stmt)
+                 if isinstance(sub, VarDecl)}
+        expanded: set[int] = set()
 
-        def refuse(node, what: str) -> None:
+        def refuse(node, what: str, via) -> None:
+            # Through a name, the error points at the loop's read of it.
             self._codegen_error(
-                node,
-                f"request.security helper loops cannot hold {what}",
+                via[1] if via else node,
+                f"request.security helper loops cannot hold {what}"
+                + (f" (through {via[0]})" if via else ""),
                 hint="Compute it before the loop, on the requested bar.",
             )
 
         header, _ = self._security_loop_parts(loop)
-        stack: list = [*header, *loop.body]
+        stack: list = [(n, None, plan["binding_stack"]) for n in (*header, *loop.body)]
         while stack:
-            n = stack.pop()
+            n, via, lexical = stack.pop()
             if isinstance(n, (list, tuple)):
-                stack.extend(n)
+                stack.extend((x, via, lexical) for x in n)
                 continue
             if not isinstance(n, ASTNode) or isinstance(n, (FuncDef, MethodDef)):
                 continue
             if isinstance(n, VarDecl):
                 if n.is_var or n.is_varip:
-                    refuse(n, "a var declaration")
-                if n.name in local_series:
-                    refuse(n, f"the local '{n.name}', which is read with history")
+                    refuse(n, "a var declaration", via)
+                if via is None and n.name in local_series:
+                    refuse(n, f"the local '{n.name}', which is read with history", None)
+            if isinstance(n, Identifier) and not (via is None and n.name in skip):
+                bound = self._security_lookup_helper_binding_context(n.name, lexical)
+                if bound is not None:
+                    value, value_lexical = bound
+                    if id(value) not in expanded:
+                        expanded.add(id(value))
+                        stack.append((value, via or (f"the parameter '{n.name}'", n),
+                                      value_lexical))
+                elif (self._security_identifier_is_global_binding(n)
+                        and n.name in global_expr_map
+                        and id(global_expr_map[n.name]) not in expanded):
+                    expanded.add(id(global_expr_map[n.name]))
+                    stack.append((global_expr_map[n.name],
+                                  via or (f"the global '{n.name}'", n), ()))
             if isinstance(n, FuncCall):
                 callee = n.callee
                 namespace = (
@@ -4399,12 +4454,13 @@ class SecurityEmitter:
                     else None
                 )
                 if self._get_ta_site(n) is not None or namespace == "ta":
-                    refuse(n, "a TA call")
+                    refuse(n, "a TA call", via)
                 if namespace in ("request", "strategy"):
-                    refuse(n, f"a {namespace}.* call")
+                    refuse(n, f"a {namespace}.* call", via)
                 if self._security_user_call_key(n) is not None:
-                    refuse(n, "a user function call")
-            stack.extend(v for k, v in vars(n).items() if k not in ("loc", "annotations"))
+                    refuse(n, "a user function call", via)
+            stack.extend((v, via, lexical) for k, v in vars(n).items()
+                         if k not in ("loc", "annotations"))
 
     @staticmethod
     def _security_arm_reassigned_names(body) -> set[str]:
@@ -6222,9 +6278,16 @@ class SecurityEmitter:
                           and isinstance(value, FuncCall)
                           and isinstance(value.callee, Identifier)
                           and self._security_user_call_key(value) is not None)
-                if shares and (sec_id, expr_node.name) in shared_globals:
-                    return shared_globals[(sec_id, expr_node.name)]
+                share_key = (sec_id, expr_node.name)
+                scope = getattr(self, "_security_scope_path", ())
+                if shares and share_key in shared_globals:
+                    # The lowering reads the locals it emitted, which only the
+                    # block it was emitted in (and blocks inside it) can see.
+                    cached, built_in = shared_globals[share_key]
+                    if scope[:len(built_in)] == built_in:
+                        return cached
                 resolving.add(expr_node.name)
+                emitted_before = len(emitted_lines) if emitted_lines is not None else 0
                 resolved = self._build_security_expr(
                     sec_id,
                     value,
@@ -6237,7 +6300,15 @@ class SecurityEmitter:
                 )
                 resolving.remove(expr_node.name)
                 if shares:
-                    shared_globals[(sec_id, expr_node.name)] = resolved
+                    # A lowering that emitted no statement is one expression,
+                    # which any scope can read; one that did is read in its
+                    # own block, where a later read outside it lowers the
+                    # call again (as every earlier build did at each read).
+                    built_in = (scope if emitted_lines is not None
+                                and len(emitted_lines) > emitted_before else ())
+                    prior = shared_globals.get(share_key)
+                    if prior is None or len(built_in) < len(prior[1]):
+                        shared_globals[share_key] = (resolved, built_in)
                 field = self._security_ta_tuple_element_field(expr_node.name)
                 if field is None and expr_node.name in self._direct_program_tuple_binding_names:
                     # The whole tuple value, not the element (a user
@@ -6663,9 +6734,10 @@ class SecurityEmitter:
                         self._security_emits_double(side, helper_binding_stack)
                         for side in (expr_node.left, expr_node.right))
                     and not any(
-                        isinstance(sub, Identifier) and any(
-                            sub.name in frame
-                            for frame in helper_binding_stack or ())
+                        isinstance(sub, Identifier)
+                        and sub.name not in self._current_counted_loop_vars
+                        and any(sub.name in frame
+                                for frame in helper_binding_stack or ())
                         for sub, _depth in iter_ast_nodes(expr_node))):
                 # 32-bit int operands whose value can leave int32 (``bar_index
                 # * 7200000``): Pine's int is 64-bit, as on the chart; an
@@ -6674,7 +6746,8 @@ class SecurityEmitter:
                 # A side the builder re-evaluates as a double (``int n =
                 # math.round(x)``) already computes in double and keeps its
                 # NaN, and a name a helper binds here is its argument, which
-                # the chart's rule does not see.
+                # the chart's rule does not see; a helper loop's counter is a
+                # counted loop's binder there too.
                 if self._int_operand_may_be_na(expr_node):
                     wide_na = True
                 else:

@@ -19,6 +19,7 @@ timezone, Asia/Taipei (UTC+8).
 |---|---|---|---|---|
 | `cgint7_int_products` | 2025-04-08 | `b47011c54ee3b110fda6adc6107017cfee9481fd1fe57acda7e3766d64cf3ede` | `a9ddf761111a7abca93d347017200aea4c11b82c87790e0b636e1373045dfc77` | 312 exits (entries from 12:00 UTC) |
 | `cgint7_lazy` | 2025-04-05 | `ce043ca7e55e6ede18b4b390bb1af630340c08879769e01760edde66fb181995` | `c88781858929975242e28bef47476c6e8d18a601b010ae48f602f3a3908305ec` | 384 (one per bar) |
+| `cgint7_loop_products` | 2025-04-08 | `077ea67d7e8fda01191c7b154ff223306bd7c32dae4c43a9fe83ea0cde5efb07` | `ec665d696fb16a990eb73a61fe289444a83e42362d1259dd45f4961f045be8c1` | 312 exits (entries from 12:00 UTC) |
 
 - `cgint7_int_products` enters on the bars at minute 0 and 30 and closes on
   the bars at minute 15 and 45; each close's comment joins `pm`, `ag`, `w`,
@@ -44,3 +45,10 @@ timezone, Asia/Taipei (UTC+8).
   `e` differently (TAIL-G's head: `r`, `c` on 378 of 384 rows; TAIL-E's
   head: `r`, `c` on 378, `m`, `e` on 284, `b` on 95): the fields need both
   rules.
+- `cgint7_loop_products` samples like `cgint7_int_products` (`s|w|q|v`): a
+  60-minute payload's `request.security` helper loop summing its counter
+  times 86400000 over `0 .. bar_index % 40` (past int32 from 7), the same
+  loop over `(i * 1000000007) % 2147483647`, and both loops on the chart.
+  TradingView computes every sum exactly; a helper loop's counter was a
+  helper-bound name the payload's 64-bit rule left 32 bits wide (lane TAIL-E
+  meeting main's rule), which overflowed.
