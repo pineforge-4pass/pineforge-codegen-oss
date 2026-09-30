@@ -40,14 +40,19 @@ for the changes in 1.0.0 and the release-note policy.
 
 ## Releases and this README
 
-<!-- Release lane: when a version is tagged, update this section, the Install
-note, the Engine pairing table, the "Both run the latest release pair" line
-and every "on `main`" marker. -->
+<!-- Release lane: when a version is tagged, add it to the Engine pairing
+table and update every "on `main`" marker. This section, the Install note and
+the hosted-server line name no latest version, so a release does not make
+them stale. -->
 
-This README describes **1.0.0** (2026-09-30), the latest release, on PyPI as
-`pineforge-codegen` and on npm as `@pineforge/codegen-pyodide`. A source
-install of the `v1.0.0` tag or of `main` also reports version 1.0.0: the
-release workflow sets the version when it tags a release.
+This README ships with each release as its package description on PyPI
+(`pineforge-codegen`); the releases are also on npm as
+`@pineforge/codegen-pyodide`. It describes 1.0.0 (2026-09-30) and what changed
+since 0.10.4; the
+[PyPI release history](https://pypi.org/project/pineforge-codegen/#history)
+and the [changelog](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/CHANGELOG.md)
+list every release. A source install reports the version in `VERSION`, which
+the release workflow sets when it tags a release.
 
 ### Upgrading from 0.10.4
 
@@ -92,7 +97,7 @@ the engine's [architecture notes](https://github.com/pineforge-4pass/pineforge-e
 pip install pineforge-codegen
 ```
 
-This installs the latest release, 1.0.0. Requires Python ≥ 3.11. No runtime
+This installs the latest release. Requires Python ≥ 3.11. No runtime
 dependencies.
 
 To get `main`, install from source (this is also the development setup):
@@ -438,7 +443,8 @@ transpiles and backtests a strategy for an AI agent. The
 [`pineforge-backtest-mcp`](https://github.com/pineforge-4pass/pineforge-backtest-mcp)
 Docker image is a local MCP server with `transpile_pine` and `backtest_pine`
 tools that runs on your machine.
-Both run the latest release pair (codegen 1.0.0 with engine `v1.0.0`).
+Both are built on the `pineforge-release` image, which ships a released codegen
+and engine pair; their `engine_info` tool reports the image's version.
 
 ## Running tests
 
