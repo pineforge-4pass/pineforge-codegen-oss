@@ -40,19 +40,23 @@ for the changes in 1.0.0 and the release-note policy.
 
 ## Releases and this README
 
-<!-- Release lane: when a version is tagged, add it to the Engine pairing
-table and update every "on `main`" marker. This section, the Install note and
-the hosted-server line name no latest version, so a release does not make
-them stale. -->
+<!-- Release lane: before a release is tagged, update the version and date in
+this section, add the release to the Engine pairing table, update the lines
+that name the release pair (the engine `src/source/` link, the clone command
+and its example output, "This section describes …") and every "on `main`"
+marker: PyPI shows the README as it is at the tag. The Install note and the
+hosted-server line name no version. -->
 
 This README ships with each release as its package description on PyPI
-(`pineforge-codegen`); the releases are also on npm as
+(`pineforge-codegen`); releases from 0.7.0 on are also on npm as
 `@pineforge/codegen-pyodide`. It describes 1.0.0 (2026-09-30) and what changed
-since 0.10.4; the
+since 0.10.4. The
 [PyPI release history](https://pypi.org/project/pineforge-codegen/#history)
-and the [changelog](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/CHANGELOG.md)
-list every release. A source install reports the version in `VERSION`, which
-the release workflow sets when it tags a release.
+lists every release; the
+[changelog](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/CHANGELOG.md)
+covers 1.0.0 on and links the notes of earlier releases. A source install
+reports the version in `VERSION`, which the release workflow sets when it tags
+a release.
 
 ### Upgrading from 0.10.4
 
