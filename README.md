@@ -15,8 +15,8 @@ In the maintainers' parity baseline of 2026-09-29
 (`pineforge-parity-baseline-20260929-engine-35db01c8`, evidence snapshot
 `47cec517…`), this repository at 70c2b4a with engine 35db01c8
 graded 7,905 of 7,989 TradingView probes excellent and the other 84
-strong, with none below strong and no engine errors; 17 more probes are held
-out as TradingView-side anomalies. A probe is a
+strong, with none below strong; 17 more probes are held out as
+TradingView-side anomalies. A probe is a
 strategy exported from TradingView with its trade list and replayed trade for
 trade on the same bars. The baseline predates the 1.0.0 releases, which changed
 no grade: codegen 1.0.0 has the code of 70c2b4a, and engine `v1.0.0` includes
@@ -40,14 +40,24 @@ for the changes in 1.0.0 and the release-note policy.
 
 ## Releases and this README
 
-<!-- Release lane: when a version is tagged, update this section, the Install
-note, the Engine pairing table, the "Both run the latest release pair" line
-and every "on `main`" marker. -->
+<!-- Release lane: before a release is tagged, add it to the Engine pairing
+table and update every line that names `1.0.0` or `v1.0.0` as the current
+release or pair (this section's version and date, the baseline paragraph at
+the top, the engine `src/source/` link, the clone command and its example
+output, "This section describes …", the timing note) and every "on `main`"
+marker; lines saying what changed in 1.0.0 stay. PyPI shows the README as it
+is at the tag. The Install note and the hosted-server line name no version. -->
 
-This README describes **1.0.0** (2026-09-30), the latest release, on PyPI as
-`pineforge-codegen` and on npm as `@pineforge/codegen-pyodide`. A source
-install of the `v1.0.0` tag or of `main` also reports version 1.0.0: the
-release workflow sets the version when it tags a release.
+This README ships with each release as its package description on PyPI
+(`pineforge-codegen`); releases from 0.7.0 on are also on npm as
+`@pineforge/codegen-pyodide`. It describes 1.0.0 (2026-09-30) and what changed
+since 0.10.4. The
+[PyPI release history](https://pypi.org/project/pineforge-codegen/#history)
+lists every release; the
+[changelog](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/CHANGELOG.md)
+covers 1.0.0 on and links the notes of earlier releases. A source install
+reports the version in `VERSION`, which the release workflow sets when it tags
+a release.
 
 ### Upgrading from 0.10.4
 
@@ -92,7 +102,7 @@ the engine's [architecture notes](https://github.com/pineforge-4pass/pineforge-e
 pip install pineforge-codegen
 ```
 
-This installs the latest release, 1.0.0. Requires Python ≥ 3.11. No runtime
+This installs the latest release. Requires Python ≥ 3.11. No runtime
 dependencies.
 
 To get `main`, install from source (this is also the development setup):
@@ -438,7 +448,8 @@ transpiles and backtests a strategy for an AI agent. The
 [`pineforge-backtest-mcp`](https://github.com/pineforge-4pass/pineforge-backtest-mcp)
 Docker image is a local MCP server with `transpile_pine` and `backtest_pine`
 tools that runs on your machine.
-Both run the latest release pair (codegen 1.0.0 with engine `v1.0.0`).
+Both are built on the `pineforge-release` image, which ships a released codegen
+and engine pair; their `engine_info` tool reports the image's version.
 
 ## Running tests
 
