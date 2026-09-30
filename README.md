@@ -15,8 +15,8 @@ In the maintainers' parity baseline of 2026-09-29
 (`pineforge-parity-baseline-20260929-engine-35db01c8`, evidence snapshot
 `47cec517…`), this repository at 70c2b4a with engine 35db01c8
 graded 7,905 of 7,989 TradingView probes excellent and the other 84
-strong, with none below strong and no engine errors; 17 more probes are held
-out as TradingView-side anomalies. A probe is a
+strong, with none below strong; 17 more probes are held out as
+TradingView-side anomalies. A probe is a
 strategy exported from TradingView with its trade list and replayed trade for
 trade on the same bars. The baseline predates the 1.0.0 releases, which changed
 no grade: codegen 1.0.0 has the code of 70c2b4a, and engine `v1.0.0` includes
@@ -40,12 +40,13 @@ for the changes in 1.0.0 and the release-note policy.
 
 ## Releases and this README
 
-<!-- Release lane: before a release is tagged, update the version and date in
-this section, add the release to the Engine pairing table, update the lines
-that name the release pair (the engine `src/source/` link, the clone command
-and its example output, "This section describes …") and every "on `main`"
-marker: PyPI shows the README as it is at the tag. The Install note and the
-hosted-server line name no version. -->
+<!-- Release lane: before a release is tagged, add it to the Engine pairing
+table and update every line that names `1.0.0` or `v1.0.0` as the current
+release or pair (this section's version and date, the baseline paragraph at
+the top, the engine `src/source/` link, the clone command and its example
+output, "This section describes …", the timing note) and every "on `main`"
+marker; lines saying what changed in 1.0.0 stay. PyPI shows the README as it
+is at the tag. The Install note and the hosted-server line name no version. -->
 
 This README ships with each release as its package description on PyPI
 (`pineforge-codegen`); releases from 0.7.0 on are also on npm as
