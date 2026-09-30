@@ -20,15 +20,15 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
-## 1.0.0 — Unreleased
+## 1.0.0 — 2026-09-30
 
-This is the proposed 1.0 release note. It covers the changes merged to `main`
+This is the 1.0 release note. It covers the changes merged to `main`
 since 0.10.4 (2026-09-06), through
-[#152](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/152). The
-release lane sets the version and date after the matching engine release is
-ready. Codegen `1.0.0` supports only engine `v1.0.0`; `1.0.0-rc.1` supports
-only engine `v1.0.0-rc.1`. Until then, `main` builds only against engine
-`main`. The notes of 0.10.4 and earlier releases are on the
+[#152](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/152);
+[#153](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/153)
+then updated the documentation. Codegen `1.0.0` supports only engine
+`v1.0.0`; `1.0.0-rc.1` supports only engine `v1.0.0-rc.1`. The notes of
+0.10.4 and earlier releases are on the
 [GitHub releases page](https://github.com/pineforge-4pass/pineforge-codegen-oss/releases).
 
 ### Compatibility and execution
@@ -243,3 +243,10 @@ only engine `v1.0.0-rc.1`. Until then, `main` builds only against engine
   pairing, contribution checks, and release-note policy. Classify the package
   as Production/Stable for the 1.0 release
   ([#140](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/140)).
+
+## 1.0.0-rc.1 — 2026-09-30
+
+The release candidate for 1.0.0. Its changes since 0.10.4 are the ones listed
+under 1.0.0; 1.0.0 changed only the version after it. It shipped as PyPI
+`1.0.0rc1`, on npm dist-tag `next` and as a GitHub prerelease, and supports
+only engine `v1.0.0-rc.1`.

@@ -67,14 +67,14 @@ This is the **source-available** half of the PineForge stack (PolyForm
 Noncommercial — see `LICENSE`). The runtime half (`pineforge-engine`,
 Apache-2.0) lives in a sibling repo and is typically checked out at
 `../pineforge-engine`. From 1.0.0 on, a released codegen `X.Y.Z` pairs only
-with engine `vX.Y.Z`; prereleases match exactly. On the 0.x line the versions
-are independent: the latest release, codegen 0.10.4, pairs with engine
-`v0.13.1` (the `pineforge-release` image `v0.1.25`), and codegen main's C++
-needs engine main (no engine release has `pineforge/source/`). Use the paired
-release's generated headers and static library, and regenerate C++ and relink
-on every pair change. Equal `PF_ABI_VERSION` values are insufficient. Engine
-main currently uses the `engine_script_run_v19` C++ namespace; see `README.md`
-and `CONTRIBUTING.md`.
+with engine `vX.Y.Z`; prereleases match exactly. The latest release, codegen
+1.0.0, pairs with engine `v1.0.0` (the `pineforge-release` image `1.0.0`). On
+the 0.x line the versions are independent: the last 0.x release, codegen
+0.10.4, pairs with engine `v0.13.1` (the `pineforge-release` image `0.1.25`).
+Use the paired release's generated headers and static library, and regenerate
+C++ and relink on every pair change. Equal `PF_ABI_VERSION` values are
+insufficient. Engine `v1.0.0` uses the `engine_script_run_v19` C++ namespace;
+see `README.md` and `CONTRIBUTING.md`.
 
 ## Pipeline
 

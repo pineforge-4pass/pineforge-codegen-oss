@@ -47,12 +47,12 @@ before treating a run as complete.
 
 ## Engine pairing
 
-Codegen `main` is developed and tested against engine `main`; its generated
-C++ does not compile against any engine release yet. On the 0.x line the two
-version lineages are independent: the released codegen 0.10.4 pairs with
-engine `v0.13.1`, the pair the
+Codegen `main` is developed and tested against engine `main`. The latest
+release, codegen 1.0.0, pairs with engine `v1.0.0`, the pair the
 [`pineforge-release`](https://github.com/pineforge-4pass/pineforge-release)
-image `v0.1.25` ships.
+image `1.0.0` ships. On the 0.x line the two version lineages are independent:
+the last 0.x release, codegen 0.10.4, pairs with engine `v0.13.1`, the pair
+the `pineforge-release` image `0.1.25` ships.
 
 From 1.0.0 on, a released codegen `X.Y.Z` is supported only with engine tag
 `vX.Y.Z`, using that release's generated headers and `libpineforge.a`.
@@ -114,6 +114,6 @@ publishing is a separate release operation.
   engine.
 - Keep [CHANGELOG.md](CHANGELOG.md) current for user-visible changes. Its
   release-note policy applies to both stable and prerelease tags.
-- The README describes `main` against the latest release and becomes the PyPI
-  page of the next one: when a version is tagged, update its "Releases and
-  this README" section, its engine-pairing table and its release markers.
+- The README describes the latest release and becomes the PyPI page of the
+  next release: when a version is tagged, update its "Releases and this
+  README" section, its engine-pairing table and its release markers.
