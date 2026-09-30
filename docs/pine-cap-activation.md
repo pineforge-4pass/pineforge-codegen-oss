@@ -4,7 +4,7 @@ This note came with the explicit cap attachment
 ([#127](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/127)). It
 now also covers the execution-adapter attachment that followed
 ([#128](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/128)) and
-describes `main` with engine `main`.
+describes codegen 1.0.0 with engine `v1.0.0`.
 
 Generated strategies explicitly select Pine intraday-cap compatibility in
 their constructor. When the engine defines
@@ -20,7 +20,7 @@ The expression is evaluated only where the source executes it, and limit
 updates preserve the existing quota and pending obligations. Selection does
 not evaluate a limit or move a conditional statement into the constructor.
 
-Engine `main` defines both macros in `pineforge/source/pine_strategy_host.hpp`,
+Engine `v1.0.0` defines both macros in `pineforge/source/pine_strategy_host.hpp`,
 the header the generated C++ includes; every engine commit with that header
 does, since the header and the macros arrived there together (engine #253). So
 the adapter branch is the one that compiles today. The cap-only branch and the
@@ -30,9 +30,9 @@ capability, bare native construction leaves the Pine cap unselected. Matching
 runtime headers and library are required; this source bridge does not make
 stale compiled C++ objects compatible across internal ABI versions.
 
-Engine `main` no longer has the `script_has_strategy_close_` member that the
+Engine `v1.0.0` no longer has the `script_has_strategy_close_` member that the
 C++ of codegen 0.10.4 and earlier assigns, so that C++ does not compile there;
-regenerate it with `main`.
+regenerate it with codegen 1.0.0.
 
 The cap's three compatibility options retain their existing behavior and
 defaults. They belong to the selected Pine component, not universal native
