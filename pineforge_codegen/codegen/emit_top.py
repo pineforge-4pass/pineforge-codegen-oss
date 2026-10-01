@@ -2365,10 +2365,16 @@ class TopLevelEmitter:
                 ),
             )
             if (drawing_name in DRAWING_TYPE_TO_CPP
-                and self._current_func_param_types.get(
+                and (self._current_func_param_types.get(
                     param, ""
                 ).removesuffix("&").removesuffix("*")
-                == DRAWING_TYPE_TO_CPP[drawing_name])
+                == DRAWING_TYPE_TO_CPP[drawing_name]
+                # A history-read drawing parameter or receiver is a
+                # ``const Series<Box>&``: ``(x[1]).get_top()`` dispatches on
+                # the handle it holds (udth_drawparam).
+                or (param in self._current_func_series_params
+                    and self._current_func_series_param_types.get(param)
+                    == DRAWING_TYPE_TO_CPP[drawing_name])))
         }
         self._lexical_udt_types = {
             param: (

@@ -329,6 +329,21 @@ SHAPES = {
         "var o = Outer.new(Cell.new(v = -5))\n"
         "o.inner := Cell.new(v = bar_index)\n"
         "r = na(o.inner[1]) ? -1 : (o.inner[1]).v + (mk(bar_index)[1]).v\n"),
+    # A drawing receiver's and parameter's history read with a built-in
+    # method (udth_drawparam).
+    "box_receiver_method_history": (
+        "method prevTop(box this) =>\n"
+        "    na(this[1]) ? -1.0 : (this[1]).get_top()\n"
+        "b = box.new(bar_index, high, bar_index + 1, low)\n"
+        "r = b.prevTop()\n"),
+    "box_parameter_method_history": (
+        "f(box x) =>\n    na(x[1]) ? -1.0 : (x[1]).get_top()\n"
+        "b = box.new(bar_index, high, bar_index + 1, low)\n"
+        "r = f(b)\n"),
+    "line_parameter_method_history": (
+        "g(line x) =>\n    na(x[1]) ? -1.0 : (x[1]).get_y1()\n"
+        "l = line.new(bar_index, close, bar_index + 1, open)\n"
+        "r = g(l)\n"),
 }
 
 

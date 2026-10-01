@@ -141,3 +141,42 @@ def test_a_field_of_a_na_object_stops_the_run(tmp_path):
         "na_field": Build(source("udth_na_field", FIXTURES))})
     error = runs["na_field"].error
     assert error is not None and "UDT access on na" in error, error
+
+
+DRAWING_PARAMETERS = """//@version=6
+strategy("drawing parameters", overlay = true)
+method prevTop(box this) =>
+    na(this[1]) ? -1.0 : (this[1]).get_top()
+prevParamTop(box x) =>
+    na(x[1]) ? -1.0 : (x[1]).get_top()
+prevY(line x) =>
+    na(x[1]) ? -1.0 : (x[1]).get_y1()
+b = box.new(bar_index, bar_index, bar_index + 1, 0)
+l = line.new(bar_index, bar_index * 3, bar_index + 1, 0)
+m1 = b.prevTop()
+p1 = prevParamTop(b)
+y1 = prevY(l)
+if bar_index == 3
+    strategy.entry("L", strategy.long)
+// @pf-trace m1=m1
+// @pf-trace p1=p1
+// @pf-trace y1=y1
+"""
+
+
+def test_a_drawing_parameters_history_reads_its_methods_bar_by_bar(tmp_path):
+    # The box a receiver or a parameter held at the previous call, read with
+    # a built-in method: its top is the previous bar_index, a line's y1
+    # three times it, -1 at the first call (udth_drawparam's m1, p1, y1).
+    engine = skip_unless_e2e_env()
+    feed = chart_feed_head(engine, tmp_path, 6)
+    runs = execute_all(engine, feed, tmp_path, {
+        "params": Build(DRAWING_PARAMETERS, trace=True)})
+    values: dict[str, list[float]] = {}
+    for record in ok(runs, "params").traces["default"]:
+        values.setdefault(record["name"], []).append(record["value"])
+    assert values == {
+        "m1": [-1, 0, 1, 2, 3, 4],
+        "p1": [-1, 0, 1, 2, 3, 4],
+        "y1": [-1, 0, 3, 6, 9, 12],
+    }
