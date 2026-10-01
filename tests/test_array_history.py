@@ -755,3 +755,36 @@ def test_many_bindings_are_walked_once_each():
     started = time.monotonic()
     transpile(_script("\n".join(lines) + "\n"))
     assert time.monotonic() - started < 40
+
+
+def test_the_changing_methods_are_the_codegen_s_mutating_ones():
+    # The checker's change tables follow the codegen's own list of the
+    # built-ins that mutate a collection.
+    from pineforge_codegen.codegen.tables import ARRAY_METHODS, MATRIX_METHODS
+    from pineforge_codegen.codegen.types import COLLECTION_MUTATING_METHODS
+    from pineforge_codegen.collection_history import (
+        ARRAY_CHANGING_METHODS, MATRIX_CHANGING_METHODS,
+    )
+    assert ARRAY_CHANGING_METHODS == COLLECTION_MUTATING_METHODS & set(ARRAY_METHODS)
+    assert MATRIX_CHANGING_METHODS == COLLECTION_MUTATING_METHODS & set(MATRIX_METHODS)
+
+
+def test_the_runtime_stops_spell_the_message_constants():
+    # The C++ stops with TradingView's texts, which the module's constants
+    # hold (fixtures/array_history_tv README).
+    from pineforge_codegen.collection_history import (
+        COLLECTION_HISTORY_CLASS_CPP, COLLECTION_HISTORY_CPP,
+        COLLECTION_HISTORY_GENERIC_MATRIX_CPP, COLLECTION_HISTORY_MATRIX_CPP,
+        HISTORICAL_CHANGE_MESSAGE, NA_ARRAY_MESSAGE, NA_MATRIX_MESSAGE,
+    )
+    assert f'"{HISTORICAL_CHANGE_MESSAGE}"' in COLLECTION_HISTORY_CLASS_CPP
+    assert f'"{NA_ARRAY_MESSAGE}"' in COLLECTION_HISTORY_CPP
+    assert f'"{NA_MATRIX_MESSAGE}"' in COLLECTION_HISTORY_MATRIX_CPP
+    assert f'"{NA_MATRIX_MESSAGE}"' in COLLECTION_HISTORY_GENERIC_MATRIX_CPP
+    assert "@" not in COLLECTION_HISTORY_CPP + COLLECTION_HISTORY_CLASS_CPP
+
+
+def test_an_array_function_s_result_is_named_in_a_refusal():
+    error = _refusal(_script(
+        "a = array.from(close, open)\nr = array.slice(a[1], 0, 1) + 1\n"))
+    _diag(error, "array.slice(a[1])")

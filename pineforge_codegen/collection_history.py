@@ -241,7 +241,7 @@ struct _PFCollectionTraits<std::vector<E, A>> {
     static std::vector<E, A> copy(const std::vector<E, A>& value) { return value; }
     static bool is_na(const std::vector<E, A>&) { return false; }
     static const char* na_message() {
-        return "Cannot call array methods when id of array is na.";
+        return "@NA_ARRAY_MESSAGE@";
     }
 };
 """
@@ -259,7 +259,7 @@ struct _PFCollectionTraits<PineMatrix> {
     }
     static bool is_na(const PineMatrix& value) { return value.is_na(); }
     static const char* na_message() {
-        return "Cannot call matrix methods when id of matrix is na.";
+        return "@NA_MATRIX_MESSAGE@";
     }
 };
 """
@@ -276,7 +276,7 @@ struct _PFCollectionTraits<PineGenericMatrix<E>> {
     }
     static bool is_na(const PineGenericMatrix<E>& value) { return value.is_na(); }
     static const char* na_message() {
-        return "Cannot call matrix methods when id of matrix is na.";
+        return "@NA_MATRIX_MESSAGE@";
     }
 };
 """
@@ -285,7 +285,7 @@ COLLECTION_HISTORY_CLASS_CPP = r"""
 // A change to the history of an array or a matrix stops the run, as
 // TradingView's does (RE10051).
 [[noreturn]] inline void _pf_collection_history_changed() {
-    pine_runtime_error("Cannot modify the elements of a historical array or any slices of that array. Instead of modifying an array referenced by an ID retrieved with the `[]` operator, create a shallow copy of the array with `array.copy()`, then modify the copy or a slice of that copy.");
+    pine_runtime_error("@HISTORICAL_CHANGE_MESSAGE@");
     throw 0;
 }
 
@@ -347,6 +347,26 @@ private:
 };
 
 """
+
+
+# The templates spell TradingView's texts from the constants above.
+_MESSAGES = {
+    "@NA_ARRAY_MESSAGE@": NA_ARRAY_MESSAGE,
+    "@NA_MATRIX_MESSAGE@": NA_MATRIX_MESSAGE,
+    "@HISTORICAL_CHANGE_MESSAGE@": HISTORICAL_CHANGE_MESSAGE,
+}
+
+
+def _with_messages(text: str) -> str:
+    for placeholder, message in _MESSAGES.items():
+        text = text.replace(placeholder, message)
+    return text
+
+
+COLLECTION_HISTORY_CPP = _with_messages(COLLECTION_HISTORY_CPP)
+COLLECTION_HISTORY_MATRIX_CPP = _with_messages(COLLECTION_HISTORY_MATRIX_CPP)
+COLLECTION_HISTORY_GENERIC_MATRIX_CPP = _with_messages(COLLECTION_HISTORY_GENERIC_MATRIX_CPP)
+COLLECTION_HISTORY_CLASS_CPP = _with_messages(COLLECTION_HISTORY_CLASS_CPP)
 
 
 def history_annotation(node) -> dict | None:
@@ -982,7 +1002,7 @@ class CollectionHistoryChecker:
         if first:
             call = self._parent[id(node)]
             if namespace == "array" and member in _ARRAY_RESULT_FUNCTIONS:
-                form += self._array_result_consumer(call)
+                form += self._array_result_consumer(call, f"array.{member}({label})")
             if namespace == "array" and member == "slice":
                 return self._slice_use(call, node, label, form)
             if namespace == "array" and member not in _ARRAY_RESULT_FUNCTIONS:
@@ -997,7 +1017,7 @@ class CollectionHistoryChecker:
             node, f"{label} is {_a(kind)}, which TradingView refuses as a value "
             f"of {namespace}.{member} (CE10123).")
 
-    def _array_result_consumer(self, call: FuncCall) -> str:
+    def _array_result_consumer(self, call: FuncCall, label: str) -> str:
         """How an array function's new array (``array.copy(a[k])``) is used,
         for the earlier lowering's verdict (``_ARRAY_RESULT_FUNCTIONS``):
         ``:receiver`` for a method called on it, ``:result`` for a function
@@ -1005,7 +1025,7 @@ class CollectionHistoryChecker:
         variable of the script's top level or a block's holding it, else
         none (a namespace call's or a user function's argument, a loop's or
         a function's local, a for...in iterable)."""
-        consumer = self.use(call, "array", "array function's result")
+        consumer = self.use(call, "array", label)
         if consumer.form == "receiver":
             return ":receiver"
         if consumer.how == "render":
