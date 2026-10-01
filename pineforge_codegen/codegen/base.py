@@ -5260,7 +5260,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for variable in self._collection_history_variables():
             lines.append(
                 f"    _PFCollectionHistory<{self._collection_history_cpp_type(variable)}> "
-                f"{self._collection_history_member(variable.name)}"
+                f"{self._collection_history_member(variable)}"
                 f"{self._collection_history_capacity(variable)};"
             )
 

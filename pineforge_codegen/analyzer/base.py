@@ -33,7 +33,8 @@ from ..limits import TimeBudget, iter_ast_nodes
 from ..security_contexts import PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series
 from ..session_reads import emitted_session_reads
 from ..collection_history import (
-    CollectionHistoryChecker, CollectionHistoryRefusal, HistoryRead, literal_offset,
+    COLLECTION_HISTORY_ANNOTATION, LEGACY, REFUSED, SUPPORTED,
+    CollectionHistoryChecker, HistoryRead,
 )
 from ..method_binding import (
     BoundMethodArgs,
@@ -434,9 +435,13 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # pass can tell borrowed clones apart from a dead function's own
         # sites (see contracts.TACallSite.owner_func).
         self._enclosing_func_names: list[str] = []
-        # Array and matrix history reads (``a[1]``), checked and annotated
-        # after the visit (pineforge_codegen/collection_history.py).
+        # Array and matrix history reads (``a[1]``), each decided where the
+        # visit meets it (pineforge_codegen/collection_history.py), and the
+        # declarations writing each class member, by name (a sibling block's
+        # declaration closes another one's history).
         self._collection_history_reads: list[HistoryRead] = []
+        self._collection_history_checker: CollectionHistoryChecker | None = None
+        self._member_writer_decls: dict[str, set[int]] = {}
         # Exact TA targets borrowed through nested callable edges while visiting
         # the current callable body. Constructor templates are tracked
         # separately in ``_func_ta_ctor_args`` because state ownership also
@@ -4353,6 +4358,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._symbols.define(sym)
         setattr(sym, "_pf_decl_node_id", id(node))
         setattr(sym, "_pf_decl_binding_name", node.name)
+        self._note_member_writer(sym, node.name, node)
         if (type_spec is None
                 and self._collection_scope_stack
                 and self._block_node_stack
@@ -4655,6 +4661,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             self._symbols.define(sym)
             setattr(sym, "_pf_decl_node_id", id(node))
             setattr(sym, "_pf_decl_binding_name", name)
+            self._note_member_writer(sym, name, node)
 
             if (self._collection_scope_stack
                     and self._block_node_stack
@@ -6183,20 +6190,18 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 assert object_spec is not None
                 self._reject_unsupported_map_history(object_spec, node)
             if (object_spec is not None
-                    and object_spec.kind in ("array", "matrix")
-                    and literal_offset(node) != 0):
-                # An untyped parameter given an array or a matrix: its history
-                # is a parameter's, which PineForge does not keep
-                # (collection_history.py).
-                name = (node.object.name if isinstance(node.object, Identifier)
-                        else "x")
-                self._error(
-                    f"{name}[...]: the history of "
-                    f"{'an array' if object_spec.kind == 'array' else 'a matrix'} "
-                    "parameter is not supported in PineForge (TradingView reads "
-                    "one copy per call: fixtures/array_history_tv ahist_fn).",
-                    node.loc,
-                )
+                    and object_spec.kind in ("array", "matrix")):
+                # A parameter given an array or a matrix: its history is a
+                # parameter's, which PineForge does not keep; the earlier
+                # lowering stays where it compiled (collection_history.py).
+                # A selection of one is an expression's history.
+                checker = self._history_checker()
+                if isinstance(node.object, Identifier):
+                    decision = checker.decide_parameter_history(node, object_spec)
+                    if decision.outcome == REFUSED:
+                        self._collection_history_raise(decision, node)
+                else:
+                    self._refuse_collection_expression_history(node, object_spec)
 
         # Propagate concrete caller specs through wrapper calls.  Each edge is
         # identity-keyed from the definition pass, so a local that shadows a
@@ -6486,12 +6491,17 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             "Series buffer for that binding.",
                             node.loc,
                         )
-                    if (getattr(sym, "type_spec", None) is not None
-                            and sym.type_spec.kind in ("array", "matrix")):
-                        # An array's or a matrix's history: copies kept
-                        # beside the variable, not a Series of it.
-                        self._note_collection_history_read(node, name, sym)
-                    elif getattr(sym, "type_spec", None) is None or sym.type_spec.kind not in ("array", "map"):
+                    # An array's or a matrix's history: copies kept beside
+                    # the variable, not a Series of it (collection_history.py);
+                    # a legacy matrix parameter's read keeps the registration
+                    # below, as it had.
+                    keeps_series = not (
+                        getattr(sym, "type_spec", None) is not None
+                        and sym.type_spec.kind in ("array", "matrix")
+                        and not self._note_collection_history_read(node, name, sym)
+                    )
+                    if keeps_series and (getattr(sym, "type_spec", None) is None
+                                         or sym.type_spec.kind not in ("array", "map")):
                         exact_member = getattr(sym, "_pf_var_member_name", None)
                         if exact_member is not None:
                             self._series_var_members.add(exact_member)
@@ -6570,34 +6580,77 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                   f"({receiver}[1]).{field.member}."),
         )])
 
-    def _refuse_collection_expression_history(self, node: Subscript, spec) -> None:
-        """The history of an expression whose value is an array or a matrix
-        (a call's result, a selection, a history): TradingView reads the copy
-        the expression produced on the bar k bars back
-        (fixtures/array_history_tv ahist_fn ``c1``), which PineForge does not
-        keep. It never compiled."""
-        if (isinstance(node.object, Identifier) or spec is None
-                or spec.kind not in ("array", "matrix")):
-            return
-        what = ("a call's" if isinstance(node.object, FuncCall)
-                else "a selection's" if isinstance(node.object, Ternary)
-                else "an expression's")
+    def _history_checker(self) -> CollectionHistoryChecker:
+        """The script's array and matrix history checker, built when the
+        visit first meets such a read."""
+        if self._collection_history_checker is None:
+            self._collection_history_checker = CollectionHistoryChecker(
+                self._ast, self._collection_history_name_kind)
+        return self._collection_history_checker
+
+    def _collection_history_name_kind(self, name: str) -> str | None:
+        """``array`` / ``matrix`` / ``map`` / ``scalar`` for a script
+        variable, else None (collection_history.CollectionHistoryChecker)."""
+        sym = self._symbols.global_scope.symbols.get(name)
+        if sym is None:
+            return None
+        spec = getattr(sym, "type_spec", None)
+        if spec is not None and spec.kind in ("array", "matrix", "map"):
+            return spec.kind
+        if sym.pine_type in (PineType.INT, PineType.FLOAT, PineType.BOOL,
+                             PineType.STRING, PineType.COLOR):
+            return "scalar"
+        return None
+
+    def _note_member_writer(self, sym, name: str, node) -> None:
+        """A declaration writing the class member of its name (the script's
+        top level and its blocks): a sibling block's declaration of the name
+        closes another one's array history before it writes
+        (codegen/collection_history.py)."""
+        if sym.scope == "global":
+            self._member_writer_decls.setdefault(name, set()).add(id(node))
+
+    def _collection_history_raise(self, decision, node) -> None:
         raise CompileError([Diagnostic(
             level=Level.ERROR,
             phase=Phase.ANALYZER,
-            location=node.loc or SourceLocation(self._filename, 1, 1, 1),
-            message=(f"The history of {what} {spec.kind} is not supported in "
-                     "PineForge: TradingView reads the copy that expression "
-                     "produced that many bars back, which PineForge does not "
-                     "keep."),
-            hint="Bind the expression to a variable and read the variable's history.",
+            location=(getattr(decision.node, "loc", None) or node.loc
+                      or SourceLocation(self._filename, 1, 1, 1)),
+            message=decision.message,
+            hint=decision.hint,
         )])
 
-    def _note_collection_history_read(self, node: Subscript, name: str, sym) -> None:
-        """Record ``a[k]`` of an array or a matrix variable for
-        ``_check_collection_history``."""
+    def _refuse_collection_expression_history(self, node: Subscript, spec) -> None:
+        """The history of an expression whose value is an array or a matrix
+        (a call's result, a selection): TradingView reads the copy the
+        expression produced k executions back (fixtures/array_history_tv
+        ahist_fn ``c1``), which PineForge does not keep. A use whose earlier
+        lowering compiled keeps it; one only a collection fits never compiled
+        and is refused (collection_history.py)."""
+        if (isinstance(node.object, Identifier) or spec is None
+                or spec.kind not in ("array", "matrix")):
+            return
+        checker = self._history_checker()
+        decided = checker.decision_for(node) is not None
+        decision = checker.decide_expression(node, spec)
+        if decision.outcome == REFUSED:
+            self._collection_history_raise(decision, node)
+        if decision.outcome == LEGACY and decision.use == "element" and not decided:
+            self._warn(
+                "(...)[...] reads an element of the selected current array in "
+                "PineForge: no history of a selection is kept, where TradingView "
+                "reads the array it selected that many bars back.",
+                node.loc,
+            )
+
+    def _note_collection_history_read(self, node: Subscript, name: str, sym) -> bool:
+        """Decide ``a[k]`` of an array or a matrix variable
+        (collection_history.py): annotate a supported read, refuse a refused
+        one, and keep a legacy one's earlier lowering. True where that
+        lowering registered a series (a matrix parameter's), which the caller
+        then does as it did."""
         decl_node_id = getattr(sym, "_pf_decl_node_id", None)
-        self._collection_history_reads.append(HistoryRead(
+        read = HistoryRead(
             node=node,
             name=name,
             kind=sym.type_spec.kind,
@@ -6608,44 +6661,38 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             is_var=bool(sym.is_var),
             decl_node_id=decl_node_id,
             scope_name=sym.scope or "",
-        ))
+        )
+        decision = self._history_checker().decide(read)
+        if node.annotations and COLLECTION_HISTORY_ANNOTATION in node.annotations:
+            node.annotations = dict(node.annotations)
+            del node.annotations[COLLECTION_HISTORY_ANNOTATION]
+        if decision.outcome == REFUSED:
+            self._collection_history_raise(decision, node)
+        if decision.outcome == SUPPORTED:
+            node.annotations = dict(node.annotations or {})
+            node.annotations[COLLECTION_HISTORY_ANNOTATION] = {
+                "var": name, "kind": read.kind, "use": decision.use,
+                "spec": read.spec, "member": None,
+            }
+            if not any(r.node is node for r in self._collection_history_reads[-1:]):
+                self._collection_history_reads.append(read)
+            return False
+        return decision.outcome == LEGACY and decision.use == "series"
+
+    def _collection_history_is_supported(self, node: Subscript) -> bool:
+        """Whether the checker supports the history read ``node`` (decided
+        where the visit met it; a read not met yet keeps its old typing)."""
+        checker = self._collection_history_checker
+        decision = checker.decision_for(node) if checker is not None else None
+        return decision is not None and decision.outcome == SUPPORTED
 
     def _check_collection_history(self) -> dict:
-        """Annotate every array or matrix history read with how its value is
-        used and return the variables whose history the codegen keeps;
-        refuse, located, a use it does not lower
-        (pineforge_codegen/collection_history.py)."""
+        """The declarations whose history the supported reads need, keyed
+        by their members (pineforge_codegen/collection_history.py)."""
         if not self._collection_history_reads:
             return {}
-        seen: set[int] = set()
-        reads = []
-        for read in self._collection_history_reads:
-            if id(read.node) not in seen:
-                seen.add(id(read.node))
-                reads.append(read)
-        def name_kind(name: str) -> str | None:
-            sym = self._symbols.global_scope.symbols.get(name)
-            if sym is None:
-                return None
-            spec = getattr(sym, "type_spec", None)
-            if spec is not None and spec.kind in ("array", "matrix", "map"):
-                return spec.kind
-            if sym.pine_type in (PineType.INT, PineType.FLOAT, PineType.BOOL,
-                                 PineType.STRING, PineType.COLOR):
-                return "scalar"
-            return None
-
-        try:
-            return CollectionHistoryChecker(self._ast, name_kind).check(reads)
-        except CollectionHistoryRefusal as refusal:
-            raise CompileError([Diagnostic(
-                level=Level.ERROR,
-                phase=Phase.ANALYZER,
-                location=(getattr(refusal.node, "loc", None)
-                          or SourceLocation(self._filename, 1, 1, 1)),
-                message=refusal.message,
-                hint=refusal.hint,
-            )]) from None
+        return self._history_checker().history_variables(
+            self._collection_history_reads, self._member_writer_decls)
 
     def _note_function_global_history_read(
             self, node: Subscript, name: str, sym) -> None:

@@ -17,10 +17,12 @@ neither compiled where an array or a matrix is read.
 TradingView refuses a method straight after the history of an array or a
 matrix (``a[1].size()``: CE10011), the history of an object's array or
 matrix field (``h.xs[1]``, ``(h.xs)[1]``: CE10290), ``==`` on arrays
-(CE10123) and an array where a number or a condition is expected (CE10123,
-CE10173, CE10101), and so does the transpiler, before generating C++. Forms
-TradingView accepts that PineForge does not lower are refused by name: they
-never compiled.
+(CE10123), an array where a number, a condition or an element is expected
+(CE10123, CE10173, CE10101, CE10122), and so does the transpiler, before
+generating C++. A form TradingView accepts that PineForge does not lower
+keeps the lowering it had where that compiled (an element of the current
+array, a parameter's current array, with a warning), and is refused by name
+where it did not.
 """
 
 from __future__ import annotations
@@ -397,7 +399,7 @@ NOT_SUPPORTED = {
         "selection"),
     "history_of_history": (
         "a = array.from(close)\n"
-        "float r = 0.0\nif bar_index > 1\n    r := ((a[1])[1]).size()\n", "expression"),
+        "float r = 0.0\nif bar_index > 1\n    r := ((a[1])[1]).size()\n", "array's history"),
     "ternary_arm": (
         "a = array.from(close)\nb = array.from(open)\n"
         "c = close > open ? a[1] : b\nr = c.size()\n", "a[1]"),
@@ -407,13 +409,25 @@ NOT_SUPPORTED = {
     "object_field_value": (
         "type H\n    array<float> xs\n"
         "a = array.from(close)\nh = H.new(a[1])\nr = h.xs.size()\n", "a[1]"),
-    "tostring": (
-        "a = array.from(close)\n"
+    "string_tostring": (
+        "a = array.from(\"x\")\n"
         "s = str.tostring(a[1])\nr = str.length(s)\n", "a[1]"),
-    "request_security": (
+    "request_security_size": (
         "a = array.from(close)\n"
-        'r = request.security(syminfo.tickerid, "60", na(a[1]) ? 0 : 1)\n',
+        'r = request.security(syminfo.tickerid, "60", (a[1]).size())\n',
         "request.security"),
+    "slice_changed": (
+        "a = array.from(close, open)\nfloat r = 0.0\n"
+        "if bar_index > 0\n    s = (a[1]).slice(0, 1)\n    s.set(0, 5.0)\n"
+        "    r := s.get(0)\n", "RE10051"),
+    "namespace_slice_changed": (
+        "a = array.from(close, open)\nfloat r = 0.0\n"
+        "if bar_index > 0\n    s = array.slice(a[1], 0, 1)\n    s.set(0, 5.0)\n"
+        "    r := s.get(0)\n", "RE10051"),
+    "bound_read_both_ways": (
+        "a = array.from(close)\nfloat r = 0.0\n"
+        "if bar_index > 0\n    pb = a[1]\n    r := pb.size() + (na(pb) ? 1 : 0)\n",
+        "na()"),
     "block_var": (
         "float r = 0.0\nif close > open\n    var bv = array.new<float>()\n"
         "    bv.push(close)\n    r := na(bv[1]) ? 0.0 : (bv[1]).size()\n", "var"),
@@ -452,3 +466,149 @@ def test_a_collection_history_pineforge_does_not_lower_is_refused(name):
 def test_the_function_scope_probes_are_refused_by_name(name):
     error = _refusal((FIXTURES / f"{name}.pine").read_text(encoding="utf-8"))
     assert any(d.location is not None for d in error.diagnostics)
+
+
+# Forms TradingView accepts (pine-facade, 2026-10-01) that PineForge does not
+# lower here, whose earlier lowering compiled: they keep it, with its
+# warning. An array variable's history outside the scopes kept, or read
+# through na() or str.tostring() where only an element was lowered, reads an
+# element of the current array; a parameter's reads the parameter's current
+# array.
+CURRENT_ELEMENT = "array history indexing uses the current collection element"
+CURRENT_PARAMETER = "reads the current array in PineForge"
+EARLIER_LOWERING = {
+    "tostring": (
+        "a = array.from(close)\ns = str.tostring(a[1])\nr = str.length(s)\n",
+        CURRENT_ELEMENT),
+    "format": (
+        "a = array.from(close)\nr = str.length(str.format(\"{0}\", a[1]))\n",
+        CURRENT_ELEMENT),
+    "bound_na": (
+        "a = array.from(close)\npb = a[1]\nr = na(pb) ? 0 : 1\n", CURRENT_ELEMENT),
+    "bound_tostring": (
+        "a = array.from(close)\npb = a[1]\nr = str.length(str.tostring(pb))\n",
+        CURRENT_ELEMENT),
+    "untyped_argument_na": (
+        "isNa(v) => na(v) ? 1 : 0\na = array.from(close)\nr = isNa(a[1])\n",
+        CURRENT_ELEMENT),
+    "request_security_na": (
+        "a = array.from(close)\n"
+        'r = request.security(syminfo.tickerid, "60", na(a[1]) ? 0 : 1)\n',
+        CURRENT_ELEMENT),
+    "global_read_in_a_function_na": (
+        "a = array.from(close)\nf() => na(a[1]) ? 0 : 1\nr = f()\n", CURRENT_ELEMENT),
+    "function_local_tostring": (
+        "f(float y) =>\n    la = array.from(y)\n    str.length(str.tostring(la[1]))\n"
+        "r = f(close)\n", CURRENT_ELEMENT),
+    "block_var_na": (
+        "float r = 0.0\nif close > open\n    var bv = array.new<float>()\n"
+        "    bv.push(close)\n    r := na(bv[1]) ? 0.0 : 1.0\n", CURRENT_ELEMENT),
+    "loop_local_na": (
+        "float r = 0.0\nfor i = 0 to 2\n    la = array.from(close + i)\n"
+        "    r += na(la[1]) ? 0.0 : 1.0\n", CURRENT_ELEMENT),
+    "selection_na": (
+        "a = array.from(close)\nb = array.from(open)\n"
+        "r = na((close > open ? a : b)[1]) ? 0 : 1\n",
+        "element of the selected current array"),
+    "string_loop_in_a_function": (
+        "s = array.from(\"x\", \"y\")\nf() =>\n    int n = 0\n"
+        "    for v in s[1]\n        n += 1\n    n\nr = f()\n", CURRENT_ELEMENT),
+    "parameter_namespace_size": (
+        "f(array<float> x) => array.size(x[1])\na = array.from(close)\nr = f(a)\n",
+        CURRENT_PARAMETER),
+    "parameter_loop": (
+        "f(array<float> x) =>\n    float t = 0.0\n    for v in x[1]\n        t += v\n    t\n"
+        "a = array.from(close)\nr = f(a)\n", CURRENT_PARAMETER),
+    "receiver_namespace_get": (
+        "method prev(array<float> this) => array.get(this[1], 0)\n"
+        "a = array.from(close)\nr = a.prev()\n", CURRENT_PARAMETER),
+}
+
+
+@pytest.mark.parametrize("name", sorted(EARLIER_LOWERING))
+def test_a_form_the_earlier_lowering_compiled_keeps_it(name):
+    body, warning = EARLIER_LOWERING[name]
+    from pineforge_codegen import transpile_full
+    result = transpile_full(_script(body))
+    messages = [d.message for d in result["diagnostics"]]
+    assert any(warning in m for m in messages), messages
+    assert "_PFCollectionHistory" not in result["cpp"]
+    compile_cpp(result["cpp"], label=name)
+
+
+def test_a_function_nothing_calls_keeps_any_history_read():
+    # The codegen emits no function nothing calls, so every read in one
+    # compiled: a matrix's history in one no longer types the matrix a
+    # number either.
+    cpp = transpile(_script(
+        "a = array.from(close)\nm = matrix.new<float>(1, 1, close)\n"
+        "unused() => (a[1]).size() + matrix.rows(m[1]) + (m[1]).get(0, 0)\n"
+        "r = a.size() + m.rows()\n"))
+    assert "PineMatrix m;" in cpp
+    compile_cpp(cpp, label="dead function")
+
+
+# Uses TradingView refuses (pine-facade, 2026-10-01), each with its code: an
+# array where an element, a number or a string is expected.
+TRADINGVIEW_REFUSED_USES = {
+    "push_into_another": ("c = array.new<float>()\nc.push(a[1])\nr = c.size()\n", "CE10123"),
+    "namespace_push_into_another": (
+        "c = array.new<float>()\narray.push(c, a[1])\nr = c.size()\n", "CE10123"),
+    "includes": ("r = a.includes(a[1]) ? 1 : 0\n", "CE10123"),
+    "indexof": ("r = a.indexof(a[1])\n", "CE10123"),
+    "fill": ("a.fill(a[1])\nr = a.size()\n", "CE10123"),
+    "array_new_initial_value": ("c = array.new<float>(2, a[1])\nr = c.size()\n", "CE10123"),
+    "matrix_new_initial_value": (
+        "m = matrix.new<float>(2, 2, a[1])\nr = m.rows()\n", "CE10123"),
+    "array_from_element": ("c = array.from(a[1])\nr = c.size()\n", "CE10122"),
+    "bound_nz": ("pb = a[1]\nx = nz(pb)\nr = 1\n", "CE10123"),
+    "log_message": ("log.info(a[1])\nr = 1\n", "CE10123"),
+    "label_text": ("label.new(bar_index, high, a[1])\nr = 1\n", "CE10123"),
+    "colors_tostring": (
+        "cs = array.from(color.red)\nlabel.new(bar_index, high, str.tostring(cs[1]))\nr = 1\n",
+        "CE10123"),
+    "float_field": (
+        "type H\n    float f = 0.0\nh = H.new()\nh.f := a[1]\nr = h.f\n", "CE10173"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(TRADINGVIEW_REFUSED_USES))
+def test_a_use_tradingview_refuses_is_refused_with_its_code(name):
+    body, code = TRADINGVIEW_REFUSED_USES[name]
+    error = _refusal(_script("a = array.from(close)\n" + body))
+    diag = _diag(error, code)
+    assert diag.location is not None
+
+
+def test_sibling_blocks_keep_a_history_each():
+    # Two blocks each declare x: each block's x has its own history, and a
+    # block's declaration closes the other's before it writes the member
+    # they share (TradingView: a block's local reads its block's previous
+    # run, fixtures/array_history_tv ahist_more t3).
+    cpp = transpile(_script(
+        "float r = 0.0\n"
+        "if bar_index % 2 == 0\n    x = array.from(1.0)\n"
+        "    r := na(x[1]) ? -1 : (x[1]).size()\n"
+        "if bar_index % 3 == 0\n    x = array.from(1.0, 2.0, 3.0)\n"
+        "    r += na(x[1]) ? -1 : (x[1]).size()\n"))
+    assert "_pf_collection_hist_x{2};" in cpp
+    assert "_pf_collection_hist_x_1{2};" in cpp
+    first = cpp.index("_pf_collection_hist_x.open(x,")
+    second = cpp.index("_pf_collection_hist_x_1.open(x,")
+    # Each declaration first closes the other's history.
+    assert cpp.rindex("_pf_collection_hist_x_1.close(x);", 0, first) >= 0
+    assert cpp.rindex("_pf_collection_hist_x.close(x);", 0, second) > first
+    compile_cpp(cpp, label="sibling blocks")
+
+
+def test_a_diamond_of_helpers_is_walked_once_per_helper():
+    # Each helper passes its parameter to the one below twice: a walk per
+    # call path visits 2**22 paths.
+    lines = ["f0(x) => x.size()"]
+    for depth in range(1, 23):
+        lines.append(f"f{depth}(x) => f{depth - 1}(x) + f{depth - 1}(x)")
+    body = "\n".join(lines) + "\na = array.from(close)\nfloat r = 0.0\nif bar_index > 0\n    r := f22(a[1])\n"
+    import time
+    started = time.monotonic()
+    transpile(_script(body))
+    assert time.monotonic() - started < 30

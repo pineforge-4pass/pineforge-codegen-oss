@@ -3,7 +3,7 @@
 Synthetic probes written for lane CG-ARRAY-HIST: the history-referencing
 operator `[]` on an array or a matrix, and an int value given to a float
 field of a user-defined object. They contain no closed or scraped source.
-The eight tapes were exported on 2026-10-01 with
+The nine tapes were exported on 2026-10-01 with
 
 ```bash
 lab tv --pine <name>.pine --slug pf-<name, underscores as dashes> --no-note \
@@ -28,6 +28,7 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `ahist_fn` | `4082e3be4e42ca68ba7b500a56d0849a49213cf89d932387abf1817f87d50837` | `792b12925ab371208a10dbaa3e47e033e1854037b92c8eb2947ecbd41ce2e5be` |
 | `ahist_method` | `fc3e1686e7493515fb4813abd4ddff475d36d8adcec010beb4f31e9ad01a6717` | `a248251a257aab65d63a5b0a57b7652eb9e4be09926d49ebd524cbfcdc64a217` |
 | `uctor_float` | `c98b31de4b8db20c2cac9426cc58b2a31e98965c989b693e4365195265212916` | `0184c3fb8a603bbd6baa4726a0f7341bd97a5110605ae1c8034c1f96e6604918` |
+| `ahist_sibling` | `04a0fa727545d2a6d364ac5db750ad79fe15d912029c3ab5c7c2419b437be142` | `7b651096759e0563ecbfd7ede637370892fba8bf64692cd53b1eb29fe7e4dbeb` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -39,6 +40,7 @@ Each exit Signal joins these fields with `|`, in this order:
 - `ahist_fn`: `a1`, `a2`, `l1`, `m1`, `c1`, `blk`
 - `ahist_method`: `m1`, `k1`
 - `uctor_float`: `d1`, `n2`, `w2`, `d3`, `d4`
+- `ahist_sibling`: `one`, `two`
 
 What each tape shows (the fields of the bars below `bar_index` 2 or 3 are the
 probes' `-1` placeholders):
@@ -87,6 +89,11 @@ probes' `-1` placeholders):
   array reads its block's previous run (`blk`).
 - `ahist_method`: a method's array receiver: `this[1]` is the receiver of the
   previous call (`m1`), at a call on every other bar too (`k1`).
+- `ahist_sibling`: two sibling if blocks that each declare an array `x` keep a
+  history each: the first block's `x[1]` is the one-element array its own
+  previous run left two bars back (`one` is 1002), never the second
+  block's four-element array, which the second block reads three bars back
+  (`two` is 4003).
 - `uctor_float`: an int given to a float field is that number: the bar index
   by keyword (`d1` is 0), an int variable by position, na on every third bar
   (`n2`: `na` there, else 0), int arithmetic by position (`w2` is 1), an

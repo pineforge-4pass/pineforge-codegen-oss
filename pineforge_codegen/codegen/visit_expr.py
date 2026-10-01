@@ -1804,6 +1804,17 @@ class ExprVisitor:
         if isinstance(node.index, NumberLiteral) and node.index.value == 0:
             return
         spec = self._type_spec_from_expr(node.object)
+        if spec is not None and spec.kind in ("array", "matrix"):
+            # A parameter's array or matrix history (collection_history.py:
+            # the earlier lowering, kept where it compiled).
+            self._codegen_warning(
+                node,
+                f"{node.object.name}[...] reads the current {spec.kind} in "
+                "PineForge: no history of this parameter is kept, where "
+                "TradingView reads the copy the call that many calls back "
+                "left (fixtures/array_history_tv ahist_fn).",
+            )
+            return
         if (spec is None or spec.kind != "udt"
                 or not (spec.name in DRAWING_TYPE_TO_CPP
                         or spec.name in self._udt_defs)):

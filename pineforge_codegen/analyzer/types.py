@@ -360,10 +360,12 @@ class TypeHelper:
                 return receiver_spec
             if (receiver_spec is not None
                     and receiver_spec.kind in ("array", "matrix")
-                    and isinstance(value.object, Identifier)):
+                    and isinstance(value.object, Identifier)
+                    and self._collection_history_is_supported(value)):
                 # An array's or a matrix's history is a collection of its
                 # type (fixtures/array_history_tv; pineforge_codegen/
-                # collection_history.py).
+                # collection_history.py); a legacy read keeps the element
+                # typing it had.
                 return receiver_spec
             return None
         if isinstance(value, IfStmt):

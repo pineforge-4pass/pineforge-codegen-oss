@@ -13,8 +13,10 @@ they are now); a ``for...in`` loop over the history, which iterates the array
 the variable holds now; an array changed after its declaration, an if
 block's local, a dynamic offset, the history bound to a variable and given
 to a function, a ``var`` array rebound every fourth bar and an array of
-objects. Each probe closes its position with a comment spelling the values
-it read, and every exit Signal of a tape must be the engine's.
+objects; two sibling blocks that each declare an array of the same name,
+each reading its own block's previous run. Each probe closes its position
+with a comment spelling the values it read, and every exit Signal of a tape
+must be the engine's.
 
 A change to the history stops TradingView's run (RE10051), and so does a
 method on it before the variable has one (RE10052 / RE10053); the engine's
@@ -39,7 +41,8 @@ from tests._e2e import (
 from tests._security_tapes import mismatches, replay, source, tape_exits
 
 FIXTURES = Path(__file__).parent / "fixtures" / "array_history_tv"
-TAPES = ("ahist_ref", "ahist_mtx", "ahist_field", "ahist_loop", "ahist_more")
+TAPES = ("ahist_ref", "ahist_mtx", "ahist_field", "ahist_loop", "ahist_more",
+         "ahist_sibling")
 # codegen when the lane started (cg/udt-history, the object history lane).
 BASE = "a7c6473512623d8fb302a370702770b28e47b933"
 

@@ -29,12 +29,19 @@ class CollectionHistoryEmitter:
     """CodeGen mixin: the history members of array and matrix variables."""
 
     def _collection_history_variables(self) -> list:
-        """The variables whose history the script reads, in name order."""
+        """The declarations whose history the script reads, in key order."""
         history = getattr(self.ctx, "collection_history", None) or {}
-        return [history[name] for name in sorted(history)]
+        return [history[key] for key in sorted(history)]
 
-    def _collection_history_member(self, name: str) -> str:
-        return f"_pf_collection_hist_{self._safe_name(name)}"
+    def _collection_history_member(self, variable) -> str:
+        """``_pf_collection_hist_<name>``; a later declaration of the same
+        name (a sibling block's) gets ``_<ordinal>``."""
+        suffix = f"_{variable.ordinal}" if variable.ordinal else ""
+        return f"_pf_collection_hist_{self._safe_name(variable.name)}{suffix}"
+
+    def _collection_history_of(self, annotation):
+        history = getattr(self.ctx, "collection_history", None) or {}
+        return history.get(annotation.get("member"))
 
     def _collection_history_cpp_type(self, variable) -> str:
         """The history's element type: the variable member's own C++ type,
@@ -62,38 +69,43 @@ class CollectionHistoryEmitter:
         lines.append(COLLECTION_HISTORY_CLASS_CPP.strip("\n"))
         lines.append("")
 
-    def _collection_history_open(self, name: str) -> str | None:
-        """The statement opening ``name``'s slot, when the script reads its
-        history, else None."""
-        history = getattr(self.ctx, "collection_history", None) or {}
-        if name not in history:
-            return None
-        return (f"{self._collection_history_member(name)}.open("
-                f"{self._safe_name(name)}, history_advances_new_bar());")
+    def _collection_history_open(self, variable) -> str:
+        """The statement opening a declaration's slot."""
+        return (f"{self._collection_history_member(variable)}.open("
+                f"{self._safe_name(variable.name)}, history_advances_new_bar());")
 
-    def _collection_history_decl_open(self, node) -> str | None:
-        """The statement a non-``var`` declaration of such a variable opens
-        its slot with (each execution: a block's on the bars it runs)."""
-        if node.is_var or node.is_varip:
-            return None
+    def _collection_history_close(self, variable) -> str:
+        return (f"{self._collection_history_member(variable)}.close("
+                f"{self._safe_name(variable.name)});")
+
+    def _collection_history_decl_statements(self, node) -> list[str]:
+        """What an execution of a declaration does first: close the history
+        of every other declaration writing the same member (a sibling
+        block's ``x``, which keeps the array its block left), then open its
+        own slot when it is not a ``var`` (a block's on the bars it runs)."""
+        statements = []
+        own = None
         for variable in self._collection_history_variables():
-            if id(node) in variable.decl_node_ids:
-                return self._collection_history_open(variable.name)
-        return None
+            if id(node) in variable.closed_by:
+                statements.append(self._collection_history_close(variable))
+            elif variable.decl_node_id == id(node):
+                own = variable
+        if own is not None and not (getattr(node, "is_var", False)
+                                    or getattr(node, "is_varip", False)):
+            statements.append(self._collection_history_open(own))
+        return statements
 
     def _emit_collection_history_var_opens(self, lines: list[str], pad: str) -> None:
         """A top-level ``var``'s slot opens on every bar, after its first
         bar's initialization."""
         for variable in self._collection_history_variables():
             if variable.is_var:
-                lines.append(f"{pad}{self._collection_history_open(variable.name)}")
+                lines.append(f"{pad}{self._collection_history_open(variable)}")
 
     def _emit_collection_history_closes(self, lines: list[str], pad: str) -> None:
         """The bar's end: every open slot keeps a copy of its variable."""
         for variable in self._collection_history_variables():
-            lines.append(
-                f"{pad}{self._collection_history_member(variable.name)}.close("
-                f"{self._safe_name(variable.name)});")
+            lines.append(f"{pad}{self._collection_history_close(variable)}")
 
     @staticmethod
     def _roots_at_collection_history(value) -> bool:
@@ -134,7 +146,7 @@ class CollectionHistoryEmitter:
         offset = literal_offset(node)
         if use == "loop" or offset == 0:
             return current
-        member = self._collection_history_member(annotation["var"])
+        member = self._collection_history_member(self._collection_history_of(annotation))
         index = self._collection_history_offset_cpp(node)
         dynamic = offset is None
         if use == "change":
@@ -155,7 +167,7 @@ class CollectionHistoryEmitter:
         offset = literal_offset(node)
         if offset == 0:
             return f"is_na({current})" if annotation["kind"] == "matrix" else "false"
-        member = self._collection_history_member(annotation["var"])
+        member = self._collection_history_member(self._collection_history_of(annotation))
         index = self._collection_history_offset_cpp(node)
         if offset is None:
             return f"{member}.is_na({index}, {current})"
