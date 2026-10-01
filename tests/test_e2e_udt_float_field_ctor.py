@@ -68,6 +68,17 @@ def test_an_int_literal_keeps_its_spelling():
     compile_cpp(cpp, label="int literal")
 
 
+def test_an_expression_of_int_literals_keeps_its_spelling():
+    # So does an expression of literals a double holds exactly; one past
+    # 2**53, which no double holds, is converted at run time.
+    cpp = transpile(_script("c = Cell.new(1 + 2, 5 * 2)\n"))
+    assert "_PFUdtRecord_Cell{.v = (1 + 2), .w = (5 * 2)}" in cpp
+    compile_cpp(cpp, label="int literal expression")
+    wide = transpile(_script("c = Cell.new(3000000000 * 4000000)\n"))
+    assert "_PFUdtRecord_Cell{.v = [&](){ auto _pf_w" in wide
+    compile_cpp(wide, label="wide int literal expression")
+
+
 def test_a_double_value_keeps_its_spelling():
     cpp = transpile(_script("c = Cell.new(v = close, w = 0.5)\n"))
     assert "_PFUdtRecord_Cell{.v = current_bar_.close, .w = 0.5}" in cpp

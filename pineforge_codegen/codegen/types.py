@@ -3427,10 +3427,12 @@ class TypeInferer:
         bar_index)``). C++ refuses to narrow a non-constant ``int`` or
         ``int64_t`` there, which did not compile; TradingView holds the
         number, an integer na as na (fixtures/array_history_tv uctor_float).
-        A double, an integer literal (a constant that fits narrows) and a bare
-        na keep their spelling."""
+        A double, an integer literal or an expression of literals (a constant
+        a double holds exactly narrows) and a bare na keep their spelling."""
+        constant = self._pure_int_literal_value(node)
         if (cpp_val == "na<double>()"
                 or self._INTEGRAL_CPP_TEXT.match(cpp_val)
+                or (constant is not None and abs(constant) <= 2 ** 53)
                 or self._emitted_value_is_double(node)):
             return cpp_val
         if cpp_val in {"na<int>()", "na<int64_t>()"}:
