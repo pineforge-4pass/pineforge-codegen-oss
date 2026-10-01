@@ -125,36 +125,59 @@ _SCALAR_NAMESPACES = frozenset({
 
 # The uses (``Use.tag``; an entry also covers its ``:``-extensions) the
 # earlier lowering of a read the checker does not support could not compile,
-# from a probe of every use in every scope on the build before this one; a
-# use not listed keeps that lowering. A variable's history read an element
-# of the current array -- a number, a bool, a color or a string -- and a
-# matrix variable's a ``Series<double>`` that never compiled; a parameter's
-# read the parameter's current collection.
+# from a probe of every use and every array function in every scope on the
+# build before this one; a use not listed keeps that lowering. A variable's
+# history read an element of the current array -- a number, a bool, a color
+# or a string -- and a matrix variable's a ``Series<double>`` that never
+# compiled; a parameter's read the parameter's current collection.
+#
+# A number's element took no array function; ``array.copy`` built a vector
+# of the element's size, which compiled where a namespace call or a loop's
+# local took it, not where a method or a member did.
+_NUMBER_ELEMENT_FAILING_FUNCTIONS = frozenset({
+    "abs", "avg", "binary_search", "binary_search_leftmost",
+    "binary_search_rightmost", "concat", "covariance", "every", "first", "get",
+    "includes", "indexof", "join", "last", "lastindexof", "max", "median",
+    "min", "mode", "percentile_linear_interpolation",
+    "percentile_nearest_rank", "percentrank", "range", "size", "some",
+    "sort_indices", "standardize", "stdev", "sum", "variance", "add_row",
+    "add_col",
+})
 _ELEMENT_LOWERING_FAILS = frozenset({
-    "read:receiver", "change:receiver", "slice:receiver", "change:argument",
-    "copy:typed", "loop", "read:argument:size", "read:argument:get",
-    "read:argument:concat", "read:argument:add_row", "read:argument:add_col",
-    "read:history", "other:collection",
+    "read:receiver", "change:receiver", "slice:receiver", "slice:argument",
+    "change:argument", "copy:typed", "loop", "read:history", "other:collection",
+    "read:argument:copy:receiver", "read:argument:copy:member",
+}) | frozenset(f"read:argument:{f}" for f in _NUMBER_ELEMENT_FAILING_FUNCTIONS)
+# A ``std::string`` element has ``size()``, ``[]``, ``clear()``, iterators and
+# more, so many array functions compiled on it; it has no na and no number
+# rendering.
+_STRING_ELEMENT_FAILING_FUNCTIONS = frozenset({
+    "abs", "binary_search", "binary_search_leftmost", "binary_search_rightmost",
+    "concat", "copy", "covariance", "includes", "indexof", "lastindexof",
+    "sort_indices", "standardize", "add_row", "add_col",
 })
-# A ``std::string`` element has ``size()``, ``[]`` and iterators, but no na
-# and no number rendering.
 _STRING_ELEMENT_LOWERING_FAILS = frozenset({
-    "read:receiver", "change:receiver", "slice:receiver", "change:argument",
-    "copy:typed", "na", "render:tostring", "read:argument:concat",
-    "read:argument:add_row", "read:argument:add_col", "read:argument:copy",
-    "read:history", "other:collection",
-})
+    "read:receiver", "change:receiver", "slice:receiver", "copy:typed", "na",
+    "render:tostring", "read:history", "other:collection",
+    "change:argument:push", "change:argument:unshift", "change:argument:insert",
+    "change:argument:set", "change:argument:fill", "change:argument:concat",
+}) | frozenset(f"read:argument:{f}" for f in _STRING_ELEMENT_FAILING_FUNCTIONS)
+# A parameter's current array took most array functions; one returning a new
+# array, a method on it, na() and rendering did not compile, nor did a
+# string array's element-typed reads (typed a number).
 _PARAMETER_LOWERING_FAILS = frozenset({
-    "read:receiver", "change:receiver", "slice:receiver", "na", "render",
-    "copy:untyped",
+    "read:receiver", "change:receiver", "slice:receiver", "slice:argument", "na",
+    "render", "copy:untyped", "read:argument:abs", "read:argument:copy",
+    "read:argument:sort_indices", "read:argument:standardize",
+    "change:argument:concat",
 })
-# A string parameter's element read through a built-in was typed a number.
-_STRING_PARAMETER_LOWERING_FAILS = _PARAMETER_LOWERING_FAILS | frozenset({
-    "read:argument:get", "read:argument:first", "read:argument:last",
-    "read:argument:max", "read:argument:min", "read:argument:mode",
-    "read:argument:median", "change:argument:pop", "change:argument:shift",
-    "change:argument:remove",
-})
+_STRING_PARAMETER_LOWERING_FAILS = _PARAMETER_LOWERING_FAILS | frozenset(
+    f"read:argument:{f}" for f in (
+        "avg", "covariance", "every", "first", "get", "join", "last", "max",
+        "median", "min", "mode", "percentile_linear_interpolation",
+        "percentile_nearest_rank", "percentrank", "range", "some", "stdev",
+        "sum", "variance")) | frozenset(
+    f"change:argument:{f}" for f in ("pop", "remove", "shift"))
 _MATRIX_RECEIVER_LOWERING_FAILS = frozenset({
     "read:receiver", "change:receiver", "render", "copy:untyped",
     "read:argument:sum", "read:argument:det", "read:argument:copy",
@@ -807,8 +830,7 @@ class CollectionHistoryChecker:
         if isinstance(parent, ExprStmt):
             return self._statement_use(parent, node, kind, label)
         if isinstance(parent, TupleLiteral):
-            return Use("other", node,
-                       f"{label} in a tuple is not supported in PineForge.")
+            return self._tuple_flow(parent, node, kind, label)
         return Use("other", node, f"{label} is not supported in PineForge here.")
 
     def _receiver_use(self, access: MemberAccess, node, kind: str, label: str) -> Use:
@@ -824,8 +846,9 @@ class CollectionHistoryChecker:
                 return Use("change", node, form="receiver")
             return Use("read", node, form="receiver")
         if method in self._methods:
+            definitions = self._definitions_for(self._methods[method], 0, None, kind)
             return Use("copy", node, names=self._parameter_uses(
-                self._methods[method], 0, None, kind), needs_collection=True)
+                definitions, 0, None, kind), needs_collection=True)
         return Use("other", node,
                    f"{label}.{method}(): no array or matrix method of that name.",
                    needs_collection=True)
@@ -847,7 +870,8 @@ class CollectionHistoryChecker:
             if name == "na":
                 return Use("na", node)
             if name in self._functions:
-                definitions = self._functions[name]
+                definitions = self._definitions_for(
+                    self._functions[name], positional, keyword, kind)
                 return Use("copy", node,
                            names=self._parameter_uses(definitions, positional, keyword, kind),
                            needs_collection=self._parameter_is_collection(
@@ -903,11 +927,13 @@ class CollectionHistoryChecker:
                 f"argument of {namespace}.{member} (CE10123).")
         if namespace not in _BUILTIN_NAMESPACES and member in self._methods:
             # A user method called on another receiver: a parameter after it.
+            position = None if positional is None else positional + 1
+            definitions = self._definitions_for(
+                self._methods[member], position, keyword, kind)
             return Use("copy", node, names=self._parameter_uses(
-                self._methods[member], None if positional is None else positional + 1,
-                keyword, kind), needs_collection=self._parameter_is_collection(
-                    self._methods[member],
-                    None if positional is None else positional + 1, keyword))
+                definitions, position, keyword, kind),
+                needs_collection=self._parameter_is_collection(
+                    definitions, position, keyword))
         if (namespace not in _BUILTIN_NAMESPACES and namespace not in self._types
                 and (member in self._array_methods or member in self._matrix_methods)):
             # A built-in method on another collection (``c.concat(a[1])``,
@@ -937,6 +963,8 @@ class CollectionHistoryChecker:
         if first:
             if namespace == "array" and member == "slice":
                 return self._slice_use(self._parent[id(node)], node, label, form)
+            if namespace == "array" and member == "copy":
+                form += self._copy_consumer(self._parent[id(node)])
             if self._changing(namespace, member):
                 return Use("change", node, form=form)
             return Use("read", node, form=form)
@@ -946,6 +974,20 @@ class CollectionHistoryChecker:
         return self._reject(
             node, f"{label} is {_a(kind)}, which TradingView refuses as a value "
             f"of {namespace}.{member} (CE10123).")
+
+    def _copy_consumer(self, call: FuncCall) -> str:
+        """How ``array.copy(a[k])``'s new array is used, for the earlier
+        lowering's verdict: ``:receiver`` for a method called on it,
+        ``:member`` for a variable outside a loop holding it, else none."""
+        consumer = self.use(call, "array", "array.copy()")
+        if consumer.how in ("read", "change", "slice") and consumer.form == "receiver":
+            return ":receiver"
+        parent = self._parent.get(id(call))
+        if isinstance(parent, (VarDecl, Assignment)) and not any(
+                isinstance(a, (ForStmt, ForInStmt, WhileStmt))
+                for a in self._ancestors(parent)):
+            return ":member"
+        return ""
 
     def _render_use(self, node, kind: str, label: str, function: str) -> Use:
         """``str.tostring(a[k])``, ``str.format(..., a[k])``: TradingView
@@ -1074,6 +1116,34 @@ class CollectionHistoryChecker:
         names.add(self.use(holder, kind, label))
         return Use("flow", node, names=names)
 
+    def _tuple_flow(self, tuple_node: TupleLiteral, node, kind: str, label: str) -> Use:
+        """An element of a function's result tuple: each tuple declaration
+        of a call binds it to the name at its index (``[p, q] = f()``)."""
+        index = next(i for i, e in enumerate(tuple_node.elements) if e is node)
+        statement = self._parent.get(id(tuple_node))
+        located = (self._containing_list(statement)
+                   if isinstance(statement, ExprStmt) else None)
+        if located is None or not isinstance(located[0], (FuncDef, MethodDef)) \
+                or located[1][-1] is not statement:
+            return Use("other", node, f"{label} in a tuple is not supported in PineForge.")
+        definition = located[0]
+        names = NameUses()
+        for call in self._calls_by_name.get(
+                (isinstance(definition, MethodDef), definition.name), ()):
+            decl = self._parent.get(id(call))
+            position = self._position.get(id(decl))
+            if (not isinstance(decl, TupleAssign) or decl.value is not call
+                    or index >= len(decl.names) or position is None):
+                continue
+            holder, body, at = position
+            name = decl.names[index]
+            names.merge(self._uses_of_name(
+                ("tuple", id(decl), index, kind), name,
+                lambda n=name, b=body, i=at, top=isinstance(holder, Program):
+                    self._region_reads(n, b, i + 1, top),
+                kind))
+        return Use("flow", node, names=names)
+
     def _result_use(self, definition, kind: str, label: str, node) -> Use:
         """A function's or a method's result: each call's use."""
         names = NameUses()
@@ -1081,6 +1151,25 @@ class CollectionHistoryChecker:
         for call in self._calls_by_name.get((method, definition.name), ()):
             names.add(self.use(call, kind, f"{definition.name}()"))
         return Use("flow", node, names=names)
+
+    def _definitions_for(self, definitions, index, keyword, kind: str) -> list:
+        """The overloads (or same-named methods of other types) whose
+        parameter at ``index`` / ``keyword`` can take a collection of
+        ``kind``: typed as one, or untyped. All of them when none can, so a
+        refusal still names a use."""
+        fitting = []
+        for definition in definitions:
+            params = list(definition.params)
+            position = params.index(keyword) if keyword in params else index
+            if position is None or position >= len(params):
+                continue
+            hints = (definition.annotations or {}).get("param_type_hints") or []
+            hint = hints[position] if position < len(hints) else None
+            if isinstance(definition, MethodDef) and position == 0:
+                hint = hint or definition.type_name
+            if hint is None or collection_hint(hint) == kind:
+                fitting.append(definition)
+        return fitting or list(definitions)
 
     def _parameter_is_collection(self, definitions, index, keyword) -> bool:
         for definition in definitions:
@@ -1271,11 +1360,6 @@ class CollectionHistoryChecker:
                 "argument that reads it."))
         table = (_STRING_ELEMENT_LOWERING_FAILS if self._element == "string"
                  else _ELEMENT_LOWERING_FAILS)
-        if not any(isinstance(a, (ForStmt, ForInStmt, WhileStmt))
-                   for a in self._ancestors(read.node)):
-            # ``array.copy(a[k])`` built a vector of the element's size, which
-            # only a loop's local (declared ``auto``) held.
-            table = table | {"read:argument:copy"}
         failing = _failing_tag(uses.tags, table)
         if failing is None:
             return Decision(LEGACY)

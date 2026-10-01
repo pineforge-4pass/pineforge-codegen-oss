@@ -35,9 +35,11 @@ class CollectionHistoryEmitter:
 
     def _collection_history_member(self, variable) -> str:
         """``_pf_collection_hist_<name>``; a later declaration of the same
-        name (a sibling block's) gets ``_<ordinal>``."""
-        suffix = f"_{variable.ordinal}" if variable.ordinal else ""
-        return f"_pf_collection_hist_{self._safe_name(variable.name)}{suffix}"
+        name (a sibling block's) gets ``_pf_collection_hist_<ordinal>_<name>``,
+        which no Pine name (none starts with a digit) can spell: ``x``'s
+        second declaration beside a variable ``x_1``."""
+        prefix = f"{variable.ordinal}_" if variable.ordinal else ""
+        return f"_pf_collection_hist_{prefix}{self._safe_name(variable.name)}"
 
     def _collection_history_of(self, annotation):
         history = getattr(self.ctx, "collection_history", None) or {}

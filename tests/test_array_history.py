@@ -147,6 +147,12 @@ SHAPES = {
         "sizeOf(x) =>\n    x.size()\n"
         "a = array.from(close)\n"
         "float r = 0.0\nif bar_index > 0\n    r := sizeOf(a[1])\n"),
+    "same_named_methods_of_two_types": (
+        "type Cell\n    float v\n"
+        "method sz(array<float> this) =>\n    this.size()\n"
+        "method sz(Cell this) =>\n    this.v + 1\n"
+        "a = array.from(close, open)\n"
+        "float r = 0.0\nif bar_index > 0\n    r := (a[1]).sz()\n"),
     "user_method_receiver": (
         "method firstOf(array<float> this) =>\n    this.get(0) + this.size()\n"
         "a = array.from(close)\n"
@@ -431,6 +437,26 @@ NOT_SUPPORTED = {
         "a = array.from(close, open)\nfloat r = 0.0\n"
         "if bar_index > 0\n    s = array.slice(a[1], 0, 1)\n    s.set(0, 5.0)\n"
         "    r := s.get(0)\n", "RE10051"),
+    # The earlier lowering read an element where these need the array: it
+    # did not compile.
+    "element_namespace_read_in_a_function": (
+        "a = array.from(close, open)\nf() => array.sum(a[1])\nr = f()\n", "function"),
+    "copy_receiver_in_a_function": (
+        "a = array.from(close, open)\nf() => array.copy(a[1]).size()\nr = f()\n", "function"),
+    "selection_arm_into_a_namespace_call": (
+        "a = array.from(close, open)\nb = array.from(high)\n"
+        "r = array.sum(close > open ? a[1] : b)\n", "a[1]"),
+    "if_value_into_a_namespace_call": (
+        "a = array.from(close, open)\nb = array.from(high)\n"
+        "c = if close > open\n    a[1]\nelse\n    b\nr = array.sum(c)\n", "a[1]"),
+    "function_result_into_a_namespace_call": (
+        "a = array.from(close, open)\ng() => a[1]\nr = array.sum(g())\n", "function"),
+    "tuple_element_method": (
+        "a = array.from(close, open)\nf() => [a[1], 1]\n[x, y] = f()\nr = x.size()\n",
+        "function"),
+    "string_parameter_get": (
+        "f(array<string> x) => str.length(array.get(x[1], 0))\n"
+        "s = array.from(\"a\")\nr = f(s)\n", "parameter"),
     "bound_read_both_ways": (
         "a = array.from(close)\nfloat r = 0.0\n"
         "if bar_index > 0\n    pb = a[1]\n    r := pb.size() + (na(pb) ? 1 : 0)\n",
@@ -529,6 +555,22 @@ EARLIER_LOWERING = {
     "receiver_namespace_get": (
         "method prev(array<float> this) => array.get(this[1], 0)\n"
         "a = array.from(close)\nr = a.prev()\n", CURRENT_PARAMETER),
+    # array.copy of an element built a vector of the element's size: a
+    # namespace call taking it compiled (fixtures/array_history_tv README).
+    "copy_into_a_namespace_call": (
+        "a = array.from(close, open)\nf() => array.size(array.copy(a[1]))\nr = f()\n",
+        CURRENT_ELEMENT),
+    "copy_in_a_request": (
+        "a = array.from(close, open)\n"
+        'r = request.security(syminfo.tickerid, "60", array.sum(array.copy(a[1])))\n',
+        CURRENT_ELEMENT),
+    "copy_of_a_block_var": (
+        "float r = 0.0\nif close > open\n    var bv = array.from(close)\n"
+        "    r := array.size(array.copy(bv[1]))\n", CURRENT_ELEMENT),
+    # A string element has std::string's members.
+    "string_clear_in_a_function": (
+        "s = array.from(\"a\")\nf() =>\n    array.clear(s[1])\n    1\nr = f()\n",
+        CURRENT_ELEMENT),
 }
 
 
@@ -599,13 +641,27 @@ def test_sibling_blocks_keep_a_history_each():
         "if bar_index % 3 == 0\n    x = array.from(1.0, 2.0, 3.0)\n"
         "    r += na(x[1]) ? -1 : (x[1]).size()\n"))
     assert "_pf_collection_hist_x{2};" in cpp
-    assert "_pf_collection_hist_x_1{2};" in cpp
+    assert "_pf_collection_hist_1_x{2};" in cpp
     first = cpp.index("_pf_collection_hist_x.open(x,")
-    second = cpp.index("_pf_collection_hist_x_1.open(x,")
+    second = cpp.index("_pf_collection_hist_1_x.open(x,")
     # Each declaration first closes the other's history.
-    assert cpp.rindex("_pf_collection_hist_x_1.close(x);", 0, first) >= 0
+    assert cpp.rindex("_pf_collection_hist_1_x.close(x);", 0, first) >= 0
     assert cpp.rindex("_pf_collection_hist_x.close(x);", 0, second) > first
     compile_cpp(cpp, label="sibling blocks")
+
+
+def test_a_later_declaration_s_history_is_named_apart_from_every_variable():
+    # The second declaration of x and a variable x_1 each keep a history; the
+    # members were both _pf_collection_hist_x_1, a duplicate member.
+    cpp = transpile(_script(
+        "float r = 0.0\n"
+        "if bar_index % 2 == 0\n    x = array.from(1.0)\n    r := na(x[1]) ? -1 : 1\n"
+        "if bar_index % 3 == 0\n    x = array.from(1.0, 2.0)\n    r += na(x[1]) ? -1 : 1\n"
+        "x_1 = array.from(3.0, 4.0, 5.0)\nr += na(x_1[1]) ? -1 : 1\n"))
+    for member in ("_pf_collection_hist_x{", "_pf_collection_hist_1_x{",
+                   "_pf_collection_hist_x_1{"):
+        assert cpp.count(member) == 1, member
+    compile_cpp(cpp, label="history member names")
 
 
 def test_a_diamond_of_helpers_is_walked_once_per_helper():
