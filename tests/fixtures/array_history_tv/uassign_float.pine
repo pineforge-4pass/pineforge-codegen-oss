@@ -1,0 +1,21 @@
+//@version=6
+// CG-ARRAY-HIST: an int assigned to a float field of a user-defined object
+// is that number, and an int na is na. Each close's comment spells the
+// field read back on that bar.
+strategy("UASSIGN float", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+type Cell
+    float v = 0.0
+    float w = 0.0
+c = Cell.new()
+int iv = bar_index * 2
+if bar_index % 3 == 0
+    iv := na
+c.v := iv
+c.w := bar_index
+n1 = na(c.v) ? "na" : str.tostring(c.v - bar_index * 2)
+w1 = str.tostring(c.w - bar_index)
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = n1 + "|" + w1)

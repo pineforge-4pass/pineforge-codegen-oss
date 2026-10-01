@@ -345,7 +345,10 @@ CPP_RESERVED = set(
 # ``_nz_v``) or initialized itself from itself (``_pna_l > close`` did not
 # compile). ``_safe_name`` escapes an authored spelling of any of them. A
 # temporary whose name the emitter allocates against the authored spellings
-# itself (``__pf_map_iter_N``, ``_pf_udt_Item__pf2``) is not listed.
+# itself (``__pf_map_iter_N``, ``_pf_udt_Item__pf2``) is not listed. An
+# array's or a matrix's history member (``_pf_collection_hist_<name>``,
+# ``_pf_collection_hist_<n>_<name>``) is reserved the same way: a script
+# variable of that spelling was a second member of one name.
 CPP_TEMPORARY_NAMES = frozenset("""
     _nz_v _nz_y _fixnan_v _pna_l _pna_r _pfc_l _pfc_r _pfc_eq _hv _hidx _sv
     _out _func_ret _pf_v _pf_idx_v _pf_idx_t _pf_bool_v _pf_bool_t
@@ -364,6 +367,7 @@ _CPP_TEMPORARY_PATTERN = re.compile(
     r"_v\d+|_secval_\d+(?:_v\d+)?|_tuple_result_\d+|_tuple_unused_\d+|__switch_val_\d+"
     r"|_for_(?:start|end|end_eval)_\d+|_pf_(?:str|array|round)_a\d+"
     r"|_pf_every_bar_ta_\d+|_pf_shared_\d+_\d+|__pf_array\w*|__pf_raw_\w+"
+    r"|_pf_collection_hist_\w+"
 )
 
 

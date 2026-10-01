@@ -42,6 +42,7 @@ from ..ast_nodes import (
     MemberAccess, MethodDef, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
     Subscript, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
+from ..collection_history import history_annotation
 from ..errors import Phase
 from ..external_requests import UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
@@ -1556,6 +1557,15 @@ class TypeInferer:
                     and (receiver_spec.name in DRAWING_TYPE_TO_CPP
                          or receiver_spec.name in self._udt_defs)):
                 return receiver_spec
+            annotation = history_annotation(node)
+            if annotation is not None:
+                # An array's or a matrix's history is a collection of its
+                # type (pineforge_codegen/collection_history.py), the
+                # analyzer's when no declaration registered one yet.
+                if (receiver_spec is not None
+                        and receiver_spec.kind in ("array", "matrix")):
+                    return receiver_spec
+                return annotation["spec"]
             return None
         if isinstance(node, Ternary):
             true_spec = self._type_spec_from_expr(node.true_val)
@@ -1854,13 +1864,18 @@ class TypeInferer:
                     if return_spec is not None:
                         return return_spec
                 if recv_spec is not None and recv_spec.kind == "matrix":
-                    if func_name in MATRIX_RETURNING_METHODS:
+                    # A method on a matrix's history names its method only
+                    # in the member (``_resolve_callee`` reports none).
+                    method = (member_name
+                              if history_annotation(node.callee.object) is not None
+                              else func_name)
+                    if method in MATRIX_RETURNING_METHODS:
                         return recv_spec
-                    if func_name in ("row", "col"):
+                    if method in ("row", "col"):
                         return TypeSpec.array(recv_spec.element)
-                    if func_name == "get":
+                    if method == "get":
                         return recv_spec.element
-                    if func_name == "eigenvalues":
+                    if method == "eigenvalues":
                         return TypeSpec.array(TypeSpec.primitive("float"))
                 # Drawing method-form: ``a.copy()`` -> same handle type;
                 # ``lf.get_line1()`` -> line. (L-N6 alias-vs-copy typing.)
@@ -3365,6 +3380,19 @@ class TypeInferer:
             cpp_type = "int64_t"
         return cpp_type if cpp_type in (*NA_PRESERVING_INT_TYPES, "bool") else None
 
+    def _udt_field_is_double(self, target_node) -> bool:
+        """Whether a UDT field write target is a ``float`` field (a C++
+        ``double``)."""
+        if not isinstance(target_node, MemberAccess):
+            return False
+        owner = self._type_spec_from_expr(target_node.object)
+        if owner is None or owner.kind != "udt" or not owner.name:
+            return False
+        spec = (self._udt_field_type_specs.get(owner.name) or {}).get(
+            target_node.member
+        )
+        return spec is not None and self._type_spec_to_cpp(spec) == "double"
+
     def _coerce_int_slot(self, cpp_val: str, node, target_cpp_type: str | None,
                          *, value_is_double: bool | None = None) -> str:
         """Route a value into an ``int``/``int64_t`` slot without losing ``na``.
@@ -3405,6 +3433,30 @@ class TypeInferer:
                 and source_cpp_type != target_cpp_type):
             return na_preserving_int_cast(cpp_val, target_cpp_type)
         return cpp_val
+
+    def _coerce_double_slot(self, cpp_val: str, node) -> str:
+        """Route a value into a ``double`` that a designated initializer
+        fills (a user-defined record's ``float`` field: ``Cell.new(v =
+        bar_index)``). C++ refuses to narrow a non-constant ``int`` or
+        ``int64_t`` there, which did not compile; TradingView holds the
+        number, an integer na as na (fixtures/array_history_tv uctor_float).
+        A double, an integer literal or an expression of literals (a constant
+        a double holds exactly narrows) and a bare na keep their spelling."""
+        constant = self._pure_int_literal_value(node)
+        if (cpp_val == "na<double>()"
+                or self._INTEGRAL_CPP_TEXT.match(cpp_val)
+                or (constant is not None and abs(constant) <= 2 ** 53)
+                or self._emitted_value_is_double(node)):
+            return cpp_val
+        if cpp_val in {"na<int>()", "na<int64_t>()"}:
+            return "na<double>()"
+        # A bool (TradingView refuses one here: CE10123, CE10173) is 1 or 0,
+        # never na, whatever is_na() of a bool resolves to.
+        return (f"[&](){{ auto _pf_w = ({cpp_val}); "
+                f"if constexpr (std::is_floating_point_v<decltype(_pf_w)> "
+                f"|| std::is_same_v<decltype(_pf_w), bool>) "
+                f"return (double)_pf_w; "
+                f"else return is_na(_pf_w) ? na<double>() : (double)_pf_w; }}()")
 
     def _coerce_int_slot_with_cast(
         self, cpp_val: str, node, target_cpp_type: str
@@ -3668,6 +3720,12 @@ class TypeInferer:
         and ternaries / if / switch expressions. Returns the string
         ``"double"`` as the safe fallback when no narrower type can be
         determined."""
+        if isinstance(node, Subscript) and history_annotation(node) is not None:
+            # An array's or a matrix's history is a collection of its type
+            # (collection_history.py): a loop's local bound to it is one.
+            spec = self._type_spec_from_expr(node)
+            if spec is not None:
+                return self._type_spec_to_cpp(spec)
         if isinstance(node, Subscript) and isinstance(node.object, Identifier):
             name = node.object.name
             if name in self.ctx.series_vars:

@@ -1,0 +1,28 @@
+//@version=6
+// CG-ARRAY-HIST: int values given to float fields of a user-defined object:
+// the bar index by keyword, an int variable that is na on every third bar and
+// int arithmetic by position, an epoch, and a function's int parameter. Each
+// close's comment spells the values the script reads on that bar.
+strategy("UCTOR float", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+type Cell
+    float v
+    float w = 0.0
+mk(int k) =>
+    Cell.new(v = k)
+int iv = bar_index * 2
+if bar_index % 3 == 0
+    iv := na
+c1 = Cell.new(v = bar_index)
+c2 = Cell.new(iv, bar_index + 1)
+c3 = Cell.new(v = time)
+c4 = mk(bar_index * 5)
+d1 = c1.v - bar_index
+n2 = na(c2.v) ? "na" : str.tostring(c2.v - bar_index * 2)
+w2 = c2.w - bar_index
+d3 = c3.v - time
+d4 = c4.v - bar_index * 5
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(d1) + "|" + n2 + "|" + str.tostring(w2) + "|" + str.tostring(d3) + "|" + str.tostring(d4))

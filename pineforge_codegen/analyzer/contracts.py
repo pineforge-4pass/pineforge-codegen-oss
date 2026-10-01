@@ -337,6 +337,9 @@ class AnalyzerContext:
     # per read. TradingView keeps that history per call site, so codegen gives
     # each emitted body its own chart-clocked buffer of the variable.
     func_global_history_reads: dict = field(default_factory=dict)
+    # Array and matrix variables whose history the script reads, by name
+    # (pineforge_codegen/collection_history.py HistoryVariable).
+    collection_history: dict = field(default_factory=dict)
     func_global_history_nodes: dict = field(default_factory=dict)
     # FuncDef owner -> declaration-bound non-persistent history-local names.
     # Parameters are deliberately excluded so a same-named qualified

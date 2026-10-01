@@ -1,0 +1,9 @@
+//@version=6
+// CG-ARRAY-HIST: a method straight after a matrix's history reference.
+strategy("AHIST m noparen", overlay = true)
+m = matrix.new<float>(2, 2, close)
+float r = 0.0
+if bar_index > 0
+    r := m[1].get(0, 0)
+if r > 0
+    strategy.entry("L", strategy.long)

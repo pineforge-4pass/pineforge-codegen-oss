@@ -1,0 +1,31 @@
+//@version=6
+// CG-ARRAY-HIST: an array or a matrix held by a user-defined object, read
+// through the object's history: a fresh object per bar, and a var object
+// whose array grows every bar. Each close's comment spells the values the
+// script reads on that bar.
+strategy("AHIST field", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+type H
+    array<int> xs
+    matrix<int> m
+h = H.new(array.from(bar_index), matrix.new<int>(1, 1, bar_index * 10))
+var hv = H.new(array.new<int>(), matrix.new<int>(1, 1, 0))
+hv.xs.push(bar_index)
+hv.m.set(0, 0, bar_index)
+int f1 = -1
+int f2 = -1
+int f3 = -1
+int f4 = -1
+int v1 = -1
+int v2 = -1
+if bar_index >= 1
+    f1 := bar_index - (h[1]).xs.get(0)
+    f2 := array.size((h[1]).xs)
+    f3 := (h[1]).m.get(0, 0) - (bar_index - 1) * 10
+    f4 := matrix.get((h[1]).m, 0, 0) - (bar_index - 1) * 10
+    v1 := (hv[1]).xs.size() - hv.xs.size()
+    v2 := (hv[1]).m.get(0, 0) - bar_index
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(f1) + "|" + str.tostring(f2) + "|" + str.tostring(f3) + "|" + str.tostring(f4) + "|" + str.tostring(v1) + "|" + str.tostring(v2))

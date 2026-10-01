@@ -1,0 +1,9 @@
+//@version=6
+// CG-ARRAY-HIST: an array compared with its history.
+strategy("AHIST eq", overlay = true)
+a = array.from(close)
+float r = 0.0
+if bar_index > 0
+    r := a == a[1] ? 1 : 0
+if r > 0
+    strategy.entry("L", strategy.long)

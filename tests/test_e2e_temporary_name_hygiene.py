@@ -65,7 +65,8 @@ HEAD = '//@version=6\nstrategy("temporary names", overlay = true)\n'
 
 @pytest.mark.parametrize("name", sorted(CPP_TEMPORARY_NAMES) + [
     "_v0", "_v12", "__switch_val_0", "_tuple_result_1", "_for_end_2", "_pf_str_a0",
-    "_pf_every_bar_ta_1", "__pf_array_arg_0", "__pf_raw_index_value"])
+    "_pf_every_bar_ta_1", "__pf_array_arg_0", "__pf_raw_index_value",
+    "_pf_collection_hist_x", "_pf_collection_hist_1_x"])
 def test_an_authored_temporary_spelling_is_escaped(name):
     cpp = transpile(HEAD + f"{name} = close * 2\nif {name} > close\n"
                            "    strategy.entry(\"L\", strategy.long)\n")
@@ -73,6 +74,20 @@ def test_an_authored_temporary_spelling_is_escaped(name):
     # The script's own assignment is escaped; the emitter's temporaries are
     # declared inside the lambdas it generates, never at a statement's start.
     assert not re.search(rf"^\s+{re.escape(name)} = ", cpp, re.M)
+
+
+def test_a_name_spelled_like_an_array_history_member_is_escaped():
+    # An array's history member, _pf_collection_hist_<name> (a later
+    # declaration's _pf_collection_hist_<n>_<name>), beside a script
+    # variable of that spelling: both became members of one name, an
+    # internal error (pineforge_codegen/collection_history.py).
+    from tests._compile import compile_cpp
+    cpp = transpile(HEAD + "x = array.from(close)\n_pf_collection_hist_x = close\n"
+                           "r = na(x[1]) ? 0.0 : _pf_collection_hist_x\n"
+                           "if r > 0\n    strategy.entry(\"L\", strategy.long)\n")
+    assert "_PFCollectionHistory<decltype(x)> _pf_collection_hist_x{2};" in cpp
+    assert re.search(r"\bpf_safe__pf_collection_hist_x\b", cpp)
+    compile_cpp(cpp, label="history member spelling")
 
 
 def test_names_outside_the_temporaries_keep_their_spelling():

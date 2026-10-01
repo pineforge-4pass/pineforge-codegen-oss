@@ -1,0 +1,10 @@
+//@version=6
+// CG-ARRAY-HIST: a method straight after an array's history reference.
+strategy("AHIST noparen", overlay = true)
+a = array.new<float>()
+a.push(close)
+float r = 0.0
+if bar_index > 0
+    r := a[1].size()
+if r > 0
+    strategy.entry("L", strategy.long)

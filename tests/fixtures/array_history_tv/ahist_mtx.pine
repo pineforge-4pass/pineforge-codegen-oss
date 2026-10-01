@@ -1,0 +1,26 @@
+//@version=6
+// CG-ARRAY-HIST: what the history of a matrix reads. A var matrix set every
+// bar, a fresh matrix per bar, a matrix of strings, and na before the first
+// bar. Each close's comment spells the values the script reads on that bar.
+strategy("AHIST mtx", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+var vm = matrix.new<float>(1, 1, 0)
+vm.set(0, 0, bar_index)
+mm = matrix.new<int>(2, 1, bar_index)
+ms = matrix.new<string>(1, 1, str.tostring(bar_index))
+var bool firstNa = na(mm[1])
+float vd = -1
+int g1 = -1
+int g2 = -1
+int r1 = -1
+string s1 = "x"
+if bar_index >= 2
+    vd := (vm[1]).get(0, 0) - vm.get(0, 0)
+    g2 := bar_index - matrix.get(mm[2], 1, 0)
+    g1 := bar_index - (mm[1]).get(0, 0)
+    r1 := (mm[1]).rows() * 10 + matrix.columns(mm[1])
+    s1 := (ms[1]).get(0, 0)
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(vd) + "|" + str.tostring(g1) + "|" + str.tostring(g2) + "|" + str.tostring(r1) + "|" + s1 + "|" + str.tostring(firstNa))

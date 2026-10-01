@@ -469,6 +469,11 @@ class StmtVisitor:
         return self._type_spec_to_cpp(spec)
 
     def _visit_var_decl(self, node: VarDecl, lines: list[str], pad: str) -> None:
+        # An array or a matrix whose history the script reads: this execution
+        # of its declaration opens a slot, after closing a sibling
+        # declaration's (codegen/collection_history.py).
+        for statement in self._collection_history_decl_statements(node):
+            lines.append(f"{pad}{statement}")
         member_meta = getattr(
             self.ctx, "var_member_metadata_by_node", {}
         ).get(id(node))
@@ -1122,6 +1127,11 @@ class StmtVisitor:
                     f"{self._udt_array_field_value(array_field, node.value, val_cpp)};")
             elif node.op == ":=":
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, field_int)
+                if self._udt_field_is_double(node.target):
+                    # An int reaching a float field keeps its na (the
+                    # constructor's conversion: fixtures/array_history_tv
+                    # uctor_float).
+                    val_cpp = self._coerce_double_slot(val_cpp, node.value)
                 lines.append(f"{pad}{target_cpp} = {val_cpp};")
             else:
                 rhs = self._compound_assign_rhs(target_cpp, node.op, val_cpp)
@@ -1241,6 +1251,11 @@ class StmtVisitor:
                         lines.append(f"{pad}{safe} {node.op} {val_cpp};")
 
     def _visit_tuple_assign(self, node: TupleAssign, lines: list[str], pad: str) -> None:
+        # A tuple declaration writing a member whose history a sibling
+        # block's declaration keeps closes that history first
+        # (codegen/collection_history.py).
+        for statement in self._collection_history_decl_statements(node):
+            lines.append(f"{pad}{statement}")
         is_top_level = any(id(node) == id(stmt) for stmt in self.ctx.ast.body)
         global_targets = (
             set(getattr(self.ctx, "ordinary_global_binding_names", set()))

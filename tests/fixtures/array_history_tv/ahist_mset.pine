@@ -1,0 +1,10 @@
+//@version=6
+// CG-ARRAY-HIST: an element set in a matrix's history.
+strategy("AHIST stop", overlay = true)
+float x = 0.0
+m = matrix.new<float>(1, 1, close)
+if bar_index > 0
+    (m[1]).set(0, 0, 1.0)
+    x := (m[1]).get(0, 0)
+if bar_index == 5
+    strategy.entry("L", strategy.long, comment = str.tostring(x))

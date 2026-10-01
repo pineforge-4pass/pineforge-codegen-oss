@@ -1,0 +1,39 @@
+//@version=6
+// CG-ARRAY-HIST: what the history of an array reads. A var array grown twice
+// every bar (before and after the reads), a fresh array per bar, a variable
+// reassigned on its bar, a loop over the history and a variable bound to its
+// own history on every other bar. Each close's comment spells the values the
+// script reads on that bar.
+strategy("AHIST ref", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+var va = array.new<int>()
+va.push(bar_index)
+b = array.from(bar_index)
+c2 = array.from(1)
+c2 := array.from(2)
+ca = array.from(bar_index)
+if bar_index % 2 == 1
+    ca := ca[1]
+var bool firstNa = na(b[1])
+int d1 = -1
+int n2 = -1
+int g1 = -1
+int s1 = -1
+int w1 = -1
+int lp = -1
+int cy = -1
+if bar_index >= 2
+    d1 := va.size() - (va[1]).size()
+    n2 := (va[1]).last()
+    g1 := bar_index - (b[1]).get(0)
+    s1 := (b[1]).size()
+    w1 := array.get(c2[1], 0)
+    lp := 0
+    for v in b[1]
+        lp += v
+    cy := bar_index - ca.get(0)
+va.push(-1)
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(d1) + "|" + str.tostring(n2) + "|" + str.tostring(g1) + "|" + str.tostring(s1) + "|" + str.tostring(w1) + "|" + str.tostring(lp) + "|" + str.tostring(cy) + "|" + str.tostring(firstNa))

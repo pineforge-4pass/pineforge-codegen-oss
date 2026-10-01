@@ -800,19 +800,30 @@ strategy("scope outer alias collision")
 var slot = array.from(4.0)
 outer_subscript() =>
     _pf_outer_slot_0 = 99
-    slot = array.from(slot[0])
+    slot = array.from(slot.get(0))
     slot.size()
 result = outer_subscript()
 '''
 
 
-def test_temporal_outer_alias_avoids_user_name_and_routes_subscript() -> None:
+def test_temporal_outer_alias_avoids_user_name_and_routes_the_read() -> None:
     cpp = transpile(_OUTER_ALIAS_COLLISION_SOURCE)
     body = _body(cpp, "double outer_subscript(")
     assert "int _pf_outer_slot_0 = 99" in body
     assert "auto& _pf_outer_slot_1 = this->slot" in body
-    assert "std::vector<double>{_pf_outer_slot_1[0]}" in body
+    assert "((_pf_outer_slot_1))};" in body
     compile_cpp(cpp, label="collection_scope_outer_alias_collision")
+
+
+def test_an_array_history_as_an_element_of_array_from_is_refused() -> None:
+    # ``slot[0]`` is the array itself, which TradingView refuses as an
+    # element of array.from (CE10122, pine-facade 2026-10-01); this test's
+    # outer alias used to read it as the array's element 0.
+    from pineforge_codegen.errors import CompileError
+
+    with pytest.raises(CompileError) as exc:
+        transpile(_OUTER_ALIAS_COLLISION_SOURCE.replace("slot.get(0)", "slot[0]"))
+    assert any("CE10122" in d.message for d in exc.value.diagnostics)
 
 
 _IDENTITY_SOURCE = '''//@version=6

@@ -1503,7 +1503,7 @@ class SupportChecker:
                 node,
                 f"{receiver}.{node.member}(): TradingView refuses a method "
                 "call straight after the history-referencing operator "
-                "(CE10010).",
+                "(CE10010; CE10011 after an array's or a matrix's history).",
                 hint=f"Call the method on the history reference in "
                      f"parentheses: ({receiver}).{node.member}().",
             )

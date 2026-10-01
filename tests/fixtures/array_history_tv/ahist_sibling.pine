@@ -1,0 +1,21 @@
+//@version=6
+// CG-ARRAY-HIST: two sibling if blocks each declare an array x. Each block's
+// x is a variable of its own: its history is the array its block's previous
+// run left, whatever the other block's x holds. The first block runs on even
+// bars, the second on every third bar and grows its x after the read; each
+// keeps the value it read last. Each close's comment spells them.
+strategy("AHIST sibling", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+var int one = -2
+var int two = -2
+if bar_index % 2 == 0
+    x = array.from(bar_index)
+    one := na(x[1]) ? -1 : (x[1]).size() * 1000 + bar_index - (x[1]).get(0)
+if bar_index % 3 == 0
+    x = array.from(bar_index, 1, 2)
+    two := na(x[1]) ? -1 : (x[1]).size() * 1000 + bar_index - (x[1]).get(0)
+    x.push(3)
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(one) + "|" + str.tostring(two))

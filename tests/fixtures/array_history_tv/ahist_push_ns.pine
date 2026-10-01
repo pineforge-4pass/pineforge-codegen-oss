@@ -1,0 +1,10 @@
+//@version=6
+// CG-ARRAY-HIST: an element pushed into an array's history by the namespace function.
+strategy("AHIST stop", overlay = true)
+float x = 0.0
+a = array.from(close)
+if bar_index > 0
+    array.push(a[1], 2.0)
+    x := array.size(a[1])
+if bar_index == 5
+    strategy.entry("L", strategy.long, comment = str.tostring(x))
