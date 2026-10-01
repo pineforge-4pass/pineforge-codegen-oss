@@ -486,6 +486,12 @@ NOT_SUPPORTED = {
     "bound_then_changed": (
         "a = array.from(close)\nfloat r = 0.0\n"
         "if bar_index > 0\n    b = a[1]\n    b.push(1.0)\n    r := b.size()\n", "RE10051"),
+    # A function that declares the name in a later block still reads the
+    # script variable before it.
+    "bound_then_changed_in_a_function_declaring_the_name_later": (
+        "a = array.from(close)\npb = a[1]\n"
+        "f() =>\n    pb.push(1.0)\n    if close > open\n        pb = 3\n    1\n"
+        "r = f()\n", "RE10051"),
     "argument_changed": (
         "f(array<float> y) =>\n    y.push(1.0)\n    y.size()\n"
         "a = array.from(close)\nfloat r = 0.0\nif bar_index > 0\n    r := f(a[1])\n",

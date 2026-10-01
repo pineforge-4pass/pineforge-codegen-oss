@@ -576,7 +576,6 @@ class CollectionHistoryChecker:
         self._declaring: dict[tuple[int, str], list[int]] = {}
         self._reads_by_name: dict[str, list[Identifier]] = {}
         self._calls_by_name: dict[tuple[bool, str], list[FuncCall]] = {}
-        self._callable_names: dict[int, set[str]] = {}
         for node in self._nodes_by_id.values():
             for body in _body_lists(node):
                 for index, stmt in enumerate(body):
@@ -604,15 +603,6 @@ class CollectionHistoryChecker:
                     if position is not None:
                         self._reads_under.setdefault((id(position[1]), name), []).append(read)
                     current = self._parent.get(id(current))
-        for stmt in program.body:
-            if isinstance(stmt, (FuncDef, MethodDef)):
-                bound = set(stmt.params)
-                for node, _depth in iter_ast_nodes(stmt):
-                    if isinstance(node, VarDecl):
-                        bound.add(node.name)
-                    elif isinstance(node, TupleAssign):
-                        bound.update(node.names)
-                self._callable_names[id(stmt)] = bound
         self._emitted = self._emitted_callables()
         self._decisions: dict[int, Decision] = {}
         self._uses: dict[tuple, Use] = {}
@@ -693,7 +683,9 @@ class CollectionHistoryChecker:
         ``region[start:]`` before a later declaration of the name there, and
         no nested statement list or loop between them declares the name
         first. A declaration of the script's top level (``top``) also
-        reaches the functions and methods that do not bind the name."""
+        reaches a function's or a method's reads that no parameter, and no
+        declaration before them in their own or an enclosing list of that
+        body, binds (one in a later or a sibling block does not)."""
         current = read
         while True:
             position = self._position.get(id(current))
@@ -704,7 +696,11 @@ class CollectionHistoryChecker:
                     later = next((i for i in declared if i >= start), None)
                     return index >= start and (later is None or index <= later)
                 if isinstance(holder, (FuncDef, MethodDef)):
-                    return top and name not in self._callable_names.get(id(holder), ())
+                    # The script variable, unless a parameter or a
+                    # declaration before the read in the body binds the name
+                    # (one in a later or nested block does not).
+                    return (top and name not in holder.params
+                            and not (declared and declared[0] < index))
                 if declared and declared[0] < index:
                     return False
                 if body is getattr(holder, "body", None) and (
