@@ -630,6 +630,33 @@ def test_a_function_nothing_calls_keeps_any_history_read():
     compile_cpp(cpp, label="dead function")
 
 
+# The codegen does emit every method, called or not, and every function a
+# call names, the call sitting in a function nothing calls included: a read
+# there is decided as in any emitted body (the reads below never compiled).
+EMITTED_UNCALLED = {
+    "uncalled_method": (
+        "type T\n    float f\n"
+        "method m(T this) => (a[1]).size() + this.f\n"),
+    "called_only_from_an_uncalled_function": (
+        "g() => (a[1]).size()\nf() => g()\n"),
+    # The read sits in the uncalled f, but its call types the emitted
+    # helper's untyped parameter with the element: v.size() on a number.
+    "an_uncalled_function_s_argument_to_a_called_helper": (
+        "sizeOf(v) => v.size()\nf() => sizeOf(a[1])\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(EMITTED_UNCALLED))
+def test_a_read_in_an_emitted_uncalled_body_is_decided_as_emitted(name):
+    error = _refusal(_script(
+        "a = array.from(close)\n" + EMITTED_UNCALLED[name] + "r = a.size()\n"))
+    diag = _diag(error, "not supported in PineForge")
+    assert diag.location is not None
+    assert diag.location.line == {"uncalled_method": 6,
+                                  "called_only_from_an_uncalled_function": 4,
+                                  "an_uncalled_function_s_argument_to_a_called_helper": 5}[name]
+
+
 # Uses TradingView refuses (pine-facade, 2026-10-01), each with its code: an
 # array where an element, a number or a string is expected.
 TRADINGVIEW_REFUSED_USES = {

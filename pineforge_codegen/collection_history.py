@@ -613,7 +613,7 @@ class CollectionHistoryChecker:
                     elif isinstance(node, TupleAssign):
                         bound.update(node.names)
                 self._callable_names[id(stmt)] = bound
-        self._reachable = self._reachable_callables()
+        self._emitted = self._emitted_callables()
         self._decisions: dict[int, Decision] = {}
         self._uses: dict[tuple, Use] = {}
         self._name_uses: dict[tuple, NameUses] = {}
@@ -636,53 +636,23 @@ class CollectionHistoryChecker:
         return next((a for a in self._ancestors(node)
                      if isinstance(a, (FuncDef, MethodDef))), None)
 
-    def _calls_in(self, root) -> tuple[set[str], set[str]]:
-        functions: set[str] = set()
-        methods: set[str] = set()
-        for node, _depth in iter_ast_nodes(root):
-            if not isinstance(node, FuncCall):
-                continue
-            callee = node.callee
-            if isinstance(callee, Identifier):
-                functions.add(callee.name)
-            elif isinstance(callee, MemberAccess):
-                methods.add(callee.member)
-        return functions, methods
-
-    def _reachable_callables(self) -> set[int]:
-        """The functions and methods a call from the script's top level
-        reaches (methods by name: a receiver's type is not known here). The
-        codegen emits no other: anything in their bodies compiled."""
-        functions: set[str] = set()
-        methods: set[str] = set()
-        for stmt in self._program.body:
-            if isinstance(stmt, (FuncDef, MethodDef)):
-                continue
-            f, m = self._calls_in(stmt)
-            functions |= f
-            methods |= m
-        reached: set[int] = set()
-        pending = True
-        while pending:
-            pending = False
-            for name, defs in list(self._functions.items()) + list(self._methods.items()):
-                called = name in (functions if defs and isinstance(defs[0], FuncDef) else methods)
-                if not called:
-                    continue
-                for definition in defs:
-                    if id(definition) in reached:
-                        continue
-                    reached.add(id(definition))
-                    f, m = self._calls_in(definition)
-                    functions |= f
-                    methods |= m
-                    pending = True
-        return reached
+    def _emitted_callables(self) -> set[int]:
+        """The functions and methods the codegen emits: every method, called
+        or not, and every function a call names anywhere -- a call in a
+        function nothing calls included, since the analyzer visits every
+        body and registers each function it sees called. A function no call
+        names is never emitted, so anything in its body compiled."""
+        emitted = {id(definition) for defs in self._methods.values()
+                   for definition in defs}
+        for name, defs in self._functions.items():
+            if self._calls_by_name.get((False, name)):
+                emitted.update(id(definition) for definition in defs)
+        return emitted
 
     def is_dead(self, node) -> bool:
-        """Whether ``node`` sits in a function or method nothing calls."""
+        """Whether ``node`` sits in a function the codegen does not emit."""
         owner = self._callable_of(node)
-        return owner is not None and id(owner) not in self._reachable
+        return owner is not None and id(owner) not in self._emitted
 
     def _in_request(self, node) -> bool:
         return any(isinstance(a, FuncCall) and isinstance(a.callee, MemberAccess)
@@ -919,7 +889,8 @@ class CollectionHistoryChecker:
                 return Use("copy", node,
                            names=self._parameter_uses(definitions, positional, keyword, kind),
                            needs_collection=self._parameter_is_collection(
-                               definitions, positional, keyword))
+                               definitions, positional, keyword),
+                           form="parameter")
             if name in _SCALAR_FUNCTIONS:
                 return self._reject(
                     node, f"{label} is {_a(kind)}, which TradingView refuses as an "
@@ -1376,8 +1347,21 @@ class CollectionHistoryChecker:
         uses = NameUses()
         uses.add(use)
         if self.is_dead(read.node):
-            # The codegen emits no function nothing calls; a matrix's read
-            # registers nothing (its Series made the variable a number).
+            # The codegen emits no function no call names; a matrix's read
+            # registers nothing (its Series made the variable a number). A
+            # call there still types an emitted function's untyped parameter
+            # with the earlier lowering's element, whose uses in that body
+            # compile as they did.
+            if (use.how == "copy" and use.form == "parameter"
+                    and not use.needs_collection and use.names is not None):
+                # A string parameter takes na() and str.tostring(), which the
+                # element itself did not.
+                table = (_STRING_ELEMENT_LOWERING_FAILS - {"na", "render:tostring"}
+                         if self._element == "string" else _ELEMENT_LOWERING_FAILS)
+                failing = _failing_tag(use.names.tags, table)
+                if failing is not None:
+                    return Decision(REFUSED, node=read.node, message=(
+                        self._scope_refusal(read) or use.names.tags[failing].message))
             return Decision(LEGACY)
         if uses.reject is not None:
             return Decision(REFUSED, node=uses.reject.node or read.node,
