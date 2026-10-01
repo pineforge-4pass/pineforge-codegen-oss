@@ -42,6 +42,7 @@ from ..ast_nodes import (
     MemberAccess, MethodDef, NaLiteral, NumberLiteral, StringLiteral, SwitchStmt,
     Subscript, Ternary, TupleAssign, TupleLiteral, UnaryOp, VarDecl,
 )
+from ..collection_history import history_annotation
 from ..errors import Phase
 from ..external_requests import UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
@@ -1556,6 +1557,15 @@ class TypeInferer:
                     and (receiver_spec.name in DRAWING_TYPE_TO_CPP
                          or receiver_spec.name in self._udt_defs)):
                 return receiver_spec
+            annotation = history_annotation(node)
+            if annotation is not None:
+                # An array's or a matrix's history is a collection of its
+                # type (pineforge_codegen/collection_history.py), the
+                # analyzer's when no declaration registered one yet.
+                if (receiver_spec is not None
+                        and receiver_spec.kind in ("array", "matrix")):
+                    return receiver_spec
+                return annotation["spec"]
             return None
         if isinstance(node, Ternary):
             true_spec = self._type_spec_from_expr(node.true_val)
@@ -1854,13 +1864,18 @@ class TypeInferer:
                     if return_spec is not None:
                         return return_spec
                 if recv_spec is not None and recv_spec.kind == "matrix":
-                    if func_name in MATRIX_RETURNING_METHODS:
+                    # A method on a matrix's history names its method only
+                    # in the member (``_resolve_callee`` reports none).
+                    method = (member_name
+                              if history_annotation(node.callee.object) is not None
+                              else func_name)
+                    if method in MATRIX_RETURNING_METHODS:
                         return recv_spec
-                    if func_name in ("row", "col"):
+                    if method in ("row", "col"):
                         return TypeSpec.array(recv_spec.element)
-                    if func_name == "get":
+                    if method == "get":
                         return recv_spec.element
-                    if func_name == "eigenvalues":
+                    if method == "eigenvalues":
                         return TypeSpec.array(TypeSpec.primitive("float"))
                 # Drawing method-form: ``a.copy()`` -> same handle type;
                 # ``lf.get_line1()`` -> line. (L-N6 alias-vs-copy typing.)

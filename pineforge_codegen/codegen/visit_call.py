@@ -149,6 +149,7 @@ from ..ast_nodes import (
     StringLiteral,
     VarDecl,
 )
+from ..collection_history import history_annotation, literal_offset
 from ..external_requests import RECORDED_KEY_ANNOTATION
 from ..limits import iter_ast_nodes
 from ..security_contexts import ticker_symbol_arg
@@ -1214,6 +1215,12 @@ class CallVisitor:
         returns its argument or a global) or a selection of a held and a
         fresh array, and ``"keep"`` for every other argument, which keeps the
         lowering it had: a variable, a field, ``na``, any other built-in."""
+        annotation = history_annotation(node)
+        if annotation is not None:
+            # A copy of an array's history for the callee (collection_history.py);
+            # at a zero offset, the variable itself.
+            return ("keep" if literal_offset(node) == 0 or annotation["use"] != "copy"
+                    else "fresh")
         if isinstance(node, Ternary):
             kinds = {self._array_arg_kind(node.true_val, depth),
                      self._array_arg_kind(node.false_val, depth)}
@@ -1644,6 +1651,17 @@ class CallVisitor:
                 args = self._array_method_args(callee.member, arg_nodes, recv_spec)
                 return self._array_method_expr(recv, callee.member, args, recv_spec, node)
 
+        # A matrix method on a matrix's history (``(m[1]).get(0, 0)``:
+        # collection_history.py), which no other receiver path reaches.
+        if (isinstance(callee, MemberAccess)
+                and isinstance(callee.object, Subscript)
+                and history_annotation(callee.object) is not None
+                and callee.member in MATRIX_METHODS):
+            recv_spec = self._type_spec_from_expr(callee.object)
+            if recv_spec is not None and recv_spec.kind == "matrix":
+                return self._matrix_history_method_expr(
+                    callee.object, callee.member, recv_spec, node)
+
         # chart.point.now/new/from_index/from_time/copy — REAL data (a ChartPoint
         # aggregate). Routed here BEFORE the obj.field.method receiver logic,
         # which would otherwise mis-treat ``chart.point`` as a receiver object
@@ -1883,6 +1901,9 @@ class CallVisitor:
                 drawing = self._drawing_na_expr(node.args[0])
                 if drawing is not None:
                     return drawing
+                history = self._collection_history_na(node.args[0])
+                if history is not None:
+                    return history
             args = ", ".join(self._visit_expr(a) for a in node.args)
             return f"is_na({args})"
 
@@ -2624,9 +2645,13 @@ class CallVisitor:
             if func_name in MATRIX_METHODS and node.args:
                 from ..ast_nodes import Identifier as _Ident
                 if func_name in MATRIX_NUMERIC_ONLY:
-                    if not isinstance(node.args[0], _Ident):
+                    recv_node = node.args[0]
+                    if history_annotation(recv_node) is not None:
+                        # A matrix's history is a matrix of its type.
+                        recv_node = recv_node.object
+                    if not isinstance(recv_node, _Ident):
                         self._codegen_error(node, f"matrix.{func_name} receiver must be a variable reference")
-                    recv_name = node.args[0].name
+                    recv_name = recv_node.name
                     recv_spec = self._collection_spec_for_name(recv_name)
                     if recv_spec is None or recv_spec.kind != "matrix":
                         self._codegen_error(node, f"matrix.{func_name}: receiver '{recv_name}' is not a known matrix variable")

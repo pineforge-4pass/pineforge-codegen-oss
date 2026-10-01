@@ -145,6 +145,7 @@ TA_TUPLE_RESULT_TYPES = {
 
 # CPP_RESERVED + the NamingHelper mixin are pulled in from helpers.py so the
 # small naming/walk utilities can be shared with future visitor mixins.
+from .collection_history import CollectionHistoryEmitter
 from .helpers import (
     CPP_RESERVED, INLINE_HISTORY_KINDS, SESSION_FLAG_MEMBERS, NamingHelper,
     cpp_code_only, na_preserving_int_cast, pine_truth_cast,
@@ -194,7 +195,7 @@ from .drawing import DrawingVisitor
 # CodeGen class
 # ---------------------------------------------------------------------------
 
-class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEmitter, TaSiteHelper, TypeInferer, InputHelper, DrawingVisitor, NamingHelper):
+class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEmitter, TaSiteHelper, TypeInferer, InputHelper, DrawingVisitor, CollectionHistoryEmitter, NamingHelper):
     """Generate C++ from an AnalyzerContext (visitor pattern).
 
     Mixin chain (Python MRO is left-to-right; method names are
@@ -2122,6 +2123,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 declared_spec = self._type_spec_from_hint_name(stmt.type_hint)
             elif isinstance(stmt.value, (Ternary, IfStmt, SwitchStmt)):
                 declared_spec = self._type_spec_from_expr(stmt.value)
+            elif self._roots_at_collection_history(stmt.value):
+                # A copy of an array's or a matrix's history, or a built-in's
+                # result on one (``pm = m[1]``, ``c = (m[1]).copy()``).
+                declared_spec = self._type_spec_from_expr(stmt.value)
+                if declared_spec is not None and declared_spec.kind == "array":
+                    self._array_vars.add(stmt.name)
+                    self._collection_types.setdefault(stmt.name, declared_spec)
+                    continue
             else:
                 continue
             if declared_spec is None or declared_spec.kind != "matrix":
@@ -4696,6 +4705,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # per-callsite instances are declared below inside GeneratedStrategy
         # and therefore join the automatic COOF checkpoint inventory.
         self._emit_lazy_source_clock_helper(lines)
+        # The history of an array or a matrix variable: its support types
+        # (pineforge_codegen/collection_history.py), emitted only for a script
+        # that reads one.
+        self._emit_collection_history_helper(lines)
         # The chart-bar session type, inserted here once the class is lowered
         # and known to call it (codegen/session_market.py).
         _session_market_at = len(lines)
@@ -5241,6 +5254,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.append("    DrawingArena<BoxRec> _pf_boxes_{_PF_DRAWING_UNBOUNDED};")
             lines.append("    DrawingArena<LabelRec> _pf_labels_{_PF_DRAWING_UNBOUNDED};")
             lines.append("    DrawingArena<LinefillRec> _pf_linefills_{_PF_DRAWING_UNBOUNDED};")
+
+        # 8e. The copies an array or a matrix variable's executions left
+        #     (pineforge_codegen/collection_history.py).
+        for variable in self._collection_history_variables():
+            lines.append(
+                f"    _PFCollectionHistory<{self._collection_history_cpp_type(variable)}> "
+                f"{self._collection_history_member(variable.name)}"
+                f"{self._collection_history_capacity(variable)};"
+            )
 
         # 9. _var_initialized flag
         if self.ctx.var_members:

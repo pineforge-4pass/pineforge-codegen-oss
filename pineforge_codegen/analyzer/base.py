@@ -32,6 +32,9 @@ from ..errors import SourceLocation, Diagnostic, CompileError, Level, Phase
 from ..limits import TimeBudget, iter_ast_nodes
 from ..security_contexts import PASS_WARNINGS_ANNOTATION, context_key, reads_bar_series
 from ..session_reads import emitted_session_reads
+from ..collection_history import (
+    CollectionHistoryChecker, CollectionHistoryRefusal, HistoryRead, literal_offset,
+)
 from ..method_binding import (
     BoundMethodArgs,
     MethodBindError,
@@ -431,6 +434,9 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # pass can tell borrowed clones apart from a dead function's own
         # sites (see contracts.TACallSite.owner_func).
         self._enclosing_func_names: list[str] = []
+        # Array and matrix history reads (``a[1]``), checked and annotated
+        # after the visit (pineforge_codegen/collection_history.py).
+        self._collection_history_reads: list[HistoryRead] = []
         # Exact TA targets borrowed through nested callable edges while visiting
         # the current callable body. Constructor templates are tracked
         # separately in ``_func_ta_ctor_args`` because state ownership also
@@ -552,6 +558,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._ensure_pine_v6()
         self._check_direct_terminal_array_element_callee_shadows()
         self._visit(self._ast)
+        collection_history = self._check_collection_history()
         self._check_direct_terminal_array_temporary_cycles()
         self._register_resolved_direct_terminal_array_forward_calls()
         self._refresh_direct_terminal_array_temporary_returns()
@@ -652,6 +659,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 for owner, names in self._func_var_storage_names.items()
             },
             func_series_vars=self._func_series_vars,
+            collection_history=collection_history,
             func_global_history_reads={
                 owner: list(names)
                 for owner, names in self._func_global_history_reads.items()
@@ -6174,6 +6182,21 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if self._type_spec_contains_map(object_spec):
                 assert object_spec is not None
                 self._reject_unsupported_map_history(object_spec, node)
+            if (object_spec is not None
+                    and object_spec.kind in ("array", "matrix")
+                    and literal_offset(node) != 0):
+                # An untyped parameter given an array or a matrix: its history
+                # is a parameter's, which PineForge does not keep
+                # (collection_history.py).
+                name = (node.object.name if isinstance(node.object, Identifier)
+                        else "x")
+                self._error(
+                    f"{name}[...]: the history of "
+                    f"{'an array' if object_spec.kind == 'array' else 'a matrix'} "
+                    "parameter is not supported in PineForge (TradingView reads "
+                    "one copy per call: fixtures/array_history_tv ahist_fn).",
+                    node.loc,
+                )
 
         # Propagate concrete caller specs through wrapper calls.  Each edge is
         # identity-keyed from the definition pass, so a local that shadows a
@@ -6428,8 +6451,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
     def _visit_Subscript(self, node: Subscript) -> PineType:
         obj_type = self._visit(node.object)
         self._visit(node.index)
+        self._refuse_collection_field_history(node)
 
         object_spec = self._history_receiver_type_spec(node.object)
+        self._refuse_collection_expression_history(node, object_spec)
         if self._type_spec_contains_map(object_spec):
             assert object_spec is not None
             self._reject_unsupported_map_history(object_spec, node)
@@ -6461,7 +6486,12 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                             "Series buffer for that binding.",
                             node.loc,
                         )
-                    if getattr(sym, "type_spec", None) is None or sym.type_spec.kind not in ("array", "map"):
+                    if (getattr(sym, "type_spec", None) is not None
+                            and sym.type_spec.kind in ("array", "matrix")):
+                        # An array's or a matrix's history: copies kept
+                        # beside the variable, not a Series of it.
+                        self._note_collection_history_read(node, name, sym)
+                    elif getattr(sym, "type_spec", None) is None or sym.type_spec.kind not in ("array", "map"):
                         exact_member = getattr(sym, "_pf_var_member_name", None)
                         if exact_member is not None:
                             self._series_var_members.add(exact_member)
@@ -6509,6 +6539,113 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                         self._note_function_global_history_read(node, name, sym)
 
         return obj_type
+
+    def _refuse_collection_field_history(self, node: Subscript) -> None:
+        """The history of an object's array, matrix or map field: TradingView
+        refuses ``h.xs[1]`` and ``(h.xs)[1]`` alike ("Cannot use the
+        history-referencing operator on fields of user-defined types",
+        CE10290: fixtures/array_history_tv ahist_field_noparen,
+        ahist_field_paren, ahist_mfield) and takes ``(h[1]).xs``. The C++
+        indexed the field's current collection."""
+        field = node.object
+        if not isinstance(field, MemberAccess):
+            return
+        owner = self._history_receiver_type_spec(field.object)
+        if (owner is None or owner.kind != "udt"
+                or owner.name not in self._udt_fields):
+            return
+        spec = (self._udt_field_type_specs.get(owner.name) or {}).get(field.member)
+        if spec is None or spec.kind not in ("array", "matrix", "map"):
+            return
+        receiver = (field.object.name if isinstance(field.object, Identifier)
+                    else "object")
+        raise CompileError([Diagnostic(
+            level=Level.ERROR,
+            phase=Phase.ANALYZER,
+            location=node.loc or SourceLocation(self._filename, 1, 1, 1),
+            message=(f"{receiver}.{field.member}[...]: TradingView refuses the "
+                     "history-referencing operator on fields of user-defined "
+                     "types (CE10290)."),
+            hint=(f"Read the field of the object's history: "
+                  f"({receiver}[1]).{field.member}."),
+        )])
+
+    def _refuse_collection_expression_history(self, node: Subscript, spec) -> None:
+        """The history of an expression whose value is an array or a matrix
+        (a call's result, a selection, a history): TradingView reads the copy
+        the expression produced on the bar k bars back
+        (fixtures/array_history_tv ahist_fn ``c1``), which PineForge does not
+        keep. It never compiled."""
+        if (isinstance(node.object, Identifier) or spec is None
+                or spec.kind not in ("array", "matrix")):
+            return
+        what = ("a call's" if isinstance(node.object, FuncCall)
+                else "a selection's" if isinstance(node.object, Ternary)
+                else "an expression's")
+        raise CompileError([Diagnostic(
+            level=Level.ERROR,
+            phase=Phase.ANALYZER,
+            location=node.loc or SourceLocation(self._filename, 1, 1, 1),
+            message=(f"The history of {what} {spec.kind} is not supported in "
+                     "PineForge: TradingView reads the copy that expression "
+                     "produced that many bars back, which PineForge does not "
+                     "keep."),
+            hint="Bind the expression to a variable and read the variable's history.",
+        )])
+
+    def _note_collection_history_read(self, node: Subscript, name: str, sym) -> None:
+        """Record ``a[k]`` of an array or a matrix variable for
+        ``_check_collection_history``."""
+        decl_node_id = getattr(sym, "_pf_decl_node_id", None)
+        self._collection_history_reads.append(HistoryRead(
+            node=node,
+            name=name,
+            kind=sym.type_spec.kind,
+            spec=sym.type_spec,
+            in_callable=bool(self._enclosing_func_names),
+            is_parameter=sym.scope != "global" and decl_node_id is None,
+            is_global=sym.scope == "global",
+            is_var=bool(sym.is_var),
+            decl_node_id=decl_node_id,
+            scope_name=sym.scope or "",
+        ))
+
+    def _check_collection_history(self) -> dict:
+        """Annotate every array or matrix history read with how its value is
+        used and return the variables whose history the codegen keeps;
+        refuse, located, a use it does not lower
+        (pineforge_codegen/collection_history.py)."""
+        if not self._collection_history_reads:
+            return {}
+        seen: set[int] = set()
+        reads = []
+        for read in self._collection_history_reads:
+            if id(read.node) not in seen:
+                seen.add(id(read.node))
+                reads.append(read)
+        def name_kind(name: str) -> str | None:
+            sym = self._symbols.global_scope.symbols.get(name)
+            if sym is None:
+                return None
+            spec = getattr(sym, "type_spec", None)
+            if spec is not None and spec.kind in ("array", "matrix", "map"):
+                return spec.kind
+            if sym.pine_type in (PineType.INT, PineType.FLOAT, PineType.BOOL,
+                                 PineType.STRING, PineType.COLOR):
+                return "scalar"
+            return None
+
+        try:
+            return CollectionHistoryChecker(self._ast, name_kind).check(reads)
+        except CollectionHistoryRefusal as refusal:
+            raise CompileError([Diagnostic(
+                level=Level.ERROR,
+                phase=Phase.ANALYZER,
+                location=(getattr(refusal.node, "loc", None)
+                          or SourceLocation(self._filename, 1, 1, 1)),
+                message=refusal.message,
+                hint=refusal.hint,
+            )]) from None
 
     def _note_function_global_history_read(
             self, node: Subscript, name: str, sym) -> None:

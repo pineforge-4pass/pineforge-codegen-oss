@@ -1865,9 +1865,9 @@ class ExprVisitor:
         history-referencing operator on fields of user-defined types",
         CE10290) and takes ``(c[1]).v``; the C++ subscripted the field's
         scalar, which did not compile. A field holding an object or a drawing
-        is a reference, whose history TradingView keeps (udth_expr); a
-        collection field keeps the current-collection lowering it compiled
-        to (the collection history warning)."""
+        is a reference, whose history TradingView keeps (udth_expr); the
+        analyzer refuses a collection field's history (CE10290 too:
+        ``_refuse_collection_field_history``)."""
         field = node.object
         if not isinstance(field, MemberAccess):
             return
@@ -1891,6 +1891,10 @@ class ExprVisitor:
         )
 
     def _visit_subscript(self, node: Subscript) -> str:
+        # An array's or a matrix's history (collection_history.py).
+        collection_history = self._lower_collection_history(node)
+        if collection_history is not None:
+            return collection_history
         self._refuse_mutable_chart_point_history(node)
         self._refuse_field_value_history(node)
         idx = self._visit_expr(node.index)
@@ -1927,6 +1931,9 @@ class ExprVisitor:
             if self._binding_is_series(name, safe):
                 # Same Pine [k] semantics as Series in runtime/series.hpp
                 return f"{safe}[{series_idx}]"
+            # An array's history the analyzer annotated lowers above
+            # (collection_history.py); this legacy element read is left for
+            # one it never met.
             spec = self._collection_spec_for_name(name)
             if spec is not None and spec.kind in ("array", "map"):
                 self._codegen_warning(

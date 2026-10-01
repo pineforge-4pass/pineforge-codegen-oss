@@ -1802,6 +1802,10 @@ class TopLevelEmitter:
         # c. Push non-var series (they start fresh each bar with a push)
         # (actual push happens in visit_VarDecl when the decl is visited)
 
+        # c1. A top-level var array's or matrix's history slot opens on every
+        # bar (pineforge_codegen/collection_history.py).
+        self._emit_collection_history_var_opens(lines, "        ")
+
         # c2. First-bar TA resize: rebuild any TA object whose ctor args come
         # from input-backed variables so strategy_set_input() actually changes
         # the circular-buffer sizes. Emits nothing when no TA site depends on
@@ -1819,6 +1823,10 @@ class TopLevelEmitter:
                 self._visit_stmt(stmt, lines, indent=2)
             finally:
                 self._clear_lazy_edge_ta_hoists()
+
+        # d2. The bar's end: each array or matrix variable whose history the
+        #     script reads keeps a copy of the value it ends the bar with.
+        self._emit_collection_history_closes(lines, "        ")
 
         # e. ``// @pf-trace`` pragma block — emitted last so trace values
         #    reflect every assignment / strategy call made earlier in the

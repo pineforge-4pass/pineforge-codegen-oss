@@ -469,6 +469,11 @@ class StmtVisitor:
         return self._type_spec_to_cpp(spec)
 
     def _visit_var_decl(self, node: VarDecl, lines: list[str], pad: str) -> None:
+        # An array or a matrix whose history the script reads: this execution
+        # of its declaration opens a slot (codegen/collection_history.py).
+        history_open = self._collection_history_decl_open(node)
+        if history_open is not None:
+            lines.append(f"{pad}{history_open}")
         member_meta = getattr(
             self.ctx, "var_member_metadata_by_node", {}
         ).get(id(node))

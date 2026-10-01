@@ -358,6 +358,13 @@ class TypeHelper:
                     and (receiver_spec.name in _DRAWING_TYPE_NAMES
                          or receiver_spec.name in self._udt_fields)):
                 return receiver_spec
+            if (receiver_spec is not None
+                    and receiver_spec.kind in ("array", "matrix")
+                    and isinstance(value.object, Identifier)):
+                # An array's or a matrix's history is a collection of its
+                # type (fixtures/array_history_tv; pineforge_codegen/
+                # collection_history.py).
+                return receiver_spec
             return None
         if isinstance(value, IfStmt):
             true_node = self._selection_terminal_expr(value.body)

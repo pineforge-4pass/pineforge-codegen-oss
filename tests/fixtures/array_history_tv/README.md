@@ -20,7 +20,7 @@ account's chart timezone, Asia/Taipei (UTC+8).
 
 | Probe | sha256 of the `.pine` | Tape sha256 |
 |---|---|---|
-| `ahist_ref` | `67211a289cace62d2e2aa18110103983ecdbdb25324aa3827464fc170b95a8ec` | `86e562fa9f5df457ef9fe30a1bbf1960c7dd03c0a2565cecab6a615bd391677a` |
+| `ahist_ref` | `455698094bc0652ad5991ba4cd0a4b3fdb2f278004e9d56a1accbf1fdc171cda` | `3b76901e0531068250af7a81fa9be00e098983f9987faa8d2ae57851d304fdd9` |
 | `ahist_mtx` | `67a0ff3e20170223c7d8d8516fd0814c7e26e598b031a6195868a633c49561b8` | `fcae222cfe0f6607aa6dd3e0639237f3b712df1e2c13964e17ddb28bdac28892` |
 | `ahist_field` | `7affefa82244e8c4680a41e16e8b337d45b7d52c95d94e834c861d2b4106ff1f` | `b38032c0346fd3be6b51a8fcfe340cf1d91fe18c212b4c854fafe884a0d270f4` |
 | `ahist_loop` | `4a47cf52a041d1ed87eeddacaa9406195bf7c3c1b806febde3be35e2ba232aa4` | `be73d218de164323058c17f642f44d619b6615d9a851129a5f934c28abc23839` |
@@ -31,7 +31,7 @@ account's chart timezone, Asia/Taipei (UTC+8).
 
 Each exit Signal joins these fields with `|`, in this order:
 
-- `ahist_ref`: `d1`, `n2`, `g1`, `s1`, `w1`, `lp`, `cy`, `mb`, `firstNa`
+- `ahist_ref`: `d1`, `n2`, `g1`, `s1`, `w1`, `lp`, `cy`, `firstNa`
 - `ahist_mtx`: `vd`, `g1`, `g2`, `r1`, `s1`, `firstNa`
 - `ahist_field`: `f1`, `f2`, `f3`, `f4`, `v1`, `v2`
 - `ahist_loop`: `l1` .. `l6`
@@ -50,9 +50,8 @@ probes' `-1` placeholders):
   previous bar's last element (`n2` is -1): its history is the array as the
   previous bar left it. A fresh array per bar reads the previous bar's
   (`g1`: `bar_index - (b[1]).get(0)` is 1, `s1`: one element), a variable
-  reassigned on its bar keeps the last array of the bar (`w1` is 2), an
-  array or na keeps either (`mb`), and `na(b[1])` is true on the first bar
-  (`firstNa`). A variable bound to its own history on every other bar reads
+  reassigned on its bar keeps the last array of the bar (`w1` is 2), and
+  `na(b[1])` is true on the first bar (`firstNa`). A variable bound to its own history on every other bar reads
   the previous bar's array (`cy` is 1). `for v in b[1]` iterates the array
   `b` holds now (`lp` is `bar_index`; `ahist_loop`).
 - `ahist_mtx`: a matrix alike. A `var` matrix set to `bar_index` every bar
