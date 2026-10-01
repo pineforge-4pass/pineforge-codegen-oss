@@ -143,45 +143,68 @@ _NUMBER_ELEMENT_FAILING_FUNCTIONS = frozenset({
     "sort_indices", "standardize", "stdev", "sum", "variance", "add_row",
     "add_col",
 })
+# The array functions returning a new array: whether the earlier lowering
+# compiled depends on how that array is used (``_array_result_consumer``):
+# called a method on, returned by a function, rendered or held by a member,
+# it did not compile.
+_ARRAY_RESULT_FUNCTIONS = frozenset({
+    "abs", "copy", "slice", "sort_indices", "standardize", "concat",
+})
+_FAILING_RESULT_CONSUMERS = ("receiver", "result", "render", "member")
 _ELEMENT_LOWERING_FAILS = frozenset({
     "read:receiver", "change:receiver", "slice:receiver", "slice:argument",
     "change:argument", "copy:typed", "loop", "read:history", "other:collection",
-    "read:argument:copy:receiver", "read:argument:copy:member",
-}) | frozenset(f"read:argument:{f}" for f in _NUMBER_ELEMENT_FAILING_FUNCTIONS)
+}) | frozenset(f"read:argument:{f}" for f in _NUMBER_ELEMENT_FAILING_FUNCTIONS) | frozenset(
+    f"read:argument:copy:{c}" for c in _FAILING_RESULT_CONSUMERS)
 # A ``std::string`` element has ``size()``, ``[]``, ``clear()``, iterators and
 # more, so many array functions compiled on it; it has no na and no number
 # rendering.
 _STRING_ELEMENT_FAILING_FUNCTIONS = frozenset({
-    "abs", "binary_search", "binary_search_leftmost", "binary_search_rightmost",
+    "binary_search", "binary_search_leftmost", "binary_search_rightmost",
     "concat", "copy", "covariance", "includes", "indexof", "lastindexof",
-    "sort_indices", "standardize", "add_row", "add_col",
+    "add_row", "add_col",
 })
 _STRING_ELEMENT_LOWERING_FAILS = frozenset({
     "read:receiver", "change:receiver", "slice:receiver", "copy:typed", "na",
     "render:tostring", "read:history", "other:collection",
     "change:argument:push", "change:argument:unshift", "change:argument:insert",
-    "change:argument:set", "change:argument:fill", "change:argument:concat",
-}) | frozenset(f"read:argument:{f}" for f in _STRING_ELEMENT_FAILING_FUNCTIONS)
+    "change:argument:set", "change:argument:fill",
+    # A function returning what these read (typed a number).
+    "change:argument:pop:result", "change:argument:shift:result",
+    "change:argument:remove:result", "read:argument:get:result",
+    "read:argument:first:result", "read:argument:last:result",
+    "read:argument:join:result",
+}) | frozenset(f"read:argument:{f}" for f in _STRING_ELEMENT_FAILING_FUNCTIONS) | frozenset(
+    f"{how}:argument:{f}:{c}"
+    for how, f in (("read", "abs"), ("read", "sort_indices"), ("read", "standardize"),
+                   ("change", "concat"), ("slice", "slice"))
+    for c in _FAILING_RESULT_CONSUMERS)
 # A parameter's current array took most array functions; one returning a new
 # array, a method on it, na() and rendering did not compile, nor did a
 # string array's element-typed reads (typed a number).
 _PARAMETER_LOWERING_FAILS = frozenset({
-    "read:receiver", "change:receiver", "slice:receiver", "slice:argument", "na",
-    "render", "copy:untyped", "read:argument:abs", "read:argument:copy",
-    "read:argument:sort_indices", "read:argument:standardize",
-    "change:argument:concat",
-})
+    "read:receiver", "change:receiver", "slice:receiver", "na", "render",
+    "copy:untyped",
+}) | frozenset(
+    f"{how}:argument:{f}:{c}"
+    for how, f in (("read", "abs"), ("read", "copy"), ("read", "sort_indices"),
+                   ("read", "standardize"), ("slice", "slice"), ("change", "concat"))
+    for c in _FAILING_RESULT_CONSUMERS)
+# A string parameter's element read where a variable or a function's result
+# typed a number took it.
 _STRING_PARAMETER_LOWERING_FAILS = _PARAMETER_LOWERING_FAILS | frozenset(
-    f"read:argument:{f}" for f in (
-        "avg", "covariance", "every", "first", "get", "join", "last", "max",
-        "median", "min", "mode", "percentile_linear_interpolation",
-        "percentile_nearest_rank", "percentrank", "range", "some", "stdev",
-        "sum", "variance")) | frozenset(
-    f"change:argument:{f}" for f in ("pop", "remove", "shift"))
+    f"{how}:argument:{f}:{c}"
+    for how, names in (
+        ("read", ("avg", "covariance", "every", "first", "get", "join", "last",
+                  "max", "median", "min", "mode", "percentile_linear_interpolation",
+                  "percentile_nearest_rank", "percentrank", "range", "some",
+                  "stdev", "sum", "variance")),
+        ("change", ("pop", "remove", "shift")))
+    for f in names for c in ("result", "bound"))
 _MATRIX_RECEIVER_LOWERING_FAILS = frozenset({
     "read:receiver", "change:receiver", "render", "copy:untyped",
-    "read:argument:sum", "read:argument:det", "read:argument:copy",
-    "change:argument",
+    "read:argument:det", "read:argument:copy", "change:argument",
+    "other:collection",  # matrix.sum (_matrix_sum_use)
 })
 
 
@@ -569,6 +592,18 @@ class CollectionHistoryChecker:
                     self._calls_by_name.setdefault((False, callee.name), []).append(node)
                 elif isinstance(callee, MemberAccess):
                     self._calls_by_name.setdefault((True, callee.member), []).append(node)
+        # Every read of a name, under each statement list holding it at any
+        # depth: a region's candidates are its own list's, so sibling blocks
+        # declaring one name do not scan each other's reads.
+        self._reads_under: dict[tuple[int, str], list[Identifier]] = {}
+        for name, reads in self._reads_by_name.items():
+            for read in reads:
+                current = read
+                while current is not None:
+                    position = self._position.get(id(current))
+                    if position is not None:
+                        self._reads_under.setdefault((id(position[1]), name), []).append(read)
+                    current = self._parent.get(id(current))
         for stmt in program.body:
             if isinstance(stmt, (FuncDef, MethodDef)):
                 bound = set(stmt.params)
@@ -713,7 +748,7 @@ class CollectionHistoryChecker:
 
     def _region_reads(self, name: str, region: list, start: int, top: bool) -> list:
         """The reads of ``name`` in a region (``_in_region``), in source order."""
-        reads = [read for read in self._reads_by_name.get(name, ())
+        reads = [read for read in self._reads_under.get((id(region), name), ())
                  if self._in_region(read, name, region, start, top)]
         reads.sort(key=lambda r: (getattr(r.loc, "line", 0) or 0,
                                   getattr(r.loc, "column", 0) or 0))
@@ -840,6 +875,8 @@ class CollectionHistoryChecker:
             return Use("other", node, f"{label}.{method}: {_a(kind)} has no fields.",
                        needs_collection=True)
         if method in self._builtin_methods(kind):
+            if kind == "matrix" and method == "sum":
+                return self._matrix_sum_use(node, label)
             if kind == "array" and method == "slice":
                 return self._slice_use(call, node, label, "receiver")
             if self._changing(kind, method):
@@ -848,10 +885,17 @@ class CollectionHistoryChecker:
         if method in self._methods:
             definitions = self._definitions_for(self._methods[method], 0, None, kind)
             return Use("copy", node, names=self._parameter_uses(
-                definitions, 0, None, kind), needs_collection=True)
+                definitions, 0, None, kind), needs_collection=True, form="receiver")
         return Use("other", node,
                    f"{label}.{method}(): no array or matrix method of that name.",
                    needs_collection=True)
+
+    def _matrix_sum_use(self, node, label: str) -> Use:
+        """``matrix.sum(m[k], m2)``: its matrix result does not compile,
+        history or not (the earlier build refused the history)."""
+        return Use("other", node,
+                   f"matrix.sum of {label} is not supported in PineForge: the "
+                   "matrix it returns does not compile.", needs_collection=True)
 
     def _slice_use(self, call: FuncCall, node, label: str, form: str) -> Use:
         """``(a[k]).slice(...)``: TradingView's slice shares the history's
@@ -891,6 +935,8 @@ class CollectionHistoryChecker:
                 return self._reject(
                     node, f"{label} is {_a(kind)}, which TradingView refuses as an "
                     "element of array.from (CE10122).")
+            if namespace == "matrix" and member == "sum" and kind == "matrix":
+                return self._matrix_sum_use(node, label)
             if member in methods:
                 return self._builtin_slot_use(
                     namespace, member, positional, keyword, node, kind, label)
@@ -927,6 +973,12 @@ class CollectionHistoryChecker:
                 f"argument of {namespace}.{member} (CE10123).")
         if namespace not in _BUILTIN_NAMESPACES and member in self._methods:
             # A user method called on another receiver: a parameter after it.
+            if len(self._methods[member]) > 1:
+                # Overloads: the earlier lowering passed the element to the
+                # one taking a number, which compiled.
+                return Use("other", node, f"{label} as an argument of the "
+                           f"overloaded method {member} is not supported in "
+                           "PineForge.")
             position = None if positional is None else positional + 1
             definitions = self._definitions_for(
                 self._methods[member], position, keyword, kind)
@@ -961,10 +1013,13 @@ class CollectionHistoryChecker:
         first = positional == 0 or keyword in ("id", "id1")
         form = f"argument:{member}"
         if first:
+            call = self._parent[id(node)]
+            if namespace == "array" and member in _ARRAY_RESULT_FUNCTIONS:
+                form += self._array_result_consumer(call)
             if namespace == "array" and member == "slice":
-                return self._slice_use(self._parent[id(node)], node, label, form)
-            if namespace == "array" and member == "copy":
-                form += self._copy_consumer(self._parent[id(node)])
+                return self._slice_use(call, node, label, form)
+            if namespace == "array" and member not in _ARRAY_RESULT_FUNCTIONS:
+                form += self._value_consumer(call)
             if self._changing(namespace, member):
                 return Use("change", node, form=form)
             return Use("read", node, form=form)
@@ -975,18 +1030,43 @@ class CollectionHistoryChecker:
             node, f"{label} is {_a(kind)}, which TradingView refuses as a value "
             f"of {namespace}.{member} (CE10123).")
 
-    def _copy_consumer(self, call: FuncCall) -> str:
-        """How ``array.copy(a[k])``'s new array is used, for the earlier
-        lowering's verdict: ``:receiver`` for a method called on it,
-        ``:member`` for a variable outside a loop holding it, else none."""
-        consumer = self.use(call, "array", "array.copy()")
-        if consumer.how in ("read", "change", "slice") and consumer.form == "receiver":
+    def _array_result_consumer(self, call: FuncCall) -> str:
+        """How an array function's new array (``array.copy(a[k])``) is used,
+        for the earlier lowering's verdict (``_ARRAY_RESULT_FUNCTIONS``):
+        ``:receiver`` for a method called on it, ``:result`` for a function
+        returning it, ``:render`` for ``str.tostring``, ``:member`` for a
+        variable of the script's top level or a block's holding it, else
+        none (a namespace call's or a user function's argument, a loop's or
+        a function's local, a for...in iterable)."""
+        consumer = self.use(call, "array", "array function's result")
+        if consumer.form == "receiver":
             return ":receiver"
+        if consumer.how == "render":
+            return ":render"
+        if consumer.how == "flow" and consumer.form == "result":
+            return ":result"
         parent = self._parent.get(id(call))
-        if isinstance(parent, (VarDecl, Assignment)) and not any(
-                isinstance(a, (ForStmt, ForInStmt, WhileStmt))
-                for a in self._ancestors(parent)):
+        if isinstance(parent, (VarDecl, Assignment)) and self._callable_of(parent) is None \
+                and not any(isinstance(a, (ForStmt, ForInStmt, WhileStmt))
+                            for a in self._ancestors(parent)):
             return ":member"
+        return ""
+
+    def _value_consumer(self, call: FuncCall) -> str:
+        """Where an array function's value goes, for the earlier lowering's
+        verdict on a string element or a string array parameter: ``:result``
+        when a function or a method returns it, ``:bound`` when a variable
+        takes it (typed a number there), else none (a statement, an
+        argument, an operand)."""
+        parent = self._parent.get(id(call))
+        if isinstance(parent, ExprStmt):
+            located = self._containing_list(parent)
+            if (located is not None and isinstance(located[0], (FuncDef, MethodDef))
+                    and located[1][-1] is parent):
+                return ":result"
+            return ""
+        if isinstance(parent, (VarDecl, Assignment)) and parent.value is call:
+            return ":bound"
         return ""
 
     def _render_use(self, node, kind: str, label: str, function: str) -> Use:
@@ -1150,7 +1230,7 @@ class CollectionHistoryChecker:
         method = isinstance(definition, MethodDef)
         for call in self._calls_by_name.get((method, definition.name), ()):
             names.add(self.use(call, kind, f"{definition.name}()"))
-        return Use("flow", node, names=names)
+        return Use("flow", node, names=names, form="result")
 
     def _definitions_for(self, definitions, index, keyword, kind: str) -> list:
         """The overloads (or same-named methods of other types) whose
@@ -1353,7 +1433,8 @@ class CollectionHistoryChecker:
         """A read the codegen does not lower: the earlier lowering (an
         element of the current array) where it compiled, else REFUSED."""
         if read.kind == "matrix":
-            return Decision(REFUSED, node=read.node, message=why or (
+            specific = uses.other.message if uses.other is not None else None
+            return Decision(REFUSED, node=read.node, message=why or specific or (
                 f"{label} is not supported in PineForge here: the history of a "
                 "matrix is supported as the receiver or an argument of a matrix "
                 "function, na(), and the value of a variable or a function's "

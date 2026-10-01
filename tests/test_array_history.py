@@ -454,8 +454,20 @@ NOT_SUPPORTED = {
     "tuple_element_method": (
         "a = array.from(close, open)\nf() => [a[1], 1]\n[x, y] = f()\nr = x.size()\n",
         "function"),
-    "string_parameter_get": (
-        "f(array<string> x) => str.length(array.get(x[1], 0))\n"
+    "copy_returned_by_a_function": (
+        "a = array.from(close, open)\nf() => array.copy(a[1])\nr = array.size(f())\n",
+        "function"),
+    "copy_rendered": (
+        "a = array.from(close, open)\nf() => str.length(str.tostring(array.copy(a[1])))\n"
+        "r = f()\n", "function"),
+    "string_pop_value_used": (
+        "s = array.from(\"a\", \"bc\")\nf() => array.pop(s[1])\nr = str.length(f())\n",
+        "function"),
+    "string_get_returned": (
+        "s = array.from(\"a\", \"bc\")\nf() => array.get(s[1], 0)\nr = str.length(f())\n",
+        "function"),
+    "string_parameter_get_bound": (
+        "f(array<string> x) =>\n    v = array.get(x[1], 0)\n    str.length(v)\n"
         "s = array.from(\"a\")\nr = f(s)\n", "parameter"),
     "bound_read_both_ways": (
         "a = array.from(close)\nfloat r = 0.0\n"
@@ -567,7 +579,28 @@ EARLIER_LOWERING = {
     "copy_of_a_block_var": (
         "float r = 0.0\nif close > open\n    var bv = array.from(close)\n"
         "    r := array.size(array.copy(bv[1]))\n", CURRENT_ELEMENT),
-    # A string element has std::string's members.
+    # A string parameter's element read where a string is expected compiled.
+    "string_parameter_get_into_a_string_call": (
+        "f(array<string> x) => str.length(array.get(x[1], 0))\n"
+        "s = array.from(\"a\")\nr = f(s)\n", CURRENT_PARAMETER),
+    "copy_into_a_function_s_local": (
+        "a = array.from(close, open)\nf() =>\n    bb = array.copy(a[1])\n"
+        "    array.size(bb)\nr = f()\n", CURRENT_ELEMENT),
+    # A parameter's new array taken by a namespace call compiled.
+    "parameter_abs_into_a_namespace_call": (
+        "f(array<float> x) => array.sum(array.abs(x[1]))\n"
+        "a = array.from(close, open)\nr = f(a)\n", CURRENT_PARAMETER),
+    # An overloaded method took the element through its number overload.
+    "overloaded_method_argument": (
+        "type T\n    float v\n"
+        "method add(T this, array<float> xs) => this.v + xs.size()\n"
+        "method add(T this, float z) => this.v + z\n"
+        "a = array.from(close, open)\nt = T.new(1.0)\nr = t.add(a[1])\n",
+        CURRENT_ELEMENT),
+    # A string element has std::string's members; a dropped pop compiled.
+    "string_pop_statement_in_a_function": (
+        "s = array.from(\"a\", \"bc\")\nf() =>\n    array.pop(s[1])\n    1\nr = f()\n",
+        CURRENT_ELEMENT),
     "string_clear_in_a_function": (
         "s = array.from(\"a\")\nf() =>\n    array.clear(s[1])\n    1\nr = f()\n",
         CURRENT_ELEMENT),
