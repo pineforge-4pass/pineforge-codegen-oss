@@ -1,0 +1,22 @@
+//@version=6
+// CG-UDT-HIST: the clock of a parameter's history at a call site that runs on
+// every third bar: x[2] read two calls back or at the call two bars back, for
+// an object parameter and a float parameter. Each close's comment spells the
+// values the script reads on that bar.
+strategy("UDTH clock", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+type Cell
+    int v
+p2(Cell x) =>
+    na(x[2]) ? -1 : (x[2]).v
+f2(float y) =>
+    na(y[2]) ? -1.0 : y[2]
+int a = -2
+float c = -2.0
+if bar_index % 3 == 1
+    a := p2(Cell.new(v = bar_index))
+    c := f2(bar_index)
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(a) + "|" + str.tostring(c))

@@ -2,7 +2,7 @@
 
 Synthetic probes written for lane CG-UDT-HIST: the history-referencing
 operator `[]` on a user-defined object or a drawing reference. They contain no
-closed or scraped source. The ten tapes were exported on 2026-10-01 with
+closed or scraped source. The twelve tapes were exported on 2026-10-01 with
 
 ```bash
 lab tv --pine <name>.pine --slug pf-<name, underscores as dashes> --no-note \
@@ -29,6 +29,8 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `udth_fn2` | `74c76921bc57cd276f1a6db8b5bec17d40a6507e4db483e4d1259f1ce40829df` | `9a898dc7ae39b87af0b59279270f8db3b03843e51d8993b551700df4bed68432` |
 | `udth_drawparam` | `879060be6c4e18eb68e19f1c13424f9d47f5db205e54a5bf308e3fd89872692e` | `0257f5ce785bf2fa31becc106819c89b8af57877d6e82a1e2b9ebab8ce99a2d1` |
 | `udth_lazy` | `4a8598e8439739430d902ef745d372eea64aff21237bc8b745343012e443e9b3` | `3b8f541af6056116c8b2a5e18e7c06e2e13c5ad489e37e3811531d3dec456f84` |
+| `udth_clock` | `b2dbf4eda4eadc24ce195f2de3dafcea762d67a51cb7f9cb476d2535f9cb44f0` | `3d407d52759da5e14549268e3fbd4fb6e8029b15f34b0e35cd39b68f11233e93` |
+| `udth_clock_method` | `ffd9a777b36274493f4048f91276493695d1b5ad6e666d5e51bb783bb06d49be` | `b457dff115e6ac1d688ada9b59a07825420c832c6b670b596e38f99995b04a52` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -43,6 +45,8 @@ Each exit Signal joins these fields with `|`, in this order:
 - `udth_fn2`: `k1`, `k2`, `f1`, `p1`
 - `udth_drawparam`: `m1`, `p1`, `y1`, `t1`, `t2`, `t3`, `u1`, `s1`
 - `udth_lazy`: `f1`, `c1`, `t1`
+- `udth_clock`: `a`, `c`
+- `udth_clock_method`: `d`
 
 What each tape shows (the fields of the bars below `bar_index` 2 or 3 are the
 probes' `-1` / `x` placeholders):
@@ -105,6 +109,22 @@ probes' `-1` / `x` placeholders):
   `bar_index - 2`), `(mk(bar_index * 7)[1]).v` that bar's call (`c1`: `7 *
   (bar_index - 1)`) and the selection `(bar_index % 4 == 1 ? a : b)[1]` that
   bar's `b` (`t1`: `3 * (bar_index - 1)`).
+- `udth_clock` and `udth_clock_method`: the clock of a parameter's and a
+  receiver's history at a call site that runs on every third bar (`bar_index
+  % 3 == 1`), read two back. An object parameter's `(x[2]).v`, a float
+  parameter's `y[2]` and a method receiver's `(this[2]).v` all read the
+  argument of the call at or before two bars back, one slot per chart bar
+  holding the last call's value: on bar 7 they read bar 4's call (`a`, `c`,
+  `d`: 4), where two calls back would be bar 1's; `-1` at the first call and
+  `-2` on bars without one. The codegen's parameter history has kept that
+  clock since #109 (TradingView's LLLL discriminator), and `udth_clock`
+  replays. A typed method's receiver does not keep that clock: typed
+  methods kept their own bridge when #109 moved plain functions to it, so a
+  receiver built at the call is pushed once per call, and on every call bar
+  from bar 7 on the engine reads `udth_clock_method`'s `d` three bars
+  further back (bar 1's call on bar 7), on 111 of its 336 closes, while a
+  variable receiver reads that variable's own history. A known gap, older
+  than this lane, which `tests/test_e2e_udt_history.py` pins.
 - `udth_fn2`: in a function too: a `var` object read through `s[1]` is the
   object itself at each of two call sites (`k1`: `bar_index`, `k2`:
   `bar_index * 100`, the field set before the read), a typed parameter's

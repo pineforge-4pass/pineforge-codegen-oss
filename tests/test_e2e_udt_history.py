@@ -37,7 +37,7 @@ from tests._security_tapes import mismatches, replay, source, tape_exits
 
 FIXTURES = Path(__file__).parent / "fixtures" / "udt_history_tv"
 TAPES = ("udth_ref", "udth_box", "udth_box2", "udth_fn", "udth_fn2", "udth_method",
-         "udth_line_eq", "udth_expr", "udth_drawparam", "udth_lazy")
+         "udth_line_eq", "udth_expr", "udth_drawparam", "udth_lazy", "udth_clock")
 # codegen main when the lane started (1.0.0 and its docs).
 BASE = "01b4ee3514ee57b3080f33072431bfd0699597a4"
 
@@ -46,7 +46,8 @@ BASE = "01b4ee3514ee57b3080f33072431bfd0699597a4"
 def exits(tmp_path_factory) -> dict[str, dict[int, str]]:
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("udt_history")
-    return replay(engine, base, {name: Build(source(name, FIXTURES)) for name in TAPES})
+    return replay(engine, base, {name: Build(source(name, FIXTURES))
+                                 for name in (*TAPES, "udth_clock_method")})
 
 
 @pytest.mark.parametrize("name", TAPES)
@@ -55,6 +56,22 @@ def test_the_tape_replays(exits, name):
     assert len(tape) == 336
     missed = mismatches(tape, exits[name])
     assert not missed, f"{len(missed)} of {len(tape)} exits differ:\n" + "\n".join(missed[:5])
+
+
+def test_a_method_receivers_history_still_counts_calls(exits):
+    # A known gap, pinned: TradingView keeps a receiver's history one slot per
+    # chart bar, holding the last call's receiver (udth_clock_method: on bar 7
+    # this[2] is bar 4's receiver), as the codegen does for a plain
+    # function's parameters (udth_clock). A typed method kept its own bridge,
+    # which pushes a receiver built at the call once per call, so from the
+    # third call on it reads the receiver two calls back: three bars
+    # further back.
+    tape = tape_exits("udth_clock_method", FIXTURES)
+    engine = exits["udth_clock_method"]
+    differing = {ms: (int(signal), int(engine[ms]))
+                 for ms, signal in tape.items() if engine.get(ms) != signal}
+    assert len(differing) == 111
+    assert all(ours == theirs - 3 for theirs, ours in differing.values())
 
 
 def test_the_tapes_read_references():
