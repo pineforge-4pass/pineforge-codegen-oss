@@ -619,3 +619,17 @@ def test_a_diamond_of_helpers_is_walked_once_per_helper():
     started = time.monotonic()
     transpile(_script(body))
     assert time.monotonic() - started < 30
+
+
+def test_many_bindings_are_walked_once_each():
+    # Each binding's uses come from an index of the script's names: a walk of
+    # the rest of the script per binding took 57 s for these 4,000 (7 s now,
+    # 4 s for the same script binding array.copy(a) instead).
+    lines = ["a = array.from(close, open)", "float r = 0.0"]
+    for i in range(4000):
+        lines.append(f"p{i} = a[1]")
+        lines.append(f"r += p{i}.size()")
+    import time
+    started = time.monotonic()
+    transpile(_script("\n".join(lines) + "\n"))
+    assert time.monotonic() - started < 40

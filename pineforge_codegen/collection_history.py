@@ -524,6 +524,37 @@ class CollectionHistoryChecker:
             elif isinstance(stmt, MethodDef):
                 self._methods.setdefault(stmt.name, []).append(stmt)
         self._top_level_ids = {id(stmt) for stmt in program.body}
+        # Indexes built once, so a name's reads and a callable's calls cost
+        # their own count, not a walk of the script each.
+        self._position: dict[int, tuple[object, list, int]] = {}
+        self._declaring: dict[tuple[int, str], list[int]] = {}
+        self._reads_by_name: dict[str, list[Identifier]] = {}
+        self._calls_by_name: dict[tuple[bool, str], list[FuncCall]] = {}
+        self._callable_names: dict[int, set[str]] = {}
+        for node in self._nodes_by_id.values():
+            for body in _body_lists(node):
+                for index, stmt in enumerate(body):
+                    self._position[id(stmt)] = (node, body, index)
+                    for name in ([stmt.name] if isinstance(stmt, VarDecl)
+                                 else stmt.names if isinstance(stmt, TupleAssign) else []):
+                        self._declaring.setdefault((id(body), name), []).append(index)
+            if isinstance(node, Identifier):
+                self._reads_by_name.setdefault(node.name, []).append(node)
+            elif isinstance(node, FuncCall):
+                callee = node.callee
+                if isinstance(callee, Identifier):
+                    self._calls_by_name.setdefault((False, callee.name), []).append(node)
+                elif isinstance(callee, MemberAccess):
+                    self._calls_by_name.setdefault((True, callee.member), []).append(node)
+        for stmt in program.body:
+            if isinstance(stmt, (FuncDef, MethodDef)):
+                bound = set(stmt.params)
+                for node, _depth in iter_ast_nodes(stmt):
+                    if isinstance(node, VarDecl):
+                        bound.add(node.name)
+                    elif isinstance(node, TupleAssign):
+                        bound.update(node.names)
+                self._callable_names[id(stmt)] = bound
         self._reachable = self._reachable_callables()
         self._decisions: dict[int, Decision] = {}
         self._uses: dict[tuple, Use] = {}
@@ -621,85 +652,59 @@ class CollectionHistoryChecker:
         return "block"
 
     def _containing_list(self, stmt) -> tuple[object, list] | None:
-        holder = self._parent.get(id(stmt))
-        if holder is None:
-            return None
-        for body in _body_lists(holder):
-            if any(s is stmt for s in body):
-                return holder, body
-        return None
+        position = self._position.get(id(stmt))
+        return None if position is None else position[:2]
 
     # -- the reads of a name ---------------------------------------------------
 
-    def _identifiers(self, root, name: str) -> list:
-        """The reads of ``name`` under ``root``, a nested declaration of
-        the name hiding the rest of its statement list."""
-        found: list = []
-        stack = [root]
-        while stack:
-            node = stack.pop()
-            if isinstance(node, Identifier):
-                if node.name == name:
-                    found.append(node)
-                continue
-            if isinstance(node, (ForStmt, ForInStmt)):
-                binders = ([node.var] if isinstance(node, ForStmt) else
-                           ([node.var] if node.var else list(node.vars or [])))
-                for child in syntax_children(node):
-                    if any(child is s for s in node.body):
-                        continue
-                    stack.append(child)
-                if name not in binders:
-                    found.extend(self._identifiers_in_list(node.body, name, 0))
-                continue
-            lists = _body_lists(node)
-            if lists:
-                in_lists = {id(s) for body in lists for s in body}
-                for child in syntax_children(node):
-                    if id(child) not in in_lists:
-                        stack.append(child)
-                for body in lists:
-                    found.extend(self._identifiers_in_list(body, name, 0))
-                continue
-            stack.extend(syntax_children(node))
-        return found
+    def _in_region(self, read, name: str, region: list, start: int,
+                   top: bool) -> bool:
+        """Whether ``read`` (an identifier spelled ``name``) reads the
+        variable a declaration at ``region[start - 1]`` binds -- for a
+        parameter, ``start`` 0 of its callable's body: it sits in
+        ``region[start:]`` before a later declaration of the name there, and
+        no nested statement list or loop between them declares the name
+        first. A declaration of the script's top level (``top``) also
+        reaches the functions and methods that do not bind the name."""
+        current = read
+        while True:
+            position = self._position.get(id(current))
+            if position is not None:
+                holder, body, index = position
+                declared = self._declaring.get((id(body), name), [])
+                if body is region:
+                    later = next((i for i in declared if i >= start), None)
+                    return index >= start and (later is None or index <= later)
+                if isinstance(holder, (FuncDef, MethodDef)):
+                    return top and name not in self._callable_names.get(id(holder), ())
+                if declared and declared[0] < index:
+                    return False
+                if body is getattr(holder, "body", None) and (
+                        (isinstance(holder, ForStmt) and holder.var == name)
+                        or (isinstance(holder, ForInStmt)
+                            and (holder.var == name or name in (holder.vars or [])))):
+                    return False
+            current = self._parent.get(id(current))
+            if current is None:
+                return False
 
-    def _identifiers_in_list(self, body: list, name: str, start: int) -> list:
-        found: list = []
-        for stmt in body[start:]:
-            if isinstance(stmt, (FuncDef, MethodDef)):
-                continue
-            if _declares(stmt, name):
-                if stmt.value is not None:
-                    found.extend(self._identifiers(stmt.value, name))
-                break
-            found.extend(self._identifiers(stmt, name))
-        return found
-
-    def _callable_reads(self, definition, name: str) -> list:
-        """A script variable's reads in a function or method body that does
-        not bind the name itself."""
-        if name in definition.params:
-            return []
-        if any(_declares(node, name) for node, _d in iter_ast_nodes(definition)):
-            return []
-        return self._identifiers_in_list(definition.body, name, 0)
+    def _region_reads(self, name: str, region: list, start: int, top: bool) -> list:
+        """The reads of ``name`` in a region (``_in_region``), in source order."""
+        reads = [read for read in self._reads_by_name.get(name, ())
+                 if self._in_region(read, name, region, start, top)]
+        reads.sort(key=lambda r: (getattr(r.loc, "line", 0) or 0,
+                                  getattr(r.loc, "column", 0) or 0))
+        return reads
 
     def _declaration_reads(self, decl) -> list:
         """The reads a declaration's value reaches through its name: the
         rest of its statement list and, for the top level, the functions and
         methods that read the script variable."""
-        located = self._containing_list(decl)
-        if located is None:
+        position = self._position.get(id(decl))
+        if position is None:
             return []
-        holder, body = located
-        index = next(i for i, s in enumerate(body) if s is decl)
-        reads = self._identifiers_in_list(body, decl.name, index + 1)
-        if isinstance(holder, Program):
-            for stmt in holder.body:
-                if isinstance(stmt, (FuncDef, MethodDef)):
-                    reads.extend(self._callable_reads(stmt, decl.name))
-        return reads
+        holder, body, index = position
+        return self._region_reads(decl.name, body, index + 1, isinstance(holder, Program))
 
     def _declaration_of(self, name: str, node):
         """The declaration (a ``VarDecl``, or ``(definition, index)`` for a
@@ -711,14 +716,14 @@ class CollectionHistoryChecker:
                 return None
             if isinstance(parent, (FuncDef, MethodDef)) and name in parent.params:
                 return (parent, parent.params.index(name))
-            for body in _body_lists(parent):
-                for index, stmt in enumerate(body):
-                    if stmt is current:
-                        for earlier in reversed(body[:index]):
-                            if isinstance(earlier, VarDecl) and earlier.name == name:
-                                return earlier
-                            if _declares(earlier, name):
-                                return None
+            position = self._position.get(id(current))
+            if position is not None:
+                _holder, body, index = position
+                for earlier in reversed(body[:index]):
+                    if isinstance(earlier, VarDecl) and earlier.name == name:
+                        return earlier
+                    if _declares(earlier, name):
+                        return None
             current = parent
         return None
 
@@ -1073,15 +1078,8 @@ class CollectionHistoryChecker:
         """A function's or a method's result: each call's use."""
         names = NameUses()
         method = isinstance(definition, MethodDef)
-        for call, _depth in iter_ast_nodes(self._program):
-            if not isinstance(call, FuncCall):
-                continue
-            callee = call.callee
-            if (not method and isinstance(callee, Identifier)
-                    and callee.name == definition.name) or (
-                    method and isinstance(callee, MemberAccess)
-                    and callee.member == definition.name):
-                names.add(self.use(call, kind, f"{definition.name}()"))
+        for call in self._calls_by_name.get((method, definition.name), ()):
+            names.add(self.use(call, kind, f"{definition.name}()"))
         return Use("flow", node, names=names)
 
     def _parameter_is_collection(self, definitions, index, keyword) -> bool:
@@ -1119,7 +1117,7 @@ class CollectionHistoryChecker:
             key = ("param", id(definition), position, kind)
             names.merge(self._uses_of_name(
                 key, params[position],
-                lambda d=definition, p=params[position]: self._identifiers_in_list(d.body, p, 0),
+                lambda d=definition, p=params[position]: self._region_reads(p, d.body, 0, False),
                 kind))
         return names
 
@@ -1385,7 +1383,7 @@ class CollectionHistoryChecker:
 
     # -- the codegen's history members -------------------------------------------
 
-    def _position(self, node_id: int | None) -> tuple:
+    def _source_position(self, node_id: int | None) -> tuple:
         loc = getattr(self._nodes_by_id.get(node_id), "loc", None)
         return (getattr(loc, "line", 0) or 0, getattr(loc, "column", 0) or 0)
 
@@ -1420,7 +1418,7 @@ class CollectionHistoryChecker:
         variables: dict[str, HistoryVariable] = {}
         keys: dict[tuple, str] = {}
         for name, entries in names.items():
-            entries.sort(key=lambda e: self._position(e.decl_node_id))
+            entries.sort(key=lambda e: self._source_position(e.decl_node_id))
             for ordinal, entry in enumerate(entries):
                 entry.ordinal = ordinal
                 entry.closed_by = set(writers.get(name, set())) - {entry.decl_node_id}
