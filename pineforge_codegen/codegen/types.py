@@ -3702,6 +3702,12 @@ class TypeInferer:
         and ternaries / if / switch expressions. Returns the string
         ``"double"`` as the safe fallback when no narrower type can be
         determined."""
+        if isinstance(node, Subscript) and history_annotation(node) is not None:
+            # An array's or a matrix's history is a collection of its type
+            # (collection_history.py): a loop's local bound to it is one.
+            spec = self._type_spec_from_expr(node)
+            if spec is not None:
+                return self._type_spec_to_cpp(spec)
         if isinstance(node, Subscript) and isinstance(node.object, Identifier):
             name = node.object.name
             if name in self.ctx.series_vars:

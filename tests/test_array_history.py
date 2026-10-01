@@ -123,6 +123,13 @@ SHAPES = {
     "bound": (
         "a = array.from(close)\n"
         "float r = 0.0\nif bar_index > 0\n    pb = a[1]\n    r := pb.get(0) + pb.size()\n"),
+    "bound_in_loop_and_switch": (
+        "a = array.from(close, open)\nm = matrix.new<float>(2, 2, close)\n"
+        "float r = 0.0\nif bar_index > 0\n"
+        "    for i = 0 to 1\n        pb = a[1]\n        pm = m[1]\n"
+        "        r += pb.size() + pm.get(0, 0)\n"
+        "    switch\n        close > open =>\n            q = a[1]\n"
+        "            r += q.size()\n        =>\n            r += 1\n"),
     "rebound": (
         "a = array.from(close)\narray<float> pb = array.new<float>()\n"
         "if bar_index > 0\n    pb := a[1]\nr = pb.size()\n"),
