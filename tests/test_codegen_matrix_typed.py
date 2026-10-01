@@ -361,7 +361,7 @@ strategy("t")
 type Pt
     float x
 var m = matrix.new<Pt>(2, 2)
-v = m[1].get(0, 0)
+v = (m[1]).get(0, 0)
 '''
     cpp = _emit(src)
     assert "PineGenericMatrix<Pt>" in cpp

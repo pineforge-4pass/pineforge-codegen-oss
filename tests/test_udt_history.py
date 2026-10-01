@@ -18,9 +18,13 @@ from __future__ import annotations
 
 import pytest
 
+from pathlib import Path
+
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
+
+FIXTURES = Path(__file__).parent / "fixtures" / "udt_history_tv"
 
 
 def _refusal(source: str) -> CompileError:
@@ -429,3 +433,22 @@ def test_a_requested_field_value_still_compiles():
         "if r > 0\n"
         '    strategy.entry("L", strategy.long)\n')
     compile_cpp(cpp, label="requested field")
+
+
+# The probes TradingView's compiler refused (fixtures/udt_history_tv README),
+# each with the code it answered.
+TRADINGVIEW_REFUSED = {
+    "udth_noparen": "CE10011",
+    "udth_method_noparen": "CE10010",
+    "udth_eq": "CE10123",
+    "udth_box_eq": "CE10123",
+    "udth_field_noparen": "CE10290",
+    "udth_field_paren": "CE10290",
+}
+
+
+@pytest.mark.parametrize("name", sorted(TRADINGVIEW_REFUSED))
+def test_every_probe_tradingview_refused_is_refused(name):
+    error = _refusal((FIXTURES / f"{name}.pine").read_text(encoding="utf-8"))
+    assert any(TRADINGVIEW_REFUSED[name] in d.message for d in error.diagnostics), (
+        [d.message for d in error.diagnostics])

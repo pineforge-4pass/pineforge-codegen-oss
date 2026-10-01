@@ -118,7 +118,8 @@ instead of "object.field[1]"." A field holding an object takes it
 
 `udth_na_field` compiles, and its run stops on the first bar with
 `RE10041` "Error on bar 0: Cannot access the 'Cell.v' field of an undefined
-object. The object is 'na'.": `(c[1]).v` where `c[1]` is na.
+object. The object is 'na'.": `(c[1]).v` where `c[1]` is na. PineForge's run
+stops there too ("UDT access on na or invalid object ID").
 
 The Pine v6 User Manual agrees: "Type system", section "Value vs. reference
 types" (user-defined types and the drawing types are reference types;

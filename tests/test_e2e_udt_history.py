@@ -127,3 +127,15 @@ def test_history_values_bar_by_bar(tmp_path):
         "lineNe": [1, 1, 1, 1, 1, 1],
         "lineSelf": [1, 1, 1, 1, 1, 1],
     }
+
+
+def test_a_field_of_a_na_object_stops_the_run(tmp_path):
+    # TradingView stops udth_na_field on its first bar (RE10041: "Cannot
+    # access the 'Cell.v' field of an undefined object"): (c[1]).v where
+    # c[1] is na. So does the engine.
+    engine = skip_unless_e2e_env()
+    feed = chart_feed_head(engine, tmp_path, 4)
+    runs = execute_all(engine, feed, tmp_path, {
+        "na_field": Build(source("udth_na_field", FIXTURES))})
+    error = runs["na_field"].error
+    assert error is not None and "UDT access on na" in error, error

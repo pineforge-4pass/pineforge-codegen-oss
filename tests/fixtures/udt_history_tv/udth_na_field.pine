@@ -3,7 +3,7 @@
 // bar, where `c[1]` is na. Each close's comment spells the value read.
 strategy("UDTH na field", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
 type Cell
-    float v
+    int v
 c = Cell.new(v = bar_index)
 prevV = (c[1]).v
 var float firstV = prevV
