@@ -347,14 +347,16 @@ class TypeHelper:
         if isinstance(value, Subscript):
             # Pine's history operator preserves the value type: a
             # ``Series<line>`` read such as ``h[1]`` is a scalar ``line``
-            # handle, not the legacy numeric fallback.  Keep this refinement
-            # drawing-only; collection subscripts have separate array/map
-            # semantics and primitive history inference already flows through
-            # PineType in ``_visit_Subscript``.
+            # handle and ``c[1]`` of a user-defined object the reference ``c``
+            # held (fixtures/udt_history_tv), not the legacy numeric fallback.
+            # Collection subscripts have separate array/map semantics and
+            # primitive history inference already flows through PineType in
+            # ``_visit_Subscript``.
             receiver_spec = self._type_spec_from_expr(value.object)
             if (receiver_spec is not None
                     and receiver_spec.kind == "udt"
-                    and receiver_spec.name in _DRAWING_TYPE_NAMES):
+                    and (receiver_spec.name in _DRAWING_TYPE_NAMES
+                         or receiver_spec.name in self._udt_fields)):
                 return receiver_spec
             return None
         if isinstance(value, IfStmt):

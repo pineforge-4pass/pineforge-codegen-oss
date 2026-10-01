@@ -63,16 +63,17 @@ The rules, and the tapes that pin them:
 | `w9dg-label-collect2` | 10 | label B dies on the eleventh label (`111\|NaN\|333\|NaN`) | `c3aed04061372459d1eaa875d6db6b537ff522fee7278c52ef8b0de804e7e73b` |
 | `w9dg-default-cap` | 28 | boxes `56:6/0` .. `128:78/0`; linefills never | `2bed4e6d437fdb1d4f0695648539b8ef8d7b203a2a7920102cf9824cdc520189` |
 | `w9dg-pin-holders` | 6 | also a `map<int, box>` value: collected (evidence only) | `7098c7ae594890b2144947a90af4aea28dbcaa001bea0baa94a4e8f6ac041aeb` |
-| `w9dg-pin-holders2` | 6 | S (`s := s[1]`) held: `first:NaN/102/103/NaN/NaN/107` (evidence only) | `684f00bdd64d614ecd17c944b6f134ea599bf4b62fdafc4a8232f85b84cbd144` |
+| `w9dg-pin-holders2` | 6 | S (`s := s[1]`) held: `first:NaN/102/103/NaN/NaN/107` | `684f00bdd64d614ecd17c944b6f134ea599bf4b62fdafc4a8232f85b84cbd144` |
 | `w9dg-label-collect` | 10 | a collected label's text is na (evidence only) | `3ae3510e142d37efa99ce2b2479980cdd179bc5e276a6d2655941de42162d48e` |
 
-The three evidence-only tapes do not replay through PineForge today: a
-`map<int, box>` is outside the supported map subset, a non-var drawing whose
-history is read declares as `Series<double>` and does not compile, and `na()`
-of a string does not compile. `-holders3` and `-label-collect2` are their
-replayable variants.
+The two evidence-only tapes do not replay through PineForge today: a
+`map<int, box>` is outside the supported map subset and `na()` of a string
+does not compile. `-holders3` and `-label-collect2` are their replayable
+variants. `w9dg-pin-holders2`, whose non-var box carried by `s := s[1]`
+declared as `Series<double>` and did not compile, replays since lane
+CG-UDT-HIST stores a drawing's history as its handles.
 
-`tests/test_e2e_drawing_lifetime.py` replays the fifteen replayable tapes end
+`tests/test_e2e_drawing_lifetime.py` replays the sixteen replayable tapes end
 to end -- `transpile_json`, the built runtime, `run_strategy.py` over the corpus
 15m feed from 2025-04-01 00:00 UTC, where TradingView's chart starts, so
 `bar_index` is the tape's -- and requires every trade and every readout value

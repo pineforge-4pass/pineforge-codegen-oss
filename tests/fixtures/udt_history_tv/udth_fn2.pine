@@ -1,0 +1,30 @@
+//@version=6
+// CG-UDT-HIST: object history in functions: a function's var object read
+// through its history at two call sites, a typed parameter's object field
+// and a ternary over two parameters. Each close's comment spells the values
+// the script reads on that bar.
+strategy("UDTH fn2", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+type State
+    int v
+type Outer
+    State inner
+keep(int x) =>
+    var s = State.new(-1)
+    s.v := x
+    na(s[1]) ? -2 : (s[1]).v
+fieldPrev(Outer p) =>
+    na(p.inner[1]) ? -2 : (p.inner[1]).v
+pickPrev(State a, State b) =>
+    t = (bar_index % 2 == 0 ? a : b)[1]
+    na(t) ? -2 : t.v
+var o = Outer.new(State.new(0))
+o.inner := State.new(bar_index * 10)
+k1 = keep(bar_index)
+k2 = keep(bar_index * 100)
+f1 = fieldPrev(o)
+p1 = pickPrev(State.new(bar_index * 2), State.new(bar_index * 3))
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(k1) + "|" + str.tostring(k2) + "|" + str.tostring(f1) + "|" + str.tostring(p1))

@@ -6,6 +6,13 @@ from typing import Any
 from pineforge_codegen.errors import SourceLocation
 
 
+# A MemberAccess (a field, or a method call's callee) written straight after a
+# history reference, ``c[1].v`` / ``b[1].get_top()``: TradingView refuses it
+# (CE10011 / CE10010) and takes ``(c[1]).v``, which parses to the same nodes.
+# Set by the parser, refused by the support checker.
+HISTORY_MEMBER_ANNOTATION = "pf_history_member"
+
+
 # ---------------------------------------------------------------------------
 # Base class
 # ---------------------------------------------------------------------------

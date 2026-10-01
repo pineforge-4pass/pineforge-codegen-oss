@@ -830,7 +830,7 @@ class StmtVisitor:
                 target_cpp_type=(
                     target_cpp_type
                     if target_cpp_type in DRAWING_TYPE_TO_CPP.values()
-                    else None
+                    else self._series_handle_target(node.name)
                 ),
             )
             cpp_val = self._coerce_int_slot(
@@ -1146,9 +1146,9 @@ class StmtVisitor:
             val_cpp = self._visit_rhs_value(
                 node.value,
                 target_name,
-                target_cpp_type=self._drawing_target_cpp_type(
-                    target_name,
-                    None,
+                target_cpp_type=(
+                    self._drawing_target_cpp_type(target_name, None)
+                    or self._series_handle_target(target_name)
                 ),
             )
             elem_int = self._int_slot_cpp_type(

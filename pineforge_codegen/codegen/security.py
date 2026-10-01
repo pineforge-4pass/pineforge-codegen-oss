@@ -88,7 +88,7 @@ from .helpers import na_preserving_int_cast, unary_sign_cpp
 from ..security_contexts import GLOBAL_ANNOTATION, UNREACHED_ANNOTATION
 from ..symbols import PineType, method_receiver_type_name
 from .tables import (
-    BAR_BUILTINS, MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_BAR_FIELDS,
+    BAR_BUILTINS, DRAWING_TYPE_TO_CPP, MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_BAR_FIELDS,
     SECURITY_BAR_FIELD_EXPRS, SECURITY_BAR_FIELD_TYPES, TA_TUPLE_FIELDS,
     _math_minmax_na_expr, _math_round_digits_expr, _merge_kwargs,
 )
@@ -6127,11 +6127,66 @@ class SecurityEmitter:
         lines.append("    }")
         lines.append("")
 
+    def _refuse_security_reference_history(self, item: dict) -> None:
+        """A request.security expression that reads the history of an
+        object or drawing reference, itself or in a function or method it
+        calls. TradingView evaluates it on the requested bars, where the
+        variable holds the objects of that timeframe's bars; PineForge keeps
+        such a history on the chart's bars only, and the payload read the
+        chart's (it never compiled before: the history was a
+        ``Series<double>``). Refused."""
+        if item["expr_node"] is None:
+            # ``request.security(sym, tf)`` with no expression: lowered to na
+            # as it always was (TradingView refuses it, CE10165).
+            return
+        pending = [item["expr_node"]]
+        seen: set[str] = set()
+        while pending:
+            for node, _depth in iter_ast_nodes(pending.pop()):
+                if isinstance(node, Subscript):
+                    receiver = node.object
+                    kind = (self._series_handle_type_name(receiver.name)
+                            if isinstance(receiver, Identifier) else None)
+                    if kind is None:
+                        spec = self._type_spec_from_expr(receiver)
+                        if (spec is not None and spec.kind == "udt"
+                                and (spec.name in DRAWING_TYPE_TO_CPP
+                                     or spec.name in self._udt_defs)):
+                            kind = spec.name
+                    if kind is not None:
+                        self._codegen_error(
+                            node,
+                            f"History of a {kind} reference inside a "
+                            "request.security expression is not supported in "
+                            "PineForge: TradingView reads the references the "
+                            "variable held on the requested timeframe's bars, "
+                            "which PineForge does not keep.",
+                            hint="Request the field values the expression "
+                                 "needs (request.security(..., obj.field)) "
+                                 "and read their history on the chart.",
+                        )
+                if not isinstance(node, FuncCall):
+                    continue
+                func_name, namespace = self._resolve_callee(node.callee)
+                keys = []
+                if namespace is None and func_name in self._func_info_map:
+                    keys.append(func_name)
+                if isinstance(node.callee, MemberAccess):
+                    keys.extend(key for key in self._func_info_map
+                                if key.endswith(f".{node.callee.member}"))
+                for key in keys:
+                    body = getattr(self._func_info_map[key], "node", None)
+                    if key not in seen and body is not None:
+                        seen.add(key)
+                        pending.append(body)
+
     def _emit_security_evaluators(self, lines: list[str]) -> None:
         """Emit _eval_security_N() methods and evaluate_security() dispatch."""
         if not self._security_calls:
             return
 
+        for item in self._security_calls:
+            self._refuse_security_reference_history(item)
         for item in self._security_calls:
             self._emit_security_evaluator_requested(item, lines)
 

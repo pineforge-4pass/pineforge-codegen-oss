@@ -6807,6 +6807,10 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             if owner_spec is not None and owner_spec.kind == "udt" and owner_spec.name:
                 field_spec = (self._udt_field_type_specs.get(owner_spec.name) or {}).get(node.member)
                 if field_spec is not None:
+                    # The receiver is read too: ``(o[1]).inner.v`` reads the
+                    # history of ``o`` (fixtures/udt_history_tv udth_ref),
+                    # which only its visit registers.
+                    self._visit(node.object)
                     return self._type_hint_to_pine(str(field_spec))
             self._visit(node.object)
             # strategy.closedtrades.* and strategy.opentrades.* return types

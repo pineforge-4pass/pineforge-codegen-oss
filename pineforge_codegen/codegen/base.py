@@ -1945,7 +1945,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     )
                 elif (orig_safe in self._series_var_member_names
                         or vname in self.ctx.series_vars):
-                    lines.append(f"    Series<{cpp_type}> {cloned_safe}{series_suffix};")
+                    # A history-read var object keeps its references, as
+                    # its base member does.
+                    udt_t = udt_spec.name if udt_spec is not None else member_udt_type
+                    element = (self._safe_name(udt_t) if udt_t in self._udt_defs
+                               else cpp_type)
+                    lines.append(f"    Series<{element}> {cloned_safe}{series_suffix};")
                 elif collection_spec is not None:
                     lines.append(
                         f"    {self._type_spec_to_cpp(collection_spec)} {cloned_safe};"
@@ -1987,8 +1992,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(f"    {cpp_type} {cloned_safe};")
                 return
         # Non-var series var
-        if orig_safe in [self._safe_name(n) for n in self.ctx.series_vars]:
-            cpp_type = self._series_type_for(orig_safe)
+        raw_names = [n for n in self.ctx.series_vars if self._safe_name(n) == orig_safe]
+        if raw_names:
+            # A history-read object or drawing (a receiver ``this`` spelled
+            # ``pf_safe_this``) holds handles, as its base member does.
+            handles = {self._series_handle_cpp_type(n) for n in raw_names}
+            cpp_type = (handles.pop() if len(handles) == 1 and None not in handles
+                        else self._series_type_for(orig_safe))
             lines.append(f"    Series<{cpp_type}> {cloned_safe}{series_suffix};")
         else:
             lines.append(f"    double {cloned_safe} = 0.0;")
@@ -3623,13 +3633,21 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if len(states) > 1
         }
 
+        # A history parameter holding a user-defined object or a drawing keeps
+        # the references its calls passed (``_series_param_element_cpp_type``).
+        handle_cpp_types = {
+            *DRAWING_TYPE_TO_CPP.values(),
+            *(self._safe_name(name) for name in self._udt_defs),
+        }
+
         def register_one(
             kind: str,
             source_key: tuple,
             cpp_type: str,
             context: str | None,
         ) -> None:
-            if cpp_type not in ("double", "int", "int64_t", "bool"):
+            if (cpp_type not in ("double", "int", "int64_t", "bool")
+                    and cpp_type not in handle_cpp_types):
                 cpp_type = "double"
             key = (kind, *source_key, context)
             if key in self._inline_history_member_by_key:
@@ -3720,6 +3738,27 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 lexical[info.node.params[0]] = receiver_spec
             lexical.update(self._func_collection_types.get(owner, {}))
             return lexical
+
+        def owner_typed(owner: str | None, compute):
+            """``compute()`` with the owner's parameter types bound, as the
+            emitter binds them: a history read of a typed parameter's field
+            (``f(Outer p) => p.inner[1]``) types its Series by the field."""
+            previous = self.__dict__.get("_current_func_param_specs")
+            self._current_func_param_specs = owner_lexical_specs(owner)
+            try:
+                return compute()
+            finally:
+                if previous is None:
+                    self.__dict__.pop("_current_func_param_specs", None)
+                else:
+                    self._current_func_param_specs = previous
+
+        def history_cpp_type(expr, owner: str | None) -> str:
+            """``_history_value_cpp_type`` of ``expr``, a reference's handle
+            resolved with the owner's parameters bound; any other value keeps
+            the inference every earlier build registered."""
+            return (owner_typed(owner, lambda: self._reference_cpp_type(expr))
+                    or self._infer_type(expr))
 
         def plain_udf_info(call: FuncCall):
             if not isinstance(call.callee, Identifier):
@@ -3846,7 +3885,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             owner = owner_by_node.get(id(node))
             if isinstance(node, Subscript) and isinstance(node.object, FuncCall):
                 register(
-                    "hist_call", (id(node),), self._infer_type(node.object), owner
+                    "hist_call", (id(node),), history_cpp_type(node.object, owner),
+                    owner,
                 )
             elif (isinstance(node, Subscript)
                     and self._is_session_flag(node.object)):
@@ -3865,9 +3905,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         self._session_call_flags.setdefault(owner, set()).add(flag)
                         register("session_call", (owner, flag), "bool", owner)
             elif (isinstance(node, Subscript)
-                    and self._is_compound_history_object(node.object)):
+                    and (self._is_compound_history_object(node.object)
+                         or (isinstance(node.object, (Ternary, MemberAccess))
+                             and owner_typed(owner, lambda: self._reference_cpp_type(
+                                 node.object)) is not None))):
                 register(
-                    "hist_call", (id(node),), self._infer_type(node.object), owner
+                    "hist_call", (id(node),), history_cpp_type(node.object, owner),
+                    owner,
                 )
 
             if not isinstance(node, FuncCall):
@@ -4021,6 +4065,38 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             ("fn_global_hist", id(fi.node), name, self._current_instance_name)
         )
 
+    def _reference_cpp_type(self, expr) -> str | None:
+        """The handle type of an expression whose value is a user-defined
+        object or a drawing reference (``Cell``, ``Box``), else None."""
+        spec = self._type_spec_from_expr(expr)
+        if (spec is None or spec.kind != "udt"
+                or not (spec.name in DRAWING_TYPE_TO_CPP
+                        or spec.name in self._udt_defs)):
+            return None
+        return DRAWING_TYPE_TO_CPP.get(spec.name) or self._safe_name(spec.name)
+
+    def _registered_history_handle(self, node: Subscript) -> str | None:
+        """The handle type of the synthetic history Series the prepass
+        registered for ``node`` (``_prepare_inline_history_members``), else
+        None: emission reads the type the member was declared with."""
+        member = self._inline_history_member_by_key.get(
+            ("hist_call", id(node), self._current_instance_name))
+        if member is None:
+            return None
+        handles = {*DRAWING_TYPE_TO_CPP.values(),
+                   *(self._safe_name(name) for name in self._udt_defs)}
+        for info in self._inline_history_members:
+            if info["member_name"] == member:
+                return info["cpp_type"] if info["cpp_type"] in handles else None
+        return None
+
+    def _history_value_cpp_type(self, expr) -> str:
+        """The element type of the synthetic Series that keeps ``expr``'s
+        history: a reference's handle (TradingView's history of such an
+        expression is the reference it produced at its previous evaluation:
+        fixtures/udt_history_tv udth_expr), else the scalar it infers."""
+        return self._reference_cpp_type(expr) or self._infer_type(expr)
+
     def _is_compound_history_object(self, node) -> bool:
         """Whether ``node[k]`` is history on an operator expression or a
         ``session.*`` flag.
@@ -4037,6 +4113,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         per-bar Series (``_prescan_session_history``).
         """
         if self._is_session_flag(node):
+            return True
+        if (isinstance(node, (Ternary, MemberAccess))
+                and self._reference_cpp_type(node) is not None):
+            # ``(c ? a : b)[1]`` and an object-typed field's ``o.inner[1]``:
+            # the reference the expression produced at its previous
+            # evaluation (fixtures/udt_history_tv udth_expr).
             return True
         return (isinstance(node, (BinOp, UnaryOp, Ternary))
                 and self._infer_type(node) in ("double", "int", "int64_t", "bool"))
@@ -4847,9 +4929,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 continue
             callable_udt_spec = self._callable_var_udt_spec(name)
             if callable_udt_spec is not None:
-                lines.append(
-                    f"    {self._type_spec_to_cpp(callable_udt_spec)} {safe};"
-                )
+                handle_cpp = self._type_spec_to_cpp(callable_udt_spec)
+                if safe in self._series_var_member_names:
+                    # A history-read var object: its history holds the
+                    # references it held (``_series_handle_cpp_type``).
+                    lines.append(f"    Series<{handle_cpp}> {safe}{_mbb};")
+                else:
+                    lines.append(f"    {handle_cpp} {safe};")
                 continue
             # Detect array vars from init expression. Guard the substring
             # heuristic against a UDT constructor that merely WRAPS array.new /
@@ -4941,7 +5027,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         udt_type = udt_name
                         break
             if udt_type:
-                lines.append(f"    {self._safe_name(udt_type)} {safe};")
+                if safe in self._series_var_member_names:
+                    # A history-read var object: its history holds the
+                    # references it held (``_series_handle_cpp_type``).
+                    lines.append(
+                        f"    Series<{self._safe_name(udt_type)}> {safe}{_mbb};")
+                else:
+                    lines.append(f"    {self._safe_name(udt_type)} {safe};")
                 continue
             cpp_type = PINE_TYPE_TO_CPP.get(ptype, "double")
             # Promote int->int64_t when init RHS is an int64-returning builtin

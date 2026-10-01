@@ -1,0 +1,19 @@
+//@version=6
+// CG-UDT-HIST: the history of a method's receiver, at a call on every bar and
+// at one on every other bar. Each close's comment spells the values the
+// script reads on that bar.
+strategy("UDTH method", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+type Cell
+    int v
+method prevSelf(Cell this) =>
+    na(this[1]) ? -1 : (this[1]).v
+c = Cell.new(v = bar_index)
+m = c.prevSelf()
+int k = -2
+if bar_index % 2 == 1
+    k := Cell.new(v = bar_index * 100).prevSelf()
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(m) + "|" + str.tostring(k))

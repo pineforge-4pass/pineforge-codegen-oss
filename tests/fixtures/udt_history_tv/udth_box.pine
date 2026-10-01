@@ -1,0 +1,27 @@
+//@version=6
+// CG-UDT-HIST: what the history of a drawing reference reads. A box drawn
+// every bar, read and changed on later bars through its history, a var box
+// changed every bar, and a deleted box. Each close's comment spells the
+// values the script reads on that bar.
+strategy("UDTH box", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1, max_boxes_count = 500)
+b = box.new(bar_index, high, bar_index + 1, low)
+var box vb = box.new(bar_index, close, bar_index + 1, close)
+box.set_top(vb, close)
+var bool firstNa = na(b[1])
+float t1 = -1.0
+float vt = -1.0
+float bt2 = -1.0
+string dl = "x"
+if bar_index >= 2
+    t1 := box.get_top(b[1]) - high[1]
+    vt := box.get_top(vb[1]) - close
+    box.set_bottom(b[1], -1.0)
+    bt2 := box.get_bottom(b[2])
+    if bar_index % 2 == 0
+        box.delete(b[2])
+    dl := na(b[2]) ? "na" : "live"
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(t1, "#.####") + "|" + str.tostring(vt, "#.####") + "|" + str.tostring(bt2, "#.####") + "|" + dl + "|" + str.tostring(firstNa))

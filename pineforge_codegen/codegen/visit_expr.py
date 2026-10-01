@@ -88,6 +88,7 @@ classes from ``..ast_nodes``.
 from __future__ import annotations
 
 from ..errors import Phase
+from ..symbols import TypeSpec
 from ..external_requests import UNPINNED_ANNOTATION
 from ..ast_nodes import (
     ASTNode,
@@ -502,6 +503,18 @@ class ExprVisitor:
                     f"return _pf_read; }}())")
         return (f'([&]() {{ pine_runtime_error(std::string("{self._cpp_string_escape(marker)}")); '
                 f"return {value}; }}())")
+
+    def _identifier_reads_series(self, node: Identifier) -> bool:
+        """Whether ``_visit_ident`` lowers ``node`` to its Series' current slot
+        (``x[0]``, a copy): a history-read parameter or variable."""
+        name = node.name
+        if name in self._current_func_series_params:
+            return True
+        if (name in self._current_func_param_types or name in BAR_FIELDS
+                or name in BAR_BUILTINS):
+            return False
+        return self._binding_is_series(
+            name, self._call_site_var_name(node, self._safe_name(name)))
 
     def _visit_ident(self, node: Identifier) -> str:
         name = node.name
@@ -1270,7 +1283,66 @@ class ExprVisitor:
             return self._emit_na_relational(op, left_cpp, right_cpp)
         return f"({left_cpp} {op} {right_cpp})"
 
+    # The reference types TradingView compares with == and != (lab tv
+    # pf-udth-line-eq: by identity, a na reference included); every other
+    # object or drawing type is CE10123 there.
+    _IDENTITY_COMPARED_REFERENCES = frozenset({"line", "label"})
+
+    def _reference_operand_kind(self, operand) -> str | None:
+        """The type of a user-defined object or drawing reference operand
+        (``Cell``, ``box``, ``chart.point``, ...), else None."""
+        spec = self._type_spec_from_expr(operand)
+        if spec is None or spec.kind != "udt" or not spec.name:
+            return None
+        if spec.name not in DRAWING_TYPE_TO_CPP and spec.name not in self._udt_defs:
+            return None
+        if self._infer_type(operand) in (
+                "double", "int", "int64_t", "bool", "std::string"):
+            return None
+        return spec.name
+
+    def _reference_equality_cpp(self, node: BinOp) -> str | None:
+        """``==`` / ``!=`` with a reference operand: a line or a label equals
+        the same line or label, na included (TradingView compares their
+        references; a deleted drawing keeps its own), the handles' ids here.
+        TradingView refuses the comparison of any other object or drawing
+        (CE10123) and of a reference with na (CE10187), which never compiled
+        here either."""
+        kinds = (self._reference_operand_kind(node.left),
+                 self._reference_operand_kind(node.right))
+        if kinds == (None, None):
+            return None
+        other = node.right if kinds[0] is not None else node.left
+        kind = kinds[0] or kinds[1]
+        if isinstance(other, NaLiteral) or (
+                isinstance(other, Identifier) and other.name == "na"):
+            self._codegen_error(
+                node,
+                f"{node.op} na on a {kind} reference: TradingView refuses a "
+                "comparison with na (CE10187: \"Cannot compare a value to "
+                "\\\"na\\\" directly\").",
+                hint="Test the reference with na(...).",
+            )
+        if kinds[0] != kinds[1] or kind not in self._IDENTITY_COMPARED_REFERENCES:
+            self._codegen_error(
+                node,
+                f"{node.op} on a {kind} reference: TradingView compares only "
+                "line and label references (CE10123: \"Cannot call "
+                f"'operator {node.op}'\" with an argument of the {kind} type).",
+                hint="Compare the fields or getter values the objects hold, "
+                     "or test na(...).",
+            )
+        left = self._visit_expr(node.left)
+        right = self._visit_expr(node.right)
+        return self._left_operand_first(
+            node, left, right,
+            lambda left, right: f"(({left}).id {node.op} ({right}).id)")
+
     def _visit_binop(self, node: BinOp) -> str:
+        if node.op in ("==", "!="):
+            identity = self._reference_equality_cpp(node)
+            if identity is not None:
+                return identity
         # An int-literal-only ``+ - *`` tree whose exact value leaves int32 is
         # a 64-bit Pine int (``90 * 24 * 60 * 60 * 1000`` = 7 776 000 000);
         # C++ ``int`` literal arithmetic would wrap it. Fold it here and spell
@@ -1723,7 +1795,104 @@ class ExprVisitor:
             idx_int = f"({idx_int})"
         return idx_int
 
+    def _warn_untracked_reference_history(self, node: Subscript) -> None:
+        """A history read of an object or drawing reference that lowers to
+        the current reference, which keeps the lowering it compiled to: the
+        analyzer registered no history for it here, while TradingView reads
+        the reference the variable held k bars back (fixtures/
+        udt_history_tv)."""
+        if isinstance(node.index, NumberLiteral) and node.index.value == 0:
+            return
+        spec = self._type_spec_from_expr(node.object)
+        if (spec is None or spec.kind != "udt"
+                or not (spec.name in DRAWING_TYPE_TO_CPP
+                        or spec.name in self._udt_defs)):
+            return
+        self._codegen_warning(
+            node,
+            f"{node.object.name}[...] reads the current {spec.name} reference "
+            "in PineForge: no history of this variable is kept here, where "
+            "TradingView reads the reference it held that many bars back.",
+        )
+
+    def _chart_point_field_written_names(self) -> set[str]:
+        """The chart.point variables a field of which the script assigns
+        (``p.price := x``). Cached."""
+        cached = getattr(self, "_chart_point_writes_cache", None)
+        if cached is not None:
+            return cached
+        point = TypeSpec.udt("chart.point")
+        names: set[str] = set()
+        for node in self._walk_ast(self.ctx.ast):
+            if (isinstance(node, Assignment)
+                    and isinstance(node.target, MemberAccess)
+                    and isinstance(node.target.object, Identifier)
+                    and any(getattr(scope.symbols.get(node.target.object.name),
+                                    "type_spec", None) == point
+                            for scope in self.ctx.symbols.all_scopes)):
+                names.add(node.target.object.name)
+        self._chart_point_writes_cache = names
+        return names
+
+    def _refuse_mutable_chart_point_history(self, node: Subscript) -> None:
+        """History of a chart.point variable the script changes a field of.
+        TradingView's chart.point is an object (its history holds references,
+        read as they are now: fixtures/udt_history_tv); PineForge holds one
+        as a value, so its history would read a changed point's old value,
+        and the field write on its history did not compile. A point no field
+        write changes reads alike either way."""
+        if isinstance(node.index, NumberLiteral) and node.index.value == 0:
+            return
+        if not (isinstance(node.object, Identifier)
+                and node.object.name in self._chart_point_field_written_names()
+                and self._type_spec_from_expr(node.object)
+                == TypeSpec.udt("chart.point")):
+            return
+        self._codegen_error(
+            node,
+            f"History of the chart.point {node.object.name} is not supported "
+            "in PineForge when the script changes its fields: PineForge holds "
+            "a chart.point as a value, where TradingView's history reads the "
+            "point object as it is now.",
+            hint="Keep the field in a variable of its own and read that "
+                 "variable's history, or build a new point instead of "
+                 "changing a field.",
+        )
+
+    def _refuse_field_value_history(self, node: Subscript) -> None:
+        """History of a user-defined object's field that holds a value:
+        TradingView refuses ``c.v[1]`` and ``(c.v)[1]`` alike ("Cannot use the
+        history-referencing operator on fields of user-defined types",
+        CE10290) and takes ``(c[1]).v``; the C++ subscripted the field's
+        scalar, which did not compile. A field holding an object or a drawing
+        is a reference, whose history TradingView keeps (udth_expr); a
+        collection field keeps the current-collection lowering it compiled
+        to (the collection history warning)."""
+        field = node.object
+        if not isinstance(field, MemberAccess):
+            return
+        owner = self._type_spec_from_expr(field.object)
+        if (owner is None or owner.kind != "udt"
+                or owner.name not in self._udt_defs
+                or self._reference_cpp_type(field) is not None):
+            return
+        field_spec = self._udt_field_type_specs.get(owner.name, {}).get(field.member)
+        if field_spec is not None and field_spec.kind in ("array", "map", "matrix"):
+            return
+        receiver = (field.object.name if isinstance(field.object, Identifier)
+                    else "object")
+        self._codegen_error(
+            node,
+            f"{receiver}.{field.member}[...]: TradingView refuses the "
+            "history-referencing operator on fields of user-defined types "
+            "(CE10290).",
+            hint=f"Read the field of the object's history: "
+                 f"({receiver}[1]).{field.member}.",
+        )
+
     def _visit_subscript(self, node: Subscript) -> str:
+        self._refuse_mutable_chart_point_history(node)
+        self._refuse_field_value_history(node)
         idx = self._visit_expr(node.index)
         # Series::operator[] accepts C++ int. A Pine int can be backed by an
         # int64_t timestamp slot; implicitly narrowing its na sentinel to int
@@ -1747,6 +1916,7 @@ class ExprVisitor:
                 return f"{self._safe_name(name)}[{series_idx}]"
             # Function parameters are scalars — src[0] → src, src[N>0] → src
             if name in self._current_func_param_types:
+                self._warn_untracked_reference_history(node)
                 return self._safe_name(name)
             if name in BAR_FIELDS or name in BAR_SERIES_PUSH:
                 # Index matches Pine: [0] current bar, [k] k bars ago (runtime Series deque).
@@ -1804,6 +1974,10 @@ class ExprVisitor:
             cpp_t = self._infer_type(node.object)
             if cpp_t not in ("double", "int", "int64_t", "bool"):
                 cpp_t = "double"
+            # A call's object or drawing result keeps the references it
+            # returned (``_history_value_cpp_type``), in the Series the
+            # prepass declared.
+            cpp_t = self._registered_history_handle(node) or cpp_t
             member = self._inline_history_member("hist_call", node)
             ta_site = self._get_ta_site(node.object)
             ta_name = (
@@ -1870,12 +2044,18 @@ class ExprVisitor:
             self._inline_history_member_by_key.get(
                 ("hist_call", id(node), self._current_instance_name)
             )
-            if isinstance(node.object, (BinOp, UnaryOp, Ternary))
+            if isinstance(node.object, (BinOp, UnaryOp, Ternary, MemberAccess))
             else None
         )
+        hoisted_member = self._hoisted_hist_reads.get(id(node))
+        if hoisted_member is not None:
+            # A reference's history below a lazy edge, pushed on every
+            # execution before the statement (``_emit_lazy_call_history_hoists``).
+            return f"{hoisted_member}[{self._history_offset_cpp(idx, node.index)}]"
         if compound_member is not None:
-            cpp_t = self._infer_type(node.object)
-            if cpp_t in ("double", "int", "int64_t", "bool"):
+            reference_cpp = self._registered_history_handle(node)
+            cpp_t = reference_cpp or self._infer_type(node.object)
+            if reference_cpp is not None or cpp_t in ("double", "int", "int64_t", "bool"):
                 inner = self._visit_expr(node.object)
                 idx_int = self._history_offset_cpp(idx, node.index)
                 return (
@@ -1893,6 +2073,7 @@ class ExprVisitor:
             if (name not in BAR_FIELDS and name not in BAR_SERIES_PUSH
                     and name not in self.ctx.series_vars
                     and name not in self._var_names):
+                self._warn_untracked_reference_history(node)
                 return obj
         idx_int = self._history_offset_cpp(idx, node.index)
         return f"{obj}[{idx_int}]"

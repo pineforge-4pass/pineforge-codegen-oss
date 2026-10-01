@@ -1,0 +1,34 @@
+//@version=6
+// CG-UDT-HIST: the history of a user-defined object inside functions and
+// blocks: a function's parameter (at a call on every bar and at one on every
+// other bar), a function's local, a drawing local of a function and an if
+// block's local. Each close's comment spells the values the script reads on
+// that bar.
+strategy("UDTH fn", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1, max_boxes_count = 500)
+type Cell
+    int v
+    int n = 0
+prevParam(Cell x) =>
+    na(x[1]) ? -1 : (x[1]).v
+prevLocal(int k) =>
+    lc = Cell.new(v = k)
+    na(lc[1]) ? -1 : (lc[1]).v
+boxPrev(float y) =>
+    bx = box.new(bar_index, y, bar_index + 1, y - 1)
+    na(bx[1]) ? -1.0 : box.get_top(bx[1])
+c = Cell.new(v = bar_index)
+a = prevParam(c)
+int b = -2
+if bar_index % 2 == 1
+    b := prevParam(Cell.new(v = bar_index * 100))
+l = prevLocal(bar_index * 3)
+t = boxPrev(bar_index)
+int blk = -3
+if bar_index % 2 == 1
+    cc = Cell.new(v = bar_index * 7)
+    blk := na(cc[1]) ? -1 : (cc[1]).v
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(a) + "|" + str.tostring(b) + "|" + str.tostring(l) + "|" + str.tostring(t) + "|" + str.tostring(blk))
