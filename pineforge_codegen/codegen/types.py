@@ -3450,8 +3450,11 @@ class TypeInferer:
             return cpp_val
         if cpp_val in {"na<int>()", "na<int64_t>()"}:
             return "na<double>()"
+        # A bool (TradingView refuses one here: CE10123, CE10173) is 1 or 0,
+        # never na, whatever is_na() of a bool resolves to.
         return (f"[&](){{ auto _pf_w = ({cpp_val}); "
-                f"if constexpr (std::is_floating_point_v<decltype(_pf_w)>) "
+                f"if constexpr (std::is_floating_point_v<decltype(_pf_w)> "
+                f"|| std::is_same_v<decltype(_pf_w), bool>) "
                 f"return (double)_pf_w; "
                 f"else return is_na(_pf_w) ? na<double>() : (double)_pf_w; }}()")
 

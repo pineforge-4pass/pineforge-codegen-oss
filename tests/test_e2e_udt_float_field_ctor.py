@@ -176,3 +176,48 @@ def test_the_fields_hold_the_numbers_bar_by_bar(tmp_path):
         "isNa": [1, 0, 0, 1, 0, 0],
         "epochExact": [1, 1, 1, 1, 1, 1],
     }
+
+
+BOOLS = """//@version=6
+strategy("bool float fields", overlay = true)
+type Cell
+    float v = 0.0
+even = bar_index % 2 == 0
+c = Cell.new(even)
+d = Cell.new()
+d.v := even
+up = even ? 1 : 0
+cNa = na(c.v) ? 1 : 0
+dNa = na(d.v) ? 1 : 0
+cUp = c.v == up ? 1 : 0
+dUp = d.v == up ? 1 : 0
+if bar_index == 3
+    strategy.entry("L", strategy.long)
+// @pf-trace cNa=cNa
+// @pf-trace dNa=dNa
+// @pf-trace cUp=cUp
+// @pf-trace dUp=dUp
+"""
+
+
+def test_a_bool_in_a_float_field_is_never_na(tmp_path):
+    # TradingView refuses a bool for a float field (CE10123 in a
+    # constructor, CE10173 in an assignment); PineForge keeps the earlier
+    # build's number, 1 or 0. The int conversion's na test read a false as
+    # na (the engine's is_na of a bool).
+    engine = skip_unless_e2e_env()
+    feed = chart_feed_head(engine, tmp_path, 6)
+    runs = execute_all(engine, feed, tmp_path, {"bools": Build(BOOLS, trace=True)})
+    values: dict[str, list[float]] = {}
+    for record in ok(runs, "bools").traces["default"]:
+        values.setdefault(record["name"], []).append(record["value"])
+    assert values == {"cNa": [0] * 6, "dNa": [0] * 6, "cUp": [1] * 6, "dUp": [1] * 6}
+
+
+def test_a_bool_converts_without_an_na_test():
+    # The conversion's na test would read a false as na wherever is_na()
+    # of a bool resolves to the integer sentinel test; the engine's na.hpp
+    # leaves bool out of that template today, so it is spelled out.
+    cpp = transpile(_script("even = bar_index % 2 == 0\nc = Cell.new(even)\nc.w := even\n"))
+    assert cpp.count("std::is_same_v<decltype(_pf_w), bool>") == 2
+    compile_cpp(cpp, label="bool float fields")
