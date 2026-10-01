@@ -1963,8 +1963,9 @@ class ExprVisitor:
             if cpp_t not in ("double", "int", "int64_t", "bool"):
                 cpp_t = "double"
             # A call's object or drawing result keeps the references it
-            # returned (``_history_value_cpp_type``).
-            cpp_t = self._reference_cpp_type(node.object) or cpp_t
+            # returned (``_history_value_cpp_type``), in the Series the
+            # prepass declared.
+            cpp_t = self._registered_history_handle(node) or cpp_t
             member = self._inline_history_member("hist_call", node)
             ta_site = self._get_ta_site(node.object)
             ta_name = (
@@ -2040,7 +2041,7 @@ class ExprVisitor:
             # execution before the statement (``_emit_lazy_call_history_hoists``).
             return f"{hoisted_member}[{self._history_offset_cpp(idx, node.index)}]"
         if compound_member is not None:
-            reference_cpp = self._reference_cpp_type(node.object)
+            reference_cpp = self._registered_history_handle(node)
             cpp_t = reference_cpp or self._infer_type(node.object)
             if reference_cpp is not None or cpp_t in ("double", "int", "int64_t", "bool"):
                 inner = self._visit_expr(node.object)

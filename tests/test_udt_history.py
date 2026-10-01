@@ -304,6 +304,24 @@ SHAPES = {
         "o = Outer.new(Cell.new(v = close))\n"
         "float r = 0.0\n"
         "if bar_index > 0\n    r := (o.inner[1]).v\n"),
+    # A function's history-read var object at two call sites: every
+    # per-call-site copy keeps its references (udth_fn2).
+    "function_var_two_calls": (
+        "type State\n    float v\n"
+        "keep(float x) =>\n    var s = State.new(0.0)\n    s.v := x\n"
+        "    na(s[1]) ? 0.0 : (s[1]).v\n"
+        "r = keep(close) + keep(open)\n"),
+    "parameter_object_field": (
+        "type Cell\n    float v\n"
+        "type Outer\n    Cell inner\n"
+        "f(Outer p) =>\n    na(p.inner[1]) ? 0.0 : (p.inner[1]).v\n"
+        "o = Outer.new(Cell.new(close))\n"
+        "r = f(o)\n"),
+    "parameter_selection": (
+        "type Cell\n    float v\n"
+        "g(Cell a, Cell b) =>\n    t = (close > open ? a : b)[1]\n"
+        "    na(t) ? 0.0 : t.v + ((close > open ? a : b)[1]).v\n"
+        "r = g(Cell.new(close), Cell.new(open))\n"),
     "lazy_arm_reads": (
         "type Cell\n    int v\n"
         "type Outer\n    Cell inner\n"
@@ -452,3 +470,16 @@ def test_every_probe_tradingview_refused_is_refused(name):
     error = _refusal((FIXTURES / f"{name}.pine").read_text(encoding="utf-8"))
     assert any(TRADINGVIEW_REFUSED[name] in d.message for d in error.diagnostics), (
         [d.message for d in error.diagnostics])
+
+
+def test_a_request_without_an_expression_still_transpiles():
+    # request.security(sym, tf) with no expression (TradingView: CE10165)
+    # lowered to na before the reference-history check, which must not
+    # trip on it.
+    cpp = transpile(
+        "//@version=6\n"
+        'strategy("s", overlay = true)\n'
+        'r = request.security(syminfo.tickerid, "D")\n'
+        "if close > open\n"
+        '    strategy.entry("L", strategy.long)\n')
+    compile_cpp(cpp, label="request without expression")

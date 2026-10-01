@@ -1218,7 +1218,8 @@ class TaSiteHelper:
                                 for arg in call.args)):
                     units.append(expr)
                     return
-                if under_lazy and self._lazy_reference_history_object(call):
+                if (under_lazy and self._registered_history_handle(expr) is not None
+                        and self._lazy_reference_history_object(call)):
                     units.append(expr)
                     return
                 scan(expr.object, under_lazy)

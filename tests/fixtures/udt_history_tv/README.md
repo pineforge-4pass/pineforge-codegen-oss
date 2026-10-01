@@ -2,7 +2,7 @@
 
 Synthetic probes written for lane CG-UDT-HIST: the history-referencing
 operator `[]` on a user-defined object or a drawing reference. They contain no
-closed or scraped source. The seven tapes were exported on 2026-10-01 with
+closed or scraped source. The eight tapes were exported on 2026-10-01 with
 
 ```bash
 lab tv --pine <name>.pine --slug pf-<name, underscores as dashes> --no-note \
@@ -26,6 +26,7 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `udth_method` | `173cd269088722f178d3061854d7682c00e349081bb8d11d21bd5a49d899c4e8` | `a248251a257aab65d63a5b0a57b7652eb9e4be09926d49ebd524cbfcdc64a217` |
 | `udth_line_eq` | `7ae562f6938d69fff32aa0da04256cd2309d481ae986bc2bddc054aa97406078` | `9508b255e755711c2fa0a709b9c4daacd73f521b538353906a90a9f8c09804da` |
 | `udth_expr` | `45b3341865d98a7927133b50d68a0a4b916b7f3fd2a0295a59adb3094bfe3103` | `d8a3a7df90ab803decd7a9026e479b3a2a09967b4ccf8f6b2e1b7973e19d893f` |
+| `udth_fn2` | `74c76921bc57cd276f1a6db8b5bec17d40a6507e4db483e4d1259f1ce40829df` | `9a898dc7ae39b87af0b59279270f8db3b03843e51d8993b551700df4bed68432` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -37,6 +38,7 @@ Each exit Signal joins these fields with `|`, in this order:
 - `udth_line_eq`: `firstNe`, `firstEq`, `firstNa`, `firstNaNe` (the first
   bar's), then `|` and `s1` .. `s10`, each `1` (true) or `0` (false)
 - `udth_expr`: `f1`, `c1`, `t1`
+- `udth_fn2`: `k1`, `k2`, `f1`, `p1`
 
 What each tape shows (the fields of the bars below `bar_index` 2 or 3 are the
 probes' `-1` / `x` placeholders):
@@ -90,6 +92,12 @@ probes' `-1` / `x` placeholders):
   7)[1]).v` the previous call's new object (`c1`: `(bar_index - 1) * 7`) and
   `((bar_index % 2 == 0 ? a : b)[1]).v` the previous bar's selection (`t1`:
   `2 * (bar_index - 1)` after an even bar).
+- `udth_fn2`: in a function too: a `var` object read through `s[1]` is the
+  object itself at each of two call sites (`k1`: `bar_index`, `k2`:
+  `bar_index * 100`, the field set before the read), a typed parameter's
+  object field `p.inner[1]` is the previous call's (`f1`: `(bar_index - 1) *
+  10`) and a selection of two parameters `(cond ? a : b)[1]` the previous
+  call's (`p1`).
 
 ## Spellings TradingView refuses or stops on
 

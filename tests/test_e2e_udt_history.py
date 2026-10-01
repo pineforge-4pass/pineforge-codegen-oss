@@ -7,12 +7,14 @@ value vs. reference types). TradingView's tapes of the synthetic probes in
 ``var`` object as it is now, a fresh object changed after its bar, a nested
 object, an object or na; boxes, lines and labels, a box deleted through its
 history; inside a function, a method and an ``if`` block, one value per
-execution of the scope; and ``==`` / ``!=`` of line and label references by
-identity; and the history of an expression whose value is an object (a field
-holding one, a function's result, a ternary's selection), the reference it
-produced at its previous evaluation, on every execution of its scope below a
-lazy edge. Each probe closes its position with a comment spelling the values
-it read, and every exit Signal of a tape must be the engine's.
+execution of the scope, a function's ``var`` object at two call sites
+included; ``==`` / ``!=`` of line and label references by identity; and the
+history of an expression whose value is an object (a field holding one, a
+function's result, a ternary's selection, of globals or of typed
+parameters), the reference it produced at its previous evaluation, on every
+execution of its scope below a lazy edge. Each probe closes its position with
+a comment spelling the values it read, and every exit Signal of a tape must
+be the engine's.
 
 The codegen before this lane (``BASE``) declared such a history
 ``Series<double>`` and pushed the handles into it: none of the probes
@@ -33,8 +35,8 @@ from tests._e2e import (
 from tests._security_tapes import mismatches, replay, source, tape_exits
 
 FIXTURES = Path(__file__).parent / "fixtures" / "udt_history_tv"
-TAPES = ("udth_ref", "udth_box", "udth_box2", "udth_fn", "udth_method", "udth_line_eq",
-         "udth_expr")
+TAPES = ("udth_ref", "udth_box", "udth_box2", "udth_fn", "udth_fn2", "udth_method",
+         "udth_line_eq", "udth_expr")
 # codegen main when the lane started (1.0.0 and its docs).
 BASE = "01b4ee3514ee57b3080f33072431bfd0699597a4"
 

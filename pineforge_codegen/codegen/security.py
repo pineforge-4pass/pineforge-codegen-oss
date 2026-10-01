@@ -6135,6 +6135,10 @@ class SecurityEmitter:
         such a history on the chart's bars only, and the payload read the
         chart's (it never compiled before: the history was a
         ``Series<double>``). Refused."""
+        if item["expr_node"] is None:
+            # ``request.security(sym, tf)`` with no expression: lowered to na
+            # as it always was (TradingView refuses it, CE10165).
+            return
         pending = [item["expr_node"]]
         seen: set[str] = set()
         while pending:

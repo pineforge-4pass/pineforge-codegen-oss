@@ -3674,6 +3674,13 @@ class TypeInferer:
                 return self._series_type_for(name)
             if name in self.ctx.series_bar_fields:
                 return "double"
+        if (isinstance(node, Subscript)
+                and isinstance(node.object, (FuncCall, Ternary, MemberAccess))):
+            # The history of an expression whose value is an object or a
+            # drawing is a reference of its type (``_history_value_cpp_type``).
+            reference = self._reference_cpp_type(node.object)
+            if reference is not None:
+                return reference
         if isinstance(node, Subscript) and isinstance(node.object, FuncCall):
             # A callable-result history read keeps the callable's scalar
             # family. Collection subscripts follow separate element-type paths.
