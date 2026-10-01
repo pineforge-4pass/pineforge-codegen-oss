@@ -3435,10 +3435,10 @@ class TypeInferer:
             return cpp_val
         if cpp_val in {"na<int>()", "na<int64_t>()"}:
             return "na<double>()"
-        return (f"[&](){{ auto _pf_v = ({cpp_val}); "
-                f"if constexpr (std::is_floating_point_v<decltype(_pf_v)>) "
-                f"return (double)_pf_v; "
-                f"else return is_na(_pf_v) ? na<double>() : (double)_pf_v; }}()")
+        return (f"[&](){{ auto _pf_w = ({cpp_val}); "
+                f"if constexpr (std::is_floating_point_v<decltype(_pf_w)>) "
+                f"return (double)_pf_w; "
+                f"else return is_na(_pf_w) ? na<double>() : (double)_pf_w; }}()")
 
     def _coerce_int_slot_with_cast(
         self, cpp_val: str, node, target_cpp_type: str

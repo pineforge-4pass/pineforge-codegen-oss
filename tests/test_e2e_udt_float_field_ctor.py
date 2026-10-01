@@ -85,6 +85,9 @@ def test_the_tape_replays(tmp_path):
 
 
 def test_the_pre_lane_build_did_not_compile_it(tmp_path):
+    # Clang refuses the narrowing of a non-constant int in the designated
+    # initializer; GCC only warns, and reads an int na there as
+    # -2147483648. Narrowing as an error makes both say so.
     tree = reference_codegen(BASE)
     if tree is None:
         pytest.skip(f"codegen {BASE} is not in this checkout's history")
@@ -93,7 +96,11 @@ def test_the_pre_lane_build_did_not_compile_it(tmp_path):
     transpiled = transpile_json(pine, tree)
     assert transpiled.get("ok"), transpiled
     with pytest.raises(AssertionError, match="compile-only check failed"):
-        compile_cpp(transpiled["cpp"], label=f"uctor_float at {BASE[:8]}")
+        compile_cpp(transpiled["cpp"], label=f"uctor_float at {BASE[:8]}",
+                    extra_flags=("-Werror=narrowing",))
+    pine_now = transpile_json(pine)
+    assert pine_now.get("ok"), pine_now
+    compile_cpp(pine_now["cpp"], label="uctor_float", extra_flags=("-Werror=narrowing",))
 
 
 VALUES = """//@version=6
