@@ -208,6 +208,16 @@ SHAPES = {
         "    r := (vm[1]).get(0, 0) - vm.get(0, 0) + (mi[1]).get(0, 0)"
         " + str.length((ms[1]).get(0, 0)) + (mc[1]).get(0, 0).v"
         " + ((mb[1]).get(0, 0) ? 1 : 0)\n"),
+    # A matrix function's new matrix keeps the history's element type, in
+    # the namespace form too (it was declared a matrix of floats).
+    "matrix_functions_of_other_element_types": (
+        "mi = matrix.new<int>(2, 2, bar_index)\nms = matrix.new<string>(2, 2, \"a\")\n"
+        "mb = matrix.new<bool>(2, 2, true)\nmc = matrix.new<color>(2, 2, color.red)\n"
+        "float r = 0.0\nif bar_index > 0\n"
+        "    ct = matrix.copy(mi[1])\n    ts = matrix.transpose(ms[1])\n"
+        "    sb = matrix.submatrix(mb[1], 0, 1, 0, 1)\n"
+        "    for i = 0 to 1\n        cc = matrix.copy(mc[1])\n        r += cc.rows()\n"
+        "    r += ct.get(0, 0) + str.length(ts.get(0, 0)) + (sb.get(0, 0) ? 1 : 0)\n"),
     "matrix_block_local_na_bound": (
         "float r = 0.0\nif close > open\n    bm = matrix.new<float>(1, 1, close)\n"
         "    r := na(bm[1]) ? 0.0 : (bm[1]).get(0, 0)\n"

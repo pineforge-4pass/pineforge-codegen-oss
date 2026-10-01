@@ -2244,10 +2244,17 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         Walks chained ``FuncCall`` receivers (e.g. ``m.transpose().copy()``)
         until it finds an ``Identifier`` so the source matrix's TypeSpec can
-        be propagated through fluent call chains.
+        be propagated through fluent call chains. A history read (``m[1]``)
+        is the variable's: its copy has the variable's type.
         """
         if not isinstance(call_node, FuncCall):
             return None
+
+        def unwrap(node):
+            if isinstance(node, Subscript) and isinstance(node.object, Identifier):
+                return node.object
+            return node
+
         callee = call_node.callee
         # Method form: m.method(...) — possibly chained: m.foo().bar()
         if isinstance(callee, MemberAccess):
@@ -2259,12 +2266,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     obj = inner_callee.object
                 else:
                     break
+            obj = unwrap(obj)
             if isinstance(obj, Identifier):
                 if obj.name != "matrix":
                     return obj.name
                 # matrix.method(m, ...) functional form
                 if call_node.args:
-                    first = call_node.args[0]
+                    first = unwrap(call_node.args[0])
                     if isinstance(first, Identifier):
                         return first.name
         return None
