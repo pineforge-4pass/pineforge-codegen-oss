@@ -2,7 +2,7 @@
 
 Synthetic probes written for lane CG-UDT-HIST: the history-referencing
 operator `[]` on a user-defined object or a drawing reference. They contain no
-closed or scraped source. The nine tapes were exported on 2026-10-01 with
+closed or scraped source. The ten tapes were exported on 2026-10-01 with
 
 ```bash
 lab tv --pine <name>.pine --slug pf-<name, underscores as dashes> --no-note \
@@ -28,6 +28,7 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `udth_expr` | `45b3341865d98a7927133b50d68a0a4b916b7f3fd2a0295a59adb3094bfe3103` | `d8a3a7df90ab803decd7a9026e479b3a2a09967b4ccf8f6b2e1b7973e19d893f` |
 | `udth_fn2` | `74c76921bc57cd276f1a6db8b5bec17d40a6507e4db483e4d1259f1ce40829df` | `9a898dc7ae39b87af0b59279270f8db3b03843e51d8993b551700df4bed68432` |
 | `udth_drawparam` | `879060be6c4e18eb68e19f1c13424f9d47f5db205e54a5bf308e3fd89872692e` | `0257f5ce785bf2fa31becc106819c89b8af57877d6e82a1e2b9ebab8ce99a2d1` |
+| `udth_lazy` | `4a8598e8439739430d902ef745d372eea64aff21237bc8b745343012e443e9b3` | `3b8f541af6056116c8b2a5e18e7c06e2e13c5ad489e37e3811531d3dec456f84` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -41,6 +42,7 @@ Each exit Signal joins these fields with `|`, in this order:
 - `udth_expr`: `f1`, `c1`, `t1`
 - `udth_fn2`: `k1`, `k2`, `f1`, `p1`
 - `udth_drawparam`: `m1`, `p1`, `y1`, `t1`, `t2`, `t3`, `u1`, `s1`
+- `udth_lazy`: `f1`, `c1`, `t1`
 
 What each tape shows (the fields of the bars below `bar_index` 2 or 3 are the
 probes' `-1` / `x` placeholders):
@@ -87,13 +89,22 @@ probes' `-1` / `x` placeholders):
   alias and not another line, and a line deleted through `l[1]` still equals
   itself (`l[1] == l[1]`, `s9`). Every close reads `1011|1111011111`.
 - `udth_expr`: the history of an expression whose value is an object is the
-  reference it produced at its previous evaluation, and below a lazy edge
-  (a ternary's arm, here guarded by `na(...)`) it is kept on every bar:
-  `(o.inner[1]).v` reads the previous bar's `o.inner` of a `var` object whose
-  field is reassigned every bar (`f1`: `bar_index - 1`), `(mk(bar_index *
-  7)[1]).v` the previous call's new object (`c1`: `(bar_index - 1) * 7`) and
-  `((bar_index % 2 == 0 ? a : b)[1]).v` the previous bar's selection (`t1`:
-  `2 * (bar_index - 1)` after an even bar).
+  reference it produced at its previous evaluation: `(o.inner[1]).v` reads
+  the previous bar's `o.inner` of a `var` object whose field is reassigned
+  every bar (`f1`: `bar_index - 1`), `(mk(bar_index * 7)[1]).v` the previous
+  call's new object (`c1`: `(bar_index - 1) * 7`) and `((bar_index % 2 == 0 ?
+  a : b)[1]).v` the previous bar's selection (`t1`: `2 * (bar_index - 1)`
+  after an even bar). The reads sit in a ternary's arm guarded by `na(...)`,
+  which the first bar skips and every later bar takes; the first close
+  already reads the first bar's values, where reading a na object would have
+  stopped the run. `udth_lazy` skips the arm on every other bar.
+- `udth_lazy`: below a lazy edge such a history is kept on every bar, the
+  bars the arm is skipped included: in a ternary arm the selector skips on
+  every even bar, each odd bar's `(o.inner[1]).v` reads the even bar before
+  it (`f1`: `bar_index - 1`, where the bars that took the arm would give
+  `bar_index - 2`), `(mk(bar_index * 7)[1]).v` that bar's call (`c1`: `7 *
+  (bar_index - 1)`) and the selection `(bar_index % 4 == 1 ? a : b)[1]` that
+  bar's `b` (`t1`: `3 * (bar_index - 1)`).
 - `udth_fn2`: in a function too: a `var` object read through `s[1]` is the
   object itself at each of two call sites (`k1`: `bar_index`, `k2`:
   `bar_index * 100`, the field set before the read), a typed parameter's

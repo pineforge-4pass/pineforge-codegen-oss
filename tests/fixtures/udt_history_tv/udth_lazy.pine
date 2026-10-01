@@ -1,0 +1,25 @@
+//@version=6
+// CG-UDT-HIST: the history of an object expression in a ternary arm the
+// selector skips on every even bar: a field holding an object, a function's
+// new object and a selection of two objects. Each close's comment spells the
+// values the script reads on that bar.
+strategy("UDTH lazy", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+type Cell
+    int v
+type Outer
+    Cell inner
+mk(int k) =>
+    Cell.new(v = k)
+var o = Outer.new(Cell.new(v = -5))
+o.inner := Cell.new(v = bar_index)
+a = Cell.new(v = bar_index * 2)
+b = Cell.new(v = bar_index * 3)
+skip = bar_index % 2 == 0
+f1 = skip ? -1 : na(o.inner[1]) ? -2 : (o.inner[1]).v
+c1 = skip ? -1 : na(mk(bar_index * 7)[1]) ? -2 : (mk(bar_index * 7)[1]).v
+t1 = skip ? -1 : na((bar_index % 4 == 1 ? a : b)[1]) ? -2 : ((bar_index % 4 == 1 ? a : b)[1]).v
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(f1) + "|" + str.tostring(c1) + "|" + str.tostring(t1))

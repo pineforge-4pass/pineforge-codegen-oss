@@ -12,9 +12,10 @@ included; ``==`` / ``!=`` of line and label references by identity; and the
 history of an expression whose value is an object (a field holding one, a
 function's result, a ternary's selection, of globals or of typed
 parameters), the reference it produced at its previous evaluation, on every
-execution of its scope below a lazy edge. Each probe closes its position with
-a comment spelling the values it read, and every exit Signal of a tape must
-be the engine's.
+execution of its scope below a lazy edge, the bars that skip the arm
+included (``udth_lazy``). Each probe closes its position with a comment
+spelling the values it read, and every exit Signal of a tape must be the
+engine's.
 
 The codegen before this lane (``BASE``) declared such a history
 ``Series<double>`` and pushed the handles into it: none of the probes
@@ -36,7 +37,7 @@ from tests._security_tapes import mismatches, replay, source, tape_exits
 
 FIXTURES = Path(__file__).parent / "fixtures" / "udt_history_tv"
 TAPES = ("udth_ref", "udth_box", "udth_box2", "udth_fn", "udth_fn2", "udth_method",
-         "udth_line_eq", "udth_expr", "udth_drawparam")
+         "udth_line_eq", "udth_expr", "udth_drawparam", "udth_lazy")
 # codegen main when the lane started (1.0.0 and its docs).
 BASE = "01b4ee3514ee57b3080f33072431bfd0699597a4"
 
