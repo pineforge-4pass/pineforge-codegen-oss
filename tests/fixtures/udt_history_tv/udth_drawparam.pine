@@ -1,0 +1,37 @@
+//@version=6
+// CG-UDT-HIST: drawings through parameters and receivers: the history of a
+// box receiver, a box parameter and a line parameter read with built-in
+// methods, and drawings passed to drawing parameters: a box's and a var box's
+// history, a new box, a user method called on a box's history and a line
+// beside its history. Each close's comment spells the values the script reads
+// on that bar.
+strategy("UDTH drawparam", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1, max_boxes_count = 500, max_lines_count = 500)
+method prevTop(box this) =>
+    na(this[1]) ? -1.0 : (this[1]).get_top()
+prevParamTop(box x) =>
+    na(x[1]) ? -1.0 : (x[1]).get_top()
+prevY(line x) =>
+    na(x[1]) ? -1.0 : (x[1]).get_y1()
+topOf(box x) =>
+    na(x) ? -1.0 : box.get_top(x)
+method topM(box this) =>
+    na(this) ? -1.0 : this.get_top()
+span(line a, line b) =>
+    na(b) ? -1.0 : line.get_y1(a) - line.get_y1(b)
+b = box.new(bar_index, bar_index, bar_index + 1, 0)
+var box vb = box.new(0, 0, 1, 0)
+box.set_top(vb, bar_index * 2)
+l = line.new(bar_index, bar_index * 3, bar_index + 1, 0)
+m1 = b.prevTop()
+p1 = prevParamTop(b)
+y1 = prevY(l)
+t1 = topOf(b[1])
+t2 = topOf(vb[1])
+t3 = topOf(box.new(bar_index, bar_index * 5, bar_index + 1, 0))
+u1 = (b[1]).topM()
+s1 = span(l, l[1])
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(m1) + "|" + str.tostring(p1) + "|" + str.tostring(y1) + "|" + str.tostring(t1) + "|" + str.tostring(t2) + "|" + str.tostring(t3) + "|" + str.tostring(u1) + "|" + str.tostring(s1))

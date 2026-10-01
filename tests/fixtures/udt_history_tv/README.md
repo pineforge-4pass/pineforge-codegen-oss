@@ -2,7 +2,7 @@
 
 Synthetic probes written for lane CG-UDT-HIST: the history-referencing
 operator `[]` on a user-defined object or a drawing reference. They contain no
-closed or scraped source. The eight tapes were exported on 2026-10-01 with
+closed or scraped source. The nine tapes were exported on 2026-10-01 with
 
 ```bash
 lab tv --pine <name>.pine --slug pf-<name, underscores as dashes> --no-note \
@@ -27,6 +27,7 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `udth_line_eq` | `7ae562f6938d69fff32aa0da04256cd2309d481ae986bc2bddc054aa97406078` | `9508b255e755711c2fa0a709b9c4daacd73f521b538353906a90a9f8c09804da` |
 | `udth_expr` | `45b3341865d98a7927133b50d68a0a4b916b7f3fd2a0295a59adb3094bfe3103` | `d8a3a7df90ab803decd7a9026e479b3a2a09967b4ccf8f6b2e1b7973e19d893f` |
 | `udth_fn2` | `74c76921bc57cd276f1a6db8b5bec17d40a6507e4db483e4d1259f1ce40829df` | `9a898dc7ae39b87af0b59279270f8db3b03843e51d8993b551700df4bed68432` |
+| `udth_drawparam` | `879060be6c4e18eb68e19f1c13424f9d47f5db205e54a5bf308e3fd89872692e` | `0257f5ce785bf2fa31becc106819c89b8af57877d6e82a1e2b9ebab8ce99a2d1` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -39,6 +40,7 @@ Each exit Signal joins these fields with `|`, in this order:
   bar's), then `|` and `s1` .. `s10`, each `1` (true) or `0` (false)
 - `udth_expr`: `f1`, `c1`, `t1`
 - `udth_fn2`: `k1`, `k2`, `f1`, `p1`
+- `udth_drawparam`: `m1`, `p1`, `y1`, `t1`, `t2`, `t3`, `u1`, `s1`
 
 What each tape shows (the fields of the bars below `bar_index` 2 or 3 are the
 probes' `-1` / `x` placeholders):
@@ -98,6 +100,15 @@ probes' `-1` / `x` placeholders):
   object field `p.inner[1]` is the previous call's (`f1`: `(bar_index - 1) *
   10`) and a selection of two parameters `(cond ? a : b)[1]` the previous
   call's (`p1`).
+- `udth_drawparam`: drawings through parameters and receivers. A box
+  receiver's and a box parameter's history read with a built-in method,
+  `(this[1]).get_top()` and `(x[1]).get_top()`, is the previous call's box
+  (`m1`, `p1`: `bar_index - 1`), and so is a line parameter's `(x[1]).get_y1()`
+  (`y1`: `3 * (bar_index - 1)`). A drawing passed to a drawing parameter is
+  the drawing itself: a box's history `topOf(b[1])` (`t1`), a `var` box's
+  history, the box as it is now (`t2`: `2 * bar_index`), a new box (`t3`),
+  a user method on a box's history `(b[1]).topM()` (`u1`) and a line beside
+  its history `span(l, l[1])` (`s1`: 3).
 
 ## Spellings TradingView refuses or stops on
 

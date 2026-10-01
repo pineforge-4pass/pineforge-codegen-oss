@@ -504,6 +504,18 @@ class ExprVisitor:
         return (f'([&]() {{ pine_runtime_error(std::string("{self._cpp_string_escape(marker)}")); '
                 f"return {value}; }}())")
 
+    def _identifier_reads_series(self, node: Identifier) -> bool:
+        """Whether ``_visit_ident`` lowers ``node`` to its Series' current slot
+        (``x[0]``, a copy): a history-read parameter or variable."""
+        name = node.name
+        if name in self._current_func_series_params:
+            return True
+        if (name in self._current_func_param_types or name in BAR_FIELDS
+                or name in BAR_BUILTINS):
+            return False
+        return self._binding_is_series(
+            name, self._call_site_var_name(node, self._safe_name(name)))
+
     def _visit_ident(self, node: Identifier) -> str:
         name = node.name
         # Bare 'na' identifier → na<double>()

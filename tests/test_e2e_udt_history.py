@@ -36,7 +36,7 @@ from tests._security_tapes import mismatches, replay, source, tape_exits
 
 FIXTURES = Path(__file__).parent / "fixtures" / "udt_history_tv"
 TAPES = ("udth_ref", "udth_box", "udth_box2", "udth_fn", "udth_fn2", "udth_method",
-         "udth_line_eq", "udth_expr")
+         "udth_line_eq", "udth_expr", "udth_drawparam")
 # codegen main when the lane started (1.0.0 and its docs).
 BASE = "01b4ee3514ee57b3080f33072431bfd0699597a4"
 

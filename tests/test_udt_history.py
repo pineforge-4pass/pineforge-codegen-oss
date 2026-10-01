@@ -344,6 +344,38 @@ SHAPES = {
         "g(line x) =>\n    na(x[1]) ? -1.0 : (x[1]).get_y1()\n"
         "l = line.new(bar_index, close, bar_index + 1, open)\n"
         "r = g(l)\n"),
+    # A drawing passed to a drawing parameter, which the callee takes as a
+    # reference: a history read, a history-read variable's current value, a
+    # new drawing (udth_drawparam).
+    "box_history_argument": (
+        "f(box x) =>\n    na(x) ? 0.0 : box.get_top(x)\n"
+        "b = box.new(bar_index, high, bar_index + 1, low)\n"
+        "r = f(b[1]) + f(b)\n"),
+    "line_history_arguments": (
+        "span(line a, line b) =>\n"
+        "    na(b) ? -1.0 : line.get_y1(a) - line.get_y1(b)\n"
+        "l = line.new(bar_index, close, bar_index + 1, open)\n"
+        "r = span(l, l[1])\n"),
+    "var_box_history_argument": (
+        "f(box x) =>\n    na(x) ? 0.0 : box.get_top(x)\n"
+        "var box vb = box.new(0, 1, 1, 0)\n"
+        "box.set_top(vb, close)\n"
+        "r = f(vb[1]) + f(vb)\n"),
+    "new_box_argument": (
+        "f(box x) =>\n    na(x) ? 0.0 : box.get_top(x)\n"
+        "r = f(box.new(bar_index, high, bar_index + 1, low))\n"),
+    "user_method_on_box_history": (
+        "method topM(box this) =>\n    na(this) ? 0.0 : this.get_top()\n"
+        "b = box.new(bar_index, high, bar_index + 1, low)\n"
+        "r = (b[1]).topM() + b.topM()\n"),
+    "forwarded_box_parameter": (
+        "f(box x) =>\n    na(x) ? 0.0 : box.get_top(x)\n"
+        "g(box y) =>\n    na(y[1]) ? 0.0 : f(y) + f(y[1])\n"
+        "b = box.new(bar_index, high, bar_index + 1, low)\n"
+        "r = g(b)\n"),
+    "new_chart_point_argument": (
+        "f(chart.point p) =>\n    na(p) ? 0.0 : p.price\n"
+        "r = f(chart.point.now(close))\n"),
 }
 
 

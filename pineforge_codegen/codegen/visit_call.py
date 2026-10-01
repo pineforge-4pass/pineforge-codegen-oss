@@ -143,6 +143,7 @@ from ..ast_nodes import (
     MemberAccess,
     NaLiteral,
     NumberLiteral,
+    Subscript,
     Ternary,
     TupleLiteral,
     StringLiteral,
@@ -583,7 +584,9 @@ class CallVisitor:
                     for arg in rest_nodes
                 )
             )) or self._binds_fresh_array_to_reference(
-                method_info, rest_nodes, first_param=1),
+                method_info, rest_nodes, first_param=1)
+            or self._binds_temporary_drawing_to_reference(
+                method_info, [receiver_node, *rest_nodes]),
         )
 
     def _callable_target_callsite_idx(self, fi, node: FuncCall) -> int | None:
@@ -1305,6 +1308,63 @@ class CallVisitor:
                 )
             stage = stage or kind == "fresh"
         return stage
+
+    # The drawing types a callable takes as ``T&`` (emit_top: a parameter of
+    # a type outside the user types is a reference).
+    _REFERENCE_DRAWING_PARAMS = frozenset({"line", "box", "label", "linefill", "chart.point"})
+
+    def _drawing_arg_is_temporary(self, arg) -> bool:
+        """Whether the C++ of the drawing argument ``arg`` is a prvalue no
+        ``T&`` takes: a history read or the current slot of a history-read
+        variable (``b[1]``, ``b[0]``: ``Series::operator[]`` returns a copy),
+        a new or copied drawing or chart point, a user call's result, or a
+        selection with such an arm. A variable, a field and a collection
+        element are lvalues, which compiled before and keep their C++."""
+        if isinstance(arg, Subscript):
+            return True
+        if isinstance(arg, Identifier):
+            return self._identifier_reads_series(arg)
+        if isinstance(arg, Ternary):
+            return (self._drawing_arg_is_temporary(arg.true_val)
+                    or self._drawing_arg_is_temporary(arg.false_val))
+        if not isinstance(arg, FuncCall):
+            return False
+        func_name, namespace = self._resolve_callee(arg.callee)
+        if namespace in DRAWING_NS and func_name in ("new", "copy"):
+            return True
+        if self._is_chart_point_callee(arg.callee):
+            return True
+        if namespace is None and func_name in self._func_info_map:
+            return True
+        return (isinstance(arg.callee, MemberAccess)
+                and self._typed_user_method_info(
+                    arg.callee.object, arg.callee.member)[1] is not None)
+
+    def _binds_temporary_drawing_to_reference(self, func_info, arg_nodes: list,
+                                              first_param: int = 0) -> bool:
+        """Whether a call passes a temporary drawing (``_drawing_arg_is_temporary``)
+        to a drawing parameter its callee takes as ``T&``: staging the call
+        (``_ordered_user_call_expr``) binds it to a named forwarding
+        reference. The handle is an arena id and Pine forbids reassigning a
+        parameter, so the callee reads the drawing the argument names
+        (udth_drawparam). A history-read parameter takes a Series bridge
+        instead."""
+        if func_info is None:
+            return False
+        specs = list(getattr(func_info, "param_type_specs", ()) or ())
+        params = (list(func_info.node.params)
+                  if getattr(func_info, "node", None) is not None else [])
+        series = self.ctx.func_series_vars.get(func_info.name, set())
+        for offset, arg in enumerate(arg_nodes):
+            index = first_param + offset
+            spec = specs[index] if index < len(specs) else None
+            if (arg is None or spec is None or spec.kind != "udt"
+                    or spec.name not in self._REFERENCE_DRAWING_PARAMS
+                    or (index < len(params) and params[index] in series)):
+                continue
+            if self._drawing_arg_is_temporary(arg):
+                return True
+        return False
 
     def _ordered_user_call_expr(
         self,
@@ -2958,6 +3018,8 @@ class CallVisitor:
                 all_args,
                 source_order_nodes=[*node.args, *node.kwargs.values()],
                 force_stage=self._binds_fresh_array_to_reference(
+                    self._func_info_map.get(func_name), ordered_arg_nodes)
+                or self._binds_temporary_drawing_to_reference(
                     self._func_info_map.get(func_name), ordered_arg_nodes),
             )
         return f"{call_head}({', '.join(all_args)})"
