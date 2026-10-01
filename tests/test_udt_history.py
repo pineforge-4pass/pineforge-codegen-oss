@@ -530,3 +530,23 @@ def test_a_request_without_an_expression_still_transpiles():
         "if close > open\n"
         '    strategy.entry("L", strategy.long)\n')
     compile_cpp(cpp, label="request without expression")
+
+
+def test_a_receivers_call_site_copies_hold_its_handles():
+    # A method whose receiver's history is read is emitted once per call
+    # site; the copy of the receiver's (unused) Series member is typed as its
+    # base member is, not Series<double>.
+    cpp = transpile(
+        "//@version=6\n"
+        'strategy("receivers", overlay = true)\n'
+        "type Cell\n    float v\n"
+        "method prevv(Cell this) =>\n    na(this[1]) ? 0.0 : (this[1]).v\n"
+        "a = Cell.new(v = close)\n"
+        "b = Cell.new(v = open)\n"
+        "r = a.prevv() + b.prevv()\n"
+        "if r > 0\n"
+        '    strategy.entry("L", strategy.long)\n')
+    assert "Series<Cell> pf_safe_this;" in cpp
+    assert "Series<Cell> pf_safe_this_cs1;" in cpp
+    assert "Series<double> pf_safe_this" not in cpp
+    compile_cpp(cpp, label="receiver copies")

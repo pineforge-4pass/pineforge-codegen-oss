@@ -1992,8 +1992,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     lines.append(f"    {cpp_type} {cloned_safe};")
                 return
         # Non-var series var
-        if orig_safe in [self._safe_name(n) for n in self.ctx.series_vars]:
-            cpp_type = self._series_type_for(orig_safe)
+        raw_names = [n for n in self.ctx.series_vars if self._safe_name(n) == orig_safe]
+        if raw_names:
+            # A history-read object or drawing (a receiver ``this`` spelled
+            # ``pf_safe_this``) holds handles, as its base member does.
+            handles = {self._series_handle_cpp_type(n) for n in raw_names}
+            cpp_type = (handles.pop() if len(handles) == 1 and None not in handles
+                        else self._series_type_for(orig_safe))
             lines.append(f"    Series<{cpp_type}> {cloned_safe}{series_suffix};")
         else:
             lines.append(f"    double {cloned_safe} = 0.0;")
