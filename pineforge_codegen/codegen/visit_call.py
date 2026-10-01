@@ -2744,6 +2744,8 @@ class CallVisitor:
                             val = "na<int64_t>()"
                     elif f_cpp_type == "bool":
                         val = self._coerce_bool_expr(val, value_node)
+                    elif f_cpp_type == "double":
+                        val = self._coerce_double_slot(val, value_node)
                     elif (self._is_nullable_collection_cpp_type(f_cpp_type)
                           and val == "na<double>()"):
                         val = f"{f_cpp_type}{{}}"

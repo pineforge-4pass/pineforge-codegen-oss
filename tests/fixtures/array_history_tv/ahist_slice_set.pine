@@ -1,0 +1,11 @@
+//@version=6
+// CG-ARRAY-HIST: an element set in a slice of an array's history.
+strategy("AHIST stop", overlay = true)
+float x = 0.0
+a = array.from(close, open)
+if bar_index > 0
+    s = (a[1]).slice(0, 1)
+    s.set(0, 5.0)
+    x := s.get(0)
+if bar_index == 5
+    strategy.entry("L", strategy.long, comment = str.tostring(x))

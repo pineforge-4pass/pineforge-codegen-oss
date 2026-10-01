@@ -1,0 +1,11 @@
+//@version=6
+// CG-ARRAY-HIST: an element pushed into the history of a var array.
+strategy("AHIST stop", overlay = true)
+float x = 0.0
+var a = array.new<float>()
+a.push(close)
+if bar_index > 0
+    (a[1]).push(1.0)
+    x := a.size()
+if bar_index == 5
+    strategy.entry("L", strategy.long, comment = str.tostring(x))

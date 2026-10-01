@@ -1,0 +1,8 @@
+//@version=6
+// CG-ARRAY-HIST: a method on a matrix's history before it has one.
+strategy("AHIST stop", overlay = true)
+float x = 0.0
+m = matrix.new<float>(1, 1, close)
+x := (m[1]).rows()
+if bar_index == 5
+    strategy.entry("L", strategy.long, comment = str.tostring(x))

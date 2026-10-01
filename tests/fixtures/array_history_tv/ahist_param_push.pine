@@ -1,0 +1,12 @@
+//@version=6
+// CG-ARRAY-HIST: a function pushing into the parameter it was given an array's history for.
+strategy("AHIST stop", overlay = true)
+float x = 0.0
+f(array<float> y) =>
+    y.push(1.0)
+    y.size()
+a = array.from(close)
+if bar_index > 0
+    x := f(a[1])
+if bar_index == 5
+    strategy.entry("L", strategy.long, comment = str.tostring(x))

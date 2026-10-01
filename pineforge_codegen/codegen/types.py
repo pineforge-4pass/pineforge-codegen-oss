@@ -3406,6 +3406,25 @@ class TypeInferer:
             return na_preserving_int_cast(cpp_val, target_cpp_type)
         return cpp_val
 
+    def _coerce_double_slot(self, cpp_val: str, node) -> str:
+        """Route a value into a ``double`` that a designated initializer
+        fills (a user-defined record's ``float`` field: ``Cell.new(v =
+        bar_index)``). C++ refuses to narrow a non-constant ``int`` or
+        ``int64_t`` there, which did not compile; TradingView holds the
+        number, an integer na as na (fixtures/array_history_tv uctor_float).
+        A double, an integer literal (a constant that fits narrows) and a bare
+        na keep their spelling."""
+        if (cpp_val == "na<double>()"
+                or self._INTEGRAL_CPP_TEXT.match(cpp_val)
+                or self._emitted_value_is_double(node)):
+            return cpp_val
+        if cpp_val in {"na<int>()", "na<int64_t>()"}:
+            return "na<double>()"
+        return (f"[&](){{ auto _pf_v = ({cpp_val}); "
+                f"if constexpr (std::is_floating_point_v<decltype(_pf_v)>) "
+                f"return (double)_pf_v; "
+                f"else return is_na(_pf_v) ? na<double>() : (double)_pf_v; }}()")
+
     def _coerce_int_slot_with_cast(
         self, cpp_val: str, node, target_cpp_type: str
     ) -> str:

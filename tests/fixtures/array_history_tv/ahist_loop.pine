@@ -1,0 +1,38 @@
+//@version=6
+// CG-ARRAY-HIST: a for...in loop over an array's history. Each close's
+// comment spells the values the script reads on that bar.
+strategy("AHIST loop", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+b = array.from(bar_index)
+var va = array.new<int>()
+va.push(bar_index)
+int l1 = -1
+int l2 = -1
+int l3 = -1
+int l4 = -1
+int l5 = -1
+int l6 = -1
+if bar_index >= 3
+    l1 := 0
+    for v in b[1]
+        l1 += v
+    bb = b[1]
+    l2 := 0
+    for v in bb
+        l2 += v
+    l3 := 0
+    for v in b[2]
+        l3 += v
+    l4 := 0
+    for [i, v] in b[1]
+        l4 += v + i * 1000
+    l5 := 0
+    for v in va[1]
+        l5 += 1
+    l6 := 0
+    for v in array.copy(b[1])
+        l6 += v
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(l1) + "|" + str.tostring(l2) + "|" + str.tostring(l3) + "|" + str.tostring(l4) + "|" + str.tostring(l5) + "|" + str.tostring(l6))

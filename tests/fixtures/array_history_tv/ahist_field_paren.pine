@@ -1,0 +1,12 @@
+//@version=6
+// CG-ARRAY-HIST: the history of an array field, in parentheses.
+strategy("AHIST field paren", overlay = true)
+type H
+    array<float> xs
+h = H.new(array.new<float>())
+h.xs.push(close)
+float r = 0.0
+if bar_index > 0
+    r := array.size((h.xs)[1])
+if r > 0
+    strategy.entry("L", strategy.long)

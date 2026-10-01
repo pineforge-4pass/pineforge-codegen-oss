@@ -1,0 +1,11 @@
+//@version=6
+// CG-ARRAY-HIST: the history of a matrix field.
+strategy("AHIST mfield", overlay = true)
+type H
+    matrix<float> m
+h = H.new(matrix.new<float>(1, 1, close))
+float r = 0.0
+if bar_index > 0
+    r := matrix.get(h.m[1], 0, 0)
+if r > 0
+    strategy.entry("L", strategy.long)
