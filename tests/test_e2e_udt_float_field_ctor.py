@@ -7,7 +7,9 @@ codegen initializes the record with a designated initializer, where C++
 refuses to narrow a non-constant ``int`` or ``int64_t`` into a ``double``:
 none of these constructors compiled. The value is now converted where the
 field is a ``double``, an integer na to na; an integer literal, which
-compiled, keeps its spelling.
+compiled, keeps its spelling. An int assigned to such a field (``c.v :=
+iv``) compiled, but an int na became -2147483648 where TradingView's field
+is na (``uassign_float``): it is converted the same way.
 """
 
 from __future__ import annotations
@@ -93,6 +95,31 @@ def test_the_tape_replays(tmp_path):
     assert set(tape.values()) == {"0|0|1|0|0", "0|na|1|0|0"}
     missed = mismatches(tape, exits["uctor_float"])
     assert not missed, f"{len(missed)} of {len(tape)} exits differ:\n" + "\n".join(missed[:5])
+
+
+def test_an_assigned_int_keeps_its_na(tmp_path):
+    # TradingView: na|0 on every third bar's close, 0|0 elsewhere; the
+    # pre-lane build read -2147483648 there.
+    engine = skip_unless_e2e_env()
+    exits = replay(engine, tmp_path, {"uassign_float": Build(source("uassign_float", FIXTURES))})
+    tape = tape_exits("uassign_float", FIXTURES)
+    assert len(tape) == 336
+    assert set(tape.values()) == {"0|0", "na|0"}
+    missed = mismatches(tape, exits["uassign_float"])
+    assert not missed, f"{len(missed)} of {len(tape)} exits differ:\n" + "\n".join(missed[:5])
+
+
+def test_an_assigned_double_or_literal_keeps_its_spelling():
+    # An int variable stored as an int is converted; one the script stores
+    # as a double (never reassigned) and a double keep their spelling.
+    cpp = transpile(_script(
+        "c = Cell.new()\nc.v := close\nc.w := 3\nint dv = bar_index\nc.w := dv\n"
+        "int iv = bar_index\nif bar_index % 3 == 0\n    iv := na\nc.w := iv\n"))
+    assert "_pf_udt_Cell.get(c).v = current_bar_.close;" in cpp
+    assert "_pf_udt_Cell.get(c).w = 3;" in cpp
+    assert "_pf_udt_Cell.get(c).w = dv;" in cpp
+    assert "_pf_udt_Cell.get(c).w = [&](){ auto _pf_w = (iv);" in cpp
+    compile_cpp(cpp, label="assigned float fields")
 
 
 def test_the_pre_lane_build_did_not_compile_it(tmp_path):

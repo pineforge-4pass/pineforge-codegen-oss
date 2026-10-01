@@ -3,7 +3,7 @@
 Synthetic probes written for lane CG-ARRAY-HIST: the history-referencing
 operator `[]` on an array or a matrix, and an int value given to a float
 field of a user-defined object. They contain no closed or scraped source.
-The nine tapes were exported on 2026-10-01 with
+The ten tapes were exported on 2026-10-01 with
 
 ```bash
 lab tv --pine <name>.pine --slug pf-<name, underscores as dashes> --no-note \
@@ -29,6 +29,7 @@ account's chart timezone, Asia/Taipei (UTC+8).
 | `ahist_method` | `fc3e1686e7493515fb4813abd4ddff475d36d8adcec010beb4f31e9ad01a6717` | `a248251a257aab65d63a5b0a57b7652eb9e4be09926d49ebd524cbfcdc64a217` |
 | `uctor_float` | `c98b31de4b8db20c2cac9426cc58b2a31e98965c989b693e4365195265212916` | `0184c3fb8a603bbd6baa4726a0f7341bd97a5110605ae1c8034c1f96e6604918` |
 | `ahist_sibling` | `04a0fa727545d2a6d364ac5db750ad79fe15d912029c3ab5c7c2419b437be142` | `7b651096759e0563ecbfd7ede637370892fba8bf64692cd53b1eb29fe7e4dbeb` |
+| `uassign_float` | `606fdba53cdc721482318cdb0712935b03d4e4a4102da5eeca3becab318345d8` | `20588f6bbbcd12f1802eb91163322e61ca3cb4afc6632a6e469d5a2322a92599` |
 
 Each exit Signal joins these fields with `|`, in this order:
 
@@ -41,6 +42,7 @@ Each exit Signal joins these fields with `|`, in this order:
 - `ahist_method`: `m1`, `k1`
 - `uctor_float`: `d1`, `n2`, `w2`, `d3`, `d4`
 - `ahist_sibling`: `one`, `two`
+- `uassign_float`: `n1`, `w1`
 
 What each tape shows (the fields of the bars below `bar_index` 2 or 3 are the
 probes' `-1` placeholders):
@@ -94,6 +96,9 @@ probes' `-1` placeholders):
   previous run left two bars back (`one` is 1002), never the second
   block's four-element array, which the second block reads three bars back
   (`two` is 4003).
+- `uassign_float`: an int assigned to a float field (`c.v := iv`) is that
+  number and an int na is na (`n1` is `na` on every third bar, else 0); a
+  `bar_index` assignment holds the bar index (`w1` is 0).
 - `uctor_float`: an int given to a float field is that number: the bar index
   by keyword (`d1` is 0), an int variable by position, na on every third bar
   (`n2`: `na` there, else 0), int arithmetic by position (`w2` is 1), an

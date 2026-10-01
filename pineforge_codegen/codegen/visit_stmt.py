@@ -1127,6 +1127,11 @@ class StmtVisitor:
                     f"{self._udt_array_field_value(array_field, node.value, val_cpp)};")
             elif node.op == ":=":
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, field_int)
+                if self._udt_field_is_double(node.target):
+                    # An int reaching a float field keeps its na (the
+                    # constructor's conversion: fixtures/array_history_tv
+                    # uctor_float).
+                    val_cpp = self._coerce_double_slot(val_cpp, node.value)
                 lines.append(f"{pad}{target_cpp} = {val_cpp};")
             else:
                 rhs = self._compound_assign_rhs(target_cpp, node.op, val_cpp)
