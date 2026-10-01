@@ -1,0 +1,14 @@
+//@version=6
+// CG-UDT-HIST: what a field of a na object reads: `(c[1]).v` on the first
+// bar, where `c[1]` is na. Each close's comment spells the value read.
+strategy("UDTH na field", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+type Cell
+    float v
+c = Cell.new(v = bar_index)
+prevV = (c[1]).v
+var float firstV = prevV
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(firstV) + "|" + str.tostring(prevV))

@@ -1,0 +1,40 @@
+//@version=6
+// CG-UDT-HIST: what the history of a user-defined object reads. A var object
+// changed every bar, a fresh object per bar changed on the next bar through
+// its history, a variable reassigned on its bar, an object or na, a nested
+// object. Each close's comment spells the values the script reads on that bar.
+strategy("UDTH ref", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+type Acc
+    float total = 0.0
+type Cell
+    int v
+    int n = 0
+type Outer
+    Cell inner
+var acc = Acc.new()
+acc.total += 1
+c = Cell.new(v = bar_index)
+Cell c2 = Cell.new(v = 1)
+c2 := Cell.new(v = 2)
+Cell maybe = bar_index % 3 == 0 ? Cell.new(v = bar_index) : na
+o = Outer.new(Cell.new(v = bar_index * 10))
+var bool firstNa = na(c[1])
+float d1 = -1.0
+int n2 = -1
+int v1 = -1
+int w1 = -1
+int i1 = -1
+if bar_index >= 2
+    p1 = c[1]
+    p1.n += 1
+    d1 := acc.total - (acc[1]).total
+    n2 := (c[2]).n
+    v1 := bar_index - (c[1]).v
+    w1 := (c2[1]).v
+    i1 := (o[1]).inner.v - (bar_index - 1) * 10
+mb = na(maybe[1]) ? "na" : str.tostring((maybe[1]).v)
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(d1) + "|" + str.tostring(n2) + "|" + str.tostring(v1) + "|" + str.tostring(w1) + "|" + str.tostring(i1) + "|" + mb + "|" + str.tostring(firstNa))

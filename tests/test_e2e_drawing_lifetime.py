@@ -132,6 +132,11 @@ CASES = (
                 (_top("u.bx"), _top("array.get(keep, 0)"), _top("f"), _top("array.get(keep, 1)"),
                  _top("array.get(w, 0).bx"), _top("array.get(keep, 2)"), _top("o"))),
     )),
+    Case("w9dg-pin-holders2", (
+        Readout("time == t(1, 15) or time == t(1, 30) or time == t(3, 0)",
+                (_top("u.bx"), _top("s"), _top("f"), _top("array.get(w, 0).bx"),
+                 _top("array.get(oa, 0)"), _top("o"))),
+    )),
     Case("w9dg-pin-locals", (
         Readout("time == t(1, 30) or time == t(1, 45) or time == t(3, 30)",
                 tuple(_top(f"array.get(ka, {i})") for i in range(4))),
@@ -147,11 +152,12 @@ CASES = (
     )),
 )
 # Exported for the rules above but not replayable through PineForge today:
-# map<int, box> is outside the supported map subset (w9dg-pin-holders); a
-# non-var drawing whose history is read declares as Series<double> and does not
-# compile (w9dg-pin-holders2); na() of a string does not compile
-# (w9dg-label-collect). Their variants -holders3 / -label-collect2 replay.
-EVIDENCE_ONLY = ("w9dg-pin-holders", "w9dg-pin-holders2", "w9dg-label-collect")
+# map<int, box> is outside the supported map subset (w9dg-pin-holders); na() of
+# a string does not compile (w9dg-label-collect). Their variants -holders3 /
+# -label-collect2 replay. w9dg-pin-holders2, whose non-var box carried by
+# s := s[1] declared as Series<double> and did not compile before lane
+# CG-UDT-HIST, replays.
+EVIDENCE_ONLY = ("w9dg-pin-holders", "w9dg-label-collect")
 BUILDS = ("lane", "base")
 
 

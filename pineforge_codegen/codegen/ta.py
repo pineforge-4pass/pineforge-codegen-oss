@@ -1131,6 +1131,65 @@ class TaSiteHelper:
             )
         return cache[id(node)]
 
+    def _lazy_ctor_history_call(self, call) -> bool:
+        """A positional call of the one user function of its name whose body
+        is a single ``T.new(...)`` of a user-defined type over
+        ``_lazy_call_history_pure_expr`` arguments of its parameters: its value
+        is a new object of fixed fields, and TradingView runs it on every
+        execution of its scope below a lazy edge when its history is read
+        (fixtures/udt_history_tv udth_expr: ``(mk(bar_index * 7)[1]).v`` in a
+        ternary's arm reads the previous bar's call)."""
+        if not isinstance(call, FuncCall) or not isinstance(call.callee, Identifier):
+            return False
+        overloads = [fi for fi in self.ctx.func_infos if fi.name == call.callee.name]
+        if call.kwargs or len(overloads) != 1 or overloads[0].node is None:
+            return False
+        node = overloads[0].node
+        body = getattr(node, "body", None) or []
+        if len(call.args) != len(node.params) or len(body) != 1:
+            return False
+        ctor = body[0].expr if isinstance(body[0], ExprStmt) else None
+        if not (isinstance(ctor, FuncCall)
+                and isinstance(ctor.callee, MemberAccess)
+                and isinstance(ctor.callee.object, Identifier)
+                and ctor.callee.object.name in self._udt_defs
+                and ctor.callee.member == "new"):
+            return False
+        params = set(node.params)
+        return all(self._lazy_call_history_pure_expr(arg, params)
+                   for arg in [*ctor.args, *ctor.kwargs.values()])
+
+    def _lazy_reference_history_object(self, obj) -> bool:
+        """Whether the history of the object or drawing reference ``obj``
+        below a lazy edge is kept on every execution of its scope, as
+        TradingView keeps it (udth_expr): a pure call or a
+        ``_lazy_ctor_history_call`` over pure arguments, a ternary over
+        names, literals and operators, or a field of a named object (read
+        na while the object is na, ``_lazy_history_read_cpp``)."""
+        if self._reference_cpp_type(obj) is None:
+            return False
+        if isinstance(obj, FuncCall):
+            return ((self._lazy_call_history_pure_call(obj)
+                     or self._lazy_ctor_history_call(obj))
+                    and all(self._lazy_call_history_pure_expr(arg, None)
+                            for arg in obj.args))
+        if isinstance(obj, Ternary):
+            return self._lazy_call_history_pure_expr(obj, None)
+        return (isinstance(obj, MemberAccess)
+                and isinstance(obj.object, Identifier)
+                and self._reference_cpp_type(obj.object) is not None)
+
+    def _lazy_history_read_cpp(self, obj) -> str:
+        """The value a hoisted history read pushes: the expression, a field of
+        a na object reading na (TradingView stops on the read itself)."""
+        if (isinstance(obj, MemberAccess)
+                and self._reference_cpp_type(obj.object) is not None):
+            handle = self._reference_cpp_type(obj)
+            receiver = self._visit_expr(obj.object)
+            return (f"(is_na({receiver}) ? {handle}{{}} : "
+                    f"{handle}({self._visit_expr(obj)}))")
+        return self._visit_expr(obj)
+
     def _lazy_call_history_units(self, stmt) -> list:
         """The ``pure_call(...)[k]`` reads below a lazy edge of ``stmt``'s
         roots (``_lazy_edge_statement_roots``), in evaluation order, whose
@@ -1157,6 +1216,9 @@ class TaSiteHelper:
                 if (under_lazy and self._lazy_call_history_pure_call(call)
                         and all(self._lazy_call_history_pure_expr(arg, None)
                                 for arg in call.args)):
+                    units.append(expr)
+                    return
+                if under_lazy and self._lazy_reference_history_object(call):
                     units.append(expr)
                     return
                 scan(expr.object, under_lazy)
@@ -1219,7 +1281,8 @@ class TaSiteHelper:
         hoisted = []
         for read in units:
             member = self._inline_history_member("hist_call", read)
-            self._emit_history_series_write(lines, pad, member, self._visit_expr(read.object))
+            self._emit_history_series_write(
+                lines, pad, member, self._lazy_history_read_cpp(read.object))
             self._hoisted_hist_reads[id(read)] = member
             hoisted.append(id(read))
         return hoisted

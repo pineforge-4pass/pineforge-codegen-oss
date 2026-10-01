@@ -36,6 +36,7 @@ import re
 from typing import Callable
 
 from .ast_nodes import (
+    HISTORY_MEMBER_ANNOTATION,
     ASTNode,
     Program, StrategyDecl, ImportStmt, TypeField,
     VarDecl, Assignment, TupleAssign,
@@ -1482,6 +1483,40 @@ class SupportChecker:
             )
         self._visit_children(node)
 
+    def _refuse_history_member(self, node: MemberAccess) -> None:
+        """A field read or a method call written straight after the
+        history-referencing operator: TradingView refuses ``c[1].v``
+        ("User variable identifiers should not contain '.'", CE10011) and
+        ``b[1].get_top()`` (CE10010), and takes the history reference in
+        parentheses, ``(c[1]).v``, which reads the field of the object the
+        variable held (fixtures/udt_history_tv)."""
+        history = node.object
+        receiver = "x[k]"
+        if (isinstance(history, Subscript)
+                and isinstance(history.object, Identifier)
+                and isinstance(history.index, (NumberLiteral, Identifier))):
+            index = (history.index.name if isinstance(history.index, Identifier)
+                     else history.index.value)
+            receiver = f"{history.object.name}[{index}]"
+        if id(node) in self._callee_node_ids:
+            self._err(
+                node,
+                f"{receiver}.{node.member}(): TradingView refuses a method "
+                "call straight after the history-referencing operator "
+                "(CE10010).",
+                hint=f"Call the method on the history reference in "
+                     f"parentheses: ({receiver}).{node.member}().",
+            )
+            return
+        self._err(
+            node,
+            f"{receiver}.{node.member}: TradingView refuses a field read "
+            "straight after the history-referencing operator (CE10011: "
+            "\"User variable identifiers should not contain '.'\").",
+            hint=f"Read the field of the history reference in parentheses: "
+                 f"({receiver}).{node.member}.",
+        )
+
     def _visit_FuncCall(self, node: FuncCall) -> None:
         ns, name = _qualified_name(node.callee)
 
@@ -1976,6 +2011,8 @@ class SupportChecker:
         self._visit(node.false_val)
 
     def _visit_MemberAccess(self, node: MemberAccess) -> None:
+        if (node.annotations or {}).get(HISTORY_MEMBER_ANNOTATION):
+            self._refuse_history_member(node)
         chain = _resolve_member_chain(node)
         if (
             chain is not None

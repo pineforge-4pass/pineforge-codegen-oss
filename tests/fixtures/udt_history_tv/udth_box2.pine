@@ -1,0 +1,30 @@
+//@version=6
+// CG-UDT-HIST: drawings read and deleted through their history: a box drawn
+// every bar and deleted through b[1] on every fourth bar, a line and a label
+// read two bars back, a var box redrawn on every third bar. Each close's
+// comment spells the values the script reads on that bar.
+strategy("UDTH box2", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+b = box.new(bar_index, high, bar_index + 1, low)
+l = line.new(bar_index, close, bar_index + 1, open)
+lb = label.new(bar_index, close, "x")
+var box vb = na
+if bar_index % 3 == 0
+    vb := box.new(bar_index, bar_index, bar_index + 1, 0)
+string d1 = "x"
+string d3 = "x"
+float ly = -1.0
+float lx = -1.0
+float vt = -1.0
+if bar_index >= 3
+    if bar_index % 4 == 1
+        box.delete(b[1])
+    d1 := na(b[1]) ? "na" : "live"
+    d3 := na(box.get_top(b[3])) ? "na" : "live"
+    ly := line.get_y1(l[1]) - close[1]
+    lx := label.get_x(lb[2]) - (bar_index - 2)
+    vt := na(vb[1]) ? -2.0 : box.get_top(vb[1])
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = d1 + "|" + d3 + "|" + str.tostring(ly, "#.####") + "|" + str.tostring(lx) + "|" + str.tostring(vt))

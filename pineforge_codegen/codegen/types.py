@@ -1545,13 +1545,16 @@ class TypeInferer:
                     return TypeSpec.primitive(primitive_name)
             return None
         if isinstance(node, Subscript):
-            # History access preserves the scalar drawing-handle type.  This
-            # is intentionally not generalized to arrays/maps: their
-            # subscripting rules are handled by the collection paths below.
+            # History access preserves the drawing-handle and user-object
+            # type: ``c[1]`` is the reference ``c`` held one bar back
+            # (fixtures/udt_history_tv).  This is intentionally not
+            # generalized to arrays/maps: their subscripting rules are handled
+            # by the collection paths below.
             receiver_spec = self._type_spec_from_expr(node.object)
             if (receiver_spec is not None
                     and receiver_spec.kind == "udt"
-                    and receiver_spec.name in DRAWING_TYPE_TO_CPP):
+                    and (receiver_spec.name in DRAWING_TYPE_TO_CPP
+                         or receiver_spec.name in self._udt_defs)):
                 return receiver_spec
             return None
         if isinstance(node, Ternary):
@@ -2206,6 +2209,9 @@ class TypeInferer:
         # init RHS is such a builtin, so also match the builtin name directly.
         if name in INT64_BUILTINS:
             return "int64_t"
+        handle = self._series_handle_cpp_type(name)
+        if handle is not None:
+            return handle
         sym = self._variable_symbol(name)
         # A float or bool an epoch reaches keeps its type: the analyzer types
         # every request.security value float (a double holds an epoch
@@ -2224,6 +2230,51 @@ class TypeInferer:
         if sym is not None:
             return PINE_TYPE_TO_CPP.get(sym.pine_type, "double")
         return "double"
+
+    def _series_handle_type_name(self, name: str) -> str | None:
+        """The user-defined or drawing type (``Cell``, ``box``) of the
+        history-read variable ``name``, else None. Such a variable holds a
+        reference, and its history the references it held: ``(c[1]).v`` reads
+        the object ``c`` held one bar back as it is now (fixtures/
+        udt_history_tv; Pine v6 User Manual, "Type system": value vs.
+        reference types). A buffer is keyed by spelling across scopes, so
+        every scope's history-read variable of that spelling must hold the
+        same type; any other variable keeps the buffer it always had.
+        Cached per name."""
+        cache = self.__dict__.setdefault("_series_handle_type_cache", {})
+        if name in cache:
+            return cache[name]
+        found: set[str] = set()
+        for scope in self.ctx.symbols.all_scopes:
+            sym = scope.symbols.get(name)
+            if sym is None or not getattr(sym, "is_series", False):
+                continue
+            spec = getattr(sym, "type_spec", None)
+            if (spec is None or spec.kind != "udt"
+                    or not (spec.name in DRAWING_TYPE_TO_CPP
+                            or spec.name in self._udt_defs)):
+                found = set()
+                break
+            found.add(spec.name)
+        cache[name] = next(iter(found)) if len(found) == 1 else None
+        return cache[name]
+
+    def _series_handle_cpp_type(self, name: str) -> str | None:
+        """The handle such a variable stores per bar (``Series<Cell>``,
+        ``Series<Box>``; a na reference is the handle's ``T{}``), else
+        None (``_series_handle_type_name``)."""
+        udt = self._series_handle_type_name(name)
+        if udt is None:
+            return None
+        return DRAWING_TYPE_TO_CPP.get(udt) or self._safe_name(udt)
+
+    def _series_handle_target(self, name: str) -> str | None:
+        """``_visit_rhs_value``'s target for a value stored in such a
+        variable's history: the drawing handle, or the user type's name."""
+        udt = self._series_handle_type_name(name)
+        if udt is None:
+            return None
+        return DRAWING_TYPE_TO_CPP.get(udt, udt)
 
     def _variable_symbol(self, name: str):
         """The symbol the variable ``name`` resolves to.
@@ -2303,6 +2354,18 @@ class TypeInferer:
         declared_spec = (
             declared_specs[index] if index < len(declared_specs) else None
         )
+        # A parameter holding a user-defined object or a drawing keeps the
+        # references its calls passed (``_series_handle_cpp_type``).
+        inferred_specs = list(getattr(func_info, "param_type_specs", ()) or ())
+        for candidate in (
+            declared_spec,
+            inferred_specs[index] if index < len(inferred_specs) else None,
+        ):
+            if (candidate is not None and candidate.kind == "udt"
+                    and (candidate.name in DRAWING_TYPE_TO_CPP
+                         or candidate.name in self._udt_defs)):
+                return (DRAWING_TYPE_TO_CPP.get(candidate.name)
+                        or self._safe_name(candidate.name))
         # A declared type is authoritative across every written call. Only a
         # truly untyped slot may consult the per-callsite specialization map.
         spec = declared_spec

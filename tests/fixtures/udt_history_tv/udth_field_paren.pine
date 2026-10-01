@@ -1,0 +1,10 @@
+//@version=6
+strategy("f2", overlay = true)
+type Cell
+    float v
+c = Cell.new(v = close)
+float r = 0.0
+if bar_index > 0
+    r := (c.v)[1]
+if r > 0
+    strategy.entry("L", strategy.long)

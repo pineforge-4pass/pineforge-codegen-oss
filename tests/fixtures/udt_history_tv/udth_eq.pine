@@ -1,0 +1,16 @@
+//@version=6
+// CG-UDT-HIST: do == and != compare user-defined objects, and against history?
+// Each close's comment spells the comparisons read on that bar.
+strategy("UDTH eq", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1)
+type Cell
+    int v
+var Cell keep = Cell.new(v = 0)
+c = Cell.new(v = bar_index)
+k = keep
+s1 = c != c[1]
+s2 = k == k[1]
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = str.tostring(s1) + "|" + str.tostring(s2))

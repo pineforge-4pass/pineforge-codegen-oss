@@ -1,0 +1,34 @@
+//@version=6
+// CG-UDT-HIST: == and != on line and label references and their history. A
+// line and a label drawn on every bar, a var line and a var label, a na line,
+// an alias, and a line deleted through its history on every fourth bar. Each
+// close's comment spells the comparisons the script reads on that bar.
+strategy("UDTH line eq", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 1, max_lines_count = 500, max_labels_count = 500)
+l = line.new(bar_index, close, bar_index + 1, open)
+var line vl = line.new(0, 0, 1, 1)
+lb = label.new(bar_index, close, "x")
+var label vlb = label.new(0, 0, "v")
+line nl = na
+var bool firstNe = l != l[1]
+var bool firstEq = l == l[1]
+var bool firstNa = nl == nl[1]
+var bool firstNaNe = nl != l
+s1 = l != l[1]
+s2 = vl == vl[1]
+s3 = lb != lb[1]
+s4 = vlb == vlb[1]
+s5 = vl == l
+alias = l
+s6 = alias == l
+s7 = nl == nl[1]
+s8 = nl != l
+if bar_index % 4 == 1
+    line.delete(l[1])
+s9 = l[1] == l[1]
+s10 = l[2] != l[1]
+f(bool b) => b ? "1" : "0"
+mn = minute(time, "UTC")
+if mn == 0 or mn == 30
+    strategy.entry("L", strategy.long)
+if mn == 15 or mn == 45
+    strategy.close("L", comment = f(firstNe) + f(firstEq) + f(firstNa) + f(firstNaNe) + "|" + f(s1) + f(s2) + f(s3) + f(s4) + f(s5) + f(s6) + f(s7) + f(s8) + f(s9) + f(s10))

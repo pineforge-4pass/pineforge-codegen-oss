@@ -1721,7 +1721,12 @@ class TopLevelEmitter:
                                 name,
                                 target_cpp_type=udt_name,
                             )
-                            lines.append(f"            {safe} = {cpp_val};")
+                            if self._binding_is_series(name, safe):
+                                # A history-read var object: its first
+                                # bar's slot holds the reference.
+                                lines.append(f"            {safe}.push({cpp_val});")
+                            else:
+                                lines.append(f"            {safe} = {cpp_val};")
                             break
                     continue
                 if self._binding_is_series(name, safe):
@@ -2103,11 +2108,16 @@ class TopLevelEmitter:
 
             if (
                 receiver_spec is not None
-                and receiver_spec.kind == "primitive"
+                and (receiver_spec.kind == "primitive"
+                     or (receiver_spec.kind == "udt"
+                         and (receiver_spec.name in DRAWING_TYPE_TO_CPP
+                              or receiver_spec.name in self._udt_defs)))
                 and p in func_sv
             ):
                 # A primitive receiver used with history is a Series boundary,
-                # just like an ordinary history-bearing UDF parameter.
+                # just like an ordinary history-bearing UDF parameter; so is
+                # an object or drawing receiver (``this[1]`` is the receiver of
+                # the previous call: fixtures/udt_history_tv udth_method).
                 elem_cpp_t = self._series_param_element_cpp_type(
                     fi, i, call_site_idx
                 )
@@ -2118,6 +2128,9 @@ class TopLevelEmitter:
                 self._current_func_series_param_types[
                     self._safe_name(p)
                 ] = elem_cpp_t
+                if receiver_spec.kind == "udt":
+                    self._udt_param_udt[self._safe_name(p)] = receiver_spec.name
+                    self._udt_param_udt[p] = receiver_spec.name
             elif is_method and i == 0 and fi.udt_type_name:
                 # Receiver pass modes follow Pine's value/ID families. A user
                 # UDT is itself a numeric object-ID handle, so pass it by value:

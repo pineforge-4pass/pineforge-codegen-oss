@@ -18,6 +18,7 @@ from .lexer import Token, TokenType
 from .errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from .limits import MAX_NESTING_DEPTH, TimeBudget, limit_error, syntax_children
 from .ast_nodes import (
+    HISTORY_MEMBER_ANNOTATION,
     ASTNode, ArgOrder,
     Program, StrategyDecl, ImportStmt,
     VarDecl, Assignment, TupleAssign,
@@ -1482,6 +1483,11 @@ class Parser:
     def _parse_postfix(self):
         chain_tok = self._current()
         expr = self._parse_primary()
+        # Whether ``expr`` is a history reference this chain wrote, not one in
+        # parentheses: TradingView refuses a member straight after it
+        # (``c[1].v``, CE10011; ``b[1].get_top()``, CE10010), which the
+        # support checker reports (HISTORY_MEMBER_ANNOTATION).
+        after_subscript = False
         while True:
             # Subscript: expr[index]
             if self._check(TokenType.LBRACKET):
@@ -1491,6 +1497,9 @@ class Parser:
                 self._consume(TokenType.RBRACKET)
                 expr = Subscript(object=expr, index=index)
                 self._set_loc(expr, start_tok)
+                after_subscript = True
+                self._check_chain(expr, chain_tok)
+                continue
 
             # Member access: expr.member  or  expr.member(args)
             elif self._check(TokenType.DOT):
@@ -1501,24 +1510,30 @@ class Parser:
                 if self._looks_like_call_template_args():
                     template_args = self._parse_template_args()
 
+                annotations = {}
+                if template_args:
+                    annotations["template_args"] = template_args
+                if after_subscript:
+                    annotations[HISTORY_MEMBER_ANNOTATION] = True
                 if self._check(TokenType.LPAREN):
                     # Build callee as MemberAccess, then parse call
                     callee = MemberAccess(object=expr, member=member_tok.value)
                     self._set_loc(callee, member_tok)
-                    if template_args:
-                        callee.annotations = {"template_args": template_args}
+                    if annotations:
+                        callee.annotations = annotations
                     expr = self._parse_call_with_callee(callee)
                 else:
                     expr = MemberAccess(object=expr, member=member_tok.value)
                     self._set_loc(expr, member_tok)
-                    if template_args:
-                        expr.annotations = {"template_args": template_args}
+                    if annotations:
+                        expr.annotations = annotations
 
             # Direct call: expr(args) — needed for identifiers followed by (
             elif self._check(TokenType.LPAREN) and self._is_call_position(expr):
                 expr = self._parse_call_with_callee(expr)
             else:
                 break
+            after_subscript = False
             self._check_chain(expr, chain_tok)
         return expr
 
