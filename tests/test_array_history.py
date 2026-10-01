@@ -22,7 +22,7 @@ matrix field (``h.xs[1]``, ``(h.xs)[1]``: CE10290), ``==`` on arrays
 generating C++. A form TradingView accepts that PineForge does not lower
 keeps the lowering it had where that compiled (an element of the current
 array, a parameter's current array, with a warning), and is refused by name
-where it did not.
+where it did not, but for the two gaps CLAUDE.md's array history row names.
 """
 
 from __future__ import annotations
