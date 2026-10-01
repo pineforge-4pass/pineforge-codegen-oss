@@ -564,7 +564,11 @@ you delete or weaken the special case, the test will tell you.
    converted where the designated initializer would narrow it, an
    integer na to na (`types._coerce_double_slot`): it did not compile
    (`tests/test_e2e_udt_float_field_ctor.py`, tape
-   `fixtures/array_history_tv/uctor_float`).
+   `fixtures/array_history_tv/uctor_float`); an expression of int
+   literals a double holds exactly keeps its spelling. A `:=` to such a
+   field converts the same way: it compiled, but an int na became
+   -2147483648 where TradingView's field is na (tape
+   `fixtures/array_history_tv/uassign_float`).
 10. **An inline `input.*()` call is one leaf of a TA length.** TA ctor
    args (and derived / user-function lengths) reach the codegen as Pine
    source spellings. `pine_spelling.py` keeps an inline input call whole
