@@ -1,8 +1,8 @@
 # Public contract for 1.0
 
-This is the contract that 1.0.0, released 2026-09-30, implements. The last
-0.x release, 0.10.4, has neither the `libraries` argument nor the
-`diagnostics` key described below.
+This is the contract that 1.0.0, released 2026-09-30, implements, and 1.0.1,
+released 2026-10-02, implements unchanged. The last 0.x release, 0.10.4, has
+neither the `libraries` argument nor the `diagnostics` key described below.
 
 The supported programmatic entry points are the Python functions
 `pineforge_codegen.transpile` and `pineforge_codegen.transpile_full`, plus the

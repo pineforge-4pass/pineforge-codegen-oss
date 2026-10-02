@@ -20,6 +20,175 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## 1.0.1 — 2026-10-02
+
+A patch release of translation fixes. It covers the changes merged to `main`
+since 1.0.0:
+[#156](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/156) and
+[#157](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/157)
+change the translation, and
+[#154](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/154) and
+[#155](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/155)
+the documentation. Codegen `1.0.1` supports only engine `v1.0.1`. Engine
+`v1.0.1` changes only documentation since `v1.0.0`, so the pair keeps C ABI
+version 4 and the script ABI epoch `engine_script_run_v19`.
+
+### Compatibility and migration
+
+- Regenerate C++ with 1.0.1 and relink it against engine `v1.0.1`'s headers
+  and `libpineforge.a`. A pair change requires it, even though the C ABI
+  number is unchanged.
+- The Python and JSON contract is unchanged: `transpile()`,
+  `transpile_full()` and `gate/glue.py`'s `transpile_json` keep their
+  arguments, result keys and envelopes. No report key changes: the engine's
+  JSON report keeps the keys it had with 1.0.0, `metrics.equity.sharpe_tv`
+  and `sortino_tv` included.
+- The engine's 325 public corpus sources and this repository's 277 gate
+  fixtures transpile to the same C++ as with 1.0.0, byte for byte (the 13
+  fixtures the gate expects to be refused are refused with the same message),
+  and so do the 1,384 real-world strategy sources the two pull requests
+  measured, transpiled in fresh processes.
+- Some scripts that 1.0.0 transpiled are refused now, each with the code
+  TradingView's compiler refuses it with. Among them are an array's history
+  used as an operand or as a value (`a[1] + 1`, `c.push(a[1])`: CE10123),
+  which 1.0.0 read, with a warning, as an element of the current array, and
+  a method straight after a history read (`m[1].get(0, 0)`: CE10011), which
+  is written `(m[1]).get(0, 0)`. "Refused at compile time" below lists them
+  all.
+
+### History of user-defined objects and drawings
+
+1.0.0 emitted C++ that did not compile for the history of an object: it
+declared a variable of a user-defined type or a drawing type whose history
+was read `Series<double>`
+([#156](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/156)).
+
+- `obj[k]` is the reference the variable held k bars back, `na` before the
+  first, and `(obj[k]).field` reads that object as it is now, as on
+  TradingView, for boxes, lines and labels too. This holds for globals, `var`
+  objects, block and function locals, function parameters and method
+  receivers, and a drawing parameter's or receiver's history takes its
+  built-in methods (`(this[1]).get_top()`).
+- In a function, a method and an `if` block the history counts the executions
+  of the scope. At a call site that skips bars, a function's object
+  parameter keeps one slot per chart bar, as TradingView does; a typed
+  method's receiver does not yet (see "Not covered" below).
+- A temporary drawing passed to a drawing parameter compiles: a history read,
+  a new drawing or chart point, or a call's result.
+- The history of an expression whose value is an object (`o.inner[1]`,
+  `f()[1]`, `(c ? a : b)[1]`) is the reference it produced at its previous
+  evaluation. Below a lazy edge, such as a `?:` arm, a read that is safe to
+  evaluate (a pure or constructor call over pure arguments, a ternary over
+  names, a named object's field) is kept on every bar, as TradingView keeps
+  it.
+- `==` / `!=` compare two lines or two labels by identity, `na` included.
+
+### History of arrays and matrices
+
+1.0.0 emitted C++ that did not compile for the history of an array or a
+matrix, such as `(a[1]).size()`, `array.size(a[1])` and `(m[1]).get(0, 0)`
+([#157](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/157)).
+
+- `a[k]` of an array or matrix variable, top-level or a block's local, is a
+  read-only copy of the collection as the variable left it at the end of its
+  scope's execution k executions back: the bar k bars back for a top-level
+  variable, the block's previous run for a block's local. A built-in reads
+  it, `na()` tests it, a variable or a function argument can hold it, and
+  `matrix.copy(m[1])` has the variable's element type. A `for...in` loop over
+  `a[1]` iterates the array the variable holds now, as on TradingView.
+- Two sibling blocks that declare the same name keep a history each.
+- A change to the copy, to a slice of it, or through a variable or parameter
+  bound to it stops the run with TradingView's runtime error RE10051. A method
+  on it before the variable has a history stops the run with RE10052 for an
+  array and RE10053 for a matrix.
+
+### Int values in float fields
+
+From [#157](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/157):
+
+- `Cell.new(v = bar_index)`, a non-constant int given to a `float` field of a
+  user-defined type, compiles: the int converts to a double and an int `na`
+  to `na`. 1.0.0 narrowed it in a braced initializer, which did not compile.
+- A value that came out silently wrong: `c.v := iv`, an int assigned to a
+  `float` field, stored an int `na` as -2147483648; it now stores `na`, as
+  TradingView does. On the `uassign_float` tape 112 of 336 exits differed
+  before.
+- A bool given to a `float` field converts to 1 or 0 and is never `na`.
+  TradingView refuses a bool there (CE10123 in a constructor, CE10173 in an
+  assignment).
+
+### Refused at compile time
+
+A located `CompileError` now refuses, with TradingView's error code, what
+TradingView's compiler refuses
+([#156](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/156),
+[#157](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/157)):
+
+- a field or method straight after the history operator: `c[1].v` (CE10011),
+  `b[1].get_top()` (CE10010), `a[1].size()` (CE10011). The parenthesized
+  `(c[1]).v` is the valid spelling;
+- the history of a field: a value field (`c.v[1]`, `(c.v)[1]`) and an
+  object's array, matrix or map field (`h.xs[1]`, `(h.xs)[1]`), CE10290;
+- `==` / `!=` of references other than lines and labels (CE10123), and of a
+  reference with `na` (CE10187);
+- an array's history where a number, a condition, a string or an element is
+  expected: an operator's operand, `nz`, `math.*`, a value slot of an array
+  function (`c.push(a[1])`, `array.new<float>(2, a[1])`), `log.*`'s message,
+  `label.new`'s text and `str.tostring` of a color array (CE10123); a scalar
+  variable or field (CE10173); an `if` or `while` condition (CE10101);
+  `array.from`, and `str.format` of a color array (CE10122); a bare statement
+  at the top level (CE10009).
+
+Refused by name, where TradingView compiles the script; none of these
+compiled under 1.0.0:
+
+- the history of an object or a drawing inside a `request.security`
+  expression (TradingView reads the requested timeframe's objects, which
+  PineForge does not keep), and the history of a `chart.point` variable whose
+  fields the script changes (PineForge holds a point as a value)
+  ([#156](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/156));
+- an array or matrix history read whose earlier lowering did not compile,
+  but for the two gaps below
+  ([#157](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/157)).
+
+### Not covered
+
+- A typed method's receiver at a call site that skips bars counts calls,
+  where TradingView keeps one slot per chart bar: from the third call on,
+  `this[2]` reads three bars further back
+  ([#156](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/156)).
+- The history of a function's array or matrix parameter or local, of a call's
+  result and of a selection is not kept (TradingView keeps one per call). Such
+  a read keeps 1.0.0's lowering where that compiled, and is refused otherwise
+  ([#157](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/157)).
+- Two kinds of history read keep the C++ they had, which does not compile: an
+  element function's value of a string array's history where the earlier
+  lowering is kept (in a function, a method, a loop or a block `var`), such
+  as `f() => str.length(array.first(s[1]))`; and the history of a variable or
+  a call that the analyzer does not type as an array or a matrix (a method's
+  or `matrix.row`'s new array, a selection of arrays, a tuple's element, an
+  array of drawings)
+  ([#157](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/157)).
+- PineForge holds no `na` array: a variable bound to a history before the
+  variable has one holds an empty array where TradingView's is `na`, and one
+  the script also tests with `na()` is refused
+  ([#157](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/157)).
+- As in 1.0.0, these do not compile: an int from `matrix.rows()`,
+  `columns()`, `elements_count()` or `strategy.wintrades` given to a `float`
+  field; `matrix.sum(m1, m2)` and other matrix results used without a
+  declared type; a method called on an operator expression
+  (`(close * 2).m()`). `str.tostring` of an array is not lowered.
+
+### Documentation
+
+- The README, the changelog and the docs describe the 1.0.0 release
+  ([#154](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/154)),
+  and the README calls no version the latest
+  ([#155](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/155)).
+  PyPI shows each release's README as its description, so 1.0.1's PyPI page
+  shows the README of the `v1.0.1` tag; 1.0.0's keeps the one it was uploaded
+  with.
+
 ## 1.0.0 — 2026-09-30
 
 This is the 1.0 release note. It covers the changes merged to `main`
