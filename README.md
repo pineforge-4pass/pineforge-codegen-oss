@@ -20,11 +20,12 @@ TradingView-side anomalies. A probe is a
 strategy exported from TradingView with its trade list and replayed trade for
 trade on the same bars. The baseline predates the 1.0.0 and 1.0.1 releases.
 The 1.0.0 releases changed no grade: codegen 1.0.0 has the code of 70c2b4a,
-and engine `v1.0.0` includes 35db01c8. The 1.0.1 releases were not re-graded:
-engine `v1.0.1` changes only documentation since `v1.0.0`, and codegen 1.0.1
-transpiles the engine's public corpus, the gate fixtures and the 1,384
-real-world strategy sources its pull requests measured to the same C++ as
-1.0.0. The
+and engine `v1.0.0` includes 35db01c8. The 1.0.1 code was graded before it
+merged: this repository at 67892cd, the code of codegen 1.0.1, with engine
+b2a578ce, whose library source is `v1.0.0`'s, graded the same 7,989 probes
+with no probe changing tier (baseline
+`pineforge-parity-baseline-20261001-codegen-67892cda`). Engine `v1.0.1`
+changes only documentation since `v1.0.0`. The
 engine's [validation scoreboard](https://github.com/pineforge-4pass/pineforge-engine#validation-scoreboard)
 describes how a probe is graded.
 
