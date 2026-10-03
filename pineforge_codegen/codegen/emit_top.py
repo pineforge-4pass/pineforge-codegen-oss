@@ -600,6 +600,7 @@ class TopLevelEmitter:
             '#error "Generated lifecycle reset requires a matching PineForge engine; rebuild with script-run preparation support"',
             "#endif",
             "    void prepare_script_run(const Bar* bars, int n, bool allow_precalculation) override {",
+            "        _pf_require_settings_ok();",
             "        _pf_script_state_checkpoint_.reset();",
         ])
         seen: set[str] = set()
@@ -1974,20 +1975,20 @@ class TopLevelEmitter:
         lines.append("    void strategy_set_input(void* s, const char* key, const char* value) {")
         lines.append("        if (!s || !key || !value) return;")
         lines.append("        try { static_cast<GeneratedStrategy*>(s)->set_input(key, value); }")
-        lines.append('        catch (const std::exception& _pf_error) { static_cast<GeneratedStrategy*>(s)->_pf_record_failure("strategy_set_input", _pf_error.what()); }')
-        lines.append('        catch (...) { static_cast<GeneratedStrategy*>(s)->_pf_record_failure("strategy_set_input", "unknown C++ exception"); }')
+        lines.append('        catch (const std::exception& _pf_error) { static_cast<GeneratedStrategy*>(s)->_pf_record_setting_failure("strategy_set_input", _pf_error.what()); }')
+        lines.append('        catch (...) { static_cast<GeneratedStrategy*>(s)->_pf_record_setting_failure("strategy_set_input", "unknown C++ exception"); }')
         lines.append("    }")
         lines.append("    void strategy_set_override(void* s, const char* key, const char* value) {")
         lines.append("        if (!s || !key || !value) return;")
         lines.append("        try { static_cast<GeneratedStrategy*>(s)->set_strategy_override(key, value); }")
-        lines.append('        catch (const std::exception& _pf_error) { static_cast<GeneratedStrategy*>(s)->_pf_record_failure("strategy_set_override", _pf_error.what()); }')
-        lines.append('        catch (...) { static_cast<GeneratedStrategy*>(s)->_pf_record_failure("strategy_set_override", "unknown C++ exception"); }')
+        lines.append('        catch (const std::exception& _pf_error) { static_cast<GeneratedStrategy*>(s)->_pf_record_setting_failure("strategy_set_override", _pf_error.what()); }')
+        lines.append('        catch (...) { static_cast<GeneratedStrategy*>(s)->_pf_record_setting_failure("strategy_set_override", "unknown C++ exception"); }')
         lines.append("    }")
         lines.append("    void strategy_set_magnifier_volume_weighted(void* s, int on) {")
         lines.append("        if (!s) return;")
         lines.append("        try { static_cast<GeneratedStrategy*>(s)->set_magnifier_volume_weighted(on != 0); }")
-        lines.append('        catch (const std::exception& _pf_error) { static_cast<GeneratedStrategy*>(s)->_pf_record_failure("strategy_set_magnifier_volume_weighted", _pf_error.what()); }')
-        lines.append('        catch (...) { static_cast<GeneratedStrategy*>(s)->_pf_record_failure("strategy_set_magnifier_volume_weighted", "unknown C++ exception"); }')
+        lines.append('        catch (const std::exception& _pf_error) { static_cast<GeneratedStrategy*>(s)->_pf_record_setting_failure("strategy_set_magnifier_volume_weighted", _pf_error.what()); }')
+        lines.append('        catch (...) { static_cast<GeneratedStrategy*>(s)->_pf_record_setting_failure("strategy_set_magnifier_volume_weighted", "unknown C++ exception"); }')
         lines.append("    }")
         from .checked_settings import emit_settings_exports
         emit_settings_exports(lines)
