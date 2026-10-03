@@ -85,13 +85,42 @@ class InputHelper:
             while merged and merged[-1] is None:
                 merged.pop()
             if merged and merged[0] is not None:
-                return merged[0]
+                return self._fold_enum_input_default(node, merged[0])
             return None
         if node.args:
-            return node.args[0]
+            return self._fold_enum_input_default(node, node.args[0])
         if "defval" in node.kwargs:
-            return node.kwargs["defval"]
+            return self._fold_enum_input_default(node, node.kwargs["defval"])
         return None
+
+    def _fold_enum_input_default(self, node: FuncCall, default):
+        """Resolve an enum defval's immutable, source-ordered initializer."""
+        func_name, namespace = self._resolve_callee(node.callee)
+        if namespace != "input" or func_name != "enum" or not isinstance(default, Identifier):
+            return default
+        declarations = {}
+        reassigned = self._find_reassigned_vars()
+        for statement in self.ctx.ast.body:
+            if any(candidate is node for candidate in self._walk_ast(statement)):
+                break
+            if isinstance(statement, VarDecl):
+                declarations.setdefault(statement.name, []).append(statement)
+        candidate = default
+        visited = set()
+        while isinstance(candidate, Identifier) and candidate.name not in visited:
+            visited.add(candidate.name)
+            bindings = declarations.get(candidate.name, [])
+            if len(bindings) != 1 or candidate.name in reassigned:
+                return default
+            declaration = bindings[0]
+            if declaration.is_var or declaration.is_varip:
+                return default
+            candidate = declaration.value
+        if isinstance(candidate, MemberAccess) and isinstance(candidate.object, Identifier):
+            members = self._enum_defs.get(candidate.object.name, [])
+            if candidate.member in members:
+                return candidate
+        return default
 
     def _input_default_value(self, node: FuncCall) -> tuple[bool, object]:
         """``(True, value)`` when the defval is the constant a ``v = input...``

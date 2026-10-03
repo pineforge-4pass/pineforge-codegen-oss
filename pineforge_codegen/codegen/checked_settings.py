@@ -18,7 +18,11 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
         "        _pf_refuse_failed_setting(nullptr);",
         "    }",
         "    void _pf_require_settings_ok() const {",
-        '        if (_pf_setting_failed_) throw pineforge::checked_settings::LatchedSettingsFailure(_pf_setting_failure_.empty() ? "legacy strategy setter failed" : _pf_setting_failure_);',
+        "#ifdef PF_SETTINGS_API_VERSION",
+        '        if (_pf_setting_failed_) throw ::pineforge::checked_settings::LatchedSettingsFailure(_pf_setting_failure_.empty() ? "legacy strategy setter failed" : _pf_setting_failure_);',
+        "#else",
+        '        if (_pf_setting_failed_) throw std::runtime_error(_pf_setting_failure_.empty() ? "legacy strategy setter failed" : _pf_setting_failure_);',
+        "#endif",
         "    }",
         "    bool _pf_refuse_failed_setting(ReportC* out) noexcept {",
         "        if (!_pf_setting_failed_) return false;",
@@ -45,6 +49,7 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
         options = []
         option_values = []
         supported = "true"
+        default_serialized = None
         names, merged = emitter._merged_args(node, func_name, namespace)
         arguments = dict(zip(names or [], merged))
         arguments.update(node.kwargs)
@@ -58,15 +63,15 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
         elif namespace == "input" and func_name == "enum":
             value_type = "enum"
             declared = getattr(arguments.get("options"), "elements", None)
-            enum_members = ([default] if isinstance(default, MemberAccess) else
-                            list(declared or []))
+            enum_members = ([default] if isinstance(default, MemberAccess) else []) + list(declared or [])
             enum_names = {member.object.name for member in enum_members
                           if isinstance(member, MemberAccess) and isinstance(member.object, Identifier)}
-            if len(enum_names) == 1:
+            if (len(enum_names) == 1 and enum_members
+                    and all(isinstance(member, MemberAccess) and isinstance(member.object, Identifier)
+                            for member in enum_members)):
                 enum_name = next(iter(enum_names))
                 members = emitter._enum_defs.get(enum_name, [])
-                selected = ([member.member for member in declared
-                             if isinstance(member, MemberAccess)] if declared else members)
+                selected = [member.member for member in declared] if declared is not None else members
                 options = [emitter._input_key_literal(f"{enum_name}.{member}")
                            for member in selected]
                 option_values = [emitter._input_key_literal(str(members.index(member)))
@@ -74,19 +79,25 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
                 supported = "true" if options and len(options) == len(option_values) else "false"
             else:
                 supported = "false"
-            effective = f'pineforge::checked_settings::number({getter}({key}, {default_cpp}))'
+            if not isinstance(default, MemberAccess):
+                supported = "false"
+                default_serialized = 'std::string("na")'
+                effective = f'(inputs_.count({key}) ? inputs_.at({key}) : std::string("na"))'
+            else:
+                effective = f'::pineforge::checked_settings::number({getter}({key}, {default_cpp}))'
         else:
             declared = getattr(arguments.get("options"), "elements", None)
             if declared:
                 for option in declared:
                     option_cpp = emitter._visit_expr(option)
                     options.append(option_cpp if getter == "get_input_string" else
-                                   f'pineforge::checked_settings::number({option_cpp})')
+                                   f'::pineforge::checked_settings::number({option_cpp})')
             expression = f'{getter}({key}, {default_cpp})'
             effective = (expression if getter == "get_input_string" else
-                         f'pineforge::checked_settings::number({expression})')
-        default_serialized = (default_cpp if value_type in ("string", "source") else
-                              f'pineforge::checked_settings::number({default_cpp})')
+                         f'::pineforge::checked_settings::number({expression})')
+        if default_serialized is None:
+            default_serialized = (default_cpp if value_type in ("string", "source") else
+                                  f'::pineforge::checked_settings::number({default_cpp})')
         constraints = [emitter._visit_expr(arguments[name]) if arguments.get(name) is not None
                        else "std::numeric_limits<double>::quiet_NaN()"
                        for name in ("minval", "maxval", "step")]
@@ -121,13 +132,13 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
     lines.extend(statement for statement in constructor if statement.startswith("        cfg."))
     lines.extend([
         "        return cfg;", "    }",
-        "    std::vector<pineforge::checked_settings::Setting> _pf_settings_inputs() const {",
+        "    std::vector<::pineforge::checked_settings::Setting> _pf_settings_inputs() const {",
         "        return {",
     ])
     lines.extend(f"            {metadata}," for metadata, _effective in inputs)
     lines.extend([
         "        };", "    }",
-        "    std::vector<pineforge::checked_settings::Setting> _pf_settings_overrides() const {",
+        "    std::vector<::pineforge::checked_settings::Setting> _pf_settings_overrides() const {",
         "        const double _pf_nan = std::numeric_limits<double>::quiet_NaN();",
         "        const auto _pf_defaults = _pf_settings_declared_config();",
         "        return {",
@@ -146,10 +157,10 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
             effective = f'_pf_{name}_word({selected})'
         else:
             options = []
-            default_value = f'pineforge::checked_settings::number({declared_default})'
-            effective = f'pineforge::checked_settings::number({selected})'
+            default_value = f'::pineforge::checked_settings::number({declared_default})'
+            effective = f'::pineforge::checked_settings::number({selected})'
             if value_type == "bool":
-                effective = f'pineforge::checked_settings::number(static_cast<bool>({selected}))'
+                effective = f'::pineforge::checked_settings::number(static_cast<bool>({selected}))'
         option_cpp = ", ".join(emitter._input_key_literal(option) for option in options)
         floor = "_pf_nan" if minimum == "nan" else minimum
         lines.append(f'            {{"{name}", "{value_type}", {default_value}, '
@@ -163,23 +174,23 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
         lines.extend(['        return "invalid";', '    }'])
     lines.extend([
         "    void _pf_set_input_checked(const std::string& _pf_key, const std::string& _pf_value) {",
-        "        using namespace pineforge::checked_settings;",
-        '        require(script_bars_processed() == 0 && stream_phase_ == StreamPhase::IDLE, "settings are frozen after execution begins", PF_SETTINGS_UNSUPPORTED);',
+        "        if (_pf_refuse_failed_setting(nullptr)) throw ::pineforge::checked_settings::Error{PF_SETTINGS_RUN_FAILED, last_error_.c_str()};",
+        '        ::pineforge::checked_settings::require(script_bars_processed() == 0 && stream_phase_ == StreamPhase::IDLE, "settings are frozen after execution begins", PF_SETTINGS_UNSUPPORTED);',
         "        const auto _pf_inputs = _pf_settings_inputs();",
-        "        const Setting* _pf_match = nullptr;",
+        "        const ::pineforge::checked_settings::Setting* _pf_match = nullptr;",
         "        for (const auto& _pf_input : _pf_inputs) {",
         "            if (_pf_input.name != _pf_key) continue;",
-        '            require(_pf_match == nullptr, "ambiguous input key", PF_SETTINGS_UNSUPPORTED);',
+        '            ::pineforge::checked_settings::require(_pf_match == nullptr, "ambiguous input key", PF_SETTINGS_UNSUPPORTED);',
         "            _pf_match = &_pf_input;",
         "        }",
-        '        require(_pf_match != nullptr, "unknown input key");',
-        "        const auto _pf_canonical = validate(*_pf_match, _pf_value);",
+        '        ::pineforge::checked_settings::require(_pf_match != nullptr, "unknown input key");',
+        "        const auto _pf_canonical = ::pineforge::checked_settings::validate(*_pf_match, _pf_value);",
         "        set_input(_pf_key, _pf_canonical);",
-        '        require(inputs_.count(_pf_key) && inputs_.at(_pf_key) == _pf_canonical, "input was not installed", PF_SETTINGS_UNSUPPORTED);',
+        '        ::pineforge::checked_settings::require(inputs_.count(_pf_key) && inputs_.at(_pf_key) == _pf_canonical, "input was not installed", PF_SETTINGS_UNSUPPORTED);',
         "    }",
         "    void _pf_set_override_checked(const std::string& _pf_key, const std::string& _pf_value) {",
-        "        using namespace pineforge::checked_settings;",
-        '        require(script_bars_processed() == 0 && stream_phase_ == StreamPhase::IDLE, "settings are frozen after execution begins", PF_SETTINGS_UNSUPPORTED);',
+        "        if (_pf_refuse_failed_setting(nullptr)) throw ::pineforge::checked_settings::Error{PF_SETTINGS_RUN_FAILED, last_error_.c_str()};",
+        '        ::pineforge::checked_settings::require(script_bars_processed() == 0 && stream_phase_ == StreamPhase::IDLE, "settings are frozen after execution begins", PF_SETTINGS_UNSUPPORTED);',
         "        for (const auto& _pf_override : _pf_settings_overrides()) {",
         "            if (_pf_override.name != _pf_key) continue;",
         "            auto _pf_alias = _pf_value;",
@@ -197,21 +208,21 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
             lines.append(f'                if ({condition}) _pf_alias = "{option}";')
         lines.append("            }")
     lines.extend([
-        "            const auto _pf_canonical = validate(_pf_override, _pf_alias);",
+        "            const auto _pf_canonical = ::pineforge::checked_settings::validate(_pf_override, _pf_alias);",
         "            set_strategy_override(_pf_key, _pf_canonical);",
         "            return;",
         "        }",
-        '        throw Error{PF_SETTINGS_INVALID_ARGUMENT, "unknown override key"};',
+        '        throw ::pineforge::checked_settings::Error{PF_SETTINGS_INVALID_ARGUMENT, "unknown override key"};',
         "    }",
         "    std::string _pf_settings_receipt() const {",
-        "        using namespace pineforge::checked_settings;",
+        '        ::pineforge::checked_settings::require(!_pf_setting_failed_, _pf_setting_failure_.empty() ? "legacy strategy setter failed" : _pf_setting_failure_.c_str(), PF_SETTINGS_RUN_FAILED);',
         '        std::string _pf_document = "{\\\"version\\\":1,\\\"inputs\\\":[";',
         "        const auto _pf_inputs = _pf_settings_inputs();",
     ])
     for index, (_metadata, effective) in enumerate(inputs):
         if index:
             lines.append("        _pf_document += ',';")
-        lines.append(f"        _pf_document += describe(_pf_inputs[{index}], {effective});")
+        lines.append(f"        _pf_document += ::pineforge::checked_settings::describe(_pf_inputs[{index}], {effective});")
     lines.extend([
         '        _pf_document += "],\\\"overrides\\\":[";',
         "        const auto _pf_overrides = _pf_settings_overrides();",
@@ -219,7 +230,7 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
     for index, effective in enumerate(override_effective):
         if index:
             lines.append("        _pf_document += ',';")
-        lines.append(f"        _pf_document += describe(_pf_overrides[{index}], {effective});")
+        lines.append(f"        _pf_document += ::pineforge::checked_settings::describe(_pf_overrides[{index}], {effective});")
     lines.extend(['        return _pf_document + "]}";', "    }", "#endif"])
 
 
@@ -229,9 +240,9 @@ def emit_settings_exports(lines: list[str]) -> None:
         "    uint32_t strategy_settings_api_version(void) { return PF_SETTINGS_API_VERSION; }",
         "    int strategy_create_checked(const char* params_json, void** out, char* error, size_t error_capacity) {",
         "        if (out) *out = nullptr;",
-        "        return pineforge::checked_settings::boundary(error, error_capacity, [&] {",
-        '            pineforge::checked_settings::require(out != nullptr, "strategy output pointer is null");',
-        '            pineforge::checked_settings::require(!params_json || !*params_json, "params_json is reserved; use checked setters", PF_SETTINGS_UNSUPPORTED);',
+        "        return ::pineforge::checked_settings::boundary(error, error_capacity, [&] {",
+        '            ::pineforge::checked_settings::require(out != nullptr, "strategy output pointer is null");',
+        '            ::pineforge::checked_settings::require(!params_json || !*params_json, "params_json is reserved; use checked setters", PF_SETTINGS_UNSUPPORTED);',
         "            *out = new GeneratedStrategy();",
         "        });",
         "    }",
@@ -239,23 +250,23 @@ def emit_settings_exports(lines: list[str]) -> None:
     for kind in ("input", "override"):
         lines.extend([
             f"    int strategy_set_{kind}_checked(void* s, const char* key, const char* value, char* error, size_t error_capacity) {{",
-            "        return pineforge::checked_settings::boundary(error, error_capacity, [&] {",
-            '            pineforge::checked_settings::require(s && key && value, "null strategy, key or value");',
+            "        return ::pineforge::checked_settings::boundary(error, error_capacity, [&] {",
+            '            ::pineforge::checked_settings::require(s && key && value, "null strategy, key or value");',
             f"            static_cast<GeneratedStrategy*>(s)->_pf_set_{kind}_checked(key, value);",
             "        });", "    }",
         ])
     lines.extend([
         "    int strategy_get_effective_settings(void* s, char* json, size_t capacity, size_t* required, char* error, size_t error_capacity) {",
         "        if (required) *required = 0;",
-        "        return pineforge::checked_settings::boundary(error, error_capacity, [&] {",
-        '            pineforge::checked_settings::require(s != nullptr, "null strategy");',
-        "            pineforge::checked_settings::receipt(static_cast<GeneratedStrategy*>(s)->_pf_settings_receipt(), json, capacity, required);",
+        "        return ::pineforge::checked_settings::boundary(error, error_capacity, [&] {",
+        '            ::pineforge::checked_settings::require(s != nullptr, "null strategy");',
+        "            ::pineforge::checked_settings::receipt(static_cast<GeneratedStrategy*>(s)->_pf_settings_receipt(), json, capacity, required);",
         "        });", "    }",
         "    int run_backtest_full_checked(void* s, Bar* bars, int n, const char* input_tf, const char* script_tf, int bar_magnifier, int magnifier_samples, int magnifier_dist, ReportC* out, char* error, size_t error_capacity) {",
-        "        return pineforge::checked_settings::boundary(error, error_capacity, [&] {",
-        '            pineforge::checked_settings::require(s && out && n >= 0 && (n == 0 || bars), "invalid batch arguments");',
+        "        return ::pineforge::checked_settings::boundary(error, error_capacity, [&] {",
+        '            ::pineforge::checked_settings::require(s && out && n >= 0 && (n == 0 || bars), "invalid batch arguments");',
         "            _pf_run_backtest_full_impl(s, bars, n, input_tf, script_tf, bar_magnifier, magnifier_samples, magnifier_dist, out);",
         "            const auto& _pf_error = static_cast<GeneratedStrategy*>(s)->last_error();",
-        '            pineforge::checked_settings::require(_pf_error.empty(), _pf_error.c_str(), PF_SETTINGS_RUN_FAILED);',
+        '            ::pineforge::checked_settings::require(_pf_error.empty(), _pf_error.c_str(), PF_SETTINGS_RUN_FAILED);',
         "        });", "    }", "#endif",
     ])

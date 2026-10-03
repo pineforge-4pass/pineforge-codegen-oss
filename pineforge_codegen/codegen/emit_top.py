@@ -1899,7 +1899,9 @@ class TopLevelEmitter:
         lines.append("    void run_backtest(void* s, Bar* bars, int n, ReportC* out) {")
         lines.append("        try {")
         lines.append("        auto* strat = static_cast<GeneratedStrategy*>(s);")
+        lines.append("#ifndef PF_SETTINGS_API_VERSION")
         lines.append("        if (strat->_pf_refuse_failed_setting(out)) return;")
+        lines.append("#endif")
         if self._security_calls:
             # If there are security calls, use the full run path. Pass empty strings
             # so the C++ runtime auto-detects input_tf from bar timestamps.
@@ -1907,9 +1909,12 @@ class TopLevelEmitter:
         else:
             lines.append("        strat->run(bars, n);")
         lines.append("        strat->fill_report(out);")
+        lines.append("        strat->_pf_refuse_failed_setting(out);")
         lines.append('        } catch (const std::exception& _pf_error) {')
+        lines.append('            if (out) *out = ReportC{};')
         lines.append('            if (s) static_cast<GeneratedStrategy*>(s)->_pf_record_failure("run_backtest", _pf_error.what());')
         lines.append('        } catch (...) {')
+        lines.append('            if (out) *out = ReportC{};')
         lines.append('            if (s) static_cast<GeneratedStrategy*>(s)->_pf_record_failure("run_backtest", "unknown C++ exception");')
         lines.append('        }')
         lines.append("    }")
@@ -1919,7 +1924,9 @@ class TopLevelEmitter:
         lines.append("                           int magnifier_dist,")
         lines.append("                           ReportC* out) {")
         lines.append('        auto* strat = static_cast<GeneratedStrategy*>(s);')
+        lines.append("#ifndef PF_SETTINGS_API_VERSION")
         lines.append("        if (strat->_pf_refuse_failed_setting(out)) return;")
+        lines.append("#endif")
         lines.append('        std::string itf = input_tf ? input_tf : "";')
         lines.append('        std::string stf = script_tf ? script_tf : "";')
         if self._security_calls:
@@ -1957,13 +1964,14 @@ class TopLevelEmitter:
             lines.append("                       static_cast<MagnifierDistribution>(magnifier_dist));")
             lines.append("        }")
         lines.append("        strat->fill_report(out);")
+        lines.append("        strat->_pf_refuse_failed_setting(out);")
         lines.append("    }")
         lines.extend([
             "    void run_backtest_full(void* s, Bar* bars, int n, const char* input_tf, const char* script_tf,",
             "                           int bar_magnifier, int magnifier_samples, int magnifier_dist, ReportC* out) {",
             "        try { _pf_run_backtest_full_impl(s, bars, n, input_tf, script_tf, bar_magnifier, magnifier_samples, magnifier_dist, out); }",
-            '        catch (const std::exception& _pf_error) { if (s) static_cast<GeneratedStrategy*>(s)->_pf_record_failure("run_backtest_full", _pf_error.what()); }',
-            '        catch (...) { if (s) static_cast<GeneratedStrategy*>(s)->_pf_record_failure("run_backtest_full", "unknown C++ exception"); }',
+            '        catch (const std::exception& _pf_error) { if (out) *out = ReportC{}; if (s) static_cast<GeneratedStrategy*>(s)->_pf_record_failure("run_backtest_full", _pf_error.what()); }',
+            '        catch (...) { if (out) *out = ReportC{}; if (s) static_cast<GeneratedStrategy*>(s)->_pf_record_failure("run_backtest_full", "unknown C++ exception"); }',
             "    }",
         ])
         lines.append("    void strategy_free(void* s) {")

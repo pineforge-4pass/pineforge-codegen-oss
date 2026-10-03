@@ -33,6 +33,25 @@ reports remain empty; checked batch returns `PF_SETTINGS_RUN_FAILED`. Free and
 recreate the handle to recover. Legacy setters that do not throw keep their
 existing permissive behaviour.
 
+The paired engine must merge before this codegen. Settings helper references are
+root-qualified and guarded by `PF_SETTINGS_API_VERSION`; old headers retain the
+standard-exception fallback and legacy batch precheck. Paired batch and stream
+refusals report NOT_COMPLETED through the shared native begin. Checked setters
+and receipt queries on a latched handle also return `PF_SETTINGS_RUN_FAILED`.
+An active stream keeps its begin-time settings after a mid-stream legacy setter
+throws; the sticky failure applies to subsequent begins.
+
+Immutable identifier defaults for `input.enum` now resolve to their declared
+member instead of reading an uninitialized script member (the old default was
+incorrectly member zero). Both the getter and deterministic receipt use that
+literal. Unfoldable defaults remain unsupported by checked setters and their
+receipt uses `na` without reading script state; the legacy getter is unchanged.
+Every enum option must be a literal member of one enum for checked support.
+Stream begin fails on any script-preparation exception with its message and
+NOT_COMPLETED; ordinary batch preparation failures keep their historical empty
+report, diagnostic and completed status. Legacy exception text is standard-
+library-dependent, and legacy run catches zero their output report.
+
 ## Released contract
 
 This is the contract that 1.0.0, released 2026-09-30, implements, and 1.0.1,

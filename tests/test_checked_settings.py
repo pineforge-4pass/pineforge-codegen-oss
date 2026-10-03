@@ -1,12 +1,14 @@
 """The opt-in settings ABI validates before mutating real generated strategies."""
 import json
 import os
+import re
+import shutil
 from pathlib import Path
 
 import pytest
 
 from pineforge_codegen import transpile
-from tests._compile import run_emitted_tu
+from tests._compile import compile_cpp, run_emitted_tu
 
 
 SOURCE = '''//@version=6
@@ -47,7 +49,7 @@ def test_metadata_and_exception_wrappers_are_emitted():
         assert f'{recorder}("{entrypoint}", "unknown C++ exception")' in cpp
     assert 'bool _pf_setting_failed_ = false;' in cpp
     assert 'std::string _pf_setting_failure_;' in cpp
-    assert 'throw pineforge::checked_settings::LatchedSettingsFailure(' in cpp
+    assert 'throw ::pineforge::checked_settings::LatchedSettingsFailure(' in cpp
     assert '        _pf_require_settings_ok();\n        _pf_script_state_checkpoint_.reset();' in cpp
     assert 'unknown input key' in cpp and 'unknown override key' in cpp
     assert 'return new GeneratedStrategy();' in cpp
@@ -143,11 +145,18 @@ def test_enum_options_supply_type_for_nonliteral_default():
 int main() {
     void* strategy = strategy_create(nullptr);
     char error[256]{};
-    assert(strategy_set_input_checked(strategy, "Side", "Side.short", error, sizeof(error)) == PF_SETTINGS_OK);
     size_t required = 0;
     assert(strategy_get_effective_settings(strategy, nullptr, 0, &required, error, sizeof(error)) == PF_SETTINGS_BUFFER_TOO_SMALL);
     std::vector<char> receipt(required);
     assert(strategy_get_effective_settings(strategy, receipt.data(), receipt.size(), &required, error, sizeof(error)) == PF_SETTINGS_OK);
+    const std::string before = receipt.data();
+    Bar bars[]{{100, 101, 99, 100, 1000, 1577836800000LL}};
+    ReportC report{};
+    run_backtest(strategy, bars, 1, &report);
+    report_free(&report);
+    assert(static_cast<GeneratedStrategy*>(strategy)->side == Side__long_);
+    assert(strategy_get_effective_settings(strategy, receipt.data(), receipt.size(), &required, error, sizeof(error)) == PF_SETTINGS_OK);
+    assert(before == receipt.data());
     std::cout << receipt.data();
     strategy_free(strategy);
 }
@@ -157,7 +166,7 @@ int main() {
     assert setting["supported"] is True
     assert setting["options"] == ["Side.long", "Side.short"]
     assert setting["option_values"] == ["1", "2"]
-    assert setting["effective_value"] == "2"
+    assert setting["default"] == setting["effective_value"] == "1"
 
 
 SETTINGS_MEMBER_NAMES = (
@@ -168,6 +177,9 @@ SETTINGS_MEMBER_NAMES = (
     "_pf_refuse_failed_setting", "_pf_settings_declared_config", "_pf_settings_inputs",
     "_pf_settings_overrides", "_pf_set_input_checked", "_pf_set_override_checked",
     "_pf_settings_receipt",
+    "_pf_close_entries_rule_word", "_pf_default_qty_type_word", "_pf_commission_type_word",
+    "LatchedSettingsFailure", "Error", "Setting", "require", "copy_error", "boundary",
+    "number", "integer", "real", "quote", "validate", "describe", "receipt",
 )
 
 
@@ -223,6 +235,82 @@ def test_settings_name_reservations_keep_default_corpus_emission_identical(monke
         assert current == previous, str(path)
 
 
+SETTINGS_HELPER_NAMES = (
+    "LatchedSettingsFailure", "Error", "Setting", "require", "copy_error", "boundary",
+    "number", "integer", "real", "quote", "validate", "describe", "receipt",
+)
+
+
+@pytest.mark.parametrize("shape", ["function", "udt", "enum"])
+def test_settings_helpers_are_not_shadowed_by_script_declarations(shape):
+    declarations = []
+    for name in SETTINGS_HELPER_NAMES:
+        if shape == "function":
+            declarations.append(f"{name}(value) => value + 1")
+        elif shape == "udt":
+            declarations.append(f"type {name}\n    int value")
+        else:
+            declarations.append(f"enum {name}\n    first\n    second")
+    source = '\n'.join(['//@version=6', 'strategy("helper declarations")',
+                        *declarations, 'length = input.int(3, "Length")'])
+    compile_cpp(transpile(source), label=f"settings helpers as {shape}")
+
+
+def test_settings_namespace_names_are_root_qualified_and_version_guarded():
+    cpp = transpile(SOURCE)
+    assert "using namespace pineforge::checked_settings" not in cpp
+    guarded = False
+    for line in cpp.splitlines():
+        if line == "#ifdef PF_SETTINGS_API_VERSION":
+            guarded = True
+        elif line in ("#else", "#endif"):
+            guarded = False
+        if "pineforge::checked_settings::" in line:
+            assert guarded, line
+            assert re.search(r"(?<!:)\bpineforge::checked_settings::", line) is None
+        if guarded:
+            for name in SETTINGS_HELPER_NAMES:
+                assert re.search(rf"(?<![\w:]){name}\s*(?:\(|\{{|\*)", line) is None, line
+
+
+def test_generated_tu_compiles_without_settings_header(tmp_path, monkeypatch):
+    from tests import _compile
+
+    _compile.skip_if_no_compile_env()
+    header_tree = tmp_path / "include"
+    shutil.copytree(_compile._ENGINE_INC, header_tree)
+    (header_tree / "pineforge" / "checked_settings.hpp").unlink()
+    public_header = header_tree / "pineforge" / "pineforge.h"
+    public_header.write_text(re.sub(r"^#define PF_SETTINGS_API_VERSION.*\n", "",
+                                   public_header.read_text(), flags=re.MULTILINE))
+    monkeypatch.setattr(_compile, "_ENGINE_INC", header_tree)
+    compile_cpp(transpile(SOURCE), label="legacy engine without checked settings header")
+
+
+@pytest.mark.parametrize("options", ["Side.long, alternate", "Side.long, Other.short"])
+def test_enum_options_require_literal_members_of_one_enum(options):
+    source = SOURCE.replace('const int FLOOR = 1',
+                            'enum Other\n    short\nalternate = Side.short\nconst int FLOOR = 1')
+    source = source.replace('options=[Side.long, Side.short]', f'options=[{options}]')
+    cpp = transpile(source)
+    row = next(line for line in cpp.splitlines() if '{"Side", "enum"' in line)
+    assert ', false,' in row
+
+
+def test_unresolved_enum_default_does_not_read_script_member_in_receipt():
+    source = SOURCE.replace('side = input.enum(Side.long,',
+                            'var defaultSide = Side.long\nside = input.enum(defaultSide,')
+    cpp = transpile(source)
+    metadata = cpp.split('std::vector<::pineforge::checked_settings::Setting> _pf_settings_inputs()', 1)[1]
+    metadata = metadata.split('std::vector<::pineforge::checked_settings::Setting> _pf_settings_overrides()', 1)[0]
+    assert 'defaultSide' not in metadata
+    assert '"Side", "enum", std::string("na")' in metadata
+    assert ', false,' in metadata
+    receipt = cpp.split('std::string _pf_settings_receipt()', 1)[1].split('#endif', 1)[0]
+    assert 'defaultSide' not in receipt
+    assert 'get_input_int("Side", defaultSide)' in cpp
+
+
 def test_legacy_setter_failure_is_readable_and_prevents_execution():
     driver = r'''
 #include <cassert>
@@ -257,6 +345,7 @@ int main() {
     pf_bar_t warmup{100, 101, 99, 100, 1000, 1577836800000LL};
     assert(strategy_stream_begin(strategy, &warmup, 1, "1", "1") == -1);
     assert(std::string(strategy_get_last_error(strategy)).find(failure) != std::string::npos);
+    assert(strategy_last_run_status(strategy) == 1);
     strategy_free(strategy);
 
     strategy = static_cast<GeneratedStrategy*>(strategy_create(nullptr));
@@ -272,16 +361,26 @@ int main() {
     report.total_trades = 99;
     run_backtest(strategy, nullptr, 0, &report);
     assert(report.total_trades == 0 && strategy->last_error() == failure);
+    assert(strategy_last_run_status(strategy) == 1);
     assert(strategy_set_native_security_feed(strategy, "D", nullptr, 0) == 0);
     assert(std::string(strategy_get_last_error(strategy)).empty());
     report.total_trades = 99;
     run_backtest_full(strategy, nullptr, 0, "", "", 0, 4, 0, &report);
     assert(report.total_trades == 0 && strategy->last_error() == failure);
+    assert(strategy_last_run_status(strategy) == 1);
     assert(strategy_set_aux_security_feed(strategy, nullptr, 0, "1") == 0);
     char error[256]{};
     assert(run_backtest_full_checked(strategy, nullptr, 0, "", "", 0, 4, 0,
                                     &report, error, sizeof(error)) == PF_SETTINGS_RUN_FAILED);
     assert(std::string(error) == failure);
+    assert(strategy_last_run_status(strategy) == 1);
+    assert(strategy_set_input_checked(strategy, "Length", "5", error, sizeof(error)) == PF_SETTINGS_RUN_FAILED);
+    assert(std::string(error) == failure);
+    assert(strategy_set_override_checked(strategy, "pyramiding", "5", error, sizeof(error)) == PF_SETTINGS_RUN_FAILED);
+    assert(std::string(error) == failure);
+    size_t required = 99;
+    assert(strategy_get_effective_settings(strategy, nullptr, 0, &required, error, sizeof(error)) == PF_SETTINGS_RUN_FAILED);
+    assert(required == 0 && std::string(error) == failure);
     assert(strategy_set_aux_security_feed(strategy, nullptr, 0, "1") == 0);
     assert(strategy_stream_begin(strategy, &warmup, 1, "1", "1") == -1);
     assert(std::string(strategy_get_last_error(strategy)) == failure);
