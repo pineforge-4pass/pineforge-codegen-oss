@@ -1,4 +1,8 @@
-"""Fail-closed diagnostics for duplicate kwargs and malformed map calls."""
+"""Fail-closed diagnostics for duplicate kwargs and malformed map calls.
+
+Frozen hashes compare legacy_cpp-normalised lowering, not the additive settings
+scaffold or exception wrappers; test_checked_settings tests actual emissions.
+"""
 
 from __future__ import annotations
 

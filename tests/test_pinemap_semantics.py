@@ -1,4 +1,8 @@
-"""Atomic PineMap codegen, handle identity, and rollback regressions."""
+"""Atomic PineMap codegen, handle identity, and rollback regressions.
+
+Frozen hashes compare legacy_cpp-normalised lowering, not the additive settings
+scaffold or exception wrappers; test_checked_settings tests actual emissions.
+"""
 
 from __future__ import annotations
 

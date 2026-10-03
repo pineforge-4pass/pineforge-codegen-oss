@@ -1,4 +1,8 @@
-"""Declared PineMap boundaries and cross-call evaluation-order regressions."""
+"""Declared PineMap boundaries and cross-call evaluation-order regressions.
+
+Frozen hashes compare legacy_cpp-normalised lowering, not the additive settings
+scaffold or exception wrappers; test_checked_settings tests actual emissions.
+"""
 
 from __future__ import annotations
 

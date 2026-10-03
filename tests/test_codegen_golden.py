@@ -1,4 +1,8 @@
-"""Byte-identical golden harness for matrix corpus probes (Task 2.17)."""
+"""Byte-identical golden harness for matrix corpus probes (Task 2.17).
+
+Goldens compare legacy_cpp-normalised lowering, excluding the additive settings
+scaffold and exception wrappers. test_checked_settings exercises actual output.
+"""
 import os
 from pathlib import Path
 import pytest

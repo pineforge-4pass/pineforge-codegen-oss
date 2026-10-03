@@ -3,7 +3,17 @@
 from ..ast_nodes import Identifier, MemberAccess
 
 
-def emit_settings_members(emitter, lines: list[str]) -> None:
+def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> None:
+    lines.extend([
+        "    void _pf_record_failure(const char* entrypoint, const char* message) noexcept {",
+        "        try { last_error_ = entrypoint; last_error_ += \": \"; last_error_ += message; } catch (...) {}",
+        "    }",
+        "    bool _pf_refuse_failed_setting(ReportC* out) const noexcept {",
+        '        if (last_error_.compare(0, 13, "strategy_set_") != 0) return false;',
+        "        if (out) *out = ReportC{};",
+        "        return true;",
+        "    }",
+    ])
     inputs = []
     for node, binding in emitter._global_input_calls_with_names():
         func_name, namespace = emitter._resolve_callee(node.callee)
@@ -18,6 +28,7 @@ def emit_settings_members(emitter, lines: list[str]) -> None:
             "get_input_double": "float", "get_input_bool": "bool",
             "get_input_string": "string",
         }[getter]
+        kind = emitter._FORM_TYPE.get(func_name, value_type) if namespace == "input" else value_type
         options = []
         option_values = []
         supported = "true"
@@ -33,17 +44,21 @@ def emit_settings_members(emitter, lines: list[str]) -> None:
                        for value in sorted(emitter._NATIVE_SOURCE_SERIES)]
         elif namespace == "input" and func_name == "enum":
             value_type = "enum"
-            if isinstance(default, MemberAccess) and isinstance(default.object, Identifier):
-                enum_name = default.object.name
+            declared = getattr(arguments.get("options"), "elements", None)
+            enum_members = ([default] if isinstance(default, MemberAccess) else
+                            list(declared or []))
+            enum_names = {member.object.name for member in enum_members
+                          if isinstance(member, MemberAccess) and isinstance(member.object, Identifier)}
+            if len(enum_names) == 1:
+                enum_name = next(iter(enum_names))
                 members = emitter._enum_defs.get(enum_name, [])
-                declared = getattr(arguments.get("options"), "elements", None)
                 selected = ([member.member for member in declared
                              if isinstance(member, MemberAccess)] if declared else members)
                 options = [emitter._input_key_literal(f"{enum_name}.{member}")
                            for member in selected]
                 option_values = [emitter._input_key_literal(str(members.index(member)))
-                                 for member in selected]
-                supported = "true" if options else "false"
+                                 for member in selected if member in members]
+                supported = "true" if options and len(options) == len(option_values) else "false"
             else:
                 supported = "false"
             effective = f'pineforge::checked_settings::number({getter}({key}, {default_cpp}))'
@@ -65,7 +80,7 @@ def emit_settings_members(emitter, lines: list[str]) -> None:
         metadata = (f'{{{key}, "{value_type}", {default_serialized}, '
                     f'{{{", ".join(options)}}}, {", ".join(constraints)}, '
                     f'{64 if getter == "get_input_int64" else 32}, {supported}, '
-                    f'{{{", ".join(option_values)}}}}}')
+                    f'{{{", ".join(option_values)}}}, "{kind}"}}')
         inputs.append((metadata, effective))
 
     overrides = [
@@ -87,6 +102,12 @@ def emit_settings_members(emitter, lines: list[str]) -> None:
     }
     lines.extend([
         "#ifdef PF_SETTINGS_API_VERSION",
+        "    static pineforge::source::PineStrategyConfig _pf_settings_declared_config() {",
+        "        pineforge::source::PineStrategyConfig cfg{};",
+    ])
+    lines.extend(statement for statement in constructor if statement.startswith("        cfg."))
+    lines.extend([
+        "        return cfg;", "    }",
         "    std::vector<pineforge::checked_settings::Setting> _pf_settings_inputs() const {",
         "        return {",
     ])
@@ -95,22 +116,24 @@ def emit_settings_members(emitter, lines: list[str]) -> None:
         "        };", "    }",
         "    std::vector<pineforge::checked_settings::Setting> _pf_settings_overrides() const {",
         "        const double _pf_nan = std::numeric_limits<double>::quiet_NaN();",
+        "        const auto _pf_defaults = _pf_settings_declared_config();",
         "        return {",
     ])
     override_effective = []
     for name, value_type, config_field, override_field, minimum in overrides:
         raw = f'config_.{config_field}'
+        declared_default = f'_pf_defaults.{config_field}'
         overridden = f'override_.{override_field}'
         selected = (f'(std::isnan({overridden}) ? {raw} : {overridden})'
                     if value_type == "float" else
                     f'({overridden} < 0 ? {raw} : {overridden})')
         if name in enum_options:
             options = enum_options[name]
-            default_value = f'_pf_{name}_word({raw})'
+            default_value = f'_pf_{name}_word({declared_default})'
             effective = f'_pf_{name}_word({selected})'
         else:
             options = []
-            default_value = f'pineforge::checked_settings::number({raw})'
+            default_value = f'pineforge::checked_settings::number({declared_default})'
             effective = f'pineforge::checked_settings::number({selected})'
             if value_type == "bool":
                 effective = f'pineforge::checked_settings::number(static_cast<bool>({selected}))'

@@ -1,4 +1,8 @@
-"""Lexical isolation for callable-local array/map/matrix TypeSpecs."""
+"""Lexical isolation for callable-local array/map/matrix TypeSpecs.
+
+Frozen hashes compare legacy_cpp-normalised lowering, not the additive settings
+scaffold or exception wrappers; test_checked_settings tests actual emissions.
+"""
 
 from __future__ import annotations
 
