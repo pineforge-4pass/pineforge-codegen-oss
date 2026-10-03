@@ -314,6 +314,9 @@ CPP_EMITTER_NAMES = frozenset("""
     _pf_drawing_na _pf_collect_drawings _pf_collect_lines_ _pf_collect_boxes_
     _pf_collect_labels_ _pf_new _pf_held
     get_input_int get_input_float get_input_bool get_input_string
+    _pf_record_failure _pf_refuse_failed_setting _pf_settings_declared_config
+    _pf_settings_inputs _pf_settings_overrides _pf_set_input_checked
+    _pf_set_override_checked _pf_settings_receipt
     trace is_na na nz fixnan
 """.split())
 

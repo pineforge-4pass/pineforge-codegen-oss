@@ -1,5 +1,7 @@
 """The opt-in settings ABI validates before mutating real generated strategies."""
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -151,6 +153,67 @@ int main() {
     assert setting["options"] == ["Side.long", "Side.short"]
     assert setting["option_values"] == ["1", "2"]
     assert setting["effective_value"] == "2"
+
+
+SETTINGS_MEMBER_NAMES = (
+    "StreamPhase", "config_", "inputs_", "last_error", "last_error_", "override_",
+    "script_bars_processed", "stream_phase_", "_pf_record_failure",
+    "_pf_refuse_failed_setting", "_pf_settings_declared_config", "_pf_settings_inputs",
+    "_pf_settings_overrides", "_pf_set_input_checked", "_pf_set_override_checked",
+    "_pf_settings_receipt",
+)
+
+
+@pytest.mark.parametrize("optimization", ["-O0", "-O2"])
+def test_setting_names_do_not_shadow_settings_scaffold(optimization):
+    source = '\n'.join([
+        '//@version=6', 'strategy("setting member names")',
+        *(f'{name} = input.int(3, "{name}")' for name in SETTINGS_MEMBER_NAMES),
+    ])
+    names = ', '.join(json.dumps(name) for name in SETTINGS_MEMBER_NAMES)
+    driver = r'''
+#include <cassert>
+#include <iostream>
+#include <vector>
+int main() {
+    void* strategy = nullptr;
+    char error[256]{};
+    assert(strategy_create_checked(nullptr, &strategy, error, sizeof(error)) == PF_SETTINGS_OK);
+    for (const char* name : std::vector<const char*>{NAMES}) {
+        assert(strategy_set_input_checked(strategy, name, "5", error, sizeof(error)) == PF_SETTINGS_OK);
+    }
+    size_t required = 0;
+    assert(strategy_get_effective_settings(strategy, nullptr, 0, &required, error, sizeof(error)) == PF_SETTINGS_BUFFER_TOO_SMALL);
+    std::vector<char> receipt(required);
+    assert(strategy_get_effective_settings(strategy, receipt.data(), receipt.size(), &required, error, sizeof(error)) == PF_SETTINGS_OK);
+    std::cout << receipt.data();
+    strategy_free(strategy);
+}
+'''.replace('NAMES', names)
+    receipt = json.loads(run_emitted_tu(transpile(source), driver, opt=optimization,
+                                       label="setting member names"))
+    inputs = {entry["name"]: entry for entry in receipt["inputs"]}
+    assert set(inputs) == set(SETTINGS_MEMBER_NAMES)
+    assert all(entry["effective_value"] == "5" for entry in inputs.values())
+
+
+def test_settings_name_reservations_keep_default_corpus_emission_identical(monkeypatch):
+    from pineforge_codegen.codegen import helpers
+
+    corpus = os.environ.get("PINEFORGE_ENGINE_CORPUS")
+    if not corpus:
+        pytest.skip("PINEFORGE_ENGINE_CORPUS is needed for emitted-byte comparison")
+    sources = sorted(Path(corpus).glob("*/*/strategy.pine"))
+    assert len(sources) >= 300
+    current_reserved = helpers.CPP_RESERVED
+    previous_reserved = current_reserved - set(SETTINGS_MEMBER_NAMES)
+    for path in sources:
+        source = path.read_text(encoding="utf-8")
+        current = transpile(source, filename=str(path))
+        with monkeypatch.context() as context:
+            context.setattr(helpers, "CPP_RESERVED", previous_reserved)
+            previous = transpile(source, filename=str(path))
+        assert current == previous, str(path)
 
 
 def test_legacy_setter_failure_is_readable_and_prevents_execution():
