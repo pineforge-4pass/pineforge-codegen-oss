@@ -24,15 +24,6 @@ contract are documented in the paired engine's `pineforge/pineforge.h` and
 `docs/checked-settings.md`. Without that optional header, codegen still emits
 the legacy ABI and exception containment, preserving old-engine builds.
 
-A legacy setter that throws permanently invalidates that generated strategy
-handle. Its first failure message is retained independently of the engine's
-last-error buffer: auxiliary-feed configuration and other diagnostic-clearing
-calls cannot clear the failure. Both batch and stream begins refuse execution,
-and `strategy_get_last_error` reports the original setter failure. Legacy batch
-reports remain empty; checked batch returns `PF_SETTINGS_RUN_FAILED`. Free and
-recreate the handle to recover. Legacy setters that do not throw keep their
-existing permissive behaviour.
-
 ## Released contract
 
 This is the contract that 1.0.0, released 2026-09-30, implements, and 1.0.1,
