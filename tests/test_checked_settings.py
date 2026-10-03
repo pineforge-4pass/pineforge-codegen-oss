@@ -263,6 +263,7 @@ int main() {
     strategy_set_override(strategy, "pyramiding", "abc");
     assert(std::string(strategy_get_last_error(strategy)) == failure);
     assert(strategy_set_aux_security_feed(strategy, nullptr, 0, "1") == 0);
+    assert(strategy_set_native_security_feed(strategy, "D", nullptr, 0) == 0);
     assert(std::string(strategy_get_last_error(strategy)).empty());
     strategy_set_override(strategy, "pyramiding", "3");
     strategy_set_override(strategy, "default_qty_value", "abc");
