@@ -23,6 +23,7 @@ transpiles to the same C++ on both builds.
 
 from __future__ import annotations
 
+from tests._legacy_cpp import legacy_cpp
 import concurrent.futures
 import csv
 import datetime as dt
@@ -171,5 +172,5 @@ def test_the_pre_lane_build_read_the_charts_history(outcomes, tape):
 
 
 def test_chart_builtins_keep_the_pre_lane_lowering(outcomes):
-    assert (_outcome(outcomes, BUILTINS, "lane").cpp
-            == _outcome(outcomes, BUILTINS, "legacy").cpp)
+    assert (legacy_cpp(_outcome(outcomes, BUILTINS, "lane").cpp)
+            == legacy_cpp(_outcome(outcomes, BUILTINS, "legacy").cpp))

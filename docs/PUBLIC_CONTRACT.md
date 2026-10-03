@@ -1,5 +1,31 @@
 # Public contract for 1.0
 
+## Optional generated settings extension
+
+Development builds paired with an engine providing `pineforge/checked_settings.hpp`
+add `strategy_settings_api_version()` (version 1), `strategy_create_checked`,
+`strategy_set_input_checked`, `strategy_set_override_checked`,
+`strategy_get_effective_settings` and `run_backtest_full_checked` to generated
+libraries. The existing symbols and their successful default computations are
+unchanged. All generated factory, setter and batch entry points contain both
+standard and non-standard exceptions; checked variants return a status and an
+optional caller-buffer error instead of silently substituting defaults.
+
+Checked inputs are keyed exactly as the generated getters: title, fallback
+binding name, or the empty key. Metadata lists every declared input (including
+inline inputs), its storage type, default, options, declared numeric limits and
+UI step. Unknown/ambiguous keys, invalid booleans/enums/options, numeric suffixes,
+integer overflow, non-finite numeric strings and limit violations are refused
+before mutation. Legacy setters stay permissive. Receipts read the actual getters
+and effective overrides, in source order, with canonical string values. Query
+the required JSON buffer size with NULL/0 before reading it. Configure checked
+settings before execution starts. The exact C signatures, statuses and buffer
+contract are documented in the paired engine's `pineforge/pineforge.h` and
+`docs/checked-settings.md`. Without that optional header, codegen still emits
+the legacy ABI and exception containment, preserving old-engine builds.
+
+## Released contract
+
 This is the contract that 1.0.0, released 2026-09-30, implements, and 1.0.1,
 released 2026-10-02, implements unchanged. The last 0.x release, 0.10.4, has
 neither the `libraries` argument nor the `diagnostics` key described below.

@@ -130,6 +130,8 @@ class TopLevelEmitter:
         )
         lines.append('#include <pineforge/source/pine_strategy_host.hpp>')
         lines.append('#include <pineforge/ta.hpp>')
+        lines.extend(['#if __has_include(<pineforge/checked_settings.hpp>)',
+                      '#include <pineforge/checked_settings.hpp>', '#endif'])
         if self._ta_uses_dynamic_lengths():
             lines.append('#include <pineforge/source/pine_ta_length.hpp>')
         lines.append('#include <pineforge/math.hpp>')
@@ -1277,6 +1279,8 @@ class TopLevelEmitter:
         lines.append("        }")
         lines.append("        pineforge::source::PineStrategyHost::set_strategy_override(overrides);")
         lines.append("    }")
+        from .checked_settings import emit_settings_members
+        emit_settings_members(self, lines)
 
         if self._uses_recorded_requests():
             lines.extend([
@@ -1889,9 +1893,10 @@ class TopLevelEmitter:
     def _emit_extern_c(self, lines: list[str]) -> None:
         lines.append('extern "C" {')
         lines.append("    void* strategy_create(const char* params_json) {")
-        lines.append("        return new GeneratedStrategy();")
+        lines.append("        try { return new GeneratedStrategy(); } catch (...) { return nullptr; }")
         lines.append("    }")
         lines.append("    void run_backtest(void* s, Bar* bars, int n, ReportC* out) {")
+        lines.append("        try {")
         lines.append("        auto* strat = static_cast<GeneratedStrategy*>(s);")
         if self._security_calls:
             # If there are security calls, use the full run path. Pass empty strings
@@ -1900,8 +1905,9 @@ class TopLevelEmitter:
         else:
             lines.append("        strat->run(bars, n);")
         lines.append("        strat->fill_report(out);")
+        lines.append("        } catch (...) {}")
         lines.append("    }")
-        lines.append("    void run_backtest_full(void* s, Bar* bars, int n,")
+        lines.append("    static void _pf_run_backtest_full_impl(void* s, Bar* bars, int n,")
         lines.append('                           const char* input_tf, const char* script_tf,')
         lines.append("                           int bar_magnifier, int magnifier_samples,")
         lines.append("                           int magnifier_dist,")
@@ -1945,24 +1951,32 @@ class TopLevelEmitter:
             lines.append("        }")
         lines.append("        strat->fill_report(out);")
         lines.append("    }")
+        lines.extend([
+            "    void run_backtest_full(void* s, Bar* bars, int n, const char* input_tf, const char* script_tf,",
+            "                           int bar_magnifier, int magnifier_samples, int magnifier_dist, ReportC* out) {",
+            "        try { _pf_run_backtest_full_impl(s, bars, n, input_tf, script_tf, bar_magnifier, magnifier_samples, magnifier_dist, out); } catch (...) {}",
+            "    }",
+        ])
         lines.append("    void strategy_free(void* s) {")
-        lines.append("        delete static_cast<GeneratedStrategy*>(s);")
+        lines.append("        try { delete static_cast<GeneratedStrategy*>(s); } catch (...) {}")
         lines.append("    }")
         lines.append("    void report_free(ReportC* report) {")
-        lines.append("        BacktestEngine::free_report(report);")
+        lines.append("        try { BacktestEngine::free_report(report); } catch (...) {}")
         lines.append("    }")
         lines.append("    void strategy_set_input(void* s, const char* key, const char* value) {")
         lines.append("        if (!s || !key || !value) return;")
-        lines.append("        static_cast<GeneratedStrategy*>(s)->set_input(key, value);")
+        lines.append("        try { static_cast<GeneratedStrategy*>(s)->set_input(key, value); } catch (...) {}")
         lines.append("    }")
         lines.append("    void strategy_set_override(void* s, const char* key, const char* value) {")
         lines.append("        if (!s || !key || !value) return;")
-        lines.append("        static_cast<GeneratedStrategy*>(s)->set_strategy_override(key, value);")
+        lines.append("        try { static_cast<GeneratedStrategy*>(s)->set_strategy_override(key, value); } catch (...) {}")
         lines.append("    }")
         lines.append("    void strategy_set_magnifier_volume_weighted(void* s, int on) {")
         lines.append("        if (!s) return;")
-        lines.append("        static_cast<GeneratedStrategy*>(s)->set_magnifier_volume_weighted(on != 0);")
+        lines.append("        try { static_cast<GeneratedStrategy*>(s)->set_magnifier_volume_weighted(on != 0); } catch (...) {}")
         lines.append("    }")
+        from .checked_settings import emit_settings_exports
+        emit_settings_exports(lines)
         if self._declares_bar_magnifier():
             # TradingView runs a script that declares use_bar_magnifier = true
             # on its bar magnifier; the host reads this export to run it on

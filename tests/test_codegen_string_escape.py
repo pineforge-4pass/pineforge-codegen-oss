@@ -6,6 +6,7 @@ and newlines. These must be escaped when emitted, or the generated C++ fails to
 compile ("invalid suffix on literal" / unterminated string).
 """
 
+from tests._legacy_cpp import legacy_cpp
 from pineforge_codegen import transpile
 
 
@@ -34,7 +35,7 @@ def test_input_title_with_quotes_and_backslashes_is_escaped():
                "src = input.source(close, 'px \"q\"')\n"
                'x = ta.ema(src, len) + input.float(0.0, "off \\"pts\\"")\n'
                "plot(x)")
-    assert cpp.count(r'get_input_int("He said \"fast\" \\ C:\\bars", 9)') == 4
+    assert legacy_cpp(cpp).count(r'get_input_int("He said \"fast\" \\ C:\\bars", 9)') == 4
     assert r'get_input_source("px \"q\"", _src_close_)' in cpp
     assert r'get_input_double("off \"pts\"", 0.0)' in cpp
     assert '"He said "fast"' not in cpp  # the broken (unescaped) form
@@ -44,4 +45,4 @@ def test_string_constant_inlined_at_its_use_is_escaped():
     cpp = _cpp('Q = "say \\"hi\\""\n'
                'if str.length(Q) > 3\n    strategy.entry("L", strategy.long)')
     assert 'std::string("say "hi"")' not in cpp
-    assert cpp.count(r'std::string("say \"hi\"")') >= 2  # the member and its use
+    assert legacy_cpp(cpp).count(r'std::string("say \"hi\"")') >= 2  # the member and its use

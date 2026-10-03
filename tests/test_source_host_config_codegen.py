@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from tests._legacy_cpp import legacy_cpp
 from pineforge_codegen import transpile
 
 
@@ -73,7 +74,7 @@ def test_constructor_configures_the_source_host_once_in_legacy_write_order():
 
 
 def test_runtime_overrides_use_the_source_host_adapter_entry_for_all_keys():
-    override = _override(transpile(_CONFIG_SOURCE))
+    override = _override(legacy_cpp(transpile(_CONFIG_SOURCE)))
     assert re.findall(r'key == "([^"]+)"', override) == [
         "initial_capital",
         "commission_value",

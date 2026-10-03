@@ -23,6 +23,7 @@ same C++ on both builds.
 
 from __future__ import annotations
 
+from tests._legacy_cpp import legacy_cpp
 import concurrent.futures
 import csv
 import datetime as dt
@@ -202,7 +203,7 @@ def test_the_pre_lane_build_missed_every_omitted_default(outcomes, case):
 def test_a_script_that_declares_every_default_is_unchanged(outcomes, case):
     lane = _outcome(outcomes, case.tape, "lane")
     legacy = _outcome(outcomes, case.tape, "legacy")
-    assert lane.cpp == legacy.cpp
+    assert legacy_cpp(lane.cpp) == legacy_cpp(legacy.cpp)
     assert lane.engine == legacy.engine == _tape(case)
 
 

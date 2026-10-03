@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import pytest
+from tests._legacy_cpp import legacy_cpp
 from pineforge_codegen import transpile
 
 # Resolve the engine corpus from the sibling checkout (../pineforge-engine)
@@ -33,7 +34,7 @@ MATRIX_EIGEN_CORPUS_SOURCE = next(
 def test_matrix_eigen_pca_byte_identical():
     src = MATRIX_EIGEN_FIXTURE.read_text()
     expected = (GOLDEN_ROOT / "matrix_eigen_pca.cpp").read_text()
-    assert transpile(src) == expected
+    assert legacy_cpp(transpile(src)) == expected
 
 
 @pytest.mark.skipif(

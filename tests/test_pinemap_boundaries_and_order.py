@@ -7,6 +7,7 @@ from hashlib import sha256
 
 import pytest
 
+from tests._legacy_cpp import legacy_cpp
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
 from tests import _compile as compile_env
@@ -208,7 +209,7 @@ observed = combine(left, right)
 '''
     cpp = transpile(source)
     assert "__pf_call_arg_" not in cpp
-    assert sha256(cpp.encode()).hexdigest() == (
+    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == (
         "3c67b8679b04e6b38515841884119fb50fe21569aa080d964b225d047dfd7987"
     )
 
