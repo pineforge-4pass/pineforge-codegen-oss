@@ -11,22 +11,17 @@ A pure-Python library that turns a PineScript v6 strategy into a complete C++
 source file you can compile against the [`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine)
 runtime.
 
-In the maintainers' parity baseline of 2026-09-29
-(`pineforge-parity-baseline-20260929-engine-35db01c8`, evidence snapshot
-`47cec517…`), this repository at 70c2b4a with engine 35db01c8
-graded 7,905 of 7,989 TradingView probes excellent and the other 84
-strong, with none below strong; 17 more probes are held out as
-TradingView-side anomalies. A probe is a
-strategy exported from TradingView with its trade list and replayed trade for
-trade on the same bars. The baseline predates the 1.0.0 and 1.0.1 releases.
-The 1.0.0 releases changed no grade: codegen 1.0.0 has the code of 70c2b4a,
-and engine `v1.0.0` includes 35db01c8. The 1.0.1 code was graded before it
-merged: this repository at 67892cd, the code of codegen 1.0.1, with engine
-b2a578ce, whose library source is `v1.0.0`'s, graded the same 7,989 probes
-with no probe changing tier (baseline
-`pineforge-parity-baseline-20261001-codegen-67892cda`). Engine `v1.0.1`
-changes only documentation since `v1.0.0`. The
-engine's [validation scoreboard](https://github.com/pineforge-4pass/pineforge-engine#validation-scoreboard)
+**Measured <!-- pf:scoreboard.date -->2026-10-03<!-- /pf -->** on main engine <!-- pf:scoreboard.engineCommit|short-code -->`700c5d24`<!-- /pf --> with codegen-oss <!-- pf:scoreboard.codegenCommit|short-code -->`13b9ccfd`<!-- /pf --> (baseline <!-- pf:scoreboard.id|code -->`pineforge-parity-baseline-20261003-engine-700c5d24`<!-- /pf -->, snapshot <!-- pf:scoreboard.snapshotSha256|short-code -->`3ee846c5`<!-- /pf -->): <!-- pf:scoreboard.excellent|int -->7,949<!-- /pf --> of <!-- pf:scoreboard.graded|int -->7,989<!-- /pf --> TradingView probes
+graded excellent and <!-- pf:scoreboard.strong|int -->40<!-- /pf --> strong, with <!-- pf:scoreboard.belowStrong|int -->0<!-- /pf --> below strong;
+<!-- pf:scoreboard.anomaliesExcluded|int -->17<!-- /pf --> more probes are held out as TradingView-side anomalies.
+A probe is a strategy exported from TradingView with its trade list and replayed
+trade for trade on the same bars.
+
+Release **1.0.1 still grades <!-- pf:releases[1.0.1].scoreboard.excellent|int -->7,905<!-- /pf --> excellent / <!-- pf:releases[1.0.1].scoreboard.strong|int -->84<!-- /pf --> strong until the next release**, on <!-- pf:releases[1.0.1].scoreboard.graded|int -->7,989<!-- /pf --> probes (baseline <!-- pf:releases[1.0.1].scoreboard.id|code -->`pineforge-parity-baseline-20261001-codegen-67892cda`<!-- /pf -->, <!-- pf:releases[1.0.1].scoreboard.date -->2026-10-01<!-- /pf -->). A main scoreboard advance does not change release results.
+
+The quantities above render from the public [facts tokens](https://github.com/pineforge-4pass/pineforge-release/blob/main/facts/facts.json). Maintain them with `lab facts render --repo . --facts <local facts file or pinned raw URL>`; `lab facts check` with the same inputs reports drift. Grades are registry-derived; the authored-script and closed-trade inventory is explicitly sourced to a historical public README for the identical population, not to registry row or slug totals.
+
+The engine's [validation scoreboard](https://github.com/pineforge-4pass/pineforge-engine#validation-scoreboard)
 describes how a probe is graded.
 
 It is **source-available and free for personal trading** — research, backtest,
