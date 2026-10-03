@@ -1,4 +1,8 @@
-"""Lexical isolation for callable-local array/map/matrix TypeSpecs."""
+"""Lexical isolation for callable-local array/map/matrix TypeSpecs.
+
+Frozen hashes compare legacy_cpp-normalised lowering, not the additive settings
+scaffold or exception wrappers; test_checked_settings tests actual emissions.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +10,7 @@ from hashlib import sha256
 
 import pytest
 
+from tests._legacy_cpp import legacy_cpp
 from pineforge_codegen import transpile
 from tests._compile import compile_cpp
 
@@ -849,7 +854,7 @@ def test_unique_local_collection_output_hash_is_stable() -> None:
     # probe's strategy() declares no capital or quantity, so its constructor
     # now carries TradingView's three Pine v6 defaults and nothing else moved.
     cpp = transpile(_IDENTITY_SOURCE)
-    assert len(cpp) == 14356
-    assert sha256(cpp.encode()).hexdigest() == (
+    assert len(legacy_cpp(cpp)) == 14356
+    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == (
         "db0f5383d1d03c10a06ff8bb164777e9a98e48dc0777a2dac02839d4f70ac488"
     )

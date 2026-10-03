@@ -1,4 +1,8 @@
-"""Atomic PineMap codegen, handle identity, and rollback regressions."""
+"""Atomic PineMap codegen, handle identity, and rollback regressions.
+
+Frozen hashes compare legacy_cpp-normalised lowering, not the additive settings
+scaffold or exception wrappers; test_checked_settings tests actual emissions.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ import tempfile
 
 import pytest
 
+from tests._legacy_cpp import legacy_cpp
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
 from tests import _compile as compile_env
@@ -388,7 +393,7 @@ observed = scalar
     cpp = transpile(source)
     # Whole-output pin includes the generated source-host constructor and
     # lifecycle reset. The ordinary non-map lowering remains unchanged.
-    assert sha256(cpp.encode()).hexdigest() == (
+    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == (
         "d2f2406c9f1fbd77606156781bb9c9899c248ad725058049ac874f3da9b3cbb3"
     )
     assert '#include <pineforge/map.hpp>' not in cpp

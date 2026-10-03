@@ -1,4 +1,8 @@
-"""Fail-closed diagnostics for duplicate kwargs and malformed map calls."""
+"""Fail-closed diagnostics for duplicate kwargs and malformed map calls.
+
+Frozen hashes compare legacy_cpp-normalised lowering, not the additive settings
+scaffold or exception wrappers; test_checked_settings tests actual emissions.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +10,7 @@ from hashlib import sha256
 
 import pytest
 
+from tests._legacy_cpp import legacy_cpp
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError, Phase
 from tests.test_map_param_methods import _compile_and_run
@@ -63,7 +68,7 @@ observed = typed_keywords(global_values, global_source)
 
 def test_valid_existing_positional_and_typed_keyword_forms_do_not_drift():
     cpp = transpile(_VALID_EXISTING_FORMS)
-    assert sha256(cpp.encode()).hexdigest() == (
+    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == (
         "c955f34b39e168579eab09094728963148a1a2c16d5c46b2bc2975d681d7963c"
     )
 
@@ -107,7 +112,7 @@ def test_lexical_identifier_named_map_remains_a_receiver(
     expected_hash: str,
 ):
     cpp = transpile(source)
-    assert sha256(cpp.encode()).hexdigest() == expected_hash
+    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == expected_hash
 
 
 _LATER_GLOBAL_MAP_SOURCE = '''//@version=6
@@ -140,7 +145,7 @@ def test_security_timeframe_clone_keeps_preceding_map_namespace_source_order():
         filename="synthetic-map-source-order.pine",
     )
 
-    assert sha256(cpp.encode()).hexdigest() == (
+    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == (
         "8c6ee0d063e5f87dcf78ba3e5090ac58452f534c7155f2c9785eb2f8ffe553fd"
     )
 
@@ -158,7 +163,7 @@ observed = foreign
 
     cpp = transpile(source, filename="synthetic-lexical-map-source-order.pine")
 
-    assert sha256(cpp.encode()).hexdigest() == (
+    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == (
         "acd8526526243ffeeb22087a2e29066815cab7fdd79413f2c518d44396374c9a"
     )
 
@@ -230,7 +235,7 @@ def test_map_namespace_resolution_respects_source_order_and_lexical_roots(
     expected_value: float,
 ):
     cpp = transpile(source)
-    assert sha256(cpp.encode()).hexdigest() == expected_hash
+    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == expected_hash
     driver = r'''
 #include <iostream>
 int main() {

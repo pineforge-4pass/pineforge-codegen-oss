@@ -1,4 +1,8 @@
-"""Terminal UDF return inference for established map call forms."""
+"""Terminal UDF return inference for established map call forms.
+
+Frozen hashes compare legacy_cpp-normalised lowering, not the additive settings
+scaffold or exception wrappers; test_checked_settings tests actual emissions.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +10,7 @@ from hashlib import sha256
 
 import pytest
 
+from tests._legacy_cpp import legacy_cpp
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
@@ -389,7 +394,7 @@ def test_map_terminal_return_forms_compile():
 
 def test_nonterminal_pinemap_output_hash_is_stable():
     cpp = transpile(_NONTERMINAL_SOURCE)
-    assert sha256(cpp.encode()).hexdigest() == (
+    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == (
         "e61e73390a8e5db675abb798ba0cfb432eccea11e6992b6dfd062ea93830a1e7"
     )
 
@@ -424,6 +429,6 @@ observed = f(map.new<string, string>())
 
 def test_unresolved_parameter_keeps_lexical_precedence_over_global_map():
     cpp = transpile(_SHADOWED_UNRESOLVED_PARAM_SOURCE)
-    assert sha256(cpp.encode()).hexdigest() == (
+    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == (
         "6c978cc39c9e14caeaaee94214b84c86b9e2d82c2d60a8e85d5556973aeab3d5"
     )
