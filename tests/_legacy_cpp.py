@@ -11,6 +11,9 @@ def legacy_cpp(cpp: str) -> str:
     cpp = re.sub(r'^    void _pf_record_failure\(.*?\n    }\n'
                  r'    bool _pf_refuse_failed_setting\(.*?\n    }\n', '',
                  cpp, flags=re.MULTILINE | re.DOTALL)
+    cpp = cpp.replace('    bool _pf_setting_failed_ = false;\n', '')
+    cpp = cpp.replace('    std::string _pf_setting_failure_;\n', '')
+    cpp = cpp.replace('        _pf_require_settings_ok();\n', '')
     cpp = cpp.replace('        if (strat->_pf_refuse_failed_setting(out)) return;\n', '')
     cpp = re.sub(r'        } catch \(const std::exception& _pf_error\) \{\n.*?'
                  r'        } catch \(\.\.\.\) \{\n.*?        }\n', '',

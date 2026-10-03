@@ -42,8 +42,13 @@ def test_metadata_and_exception_wrappers_are_emitted():
     assert cpp.count('catch (...)') >= 7
     for entrypoint in ("run_backtest", "run_backtest_full", "strategy_set_input",
                        "strategy_set_override", "strategy_set_magnifier_volume_weighted"):
-        assert f'_pf_record_failure("{entrypoint}", _pf_error.what())' in cpp
-        assert f'_pf_record_failure("{entrypoint}", "unknown C++ exception")' in cpp
+        recorder = "_pf_record_setting_failure" if entrypoint.startswith("strategy_set_") else "_pf_record_failure"
+        assert f'{recorder}("{entrypoint}", _pf_error.what())' in cpp
+        assert f'{recorder}("{entrypoint}", "unknown C++ exception")' in cpp
+    assert 'bool _pf_setting_failed_ = false;' in cpp
+    assert 'std::string _pf_setting_failure_;' in cpp
+    assert 'throw pineforge::checked_settings::LatchedSettingsFailure(' in cpp
+    assert '        _pf_require_settings_ok();\n        _pf_script_state_checkpoint_.reset();' in cpp
     assert 'unknown input key' in cpp and 'unknown override key' in cpp
     assert 'return new GeneratedStrategy();' in cpp
 
@@ -158,6 +163,8 @@ int main() {
 SETTINGS_MEMBER_NAMES = (
     "StreamPhase", "config_", "inputs_", "last_error", "last_error_", "override_",
     "script_bars_processed", "stream_phase_", "_pf_record_failure",
+    "_pf_record_setting_failure", "_pf_require_settings_ok",
+    "_pf_setting_failed_", "_pf_setting_failure_",
     "_pf_refuse_failed_setting", "_pf_settings_declared_config", "_pf_settings_inputs",
     "_pf_settings_overrides", "_pf_set_input_checked", "_pf_set_override_checked",
     "_pf_settings_receipt",
@@ -236,3 +243,66 @@ int main() {
 }
 '''
     run_emitted_tu(transpile(SOURCE), driver, opt="-O0", label="legacy exception readback")
+
+
+@pytest.mark.parametrize("optimization", ["-O0", "-O2"])
+def test_legacy_setter_failure_survives_error_clears_and_refuses_stream(optimization):
+    driver = r'''
+#include <cassert>
+int main() {
+    auto* strategy = static_cast<GeneratedStrategy*>(strategy_create(nullptr));
+    strategy_set_override(strategy, "pyramiding", "abc");
+    const std::string failure = strategy_get_last_error(strategy);
+    assert(failure.find("strategy_set_override:") == 0 && failure.size() > 23);
+    pf_bar_t warmup{100, 101, 99, 100, 1000, 1577836800000LL};
+    assert(strategy_stream_begin(strategy, &warmup, 1, "1", "1") == -1);
+    assert(std::string(strategy_get_last_error(strategy)).find(failure) != std::string::npos);
+    strategy_free(strategy);
+
+    strategy = static_cast<GeneratedStrategy*>(strategy_create(nullptr));
+    strategy_set_override(strategy, "pyramiding", "abc");
+    assert(std::string(strategy_get_last_error(strategy)) == failure);
+    assert(strategy_set_aux_security_feed(strategy, nullptr, 0, "1") == 0);
+    assert(std::string(strategy_get_last_error(strategy)).empty());
+    strategy_set_override(strategy, "pyramiding", "3");
+    strategy_set_override(strategy, "default_qty_value", "abc");
+    assert(std::string(strategy_get_last_error(strategy)) == failure);
+    ReportC report{};
+    report.total_trades = 99;
+    run_backtest(strategy, nullptr, 0, &report);
+    assert(report.total_trades == 0 && strategy->last_error() == failure);
+    assert(strategy_set_native_security_feed(strategy, "D", nullptr, 0) == 0);
+    assert(std::string(strategy_get_last_error(strategy)).empty());
+    report.total_trades = 99;
+    run_backtest_full(strategy, nullptr, 0, "", "", 0, 4, 0, &report);
+    assert(report.total_trades == 0 && strategy->last_error() == failure);
+    assert(strategy_set_aux_security_feed(strategy, nullptr, 0, "1") == 0);
+    char error[256]{};
+    assert(run_backtest_full_checked(strategy, nullptr, 0, "", "", 0, 4, 0,
+                                    &report, error, sizeof(error)) == PF_SETTINGS_RUN_FAILED);
+    assert(std::string(error) == failure);
+    assert(strategy_set_aux_security_feed(strategy, nullptr, 0, "1") == 0);
+    assert(strategy_stream_begin(strategy, &warmup, 1, "1", "1") == -1);
+    assert(std::string(strategy_get_last_error(strategy)) == failure);
+    strategy_free(strategy);
+
+    strategy = static_cast<GeneratedStrategy*>(strategy_create(nullptr));
+    strategy_set_override(strategy, "pyramiding", "abc");
+    assert(strategy_set_aux_security_feed(strategy, nullptr, 0, "1") == 0);
+    Bar bars[]{{100, 101, 99, 100, 1000, 1577836800000LL}};
+    strategy->run(bars, 1);
+    assert(std::string(strategy_get_last_error(strategy)).find(failure) != std::string::npos);
+    assert(strategy->script_bars_processed() == 0);
+    ReportC retry_report{};
+    retry_report.total_trades = 99;
+    run_backtest(strategy, bars, 1, &retry_report);
+    assert(retry_report.total_trades == 0 && strategy->last_error() == failure);
+    strategy_free(strategy);
+
+    strategy = static_cast<GeneratedStrategy*>(strategy_create(nullptr));
+    assert(strategy_stream_begin(strategy, &warmup, 1, "1", "1") == 0);
+    strategy_free(strategy);
+}
+'''
+    run_emitted_tu(transpile(SOURCE), driver, opt=optimization,
+                   label="sticky legacy setter failure in batch and stream")
