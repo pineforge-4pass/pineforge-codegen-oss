@@ -21,6 +21,7 @@ and misses its tape; the twin passes on both builds with the same C++.
 
 from __future__ import annotations
 
+from tests._legacy_cpp import legacy_cpp
 import concurrent.futures
 import csv
 import ctypes
@@ -179,7 +180,7 @@ def test_the_pre_lane_build_ran_the_declaring_script_unmagnified(outcomes):
 def test_a_script_that_does_not_declare_it_is_unchanged(outcomes):
     lane = _outcome(outcomes, "w9mag-fx-eth-15-off", "lane")
     base = _outcome(outcomes, "w9mag-fx-eth-15-off", "base")
-    assert lane.cpp == base.cpp
+    assert legacy_cpp(lane.cpp) == legacy_cpp(base.cpp)
     assert "strategy_declares_bar_magnifier" not in lane.cpp
     assert lane.engine == base.engine == _tape("w9mag-fx-eth-15-off")
 

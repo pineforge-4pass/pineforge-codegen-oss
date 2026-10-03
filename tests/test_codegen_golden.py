@@ -1,7 +1,12 @@
-"""Byte-identical golden harness for matrix corpus probes (Task 2.17)."""
+"""Byte-identical golden harness for matrix corpus probes (Task 2.17).
+
+Goldens compare legacy_cpp-normalised lowering, excluding the additive settings
+scaffold and exception wrappers. test_checked_settings exercises actual output.
+"""
 import os
 from pathlib import Path
 import pytest
+from tests._legacy_cpp import legacy_cpp
 from pineforge_codegen import transpile
 
 # Resolve the engine corpus from the sibling checkout (../pineforge-engine)
@@ -33,7 +38,7 @@ MATRIX_EIGEN_CORPUS_SOURCE = next(
 def test_matrix_eigen_pca_byte_identical():
     src = MATRIX_EIGEN_FIXTURE.read_text()
     expected = (GOLDEN_ROOT / "matrix_eigen_pca.cpp").read_text()
-    assert transpile(src) == expected
+    assert legacy_cpp(transpile(src)) == expected
 
 
 @pytest.mark.skipif(

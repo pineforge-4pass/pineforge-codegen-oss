@@ -314,7 +314,13 @@ CPP_EMITTER_NAMES = frozenset("""
     _pf_drawing_na _pf_collect_drawings _pf_collect_lines_ _pf_collect_boxes_
     _pf_collect_labels_ _pf_new _pf_held
     get_input_int get_input_float get_input_bool get_input_string
-    trace is_na na nz fixnan
+    _pf_record_failure _pf_refuse_failed_setting _pf_settings_declared_config
+    _pf_record_setting_failure _pf_require_settings_ok
+    _pf_setting_failed_ _pf_setting_failure_
+    _pf_settings_inputs _pf_settings_overrides _pf_set_input_checked
+    _pf_set_override_checked _pf_settings_receipt
+    _pf_close_entries_rule_word _pf_default_qty_type_word _pf_commission_type_word
+    checked_settings trace is_na na nz fixnan
 """.split())
 
 # The generated history members, ``_<kind>_<n>`` (codegen/base.py
