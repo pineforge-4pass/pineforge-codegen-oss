@@ -8,7 +8,7 @@ from tests._compile import run_emitted_tu
 
 
 SOURCE = '''//@version=6
-strategy("checked settings", initial_capital=10000)
+strategy("checked settings", initial_capital=10000, default_qty_value=1)
 enum Side
     neutral
     long
