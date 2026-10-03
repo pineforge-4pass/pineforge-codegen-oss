@@ -320,7 +320,7 @@ CPP_EMITTER_NAMES = frozenset("""
     _pf_settings_inputs _pf_settings_overrides _pf_set_input_checked
     _pf_set_override_checked _pf_settings_receipt
     _pf_close_entries_rule_word _pf_default_qty_type_word _pf_commission_type_word
-    trace is_na na nz fixnan
+    checked_settings trace is_na na nz fixnan
 """.split())
 
 # The generated history members, ``_<kind>_<n>`` (codegen/base.py

@@ -17,7 +17,9 @@ def legacy_cpp(cpp: str) -> str:
     cpp = cpp.replace('    std::string _pf_setting_failure_;\n', '')
     cpp = cpp.replace('        _pf_require_settings_ok();\n', '')
     cpp = cpp.replace('        if (strat->_pf_refuse_failed_setting(out)) return;\n', '')
-    cpp = cpp.replace('        strat->_pf_refuse_failed_setting(out);\n', '')
+    cpp = cpp.replace(
+        '        if (!strat->_pf_refuse_failed_setting(out)) strat->fill_report(out);\n',
+        '        strat->fill_report(out);\n')
     cpp = re.sub(r'        } catch \(const std::exception& _pf_error\) \{\n.*?'
                  r'        } catch \(\.\.\.\) \{\n.*?        }\n', '',
                  cpp, flags=re.DOTALL)

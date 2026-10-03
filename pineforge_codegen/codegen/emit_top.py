@@ -1908,8 +1908,7 @@ class TopLevelEmitter:
             lines.append('        strat->run(bars, n, "", "", false, 4, MagnifierDistribution::ENDPOINTS);')
         else:
             lines.append("        strat->run(bars, n);")
-        lines.append("        strat->fill_report(out);")
-        lines.append("        strat->_pf_refuse_failed_setting(out);")
+        lines.append("        if (!strat->_pf_refuse_failed_setting(out)) strat->fill_report(out);")
         lines.append('        } catch (const std::exception& _pf_error) {')
         lines.append('            if (out) *out = ReportC{};')
         lines.append('            if (s) static_cast<GeneratedStrategy*>(s)->_pf_record_failure("run_backtest", _pf_error.what());')
@@ -1963,8 +1962,7 @@ class TopLevelEmitter:
             lines.append("            strat->run(bars, n, itf, stf, bar_magnifier != 0, magnifier_samples,")
             lines.append("                       static_cast<MagnifierDistribution>(magnifier_dist));")
             lines.append("        }")
-        lines.append("        strat->fill_report(out);")
-        lines.append("        strat->_pf_refuse_failed_setting(out);")
+        lines.append("        if (!strat->_pf_refuse_failed_setting(out)) strat->fill_report(out);")
         lines.append("    }")
         lines.extend([
             "    void run_backtest_full(void* s, Bar* bars, int n, const char* input_tf, const char* script_tf,",

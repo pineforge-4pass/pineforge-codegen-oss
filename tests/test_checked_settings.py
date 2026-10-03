@@ -179,7 +179,7 @@ SETTINGS_MEMBER_NAMES = (
     "_pf_settings_receipt",
     "_pf_close_entries_rule_word", "_pf_default_qty_type_word", "_pf_commission_type_word",
     "LatchedSettingsFailure", "Error", "Setting", "require", "copy_error", "boundary",
-    "number", "integer", "real", "quote", "validate", "describe", "receipt",
+    "number", "integer", "real", "quote", "validate", "describe", "receipt", "checked_settings",
 )
 
 
@@ -237,15 +237,17 @@ def test_settings_name_reservations_keep_default_corpus_emission_identical(monke
 
 SETTINGS_HELPER_NAMES = (
     "LatchedSettingsFailure", "Error", "Setting", "require", "copy_error", "boundary",
-    "number", "integer", "real", "quote", "validate", "describe", "receipt",
+    "number", "integer", "real", "quote", "validate", "describe", "receipt", "checked_settings",
 )
 
 
-@pytest.mark.parametrize("shape", ["function", "udt", "enum"])
+@pytest.mark.parametrize("shape", ["variable", "function", "udt", "enum"])
 def test_settings_helpers_are_not_shadowed_by_script_declarations(shape):
     declarations = []
     for name in SETTINGS_HELPER_NAMES:
-        if shape == "function":
+        if shape == "variable":
+            declarations.append(f"{name} = 1")
+        elif shape == "function":
             declarations.append(f"{name}(value) => value + 1")
         elif shape == "udt":
             declarations.append(f"type {name}\n    int value")
