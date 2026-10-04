@@ -12,6 +12,7 @@ import { nowIso } from "../../lib/dates.ts";
 import { deploymentMode, liveBlocked, safeLocale, siteUrl, type Env } from "../../server/env.ts";
 import { BodyError, apiError, clientIp, json, randomId, readJson } from "../../server/http.ts";
 import { CHECKOUT_LIMIT, allowRequest } from "../../server/rate-limit.ts";
+import { rateLimitKey } from "../../lib/client-ip.ts";
 import { Stripe, stripeClient } from "../../server/stripe.ts";
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
@@ -39,7 +40,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const locale = safeLocale(input.locale);
 
   try {
-    if (!(await allowRequest(env.DB, CHECKOUT_LIMIT, clientIp(request)))) return apiError(429, "rate_limited");
+    if (!(await allowRequest(env.DB, CHECKOUT_LIMIT, rateLimitKey(clientIp(request))))) return apiError(429, "rate_limited");
   } catch (e) {
     console.error("[checkout] rate limit failed:", e);
     return apiError(500, "server_error");

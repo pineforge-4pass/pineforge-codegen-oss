@@ -14,6 +14,11 @@ export function trustedKeyring(env: Env): Keyring {
   return override ? parseKeyring(override) : BUNDLED;
 }
 
+/** True when `kid` names a key of the BUNDLED (production) keyring, whatever LICENSE_PUBLIC_KEYS says. */
+export function isProductionKid(kid: string): boolean {
+  return BUNDLED.keys.some((k) => k.kid === kid);
+}
+
 /** The Ed25519 private JWK in LICENSE_SIGNING_KEY; throws when missing or invalid. */
 export function signingKey(env: Env): PrivateJwk {
   const raw = (env.LICENSE_SIGNING_KEY ?? "").trim();

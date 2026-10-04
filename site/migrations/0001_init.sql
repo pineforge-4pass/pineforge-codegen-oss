@@ -50,7 +50,7 @@ CREATE TABLE licenses (
   valid_from TEXT NOT NULL,
   valid_until TEXT NOT NULL,
   revoked_at TEXT,
-  revoke_reason TEXT,
+  revoke_reason TEXT,                        -- refund | dispute_lost
   emailed_at TEXT,                           -- the buyer's license email was accepted by Resend
   email_claimed_at TEXT                      -- a delivery is sending it (stale after 5 minutes)
 );
@@ -84,14 +84,16 @@ CREATE TABLE email_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   to_addr TEXT NOT NULL,
   subject TEXT NOT NULL,
-  kind TEXT NOT NULL,                        -- license | sale | quote | alert
-  related_id TEXT,                           -- order, license or quote id
+  kind TEXT NOT NULL,                        -- license | sale | quote | alert, or an alert sent once
+                                             -- per related id: alert-issue (order), alert-dispute and
+                                             -- alert-dispute-lost (Stripe dispute)
+  related_id TEXT,                           -- order, license, quote or Stripe dispute id
   provider_id TEXT,
   status TEXT NOT NULL CHECK (status IN ('sent', 'failed', 'skipped')),
   error TEXT,
   created_at TEXT NOT NULL
 );
-CREATE INDEX email_log_related ON email_log (related_id);
+CREATE INDEX email_log_related ON email_log (related_id, kind);
 
 -- Fixed-window request counters, keyed "<scope>:<client ip>".
 CREATE TABLE rate_limits (

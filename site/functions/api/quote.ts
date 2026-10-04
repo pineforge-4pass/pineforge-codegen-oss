@@ -10,6 +10,7 @@ import { nowIso } from "../../lib/dates.ts";
 import { safeLocale, type Env } from "../../server/env.ts";
 import { BodyError, apiError, clientIp, json, randomId, readJson } from "../../server/http.ts";
 import { QUOTE_LIMIT, allowRequest } from "../../server/rate-limit.ts";
+import { rateLimitKey } from "../../lib/client-ip.ts";
 import { sendEmail } from "../../server/email.ts";
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
@@ -30,7 +31,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const ip = clientIp(request);
 
   try {
-    if (!(await allowRequest(env.DB, QUOTE_LIMIT, ip))) return apiError(429, "rate_limited");
+    if (!(await allowRequest(env.DB, QUOTE_LIMIT, rateLimitKey(ip)))) return apiError(429, "rate_limited");
   } catch (e) {
     console.error("[quote] rate limit failed:", e);
     return apiError(500, "server_error");

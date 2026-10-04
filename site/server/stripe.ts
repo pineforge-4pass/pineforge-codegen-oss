@@ -19,6 +19,7 @@ export function stripeClient(env: Env): Stripe {
   if (!key) throw new Error("STRIPE_SECRET_KEY is not set");
   const { host, port, protocol } = stripeApiOrigin(env);
   return new Stripe(key, {
+    apiVersion: "2026-09-30.endive",
     httpClient: Stripe.createFetchHttpClient(),
     host,
     port,

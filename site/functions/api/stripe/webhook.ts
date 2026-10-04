@@ -1,23 +1,30 @@
 // POST /api/stripe/webhook
 //
-// Verifies the Stripe-Signature over the raw body (400 and no side effects
-// when it is missing or wrong), rejects events whose livemode differs from
-// this deployment's mode, skips event ids already processed, processes the
-// event and only then records its id: a failed run answers 500, Stripe
-// retries, and processing the same event again is safe.
+// Refuses a body over 1 MiB (413) unread, verifies the Stripe-Signature over
+// the raw body (400 and no side effects when it is missing or wrong), rejects
+// events whose livemode differs from this deployment's mode, skips event ids
+// already processed, processes the event and only then records its id: a
+// failed run answers 500, Stripe retries, and processing the same event again
+// is safe. Disputes: a new one alerts the operator once; a lost one revokes
+// the order's license (reason dispute_lost) and alerts; a won one is recorded.
 import { Stripe, idOf } from "../../../server/stripe.ts";
 import { deploymentMode, liveBlockReasons, siteUrl, type Env } from "../../../server/env.ts";
-import { apiError, json } from "../../../server/http.ts";
-import { orderById, orderByPaymentIntent, orderBySession, type OrderRow } from "../../../server/db.ts";
+import { apiError, json, readTextCapped } from "../../../server/http.ts";
+import { licenseByOrder, orderById, orderByPaymentIntent, orderBySession, type OrderRow } from "../../../server/db.ts";
 import { issueLicense } from "../../../server/issue.ts";
-import { sendAlert } from "../../../server/email.ts";
+import { sendAlert, sendAlertOnce } from "../../../server/email.ts";
 import { nowIso } from "../../../lib/dates.ts";
 
 type Session = Stripe.Checkout.Session;
 type Charge = Stripe.Charge;
+type Dispute = Stripe.Dispute;
+
+/** Stripe event payloads are far smaller; anything larger is refused unread. */
+const MAX_BODY_BYTES = 1024 * 1024;
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
-  const raw = await request.text();
+  const raw = await readTextCapped(request, MAX_BODY_BYTES);
+  if (raw === null) return apiError(413, "payload_too_large");
   const signature = request.headers.get("Stripe-Signature");
   if (!signature) return apiError(400, "invalid_signature");
   const secret = (env.STRIPE_WEBHOOK_SECRET ?? "").trim();
@@ -63,6 +70,10 @@ async function handle(env: Env, event: Stripe.Event, site: string): Promise<void
       return sessionClosed(env, event.data.object, "expired");
     case "charge.refunded":
       return chargeRefunded(env, event.data.object);
+    case "charge.dispute.created":
+      return disputeCreated(env, event.data.object);
+    case "charge.dispute.closed":
+      return disputeClosed(env, event.data.object);
     default:
       return;
   }
@@ -204,5 +215,57 @@ async function chargeRefunded(env: Env, charge: Charge): Promise<void> {
     env.DB.prepare(
       "UPDATE licenses SET status = 'revoked', revoked_at = ?1, revoke_reason = 'refund' WHERE order_id = ?2 AND status = 'active'",
     ).bind(now, order.id),
+  ]);
+}
+
+/** The order a dispute's payment belongs to, or null (logged) when it is not one of this site's. */
+async function disputeOrder(env: Env, dispute: Dispute): Promise<OrderRow | null> {
+  const paymentIntent = idOf(dispute.payment_intent);
+  const order = paymentIntent ? await orderByPaymentIntent(env.DB, paymentIntent) : null;
+  if (!order) console.warn(`[webhook] dispute ${dispute.id} belongs to no order of this site`);
+  return order;
+}
+
+function disputeLines(dispute: Dispute, order: OrderRow, licenseId: string | null): string[] {
+  return [
+    `Dispute: ${dispute.id} (${dispute.status}, reason ${dispute.reason})`,
+    `Amount:  ${dispute.amount} ${dispute.currency} (minor units)`,
+    `Charge:  ${idOf(dispute.charge) ?? "(none)"}, payment ${idOf(dispute.payment_intent) ?? "(none)"}`,
+    `Order:   ${order.id} (${order.company}, ${order.tier}/${order.option_id}), buyer ${order.buyer_email}`,
+    `License: ${licenseId ?? "(none issued)"}`,
+  ];
+}
+
+/** A new dispute: one alert per dispute (email_log kind "alert-dispute"). */
+async function disputeCreated(env: Env, dispute: Dispute): Promise<void> {
+  const order = await disputeOrder(env, dispute);
+  if (!order) return;
+  const license = await licenseByOrder(env.DB, order.id);
+  await sendAlertOnce(env, "alert-dispute", dispute.id, `payment disputed on order ${order.id} (${dispute.id})`, [
+    ...disputeLines(dispute, order, license?.id ?? null),
+    "Respond in the Stripe dashboard before the evidence deadline. The license stays active",
+    "unless the dispute is lost.",
+  ]);
+}
+
+/** A closed dispute: lost revokes the order's license (reason dispute_lost) and alerts once; won is only recorded. */
+async function disputeClosed(env: Env, dispute: Dispute): Promise<void> {
+  if (dispute.status !== "lost") {
+    console.log(`[webhook] dispute ${dispute.id} closed: ${dispute.status}`);
+    return;
+  }
+  const order = await disputeOrder(env, dispute);
+  if (!order) return;
+  await env.DB.prepare(
+    "UPDATE licenses SET status = 'revoked', revoked_at = ?1, revoke_reason = 'dispute_lost' WHERE order_id = ?2 AND status = 'active'",
+  )
+    .bind(nowIso(), order.id)
+    .run();
+  const license = await licenseByOrder(env.DB, order.id);
+  await sendAlertOnce(env, "alert-dispute-lost", dispute.id, `dispute lost on order ${order.id} (${dispute.id})`, [
+    ...disputeLines(dispute, order, license?.id ?? null),
+    license
+      ? `The license is revoked (${license.status}, reason ${license.revoke_reason ?? "(none)"}).`
+      : "No license was issued for this order.",
   ]);
 }

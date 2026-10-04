@@ -52,7 +52,13 @@ function tierLabel(tier: string): string {
   return tier;
 }
 
+// The site's self-hosted IBM Plex (public/fonts, latin subset); the system
+// stacks below stay as fallbacks.
 const STYLE = `
+@font-face { font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400; font-display: swap; src: url("/fonts/ibm-plex-sans-latin-400-normal.woff2") format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "IBM Plex Sans"; font-style: normal; font-weight: 500; font-display: swap; src: url("/fonts/ibm-plex-sans-latin-500-normal.woff2") format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "IBM Plex Sans"; font-style: normal; font-weight: 600; font-display: swap; src: url("/fonts/ibm-plex-sans-latin-600-normal.woff2") format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("/fonts/ibm-plex-mono-latin-400-normal.woff2") format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
 :root {
   --paper: #ecefe9; --ink: #0f2b21; --ink-2: #46594f; --hair: #c9d1ca; --rule: #7d8c84; --field: #e2e7e0;
   --accent: #e8a33d; --accent-text: #8a4f00; --on-accent: #0f2b21;
@@ -116,7 +122,7 @@ a:focus-visible, button:focus-visible { outline: 3px solid var(--ink); outline-o
 }
 `;
 
-function page(opts: { title: string; nonce: string; siteUrl: string; locale: string; main: string }): string {
+function page(opts: { title: string; nonce: string; locale: string; main: string }): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -147,6 +153,7 @@ function headers(n: string): Record<string, string> {
       `style-src 'nonce-${n}'`,
       `script-src 'nonce-${n}'`,
       "img-src 'self'",
+      "font-src 'self'",
       "base-uri 'none'",
       "form-action 'none'",
       "frame-ancestors 'none'",
@@ -205,12 +212,12 @@ ${row(t.status, `<span data-testid="certificate-status">${escapeHtml(statusLabel
 </main>`;
 
   return {
-    body: page({ title: fill(t.docTitle, { id: p.id }), nonce: n, siteUrl: d.siteUrl, locale: d.locale, main }),
+    body: page({ title: fill(t.docTitle, { id: p.id }), nonce: n, locale: d.locale, main }),
     headers: headers(n),
   };
 }
 
-export function renderNotFound(id: string, contactEmail: string, siteUrl: string, locale: string): { body: string; headers: Record<string, string> } {
+export function renderNotFound(id: string, contactEmail: string, locale: string): { body: string; headers: Record<string, string> } {
   const n = nonce();
   const main = `<main id="main" class="wrap" data-testid="certificate-not-found">
 <h1>${escapeHtml(t.notFoundTitle)}</h1>
@@ -219,5 +226,5 @@ export function renderNotFound(id: string, contactEmail: string, siteUrl: string
     email: link(`mailto:${contactEmail}`, contactEmail),
   })}</p>
 </main>`;
-  return { body: page({ title: t.notFoundTitle, nonce: n, siteUrl, locale, main }), headers: headers(n) };
+  return { body: page({ title: t.notFoundTitle, nonce: n, locale, main }), headers: headers(n) };
 }

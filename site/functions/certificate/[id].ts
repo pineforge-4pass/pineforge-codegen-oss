@@ -13,7 +13,7 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env, params })
   const site = siteUrl(env, request);
   const locale = safeLocale(undefined);
   const notFound = () => {
-    const page = renderNotFound(raw.slice(0, 64), commerce.seller.contactEmail, site, locale);
+    const page = renderNotFound(raw.slice(0, 64), commerce.seller.contactEmail, locale);
     return html(404, page.body, page.headers);
   };
   if (!raw || raw.length > 64 || !isLicenseId(raw)) return notFound();

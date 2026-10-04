@@ -1,7 +1,6 @@
 // Environment of the Pages Functions, the deployment mode and the live-payment
 // guard. Shared by every Function; this directory is not routed.
-import { AGREEMENT_IS_DRAFT } from "../lib/generated/build-info.ts";
-import { commerce } from "../lib/commerce-config.ts";
+import { goLiveBlockers } from "../lib/go-live.ts";
 import locales from "../i18n/locales.json";
 
 export interface Env {
@@ -21,6 +20,12 @@ export interface Env {
   RESEND_API_BASE?: string;
   /** JSON keyring that REPLACES the bundled one. Local development and tests only. */
   LICENSE_PUBLIC_KEYS?: string;
+  /**
+   * Test mode only: comma list of buyer addresses (exact, or "@domain") that
+   * receive the license email. Other buyers get none (logged as skipped);
+   * a live deployment ignores it.
+   */
+  TEST_EMAIL_ALLOWLIST?: string;
 }
 
 export type DeploymentMode = "test" | "live";
@@ -48,11 +53,7 @@ export function testOverride(env: Env, name: "STRIPE_API_BASE" | "RESEND_API_BAS
 
 /** Why live payments must not be taken yet; [] once the owner has cleared every item. */
 export function liveBlockReasons(): string[] {
-  const reasons: string[] = [];
-  if (AGREEMENT_IS_DRAFT) reasons.push("the Commercial License Agreement is still marked DRAFT");
-  if (commerce.pricesArePlaceholders) reasons.push("prices are placeholders (pricesArePlaceholders is true)");
-  if (!commerce.seller.legalName) reasons.push("the selling legal entity is not named (seller.legalName is null)");
-  return reasons;
+  return goLiveBlockers();
 }
 
 /** Live key while the agreement, prices or seller are not ready: no checkout, no live issuance. */
