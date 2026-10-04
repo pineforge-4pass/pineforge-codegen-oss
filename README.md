@@ -11,8 +11,8 @@ A pure-Python library that turns a PineScript v6 strategy into a complete C++
 source file you can compile against the [`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine)
 runtime.
 
-**Measured <!-- pf:scoreboard.date -->2026-10-04<!-- /pf -->** on main engine <!-- pf:scoreboard.engineCommit|short-code -->`7b596622`<!-- /pf --> with codegen-oss <!-- pf:scoreboard.codegenCommit|short-code -->`c5d97ee5`<!-- /pf --> (baseline <!-- pf:scoreboard.id|code -->`pineforge-parity-baseline-20261004-engine-7b596622`<!-- /pf -->, snapshot <!-- pf:scoreboard.snapshotSha256|short-code -->`af86f13e`<!-- /pf -->): <!-- pf:scoreboard.excellent|int -->7,951<!-- /pf --> of <!-- pf:scoreboard.graded|int -->7,989<!-- /pf --> TradingView probes
-graded excellent and <!-- pf:scoreboard.strong|int -->38<!-- /pf --> strong, with <!-- pf:scoreboard.belowStrong|int -->0<!-- /pf --> below strong; <!-- pf:scoreboard.anomaliesExcluded|int -->17<!-- /pf --> more probes are held out as TradingView-side anomalies.
+**Measured <!-- pf:scoreboard.date -->2026-10-04<!-- /pf -->** on main engine <!-- pf:scoreboard.engineCommit|short-code -->`6b77f061`<!-- /pf --> with codegen-oss <!-- pf:scoreboard.codegenCommit|short-code -->`285ac035`<!-- /pf --> (baseline <!-- pf:scoreboard.id|code -->`pineforge-parity-baseline-20261004-engine-6b77f061`<!-- /pf -->, snapshot <!-- pf:scoreboard.snapshotSha256|short-code -->`21639bad`<!-- /pf -->): <!-- pf:scoreboard.excellent|int -->7,970<!-- /pf --> of <!-- pf:scoreboard.graded|int -->7,989<!-- /pf --> TradingView probes
+graded excellent and <!-- pf:scoreboard.strong|int -->19<!-- /pf --> strong, with <!-- pf:scoreboard.belowStrong|int -->0<!-- /pf --> below strong; <!-- pf:scoreboard.anomaliesExcluded|int -->17<!-- /pf --> more probes are held out as TradingView-side anomalies.
 A probe is a strategy exported from TradingView with its trade list and replayed
 trade for trade on the same bars.
 
