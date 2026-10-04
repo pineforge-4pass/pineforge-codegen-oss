@@ -74,8 +74,11 @@ over HTTP. It:
    secret for this run only;
 2. builds the site if `out/` is missing, applies the D1 migrations to a fresh
    local database directory;
-3. starts two local fakes and `wrangler pages dev out` (plus a second site
-   instance with a live-looking Stripe key for the live-guard test);
+3. starts two local fakes and three `wrangler pages dev out` instances: the
+   test-mode site (`TEST_EMAIL_ALLOWLIST=@example.com`), one holding a
+   live-looking Stripe key (the live-payment guard, and a live-mode event on
+   a blocked deployment), and a test-mode one whose signing key the keyring
+   does not trust (the issuance-failure alert);
 4. runs Playwright (`e2e/playwright.config.mjs`, specs in `e2e/specs/`),
    tears everything down and exits with Playwright's code.
 
@@ -85,13 +88,18 @@ over HTTP. It:
   (`POST /v1/checkout/sessions`, `GET /v1/checkout/sessions/:id`), serves a
   look-alike hosted checkout page, and posts webhook events signed exactly as
   Stripe signs them. Card `4242 4242 4242 4242` pays; `4000 0000 0000 0002`
-  is declined. A control endpoint refunds a payment and posts
-  `charge.refunded`.
+  is declined; `4000 0000 0000 0077` pays but delivers its webhook after the
+  redirect. Control endpoints refund a payment (`charge.refunded`, the charge
+  carrying the PaymentIntent's metadata as on Stripe), open and close
+  disputes (`charge.dispute.*`) and redeliver an event.
 - `e2e/fakes/resend.mjs` accepts `POST /emails` like Resend and keeps the
   messages for the tests to read. Nothing is sent.
 
 Everything else (pages, Functions, D1, signing, verification) is the real
-code. The suite covers the decision guide (with and without JavaScript), the
+code. One spec reaches past the interface, and says so: a deployment with a
+live key refuses checkout, so the live-mode event spec seeds that
+deployment's order with `wrangler d1 execute` and reads its `email_log` (its
+email goes nowhere: a live deployment ignores `RESEND_API_BASE`). The suite covers the decision guide (with and without JavaScript), the
 plans and checkout (desktop and a 390 px phone), a purchase from plans to
 certificate, the emails and their attached license (checked with
 `scripts/verify-license.mjs`), verification of genuine and tampered licenses,
