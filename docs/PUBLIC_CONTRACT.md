@@ -54,12 +54,12 @@ NOT_COMPLETED; ordinary batch preparation failures keep their historical empty
 report, diagnostic and completed status. Legacy exception text is standard-
 library-dependent, and legacy run catches zero their output report.
 
-## Request discovery (unreleased)
+## Request discovery
 
-Development builds add a `requests` key to `transpile_full()`'s result and to
-`gate/glue.py`'s `transpile_json` success envelope, and `"kind": "symbol"` to
-each `input.symbol` entry of the input manifest (its other fields are
-unchanged). The emitted C++ does not change.
+From 1.1.0 on, `transpile_full()`'s result and `gate/glue.py`'s
+`transpile_json` success envelope carry a `requests` key, and each
+`input.symbol` entry of the input manifest has `"kind": "symbol"` (its other
+fields are unchanged). Request discovery does not change the emitted C++.
 
 `requests` lists, in source order, every request site that reads another
 symbol's feed: a `request.security` of another symbol whose value can reach a
@@ -97,8 +97,10 @@ reads the chart.
 
 This is the contract that 1.0.0, released 2026-09-30, implements, and 1.0.1,
 released 2026-10-02, implements unchanged. 1.1.0, released 2026-10-04,
-implements it with the generated settings extension above added; its Python
-functions and JSON protocol keep their arguments, result keys and envelopes.
+implements it with the generated settings extension and request discovery
+above added: `transpile_full()`'s result and the JSON success envelope gain
+`requests`, and `input.symbol` manifest entries gain `kind`. No argument,
+result key or envelope is removed or renamed.
 The last 0.x release, 0.10.4, has
 neither the `libraries` argument nor the `diagnostics` key described below.
 
@@ -143,6 +145,7 @@ success:
 | `inputs` | `list[dict]` | Input manifest in global source order, one entry per global-scope input call, including inline calls. |
 | `strategyParams` | `dict` | Values extracted from the `strategy(...)` declaration; a nonliteral value can be `None`, and an omitted argument is absent even where the C++ applies a default. |
 | `diagnostics` | `list[Diagnostic]` | Nonfatal warnings only, with `Level.WARNING` and source locations. |
+| `requests` | `list[dict]` | Since 1.1.0: the other symbols' feeds the script reads, one entry per request site; see [Request discovery](#request-discovery). |
 
 An error still raises `CompileError`; there is no partial success dict. The
 diagnostic severity enum values are `"warning"` and `"error"`. A successful
@@ -154,7 +157,8 @@ warnings and errors.
 Each manifest entry has `title` (string), `type` (one of `int`, `float`,
 `bool`, `string`, `source`, `enum`), and `default` (a literal scalar or `None`).
 It may also have `min`, `max`, `step` numeric values or a string `options`
-list. An optional field is omitted when its argument is absent or cannot be
+list. Since 1.1.0, an `input.symbol` entry also has `kind` equal to
+`"symbol"`. An optional field is omitted when its argument is absent or cannot be
 reduced to the supported literal form. The `title` is the **actual override
 key read by the emitted C++**:
 
@@ -177,19 +181,20 @@ serialized JSON **string**. The shipped Pyodide worker runs that glue. Its
 success and compile-error envelopes are:
 
 ```json
-{"ok":true,"cpp":"...","inputs":[],"strategyParams":{},"diagnostics":[]}
+{"ok":true,"cpp":"...","inputs":[],"strategyParams":{},"diagnostics":[],"requests":[]}
 ```
 
 ```json
 {"ok":false,"error":"<input>:2:1: ...","diagnostics":[{"line":2,"col":1,"message":"...","severity":"error","endCol":10}]}
 ```
 
-`ok` is a boolean. On success, `cpp`, `inputs`, and `strategyParams` have the
-same meanings as in `transpile_full()`, and `diagnostics` contains warnings.
-On a `CompileError`, `error` is `str(error)` and `diagnostics` contains the
-error's diagnostics; `cpp`, `inputs`, and `strategyParams` are absent. Every
-JSON diagnostic has 1-based integer `line` and `col`, a `message` string, and
-`severity` equal to `"warning"` or `"error"`. `endCol` is included when the
+`ok` is a boolean. On success, `cpp`, `inputs`, `strategyParams` and (since
+1.1.0) `requests` have the same meanings as in `transpile_full()`, and
+`diagnostics` contains warnings. On a `CompileError`, `error` is `str(error)`
+and `diagnostics` contains the error's diagnostics; `cpp`, `inputs`,
+`strategyParams` and `requests` are absent. Every JSON diagnostic has 1-based
+integer `line` and `col`, a `message` string, and `severity` equal to
+`"warning"` or `"error"`. `endCol` is included when the
 source location provides it. A diagnostic hint, when present, is appended to
 `message` after ` — `. The glue catches `CompileError`; an unexpected Python
 exception may propagate instead of producing an envelope. The JSON entry

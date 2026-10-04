@@ -20,41 +20,19 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
-## Unreleased
-
-### Request discovery
-
-- `transpile_full()` returns a new key, `requests`: every request site that
-  reads another symbol's feed, so a host can fetch the bars a run needs before
-  it starts it. Each entry gives the request's `line` and `fn`, its symbol
-  (`literal`, `input` with its override key and default, `computed` with its
-  value at the inputs' defaults where literals and inputs compute it, or
-  `unresolvable`), its timeframe (`literal` in the engine's feed spelling,
-  `chart`, `input` or `computed`), `lookahead`, `gaps` and
-  `ignore_invalid_symbol`. A request lowered to `na` (its value reaches only
-  plots and alerts) is not listed. See the
-  [public contract](docs/PUBLIC_CONTRACT.md#request-discovery-unreleased).
-- `gate/glue.py`'s `transpile_json` success envelope carries the same list
-  under `requests`.
-- The input manifest marks each `input.symbol` entry with `"kind": "symbol"`;
-  its `title`, `type` and `default` are unchanged.
-
-### Compatibility and migration
-
-- Additive only. The emitted C++ is unchanged: the engine's 325 public corpus
-  sources and this repository's 540 test-fixture `.pine` files transpile to the
-  same C++ as before, byte for byte, each in a fresh process (the 51 refused
-  before are refused with the same message).
-
 ## 1.1.0 — 2026-10-04
 
 A minor release: generated strategy libraries gain the checked settings
-functions that engine `v1.1.0` adds to the C ABI. It covers the changes merged
-to `main` since 1.0.1:
+functions that engine `v1.1.0` adds to the C ABI, and `transpile_full()` lists
+the other symbols' feeds a script requests. It covers the changes merged to
+`main` since 1.0.1:
 [#159](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/159)
-changes the emitted C++, and
-[#160](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/160)
-the documentation. Codegen `1.1.0` supports only engine `v1.1.0`. Engine
+changes the emitted C++,
+[#164](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/164)
+adds request discovery to the Python and JSON results, and
+[#160](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/160) and
+[#162](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/162) the
+documentation. Codegen `1.1.0` supports only engine `v1.1.0`. Engine
 `v1.1.0` declares six functions in `<pineforge/pineforge.h>`
 ([pineforge-engine#317](https://github.com/pineforge-4pass/pineforge-engine/pull/317))
 that the C++ of codegen 1.1.0 defines; the pair keeps C ABI version 4 and the
@@ -77,12 +55,19 @@ script ABI epoch `engine_script_run_v19`.
   C++ with the settings code removed (`tests/_legacy_cpp.py`) is 1.0.1's C++
   byte for byte, and the 13 fixtures the gate expects to be refused are refused
   with the same message.
-- The Python and JSON contract keeps its shape: `transpile()`,
-  `transpile_full()` and `gate/glue.py`'s `transpile_json` keep their
-  arguments, result keys and envelopes; #159 changes only modules under
-  `pineforge_codegen/codegen/`, the tests and `docs/PUBLIC_CONTRACT.md`, and
-  #160 only the README. One value changes: the `default` reported for an
-  `input.enum` whose default is a variable (see "Enum input defaults").
+- Request discovery does not change the emitted C++
+  ([#164](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/164)):
+  the engine's 325 public corpus sources and this repository's 540
+  test-fixture `.pine` files transpile to the same C++ as before it, byte for
+  byte, each in a fresh process, and the 51 refused are refused with the same
+  message.
+- The Python and JSON contract is additive: `transpile_full()`'s result and
+  `gate/glue.py`'s `transpile_json` success envelope gain the key `requests`,
+  and each `input.symbol` entry of the input manifest gains
+  `"kind": "symbol"` (see "Request discovery"). No argument, result key or
+  envelope is removed or renamed, and `transpile()` and the error envelope are
+  unchanged. One value changes: the `default` reported for an `input.enum`
+  whose default is a variable (see "Enum input defaults").
 - Report keys: the JSON report of the engine's Docker harness
   (`docker/run_json.py`, which the `pineforge-release` image runs) keeps every
   key it had with 1.0.1, `metrics.equity.sharpe_tv` and `sortino_tv` included,
@@ -217,6 +202,25 @@ From [#159](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/159):
   does; `strategy_set_input_checked` refuses such an input as unsupported, and
   the receipt reports its default as `na`.
 
+### Request discovery
+
+From [#164](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/164):
+
+- `transpile_full()` returns a new key, `requests`: every request site that
+  reads another symbol's feed, so a host can fetch the bars a run needs before
+  it starts it. Each entry gives the request's `line` and `fn`, its symbol
+  (`literal`, `input` with its override key and default, `computed` with its
+  value at the inputs' defaults where literals and inputs compute it, or
+  `unresolvable`), its timeframe (`literal` in the engine's feed spelling,
+  `chart`, `input` or `computed`), `lookahead`, `gaps` and
+  `ignore_invalid_symbol`. A request lowered to `na` (its value reaches only
+  plots and alerts) is not listed. See the
+  [public contract](docs/PUBLIC_CONTRACT.md#request-discovery).
+- `gate/glue.py`'s `transpile_json` success envelope carries the same list
+  under `requests`.
+- The input manifest marks each `input.symbol` entry with `"kind": "symbol"`;
+  its `title`, `type` and `default` are unchanged.
+
 ### Documentation
 
 - The README's parity scoreboard renders from the public facts tokens of
@@ -232,7 +236,9 @@ From [#159](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/159):
   codegen 1.1.0's.
 - `docs/PUBLIC_CONTRACT.md` describes the checked settings functions and the
   exception handling
-  ([#159](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/159)).
+  ([#159](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/159))
+  and request discovery
+  ([#164](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/164)).
 
 ## 1.0.1 — 2026-10-02
 

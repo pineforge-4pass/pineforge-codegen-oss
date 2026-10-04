@@ -183,15 +183,15 @@ transpile_full(
 
 It returns `{"cpp": str, "inputs": list[dict], "strategyParams": dict,
 "diagnostics": list[Diagnostic], "requests": list[dict]}` on success (0.10.4
-returns the first three keys; `requests` is unreleased). `inputs` is the input
+returns the first three keys; `requests` is new in 1.1.0). `inputs` is the input
 manifest; its `title` is the actual override key, and an `input.symbol` entry
-also has `"kind": "symbol"` (unreleased). `diagnostics` contains nonfatal
+also has `"kind": "symbol"` (since 1.1.0). `diagnostics` contains nonfatal
 warnings. `requests` lists the other symbols' feeds the script reads (see
 [List the other symbols a script requests](#list-the-other-symbols-a-script-requests)).
 A rejected script raises `CompileError` with its diagnostics. The Pyodide
 package ships `gate/glue.py`'s `transpile_json(source) -> str`, whose JSON
-success and error envelopes carry the same manifest, since 1.0.0 the same
-warnings, and the same `requests` (unreleased). See the
+success and error envelopes carry the same manifest and, since 1.0.0, the same
+warnings; since 1.1.0 the success envelope also carries `requests`. See the
 [1.0 public contract](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/docs/PUBLIC_CONTRACT.md)
 for the exact fields, severity values, and input key rules. There is no
 installed CLI or exit-code contract.
@@ -200,7 +200,7 @@ installed CLI or exit-code contract.
 
 A run reads another symbol's bars only from the feed it is given for that
 symbol string and timeframe, matched byte for byte. `transpile_full()`'s
-`requests` (unreleased) names those feeds before the run, one entry per
+`requests` (new in 1.1.0) names those feeds before the run, one entry per
 request site:
 
 ```python
