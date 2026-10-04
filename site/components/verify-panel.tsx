@@ -268,7 +268,7 @@ function Result({ shown, t, tc, tcert }: { shown: Shown; t: T; tc: T; tcert: T }
       data-status={status}
       data-valid={shown.valid ? "true" : "false"}
       aria-labelledby="verify-result-heading"
-      className={"measure pt-5 " + (shown.valid ? "border-t-2 border-ink" : "border-t-2 border-ink")}
+      className="measure border-t-2 border-ink pt-5"
     >
       <h2 id="verify-result-heading" className="subheading">
         {t("resultHeading")}

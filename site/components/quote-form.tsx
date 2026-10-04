@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { useLocale, useTranslations } from "next-intl";
-import { USE_CASES, validateQuote, type FieldError as FieldErr } from "@/lib/validate";
+import { HONEYPOT_FIELD, USE_CASES, validateQuote, type FieldError as FieldErr } from "@/lib/validate";
 import { Field, Honeypot } from "./form-field";
 import { CONTACT_EMAIL } from "./paths";
 
@@ -70,7 +70,7 @@ export function QuoteForm() {
       deployment: str("deployment"),
       message: str("message"),
       locale,
-      website: str("website"),
+      [HONEYPOT_FIELD]: str(HONEYPOT_FIELD),
     };
     setFormError(null);
     const checked = validateQuote(body);

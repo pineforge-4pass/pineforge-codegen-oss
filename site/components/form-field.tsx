@@ -1,6 +1,7 @@
 "use client";
 
 import type { HTMLInputTypeAttribute, ReactNode } from "react";
+import { HONEYPOT_FIELD } from "@/lib/validate";
 
 /**
  * A labelled field. The label text is the field's accessible name, verbatim;
@@ -80,8 +81,8 @@ export function FieldError({ id, name, message }: { id: string; name: string; me
 export function Honeypot({ label }: { label: string }) {
   return (
     <div className="hp" aria-hidden="true">
-      <label htmlFor="field-website">{label}</label>
-      <input id="field-website" type="text" name="website" tabIndex={-1} autoComplete="off" defaultValue="" />
+      <label htmlFor="f-x7q">{label}</label>
+      <input id="f-x7q" type="text" name={HONEYPOT_FIELD} tabIndex={-1} autoComplete="off" defaultValue="" />
     </div>
   );
 }

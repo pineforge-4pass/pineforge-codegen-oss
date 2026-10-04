@@ -1,5 +1,6 @@
 import { getTranslations } from "next-intl/server";
 import { commerce } from "@/lib/commerce-config";
+import { isPreview } from "@/lib/go-live";
 import { localePath } from "./paths";
 import { SiteNav } from "./site-nav";
 
@@ -15,10 +16,10 @@ export async function SiteHeader({ locale }: { locale: string }) {
   ];
   return (
     <header className="border-b border-hair">
-      {commerce.pricesArePlaceholders ? (
+      {isPreview() ? (
         <div className="border-b border-hair bg-field">
           <p data-testid="test-mode-notice" className="wrap py-2 text-[14px] text-ink-2">
-            {t("testModeNotice")}
+            {commerce.pricesArePlaceholders ? t("testModeNoticePlaceholders") : t("testModeNotice")}
           </p>
         </div>
       ) : null}

@@ -56,8 +56,9 @@ function InteractiveGuide({ locale }: { locale: string }) {
   return (
     <div data-testid="guide-interactive" ref={rootRef} className="mt-8">
       <ol className="grid gap-5">
-        {asked.map((q) => {
-          const n = QUESTION_ORDER.indexOf(q) + 1;
+        {asked.map((q, i) => {
+          // Numbered by the questions actually asked, so a skipped follow-up leaves no gap.
+          const n = i + 1;
           const hintId = `guide-hint-${q}`;
           return (
             <li key={q}>

@@ -1,16 +1,17 @@
 import { getTranslations } from "next-intl/server";
 import { LICENSE_URL } from "@/content/license-quotes";
-import { decide, QUESTION_ORDER, type Answers, type Outcome } from "@/lib/decide";
+import { decide, QUESTION_ORDER, type Answers, type Outcome, type QuestionId } from "@/lib/decide";
 import { LicenseQuote } from "./license-quote";
 import { outcomeHref } from "./guide-links";
 
 // One set of answers per outcome, so the static fallback lists every result
 // with the quotations lib/decide.ts attaches to it.
 const EXAMPLES: Answers[] = [
-  { othersCapital: false, organization: true, embedding: false, hosted: false },
-  { othersCapital: true, organization: true, embedding: false, hosted: false },
+  { othersCapital: false, organization: true, noncommercialOrg: false, embedding: false, hosted: false },
+  { othersCapital: true, organization: true, noncommercialOrg: false, embedding: false, hosted: false },
   { othersCapital: false, organization: false, embedding: true, hosted: false },
   { othersCapital: true, organization: false, embedding: true, hosted: false },
+  { othersCapital: false, organization: true, noncommercialOrg: true, embedding: false, hosted: false },
   {
     othersCapital: false,
     organization: false,
@@ -30,6 +31,18 @@ const EXAMPLES: Answers[] = [
  */
 export async function GuideStatic({ locale }: { locale: string }) {
   const t = await getTranslations({ locale, namespace: "guide" });
+  // Question numbers follow QUESTION_ORDER, as in the list below and the interactive guide.
+  const n = (q: QuestionId) => QUESTION_ORDER.indexOf(q) + 1;
+  const numbers = {
+    use1: n("othersCapital"),
+    use2: n("organization"),
+    use3: n("embedding"),
+    use4: n("hosted"),
+    org: n("noncommercialOrg"),
+    pt1: n("naturalPerson"),
+    pt3: n("ownCapital"),
+    nc: n("noncommercial"),
+  };
   const seen = new Set<string>();
   const outcomes: Outcome[] = [];
   for (const answers of EXAMPLES) {
@@ -43,9 +56,10 @@ export async function GuideStatic({ locale }: { locale: string }) {
     <div className="mt-8">
       <h3 className="subheading">{t("static.heading")}</h3>
       <ol className="measure mt-3 grid list-decimal gap-2 pl-6">
-        <li>{t("static.rule1")}</li>
-        <li>{t("static.rule2")}</li>
-        <li>{t("static.rule3")}</li>
+        <li>{t("static.rule1", numbers)}</li>
+        <li>{t("static.ruleOrg", numbers)}</li>
+        <li>{t("static.rule2", numbers)}</li>
+        <li>{t("static.rule3", numbers)}</li>
       </ol>
 
       <h3 className="subheading mt-10">{t("static.questionsHeading")}</h3>

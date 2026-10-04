@@ -4,7 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { commerce } from "@/lib/commerce-config";
 import { findPlan, formatMoney, productName } from "@/lib/commerce";
-import { validateCheckout, type FieldError as FieldErr } from "@/lib/validate";
+import { HONEYPOT_FIELD, validateCheckout, type FieldError as FieldErr } from "@/lib/validate";
 import { AGREEMENT_IS_DRAFT } from "@/lib/generated/build-info";
 import { Field, FieldError, Honeypot } from "./form-field";
 import { CONTACT_EMAIL, localePath } from "./paths";
@@ -92,7 +92,7 @@ export function CheckoutForm() {
       reference: str("reference"),
       acceptAgreement: fd.get("acceptAgreement") === "on",
       locale,
-      website: str("website"),
+      [HONEYPOT_FIELD]: str(HONEYPOT_FIELD),
     };
     setFormError(null);
     const checked = validateCheckout(body);
