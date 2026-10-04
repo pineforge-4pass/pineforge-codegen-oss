@@ -23,6 +23,10 @@ def _diagnostic_entries(diagnostics) -> list:
             "col": loc.col if loc else 1,
             "message": message,
             "severity": getattr(d.level, "value", "error"),
+            # The stable code and named arguments of the catalog templates the
+            # message (and the hint after " — ") render from.
+            "code": d.code,
+            "args": d.args,
         }
         end_col = getattr(loc, "end_col", None) if loc else None
         if end_col is not None:

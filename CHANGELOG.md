@@ -43,6 +43,22 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## Unreleased
+
+Planned as 1.2.0, an additive change to the public API; the emitted C++ is
+unchanged.
+
+- **Diagnostic codes.** Every transpile diagnostic carries a stable `code`
+  (`PF-E1203` / `PF-W0412`) and named, raw `args`, in
+  `transpile_full(...)["diagnostics"]`, in `CompileError.diagnostics` and in
+  the `transpile_json` envelopes. `diagnostics_catalog()` and
+  `pineforge_codegen/diagnostics_catalog.json` (attached to each GitHub
+  release) give each code its severity, English ICU MessageFormat templates,
+  argument kinds and a one-line explanation; the templates render the
+  `message` and `hint` byte for byte, which keep their text. Codes are never
+  reused (`tests/fixtures/diagnostic_codes_pin.json`). See
+  [Diagnostic codes](docs/PUBLIC_CONTRACT.md#diagnostic-codes).
+
 ## 1.1.0 — 2026-10-04
 
 A minor release: generated strategy libraries gain the checked settings

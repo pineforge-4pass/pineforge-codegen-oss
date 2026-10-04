@@ -7,7 +7,8 @@
   "exports": {
     ".": "./index.mjs",
     "./tables.json": "./tables.json",
-    "./release.json": "./release.json"
+    "./release.json": "./release.json",
+    "./diagnostics_catalog.json": "./pineforge_codegen/diagnostics_catalog.json"
   },
   "files": [
     "index.mjs",

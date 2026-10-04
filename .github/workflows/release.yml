@@ -152,12 +152,15 @@ jobs:
           # A prerelease is a GitHub prerelease and never "Latest".
           channel=()
           if [ "$PRERELEASE" = true ]; then channel=(--prerelease --latest=false); fi
+          # The diagnostics catalog (docs/PUBLIC_CONTRACT.md, "Diagnostic codes").
+          catalog="diagnostics_catalog-${GIT_TAG}.json"
+          cp pineforge_codegen/diagnostics_catalog.json "${catalog}"
           gh release create "${GIT_TAG}" \
             --title "${GIT_TAG}" \
             --generate-notes \
             --notes "Install: \`pip install pineforge-codegen==${PYPI_VERSION}\`" \
             ${channel[@]+"${channel[@]}"} \
-            dist/*
+            dist/* "${catalog}"
 
       # Notify the pineforge-release hub: it bumps its CODEGEN_VERSION pin,
       # rebuilds the combined image, and fans out to the MCPs. FAIL LOUD (no
