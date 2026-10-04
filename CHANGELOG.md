@@ -139,8 +139,7 @@ ABI").
   input, inline inputs included, in source order, and of the overrides above:
   type, options, default and effective value as canonical strings, and
   `min` / `max` / `step` as numbers or `null`. Called with a NULL buffer and 0,
-  it returns
-  `PF_SETTINGS_BUFFER_TOO_SMALL` and the size to allocate.
+  it returns `PF_SETTINGS_BUFFER_TOO_SMALL` and the size to allocate.
 - `run_backtest_full_checked` runs the batch `run_backtest_full` runs and
   returns `PF_SETTINGS_RUN_FAILED` for a failure the run reports and
   `PF_SETTINGS_EXCEPTION` for an exception.
