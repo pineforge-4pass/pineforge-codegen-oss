@@ -1,0 +1,37 @@
+{
+  "pricesArePlaceholders": true,
+  "currency": "usd",
+  "seller": {
+    "displayName": "PineForge",
+    "legalName": null,
+    "contactEmail": "enterprise@pineforge.dev"
+  },
+  "termMonths": 12,
+  "tiers": [
+    {
+      "id": "team",
+      "options": [
+        { "id": "seats-5", "seats": 5, "annual": 240000 },
+        { "id": "seats-15", "seats": 15, "annual": 600000 }
+      ],
+      "quoteAbove": "more than 15 seats"
+    },
+    {
+      "id": "fund",
+      "options": [
+        { "id": "aum-25m", "aumBandUsd": [0, 25000000], "seats": 10, "annual": 900000 },
+        { "id": "aum-100m", "aumBandUsd": [25000000, 100000000], "seats": 10, "annual": 1800000 },
+        { "id": "aum-500m", "aumBandUsd": [100000000, 500000000], "seats": 25, "annual": 3600000 }
+      ],
+      "quoteAbove": "AUM above $500M"
+    },
+    {
+      "id": "oem",
+      "options": [
+        { "id": "product-1k", "deployment": { "products": 1, "endUsers": 1000 }, "annual": 1200000 },
+        { "id": "product-10k", "deployment": { "products": 1, "endUsers": 10000 }, "annual": 3000000 }
+      ],
+      "quoteAbove": "more products or more end users"
+    }
+  ]
+}

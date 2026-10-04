@@ -1,0 +1,31 @@
+// Cloudflare Pages project for the PineForge Codegen commercial-license site.
+// Static pages come from `out/` (Next.js export); `functions/` holds the API,
+// the Stripe webhook and the certificate page. Deploy plan: README.md.
+//
+// Secrets are never in this file. Set them per environment with
+//   wrangler pages secret put <NAME> --project-name pineforge-license
+// STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, LICENSE_SIGNING_KEY, RESEND_API_KEY
+// (optional: TURNSTILE_SECRET).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pineforge-license",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "pages_build_output_dir": "out",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "pineforge-license",
+      // Placeholder: replace with the id printed by `npm run d1:create`.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "SITE_URL": "https://license.pineforge.dev",
+    "RESEND_FROM": "PineForge Licensing <enterprise@pineforge.dev>",
+    "LICENSE_NOTIFY_TO": "enterprise@pineforge.dev",
+    // "on" enables Stripe Tax (automatic_tax) on Checkout Sessions.
+    "STRIPE_TAX": "off"
+  }
+}
