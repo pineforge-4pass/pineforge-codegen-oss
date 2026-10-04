@@ -32,6 +32,29 @@ class Diagnostic:
     message: str
     hint: str | None = None
 
+    # The stable code (``PF-E1203`` / ``PF-W0412``) and named arguments of the
+    # catalog template the English ``message`` and ``hint`` render from
+    # (``diagnostic_codes``, ``diagnostics_catalog.json``). Both are read off
+    # the text when first asked for, after the transpile: the text and the
+    # C++ never depend on them.
+    @property
+    def code(self) -> str:
+        return self._coded()[0]
+
+    @property
+    def args(self) -> dict:
+        return self._coded()[1]
+
+    def _coded(self) -> tuple[str, dict]:
+        severity = getattr(self.level, "value", self.level)
+        key = (severity, self.message, self.hint)
+        cached = self.__dict__.get("_pf_coded")
+        if cached is None or cached[0] != key:
+            from .diagnostic_codes import classify
+            cached = (key, classify(severity, self.message, self.hint))
+            self.__dict__["_pf_coded"] = cached
+        return cached[1]
+
 
 class CompileError(Exception):
     def __init__(self, diagnostics: list[Diagnostic]):

@@ -171,6 +171,13 @@ pineforge_codegen/
 ├── tv_input_choices.py             input.string options metadata
 ├── errors.py                       CompileError + SourceLocation +
 │                                   Diagnostic + Level / Phase
+├── diagnostic_codes.py             Stable diagnostic codes: a Diagnostic's
+│                                   code/args are read off its text by the
+│                                   ICU templates of diagnostics_catalog.json
+│                                   (scripts/gen_diagnostics_catalog.py adds a
+│                                   code per new template; the pin in
+│                                   tests/fixtures/diagnostic_codes_pin.json
+│                                   never changes a code's meaning).
 ├── pine_spelling.py                String-literal-safe helpers for the Pine
 │                                   spellings of TA ctor args (inline
 │                                   input calls kept whole; see quirk 10)

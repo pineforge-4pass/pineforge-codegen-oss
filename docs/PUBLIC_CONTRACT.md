@@ -239,9 +239,50 @@ and `diagnostics` contains the error's diagnostics; `cpp`, `inputs`,
 integer `line` and `col`, a `message` string, and `severity` equal to
 `"warning"` or `"error"`. `endCol` is included when the
 source location provides it. A diagnostic hint, when present, is appended to
-`message` after ` — `. The glue catches `CompileError`; an unexpected Python
-exception may propagate instead of producing an envelope. The JSON entry
-point does not accept a `filename` argument.
+`message` after ` — `. Since 1.2.0 every JSON diagnostic also has `code` and
+`args` ([Diagnostic codes](#diagnostic-codes)). The glue catches
+`CompileError`; an unexpected Python exception may propagate instead of
+producing an envelope. The JSON entry point does not accept a `filename`
+argument.
+
+## Diagnostic codes
+
+Since 1.2.0 every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
+`CompileError`'s `diagnostics`, and in the glue envelopes) carries:
+
+- `code`: a stable string `PF-<S><NNNN>`, `S` being `E` for an error and `W`
+  for a warning. Its first digit is the area that spells the text: `0`
+  source (lexer, parser, limits), `1` support checker and requests, `2`
+  analysis, `3` `request.security`, `4` libraries and imports, `5` code
+  generation, `6` array and matrix history, `7` `ta.*`. The support checker
+  reports what it refuses inside a `switch` arm as a warning: `PF-W1nnn` with
+  `nnn` below 500 is `PF-E1nnn` there.
+- `args`: an object of named values, raw: identifiers, types, keywords and
+  Pine spellings as strings, counts as JSON numbers; never quoting, backticks
+  or a formatted number.
+
+`diagnostics_catalog()` returns the catalog, which ships as
+`pineforge_codegen/diagnostics_catalog.json` (schema
+`pineforge-diagnostics-catalog/v1`) and is attached to each GitHub release.
+Per code it gives `severity`, `area`, the English ICU MessageFormat `message`
+template, the `hint` template or `null`, a one-line `explanation`, and `args`:
+per argument its `kind` — `identifier`, `type`, `keyword`, `number`, `vocab`
+(an English word or phrase the transpiler picks from the closed set listed in
+`values`, which an application may translate) or `text` (open English text the
+transpiler builds, such as a nested reason; shown as is). The templates use
+simple `{name}` arguments and ICU apostrophe quoting (`''` is one apostrophe,
+`'{'` a literal brace); a string argument renders as is and a number in plain
+decimal digits. `render_diagnostic(code, args)` returns the English
+`(message, hint)`, which equal the diagnostic's `message` and `hint` byte for
+byte; in the glue envelope `message` is the message, plus ` — ` and the hint
+when there is one.
+
+A code is never removed or reused, and a changed meaning gets a new code
+(`tests/fixtures/diagnostic_codes_pin.json` pins each code's templates). A
+text no template renders carries `PF-E0000` / `PF-W0000` with the text in
+`args.message` (and `args.hint`); the test suite refuses it. The `message`
+text itself is unchanged and stays the English rendering; `runtime.error`
+text a strategy authors is not a transpile diagnostic.
 
 ## Compatibility boundary
 

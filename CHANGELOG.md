@@ -28,6 +28,26 @@ supported as exact pairs; on the 0.x line they are independent. See the
   without the extension warn and run, including their requests, without proving
   eligibility. Default batch computation is unchanged.
 
+### Diagnostic codes
+
+An additive change to the public API; it leaves the emitted C++ unchanged.
+
+- **Diagnostic codes.** Every transpile diagnostic carries a stable `code`
+  (`PF-E1203` / `PF-W0412`) and named, raw `args`, in
+  `transpile_full(...)["diagnostics"]`, in `CompileError.diagnostics` and in
+  the `transpile_json` envelopes. `diagnostics_catalog()` and
+  `pineforge_codegen/diagnostics_catalog.json` (attached to each GitHub
+  release) give each code its severity, English ICU MessageFormat templates,
+  argument kinds and a one-line explanation; the templates render the
+  `message` and `hint` byte for byte, which keep their text. Codes are never
+  reused (`tests/fixtures/diagnostic_codes_pin.json`). See
+  [Diagnostic codes](docs/PUBLIC_CONTRACT.md#diagnostic-codes).
+- **First error in source order.** Since 1.1.0 the settings metadata visited
+  every input's `defval`, `options`, `minval`, `maxval` and `step` ahead of
+  the script body, so an error there (an unknown name in `minval`) was raised
+  before an error on an earlier line. The script's first error in source
+  order is raised again; no emitted C++ changes.
+
 ## Release note policy
 
 - Keep a section for each released version, including prereleases. Use the exact

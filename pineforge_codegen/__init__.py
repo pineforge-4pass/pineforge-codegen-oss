@@ -6,6 +6,7 @@ from .lexer import Lexer
 from .parser import Parser
 from .analyzer import Analyzer
 from .codegen import CodeGen
+from .diagnostic_codes import diagnostics_catalog, render_diagnostic
 from .errors import CompileError, Level, Phase
 from .external_requests import lower_no_data_requests
 from .builtin_keywords import bind_builtin_keywords

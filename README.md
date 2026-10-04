@@ -196,6 +196,33 @@ warnings; since 1.1.0 the success envelope also carries `requests`. See the
 for the exact fields, severity values, and input key rules. There is no
 installed CLI or exit-code contract.
 
+### Diagnostic codes
+
+Every diagnostic carries a stable `code` and named `args` (since 1.2.0):
+`PF-E1203` for an error, `PF-W0412` for a warning, and the data its English
+`message` and `hint` were built from — identifiers, types, keywords and
+numbers, raw.
+
+```python
+from pineforge_codegen import diagnostics_catalog, transpile_full
+
+for d in transpile_full(source)["diagnostics"]:
+    print(d.code, d.args, d.message)
+# PF-W1067 {'name': 'bar_index'} bar_index diverges from TradingView semantics in PineForge.
+
+entry = diagnostics_catalog()["codes"]["PF-W1067"]
+# {'severity': 'warning', 'area': 'support',
+#  'message': '{name} diverges from TradingView semantics in PineForge.',
+#  'hint': '...', 'explanation': '...', 'args': {'name': {'kind': 'identifier'}}}
+```
+
+The catalog (`pineforge_codegen/diagnostics_catalog.json`, also attached to
+each GitHub release) gives each code its severity, English ICU MessageFormat
+templates and a one-line explanation; rendering the templates with `args`
+gives the `message` and `hint` byte for byte, so an application can translate
+a diagnostic by its code. Codes are never reused. See
+[Diagnostic codes](docs/PUBLIC_CONTRACT.md#diagnostic-codes).
+
 ### List the other symbols a script requests
 
 A run reads another symbol's bars only from the feed it is given for that
