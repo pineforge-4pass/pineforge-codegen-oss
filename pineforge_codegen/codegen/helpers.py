@@ -282,6 +282,7 @@ CPP_EMITTER_NAMES = frozenset("""
     configure_security_evaluators snapshot_script_state restore_script_state
     commit_script_state set_strategy_override set_input
     set_magnifier_volume_weighted strategy_declares_bar_magnifier fill_report run
+    strategy_capabilities_api_version strategy_capabilities_receipt
     precalculate
     strategy_entry strategy_close strategy_close_all strategy_exit
     strategy_exit_cancel_bracket strategy_cancel strategy_cancel_all strategy_order

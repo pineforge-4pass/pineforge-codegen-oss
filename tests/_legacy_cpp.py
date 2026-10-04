@@ -1,4 +1,4 @@
-"""Compare frozen lowering bytes without the additive checked-settings ABI."""
+"""Compare frozen lowering bytes without additive settings/capabilities ABIs."""
 import re
 
 
@@ -6,6 +6,8 @@ def legacy_cpp(cpp: str) -> str:
     cpp = cpp.replace(
         '#if __has_include(<pineforge/checked_settings.hpp>)\n'
         '#include <pineforge/checked_settings.hpp>\n#endif\n', '')
+    cpp = re.sub(r'^#ifdef PF_CAPABILITIES_API_VERSION\n.*?^#endif\n', '',
+                 cpp, flags=re.MULTILINE | re.DOTALL)
     cpp = re.sub(r'^#ifdef PF_SETTINGS_API_VERSION\n.*?^#endif\n', '',
                  cpp, flags=re.MULTILINE | re.DOTALL)
     cpp = re.sub(r'^#ifndef PF_SETTINGS_API_VERSION\n.*?^#endif\n', '',

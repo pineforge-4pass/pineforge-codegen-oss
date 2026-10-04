@@ -85,6 +85,19 @@ _RECORDED_PARAMS = {
 # RequestRef}``: the run stops there only when no data is installed for the
 # request that carries the same ref (``REQUEST_REF_ANNOTATION``).
 UNPINNED_ANNOTATION = "pf_request_unpinned"
+CAPABILITY_UNPINNED_ANNOTATION = "pf_capability_unpinned_requests"
+
+
+def _record_unpinned_capability(program, request):
+    notes = program.annotations = dict(program.annotations or {})
+    sites = notes.setdefault(CAPABILITY_UNPINNED_ANNOTATION, [])
+    sites.append({
+        "function": f"request.{request.callee.member}",
+        "symbol_node": request.args[0] if request.args else request.kwargs.get("symbol"),
+        "tf_node": request.args[1] if len(request.args) > 1 else request.kwargs.get("timeframe"),
+        "lookahead_node": request.kwargs.get("lookahead"),
+        "gaps_node": request.kwargs.get("gaps"),
+    })
 REQUEST_REF_ANNOTATION = "pf_request_ref"
 # On a request whose symbol can select the chart's or another symbol's: it
 # read the chart before it read a feed, and keeps that lowering where no feed
@@ -785,10 +798,12 @@ def lower_no_data_requests(program: Program) -> Program:
             backed.append(node)
             continue
         if lowering == ABSENT_LOWERING:
+            _record_unpinned_capability(program, node)
             node.annotations = {**node.annotations, UNPINNED_ANNOTATION: unpinned_message(node)}
             continue
         swaps[id(node)] = _na_of(node, funcs)
         if lowering == "unpinned":
+            _record_unpinned_capability(program, node)
             unpinned.append(node)
     if unpinned or backed:
         index = ScriptIndex(program)
@@ -853,6 +868,7 @@ def unpin_requests(program: Program, reasons: dict[int, str]) -> None:
                 "results."))
             continue
         lowered = _na_of(request, funcs)
+        _record_unpinned_capability(program, request)
         marker = (request.annotations or {}).get(UNPINNED_ANNOTATION)
         if isinstance(marker, dict):
             lowered.annotations = {**(lowered.annotations or {}),
