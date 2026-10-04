@@ -9,6 +9,7 @@ import {
   apiCheckout,
   dispute,
   failNextEmails,
+  refund,
   fakeSession,
   getJson,
   isAlert,
@@ -99,7 +100,7 @@ test("the same dispute created twice alerts once", async ({ request }) => {
 // On the orphan instance (run.mjs) issuance always fails, so the paid order keeps no license: its completed event
 // answers 500. A lost dispute on that payment marks the order disputed; Stripe's retry of the same completed event
 // then answers 200 and issues nothing.
-test("a lost dispute on an order without a license, then a redelivered completed event, issues nothing", async ({ request }) => {
+test("a lost dispute on an order without a license, then a redelivered completed event, issues nothing", async ({ page, request }) => {
   const buyer = makeBuyer("dispute-unissued", test.info());
   const { sessionId } = await apiCheckout(request, buyer, {}, E.orphan);
   const { session } = await fakeSession(request, sessionId);
@@ -155,6 +156,10 @@ test("a lost dispute on an order without a license, then a redelivered completed
   expect(after.body.status).not.toBe("issued");
   // A paid order without a license reads "pending"; a disputed one never does again.
   expect(after.body.status).not.toBe("pending");
+  // It reads "closed" (it never had a license, so nothing was revoked), in the API and on the page.
+  expect(after.body.status).toBe("closed");
+  await page.goto(`${E.orphan}/en/order/?session_id=${encodeURIComponent(sessionId)}`);
+  await expect(page.getByTestId("order-status")).toHaveAttribute("data-status", "closed");
   // Nothing went to the buyer: there is no license to send.
   expect((await listEmails(request)).filter((m) => JSON.stringify(m.to).toLowerCase().includes(buyer.email))).toEqual([]);
 });
@@ -176,4 +181,15 @@ test("a dispute alert that fails to send answers 500; the redelivery alerts once
   expect(third.delivery.status, third.delivery.body).toBe(200);
   await new Promise((r) => setTimeout(r, 1500));
   expect((await listEmails(request)).filter(match)).toHaveLength(1);
+});
+
+test("a refunded order stays refunded after a lost dispute", async ({ request }) => {
+  const o = await paidOrder(request, "dispute-after-refund");
+  await refund(request, o.paymentIntent);
+  await waitForOrderApi(request, o.sessionId, "refunded");
+  const lost = await dispute(request, o.paymentIntent, "closed", "lost");
+  expect(lost.delivery.status, lost.delivery.body).toBe(200);
+  const after = await getJson(request, `${E.base}/api/order?session_id=${encodeURIComponent(o.sessionId)}`);
+  expect(after.body.status).toBe("refunded");
+  expect(after.body.license?.status).toBe("revoked");
 });

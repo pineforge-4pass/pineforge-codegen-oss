@@ -41,7 +41,10 @@ export function agreementStatus(text: string): AgreementStatus {
   const version = agreementVersion(text);
   const versionLine = text.split(/\r\n?|\n/).find((line) => /^[\s>*_]*Version[\s*_]*:/i.test(line));
   if (!version) reasons.push('no "Version:" line');
-  else if (/draft/i.test(versionLine ?? version)) reasons.push(`the version line "${(versionLine ?? version).trim()}" is a draft version`);
+  // The value may sit on the line after "Version:", so both are checked.
+  else if (/draft/i.test(version) || /draft/i.test(versionLine ?? "")) {
+    reasons.push(`the version "${version}" is a draft version`);
+  }
   const lines = text.split(/\r\n?|\n/);
   const draftLine = lines.find((line) => line.includes("DRAFT") || /draft\s*[—–-]+\s*requires review/i.test(line));
   if (draftLine !== undefined) reasons.push(`a line still says DRAFT: "${draftLine.trim().slice(0, 80)}"`);
@@ -65,8 +68,12 @@ export function bracketPlaceholders(text: string): string[] {
     const next = text.charAt(end);
     const prev = start > 0 ? text.charAt(start - 1) : "";
     const lineStart = start === 0 || text.charAt(start - 1) === "\n";
-    // ALL-CAPS bracket text is a placeholder whatever form it takes.
-    if (/^\^?[A-Z][A-Z ]*[A-Z]$/.test(inner.trim())) {
+    // Whatever form it takes, bracket text is a placeholder when it is in
+    // capitals (letters, digits, spaces, "-", "_", dashes; two letters or more,
+    // also wrapped across lines) or names the owner or counsel. All-caps link
+    // text such as [LICENSE](url) is refused too: word such links differently.
+    const flat = inner.replace(/\s+/g, " ").trim().replace(/^\^/, "");
+    if ((/^[A-Z0-9 _\-—–]+$/.test(flat) && (flat.match(/[A-Z]/g) ?? []).length >= 2) || /owner|counsel/i.test(flat)) {
       found.push(inner);
       continue;
     }

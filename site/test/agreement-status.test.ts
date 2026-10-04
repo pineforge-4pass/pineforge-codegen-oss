@@ -91,3 +91,24 @@ test("ALL-CAPS bracket text is a placeholder in link, reference and footnote for
     assert.ok(s.reasons.some((r) => r.includes("placeholder")), extra);
   }
 });
+
+test("a draft version on the line after Version: is a draft", () => {
+  const text = FINAL.replace("Version: 2027-01-15", "Version:\ndraft-2027-01-15");
+  assert.equal(agreementStatus(text).isDraft, true);
+});
+
+test("placeholders in link forms: hyphens, underscores, digits, the agreement's own style, wrapped caps", () => {
+  for (const extra of [
+    "[WIND-DOWN PERIOD](x)",
+    "[MID-TERM AUM][x]",
+    "[30 DAYS](x)",
+    "[LICENSOR_NAME](x)",
+    '[LICENSOR ADDRESS — owner to confirm]("Licensor")',
+    "[LICENSOR\nLEGAL ENTITY](x)",
+    "[LICENSE](https://example.com/l)",
+  ]) {
+    const s = agreementStatus(FINAL + `\n${extra}\n`);
+    assert.equal(s.isDraft, true, extra);
+    assert.ok(s.reasons.some((r) => r.includes("placeholder")), extra);
+  }
+});

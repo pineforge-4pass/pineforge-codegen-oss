@@ -254,7 +254,10 @@ export async function redeliver(request, sessionId) {
   return res.body;
 }
 
-/** The next `count` emails addressed to `to` answer `status` (default 503) in the sink and are not stored. */
+/**
+ * The next `count` emails addressed to `to` (when given) and whose subject contains `subject` (when given)
+ * answer `status` (default 503) in the sink and are not stored.
+ */
 export async function failNextEmails(request, { count = 1, status = 503, to, subject }) {
   const res = await postJson(request, `${E.resend}/__control/fail-next`, { count, status, to, subject });
   expect(res.status, res.text).toBe(200);

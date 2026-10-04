@@ -21,12 +21,21 @@ advice.
 - The selling entity is not named yet (`seller.legalName: null`).
 - The Commercial License Agreement in `legal/commercial-license-agreement.md`
   is a draft. It counts as final only when all of these hold
-  (`lib/agreement-status.ts`, shared by the build guard and the pages): the
-  marker `DRAFT — requires review by counsel before go-live` is gone, a line
-  exactly `Status: final` is present, the `Version:` value does not contain
-  "draft", and no placeholder is left (no `[...]` mentioning "owner" or
-  "counsel", no bracketed number such as `[30]`). Anything else, a drifted
-  marker included, reads as draft.
+  (`lib/agreement-status.ts`, shared by the build guard and the pages):
+  - the draft marker is gone, in any case or form ("DRAFT", "Draft —",
+    "draft - requires review", ...), and no line says "DRAFT";
+  - the draft notice paragraph is gone ("no one can accept it", "this notice
+    is removed");
+  - a line exactly `Status: final` is present;
+  - neither the `Version:` line nor its value (also on the next line) says
+    "draft";
+  - no bracket placeholder is left: any `[...]` other than a Markdown link,
+    reference or footnote, and any bracket text in capitals or naming the
+    owner or counsel, in every form. All-caps link text such as
+    `[LICENSE](url)` is refused too, so word such links differently
+    (`[the license text](url)`).
+
+  Anything else reads as draft.
 
 While any of those holds, the site shows a preview notice on every page and
 live payments are refused twice over: `npm run build` fails when a live
@@ -233,9 +242,14 @@ the keyring, a database error), one alert per order goes to
 `migrations/0001_init.sql` changed while this site was being built, before
 its first deploy (licenses gained `emailed_at` and `email_claimed_at`; orders
 gained the `disputed` status). Wrangler applies a migration file only once, so
-any local `.wrangler` D1 state or preview database created from an earlier
-version of it must be deleted and recreated (`npm run d1:migrate:local`, or
-`--remote` for a recreated preview database).
+a database created from an earlier version of it must be deleted and created
+again: locally, delete `site/.wrangler/state/v3/d1` and run
+`npm run d1:migrate:local`; for a remote database, delete it in the
+Cloudflare dashboard (or `npx wrangler d1 delete <name>`), create it again
+(`npx wrangler d1 create <name>`, then update its id where it is bound) and
+migrate it: `npm run d1:migrate:remote` for the production database
+`pineforge-license`, `npx wrangler d1 migrations apply <name> --remote` for a
+preview one.
 
 `orders` (pending, paid, refunded, expired, failed, mismatch, disputed), `licenses`
 (at most one per order; active or revoked), `stripe_events` (processed event
