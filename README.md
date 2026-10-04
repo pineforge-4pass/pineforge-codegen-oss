@@ -11,12 +11,12 @@ A pure-Python library that turns a PineScript v6 strategy into a complete C++
 source file you can compile against the [`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine)
 runtime.
 
-**Measured <!-- pf:scoreboard.date -->2026-10-03<!-- /pf -->** on main engine <!-- pf:scoreboard.engineCommit|short-code -->`700c5d24`<!-- /pf --> with codegen-oss <!-- pf:scoreboard.codegenCommit|short-code -->`13b9ccfd`<!-- /pf --> (baseline <!-- pf:scoreboard.id|code -->`pineforge-parity-baseline-20261003-engine-700c5d24`<!-- /pf -->, snapshot <!-- pf:scoreboard.snapshotSha256|short-code -->`3ee846c5`<!-- /pf -->): <!-- pf:scoreboard.excellent|int -->7,949<!-- /pf --> of <!-- pf:scoreboard.graded|int -->7,989<!-- /pf --> TradingView probes
+**Measured <!-- pf:scoreboard.date -->2026-10-03<!-- /pf -->** on main engine <!-- pf:scoreboard.engineCommit|short-code -->`dbd17b38`<!-- /pf --> with codegen-oss <!-- pf:scoreboard.codegenCommit|short-code -->`ee04fc66`<!-- /pf --> (baseline <!-- pf:scoreboard.id|code -->`pineforge-parity-baseline-20261003-engine-dbd17b38`<!-- /pf -->, snapshot <!-- pf:scoreboard.snapshotSha256|short-code -->`cee4a9fd`<!-- /pf -->): <!-- pf:scoreboard.excellent|int -->7,949<!-- /pf --> of <!-- pf:scoreboard.graded|int -->7,989<!-- /pf --> TradingView probes
 graded excellent and <!-- pf:scoreboard.strong|int -->40<!-- /pf --> strong, with <!-- pf:scoreboard.belowStrong|int -->0<!-- /pf --> below strong; <!-- pf:scoreboard.anomaliesExcluded|int -->17<!-- /pf --> more probes are held out as TradingView-side anomalies.
 A probe is a strategy exported from TradingView with its trade list and replayed
 trade for trade on the same bars.
 
-Release **1.0.1 still grades <!-- pf:releases[1.0.1].scoreboard.excellent|int -->7,905<!-- /pf --> excellent / <!-- pf:releases[1.0.1].scoreboard.strong|int -->84<!-- /pf --> strong until the next release**, on <!-- pf:releases[1.0.1].scoreboard.graded|int -->7,989<!-- /pf --> probes (baseline <!-- pf:releases[1.0.1].scoreboard.id|code -->`pineforge-parity-baseline-20261001-codegen-67892cda`<!-- /pf -->, <!-- pf:releases[1.0.1].scoreboard.date -->2026-10-01<!-- /pf -->). A main scoreboard advance does not change release results.
+Release **1.1.0 still grades <!-- pf:releases[1.1.0].scoreboard.excellent|int -->7,949<!-- /pf --> excellent / <!-- pf:releases[1.1.0].scoreboard.strong|int -->40<!-- /pf --> strong until the next release**, on <!-- pf:releases[1.1.0].scoreboard.graded|int -->7,989<!-- /pf --> probes (baseline <!-- pf:releases[1.1.0].scoreboard.id|code -->`pineforge-parity-baseline-20261003-engine-dbd17b38`<!-- /pf -->, <!-- pf:releases[1.1.0].scoreboard.date -->2026-10-03<!-- /pf -->). A main scoreboard advance does not change release results.
 
 The quantities above render from the public [facts tokens](https://github.com/pineforge-4pass/pineforge-release/blob/main/facts/facts.json). Maintain them with `lab facts render --repo . --facts <local facts file or pinned raw URL>`; `lab facts check` with the same inputs reports drift. Grades are registry-derived; the authored-script and closed-trade inventory is explicitly sourced to a historical public README for the identical population, not to registry row or slug totals.
 
@@ -40,7 +40,7 @@ for the changes in each release from 1.0.0 on and the release-note policy.
 ## Releases and this README
 
 <!-- Release lane: before a release is tagged, add it to the Engine pairing
-table and update every line that names `1.0.1` or `v1.0.1` as the current
+table and update every line that names `1.1.0` or `v1.1.0` as the current
 release or pair (this section's version and date, the baseline paragraph at
 the top, the engine `src/source/` link, the `@pf-trace` note, the clone
 command and its example output, "This section describes …", the timing note)
@@ -50,7 +50,7 @@ hosted-server line name no version. -->
 
 This README ships with each release as its package description on PyPI
 (`pineforge-codegen`); releases from 0.7.0 on are also on npm as
-`@pineforge/codegen-pyodide`. It describes 1.0.1 (2026-10-02) and what changed
+`@pineforge/codegen-pyodide`. It describes 1.1.0 (2026-10-04) and what changed
 since 0.10.4. The
 [PyPI release history](https://pypi.org/project/pineforge-codegen/#history)
 lists every release; the
@@ -90,8 +90,8 @@ It does **not** own execution semantics. Order lifecycle, bracket legs,
 fill-price and slippage rules, `process_orders_on_close` / `calc_on_order_fills`,
 margin revival and trail/stop behaviour — everything TradingView parity depends
 on at run time — live in the engine's source-adapter runtime
-([`src/source/`](https://github.com/pineforge-4pass/pineforge-engine/tree/v1.0.1/src/source)
-in engine `v1.0.1`), which maps them onto the engine's Pine-agnostic kernel. See
+([`src/source/`](https://github.com/pineforge-4pass/pineforge-engine/tree/v1.1.0/src/source)
+in engine `v1.1.0`), which maps them onto the engine's Pine-agnostic kernel. See
 the engine's [architecture notes](https://github.com/pineforge-4pass/pineforge-engine#architecture-kernel-vs-parity).
 
 ---
@@ -317,7 +317,7 @@ fields, such as `// @pf-trace gap=close - e` or
 `// @pf-trace body=math.abs(close - open)`. A `ta.*` call written in the
 pragma itself is not computed: `// @pf-trace rsi=ta.rsi(close, 14)` records
 `na` on every bar, and its C++ carries an `/* unsupported: ta.rsi */` marker.
-0.10.4, 1.0.0 and 1.0.1 all behave this way.
+0.10.4, 1.0.0, 1.0.1 and 1.1.0 all behave this way.
 
 ### Advanced: run the pipeline stages directly
 
@@ -362,9 +362,9 @@ does not bypass them.
 
 The last column was measured on 2026-09-29 with 70c2b4a (the same code as
 1.0.0) on CPython 3.14 on an Apple M4 Max, over the engine corpus that engine
-35db01c8 pins (as `v1.0.0` and `v1.0.1` do) and this repository's
-`tests/gate-corpus`. On 2026-10-02, on CPython 3.14 on an Apple M4 Max, 1.0.1
-transpiled each of those sources in at most 0.05 seconds.
+35db01c8 pins (as `v1.0.0`, `v1.0.1` and `v1.1.0` do) and this repository's
+`tests/gate-corpus`. On 2026-10-04, on CPython 3.14 on an Apple M4 Max, 1.1.0
+transpiled each of those sources in under 0.1 seconds.
 
 Nesting counts brackets, indented blocks, prefix operators, `?:` and
 `else if` chains, and the depth of the parsed syntax tree, in which an
@@ -413,6 +413,7 @@ Generated C++ compiles only against the engine it was generated for:
 | 0.10.4 (PyPI, 2026-09-06) | `v0.13.1` | The last 0.x pair, which the `pineforge-release` image `0.1.25` ships. Its C++ does not compile against engine `v1.0.0`. |
 | 1.0.0 (PyPI, 2026-09-30) | `v1.0.0` | The pair the `pineforge-release` image `1.0.0` ships. Its C++ needs `pineforge/source/pine_strategy_host.hpp`, which engine `v0.13.1` does not have. |
 | 1.0.1 (PyPI, 2026-10-02) | `v1.0.1` | The pair the `pineforge-release` image `1.0.1` ships. Engine `v1.0.1` changes only documentation since `v1.0.0`; regenerate and relink all the same. |
+| 1.1.0 (PyPI, 2026-10-04) | `v1.1.0` | The pair the `pineforge-release` image `1.1.0` ships. Its C++ defines the checked settings functions that engine `v1.1.0` adds to `<pineforge/pineforge.h>`; regenerate and relink. |
 | Later `X.Y.Z` releases | `vX.Y.Z` of the same version | See below. |
 
 On the 0.x line the engine and codegen versions are independent, and the
@@ -438,8 +439,8 @@ Pine as `strategy.pine`, write `strategy.generated.cpp` with the
 [file example](#transpile-a-file-to-a-cpp) above, then from the same directory:
 
 ```bash
-# 1.0.1 pairs with engine v1.0.1. For 0.10.4 use --branch v0.13.1.
-git clone --branch v1.0.1 https://github.com/pineforge-4pass/pineforge-engine.git
+# 1.1.0 pairs with engine v1.1.0. For 0.10.4 use --branch v0.13.1.
+git clone --branch v1.1.0 https://github.com/pineforge-4pass/pineforge-engine.git
 cd pineforge-engine
 cp ../strategy.generated.cpp tutorial/macd/generated.cpp   # the tutorial's strategy slot
 bash tutorial/run.sh    # needs cmake, a C++17 compiler and python3
@@ -448,7 +449,7 @@ bash tutorial/run.sh    # needs cmake, a C++17 compiler and python3
 `run.sh` configures CMake once, builds `libpineforge.a` and
 `tutorial/macd/strategy.so`, and runs `tutorial/run.py`, which loads the `.so`,
 feeds it the bars and reads back the closed trades. For the quick-start SMA
-cross, 1.0.1 with engine `v1.0.1` prints:
+cross, 1.1.0 with engine `v1.1.0` prints:
 
 ```
 MACD(12,26,9) on BTCUSDT 15m — 672 bars, 2026-04-29 18:15 → 2026-05-06 18:00 UTC
@@ -456,7 +457,7 @@ MACD(12,26,9) on BTCUSDT 15m — 672 bars, 2026-04-29 18:15 → 2026-05-06 18:00
   net pnl:   +738.20
   best/worst:+679.22 / -335.02
   max dd:    -788.79
-  elapsed:   1.4 ms
+  elapsed:   1.0 ms
 ```
 
 The `MACD(12,26,9)` label on the first line is fixed text in `run.py`,
@@ -466,7 +467,7 @@ order sizing: 1.0.0 gives an omitted
 `initial_capital`, `default_qty_type` and `default_qty_value` TradingView's
 Pine v6 defaults (100,000, `strategy.percent_of_equity`, 100), where 0.10.4
 leaves the engine's own (1,000,000 and 1 contract). Declaring those in
-`strategy()` books the same 13 trades on 1.0.1.
+`strategy()` books the same 13 trades on 1.1.0.
 
 Since 1.0.0, generated strategies reset persistent Pine state before each new
 batch or stream warmup through the engine's script-run preparation hook. Input
@@ -528,7 +529,7 @@ hosted/embedded use. Email **luis@4pass.com.tw** with your use case for a quote.
 
 ## Explicit Pine execution attachment
 
-This section describes 1.0.1 and engine `v1.0.1`. The Pine execution adapter is
+This section describes 1.1.0 and engine `v1.1.0`. The Pine execution adapter is
 the engine's full Pine execution runtime (`PineExecutionAdapter` and
 `PineStrategyHost` in the engine's `src/source/`): order lifecycle, bracket
 legs, fill-price and slippage rules, POOC / `calc_on_order_fills`, margin
@@ -551,9 +552,9 @@ Regenerate old generated C++ before using a new engine for Pine execution. C++
 generated before the source-layer cut
 ([#129](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/129)),
 0.10.4's included, derives from `BacktestEngine` and does not compile against
-engine `v1.0.1`; old cap-only C++ does not attach the priority rule, and
+engine `v1.1.0`; old cap-only C++ does not attach the priority rule, and
 metadata cannot silently restore it. Rebuild all modules against the
-new matching C++ layout (`engine_script_run_v19` in engine `v1.0.1`); old
+new matching C++ layout (`engine_script_run_v19` in engine `v1.1.0`); old
 fingerprint versions are not comparable. The extraction preserves Pine policy
 under explicit attachment; it does not implement the generic native
 child-activation scheduler or prove campaign neutrality. Compile-only corpus

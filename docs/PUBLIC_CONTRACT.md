@@ -2,8 +2,9 @@
 
 ## Optional generated settings extension
 
-Development builds paired with an engine providing `pineforge/checked_settings.hpp`
-add `strategy_settings_api_version()` (version 1), `strategy_create_checked`,
+From 1.1.0 on, C++ compiled against an engine providing
+`pineforge/checked_settings.hpp`, as engine `v1.1.0` does, adds
+`strategy_settings_api_version()` (version 1), `strategy_create_checked`,
 `strategy_set_input_checked`, `strategy_set_override_checked`,
 `strategy_get_effective_settings` and `run_backtest_full_checked` to generated
 libraries. The existing symbols and their successful default computations are
@@ -33,13 +34,14 @@ reports remain empty; checked batch returns `PF_SETTINGS_RUN_FAILED`. Free and
 recreate the handle to recover. Legacy setters that do not throw keep their
 existing permissive behaviour.
 
-The paired engine must merge before this codegen. Settings helper references are
-root-qualified and guarded by `PF_SETTINGS_API_VERSION`; old headers retain the
-standard-exception fallback and legacy batch precheck. Paired batch and stream
-refusals report NOT_COMPLETED through the shared native begin. Checked setters
-and receipt queries on a latched handle also return `PF_SETTINGS_RUN_FAILED`.
-An active stream keeps its begin-time settings after a mid-stream legacy setter
-throws; the sticky failure applies to subsequent begins.
+Engine `v1.1.0`, the pair of codegen 1.1.0, provides that header. Settings
+helper references are root-qualified and guarded by `PF_SETTINGS_API_VERSION`;
+old headers retain the standard-exception fallback and legacy batch precheck.
+Paired batch and stream refusals report NOT_COMPLETED through the shared native
+begin. Checked setters and receipt queries on a latched handle also return
+`PF_SETTINGS_RUN_FAILED`. An active stream keeps its begin-time settings after
+a mid-stream legacy setter throws; the sticky failure applies to subsequent
+begins.
 
 Immutable identifier defaults for `input.enum` now resolve to their declared
 member instead of reading an uninitialized script member (the old default was
@@ -94,7 +96,9 @@ reads the chart.
 ## Released contract
 
 This is the contract that 1.0.0, released 2026-09-30, implements, and 1.0.1,
-released 2026-10-02, implements unchanged. The last 0.x release, 0.10.4, has
+released 2026-10-02, implements unchanged. 1.1.0, released 2026-10-04,
+implements it with the generated settings extension above added; its Python
+functions and JSON protocol are unchanged. The last 0.x release, 0.10.4, has
 neither the `libraries` argument nor the `diagnostics` key described below.
 
 The supported programmatic entry points are the Python functions
