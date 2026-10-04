@@ -98,7 +98,8 @@ reads the chart.
 This is the contract that 1.0.0, released 2026-09-30, implements, and 1.0.1,
 released 2026-10-02, implements unchanged. 1.1.0, released 2026-10-04,
 implements it with the generated settings extension above added; its Python
-functions and JSON protocol are unchanged. The last 0.x release, 0.10.4, has
+functions and JSON protocol keep their arguments, result keys and envelopes.
+The last 0.x release, 0.10.4, has
 neither the `libraries` argument nor the `diagnostics` key described below.
 
 The supported programmatic entry points are the Python functions
