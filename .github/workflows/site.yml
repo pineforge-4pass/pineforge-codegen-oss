@@ -7,6 +7,7 @@ name: Site
 
 on:
   push:
+    branches: [main]
     paths:
       - "site/**"
       - ".github/workflows/site.yml"
@@ -41,7 +42,10 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Check (types, config schema, LICENSE quotes, i18n, unit tests)
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Check (types, config schema, LICENSE quotes, i18n, unit tests, audit)
         run: npm run check
 
       - name: Build

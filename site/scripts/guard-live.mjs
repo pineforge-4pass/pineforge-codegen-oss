@@ -1,8 +1,7 @@
 // Live-payment guard, run before every build. While the agreement is a draft,
 // prices are placeholders or no selling entity is named, a build whose
 // environment (or site/.dev.vars) holds a live Stripe key fails here.
-import { AGREEMENT_FILE, AGREEMENT_MARKER, readCommerce, readDevVars } from "./site-files.mjs";
-import { readFileSync } from "node:fs";
+import { agreementInfo, readCommerce, readDevVars } from "./site-files.mjs";
 
 const LIVE = /^(sk|rk|pk)_live_/;
 const NAMES = ["STRIPE_SECRET_KEY", "STRIPE_PUBLISHABLE_KEY"];
@@ -16,8 +15,9 @@ for (const name of NAMES) {
 
 const commerce = readCommerce();
 const blockers = [];
-if (readFileSync(AGREEMENT_FILE, "utf8").includes(AGREEMENT_MARKER)) {
-  blockers.push(`legal/commercial-license-agreement.md still carries "${AGREEMENT_MARKER}"`);
+const agreement = await agreementInfo();
+for (const reason of agreement.draftReasons) {
+  blockers.push(`legal/commercial-license-agreement.md is not final: ${reason}`);
 }
 if (commerce.pricesArePlaceholders) blockers.push("config/commerce.json: pricesArePlaceholders is true");
 if (!commerce.seller?.legalName) blockers.push("config/commerce.json: seller.legalName is not set");

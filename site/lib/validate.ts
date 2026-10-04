@@ -1,7 +1,8 @@
 // Field validation shared by the client forms (inline errors) and the
 // Functions (authoritative). Returns every error, not just the first.
 
-export const HONEYPOT_FIELD = "website";
+// A non-semantic name, so browser form fillers leave it empty.
+export const HONEYPOT_FIELD = "pf_hp";
 
 export type FieldError = { field: string; code: "required" | "too_long" | "invalid" };
 

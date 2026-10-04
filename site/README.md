@@ -20,13 +20,19 @@ advice.
   true`), and the site says so on every page.
 - The selling entity is not named yet (`seller.legalName: null`).
 - The Commercial License Agreement in `legal/commercial-license-agreement.md`
-  is a draft that starts with the marker `DRAFT — requires review by counsel
-  before go-live`.
+  is a draft. It counts as final only when all of these hold
+  (`lib/agreement-status.ts`, shared by the build guard and the pages): the
+  marker `DRAFT — requires review by counsel before go-live` is gone, a line
+  exactly `Status: final` is present, the `Version:` value does not contain
+  "draft", and no placeholder is left (no `[...]` mentioning "owner" or
+  "counsel", no bracketed number such as `[30]`). Anything else, a drifted
+  marker included, reads as draft.
 
-While any of those holds, live payments are refused twice over: `npm run
-build` fails when a live Stripe key is in its environment (or in
-`.dev.vars`), and at run time `/api/checkout` answers 503 and the webhook
-never issues a license from a live-mode event. See "Go-live checklist".
+While any of those holds, the site shows a preview notice on every page and
+live payments are refused twice over: `npm run build` fails when a live
+Stripe key is in its environment (or in `.dev.vars`), and at run time
+`/api/checkout` answers 503 and the webhook never issues a license from a
+live-mode event. See "Go-live checklist".
 
 ## Quick start
 
@@ -158,6 +164,7 @@ from it, never from the client. `npm run check` validates it
 | `RESEND_FROM` | var | `PineForge Licensing <enterprise@pineforge.dev>` |
 | `LICENSE_NOTIFY_TO` | var | sale notices, quote requests and alerts (`enterprise@pineforge.dev`) |
 | `STRIPE_TAX` | var | `"on"` sets `automatic_tax.enabled` (Stripe Tax); default `"off"` |
+| `TEST_EMAIL_ALLOWLIST` | var | test mode only: comma-separated addresses or `@domain`s the buyer email may go to; empty (the default) sends none; live mode ignores it |
 | `STRIPE_API_BASE` | var, optional | default `https://api.stripe.com` (tests point it at the fake) |
 | `RESEND_API_BASE` | var, optional | default `https://api.resend.com` |
 | `LICENSE_PUBLIC_KEYS` | var, optional | JSON keyring that REPLACES the bundled one: local development, tests and preview deployments only; never set in production |
@@ -199,9 +206,19 @@ from it, never from the client. `npm run check` validates it
 
 Webhook events handled: `checkout.session.completed` and
 `checkout.session.async_payment_succeeded` (issue when `payment_status` is
-`paid`), `checkout.session.async_payment_failed`, `checkout.session.expired`
-and `charge.refunded` (a full refund revokes the license; a partial refund is
-recorded only).
+`paid`), `checkout.session.async_payment_failed`, `checkout.session.expired`,
+`charge.refunded` (a full refund revokes the license; a partial refund is
+recorded only), `charge.dispute.created` (one alert) and
+`charge.dispute.closed` (lost: the license is revoked with reason
+`dispute_lost` and an alert goes out; won: recorded only).
+
+Emails: the buyer gets the license (signed JSON attached) and
+`LICENSE_NOTIFY_TO` a sale notice. In test mode the buyer email goes only to
+addresses on `TEST_EMAIL_ALLOWLIST`; for anyone else it is logged as
+skipped, while the order page, the certificate and the sale notice work as
+usual. When issuance fails for a paid order (signing key missing or not in
+the keyring, a database error), one alert per order goes to
+`LICENSE_NOTIFY_TO` and the webhook answers 500, so Stripe retries.
 
 ### D1 tables (`migrations/`)
 
@@ -252,14 +269,37 @@ verifier say so, and a live deployment never reports one as valid.
   keyring. Keep retired public keys in the keyring so the licenses they signed
   still verify.
 - `node scripts/verify-license.mjs <license.json> [--keyring <file>]` checks
-  a license offline. Revocation is only visible online.
+  a license offline. It exits 0 only for a valid live license within its
+  term; a test license or one outside its term exits 3 unless `--allow-test`
+  / `--allow-expired` is given; an invalid one exits 1. Revocation is only
+  visible online.
+- Issuance refuses to sign a test-mode license with a key whose kid is in the
+  bundled (production) keyring.
 
 ### Revocation
 
 A full refund (`charge.refunded`) marks the order refunded and the license
-revoked with reason `refund`. Verification then reports `revoked`, and the
-certificate shows REVOKED. Any other revocation is a manual D1 update of
-`licenses.status`, `revoked_at` and `revoke_reason`.
+revoked with reason `refund`; a lost dispute (`charge.dispute.closed`,
+status `lost`) revokes it with reason `dispute_lost`. Verification then
+reports `revoked`, and the certificate shows REVOKED. Any other revocation is
+a manual D1 update of `licenses.status`, `revoked_at` and `revoke_reason`.
+
+### Reconciliation
+
+Paid orders that have no license (issuance failed or was blocked; each one
+also raised an alert):
+
+```bash
+npx wrangler d1 execute pineforge-license --remote --command "
+  SELECT o.id, o.company, o.tier, o.option_id, o.paid_at, o.stripe_payment_intent
+  FROM orders o LEFT JOIN licenses l ON l.order_id = o.id
+  WHERE o.status = 'paid' AND l.id IS NULL
+  ORDER BY o.paid_at"
+```
+
+Once the cause is fixed, resend the order's `checkout.session.completed`
+event from the Stripe dashboard (Developers, Events) to issue the license,
+or refund the payment.
 
 ## Security notes
 
@@ -269,18 +309,36 @@ certificate shows REVOKED. Any other revocation is a manual D1 update of
   nothing.
 - **Mode check.** An event whose `livemode` differs from the deployment's mode
   (decided by the `sk_live_` / `sk_test_` key prefix) is rejected.
-- **Idempotency.** Each event id is processed once (`stripe_events`); a license
-  is issued at most once per order (`licenses.order_id` is unique); the
-  Checkout Session uses the order id as its idempotency key.
+- **Idempotency.** Stripe delivers events at least once, so every handler is
+  idempotent: an event id is recorded (`stripe_events`) only after it was
+  handled, a license is issued at most once per order (`licenses.order_id`
+  is unique), the buyer email is claimed before it is sent (a delivery that
+  finds a fresh claim held by another answers 500, so Stripe retries), and
+  the Checkout Session uses the order id as its idempotency key. Webhook
+  bodies over 1 MiB are refused (413) before the signature check.
 - **Amount check.** The paid session must match the order by session id and
   `client_reference_id`, and its `amount_subtotal` and currency must equal the
   order's; otherwise the order is marked `mismatch`, an alert is emailed and no
   license is issued.
 - **Server-side prices.** The client sends only a tier and option id.
-- **Rate limits.** Checkout and quote requests are limited per IP (D1
-  fixed windows: 30 checkouts per 10 minutes, 10 quotes per 15 minutes).
-  Both forms carry a honeypot field, and both endpoints accept only
+- **Rate limits.** Checkout and quote requests are limited per client (D1
+  fixed windows: 30 checkouts per 10 minutes, 10 quotes per 15 minutes),
+  keyed by the IPv4 address or the IPv6 /64. Both forms carry a honeypot field
+  with a non-semantic name (`pf_hp`), and both endpoints accept only
   `Content-Type: application/json`, which a cross-site HTML form cannot send.
+- **Test deployments.** A test-mode deployment emails licenses only to
+  `TEST_EMAIL_ALLOWLIST`, so it cannot be used to send mail from
+  enterprise@pineforge.dev to arbitrary addresses. Put preview deployments
+  behind Cloudflare Access as well, so only the team can reach them.
+- **Stripe API version.** The client pins `2026-09-30.endive` (the version
+  of the `stripe` package's types); create the webhook endpoints with the same
+  API version, so event payloads match what the code expects.
+- **Currency.** The amount check compares the session's `amount_subtotal` and
+  currency with the order's (USD). If Stripe Adaptive Pricing is turned on,
+  buyers may pay in their local currency and the session's amounts change, so
+  every such payment would be marked `mismatch`; keep Adaptive Pricing off,
+  or extend the check to the original-currency amounts Stripe reports on such
+  sessions before turning it on.
 - **Keys.** A license is stored only if it verifies against the trusted
   keyring right after signing. A deployment holding a live Stripe key
   ignores `STRIPE_API_BASE`, `RESEND_API_BASE` and `LICENSE_PUBLIC_KEYS`.
@@ -329,10 +387,12 @@ certificate shows REVOKED. Any other revocation is a manual D1 update of
      dedicated `preview` branch), never the production URL: the production
      deployment rejects test-mode events (`livemode_mismatch`).
 
-   Subscribe both to `checkout.session.completed`,
+   Create both with API version `2026-09-30.endive` (the version the client
+   pins) and subscribe both to `checkout.session.completed`,
    `checkout.session.async_payment_succeeded`,
-   `checkout.session.async_payment_failed`, `checkout.session.expired` and
-   `charge.refunded`. Configure invoice settings (the seller's legal name,
+   `checkout.session.async_payment_failed`, `checkout.session.expired`,
+   `charge.refunded`, `charge.dispute.created` and `charge.dispute.closed`.
+   Keep Adaptive Pricing off (see "Security notes"). Configure invoice settings (the seller's legal name,
    address and tax ids on invoices; Checkout creates an invoice for every
    purchase) and, if Stripe Tax is used, the origin address and
    registrations, then set `STRIPE_TAX` to `"on"`.
@@ -346,8 +406,10 @@ Owner decisions:
 - [ ] Real prices per tier in `config/commerce.json`, then
       `pricesArePlaceholders: false`.
 - [ ] The selling legal entity in `seller.legalName` (and on Stripe invoices).
-- [ ] Counsel's review of `legal/commercial-license-agreement.md`; remove the
-      DRAFT marker only after it, and give the reviewed text a version line.
+- [ ] Counsel's review of `legal/commercial-license-agreement.md`; only after
+      it: remove the DRAFT marker, fill every bracketed placeholder, give the
+      text a final `Version:` line (without "draft") and add the line
+      `Status: final`.
 - [ ] The refund policy wording (in the agreement and the FAQ).
 - [ ] The Stripe account: business details, payouts, tax settings and
       registrations, invoice template, and customer emails for successful
@@ -360,7 +422,10 @@ Operations:
 - [ ] Pages project; production and preview D1 databases, both migrated;
       production and preview secrets and variables set as above.
 - [ ] Stripe live and test webhook endpoints, each on its own deployment,
-      with the five events; their secrets stored.
+      on API version `2026-09-30.endive`, with the seven events; their
+      secrets stored.
+- [ ] Preview deployments behind Cloudflare Access; `TEST_EMAIL_ALLOWLIST`
+      set on preview to the team's addresses or domain.
 - [ ] Resend domain verified; a test purchase in preview delivers both emails.
 - [ ] One end-to-end purchase with a real test-mode key on the preview
       deployment (see "Real Stripe test mode"), including a refund.
@@ -368,20 +433,22 @@ Operations:
       three conditions above are met.
 - [ ] `LICENSE_PUBLIC_KEYS`, `STRIPE_API_BASE` and `RESEND_API_BASE` are
       NOT set in production.
+- [ ] When the site opens, update the root `README.md` ("Buying a commercial
+      license") and `LEGAL.md`, which today say the site is in preview and
+      not yet taking orders.
 
 ## Known limits
 
 - A live payment that arrives while live payments are blocked, or a paid
   session whose amount does not match its order, is recorded and alerted
-  but issues no license; issuing or refunding it is a manual step (there
-  is no operator script yet).
+  but issues no license; issuing or refunding it is a manual step (see
+  "Reconciliation"; there is no operator script yet).
 - A buyer email that Resend does not accept is retried on Stripe's
   redelivery of the event; the sale notice to `LICENSE_NOTIFY_TO` is sent
   once and only logged on failure.
 - The certificate page shows the D1 status (active, revoked, expired) and
   the TEST banner; it does not re-check the signature (the verify page
   does).
-- Disputes (`charge.dispute.*`) are not handled; revoke manually.
 - `TURNSTILE_SECRET` is accepted by `/api/quote`, but the quote form does
   not render a Turnstile widget yet.
 - Not built: a PDF certificate (print the page to PDF), a

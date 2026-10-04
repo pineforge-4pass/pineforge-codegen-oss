@@ -26,6 +26,9 @@
     "RESEND_FROM": "PineForge Licensing <enterprise@pineforge.dev>",
     "LICENSE_NOTIFY_TO": "enterprise@pineforge.dev",
     // "on" enables Stripe Tax (automatic_tax) on Checkout Sessions.
-    "STRIPE_TAX": "off"
+    "STRIPE_TAX": "off",
+    // Test mode only: the buyer emails a test deployment may send. Comma-
+    // separated addresses or @domains; empty sends none (live mode ignores it).
+    "TEST_EMAIL_ALLOWLIST": ""
   }
 }

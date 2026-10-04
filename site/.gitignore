@@ -10,3 +10,4 @@ next-env.d.ts
 lib/generated/
 public/.well-known/pineforge-license-keys.json
 *.tsbuildinfo
+public/fonts/

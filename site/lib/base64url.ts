@@ -16,5 +16,8 @@ export function b64urlDecode(s: string): Uint8Array<ArrayBuffer> {
   const bin = atob(padded);
   const out = new Uint8Array(new ArrayBuffer(bin.length));
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  // Only the canonical encoding decodes: unused trailing bits must be zero,
+  // so one byte string has exactly one accepted spelling.
+  if (b64urlEncode(out) !== s) throw new Error("non-canonical base64url");
   return out;
 }

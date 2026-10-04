@@ -172,7 +172,13 @@ export function parsePrivateJwk(json: string): PrivateJwk {
 export function parseKeyring(json: string): Keyring {
   const r: unknown = JSON.parse(json);
   if (!isObj(r) || !Array.isArray(r.keys)) throw new Error("keyring must be {\"keys\": [...]}");
-  return { keys: r.keys.map(checkPublicJwk) };
+  const keys = r.keys.map(checkPublicJwk);
+  const kids = new Set<string>();
+  for (const k of keys) {
+    if (kids.has(k.kid)) throw new Error(`keyring has duplicate kid "${k.kid}"`);
+    kids.add(k.kid);
+  }
+  return { keys };
 }
 
 /** First 64 bits of sha256(signature bytes) in hex, grouped by four: "ab12 cd34 ef56 7890". */

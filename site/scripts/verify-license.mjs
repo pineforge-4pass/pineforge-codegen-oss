@@ -1,13 +1,14 @@
 // Offline check of a signed license file.
 //
-//   node scripts/verify-license.mjs <license.json> [--keyring <keyring.json>] [--strict]
+//   node scripts/verify-license.mjs <license.json> [--keyring <keyring.json>] [--allow-test] [--allow-expired]
 //
 // Checks the Ed25519 signature against the shipped keyring
 // (keys/license-public-keys.json), or --keyring <file>, or the
 // LICENSE_PUBLIC_KEYS environment variable (JSON). Revocation needs the online
-// check (the site's verify page). Exit 0: signature valid; 1: not valid; 2: usage;
-// 3 (only with --strict): the signature is valid but the license is a test
-// license or outside its term.
+// check (the site's verify page). Exit 0: a valid live license within its term;
+// 1: not valid (signature, key, format); 2: usage; 3: the signature is valid but
+// the license is a test license (unless --allow-test) or outside its term
+// (unless --allow-expired).
 import { readFileSync } from "node:fs";
 import { KEYRING_FILE } from "./site-files.mjs";
 import { parseKeyring, verifyLicenseSignature } from "../lib/license.ts";
@@ -15,10 +16,11 @@ import { parseKeyring, verifyLicenseSignature } from "../lib/license.ts";
 const args = process.argv.slice(2);
 const ki = args.indexOf("--keyring");
 const keyringPath = ki >= 0 ? args[ki + 1] : null;
-const strict = args.includes("--strict");
+const allowTest = args.includes("--allow-test");
+const allowExpired = args.includes("--allow-expired");
 const file = args.find((a, i) => !a.startsWith("--") && (ki < 0 || i !== ki + 1));
 if (!file || (ki >= 0 && !keyringPath)) {
-  console.error("usage: node scripts/verify-license.mjs <license.json> [--keyring <keyring.json>] [--strict]");
+  console.error("usage: node scripts/verify-license.mjs <license.json> [--keyring <keyring.json>] [--allow-test] [--allow-expired]");
   process.exit(2);
 }
 
@@ -59,4 +61,10 @@ if (l.mode === "test") {
   console.log("Mode:      live");
 }
 console.log("Revocation: not visible offline; check the license id on the site's verify page.");
-if (strict && (l.mode !== "live" || dates !== "within its term")) process.exit(3);
+if ((l.mode !== "live" && !allowTest) || (dates !== "within its term" && !allowExpired)) {
+  console.log(
+    `Result:    not accepted (${[l.mode !== "live" && !allowTest ? "test license" : "", dates !== "within its term" && !allowExpired ? dates : ""].filter(Boolean).join(", ")}); see --allow-test / --allow-expired`,
+  );
+  process.exit(3);
+}
+console.log("Result:    valid");

@@ -15,7 +15,8 @@ export type QuoteId =
   | "personalTradingB"
   | "noncommercialPurposes"
   | "personalUses"
-  | "noncommercialOrgs";
+  | "noncommercialOrgs"
+  | "supplementalControl";
 
 export const LICENSE_URL = "https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE";
 
@@ -34,6 +35,7 @@ export const LICENSE_QUOTE_SECTION: Record<QuoteId, string> = {
   noncommercialPurposes: "PolyForm Noncommercial License 1.0.0 — Noncommercial Purposes",
   personalUses: "PolyForm Noncommercial License 1.0.0 — Personal Uses",
   noncommercialOrgs: "PolyForm Noncommercial License 1.0.0 — Noncommercial Organizations",
+  supplementalControl: "Preamble",
 };
 
 export const LICENSE_QUOTES: Record<QuoteId, string> = {
@@ -50,4 +52,5 @@ export const LICENSE_QUOTES: Record<QuoteId, string> = {
   noncommercialPurposes: "Any noncommercial purpose is a permitted purpose.",
   personalUses: "Personal use for research, experiment, and testing for the benefit of public knowledge, personal study, private entertainment, hobby projects, amateur pursuits, or religious observance, without any anticipated commercial application, is use for a permitted purpose.",
   noncommercialOrgs: "Use by any charitable organization, educational institution, public research organization, public safety or health organization, environmental protection organization, or government institution is use for a permitted purpose regardless of the source of funding or obligations resulting from the funding.",
+  supplementalControl: "In case of any conflict, the supplemental sections (\"Additional Permission\" and \"Commercial Use\") control over the base license.",
 };

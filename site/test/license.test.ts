@@ -11,6 +11,8 @@ import {
   type PrivateJwk,
 } from "../lib/license.ts";
 import { addMonthsIso } from "../lib/dates.ts";
+import { b64urlDecode } from "../lib/base64url.ts";
+import { parseKeyring } from "../lib/license.ts";
 
 async function keypair(kid: string) {
   const { privateKey } = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
@@ -73,4 +75,17 @@ test("term arithmetic clamps the day", () => {
   assert.equal(addMonthsIso("2026-10-04T08:30:00Z", 12), "2027-10-04T08:30:00Z");
   assert.equal(addMonthsIso("2026-01-31T00:00:00Z", 1), "2026-02-28T00:00:00Z");
   assert.equal(addMonthsIso("2028-02-29T12:00:00Z", 12), "2029-02-28T12:00:00Z");
+});
+
+test("base64url accepts only the canonical encoding", () => {
+  assert.deepEqual([...b64urlDecode("AQ")], [1]);
+  assert.throws(() => b64urlDecode("AR"), /non-canonical/, "nonzero unused bits");
+  assert.throws(() => b64urlDecode("AQ=="), /invalid/, "padding");
+  assert.throws(() => b64urlDecode("A+/="), /invalid/);
+});
+
+test("a keyring with a duplicate kid is refused", () => {
+  const k = { kty: "OKP", crv: "Ed25519", x: "2bIiI78i_XKQZ32PPGumido_8R5ad8vVdSToZ3gLN3s", kid: "pfl-a" };
+  assert.equal(parseKeyring(JSON.stringify({ keys: [k] })).keys.length, 1);
+  assert.throws(() => parseKeyring(JSON.stringify({ keys: [k, { ...k }] })), /duplicate kid/);
 });

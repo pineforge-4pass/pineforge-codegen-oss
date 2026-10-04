@@ -7,23 +7,22 @@ export const SITE = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const AGREEMENT_FILE = join(SITE, "legal", "commercial-license-agreement.md");
 export const COMMERCE_FILE = join(SITE, "config", "commerce.json");
 export const KEYRING_FILE = join(SITE, "keys", "license-public-keys.json");
-export const AGREEMENT_MARKER = "DRAFT — requires review by counsel before go-live";
 
 export function readCommerce() {
   return JSON.parse(readFileSync(COMMERCE_FILE, "utf8"));
 }
 
-/** The agreement's draft flag, version line and sha256 of its bytes. */
+/** The agreement's draft status (lib/agreement-status.ts), version line and sha256 of its bytes. */
 export async function agreementInfo() {
   const { createHash } = await import("node:crypto");
+  const { agreementStatus } = await import("../lib/agreement-status.ts");
   const bytes = readFileSync(AGREEMENT_FILE);
-  const text = bytes.toString("utf8");
   const sha256 = createHash("sha256").update(bytes).digest("hex");
-  // "Version: x", "**Version:** x", "**Version**: x"
-  const m = text.match(/^[\s>*_]*Version[\s*_]*:[\s*_]*`?([^\s*`]+)/im);
+  const status = agreementStatus(bytes.toString("utf8"));
   return {
-    isDraft: text.includes(AGREEMENT_MARKER),
-    version: m ? m[1] : `unversioned-${sha256.slice(0, 12)}`,
+    isDraft: status.isDraft,
+    draftReasons: status.reasons,
+    version: status.version ?? `unversioned-${sha256.slice(0, 12)}`,
     sha256,
   };
 }

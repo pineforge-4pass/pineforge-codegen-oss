@@ -488,10 +488,10 @@ This is source-available, not OSI open source.
 
 ### Buying a commercial license
 
-Buy a Team, Fund or OEM / Embedded commercial license online at
-[license.pineforge.dev](https://license.pineforge.dev) (self-serve checkout, signed
-license certificate, online verification), or email **enterprise@pineforge.dev**
-for a quote or anything that does not fit a plan. Personal trading stays free.
+A self-serve site for Team, Fund and OEM / Embedded licenses,
+[license.pineforge.dev](https://license.pineforge.dev), is in preview and not yet
+taking orders. Until it opens, email **enterprise@pineforge.dev** for a commercial
+license or a quote. Personal trading stays free.
 
 ## Explicit Pine execution attachment
 
