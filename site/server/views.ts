@@ -34,7 +34,7 @@ export function publicLicense(payload: LicensePayload, kid: string, row: License
     agreement: { version: payload.agreement.version, sha256: payload.agreement.sha256 },
     kid,
     revokedAt: row?.revoked_at ?? null,
-    revokeReason: row?.revoke_reason ?? null,
+    revokeReason: publicRevokeReason(row?.revoke_reason ?? null),
   };
 }
 
@@ -58,4 +58,13 @@ export function scopeText(tierId: string, scope: LicenseScope): string {
   }
   const tier: Tier = { id: tierId as Tier["id"], options: [option], quoteAbove: "" };
   return scopeSummary(tier, option);
+}
+
+/**
+ * The revoke reason a public answer may carry: "refund", or "revoked" for any
+ * other stored reason (dispute_lost included), so a dispute is never disclosed.
+ */
+export function publicRevokeReason(code: string | null): "refund" | "revoked" | null {
+  if (!code) return null;
+  return code === "refund" ? "refund" : "revoked";
 }

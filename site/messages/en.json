@@ -5,8 +5,8 @@
     "metaDescription": "Buy and verify a commercial license for PineForge Codegen, the PineScript v6 to C++ transpiler.",
     "titleTemplate": "{page} — PineForge Codegen commercial license",
     "skip": "Skip to content",
-    "testModeNotice": "Preview — live sales have not started. Checkout runs in Stripe test mode: no real payment is taken, and a test license is not a commercial license.",
-    "testModeNoticePlaceholders": "Preview — prices are placeholders and live sales have not started. Checkout runs in Stripe test mode: no real payment is taken, and a test license is not a commercial license.",
+    "testModeNotice": "Preview — live sales have not started: no real payment is taken, and a test license is not a commercial license.",
+    "testModeNoticePlaceholders": "Preview — prices are placeholders and live sales have not started: no real payment is taken, and a test license is not a commercial license.",
     "nav": {
       "label": "Main",
       "home": "Do I need one?",
@@ -60,6 +60,7 @@
     "no": "No",
     "startOver": "Start over",
     "resultHeading": "Result",
+    "askFirstAlso": "Your answers also name use {uses}, quoted below with the rest. Name them in your message too: the written answer will cover every use you describe.",
     "questionNumber": "Question {n}",
     "licenseLink": "Read the full LICENSE on GitHub",
     "questions": {
@@ -143,7 +144,7 @@
     "static": {
       "heading": "How the guide decides",
       "rule1": "Questions {use1}, {use2}, {use3} and {use4} are the four uses the LICENSE names as Commercial Use. A yes to any of them means you need a commercial license: Team for use (2) alone; Fund when you also handle others' capital (1); OEM / Embedded for products (3) and hosted services (4). A combination no single plan covers needs a quote.",
-      "ruleOrg": "Question {org} is asked only after a yes to question {use2}: is the organization one of those the base license's Noncommercial Organizations clause names? If it is, and use (2) is your only yes, the LICENSE contains two readings that counsel has not settled, so the guide recommends no plan and asks you to write to us first.",
+      "ruleOrg": "Question {org} is asked only after a yes to question {use2}: is the organization one of those the base license's Noncommercial Organizations clause names? If it is, the LICENSE contains two readings that counsel has not settled, so the guide recommends no plan, whatever else you answer, and asks you to write to us first.",
       "rule2": "If all four uses are no, questions {pt1} to {pt3} test Personal Trading: an individual, trading for their own account, with only their own capital. Three yes answers: no commercial license is needed.",
       "rule3": "Otherwise question {nc} asks whether your use is a personal noncommercial purpose under the base license. Yes: no commercial license is needed. No: ask for a commercial license.",
       "questionsHeading": "The questions",
@@ -224,7 +225,7 @@
   "order": {
     "metaTitle": "Your order",
     "title": "Your order",
-    "invoiceNote": "For a live purchase, Stripe creates an invoice for the payment; whether Stripe emails it to you depends on the seller's Stripe settings. Test-mode orders get no real invoice. The license itself is emailed to you separately.",
+    "invoiceNote": "For a live purchase, Stripe creates an invoice for the payment; whether Stripe emails it to you depends on the seller's Stripe settings. Test-mode orders get no real invoice. Keep the license file from the download above: a live order also emails it to you, while a test-mode order emails it only to the addresses its test setup allows.",
     "status": {
       "pending": "Waiting for Stripe to confirm the payment. This page updates by itself.",
       "pendingTimeout": "Stripe has not confirmed the payment yet. Reload this page in a few minutes; the license is also emailed to you once it is issued. If nothing arrives, write to {email}.",

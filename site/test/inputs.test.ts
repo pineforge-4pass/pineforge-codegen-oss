@@ -22,4 +22,6 @@ test("rate-limit keys: IPv6 by its /64, IPv4 as is", () => {
   assert.notEqual(rateLimitKey("2001:db8:85a3:1::1"), rateLimitKey("2001:db8:85a3:2::1"));
   assert.equal(rateLimitKey("fe80::1%eth0"), "fe80:0:0:0::/64");
   assert.equal(rateLimitKey("unknown"), "unknown");
+  assert.equal(rateLimitKey("::ffff:192.0.2.1"), "192.0.2.1", "IPv4-mapped IPv6 is the IPv4 client");
+  assert.equal(rateLimitKey("::FFFF:c000:0201"), "192.0.2.1");
 });

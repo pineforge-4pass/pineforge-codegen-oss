@@ -33,16 +33,30 @@ test("a yes to (2) asks whether the organization is one the base license lists",
   ]);
 });
 
-test("a listed organization whose only Commercial Use is (2) is asked to write first: no tier", () => {
+test("a listed organization is always asked to write first: no tier, whatever else it answers", () => {
   const o = decide({ ...uses(false, true, false, false), noncommercialOrg: true });
   assert.equal(o?.id, "ask-first");
   assert.equal(o?.tier, null);
   assert.deepEqual(o?.quotes, ["noncommercialOrgs", "use2", "usesAreCommercial", "supplementalControl"]);
   // Not listed: Team, as before.
   assert.equal(decide({ ...uses(false, true, false, false), noncommercialOrg: false })?.id, "commercial-team");
-  // Listed but with another Commercial Use: the usual routing.
-  assert.equal(decide({ ...uses(false, true, true, false), noncommercialOrg: true })?.id, "commercial-oem");
-  assert.equal(decide({ ...uses(true, true, false, false), noncommercialOrg: true })?.id, "commercial-fund");
+  // Listed, with other Commercial Uses too: still ask-first, quoting every use named.
+  const oem = decide({ ...uses(false, true, true, false), noncommercialOrg: true });
+  assert.equal(oem?.id, "ask-first");
+  assert.equal(oem?.tier, null);
+  assert.deepEqual(oem?.uses, [2, 3]);
+  assert.deepEqual(oem?.quotes, ["noncommercialOrgs", "use2", "use3", "usesAreCommercial", "supplementalControl"]);
+  const all = decide({ ...uses(true, true, true, true), noncommercialOrg: true });
+  assert.equal(all?.id, "ask-first");
+  assert.deepEqual(all?.quotes, [
+    "noncommercialOrgs",
+    "use1",
+    "use2",
+    "use3",
+    "use4",
+    "usesAreCommercial",
+    "supplementalControl",
+  ]);
 });
 
 test("recommends the smallest tier covering every yes", () => {

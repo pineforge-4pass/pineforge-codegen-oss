@@ -86,9 +86,9 @@ export async function sendAlert(
   lines: string[],
   relatedId: string | null,
   kind: EmailKind = "alert",
-): Promise<void> {
+): Promise<SendResult> {
   const to = (env.LICENSE_NOTIFY_TO ?? "").trim();
-  await sendEmail(env, {
+  return sendEmail(env, {
     to: to ? [to] : [],
     subject: `ALERT: ${subject}`,
     text: lines.join("\n"),
@@ -101,7 +101,8 @@ export async function sendAlert(
  * An alert sent once per (kind, relatedId): skipped when email_log already
  * holds a row of that kind for that id that is not a failed attempt (a
  * failed one is retried by the next call). Never throws; when the lookup
- * itself fails the alert is sent anyway.
+ * itself fails the alert is sent anyway. Returns null when an earlier
+ * attempt already went out, else this attempt's result.
  */
 export async function sendAlertOnce(
   env: Env,
@@ -109,16 +110,32 @@ export async function sendAlertOnce(
   relatedId: string,
   subject: string,
   lines: string[],
-): Promise<void> {
+): Promise<SendResult | null> {
   try {
     const prior = await env.DB.prepare(
       "SELECT id FROM email_log WHERE kind = ?1 AND related_id = ?2 AND status <> 'failed' LIMIT 1",
     )
       .bind(kind, relatedId)
       .first();
-    if (prior) return;
+    if (prior) return null;
   } catch (e) {
     console.error(`[email] ${kind} dedupe lookup failed:`, e);
   }
-  await sendAlert(env, subject, lines, relatedId, kind);
+  return sendAlert(env, subject, lines, relatedId, kind);
+}
+
+/**
+ * sendAlertOnce for a webhook handler: a failed send throws, so the webhook
+ * answers 500 and Stripe redelivers the event; the dedupe above keeps the
+ * redelivery from alerting twice once a send has gone out.
+ */
+export async function alertOnceOrThrow(
+  env: Env,
+  kind: EmailKind,
+  relatedId: string,
+  subject: string,
+  lines: string[],
+): Promise<void> {
+  const result = await sendAlertOnce(env, kind, relatedId, subject, lines);
+  if (result?.status === "failed") throw new Error(`${kind} alert for ${relatedId} not accepted: ${result.error ?? ""}`);
 }

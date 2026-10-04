@@ -488,10 +488,10 @@ This is source-available, not OSI open source.
 
 ### Buying a commercial license
 
-A self-serve site for Team, Fund and OEM / Embedded licenses,
-[license.pineforge.dev](https://license.pineforge.dev), is in preview and not yet
-taking orders. Until it opens, email **enterprise@pineforge.dev** for a commercial
-license or a quote. Personal trading stays free.
+A self-serve site for Team, Fund and OEM / Embedded licenses is in preview and
+will open at license.pineforge.dev (not yet online); until then, email
+**enterprise@pineforge.dev** for a commercial license or a quote. Personal
+trading stays free.
 
 ## Explicit Pine execution attachment
 

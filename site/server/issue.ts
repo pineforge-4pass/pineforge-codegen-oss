@@ -87,7 +87,7 @@ async function storeLicense(env: Env, order: OrderRow, mode: LicenseMode): Promi
   const key = signingKey(env);
   // A production key never signs a test license: such a license would verify
   // as genuine against the published keyring.
-  if (mode === "test" && isProductionKid(key.kid)) {
+  if (mode === "test" && isProductionKid(key.kid, key.x)) {
     throw new Error(`refusing to sign a test license with production key ${key.kid}; set a test LICENSE_SIGNING_KEY`);
   }
   const issuedAt = nowIso();
@@ -206,7 +206,9 @@ async function deliverBuyerEmail(env: Env, order: OrderRow, row: LicenseRow, sit
       "",
       `The signed license file ${row.id}.json is attached. Its Ed25519 signature can be`,
       `checked offline against the public keys at ${keysUrl}.`,
-      "The invoice for this payment comes from Stripe in a separate email.",
+      row.mode === "test"
+        ? "This test-mode order has no real invoice."
+        : "Stripe creates the invoice for this payment; whether Stripe emails it depends on the seller's Stripe settings.",
       "",
       `Questions: ${env.LICENSE_NOTIFY_TO ?? "enterprise@pineforge.dev"}`,
     ].join("\n"),

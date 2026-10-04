@@ -116,6 +116,16 @@ function InteractiveGuide({ locale }: { locale: string }) {
             <p className="mono text-[13px] text-ink-2">{t("resultHeading")}</p>
             <h3 className="subheading mt-1">{t(`outcomes.${outcome.id}.title`)}</h3>
             <p className="mt-3">{t(`outcomes.${outcome.id}.body`)}</p>
+            {outcome.id === "ask-first" && outcome.uses.some((u) => u !== 2) ? (
+              <p className="mt-3" data-testid="ask-first-also">
+                {t("askFirstAlso", {
+                  uses: outcome.uses
+                    .filter((u) => u !== 2)
+                    .map((u) => `(${u})`)
+                    .join(", "),
+                })}
+              </p>
+            ) : null}
             <div className="mt-5 grid gap-4">
               {outcome.quotes.map((q) => (
                 <LicenseQuote key={q} id={q} />

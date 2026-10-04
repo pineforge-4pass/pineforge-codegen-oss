@@ -35,7 +35,7 @@ export const LICENSE_QUOTE_SECTION: Record<QuoteId, string> = {
   noncommercialPurposes: "PolyForm Noncommercial License 1.0.0 — Noncommercial Purposes",
   personalUses: "PolyForm Noncommercial License 1.0.0 — Personal Uses",
   noncommercialOrgs: "PolyForm Noncommercial License 1.0.0 — Noncommercial Organizations",
-  supplementalControl: "Preamble",
+  supplementalControl: "PineForge Codegen — License",
 };
 
 export const LICENSE_QUOTES: Record<QuoteId, string> = {

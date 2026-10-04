@@ -42,9 +42,6 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
-
       - name: Check (types, config schema, LICENSE quotes, i18n, unit tests, audit)
         run: npm run check
 

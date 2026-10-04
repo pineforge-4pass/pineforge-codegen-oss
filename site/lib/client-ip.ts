@@ -30,6 +30,10 @@ function ipv6Groups(ip: string): number[] | null {
 export function rateLimitKey(ip: string): string {
   const groups = ipv6Groups(ip);
   if (!groups) return ip.trim();
+  // An IPv4-mapped address (::ffff:a.b.c.d) is that IPv4 client.
+  if (groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff) {
+    return [groups[6] >> 8, groups[6] & 255, groups[7] >> 8, groups[7] & 255].join(".");
+  }
   return `${groups
     .slice(0, 4)
     .map((g) => g.toString(16))

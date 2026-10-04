@@ -8,8 +8,11 @@
 //   - the DRAFT marker is absent;
 //   - a line exactly "Status: final" is present;
 //   - a "Version:" line exists and its value does not contain "draft";
-//   - no placeholder remains: no [...] mentioning "owner" or "counsel", and no
-//     bracketed number such as [30].
+//   - no line contains "DRAFT" in capitals;
+//   - no bracketed text remains other than Markdown links and references:
+//     "[text](url)", "[text][ref]", "[ref]: url" and footnotes "[^1]" are
+//     fine; any other "[...]", also one wrapped across lines ("[TBD]",
+//     "[30 days]", "[REFUND POLICY]"), is a placeholder.
 
 export const AGREEMENT_MARKER = "DRAFT — requires review by counsel before go-live";
 
@@ -33,11 +36,30 @@ export function agreementStatus(text: string): AgreementStatus {
   const version = agreementVersion(text);
   if (!version) reasons.push('no "Version:" line');
   else if (/draft/i.test(version)) reasons.push(`the version "${version}" is a draft version`);
-  const placeholders = [...text.matchAll(/\[([^\]\n]*)\]/g)]
-    .map((m) => m[1])
-    .filter((inner) => /owner|counsel/i.test(inner) || /^\s*\d+(\.\d+)?\s*$/.test(inner));
+  const draftLine = text.split(/\r\n?|\n/).find((line) => line.includes("DRAFT"));
+  if (draftLine !== undefined) reasons.push(`a line still says DRAFT: "${draftLine.trim().slice(0, 80)}"`);
+  const placeholders = bracketPlaceholders(text);
   if (placeholders.length) {
-    reasons.push(`${placeholders.length} placeholder(s) remain, e.g. [${placeholders[0]}]`);
+    reasons.push(`${placeholders.length} placeholder(s) remain, e.g. [${placeholders[0].replace(/\s+/g, " ")}]`);
   }
   return { isDraft: reasons.length > 0, reasons, version };
+}
+
+/** Bracketed text that is not Markdown link syntax (see the rules above). */
+export function bracketPlaceholders(text: string): string[] {
+  const found: string[] = [];
+  for (const m of text.matchAll(/\[([^\[\]]*)\]/g)) {
+    const start = m.index ?? 0;
+    const end = start + m[0].length;
+    const inner = m[1];
+    const next = text.charAt(end);
+    const prev = start > 0 ? text.charAt(start - 1) : "";
+    const lineStart = start === 0 || text.charAt(start - 1) === "\n";
+    if (next === "(" || next === "[") continue; // [text](url), [text][ref]
+    if (prev === "]") continue; // the [ref] of [text][ref]
+    if (inner.startsWith("^")) continue; // footnote [^1]
+    if (lineStart && next === ":") continue; // reference definition [ref]: url
+    found.push(inner);
+  }
+  return found;
 }

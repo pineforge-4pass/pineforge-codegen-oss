@@ -230,7 +230,7 @@ the keyring, a database error), one alert per order goes to
 
 ### D1 tables (`migrations/`)
 
-`orders` (pending, paid, refunded, expired, failed, mismatch), `licenses`
+`orders` (pending, paid, refunded, expired, failed, mismatch, disputed), `licenses`
 (at most one per order; active or revoked), `stripe_events` (processed event
 ids), `quotes`, `email_log` (every email attempt and its result) and
 `rate_limits`.
@@ -288,8 +288,11 @@ verifier say so, and a live deployment never reports one as valid.
 
 A full refund (`charge.refunded`) marks the order refunded and the license
 revoked with reason `refund`; a lost dispute (`charge.dispute.closed`,
-status `lost`) revokes it with reason `dispute_lost`. Verification then
-reports `revoked`, and the certificate shows REVOKED. Any other revocation is
+status `lost`) marks the order `disputed` (it can never issue afterwards) and
+revokes any license with reason `dispute_lost`. Verification then reports
+`revoked`, and the certificate shows REVOKED. Public answers and pages give
+the reason only as "refund" or a neutral "revoked by the licensor", never a
+dispute. Any other revocation is
 a manual D1 update of `licenses.status`, `revoked_at` and `revoke_reason`.
 
 ### Reconciliation
@@ -442,8 +445,9 @@ Operations:
 - [ ] `LICENSE_PUBLIC_KEYS`, `STRIPE_API_BASE` and `RESEND_API_BASE` are
       NOT set in production.
 - [ ] When the site opens, update the root `README.md` ("Buying a commercial
-      license") and `LEGAL.md`, which today say the site is in preview and
-      not yet taking orders.
+      license") and `LEGAL.md`, which today name license.pineforge.dev as plain
+      text and say it is not yet online: restore the link and say it takes
+      orders.
 
 ## Known limits
 

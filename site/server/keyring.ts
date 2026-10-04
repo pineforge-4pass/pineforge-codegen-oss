@@ -15,8 +15,8 @@ export function trustedKeyring(env: Env): Keyring {
 }
 
 /** True when `kid` names a key of the BUNDLED (production) keyring, whatever LICENSE_PUBLIC_KEYS says. */
-export function isProductionKid(kid: string): boolean {
-  return BUNDLED.keys.some((k) => k.kid === kid);
+export function isProductionKid(kid: string, x?: string): boolean {
+  return BUNDLED.keys.some((k) => k.kid === kid || (x !== undefined && k.x === x));
 }
 
 /** The Ed25519 private JWK in LICENSE_SIGNING_KEY; throws when missing or invalid. */

@@ -6,7 +6,7 @@
 CREATE TABLE orders (
   id TEXT PRIMARY KEY,                       -- ord_<random>
   status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'paid', 'refunded', 'expired', 'failed', 'mismatch')),
+    CHECK (status IN ('pending', 'paid', 'refunded', 'expired', 'failed', 'mismatch', 'disputed')),
   company TEXT NOT NULL,
   country TEXT NOT NULL,
   buyer_name TEXT NOT NULL,

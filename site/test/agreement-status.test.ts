@@ -31,6 +31,26 @@ test("a drifted marker (hyphen for the em dash) without Status: final is a draft
   assert.ok(s.reasons.some((r) => r.includes("Status: final")));
 });
 
+test("Markdown links, references and footnotes are not placeholders", () => {
+  const md = FINAL + "\nSee [the terms](https://example.com/t), [the LICENSE][lic] and a note[^1].\n\n[lic]: https://example.com/l\n[^1]: A footnote.\n";
+  assert.deepEqual(agreementStatus(md).reasons, []);
+});
+
+test("any other bracketed text is a placeholder, also wrapped across lines", () => {
+  for (const ph of ["[TBD]", "[REFUND POLICY]", "[30 days]", "[LICENSOR\nLEGAL ENTITY]", "[x]"]) {
+    const s = agreementStatus(FINAL + `\nText ${ph} here.\n`);
+    assert.equal(s.isDraft, true, ph);
+    assert.ok(s.reasons.some((r) => r.includes("placeholder")), ph);
+  }
+});
+
+test("a line saying DRAFT in capitals is a draft", () => {
+  const s = agreementStatus(FINAL + "\nThis DRAFT is for discussion.\n");
+  assert.equal(s.isDraft, true);
+  assert.ok(s.reasons.some((r) => r.includes("DRAFT")));
+  assert.equal(agreementStatus(FINAL + "\nA draft in lowercase prose is fine.\n").isDraft, false);
+});
+
 test("marker removed but placeholders left is a draft", () => {
   for (const ph of ["[LICENSOR LEGAL ENTITY — owner to confirm]", "[GOVERNING LAW — to be set by Counsel]", "within [30] days"]) {
     const s = agreementStatus(FINAL + `\nText ${ph}.\n`);

@@ -6,10 +6,10 @@
 // Then the Personal Trading test; then the base license's permitted purposes.
 //
 // One case the guide does not decide: an organization of the kinds the base
-// license's "Noncommercial Organizations" clause lists, whose only Commercial
-// Use is (2). That clause makes its use a permitted purpose, while the
-// supplemental sections call use (2) Commercial Use and control in a
-// conflict. Until counsel settles it, such users are asked to write first.
+// license's "Noncommercial Organizations" clause lists. That clause makes its
+// use a permitted purpose, while the supplemental sections call uses (1)-(4)
+// Commercial Use and control in a conflict. Until counsel settles it, such an
+// organization is asked to write first, whatever other uses it names.
 import type { QuoteId } from "../content/license-quotes.ts";
 
 export type QuestionId =
@@ -99,12 +99,14 @@ export function nextQuestion(answers: Answers): QuestionId | null {
 export function decide(answers: Answers): Outcome | null {
   if (nextQuestion(answers) !== null) return null;
   const uses = USE_QUESTIONS.filter((q) => answers[q] === true).map((q) => USE_OF[q] as Use);
-  if (uses.length === 1 && uses[0] === 2 && answers.noncommercialOrg === true) {
+  if (answers.noncommercialOrg === true) {
+    // Never resolved either way, whatever else applies: the other uses the
+    // answers name are quoted beside the clause and the conflict sentence.
     return {
       id: "ask-first",
       tier: null,
       uses,
-      quotes: ["noncommercialOrgs", "use2", "usesAreCommercial", "supplementalControl"],
+      quotes: ["noncommercialOrgs", ...uses.map((u) => USE_QUOTE[u]), "usesAreCommercial", "supplementalControl"],
     };
   }
   if (uses.length > 0) {

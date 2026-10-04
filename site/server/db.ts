@@ -1,7 +1,7 @@
 // Row types and lookups of the D1 tables (migrations/0001_init.sql).
 import type { LicensePayload, SignedLicense } from "../lib/license.ts";
 
-export type OrderStatus = "pending" | "paid" | "refunded" | "expired" | "failed" | "mismatch";
+export type OrderStatus = "pending" | "paid" | "refunded" | "expired" | "failed" | "mismatch" | "disputed";
 
 export interface OrderRow {
   id: string;

@@ -12,7 +12,7 @@ import { deploymentMode, liveBlockReasons, siteUrl, type Env } from "../../../se
 import { apiError, json, readTextCapped } from "../../../server/http.ts";
 import { licenseByOrder, orderById, orderByPaymentIntent, orderBySession, type OrderRow } from "../../../server/db.ts";
 import { issueLicense } from "../../../server/issue.ts";
-import { sendAlert, sendAlertOnce } from "../../../server/email.ts";
+import { alertOnceOrThrow, sendAlert } from "../../../server/email.ts";
 import { nowIso } from "../../../lib/dates.ts";
 
 type Session = Stripe.Checkout.Session;
@@ -110,7 +110,9 @@ async function sessionPaid(env: Env, session: Session, site: string): Promise<vo
   if (session.payment_status !== "paid") return;
   const order = await matchOrder(env, session);
   if (!order) return;
-  if (order.status === "refunded" || order.status === "mismatch") return;
+  // Only a pending (or failed/expired, then paid) order can become paid; a
+  // refunded, mismatched or disputed one never issues.
+  if (order.status === "refunded" || order.status === "mismatch" || order.status === "disputed") return;
 
   const now = nowIso();
   const paymentIntent = idOf(session.payment_intent);
@@ -241,7 +243,7 @@ async function disputeCreated(env: Env, dispute: Dispute): Promise<void> {
   const order = await disputeOrder(env, dispute);
   if (!order) return;
   const license = await licenseByOrder(env.DB, order.id);
-  await sendAlertOnce(env, "alert-dispute", dispute.id, `payment disputed on order ${order.id} (${dispute.id})`, [
+  await alertOnceOrThrow(env, "alert-dispute", dispute.id, `payment disputed on order ${order.id} (${dispute.id})`, [
     ...disputeLines(dispute, order, license?.id ?? null),
     "Respond in the Stripe dashboard before the evidence deadline. The license stays active",
     "unless the dispute is lost.",
@@ -256,13 +258,17 @@ async function disputeClosed(env: Env, dispute: Dispute): Promise<void> {
   }
   const order = await disputeOrder(env, dispute);
   if (!order) return;
-  await env.DB.prepare(
-    "UPDATE licenses SET status = 'revoked', revoked_at = ?1, revoke_reason = 'dispute_lost' WHERE order_id = ?2 AND status = 'active'",
-  )
-    .bind(nowIso(), order.id)
-    .run();
+  // One batch: the order becomes `disputed` (so no later delivery or manual
+  // redelivery can issue a license for it) and any active license is revoked.
+  const now = nowIso();
+  await env.DB.batch([
+    env.DB.prepare("UPDATE orders SET status = 'disputed', updated_at = ?1 WHERE id = ?2").bind(now, order.id),
+    env.DB.prepare(
+      "UPDATE licenses SET status = 'revoked', revoked_at = ?1, revoke_reason = 'dispute_lost' WHERE order_id = ?2 AND status = 'active'",
+    ).bind(now, order.id),
+  ]);
   const license = await licenseByOrder(env.DB, order.id);
-  await sendAlertOnce(env, "alert-dispute-lost", dispute.id, `dispute lost on order ${order.id} (${dispute.id})`, [
+  await alertOnceOrThrow(env, "alert-dispute-lost", dispute.id, `dispute lost on order ${order.id} (${dispute.id})`, [
     ...disputeLines(dispute, order, license?.id ?? null),
     license
       ? `The license is revoked (${license.status}, reason ${license.revoke_reason ?? "(none)"}).`

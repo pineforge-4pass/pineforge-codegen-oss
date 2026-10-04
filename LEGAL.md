@@ -7,7 +7,7 @@ Summary of licensing, third-party components, and trademarks for `pineforge-code
 `pineforge-codegen` is **source-available**, **not** OSI "open source." It is distributed under the **PolyForm Noncommercial License 1.0.0** with two supplemental terms — see [LICENSE](LICENSE), which is the controlling text:
 
 - **Personal Trading exception** — free to research, backtest, and trade your **own** capital, for an individual acting on their own behalf.
-- **Commercial use** — companies, funds, managing third-party capital, embedding in a product, or operating a hosted/public-facing service requires a **commercial license**: email **enterprise@pineforge.dev** (the self-serve site, [license.pineforge.dev](https://license.pineforge.dev), is in preview and not yet taking orders).
+- **Commercial use** — companies, funds, managing third-party capital, embedding in a product, or operating a hosted/public-facing service requires a **commercial license**: email **enterprise@pineforge.dev** (a self-serve site is in preview and will open at license.pineforge.dev; it is not yet online).
 
 Describe this project as **"source-available"** rather than "open source." The runtime it targets, [`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine), is separate and **Apache-2.0**.
 

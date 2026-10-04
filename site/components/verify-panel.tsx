@@ -260,8 +260,9 @@ function Result({ shown, t, tc, tcert }: { shown: Shown; t: T; tc: T; tcert: T }
   const key = status === "valid" && (shown.mode === "test" || shown.license?.mode === "test") ? "validTest" : status;
   const lic = shown.license;
   const tierName = (id: string) => (tc.has(`tiers.${id}`) ? tc(`tiers.${id}`) : id);
-  const reason = (r: string | null) =>
-    r === "refund" ? tcert("reasonRefund") : r ? r : tcert("reasonOther");
+  // Catalog text only, never the stored code: a refund says so; every other
+  // reason (dispute_lost included) reads as the certificate's neutral wording.
+  const reason = (r: string | null) => (r === "refund" ? tcert("reasonRefund") : tcert("reasonOther"));
   return (
     <section
       data-testid="verify-result"
