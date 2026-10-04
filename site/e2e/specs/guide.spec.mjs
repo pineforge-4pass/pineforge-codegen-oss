@@ -31,6 +31,22 @@ const PATHS = [
     outcome: "ask-first",
     quotes: ["noncommercialOrgs", "use2", "usesAreCommercial", "supplementalControl"],
   },
+  // A noncommercial organization is asked to write first whatever other uses it names; the result quotes the
+  // clause, each use answered Yes in order, then the two sentences that put the uses above it.
+  {
+    name: "noncommercial organization that also embeds -> ask first, quoting each use",
+    answers: { ...NO_USES, organization: true, noncommercialOrg: true, embedding: true },
+    outcome: "ask-first",
+    quotes: ["noncommercialOrgs", "use2", "use3", "usesAreCommercial", "supplementalControl"],
+    ordered: true,
+  },
+  {
+    name: "noncommercial organization with others' capital and a hosted service -> ask first, quoting each use",
+    answers: { ...NO_USES, othersCapital: true, organization: true, noncommercialOrg: true, hosted: true },
+    outcome: "ask-first",
+    quotes: ["noncommercialOrgs", "use1", "use2", "use4", "usesAreCommercial", "supplementalControl"],
+    ordered: true,
+  },
   {
     name: "others' capital for a fund -> Fund",
     answers: { ...NO_USES, othersCapital: true, organization: true, noncommercialOrg: false },
@@ -56,7 +72,7 @@ const PATHS = [
     quotes: ["personalTradingGrant", "personalTradingDef", "personalTradingA", "personalTradingB"],
   },
   {
-    name: "noncommercial organization -> permitted purpose",
+    name: "no personal trading, a noncommercial purpose of one's own -> permitted purpose",
     answers: { ...NO_USES, naturalPerson: false, noncommercial: true },
     outcome: "permitted-noncommercial",
     quotes: ["noncommercialPurposes", "personalUses"],
@@ -119,7 +135,8 @@ test.describe("decision guide", () => {
       await expect(res).toHaveAttribute("data-outcome", p.outcome);
       const quotes = res.locator('blockquote[data-testid="license-quote"]');
       const ids = await quotes.evaluateAll((els) => els.map((e) => e.getAttribute("data-quote")));
-      expect([...ids].sort()).toEqual([...p.quotes].sort());
+      if (p.ordered) expect(ids).toEqual(p.quotes);
+      else expect([...ids].sort()).toEqual([...p.quotes].sort());
       if (p.quotes.includes("supplementalControl")) {
         await expect(quotes.and(res.locator('[data-quote="supplementalControl"]'))).toHaveCount(1);
         expect(normalizeText(await res.locator('blockquote[data-quote="supplementalControl"]').innerText())).toContain(
