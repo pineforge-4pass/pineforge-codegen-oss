@@ -1,0 +1,54 @@
+{
+  "name": "pineforge-license-site",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-serve commercial-license site for PineForge Codegen: Next.js static export + Cloudflare Pages Functions, D1, Stripe Checkout and Resend.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "gen": "node scripts/gen-build-info.mjs",
+    "guard": "node scripts/guard-live.mjs",
+    "predev": "npm run gen",
+    "dev": "next dev",
+    "prebuild": "npm run guard && npm run gen",
+    "build": "next build",
+    "preview": "npm run build && wrangler pages dev out",
+    "typecheck": "npm run gen && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.functions.json --noEmit",
+    "check:config": "node scripts/check-config.mjs",
+    "check:quotes": "node scripts/check-license-quotes.mjs",
+    "check:i18n": "node scripts/check-i18n.mjs",
+    "test:unit": "node --test test/*.test.ts",
+    "check:audit": "npm audit --omit=dev --audit-level=high",
+    "check": "npm run typecheck && npm run check:config && npm run check:quotes && npm run check:i18n && npm run test:unit && npm run check:audit",
+    "e2e": "node e2e/run.mjs",
+    "e2e:fakes": "node e2e/fakes/selftest.mjs",
+    "d1:create": "wrangler d1 create pineforge-license",
+    "d1:migrate:local": "wrangler d1 migrations apply pineforge-license --local",
+    "d1:migrate:remote": "wrangler d1 migrations apply pineforge-license --remote",
+    "deploy": "npm run build && wrangler pages deploy out"
+  },
+  "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/ibm-plex-sans": "^5.3.0",
+    "marked": "^18.0.14",
+    "next": "16.3.8",
+    "next-intl": "^4.11.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "stripe": "^23.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261001.1",
+    "@playwright/test": "1.62.0",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "axe-core": "4.13.0",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "wrangler": "^4"
+  }
+}

@@ -13,6 +13,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  # The commercial-license website (site/, its own package-lock.json).
+  - package-ecosystem: "npm"
+    directory: "/site"
+    schedule:
+      interval: "weekly"
   # Python dev deps (pytest).
   - package-ecosystem: "pip"
     directory: "/"

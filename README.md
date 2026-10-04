@@ -488,8 +488,10 @@ This is source-available, not OSI open source.
 
 ### Buying a commercial license
 
-Commercial licenses are available — flexible terms for funds, products, and
-hosted/embedded use. Email **luis@4pass.com.tw** with your use case for a quote.
+A self-serve site for Team, Fund and OEM / Embedded licenses,
+[license.pineforge.dev](https://license.pineforge.dev), is in preview and not yet
+taking orders. Until it opens, email **enterprise@pineforge.dev** for a commercial
+license or a quote. Personal trading stays free.
 
 ## Explicit Pine execution attachment
 
