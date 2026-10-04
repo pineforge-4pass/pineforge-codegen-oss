@@ -14,6 +14,16 @@ literal text must equal the message's around its arguments, so a code is
 never guessed: a text no template renders gets the uncatalogued code of its
 severity (``PF-E0000`` / ``PF-W0000``), which the test suite refuses.
 
+The match never backtracks over the text's characters: each literal segment
+of a template goes to its leftmost place after the previous one, the last to
+the text's end, and every argument is the text between its literals -- the
+split a fullmatch of the template with lazy ``(.*?)`` arguments returns. Where
+an argument is named twice (``{receiver}`` in the message and the hint) the
+leftmost split can name it two values; then the later places of a literal are
+tried in order, as the regex's backtracking tries them, within a fixed budget
+of steps. The regex took seconds, then minutes, as a crafted message grew,
+and a user's script spells argument text.
+
 Rendering (:func:`render`) is the ICU MessageFormat subset the catalog uses:
 literal text with ICU apostrophe quoting (``''`` is one apostrophe, ``'{'``
 a literal brace) and simple ``{name}`` arguments, a string argument
@@ -158,47 +168,133 @@ def render_diagnostic(code: str, args: dict) -> tuple[str, str | None]:
 # Classification
 # ---------------------------------------------------------------------------
 
-# Joins a message and its hint into one subject, so an argument both name is
-# one value (a backreference). No template spells it.
-_JOIN = "\x00"
 _CANONICAL_INT = re.compile(r"-?(?:0|[1-9][0-9]*)")
 _CANONICAL_FLOAT = re.compile(r"-?(?:0|[1-9][0-9]*)\.[0-9]+")
 
 
+def _segments(parts: list) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """A parsed template as its leading literal and ``(argument, literal after
+    it)`` pairs; the literal after an argument may be empty."""
+    head = ""
+    pairs: list[list[str]] = []
+    for part in parts:
+        if isinstance(part, str):
+            if pairs:
+                pairs[-1][1] += part
+            else:
+                head += part
+        else:
+            pairs.append([part[0], ""])
+    return head, tuple((name, literal) for name, literal in pairs)
+
+
+# Literal places a template whose argument is named twice may try, per
+# classification: a script's text never needs more than a few, and a crafted
+# one gets the uncatalogued code instead of a long search.
+_SEARCH_BUDGET = 4096
+
+
+def _search(segments: list, texts: list[str], repeats: bool) -> dict[str, str] | None:
+    """Split ``texts`` (the message, then the hint) by their templates'
+    ``segments``: each argument ends at the leftmost place of the literal after
+    it, the last argument of a text at its end -- the split a lazy-regex
+    fullmatch returns. Without an argument named twice (``repeats``) that split
+    succeeds whenever any does, since a leftmost place leaves the rest the most
+    room: it is the only one tried, so the work is linear. With one, a split can
+    give the name two values; then the later places of a literal are tried in
+    order, as the regex backtracks, within ``_SEARCH_BUDGET`` places."""
+    starts: list[int] = []
+    ends: list[int] = []
+    slots: list[tuple[int, str, str, bool]] = []   # text, argument, literal after it, last
+    for index, ((head, pairs), text) in enumerate(zip(segments, texts)):
+        if not text.startswith(head):
+            return None
+        if not pairs:
+            if len(text) != len(head):
+                return None
+            starts.append(len(head))
+            ends.append(len(head))
+            continue
+        tail = pairs[-1][1]
+        end = len(text) - len(tail)
+        if end < len(head) or not text.endswith(tail):
+            return None
+        starts.append(len(head))
+        ends.append(end)
+        for at, (name, literal) in enumerate(pairs):
+            slots.append((index, name, literal, at == len(pairs) - 1))
+    found: dict[str, str] = {}
+    budget = [_SEARCH_BUDGET]
+
+    def step(slot: int, pos: int) -> bool:
+        if slot == len(slots):
+            return True
+        text_index, name, literal, last = slots[slot]
+        text, end = texts[text_index], ends[text_index]
+        following = slot + 1
+        known = found.get(name)
+        if last:
+            value = text[pos:end]
+            resume = (starts[slots[following][0]] if following < len(slots) else end)
+            if known is not None:
+                return known == value and step(following, resume)
+            found[name] = value
+            if step(following, resume):
+                return True
+            del found[name]
+            return False
+        if known is not None:
+            stop = pos + len(known)
+            return (text.startswith(known, pos) and stop + len(literal) <= end
+                    and text.startswith(literal, stop) and step(following, stop + len(literal)))
+        at = text.find(literal, pos, end)
+        while at >= 0:
+            budget[0] -= 1
+            if budget[0] < 0:
+                return False
+            found[name] = text[pos:at]
+            if step(following, at + len(literal)):
+                return True
+            del found[name]
+            if not repeats:
+                return False
+            at = text.find(literal, at + 1, end) if at < end else -1
+        return False
+
+    first = starts[slots[0][0]] if slots else 0
+    return found if step(0, first) else None
+
+
 class _Matcher:
     __slots__ = ("code", "has_hint", "prefix", "suffix", "specificity",
-                 "_parts", "_regex", "_kinds")
+                 "_message", "_hint", "_kinds", "_repeats")
 
     def __init__(self, code: str, entry: dict):
         self.code = code
         message = parse_template(entry["message"])
         hint = entry.get("hint")
+        hint_parts = parse_template(hint) if hint is not None else []
         self.has_hint = hint is not None
-        self._parts = message + ([_JOIN] + parse_template(hint) if hint is not None else [])
+        self._message = _segments(message)
+        self._hint = _segments(hint_parts) if hint is not None else None
         self.prefix = message[0] if message and isinstance(message[0], str) else ""
         self.suffix = message[-1] if message and isinstance(message[-1], str) else ""
-        self.specificity = sum(len(p) for p in self._parts if isinstance(p, str))
-        self._regex = None
+        # The text a template spells itself; the hint's separator counted as one
+        # character, as the order of the catalog's codes has always assumed.
+        self.specificity = (sum(len(p) for p in message + hint_parts if isinstance(p, str))
+                            + (1 if hint is not None else 0))
         self._kinds = {name: spec.get("kind") for name, spec in entry.get("args", {}).items()}
+        names = [part[0] for part in message + hint_parts if isinstance(part, tuple)]
+        self._repeats = len(names) != len(set(names))
 
-    def match(self, subject: str) -> dict | None:
-        if self._regex is None:
-            pieces: list[str] = []
-            seen: set[str] = set()
-            for part in self._parts:
-                if isinstance(part, str):
-                    pieces.append(re.escape(part))
-                elif part[0] in seen:
-                    pieces.append(f"(?P={part[0]})")
-                else:
-                    seen.add(part[0])
-                    pieces.append(f"(?P<{part[0]}>.*?)")
-            self._regex = re.compile("".join(pieces), re.DOTALL)
-        found = self._regex.fullmatch(subject)
+    def match(self, message: str, hint: str | None) -> dict | None:
+        segments = [self._message] + ([self._hint] if self._hint is not None else [])
+        texts = [message] + ([hint] if self._hint is not None else [])
+        found = _search(segments, texts, self._repeats)
         if found is None:
             return None
         args: dict[str, Any] = {}
-        for name, value in found.groupdict().items():
+        for name, value in found.items():
             if self._kinds.get(name) == "number":
                 if _CANONICAL_INT.fullmatch(value):
                     args[name] = int(value)
@@ -230,13 +326,12 @@ def classify(severity: str, message: str, hint: str | None = None) -> tuple[str,
     ``severity`` is ``"error"`` or ``"warning"``. A text no catalog template
     renders gets ``PF-E0000`` / ``PF-W0000`` with its text as ``args``.
     """
-    subject = message if hint is None else message + _JOIN + hint
     for matcher in _matchers().get(severity, ()):
         if matcher.has_hint != (hint is not None):
             continue
         if not message.startswith(matcher.prefix) or not message.endswith(matcher.suffix):
             continue
-        args = matcher.match(subject)
+        args = matcher.match(message, hint)
         if args is not None:
             return matcher.code, args
     args = {"message": message}

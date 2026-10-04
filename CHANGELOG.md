@@ -41,7 +41,9 @@ An additive change to the public API; it leaves the emitted C++ unchanged.
   argument kinds and a one-line explanation; the templates render the
   `message` and `hint` byte for byte, which keep their text. Codes are never
   reused (`tests/fixtures/diagnostic_codes_pin.json`). See
-  [Diagnostic codes](docs/PUBLIC_CONTRACT.md#diagnostic-codes).
+  [Diagnostic codes](docs/PUBLIC_CONTRACT.md#diagnostic-codes). A code is
+  read off its text in time linear in the text: a crafted script's text cannot
+  stall the classification, which a backtracking regex let it do.
 - **First error in source order.** Since 1.1.0 the settings metadata visited
   every input's `defval`, `options`, `minval`, `maxval` and `step` ahead of
   the script body, so an error there (an unknown name in `minval`) was raised
