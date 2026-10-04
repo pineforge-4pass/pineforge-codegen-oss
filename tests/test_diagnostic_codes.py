@@ -12,10 +12,10 @@ a code is never removed or repurposed, and a new code needs a catalog entry
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -98,27 +98,16 @@ def test_switch_arm_warnings_twin_support_checker_errors():
             assert twin["severity"] == "warning"
 
 
-def _load_generator():
-    spec = importlib.util.spec_from_file_location(
-        "gen_diagnostics_catalog", ROOT / "scripts" / "gen_diagnostics_catalog.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_every_spelled_template_has_a_code():
-    """A diagnostic text the source spells needs a catalog entry."""
-    generator = _load_generator()
-    have = {(e["severity"], e["message"], e.get("hint")) for e in CATALOG.values()}
-    missing = [
-        f"[{t['severity']}] {t['message']!r} (hint {t['hint']!r}) at {', '.join(t['sites'])}"
-        for t in generator.extract()
-        if (t["severity"], t["message"], t["hint"]) not in have
-    ]
-    assert not missing, (
+    """A diagnostic text the source spells needs a catalog entry. The
+    generator's check runs in its own process: it parses the whole package,
+    and loaded here its trees stayed in the worker for the rest of the suite."""
+    check = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "gen_diagnostics_catalog.py")],
+        capture_output=True, text=True, check=False)
+    assert check.returncode == 0, (
         "templates without a code (run scripts/gen_diagnostics_catalog.py --write):\n"
-        + "\n".join(missing))
+        + check.stdout + check.stderr)
 
 
 # ---------------------------------------------------------------------------
