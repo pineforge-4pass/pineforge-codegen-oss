@@ -54,6 +54,9 @@ def test_receipts_use_the_registration_lowering(body, clock, heikinashi, feed):
     ('strategy.close_all()', 'close:market'),
     ('strategy.close("L", immediately=true)', 'strategy.close (unproven order shape)'),
     ('strategy.entry("S", strategy.short)\nstrategy.exit("X", "S", stop=high, limit=low)', 'exit:short_bracket'),
+    ('strategy.entry(id="S", direction=strategy.short)\nstrategy.exit(id="X", from_entry="S", stop=high, limit=low)', 'exit:short_bracket'),
+    ('strategy.entry("S", strategy.short)\nstrategy.entry(id="S", direction=strategy.long)\nstrategy.exit("X", "S", stop=high, limit=low)', 'strategy.exit (unproven order shape)'),
+    ('strategy.entry("L", strategy.long, oca_name="group", oca_type=strategy.oca.cancel)', 'strategy.entry (unproven order shape)'),
     ('strategy.entry("L", strategy.long)\nstrategy.exit("X", "L", stop=high, limit=low)', 'strategy.exit (unproven order shape)'),
     ('strategy.entry("S", strategy.short)\nstrategy.exit("X", "S", trail_points=2, trail_offset=1)', 'strategy.exit (unproven exit terms)'),
 ])
@@ -229,7 +232,8 @@ def test_capabilities_collect_facts_in_one_walk(monkeypatch):
 
 
 @pytest.mark.parametrize('declaration', ['calc_on_every_tick=true', 'process_orders_on_close=true'])
-def test_receipt_runtime_buffer_protocol_and_reused_handle(declaration):
+@pytest.mark.parametrize('receipt_kind', ['capabilities', 'confirmed_bar'])
+def test_receipt_runtime_buffer_protocol_and_reused_handle(declaration, receipt_kind):
     cpp = transpile(f'''//@version=6
 strategy("runtime receipt", {declaration})
 if bar_index % 3 == 0
@@ -278,6 +282,11 @@ int main() {
     std::cout << initial;
 }
 '''
+    driver = driver.replace('strategy_capabilities_', f'strategy_{receipt_kind}_')
     receipt = json.loads(run_emitted_tu(cpp, driver, opt='-O0'))
-    name = declaration.split('=')[0]
-    assert receipt['declarations'][name] is True
+    if receipt_kind == 'capabilities':
+        name = declaration.split('=')[0]
+        assert receipt['declarations'][name] is True
+    else:
+        assert receipt == {'version': 1, 'requests': [], 'orders': ['entry:market'],
+                           'intrabar_persistence': False}

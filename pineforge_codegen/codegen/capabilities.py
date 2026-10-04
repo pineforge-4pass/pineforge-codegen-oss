@@ -63,7 +63,7 @@ def _literal(node):
     return _expression(node), False
 
 
-def _order_shape(node, short_ids):
+def _order_arguments(node):
     name = _expression(node.callee)
     positional = {
         "strategy.entry": ("id", "direction", "qty", "limit", "stop", "oca_name", "oca_type", "comment", "alert_message", "disable_alert"),
@@ -73,6 +73,12 @@ def _order_shape(node, short_ids):
     }.get(name, ())
     arguments = dict(zip(positional, node.args))
     arguments.update(node.kwargs)
+    return arguments
+
+
+def _order_shape(node, short_ids):
+    name = _expression(node.callee)
+    arguments = _order_arguments(node)
     if name == "strategy.entry" and _expression(arguments.get("direction")) in ("strategy.long", "strategy.short"):
         priced = {key for key in ("limit", "stop") if key in arguments}
         if len(priced) < 2 and not (set(arguments) & {"oca_name", "oca_type"}):
@@ -80,7 +86,9 @@ def _order_shape(node, short_ids):
     if name == "strategy.exit":
         if (set(arguments) & {"profit", "loss", "trail_price", "trail_points", "trail_offset", "qty", "qty_percent"}):
             return name + " (unproven exit terms)"
-        if "limit" in arguments and "stop" in arguments and _expression(arguments.get("from_entry")) in short_ids:
+        if ("limit" in arguments and "stop" in arguments
+                and isinstance(arguments.get("from_entry"), StringLiteral)
+                and _expression(arguments["from_entry"]) in short_ids):
             return "exit:short_bracket"
     if name in ("strategy.close", "strategy.close_all"):
         immediate = arguments.get("immediately")
@@ -204,12 +212,22 @@ def capabilities_documents(emitter) -> tuple[str, str]:
         "historical_probe_overrides": False,
         "intrabar_persistence": intrabar,
     }
-    short_ids = {_expression(node.args[0]) for node in order_nodes
-                 if _expression(node.callee) == "strategy.entry" and len(node.args) > 1
-                 and _expression(node.args[1]) == "strategy.short"}
-    conflicting_ids = {_expression(node.args[0]) for node in order_nodes
-                       if _expression(node.callee) == "strategy.entry" and len(node.args) > 1
-                       and _expression(node.args[1]) != "strategy.short"}
+    short_ids = set()
+    conflicting_ids = set()
+    dynamic_entry_id = False
+    for node in order_nodes:
+        if _expression(node.callee) != "strategy.entry":
+            continue
+        arguments = _order_arguments(node)
+        identifier = arguments.get("id")
+        if not isinstance(identifier, StringLiteral):
+            dynamic_entry_id = True
+        elif _expression(arguments.get("direction")) == "strategy.short":
+            short_ids.add(identifier.value)
+        else:
+            conflicting_ids.add(identifier.value)
+    if dynamic_entry_id:
+        short_ids.clear()
     confirmed = {"version": 1, "requests": confirmed_requests,
                  "orders": sorted(set(_order_shape(node, short_ids - conflicting_ids) for node in order_nodes)),
                  "intrabar_persistence": intrabar}
