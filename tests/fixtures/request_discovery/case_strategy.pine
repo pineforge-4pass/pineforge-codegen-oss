@@ -1,0 +1,16 @@
+//@version=6
+strategy("XSYM case: BTC/ETH ratio trend, ETH daily filter", overlay=false, initial_capital=100000, default_qty_type=strategy.fixed, default_qty_value=0.5, pyramiding=0, commission_type=strategy.commission.percent, commission_value=0.1, margin_long=100, margin_short=100)
+other   = input.symbol("BINANCE:ETHUSDT", "Other symbol")
+fastLen = input.int(20, "Fast Length", minval=1)
+slowLen = input.int(50, "Slow Length", minval=1)
+dayLen  = input.int(10, "Daily SMA Length", minval=1)
+otherClose    = request.security(other, timeframe.period, close)
+otherDailySma = request.security(other, "D", ta.sma(close, dayLen))
+ratio = close / otherClose
+fast  = ta.sma(ratio, fastLen)
+slow  = ta.sma(ratio, slowLen)
+trendOk = otherClose > otherDailySma
+if ta.crossover(fast, slow) and trendOk
+    strategy.entry("Long", strategy.long)
+if ta.crossunder(fast, slow)
+    strategy.close("Long")

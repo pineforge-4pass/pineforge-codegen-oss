@@ -151,6 +151,10 @@ pineforge_codegen/
 │                                   paths (one context per value) before
 │                                   the analyzer; refuses what
 │                                   registration cannot compute.
+├── request_discovery.py            transpile_full()'s requests: the
+│                                   other symbols' feeds a script reads,
+│                                   keyed as registration computes them
+│                                   (after generation; the C++ unchanged).
 ├── session_reads.py                The session.<flag>[k] reads the generated
 │                                   C++ holds (analyzer and codegen share it).
 ├── signatures.py                   Pine v6 builtin signature registry

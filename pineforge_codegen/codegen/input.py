@@ -556,6 +556,10 @@ class InputHelper:
             "type": form_type,
             "default": default_val,
         }
+        if namespace == "input" and func_name == "symbol":
+            # A symbol string, which the type does not tell from a string's:
+            # the requests of another symbol key their feeds on its value.
+            entry["kind"] = "symbol"
         # Pull min/max/step/options by signature param name; emit only
         # const literals so the override form never references a runtime
         # value it can't reproduce.

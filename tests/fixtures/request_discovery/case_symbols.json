@@ -1,0 +1,32 @@
+{
+  "symbols": {
+    "BINANCE:ETHUSDT": {
+      "syminfo": {
+        "ticker": "ETHUSDT",
+        "tickerid": "BINANCE:ETHUSDT",
+        "prefix": "BINANCE",
+        "description": "ETH / USDT",
+        "type": "crypto",
+        "main_tickerid": "BINANCE:ETHUSDT",
+        "currency": "USDT",
+        "basecurrency": "ETH",
+        "country": null,
+        "mintick": 0.01,
+        "minmove": 1,
+        "pricescale": 100,
+        "pointvalue": 1.0,
+        "mincontract": 0.0001,
+        "volumetype": "base",
+        "session": "24x7",
+        "session_regular": "24x7",
+        "root": null,
+        "expiration_date": null,
+        "timezone": "UTC"
+      },
+      "feeds": {
+        "240": "ethusdt-240.csv",
+        "1D": "ethusdt-1D.csv"
+      }
+    }
+  }
+}

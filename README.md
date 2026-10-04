@@ -182,15 +182,51 @@ transpile_full(
 ```
 
 It returns `{"cpp": str, "inputs": list[dict], "strategyParams": dict,
-"diagnostics": list[Diagnostic]}` on success (0.10.4 returns the first three
-keys). `inputs` is the input manifest; its `title` is the actual override key.
-`diagnostics` contains nonfatal warnings. A rejected script raises
-`CompileError` with its diagnostics. The Pyodide package ships `gate/glue.py`'s
-`transpile_json(source) -> str`, whose JSON success and error envelopes carry
-the same manifest and, since 1.0.0, the same warnings. See the
+"diagnostics": list[Diagnostic], "requests": list[dict]}` on success (0.10.4
+returns the first three keys; `requests` is unreleased). `inputs` is the input
+manifest; its `title` is the actual override key, and an `input.symbol` entry
+also has `"kind": "symbol"` (unreleased). `diagnostics` contains nonfatal
+warnings. `requests` lists the other symbols' feeds the script reads (see
+[List the other symbols a script requests](#list-the-other-symbols-a-script-requests)).
+A rejected script raises `CompileError` with its diagnostics. The Pyodide
+package ships `gate/glue.py`'s `transpile_json(source) -> str`, whose JSON
+success and error envelopes carry the same manifest, since 1.0.0 the same
+warnings, and the same `requests` (unreleased). See the
 [1.0 public contract](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/docs/PUBLIC_CONTRACT.md)
 for the exact fields, severity values, and input key rules. There is no
 installed CLI or exit-code contract.
+
+### List the other symbols a script requests
+
+A run reads another symbol's bars only from the feed it is given for that
+symbol string and timeframe, matched byte for byte. `transpile_full()`'s
+`requests` (unreleased) names those feeds before the run, one entry per
+request site:
+
+```python
+from pineforge_codegen import transpile_full
+
+full = transpile_full(open("my_strategy.pine").read())
+for request in full["requests"]:
+    print(request)
+# {'line': 7, 'fn': 'request.security',
+#  'symbol': {'kind': 'input', 'title': 'Other symbol', 'default': 'BINANCE:ETHUSDT'},
+#  'timeframe': {'kind': 'chart'},
+#  'lookahead': False, 'gaps': False, 'ignore_invalid_symbol': False}
+```
+
+The symbol is a `literal` (its `value`), an `input` (its override key `title`
+and its `default`: the run keys the feed on the override, else the default),
+`computed` (its `expr`, the `value` at the inputs' defaults when it can be
+computed, and the `inputs` it reads) or `unresolvable` (a request PineForge
+cannot key before the first bar: the run stops where its value is read). The
+timeframe is a `literal` in the engine's spelling (whole minutes such as
+`"240"`, `<n>D|W|M|S` such as `"1D"`, Pine's bare `"D"` as `"1D"`), the
+`chart`'s, an `input` or `computed` (an empty `value` is the chart's). A
+request whose value reaches only plots and alerts is lowered to `na` and
+reads no feed, so it is not listed. The
+[public contract](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/docs/PUBLIC_CONTRACT.md)
+gives every field.
 
 ### Transpile a file to a `.cpp`
 
