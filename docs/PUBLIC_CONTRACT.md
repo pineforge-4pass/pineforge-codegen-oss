@@ -1,5 +1,48 @@
 # Public contract for 1.0
 
+## Optional compiled execution capabilities
+
+Availability: **since the next release**, with the paired engine's capability
+extension and receipt-based runner admission policy.
+
+The receipt proves declarations only, not general live-versus-batch equivalence.
+Its `strategy()` positional arguments follow Pine signature order independently
+of batch configuration extraction. Every unresolved argument is named in
+`unresolved`. Runtime-lowered unpinned request sites retain their request kind,
+symbol and timeframe in `requests` with `feed: "unpinned"`, and in `unresolved`.
+The close-only runner retains its conservative refusal of every nonempty
+request array and `process_orders_on_close=true`; confirmed-bar runtime fixes
+and their equivalence tests do not automatically widen that admission policy.
+Legacy libraries without a receipt warn and run, including their requests.
+Realtime
+builtins are conservatively named and refused: generated `barstate.isrealtime`
+is `false`, and `timenow` reads the bar timestamp in both warmup and realtime.
+`barstate.islast`, `barstate.islastconfirmedhistory`, `last_bar_index` and
+`last_bar_time` are also named in `unresolved`: a stream's delivered endpoint
+and last-bar flags differ from the completed batch's final bar.
+All six builtin uses are refused including display-only use (plots, labels,
+tables): the receipt records their use conservatively rather than certifying
+that display-only code cannot influence strategy execution.
+
+Paired development headers defining `PF_CAPABILITIES_API_VERSION` add
+`strategy_capabilities_api_version()` (version 1) and
+`strategy_capabilities_receipt(handle, json, capacity, required, error, error_capacity)`.
+The receipt uses the checked-settings status and buffer protocol: NULL/0 queries
+return `PF_SETTINGS_BUFFER_TOO_SMALL`, `required` includes the NUL, and short
+buffers return no partial JSON. Canonical JSON is emitted from `strategy()`
+declarations and analyzed security/request sites, not guessed from a handle's
+runtime behavior. It is immutable across settings changes and fresh/reused runs.
+
+Version 1 has `version`, `declarations`, `requests`, `requirements` and `unresolved`
+keys. Declarations include calculation cadence, close execution, magnifier,
+standard-OHLC fill mode, limit verification, currency and clock settings. Requests
+name their function, symbol, timeframe, gaps, lookahead, Heikin-Ashi transform and
+feed source. Requirements name historical-only data and intrabar persistence;
+nonliteral contexts remain explicit rather than silently assuming defaults.
+See the paired engine's `docs/strategy-capabilities.md` for the exact schema and
+live-runner refusal policy. No batch dispatch, strategy calculation, matching,
+margin or numeric behavior changes. Old paired headers emit no capability extension.
+
 ## Optional generated settings extension
 
 From 1.1.0 on, C++ compiled against an engine providing

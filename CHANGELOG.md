@@ -5,6 +5,29 @@ Release notes for `pineforge-codegen`. From 1.0.0 on, versions of codegen and
 supported as exact pairs; on the 0.x line they are independent. See the
 [pairing rule](README.md#engine-pairing).
 
+## Unreleased
+
+### Compiled execution capabilities
+
+- Emit the optional generated-strategy C ABI capability extension:
+  `strategy_capabilities_api_version()` and `strategy_capabilities_receipt()`,
+  versioned by the paired engine's `PF_CAPABILITIES_API_VERSION`. Its immutable
+  canonical JSON uses the checked-settings buffer protocol without changing the
+  base C ABI. Regenerate C++ and relink against the paired next-release engine.
+- Record `strategy()` execution declarations, including positional arguments in
+  Pine signature order, and analyzed request/feed, FX and intrabar requirements.
+  Name nonliteral arguments and unpinned runtime-lowered request sites in
+  `unresolved`; retain every request kind, symbol, timeframe and lookahead.
+  Record endpoint/realtime builtin use even in plots, labels and tables. The
+  receipt proves declarations only, not arbitrary live-versus-batch equivalence.
+- The paired close-only runner refuses intrabar/fill-policy declarations,
+  `process_orders_on_close`, every `request.*` site regardless of timeframe,
+  unsupported clock/feed/FX requirements, `varip`, unresolved declarations and
+  the six endpoint/realtime builtins before its ledger exists, naming the
+  requirement instead of silently changing the computation. Legacy libraries
+  without the extension warn and run, including their requests, without proving
+  eligibility. Default batch computation is unchanged.
+
 ## Release note policy
 
 - Keep a section for each released version, including prereleases. Use the exact

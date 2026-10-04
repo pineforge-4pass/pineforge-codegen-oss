@@ -1998,6 +1998,8 @@ class TopLevelEmitter:
         lines.append("    }")
         from .checked_settings import emit_settings_exports
         emit_settings_exports(lines)
+        from .capabilities import emit_capabilities_exports
+        emit_capabilities_exports(self, lines)
         if self._declares_bar_magnifier():
             # TradingView runs a script that declares use_bar_magnifier = true
             # on its bar magnifier; the host reads this export to run it on
