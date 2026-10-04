@@ -11,15 +11,18 @@
 // Module:      const fake = await startStripeFake({ port, webhookUrl, webhookSecret }); fake.url; await fake.close();
 //
 // Stripe API:  POST /v1/checkout/sessions, GET /v1/checkout/sessions/:id, GET /v1/checkout/sessions/:id/line_items
-// Hosted page: GET /pay/:id, POST /pay/:id (4242 4242 4242 4242 pays; 4000 0000 0000 0002 is declined)
+// Hosted page: GET /pay/:id, POST /pay/:id (4242 4242 4242 4242 pays; 4000 0000 0000 0002 is declined;
+//              4000 0000 0000 0077 pays but its webhook is delivered `deferMs` (default 3000) AFTER the redirect)
 // Control:     GET  /__control/health
 //              GET  /__control/sessions            -> { sessions: [{ session, params, idempotencyKey }] }
 //              GET  /__control/sessions/:id        -> { session, params, idempotencyKey, charge }
 //              GET  /__control/requests            -> { requests: [{ method, path, auth, idempotencyKey, status }] }
 //              GET  /__control/events              -> { events: [{ event, delivery }] }
 //              POST /__control/refund      { payment_intent, amount? }                 -> { charge, event, delivery }
-//              POST /__control/send-event  { type, object, signature?, livemode?, url? } -> { event, delivery }
+//              POST /__control/send-event  { type, object, signature?, livemode?, url?, id? } -> { event, delivery }
 //                   signature: "valid" (default) | "bad" | "none" | "stale" | "wrong-secret"
+//              POST /__control/redeliver   { session_id } -> { event, delivery }: the SAME completed event
+//                   (same id and payload) posted again with a fresh signature, as Stripe retries it
 import http from "node:http";
 import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -27,6 +30,7 @@ import { pathToFileURL } from "node:url";
 export const FAKE_API_VERSION = "2026-09-30.endive";
 const TEST_CARD_OK = "4242424242424242";
 const TEST_CARD_DECLINED = "4000000000000002";
+const TEST_CARD_DEFERRED = "4000000000000077";
 
 function rand(n = 24) {
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -163,6 +167,7 @@ export async function startStripeFake(options = {}) {
     webhookUrl: options.webhookUrl ?? "",
     webhookSecret: options.webhookSecret ?? "",
     log: options.log ?? (() => {}),
+    deferMs: Number(options.deferMs ?? 3000),
   };
   const sessions = new Map(); // id -> { session, params, idempotencyKey, lineItems, charge }
   const byIdempotencyKey = new Map(); // key -> session id
@@ -435,11 +440,11 @@ export async function startStripeFake(options = {}) {
     if (!/^\d{3,4}$/.test(String(values.cvc ?? "").trim())) return "Your card's security code is incomplete.";
     if (!String(values.name ?? "").trim()) return "Your name is required.";
     if (number === TEST_CARD_DECLINED) return "Your card was declined.";
-    if (number !== TEST_CARD_OK) return "Your card number is incorrect.";
+    if (number !== TEST_CARD_OK && number !== TEST_CARD_DEFERRED) return "Your card number is incorrect.";
     return "";
   }
 
-  async function payHostedSession(entry, values) {
+  async function payHostedSession(entry, values, { defer = false } = {}) {
     const s = entry.session;
     s.status = "complete";
     s.payment_status = "paid";
@@ -474,6 +479,11 @@ export async function startStripeFake(options = {}) {
       status: "succeeded",
     };
     const event = makeEvent("checkout.session.completed", structuredClone(s));
+    entry.completedEvent = event;
+    if (defer) {
+      setTimeout(() => deliver(event).catch((err) => opts.log(`deferred delivery failed: ${err}`)), opts.deferMs);
+      return null;
+    }
     return deliver(event);
   }
 
@@ -488,7 +498,8 @@ export async function startStripeFake(options = {}) {
     }
     const error = validateCard(values);
     if (error) return sendHtml(res, 402, hostedPage(entry, { error, values: { ...values, cardNumber: values.cardNumber } }));
-    await payHostedSession(entry, values);
+    const defer = String(values.cardNumber ?? "").replace(/[\s-]/g, "") === TEST_CARD_DEFERRED;
+    await payHostedSession(entry, values, { defer });
     res.writeHead(303, { Location: successUrlFor(entry.session) });
     res.end();
   }
@@ -526,6 +537,18 @@ export async function startStripeFake(options = {}) {
       event.data.previous_attributes = { amount_refunded: e.charge.amount_refunded - amount, refunded: false };
       const delivery = await deliver(event);
       return sendJson(res, 200, { charge: e.charge, event, delivery });
+    }
+    if (req.method === "POST" && path === "/redeliver") {
+      let body;
+      try {
+        body = JSON.parse((await readBody(req)) || "{}");
+      } catch {
+        return sendJson(res, 400, { error: "invalid_json" });
+      }
+      const e = sessions.get(body.session_id);
+      if (!e?.completedEvent) return sendJson(res, 404, { error: "no_completed_event" });
+      const delivery = await deliver(e.completedEvent, { signature: body.signature ?? "valid" });
+      return sendJson(res, 200, { event: e.completedEvent, delivery });
     }
     if (req.method === "POST" && path === "/send-event") {
       let body;
@@ -596,6 +619,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     host: a.host ?? process.env.FAKE_STRIPE_HOST ?? "127.0.0.1",
     webhookUrl: a["webhook-url"] ?? process.env.FAKE_STRIPE_WEBHOOK_URL ?? "",
     webhookSecret: a["webhook-secret"] ?? process.env.FAKE_STRIPE_WEBHOOK_SECRET ?? "",
+    deferMs: a["defer-ms"] ?? process.env.FAKE_STRIPE_DEFER_MS ?? 3000,
     log: (line) => console.log(`[stripe-fake] ${line}`),
   });
   console.log(`[stripe-fake] listening on ${fake.url}`);

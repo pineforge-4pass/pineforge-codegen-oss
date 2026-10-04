@@ -28,7 +28,7 @@ const receiver = http.createServer(async (req, res) => {
 await new Promise((r) => receiver.listen(0, "127.0.0.1", r));
 const webhookUrl = `http://127.0.0.1:${receiver.address().port}/api/stripe/webhook`;
 
-const fake = await startStripeFake({ webhookUrl, webhookSecret: secret });
+const fake = await startStripeFake({ webhookUrl, webhookSecret: secret, deferMs: 400 });
 const sink = await startResendFake();
 const base = new URL(fake.url);
 const stripe = new Stripe("sk_test_e2e", {
@@ -205,6 +205,43 @@ await check("send-event with a valid signature verifies", async () => {
   const r = await (await fetch(`${fake.url}/__control/send-event`, { method: "POST", body: JSON.stringify({ type: "checkout.session.expired", object: paid }) })).json();
   assert.equal(r.delivery.status, 200);
   assert.equal(received.at(-1).event.type, "checkout.session.expired");
+});
+
+await check("card 4000 0000 0000 0077 pays, redirects first, delivers the event later; redeliver resends the same event", async () => {
+  const s2 = await stripe.checkout.sessions.create({ ...createParams, client_reference_id: `${orderId}-2` });
+  const before = received.length;
+  const r = await fetch(s2.url, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: payForm("4000 0000 0000 0077"), redirect: "manual" });
+  assert.equal(r.status, 303);
+  assert.equal(received.length, before);
+  await new Promise((res) => setTimeout(res, 1000));
+  assert.equal(received.length, before + 1);
+  const first = received.at(-1);
+  assert.ok(first.ok, first.error);
+  assert.equal(first.event.data.object.id, s2.id);
+  const again = await (await fetch(`${fake.url}/__control/redeliver`, { method: "POST", body: JSON.stringify({ session_id: s2.id }) })).json();
+  assert.equal(again.delivery.status, 200);
+  assert.ok(received.at(-1).ok);
+  assert.equal(received.at(-1).event.id, first.event.id);
+  const none = await fetch(`${fake.url}/__control/redeliver`, { method: "POST", body: JSON.stringify({ session_id: "cs_test_nope" }) });
+  assert.equal(none.status, 404);
+});
+
+await check("resend sink: fail-next answers the next matching email with an error and does not store it", async () => {
+  const send = (to) =>
+    fetch(`${sink.url}/emails`, {
+      method: "POST",
+      headers: { Authorization: "Bearer re_test_e2e", "Content-Type": "application/json" },
+      body: JSON.stringify({ from: "a@example.com", to: [to], subject: "retry", text: "t" }),
+    });
+  const set = await fetch(`${sink.url}/__control/fail-next`, { method: "POST", body: JSON.stringify({ count: 1, to: "target@example.com" }) });
+  assert.equal(set.status, 200);
+  assert.equal((await send("other@example.com")).status, 200);
+  assert.equal((await send("target@example.com")).status, 503);
+  assert.equal((await send("target@example.com")).status, 200);
+  const { emails } = await (await fetch(`${sink.url}/__control/emails?to=target@example.com`)).json();
+  assert.equal(emails.length, 1);
+  const { failed } = await (await fetch(`${sink.url}/__control/failed`)).json();
+  assert.equal(failed.length, 1);
 });
 
 await check("resend sink: Bearer required, stores and lists", async () => {

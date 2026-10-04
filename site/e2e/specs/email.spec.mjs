@@ -3,9 +3,29 @@
 // offline with scripts/verify-license.mjs against this run's key.
 import { test, expect } from "@playwright/test";
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { E, NOTIFY_TO, decodeAttachment, makeBuyer, purchase, recipients, waitForEmails } from "../support/e2e.mjs";
+
+// Written here on purpose, independent of lib/: recursively sorted keys, no whitespace,
+// JSON.stringify for every scalar, arrays in order.
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** Ed25519 check of a SignedLicense with node:crypto against the run's public JWK. */
+function nodeCryptoVerify(signed, jwk) {
+  const key = crypto.createPublicKey({ key: { kty: jwk.kty, crv: jwk.crv, x: jwk.x }, format: "jwk" });
+  return crypto.verify(null, Buffer.from(canonical(signed.license), "utf8"), key, Buffer.from(signed.signature.value, "base64url"));
+}
 
 function verifyLicenseCli(file, keyringFile) {
   const args = ["scripts/verify-license.mjs", file];
@@ -39,6 +59,18 @@ test("buyer email with the signed license attached, and the sale notice", async 
   // Exactly the two emails for this license.
   const all = await waitForEmails(request, (m) => String(m.subject).includes(licenseId), { min: 2 });
   expect(all).toHaveLength(2);
+
+  // Independent check with node:crypto and the run's public key (not the site's own code).
+  const keyring = JSON.parse(fs.readFileSync(E.keyringFile, "utf8"));
+  const jwk = keyring.keys.find((k) => k.kid === E.kid);
+  expect(jwk, `the run's key ${E.kid} in the keyring file`).toBeTruthy();
+  expect(signed.signature.alg).toBe("Ed25519");
+  expect(signed.signature.kid).toBe(E.kid);
+  expect(Buffer.from(signed.signature.value, "base64url")).toHaveLength(64);
+  expect(nodeCryptoVerify(signed, jwk)).toBe(true);
+  const forged = JSON.parse(json);
+  forged.license.term.validUntil = "2099-12-31T00:00:00.000Z";
+  expect(nodeCryptoVerify(forged, jwk)).toBe(false);
 
   // Offline verification of the attached file.
   const dir = fs.mkdtempSync(path.join(E.tmpDir, "email-"));

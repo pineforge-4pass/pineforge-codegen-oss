@@ -33,6 +33,9 @@ export const E = {
   get keyringFile() {
     return required("E2E_KEYRING_FILE");
   },
+  get kid() {
+    return required("E2E_KID");
+  },
   get runId() {
     return required("E2E_RUN_ID");
   },
@@ -236,6 +239,19 @@ export async function sendEvent(request, payload) {
   const res = await postJson(request, `${E.stripe}/__control/send-event`, payload);
   expect(res.status, res.text).toBe(200);
   return res.body;
+}
+
+/** Re-posts the SAME checkout.session.completed event of a session (fresh signature), as a Stripe retry. */
+export async function redeliver(request, sessionId) {
+  const res = await postJson(request, `${E.stripe}/__control/redeliver`, { session_id: sessionId });
+  expect(res.status, res.text).toBe(200);
+  return res.body;
+}
+
+/** The next `count` emails addressed to `to` answer `status` (default 503) in the sink and are not stored. */
+export async function failNextEmails(request, { count = 1, status = 503, to }) {
+  const res = await postJson(request, `${E.resend}/__control/fail-next`, { count, status, to });
+  expect(res.status, res.text).toBe(200);
 }
 
 export async function refund(request, paymentIntent, amount) {

@@ -5,11 +5,13 @@ import fs from "node:fs";
 import {
   E,
   LICENSE_ID_RE,
+  checkoutBody,
   fakeEvents,
   fakeSession,
   getJson,
   getOrder,
   makeBuyer,
+  postJson,
   payOnFakeCheckout,
   startCheckout,
   waitForOrderStatus,
@@ -72,7 +74,7 @@ test("Team 5 seats: pay with 4242, license issued, certificate active, verify va
   expect(signed.license.term.months).toBe(12);
   expect(signed.license.mode).toBe("test");
   expect(signed.signature.alg).toBe("Ed25519");
-  expect(signed.signature.kid).toBe(process.env.E2E_KID ?? signed.signature.kid);
+  expect(signed.signature.kid).toBe(E.kid);
   expect(JSON.stringify(signed)).not.toContain(buyer.email);
 
   // Order API agrees.
@@ -132,4 +134,40 @@ test("declined card 4000 0000 0000 0002: decline shown, no event, no license", a
   const missing = await getJson(request, `${E.base}/api/order`);
   expect(missing.status).toBe(400);
   expect(missing.body.error).toBe("missing_session_id");
+});
+
+test("a webhook that arrives after the redirect: the order page shows pending, then issued", async ({ page, request }) => {
+  const buyer = makeBuyer("pending", test.info());
+  const sessionId = await startCheckout(page, { tier: "team", option: "seats-5", buyer, fromPlans: false });
+  // Card 4000 0000 0000 0077: the fake redirects at once and delivers checkout.session.completed ~3 s later.
+  await payOnFakeCheckout(page, { card: "4000 0000 0000 0077", name: buyer.name });
+  await page.waitForURL((u) => u.pathname === "/en/order/" && u.searchParams.get("session_id") === sessionId);
+  await waitForOrderStatus(page, "pending", 2500);
+  await expect(page.getByTestId("license-id")).toHaveCount(0);
+  expect((await fakeEvents(request)).filter((e) => e.event.data.object.id === sessionId)).toHaveLength(0);
+  await waitForOrderStatus(page, "issued", 30_000);
+  await expect(page.getByTestId("license-id").first()).toHaveText(LICENSE_ID_RE);
+  const delivered = (await fakeEvents(request)).filter((e) => e.event.data.object.id === sessionId);
+  expect(delivered.map((e) => e.delivery.status)).toEqual([200]);
+});
+
+test("checkout honeypot: answered 200 with the home page, and no Stripe session is created", async ({ request }) => {
+  const buyer = makeBuyer("checkout-trap", test.info());
+  const res = await postJson(request, `${E.base}/api/checkout`, checkoutBody(buyer, { website: "http://spam.example" }));
+  expect(res.status, res.text).toBe(200);
+  expect(res.body).toEqual({ url: `${E.base}/en/` });
+  const { sessions } = (await getJson(request, `${E.stripe}/__control/sessions`)).body;
+  expect(sessions.filter((x) => x.params.customer_email === buyer.email || JSON.stringify(x.params).includes(buyer.company))).toEqual([]);
+});
+
+test("checkout refuses a body that is not application/json: 400, and no Stripe session", async ({ request }) => {
+  const buyer = makeBuyer("checkout-text-plain", test.info());
+  const r = await request.post(`${E.base}/api/checkout`, {
+    headers: { "Content-Type": "text/plain" },
+    data: Buffer.from(JSON.stringify(checkoutBody(buyer))),
+  });
+  expect(r.status()).toBe(400);
+  expect((await r.json()).error).toBe("invalid_json");
+  const { sessions } = (await getJson(request, `${E.stripe}/__control/sessions`)).body;
+  expect(sessions.filter((x) => x.params.customer_email === buyer.email)).toEqual([]);
 });

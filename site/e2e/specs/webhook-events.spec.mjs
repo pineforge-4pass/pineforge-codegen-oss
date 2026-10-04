@@ -69,7 +69,10 @@ test("an event whose client_reference_id names another order issues nothing", as
 
   const crossed = paidSessionObject(sessionA, { client_reference_id: sessionB.client_reference_id });
   const r = await sendEvent(request, { type: "checkout.session.completed", object: crossed });
-  expect(r.delivery.status).toBeLessThan(500);
+  // Acknowledged (200, so Stripe does not retry), alerted, and nothing issued.
+  expect(r.delivery.status, r.delivery.body).toBe(200);
+  expect(JSON.parse(r.delivery.body)).toEqual({ received: true });
+  await waitForEmails(request, (m) => /^(\[TEST\] )?ALERT:/.test(String(m.subject)) && JSON.stringify(m).includes(sessionA.id));
   await new Promise((res) => setTimeout(res, 1000));
   for (const id of [a.sessionId, b.sessionId]) {
     const order = await getOrder(request, id);
