@@ -22,6 +22,7 @@
     "test:unit": "node --test test/*.test.ts",
     "check": "npm run typecheck && npm run check:config && npm run check:quotes && npm run check:i18n && npm run test:unit",
     "e2e": "node e2e/run.mjs",
+    "e2e:fakes": "node e2e/fakes/selftest.mjs",
     "d1:create": "wrangler d1 create pineforge-license",
     "d1:migrate:local": "wrangler d1 migrations apply pineforge-license --local",
     "d1:migrate:remote": "wrangler d1 migrations apply pineforge-license --remote",

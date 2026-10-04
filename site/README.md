@@ -85,12 +85,21 @@ over HTTP. It:
   messages for the tests to read. Nothing is sent.
 
 Everything else (pages, Functions, D1, signing, verification) is the real
-code. The suite covers the decision guide, a purchase from plans to
+code. The suite covers the decision guide (with and without JavaScript), the
+plans and checkout (desktop and a 390 px phone), a purchase from plans to
 certificate, the emails and their attached license (checked with
 `scripts/verify-license.mjs`), verification of genuine and tampered licenses,
-webhook signature rejection, refunds and revocation, the live-payment guard,
-the quote form, and axe-core accessibility checks of every page. Screenshots
-land in `e2e/artifacts/screens/` (ignored by git).
+webhook signature rejection and the other checkout events, refunds and
+revocation, the live-payment guard, the quote form, headers and redirects,
+and axe-core accessibility checks of every page in both colour schemes.
+Screenshots land in `e2e/artifacts/screens/` and wrangler logs in
+`e2e/artifacts/run/` (both ignored by git).
+
+Useful knobs: `npm run e2e -- specs/purchase.spec.mjs --project desktop`
+passes arguments to Playwright; `E2E_FORCE_BUILD=1` rebuilds `out/` first,
+`E2E_SKIP_BUILD=1` never builds, `E2E_KEEP_TMP=1` keeps the run's temporary
+D1 directories. `npm run e2e:fakes` checks the two fakes on their own with
+the official `stripe` client.
 
 CI runs `npm run check`, `npm run build` and `npm run e2e` in
 `.github/workflows/site.yml` with no secrets.
