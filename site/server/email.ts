@@ -1,6 +1,6 @@
 // Resend sender. Every attempt is logged in email_log; nothing here throws,
 // so a failed email never fails the request that triggered it.
-import type { Env } from "./env.ts";
+import { testOverride, type Env } from "./env.ts";
 import { nowIso } from "../lib/dates.ts";
 
 export type EmailKind = "license" | "sale" | "quote" | "alert";
@@ -27,7 +27,7 @@ async function send(env: Env, msg: OutgoingEmail): Promise<SendResult> {
   const from = (env.RESEND_FROM ?? "").trim();
   if (!apiKey || !from) return { status: "skipped", providerId: null, error: "RESEND_API_KEY or RESEND_FROM not set" };
   if (msg.to.length === 0 || msg.to.some((t) => !t)) return { status: "skipped", providerId: null, error: "no recipient" };
-  const base = ((env.RESEND_API_BASE ?? "").trim() || "https://api.resend.com").replace(/\/+$/, "");
+  const base = (testOverride(env, "RESEND_API_BASE") || "https://api.resend.com").replace(/\/+$/, "");
   const body: Record<string, unknown> = { from, to: msg.to, subject: msg.subject, text: msg.text };
   if (msg.html) body.html = msg.html;
   if (msg.replyTo) body.reply_to = msg.replyTo;

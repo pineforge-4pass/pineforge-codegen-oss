@@ -153,14 +153,14 @@ from it, never from the client. `npm run check` validates it
 | `STRIPE_WEBHOOK_SECRET` | secret | `whsec_` of the webhook endpoint, per mode |
 | `LICENSE_SIGNING_KEY` | secret | Ed25519 private JWK with `kid` (JSON string) |
 | `RESEND_API_KEY` | secret | Resend API key |
-| `TURNSTILE_SECRET` | secret, optional | reserved for a captcha on the quote form (not wired yet) |
-| `SITE_URL` | var | absolute base URL used in Stripe return URLs and emails |
+| `TURNSTILE_SECRET` | secret, optional | makes `/api/quote` require a Cloudflare Turnstile token; the quote form does not send one yet, so leave it unset |
+| `SITE_URL` | var | absolute base URL used in Stripe return URLs and emails; empty = the request's origin |
 | `RESEND_FROM` | var | `PineForge Licensing <enterprise@pineforge.dev>` |
 | `LICENSE_NOTIFY_TO` | var | sale notices, quote requests and alerts (`enterprise@pineforge.dev`) |
 | `STRIPE_TAX` | var | `"on"` sets `automatic_tax.enabled` (Stripe Tax); default `"off"` |
 | `STRIPE_API_BASE` | var, optional | default `https://api.stripe.com` (tests point it at the fake) |
 | `RESEND_API_BASE` | var, optional | default `https://api.resend.com` |
-| `LICENSE_PUBLIC_KEYS` | var, optional | JSON keyring that REPLACES the bundled one: local development and tests only, never set in production |
+| `LICENSE_PUBLIC_KEYS` | var, optional | JSON keyring that REPLACES the bundled one: local development, tests and preview deployments only; never set in production |
 
 ### Adding a locale
 
@@ -278,7 +278,12 @@ certificate shows REVOKED. Any other revocation is a manual D1 update of
   license is issued.
 - **Server-side prices.** The client sends only a tier and option id.
 - **Rate limits.** Checkout and quote requests are limited per IP (D1
-  fixed windows). Both forms carry a honeypot field.
+  fixed windows: 30 checkouts per 10 minutes, 10 quotes per 15 minutes).
+  Both forms carry a honeypot field, and both endpoints accept only
+  `Content-Type: application/json`, which a cross-site HTML form cannot send.
+- **Keys.** A license is stored only if it verifies against the trusted
+  keyring right after signing. A deployment holding a live Stripe key
+  ignores `STRIPE_API_BASE`, `RESEND_API_BASE` and `LICENSE_PUBLIC_KEYS`.
 - **No PII in licenses.** Licenses, certificates and verification responses
   show the company and country only.
 - **Headers.** `public/_headers` denies framing and sets a strict referrer
@@ -292,27 +297,45 @@ certificate shows REVOKED. Any other revocation is a manual D1 update of
    deployments for pull requests stay in test mode.
 2. **Domain.** Proposed `license.pineforge.dev`; the owner adds the DNS
    record and the custom domain in Pages. Set `SITE_URL` to match.
-3. **D1.** `npm run d1:create`, put the printed id into `wrangler.jsonc`
-   (`database_id`), bind it as `DB` for production and preview, then
-   `npm run d1:migrate:remote`.
-4. **Secrets**, per environment, with `wrangler pages secret put <NAME>
-   --project-name pineforge-license` (add `--env preview` for preview):
+3. **D1: one database per environment.** `npm run d1:create` creates
+   `pineforge-license` for production; put its id into `wrangler.jsonc`
+   (`database_id`) and run `npm run d1:migrate:remote`. Create a second
+   database (for example `wrangler d1 create pineforge-license-preview`),
+   migrate it, and bind it as `DB` for the preview environment (Pages
+   settings, or an `env.preview` block in `wrangler.jsonc`, which must then
+   repeat `d1_databases` and `vars`). Test-mode orders and licenses never
+   share the production database.
+4. **Secrets and variables**, per environment, with `wrangler pages secret
+   put <NAME> --project-name pineforge-license` (add `--env preview` for
+   preview):
    - production: `STRIPE_SECRET_KEY` (live, only after the go-live
      checklist), `STRIPE_WEBHOOK_SECRET` (the live endpoint's),
      `LICENSE_SIGNING_KEY` (the production key `pfl-live-2026-10`, from the
-     owner's keychain), `RESEND_API_KEY`;
+     owner's keychain), `RESEND_API_KEY`. Never `LICENSE_PUBLIC_KEYS`,
+     `STRIPE_API_BASE` or `RESEND_API_BASE` (a live deployment ignores them).
    - preview: a Stripe test key and the test endpoint's webhook secret, a
      separate signing key (`node scripts/generate-signing-key.mjs
-     pfl-preview-...`; add its public key to the keyring only if preview
-     licenses should verify on production), `RESEND_API_KEY`.
-5. **Stripe.** One webhook endpoint per mode at
-   `https://license.pineforge.dev/api/stripe/webhook`, subscribed to
-   `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
+     pfl-preview-...`) with `LICENSE_PUBLIC_KEYS` set to a keyring holding
+     its public key (issuance refuses a license that the trusted keyring
+     cannot verify), `RESEND_API_KEY`, and `SITE_URL` set to the preview
+     alias below. The `vars` in `wrangler.jsonc` apply to preview
+     deployments too, so without this override Stripe return URLs and
+     email links would point at the production domain (an empty
+     `SITE_URL` falls back to each request's own origin).
+5. **Stripe: one webhook endpoint per mode, each on its own deployment.**
+   - Live mode: `https://license.pineforge.dev/api/stripe/webhook`.
+   - Test mode: the preview branch's stable alias (for example
+     `https://<branch>.<project>.pages.dev/api/stripe/webhook` for a
+     dedicated `preview` branch), never the production URL: the production
+     deployment rejects test-mode events (`livemode_mismatch`).
+
+   Subscribe both to `checkout.session.completed`,
+   `checkout.session.async_payment_succeeded`,
    `checkout.session.async_payment_failed`, `checkout.session.expired` and
    `charge.refunded`. Configure invoice settings (the seller's legal name,
    address and tax ids on invoices; Checkout creates an invoice for every
-   purchase) and, if Stripe Tax is used, the origin address and registrations,
-   then set `STRIPE_TAX` to `"on"`.
+   purchase) and, if Stripe Tax is used, the origin address and
+   registrations, then set `STRIPE_TAX` to `"on"`.
 6. **Resend.** Verify the sending domain (`pineforge.dev`: the DKIM and SPF
    records Resend lists) so `enterprise@pineforge.dev` can send.
 
@@ -327,17 +350,39 @@ Owner decisions:
       DRAFT marker only after it, and give the reviewed text a version line.
 - [ ] The refund policy wording (in the agreement and the FAQ).
 - [ ] The Stripe account: business details, payouts, tax settings and
-      registrations, invoice template.
+      registrations, invoice template, and customer emails for successful
+      payments and invoices turned on (the site tells buyers their invoice
+      comes from Stripe by email).
 - [ ] The domain `license.pineforge.dev`.
 
 Operations:
 
-- [ ] Pages project, D1 database and migrations, production and preview
-      secrets set as above.
-- [ ] Stripe live webhook endpoint with the five events; its secret stored.
+- [ ] Pages project; production and preview D1 databases, both migrated;
+      production and preview secrets and variables set as above.
+- [ ] Stripe live and test webhook endpoints, each on its own deployment,
+      with the five events; their secrets stored.
 - [ ] Resend domain verified; a test purchase in preview delivers both emails.
 - [ ] One end-to-end purchase with a real test-mode key on the preview
       deployment (see "Real Stripe test mode"), including a refund.
 - [ ] `npm run build` with the live keys passes the guard only after the
       three conditions above are met.
-- [ ] `LICENSE_PUBLIC_KEYS` is NOT set in production.
+- [ ] `LICENSE_PUBLIC_KEYS`, `STRIPE_API_BASE` and `RESEND_API_BASE` are
+      NOT set in production.
+
+## Known limits
+
+- A live payment that arrives while live payments are blocked, or a paid
+  session whose amount does not match its order, is recorded and alerted
+  but issues no license; issuing or refunding it is a manual step (there
+  is no operator script yet).
+- A buyer email that Resend does not accept is retried on Stripe's
+  redelivery of the event; the sale notice to `LICENSE_NOTIFY_TO` is sent
+  once and only logged on failure.
+- The certificate page shows the D1 status (active, revoked, expired) and
+  the TEST banner; it does not re-check the signature (the verify page
+  does).
+- Disputes (`charge.dispute.*`) are not handled; revoke manually.
+- `TURNSTILE_SECRET` is accepted by `/api/quote`, but the quote form does
+  not render a Turnstile widget yet.
+- Not built: a PDF certificate (print the page to PDF), a
+  `security.txt`, more locales.

@@ -31,6 +31,21 @@ export function deploymentMode(env: Env): DeploymentMode {
   return key.startsWith("sk_live_") || key.startsWith("rk_live_") ? "live" : "test";
 }
 
+/**
+ * A development/test override (STRIPE_API_BASE, RESEND_API_BASE,
+ * LICENSE_PUBLIC_KEYS). A deployment holding a live Stripe key ignores them,
+ * so a stray override can neither send the live key elsewhere nor replace the
+ * trusted keyring.
+ */
+export function testOverride(env: Env, name: "STRIPE_API_BASE" | "RESEND_API_BASE" | "LICENSE_PUBLIC_KEYS"): string {
+  const value = (env[name] ?? "").trim();
+  if (value && deploymentMode(env) === "live") {
+    console.error(`[env] ${name} is ignored on a live deployment`);
+    return "";
+  }
+  return value;
+}
+
 /** Why live payments must not be taken yet; [] once the owner has cleared every item. */
 export function liveBlockReasons(): string[] {
   const reasons: string[] = [];

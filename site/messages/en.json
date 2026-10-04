@@ -213,7 +213,7 @@
   "order": {
     "metaTitle": "Your order",
     "title": "Your order",
-    "invoiceNote": "Stripe emails the receipt and the invoice for this payment to the address you gave at checkout. The license itself arrives in a separate email.",
+    "invoiceNote": "The invoice for this payment comes from Stripe, which creates one for every purchase and sends it to the email address you gave at checkout. The license itself arrives in a separate email.",
     "status": {
       "pending": "Waiting for Stripe to confirm the payment. This page updates by itself.",
       "pendingTimeout": "Stripe has not confirmed the payment yet. Reload this page in a few minutes; the license is also emailed to you once it is issued. If nothing arrives, write to {email}.",
@@ -322,7 +322,7 @@
       },
       "invoice": {
         "q": "Do I get an invoice? What about tax?",
-        "a": "Stripe emails a receipt and an invoice for the payment. At checkout Stripe asks for a billing address and lets you add a tax id. Stripe shows the amount due before you pay."
+        "a": "Yes. Checkout creates a Stripe invoice for every purchase, sent to the email address you give there. Stripe asks for a billing address, lets you add a tax id, and shows the amount due before you pay."
       },
       "refund": {
         "q": "Can I get a refund?",
@@ -354,7 +354,7 @@
       "seller": "Seller: {seller}.",
       "sellerPending": "The selling legal entity will be named here before live sales start.",
       "what": "What you buy: a commercial license for PineForge Codegen, for the plan and scope you choose, for {months} months from the day it is issued, under the Commercial License Agreement below.",
-      "payment": "Payment: you pay on Stripe's checkout page; card details are entered there, not on this site. Stripe emails the receipt and the invoice.",
+      "payment": "Payment: you pay on Stripe's checkout page; card details are entered there, not on this site. The invoice comes from Stripe.",
       "delivery": "Delivery: the license is issued once Stripe confirms the payment. It is shown on the order page and emailed to you with the signed license file.",
       "refunds": "Refunds: as stated in the Commercial License Agreement. A license whose order is refunded in full is revoked.",
       "preview": "Preview: while prices are placeholders, checkout runs in test mode, no real payment is taken, and test licenses are not commercial licenses.",

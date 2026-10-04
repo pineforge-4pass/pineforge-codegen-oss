@@ -15,7 +15,7 @@ import { sendEmail } from "../../server/email.ts";
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   let body: unknown;
   try {
-    body = await readJson(request, 32 * 1024);
+    body = await readJson(request, 32 * 1024, { requireJsonType: true });
   } catch (e) {
     if (!(e instanceof BodyError)) console.error("[quote] reading the body failed:", e);
     return apiError(400, "invalid_json");

@@ -50,7 +50,9 @@ CREATE TABLE licenses (
   valid_from TEXT NOT NULL,
   valid_until TEXT NOT NULL,
   revoked_at TEXT,
-  revoke_reason TEXT
+  revoke_reason TEXT,
+  emailed_at TEXT,                           -- the buyer's license email was accepted by Resend
+  email_claimed_at TEXT                      -- a delivery is sending it (stale after 5 minutes)
 );
 
 -- Stripe event ids already processed (recorded after processing succeeds).

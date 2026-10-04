@@ -47,6 +47,8 @@ export interface LicenseRow {
   valid_until: string;
   revoked_at: string | null;
   revoke_reason: string | null;
+  emailed_at: string | null;
+  email_claimed_at: string | null;
 }
 
 export function orderById(db: D1Database, id: string): Promise<OrderRow | null> {

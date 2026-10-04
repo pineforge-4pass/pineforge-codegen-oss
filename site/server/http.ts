@@ -33,9 +33,18 @@ export class BodyError extends Error {}
 
 /**
  * Reads a JSON request body of at most `maxBytes`. Throws BodyError for an
- * oversized body or invalid JSON.
+ * oversized body or invalid JSON, and with `requireJsonType` for a request
+ * that is not `Content-Type: application/json` (a cross-site HTML form can
+ * only send form or text types, so state-changing endpoints require JSON).
  */
-export async function readJson(request: Request, maxBytes = 64 * 1024): Promise<unknown> {
+export async function readJson(
+  request: Request,
+  maxBytes = 64 * 1024,
+  { requireJsonType = false }: { requireJsonType?: boolean } = {},
+): Promise<unknown> {
+  if (requireJsonType && !/^application\/json\s*(;|$)/i.test(request.headers.get("Content-Type") ?? "")) {
+    throw new BodyError("content type is not application/json");
+  }
   const declared = Number(request.headers.get("Content-Length") ?? "0");
   if (declared > maxBytes) throw new BodyError("body too large");
   const text = await request.text();

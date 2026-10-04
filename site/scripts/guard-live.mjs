@@ -10,8 +10,8 @@ const NAMES = ["STRIPE_SECRET_KEY", "STRIPE_PUBLISHABLE_KEY"];
 const devVars = readDevVars();
 const live = [];
 for (const name of NAMES) {
-  if (LIVE.test(process.env[name] ?? "")) live.push(`${name} (environment)`);
-  if (LIVE.test(devVars[name] ?? "")) live.push(`${name} (.dev.vars)`);
+  if (LIVE.test((process.env[name] ?? "").trim())) live.push(`${name} (environment)`);
+  if (LIVE.test((devVars[name] ?? "").trim())) live.push(`${name} (.dev.vars)`);
 }
 
 const commerce = readCommerce();

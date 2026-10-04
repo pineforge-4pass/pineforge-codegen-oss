@@ -36,7 +36,7 @@ export function readDevVars() {
   for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
     const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
     if (!m) continue;
-    out[m[1]] = m[2].replace(/^(['"])(.*)\1$/, "$2");
+    out[m[1]] = m[2].trim().replace(/^(['"])(.*)\1$/, "$2").trim();
   }
   return out;
 }

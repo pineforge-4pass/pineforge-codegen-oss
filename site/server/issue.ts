@@ -2,13 +2,20 @@
 // (at most one license per order: licenses.order_id is UNIQUE) and, only when
 // this call created the license, email the buyer and the sale notice.
 import { addMonthsIso, nowIso } from "../lib/dates.ts";
-import { generateLicenseId, signLicense, type LicenseMode, type LicensePayload, type LicenseScope } from "../lib/license.ts";
+import {
+  generateLicenseId,
+  signLicense,
+  verifyLicenseSignature,
+  type LicenseMode,
+  type LicensePayload,
+  type LicenseScope,
+} from "../lib/license.ts";
 import { canonicalize } from "../lib/canonical-json.ts";
 import { b64Encode } from "../lib/base64url.ts";
 import { tierName } from "../lib/commerce.ts";
 import { licenseByOrder, type LicenseRow, type OrderRow } from "./db.ts";
-import { sendEmail } from "./email.ts";
-import { signingKey } from "./keyring.ts";
+import { sendAlert, sendEmail } from "./email.ts";
+import { signingKey, trustedKeyring } from "./keyring.ts";
 import type { Env } from "./env.ts";
 
 export interface IssueResult {
@@ -43,12 +50,24 @@ export function buildPayload(order: OrderRow, mode: LicenseMode, id: string, iss
  */
 export async function issueLicense(env: Env, order: OrderRow, mode: LicenseMode, siteUrl: string): Promise<IssueResult | null> {
   const existing = await licenseByOrder(env.DB, order.id);
-  if (existing) return { license: existing, created: false };
+  if (existing) {
+    // A redelivery after the buyer's email failed sends it now (no-op once sent).
+    if (existing.status === "active") await deliverBuyerEmail(env, order, existing, siteUrl);
+    return { license: existing, created: false };
+  }
 
   const key = signingKey(env);
   const issuedAt = nowIso();
   const payload = buildPayload(order, mode, generateLicenseId(), issuedAt);
   const signed = await signLicense(payload, key);
+  // Store only a license that verifies where it will be checked: a signing key
+  // missing from the trusted keyring (a preview key, a mistyped secret) would
+  // issue licenses that verify as unknown_key. Throwing answers 500, so Stripe
+  // retries the event once the configuration is fixed.
+  const selfCheck = await verifyLicenseSignature(signed, trustedKeyring(env));
+  if (!selfCheck.ok) {
+    throw new Error(`signed license fails the trusted keyring (${selfCheck.reason}); check LICENSE_SIGNING_KEY's kid and the keyring`);
+  }
   const payloadJson = canonicalize(signed.license);
 
   const res = await env.DB.prepare(
@@ -73,12 +92,43 @@ export async function issueLicense(env: Env, order: OrderRow, mode: LicenseMode,
   const stored = await licenseByOrder(env.DB, order.id);
   if (!stored) return null; // the order stopped being paid (refunded) before the insert
   const created = (res.meta?.changes ?? 0) > 0 && stored.id === payload.id;
-  if (created) await sendIssueEmails(env, order, stored, siteUrl);
+  if (created) {
+    // The sale notice goes out once, from the delivery that created the
+    // license; the buyer's email is retried until Resend accepts it.
+    let buyerError: unknown = null;
+    try {
+      await deliverBuyerEmail(env, order, stored, siteUrl);
+    } catch (e) {
+      buyerError = e;
+    }
+    await sendSaleNotice(env, order, stored, siteUrl);
+    if (buyerError) throw buyerError;
+  }
   return { license: stored, created };
 }
 
-async function sendIssueEmails(env: Env, order: OrderRow, row: LicenseRow, siteUrl: string): Promise<void> {
-  const prefix = row.mode === "test" ? "[TEST] " : "";
+const prefixOf = (row: LicenseRow) => (row.mode === "test" ? "[TEST] " : "");
+
+/**
+ * Emails the license to the buyer unless that already happened. A claim on
+ * the row keeps concurrent deliveries from sending it twice (a claim older
+ * than five minutes is treated as abandoned). When Resend does not accept
+ * the email, the claim is released, the operator is alerted and this throws:
+ * the webhook answers 500, Stripe redelivers the event and the next delivery
+ * sends the email. Without Resend configured (status "skipped") it only logs.
+ */
+async function deliverBuyerEmail(env: Env, order: OrderRow, row: LicenseRow, siteUrl: string): Promise<void> {
+  if (row.emailed_at) return;
+  const now = nowIso();
+  const stale = new Date(Date.now() - 5 * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const claim = await env.DB.prepare(
+    `UPDATE licenses SET email_claimed_at = ?1
+     WHERE id = ?2 AND emailed_at IS NULL AND (email_claimed_at IS NULL OR email_claimed_at < ?3)`,
+  )
+    .bind(now, row.id, stale)
+    .run();
+  if ((claim.meta?.changes ?? 0) === 0) return; // sent already, or another delivery is sending it
+
   const signedJson = JSON.stringify(
     { license: JSON.parse(row.payload_json), signature: { alg: "Ed25519", kid: row.kid, value: row.signature } },
     null,
@@ -92,9 +142,9 @@ async function sendIssueEmails(env: Env, order: OrderRow, row: LicenseRow, siteU
       ? ["", "TEST LICENSE: issued from a Stripe test-mode payment; it is not a commercial license.", ""]
       : [""];
 
-  await sendEmail(env, {
+  const result = await sendEmail(env, {
     to: [order.buyer_email],
-    subject: `${prefix}Your PineForge Codegen commercial license ${row.id}`,
+    subject: `${prefixOf(row)}Your PineForge Codegen commercial license ${row.id}`,
     text: [
       `Hello ${order.buyer_name},`,
       "",
@@ -110,7 +160,7 @@ async function sendIssueEmails(env: Env, order: OrderRow, row: LicenseRow, siteU
       "",
       `The signed license file ${row.id}.json is attached. Its Ed25519 signature can be`,
       `checked offline against the public keys at ${keysUrl}.`,
-      "Stripe sends the invoice and receipt separately.",
+      "The invoice for this payment comes from Stripe in a separate email.",
       "",
       `Questions: ${env.LICENSE_NOTIFY_TO ?? "enterprise@pineforge.dev"}`,
     ].join("\n"),
@@ -119,10 +169,34 @@ async function sendIssueEmails(env: Env, order: OrderRow, row: LicenseRow, siteU
     relatedId: row.id,
   });
 
+  if (result.status === "sent") {
+    await env.DB.prepare("UPDATE licenses SET emailed_at = ?1 WHERE id = ?2").bind(nowIso(), row.id).run();
+    return;
+  }
+  await env.DB.prepare("UPDATE licenses SET email_claimed_at = NULL WHERE id = ?1").bind(row.id).run();
+  // Not configured (local development without Resend): nothing a retry would fix.
+  if (result.status === "skipped") return;
+  await sendAlert(
+    env,
+    `license email to the buyer failed (${row.id})`,
+    [
+      `License: ${row.id} (${row.mode}), order ${order.id} (${order.company})`,
+      `Result:  ${result.status}: ${result.error ?? ""}`,
+      "The webhook answered 500 so Stripe redelivers the event; the next delivery retries the email.",
+      `The buyer can also fetch the license from the order page or ${siteUrl}/certificate/${row.id}.`,
+    ],
+    row.id,
+  );
+  throw new Error(`buyer email for ${row.id} not accepted (${result.status})`);
+}
+
+/** The sale notice to LICENSE_NOTIFY_TO, sent once by the delivery that created the license. */
+async function sendSaleNotice(env: Env, order: OrderRow, row: LicenseRow, siteUrl: string): Promise<void> {
+  const certificateUrl = `${siteUrl}/certificate/${row.id}`;
   const notifyTo = (env.LICENSE_NOTIFY_TO ?? "").trim();
   await sendEmail(env, {
     to: notifyTo ? [notifyTo] : [],
-    subject: `${prefix}License sale: ${row.id} — ${order.company} (${order.tier}/${order.option_id})`,
+    subject: `${prefixOf(row)}License sale: ${row.id} — ${order.company} (${order.tier}/${order.option_id})`,
     text: [
       `License:     ${row.id} (${row.mode})`,
       `Order:       ${order.id}`,
