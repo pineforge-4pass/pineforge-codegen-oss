@@ -1,34 +1,89 @@
 PineForge Codegen — License
 ============================
 
-Copyright 2025 PineForge <luis@4pass.com.tw>
+Copyright 2025-2026 pineforge, LLC
 
 This software is made available under the **PolyForm Noncommercial License
-1.0.0** (reproduced in full below), as modified by the two supplemental
-sections that follow. In case of any conflict, the supplemental sections
-("Additional Permission" and "Commercial Use") control over the base license.
+1.0.0** (the "base license", reproduced in full below), with the additional
+permission and the definitions that follow. The licensor is pineforge, LLC.
 
-Required Notice: Copyright 2025 PineForge (https://github.com/pineforge-4pass/pineforge-codegen-oss)
+The sections "Additional Permission — Personal Trading" and "Commercial Use"
+only add to the base license. Nothing in them reduces, limits or conditions
+any license or permission the base license gives, including the permitted
+purposes in its Noncommercial Purposes, Personal Uses and Noncommercial
+Organizations sections.
+
+Required Notice: Copyright 2025-2026 pineforge, LLC (https://github.com/pineforge-4pass/pineforge-codegen-oss)
 
 
 Additional Permission — Personal Trading
 ----------------------------------------
 
-Notwithstanding the limitation to noncommercial purposes in the base license,
-the licensor grants you, free of charge, an additional license to use the
-software for **Personal Trading**, and Personal Trading is hereby a permitted
-purpose under the base license — including its Copyright License, Distribution
-License, Changes and New Works License, and Patent License.
+In addition to the permitted purposes of the base license, the licensor
+grants you, free of charge, a license to use the software for **Personal
+Trading**, and Personal Trading is a permitted purpose under the base
+license for every license it gives.
 
-**Personal Trading** means use of the software by a natural person to research,
-develop, backtest, and execute trades in financial instruments, where:
+**Personal Trading** means use of the software by a natural person to do any
+of the following, solely for trades that meet conditions (a) and (b) below:
+research, develop or backtest trading strategies, or execute trades in
+securities, derivatives, currencies, crypto-assets, commodities or other
+financial instruments.
 
-  (a) the trades are placed for that same natural person's own account; and
+  (a) The trades are, or will be, placed for that person's own account.
 
-  (b) the trades are funded solely by that person's own capital.
+  (b) The trades are, or will be, funded solely by that person's own
+      capital.
 
-Personal Trading does **not** include, and this Additional Permission does
-**not** cover:
+For Personal Trading:
+
+  - A person's **household** is that person, their spouse or domestic
+    partner, and their dependants.
+
+  - A person's **own account** includes an account held by the person alone
+    or jointly with members of their household; an account of a member of
+    their household; and a retirement, pension, education-savings or other
+    tax-advantaged account, or an account of a revocable trust, held for the
+    benefit of the person or members of their household.
+
+  - A person's **own capital** includes capital belonging to members of
+    their household, and capital borrowed in the ordinary course from a
+    broker, bank or other lender, such as margin, leverage or credit on a
+    trading account, for which the person or their household is liable.
+    Money the person has received outright, such as pay, a gift or an
+    inheritance, is the person's own capital.
+
+  - Trading in the person's own name, for their own account and with their
+    own capital, is Personal Trading even when it is the person's business
+    or livelihood.
+
+  - Publishing or teaching about the person's own Personal Trading,
+    including its results, is part of Personal Trading even when the person
+    is paid for it, as long as they do not give Output to others.
+
+  - An account of a company, partnership, fund, trust or other
+    organization, other than an account described under own account above,
+    is not the person's own account, even if the person wholly owns or
+    controls it.
+
+  - Capital that an employer, a proprietary-trading firm, a funded-trader
+    program or anyone else outside the person's household provides or
+    allocates to the person to trade, and that the provider still owns or
+    whose losses the provider bears, is not the person's own capital, even
+    if the person shares in the profits.
+
+
+Commercial Use
+--------------
+
+**Output** means code that the software generates, such as the C++ source
+code it generates from PineScript, and any program or library built from
+that code. Backtest results, charts, reports and trade signals are not
+Output.
+
+**Commercial Use** means any use of the software that neither the base
+license nor the Additional Permission above permits. Unless one of them
+permits it, each of the following is Commercial Use:
 
   (1) managing, advising on, or trading capital belonging to any other person
       or entity, whether or not for a fee;
@@ -37,30 +92,29 @@ Personal Trading does **not** include, and this Additional Permission does
       organization, including use by an individual in the course of work for
       such an organization;
 
-  (3) embedding the software, or output generated by it, into any product or
-      service made available to others; or
+  (3) embedding the software, or its Output, into any product or service
+      made available to others, including using the software to generate
+      Output for such a product or service; and
 
   (4) operating any hosted, software-as-a-service, or otherwise public-facing
-      service that uses the software.
+      service through which others can run the software or receive its
+      Output.
 
-The use described in (1)–(4) is Commercial Use.
+For example, use by an organization of a kind listed in the base license's
+Noncommercial Organizations section is a permitted purpose under the base
+license, and so is not Commercial Use.
 
+This section does not override, narrow or condition any license or permitted
+purpose of the base license, or Personal Trading. It only identifies uses
+that those free permissions do not cover. Commercial Use requires a separate
+commercial license from the licensor.
 
-Commercial Use
---------------
-
-Any use that is not a permitted purpose under the base license and is not
-covered by the Additional Permission above — including the uses listed in
-(1)–(4) of that section — requires a separate commercial license from the
-licensor.
-
-To obtain a commercial license, contact: luis@4pass.com.tw
+To obtain a commercial license, contact: enterprise@pineforge.dev
 
 
 ================================================================================
-The remainder of this file is the verbatim text of the PolyForm Noncommercial
-License 1.0.0. Where it differs from the supplemental sections above, the
-supplemental sections control.
+The remainder of this file is the verbatim, unchanged text of the PolyForm
+Noncommercial License 1.0.0.
 ================================================================================
 
 

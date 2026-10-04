@@ -4,7 +4,7 @@ This is the source-available PineScript v6 to C++ translator. Read the
 [license and contribution terms](LEGAL.md) before sending a material change.
 Contributions use the Developer Certificate of Origin: add a `Signed-off-by`
 line with `git commit -s`. Material contributions also require a Contributor
-License Agreement so PineForge can include them in its commercial license;
+License Agreement so pineforge, LLC can include them in its commercial licenses;
 contact luis@4pass.com.tw before opening a material pull request.
 
 ## Local setup

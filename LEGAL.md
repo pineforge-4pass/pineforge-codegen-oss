@@ -4,12 +4,17 @@ Summary of licensing, third-party components, and trademarks for `pineforge-code
 
 ## License
 
-`pineforge-codegen` is **source-available**, **not** OSI "open source." It is distributed under the **PolyForm Noncommercial License 1.0.0** with two supplemental terms — see [LICENSE](LICENSE), which is the controlling text:
+`pineforge-codegen` is **source-available**, **not** OSI "open source." It is distributed under the **PolyForm Noncommercial License 1.0.0** with an additional permission and a definition of Commercial Use — see [LICENSE](LICENSE), which is the controlling text. Both only add to the base license; they take away none of its permissions.
 
-- **Personal Trading exception** — free to research, backtest, and trade your **own** capital, for an individual acting on their own behalf.
-- **Commercial use** — companies, funds, managing third-party capital, embedding in a product, or operating a hosted/public-facing service requires a **commercial license** (email **enterprise@pineforge.dev**; the commercial-license store is coming soon).
+- **Noncommercial use** — any noncommercial purpose, and any use by a charitable organization, educational institution, public research organization, public safety or health organization, environmental protection organization or government institution, is free under the base license.
+- **Personal Trading** — free for a natural person to research, develop or backtest strategies and trade their **own** account with their **own** capital. Household, joint and retirement accounts and ordinary margin count as their own; a company's or fund's account does not, even a company they wholly own.
+- **Commercial Use** — any other use, such as managing, advising on or trading third-party capital, use by or for a company or fund, embedding the software or its output in a product or service for others, or operating a hosted/public-facing service with it, requires a **commercial license** (email **enterprise@pineforge.dev**; the commercial-license store is coming soon).
 
 Describe this project as **"source-available"** rather than "open source." The runtime it targets, [`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine), is separate and **Apache-2.0**.
+
+## Copyright and licensor
+
+The licensor is **pineforge, LLC**, a Delaware limited liability company. It holds the copyright in `pineforge-codegen`; the founder's rights in the software are assigned to it. Commercial licenses are granted by pineforge, LLC.
 
 ## What this repository is
 
@@ -25,7 +30,7 @@ The transpiler has **no runtime dependencies** (`transpile()` and `transpile_ful
 
 ## Contributions
 
-Contributions are accepted under a Developer Certificate of Origin (`Signed-off-by`). Because this project is **dual-licensed** (source-available + a sold commercial license), material contributions require a Contributor License Agreement granting PineForge the right to include the contribution in the commercial license; otherwise it cannot be accepted. See [CONTRIBUTING.md](CONTRIBUTING.md) (or contact luis@4pass.com.tw) before opening a material PR.
+Contributions are accepted under a Developer Certificate of Origin (`Signed-off-by`). Because this project is **dual-licensed** (source-available + a sold commercial license), material contributions require a Contributor License Agreement granting pineforge, LLC the right to include the contribution in its commercial licenses; otherwise it cannot be accepted. See [CONTRIBUTING.md](CONTRIBUTING.md) (or contact luis@4pass.com.tw) before opening a material PR.
 
 ## No warranty
 

@@ -532,28 +532,42 @@ use `python -m pytest --collect-only -q` for the current collection count.
 ## License
 
 Source-available under the [PolyForm Noncommercial License 1.0.0](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE),
-with two supplemental sections (the `LICENSE` file is the controlling text;
-where they conflict with the base license, the supplemental sections control):
+with an additional permission for personal trading and a definition of
+Commercial Use. Both only add to the base license and take away none of its
+permissions; the `LICENSE` file is the controlling text. The licensor is
+pineforge, LLC.
 
-- **Additional Permission — Personal Trading** — a natural person may use the
-  software free of charge to research, develop, backtest and execute trades
-  for their own account, funded solely by their own capital.
-- **Commercial Use** — managing, advising on or trading anyone else's capital;
-  use by, for or on behalf of a company, fund, partnership or other
-  organization (including an individual's work for one); embedding the
-  software or its output in a product or service made available to others; and
-  operating a hosted, software-as-a-service or other public-facing service
-  that uses the software all require a separate commercial license.
-  So does any other use that is neither a permitted purpose under the base
-  license nor covered by the Personal Trading permission.
+- **Noncommercial use is free** under the base license: any noncommercial
+  purpose, and any use by a charitable organization, educational
+  institution, public research organization, public safety or health
+  organization, environmental protection organization or government
+  institution.
+- **Personal Trading is free:** a natural person may research, develop or
+  backtest strategies and execute trades for their own account with their
+  own capital. Their own account includes joint and household accounts
+  (spouse or domestic partner, dependants), retirement and other
+  tax-advantaged accounts and a revocable trust for their benefit; their own
+  capital includes margin and other ordinary borrowing from a broker or
+  lender. A company's or fund's account is not a personal account, even if
+  the person wholly owns the company.
+- **Commercial Use needs a commercial license:** any other use, such as
+  managing, advising on or trading anyone else's capital (outside their
+  household); use by, for or on
+  behalf of a company, fund, partnership or other organization (including an
+  individual's work for one); embedding the software or its output in a
+  product or service made available to others; or operating a hosted,
+  software-as-a-service or other public-facing service through which others
+  run the software or receive its output.
 
 This is source-available, not OSI open source.
 
 ### Buying a commercial license
 
-Commercial licenses are available — flexible terms for funds, products, and
-hosted/embedded use. Email **enterprise@pineforge.dev** with your use case for
-a quote. The commercial-license store (coming soon) will take orders online.
+Commercial licenses are annual: Solo for one person, Team for an
+organization's own use, Fund for managers of others' capital (by assets under
+management) and OEM / Embedded for products and hosted services. Email
+**enterprise@pineforge.dev** with questions or for a quote. The
+commercial-license store (coming soon) will take orders online.
 
 ## Explicit Pine execution attachment
 
