@@ -153,7 +153,7 @@ test("a webhook that arrives after the redirect: the order page shows pending, t
 
 test("checkout honeypot: answered 200 with the home page, and no Stripe session is created", async ({ request }) => {
   const buyer = makeBuyer("checkout-trap", test.info());
-  const res = await postJson(request, `${E.base}/api/checkout`, checkoutBody(buyer, { website: "http://spam.example" }));
+  const res = await postJson(request, `${E.base}/api/checkout`, checkoutBody(buyer, { pf_hp: "http://spam.example" }));
   expect(res.status, res.text).toBe(200);
   expect(res.body).toEqual({ url: `${E.base}/en/` });
   const { sessions } = (await getJson(request, `${E.stripe}/__control/sessions`)).body;

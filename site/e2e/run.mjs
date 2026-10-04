@@ -5,9 +5,10 @@
 // - Picks free ports at run time; nothing is fixed.
 // - Generates a throwaway Ed25519 signing key (kid `pfl-e2e-<timestamp>`) and webhook secret per run.
 // - Builds the static site if `out/` is missing (`npm run build`; E2E_FORCE_BUILD=1 rebuilds).
-// - Applies the D1 migrations to fresh local persistence dirs and starts two `wrangler pages dev out`
+// - Applies the D1 migrations to fresh local persistence dirs and starts three `wrangler pages dev out`
 //   instances: the test-mode site (sk_test_ key) and a second one holding a live-looking key
-//   (sk_live_x) for the live-payment guard spec.
+//   (sk_live_x) for the live-payment guard spec. The test instance gets TEST_EMAIL_ALLOWLIST=@example.com.
+//   A third test-mode instance signs with a throwaway key whose kid is not in its keyring (issuance-failure spec).
 // - Starts the local Stripe and Resend fakes (e2e/fakes/). They stand in for the two third parties,
 //   the only mocking in the suite.
 // Extra CLI args go to `playwright test` (e.g. `npm run e2e -- specs/purchase.spec.mjs --project desktop`).
@@ -162,10 +163,9 @@ async function waitReady(url, child, logFile) {
   await fail(`${child.label} not ready at ${url}/en/ after ${readyTimeoutMs} ms`, [logFile]);
 }
 
-async function makeKeys() {
+async function makeKeys(kid = `pfl-e2e-${stamp}`) {
   const { privateKey } = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
   const jwk = await crypto.subtle.exportKey("jwk", privateKey);
-  const kid = `pfl-e2e-${stamp}`;
   const pub = { kty: "OKP", crv: "Ed25519", x: jwk.x, kid, alg: "EdDSA", use: "sig" };
   return { kid, privateJwk: { ...pub, d: jwk.d }, keyring: { keys: [pub] } };
 }
@@ -212,14 +212,21 @@ async function main() {
   await fsp.writeFile(keyringFile, JSON.stringify(keyring, null, 2));
   const webhookSecret = `whsec_e2e${crypto.randomBytes(24).toString("hex")}`;
 
+  // A third, test-mode instance signs with a key whose kid is NOT in its keyring: issuance must fail there.
+  const orphan = await makeKeys(`pfl-e2e-orphan-${stamp}`);
+
   const mainPersist = path.join(tmpRoot, "d1-test");
   const livePersist = path.join(tmpRoot, "d1-live");
+  const orphanPersist = path.join(tmpRoot, "d1-orphan");
   await migrate(mainPersist, "migrate-test");
   await migrate(livePersist, "migrate-live");
+  await migrate(orphanPersist, "migrate-orphan");
 
   const [sitePort, siteInspector, livePort, liveInspector] = [await freePort(), await freePort(), await freePort(), await freePort()];
+  const [orphanPort, orphanInspector] = [await freePort(), await freePort()];
   const siteUrl = `http://127.0.0.1:${sitePort}`;
   const liveUrl = `http://127.0.0.1:${livePort}`;
+  const orphanUrl = `http://127.0.0.1:${orphanPort}`;
   const webhookUrl = `${siteUrl}/api/stripe/webhook`;
 
   const fakeLog = (file) => {
@@ -244,12 +251,34 @@ async function main() {
     STRIPE_WEBHOOK_SECRET: webhookSecret,
     STRIPE_TAX: "off",
   };
-  say("starting wrangler pages dev (test mode and live-key instances)");
-  const [site, live] = await Promise.all([
-    startSite("site-test", { port: sitePort, inspectorPort: siteInspector, persistDir: mainPersist, bindings: { ...common, STRIPE_SECRET_KEY: "sk_test_e2e", SITE_URL: siteUrl } }),
-    startSite("site-live", { port: livePort, inspectorPort: liveInspector, persistDir: livePersist, bindings: { ...common, STRIPE_SECRET_KEY: "sk_live_x", SITE_URL: liveUrl } }),
+  // A live deployment ignores RESEND_API_BASE and would mail through the real Resend: it gets no Resend key,
+  // so its emails are logged as skipped (its D1 email_log) and nothing leaves this machine.
+  const liveBindings = { ...common, STRIPE_SECRET_KEY: "sk_live_x", SITE_URL: liveUrl };
+  delete liveBindings.RESEND_API_KEY;
+  say("starting wrangler pages dev (test mode, live-key and unknown-signing-kid instances)");
+  const [site, live, orphanSite] = await Promise.all([
+    // Test-mode buyer emails go only to TEST_EMAIL_ALLOWLIST: every spec buyer is @example.com.
+    startSite("site-test", {
+      port: sitePort,
+      inspectorPort: siteInspector,
+      persistDir: mainPersist,
+      bindings: { ...common, STRIPE_SECRET_KEY: "sk_test_e2e", SITE_URL: siteUrl, TEST_EMAIL_ALLOWLIST: "@example.com" },
+    }),
+    startSite("site-live", { port: livePort, inspectorPort: liveInspector, persistDir: livePersist, bindings: liveBindings }),
+    startSite("site-orphan", {
+      port: orphanPort,
+      inspectorPort: orphanInspector,
+      persistDir: orphanPersist,
+      bindings: {
+        ...common,
+        LICENSE_SIGNING_KEY: JSON.stringify(orphan.privateJwk),
+        STRIPE_SECRET_KEY: "sk_test_e2e",
+        SITE_URL: orphanUrl,
+        TEST_EMAIL_ALLOWLIST: "@example.com",
+      },
+    }),
   ]);
-  say(`site ${site.url} (test), ${live.url} (live key)`);
+  say(`site ${site.url} (test), ${live.url} (live key), ${orphanSite.url} (signing kid ${orphan.kid} not in its keyring)`);
 
   // A cheap probe that the Functions compiled (contract: GET /api/verify without id -> 400 missing_id).
   try {
@@ -272,6 +301,9 @@ async function main() {
     E2E_RUN_ID: runId,
     E2E_SITE_DIR: siteDir,
     E2E_TMP_DIR: tmpRoot,
+    // The live-key instance's D1 persistence: a spec seeds an order row there (checkout answers 503).
+    E2E_LIVE_PERSIST_DIR: livePersist,
+    E2E_ORPHAN_URL: orphanSite.url,
   });
   say(`npx playwright test -c e2e/playwright.config.mjs ${extraArgs.join(" ")}`);
   const pw = spawn(npx, ["playwright", "test", "-c", "e2e/playwright.config.mjs", ...extraArgs], { cwd: siteDir, env: pwEnv, stdio: "inherit" });
@@ -279,7 +311,7 @@ async function main() {
   const code = await new Promise((resolve) => pw.once("exit", (c, s) => resolve(c ?? (s ? 1 : 0))));
   say(`playwright exited ${code}`);
   if (code !== 0) {
-    for (const f of [site.logFile, live.logFile]) console.error(`--- ${path.relative(siteDir, f)} (tail) ---\n${await tail(f, 40)}\n`);
+    for (const f of [site.logFile, live.logFile, orphanSite.logFile]) console.error(`--- ${path.relative(siteDir, f)} (tail) ---\n${await tail(f, 40)}\n`);
   }
   await teardown();
   process.exit(signalled ? SIGNAL_EXIT[signalled] : code);

@@ -1,6 +1,6 @@
 // 3. Email sink: a purchase sends the buyer's license email (id, certificate link, verify link, the
 // signed license attached) and the sale notice to enterprise@pineforge.dev. The attachment verifies
-// offline with scripts/verify-license.mjs against this run's key.
+// offline with scripts/verify-license.mjs --allow-test against this run's key (exit 3 without the flag).
 import { test, expect } from "@playwright/test";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
@@ -27,8 +27,8 @@ function nodeCryptoVerify(signed, jwk) {
   return crypto.verify(null, Buffer.from(canonical(signed.license), "utf8"), key, Buffer.from(signed.signature.value, "base64url"));
 }
 
-function verifyLicenseCli(file, keyringFile) {
-  const args = ["scripts/verify-license.mjs", file];
+function verifyLicenseCli(file, keyringFile, extra = []) {
+  const args = ["scripts/verify-license.mjs", file, ...extra];
   if (keyringFile) args.push("--keyring", keyringFile);
   const r = spawnSync(process.execPath, args, { cwd: E.siteDir, encoding: "utf8", timeout: 60_000, env: { ...process.env, LICENSE_PUBLIC_KEYS: "" } });
   return { status: r.status, out: `${r.stdout}\n${r.stderr}` };
@@ -72,11 +72,14 @@ test("buyer email with the signed license attached, and the sale notice", async 
   forged.license.term.validUntil = "2099-12-31T00:00:00.000Z";
   expect(nodeCryptoVerify(forged, jwk)).toBe(false);
 
-  // Offline verification of the attached file.
+  // Offline verification of the attached file. The checker is strict by default: a test-mode license
+  // exits 3 unless --allow-test is given.
   const dir = fs.mkdtempSync(path.join(E.tmpDir, "email-"));
   const file = path.join(dir, `${licenseId}.json`);
   fs.writeFileSync(file, json);
-  const ok = verifyLicenseCli(file, E.keyringFile);
+  const strict = verifyLicenseCli(file, E.keyringFile);
+  expect(strict.status, strict.out).toBe(3);
+  const ok = verifyLicenseCli(file, E.keyringFile, ["--allow-test"]);
   expect(ok.status, ok.out).toBe(0);
   expect(ok.out).toMatch(/Signature: valid/);
   expect(ok.out).not.toMatch(/INVALID/);
@@ -86,10 +89,10 @@ test("buyer email with the signed license attached, and the sale notice", async 
   // A tampered copy fails, and the shipped (production) keyring does not trust the run's test key.
   const tampered = path.join(dir, "tampered.json");
   fs.writeFileSync(tampered, JSON.stringify({ ...signed, license: { ...signed.license, licensee: { ...signed.license.licensee, company: `${buyer.company} Holdings` } } }, null, 2));
-  const bad = verifyLicenseCli(tampered, E.keyringFile);
+  const bad = verifyLicenseCli(tampered, E.keyringFile, ["--allow-test"]);
   expect(bad.status, bad.out).toBe(1);
   expect(bad.out).toMatch(/INVALID/);
-  const shipped = verifyLicenseCli(file, null);
+  const shipped = verifyLicenseCli(file, null, ["--allow-test"]);
   expect(shipped.status, shipped.out).toBe(1);
   expect(shipped.out).toMatch(/not in the keyring/);
 });

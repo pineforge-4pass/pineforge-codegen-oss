@@ -83,7 +83,7 @@ test.describe("checkout", () => {
 
   test("the honeypot is out of the tab order and autocomplete", async ({ page }) => {
     await page.goto("/en/checkout/?tier=team&option=seats-5");
-    const trap = page.locator('input[name="website"]');
+    const trap = page.locator('input[name="pf_hp"]');
     await expect(trap).toHaveCount(1);
     await expect(trap).toHaveAttribute("tabindex", "-1");
     await expect(trap).toHaveAttribute("autocomplete", "off");

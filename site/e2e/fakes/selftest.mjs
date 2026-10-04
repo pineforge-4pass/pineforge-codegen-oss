@@ -67,6 +67,7 @@ const createParams = {
   client_reference_id: orderId,
   metadata: { order_id: orderId, tier: "team", option: "seats-5", term: "12" },
   invoice_creation: { enabled: true, invoice_data: { description: "PineForge Codegen", metadata: { order_id: orderId } } },
+  payment_intent_data: { metadata: { order_id: orderId } },
   automatic_tax: { enabled: false },
   tax_id_collection: { enabled: true },
   billing_address_collection: "required",
@@ -191,6 +192,35 @@ await check("control refund posts a verifiable charge.refunded", async () => {
   assert.equal(ch.refunded, true);
   assert.equal(ch.payment_intent, paid.payment_intent);
   assert.match(ch.id, /^ch_/);
+  assert.equal(ch.metadata.order_id, orderId, "the Charge carries the PaymentIntent's metadata");
+});
+
+await check("control dispute posts verifiable charge.dispute.created / .closed; created again re-sends it", async () => {
+  const post = async (body) => (await fetch(`${fake.url}/__control/dispute`, { method: "POST", body: JSON.stringify({ payment_intent: paid.payment_intent, ...body }) })).json();
+  const created = await post({ action: "created" });
+  assert.equal(created.delivery.status, 200);
+  const ev = received.at(-1);
+  assert.ok(ev.ok, ev.error);
+  assert.equal(ev.event.type, "charge.dispute.created");
+  const dp = ev.event.data.object;
+  assert.match(dp.id, /^dp_/);
+  assert.equal(dp.object, "dispute");
+  assert.equal(dp.payment_intent, paid.payment_intent);
+  assert.match(dp.charge, /^ch_/);
+  assert.equal(dp.amount, 240000);
+  assert.equal(dp.currency, "usd");
+  assert.equal(dp.status, "needs_response");
+  assert.ok(dp.reason);
+  const again = await post({ action: "created" });
+  assert.equal(again.dispute.id, dp.id);
+  assert.notEqual(again.event.id, created.event.id);
+  const closed = await post({ action: "closed", status: "lost" });
+  assert.equal(closed.delivery.status, 200);
+  const last = received.at(-1);
+  assert.ok(last.ok, last.error);
+  assert.equal(last.event.type, "charge.dispute.closed");
+  assert.equal(last.event.data.object.id, dp.id);
+  assert.equal(last.event.data.object.status, "lost");
 });
 
 for (const signature of ["bad", "none", "stale", "wrong-secret"]) {

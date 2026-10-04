@@ -42,6 +42,12 @@ export const E = {
   get siteDir() {
     return process.env.E2E_SITE_DIR || process.cwd();
   },
+  get orphan() {
+    return required("E2E_ORPHAN_URL");
+  },
+  get livePersistDir() {
+    return required("E2E_LIVE_PERSIST_DIR");
+  },
   get tmpDir() {
     return process.env.E2E_TMP_DIR || fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "pf-license-e2e-spec-"));
   },
@@ -197,7 +203,7 @@ export async function postJson(request, url, data, init = {}) {
   return { status: r.status(), body, text, headers: r.headers() };
 }
 
-export function checkoutBody(buyer, { tier = "team", option = "seats-5", website = "" } = {}) {
+export function checkoutBody(buyer, { tier = "team", option = "seats-5", pf_hp = "" } = {}) {
   return {
     tier,
     option,
@@ -208,7 +214,7 @@ export function checkoutBody(buyer, { tier = "team", option = "seats-5", website
     reference: buyer.reference,
     acceptAgreement: true,
     locale: "en",
-    website,
+    pf_hp,
   };
 }
 
@@ -259,6 +265,36 @@ export async function refund(request, paymentIntent, amount) {
   expect(res.status, res.text).toBe(200);
   return res.body;
 }
+
+/** A signed charge.dispute.created / charge.dispute.closed for the charge of `paymentIntent` (one dispute per charge). */
+export async function dispute(request, paymentIntent, action, status) {
+  const res = await postJson(request, `${E.stripe}/__control/dispute`, { payment_intent: paymentIntent, action, ...(status ? { status } : {}) });
+  expect(res.status, res.text).toBe(200);
+  return res.body;
+}
+
+/** Pays a session on the fake hosted page over HTTP (no browser); the fake answers 303 to the success url. */
+export async function payOverHttp(request, sessionId, { card = "4242 4242 4242 4242", email = "buyer@example.com" } = {}) {
+  const r = await request.post(`${E.stripe}/pay/${sessionId}`, {
+    form: { email, cardNumber: card, expiry: cardExpiry().replace(/ /g, ""), cvc: "123", name: "Ada Buyer", country: "DE" },
+    maxRedirects: 0,
+  });
+  expect(r.status(), await r.text()).toBe(303);
+}
+
+/** Polls GET /api/order until the order reaches `status`; returns its body. */
+export async function waitForOrderApi(request, sessionId, status = "issued", timeout = 45_000) {
+  let body;
+  await expect
+    .poll(async () => {
+      body = (await getOrder(request, sessionId)).body;
+      return body.status;
+    }, { timeout })
+    .toBe(status);
+  return body;
+}
+
+export const isAlert = (m) => /^(\[TEST\] )?ALERT:/.test(String(m.subject));
 
 export async function listEmails(request) {
   return (await getJson(request, `${E.resend}/__control/emails`)).body.emails ?? [];

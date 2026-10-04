@@ -23,6 +23,9 @@
 //                   signature: "valid" (default) | "bad" | "none" | "stale" | "wrong-secret"
 //              POST /__control/redeliver   { session_id } -> { event, delivery }: the SAME completed event
 //                   (same id and payload) posted again with a fresh signature, as Stripe retries it
+//              POST /__control/dispute     { payment_intent, action: "created"|"closed", status?, reason? }
+//                   -> { dispute, event, delivery }: a signed charge.dispute.created / .closed (one dispute per
+//                   charge; "created" again re-sends that dispute under a new event id)
 import http from "node:http";
 import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -472,7 +475,8 @@ export async function startStripeFake(options = {}) {
       currency: s.currency,
       customer: s.customer,
       livemode: false,
-      metadata: {},
+      // Stripe copies the PaymentIntent's metadata (payment_intent_data.metadata) onto its Charge.
+      metadata: structuredClone(entry.params.payment_intent_data?.metadata ?? {}),
       paid: true,
       payment_intent: s.payment_intent,
       refunded: false,
@@ -537,6 +541,41 @@ export async function startStripeFake(options = {}) {
       event.data.previous_attributes = { amount_refunded: e.charge.amount_refunded - amount, refunded: false };
       const delivery = await deliver(event);
       return sendJson(res, 200, { charge: e.charge, event, delivery });
+    }
+    if (req.method === "POST" && path === "/dispute") {
+      let body;
+      try {
+        body = JSON.parse((await readBody(req)) || "{}");
+      } catch {
+        return sendJson(res, 400, { error: "invalid_json" });
+      }
+      const sid = byPaymentIntent.get(body.payment_intent);
+      const e = sid ? sessions.get(sid) : null;
+      if (!e?.charge) return sendJson(res, 404, { error: "unknown_payment_intent" });
+      if (body.action !== "created" && body.action !== "closed") return sendJson(res, 400, { error: "action_must_be_created_or_closed" });
+      e.dispute ??= {
+        id: `dp_${rand(24)}`,
+        object: "dispute",
+        amount: e.charge.amount,
+        balance_transactions: [],
+        charge: e.charge.id,
+        created: now(),
+        currency: e.charge.currency,
+        evidence_details: { due_by: now() + 7 * 24 * 3600, has_evidence: false, past_due: false, submission_count: 0 },
+        is_charge_refundable: false,
+        livemode: false,
+        metadata: {},
+        payment_intent: e.charge.payment_intent,
+        reason: body.reason ?? "fraudulent",
+        status: "needs_response",
+      };
+      if (body.status) e.dispute.status = body.status;
+      else if (body.action === "created") e.dispute.status = "needs_response";
+      if (body.reason) e.dispute.reason = body.reason;
+      if (body.action === "created") e.charge.disputed = true;
+      const event = makeEvent(`charge.dispute.${body.action}`, structuredClone(e.dispute));
+      const delivery = await deliver(event);
+      return sendJson(res, 200, { dispute: e.dispute, event, delivery });
     }
     if (req.method === "POST" && path === "/redeliver") {
       let body;

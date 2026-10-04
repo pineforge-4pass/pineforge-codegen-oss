@@ -6,9 +6,10 @@ const NO_USES = { othersCapital: false, organization: false, embedding: false, h
 const USE_QS = ["othersCapital", "organization", "embedding", "hosted"];
 const PT_QS = ["naturalPerson", "ownAccount", "ownCapital"];
 
-// The questions the guide must ask for a set of answers (contract "Decision guide").
+// The questions the guide must ask for a set of answers (contract "Decision guide"). "noncommercialOrg"
+// is asked right after "organization" when the answer to it is Yes.
 function expectedPath(a) {
-  const asked = [...USE_QS];
+  const asked = a.organization ? ["othersCapital", "organization", "noncommercialOrg", "embedding", "hosted"] : [...USE_QS];
   if (USE_QS.some((q) => a[q])) return asked;
   for (const q of PT_QS) {
     asked.push(q);
@@ -20,13 +21,19 @@ function expectedPath(a) {
 const PATHS = [
   {
     name: "work for an organization -> Team",
-    answers: { ...NO_USES, organization: true },
+    answers: { ...NO_USES, organization: true, noncommercialOrg: false },
     outcome: "commercial-team",
     quotes: ["use2", "usesAreCommercial", "commercialUse"],
   },
   {
+    name: "work for a noncommercial organization -> ask first",
+    answers: { ...NO_USES, organization: true, noncommercialOrg: true },
+    outcome: "ask-first",
+    quotes: ["noncommercialOrgs", "use2", "usesAreCommercial", "supplementalControl"],
+  },
+  {
     name: "others' capital for a fund -> Fund",
-    answers: { ...NO_USES, othersCapital: true, organization: true },
+    answers: { ...NO_USES, othersCapital: true, organization: true, noncommercialOrg: false },
     outcome: "commercial-fund",
     quotes: ["use1", "use2", "usesAreCommercial", "commercialUse"],
   },
@@ -52,7 +59,7 @@ const PATHS = [
     name: "noncommercial organization -> permitted purpose",
     answers: { ...NO_USES, naturalPerson: false, noncommercial: true },
     outcome: "permitted-noncommercial",
-    quotes: ["noncommercialPurposes", "personalUses", "noncommercialOrgs"],
+    quotes: ["noncommercialPurposes", "personalUses"],
   },
   {
     name: "own account but not own capital, not noncommercial -> talk to us",
@@ -113,6 +120,12 @@ test.describe("decision guide", () => {
       const quotes = res.locator('blockquote[data-testid="license-quote"]');
       const ids = await quotes.evaluateAll((els) => els.map((e) => e.getAttribute("data-quote")));
       expect([...ids].sort()).toEqual([...p.quotes].sort());
+      if (p.quotes.includes("supplementalControl")) {
+        await expect(quotes.and(res.locator('[data-quote="supplementalControl"]'))).toHaveCount(1);
+        expect(normalizeText(await res.locator('blockquote[data-quote="supplementalControl"]').innerText())).toContain(
+          'In case of any conflict, the supplemental sections ("Additional Permission" and "Commercial Use") control over the base license.',
+        );
+      }
       for (const q of await quotes.all()) {
         const text = normalizeText(await q.innerText());
         expect(text.length).toBeGreaterThan(20);
@@ -127,9 +140,11 @@ test.describe("decision guide", () => {
     await answerAll(guide, PATHS[0].answers);
     await expect(result(page)).toHaveAttribute("data-outcome", "commercial-team");
 
-    // Change an earlier answer: organization -> No reveals the Personal Trading test, hosted -> Yes leads to OEM.
+    // Change an earlier answer: organization -> No drops the noncommercial-organization question and reveals the
+    // Personal Trading test, hosted -> Yes leads to OEM.
     const org = guide.locator('fieldset[data-question="organization"]');
     await org.getByRole("radio", { name: "No", exact: true }).check();
+    await expect(guide.locator('fieldset[data-question="noncommercialOrg"]')).toHaveCount(0);
     await expect(guide.locator('fieldset[data-question="naturalPerson"]')).toBeVisible();
     await guide.locator('fieldset[data-question="hosted"]').getByRole("radio", { name: "Yes", exact: true }).check();
     await expect(result(page)).toHaveAttribute("data-outcome", "commercial-oem");

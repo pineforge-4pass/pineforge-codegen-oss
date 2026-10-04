@@ -41,13 +41,13 @@ test("quote API: honeypot answered 200 and nothing sent; invalid fields answered
     deployment: "",
     message: "buy now",
     locale: "en",
-    website: "http://spam.example",
+    pf_hp: "http://spam.example",
   };
   const trap = await postJson(request, `${E.base}/api/quote`, body);
   expect(trap.status, trap.text).toBe(200);
   expect(trap.body).toEqual({ ok: true });
 
-  const invalid = await postJson(request, `${E.base}/api/quote`, { ...body, website: "", email: "not-an-email" });
+  const invalid = await postJson(request, `${E.base}/api/quote`, { ...body, pf_hp: "", email: "not-an-email" });
   expect(invalid.status, invalid.text).toBe(400);
   expect(invalid.body.error).toBe("invalid_fields");
   expect(invalid.body.fields.map((f) => f.field)).toContain("email");
