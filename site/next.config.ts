@@ -10,6 +10,9 @@ const nextConfig: NextConfig = {
   trailingSlash: true,
   images: { unoptimized: true },
   poweredByHeader: false,
+  // site/ is its own project inside the repository (which has its own
+  // package-lock.json); npm scripts always run from site/.
+  turbopack: { root: process.cwd() },
 };
 
 export default withNextIntl(nextConfig);
