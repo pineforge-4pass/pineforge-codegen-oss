@@ -130,3 +130,4 @@ temp/
 /npm/release.json
 /npm/transpile.worker.mjs
 /npm/glue.py
+/npm/LICENSE

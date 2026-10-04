@@ -4,13 +4,16 @@ Summary of licensing, third-party components, and trademarks for `pineforge-code
 
 ## License
 
-`pineforge-codegen` is **source-available**, **not** OSI "open source." It is distributed under the **PolyForm Noncommercial License 1.0.0** with an additional permission and a definition of Commercial Use — see [LICENSE](LICENSE), which is the controlling text. Both only add to the base license; they take away none of its permissions.
+`pineforge-codegen` is **source-available**, **not** OSI "open source." It is distributed under the **PineForge Source License 1.0** — see [LICENSE](LICENSE), which is the controlling text.
 
-- **Noncommercial use** — any noncommercial purpose, and any use by a charitable organization, educational institution, public research organization, public safety or health organization, environmental protection organization or government institution, is free under the base license.
+- **Noncommercial use** — any noncommercial purpose, and use by a charitable organization, educational institution, public research organization, public safety or health organization, environmental protection organization or government institution for its teaching, research and other operations, is free.
 - **Personal Trading** — free for a natural person to research, develop or backtest strategies and trade their **own** account with their **own** capital. Household, joint and retirement accounts and ordinary margin count as their own; a company's or fund's account does not, even a company they wholly own.
-- **Commercial Use** — any other use, such as managing, advising on or trading third-party capital, use by or for a company or fund, embedding the software or its output in a product or service for others, or operating a hosted/public-facing service with it, requires a **commercial license** (email **enterprise@pineforge.dev**; the commercial-license store is coming soon).
+- **Investment management** — managing, advising on or trading investment capital, or researching strategies for it (a friend's, clients' or investors' capital, an endowment, a pension fund, a public fund, a foundation's treasury), is **Commercial Use for every individual and every organization**, noncommercial organizations included, except Personal Trading.
+- **Commercial Use** — investment management and any other use that is not free, such as use by or for a company or fund, embedding the software or its output in a product or service for others, or operating a hosted/public-facing service with it, requires a **commercial license** (email **enterprise@pineforge.dev**; the commercial-license store is coming soon).
 
 Describe this project as **"source-available"** rather than "open source." The runtime it targets, [`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine), is separate and **Apache-2.0**.
+
+Releases up to and including 1.1.0 were published under the license text that came with them (the PolyForm Noncommercial License 1.0.0 with a PineForge supplement); copies of those releases keep that license. The PineForge Source License 1.0 is a separate license and is not a PolyForm license.
 
 ## Copyright and licensor
 

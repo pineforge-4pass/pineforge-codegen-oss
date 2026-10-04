@@ -4,7 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/pineforge-codegen.svg)](https://pypi.org/project/pineforge-codegen/)
 [![Python](https://img.shields.io/pypi/pyversions/pineforge-codegen.svg)](https://pypi.org/project/pineforge-codegen/)
-[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-orange.svg)](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-PineForge%20Source%201.0-orange.svg)](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE)
 [![Personal use](https://img.shields.io/badge/personal%20trading-free-22c55e.svg)](#license)
 
 A pure-Python library that turns a PineScript v6 strategy into a complete C++
@@ -531,18 +531,15 @@ use `python -m pytest --collect-only -q` for the current collection count.
 
 ## License
 
-Source-available under the [PolyForm Noncommercial License 1.0.0](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE),
-with an additional permission for personal trading and a definition of
-Commercial Use. Both only add to the base license and take away none of its
-permissions; the `LICENSE` file is the controlling text. The licensor is
-pineforge, LLC.
+Source-available under the [PineForge Source License 1.0](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE);
+the `LICENSE` file is the controlling text. The licensor is pineforge, LLC.
 
-- **Noncommercial use is free** under the base license: any noncommercial
-  purpose, and any use by a charitable organization, educational
-  institution, public research organization, public safety or health
-  organization, environmental protection organization or government
-  institution.
-- **Personal Trading is free:** a natural person may research, develop or
+- **Free for noncommercial use:** any noncommercial purpose, and use by a
+  charitable organization, educational institution, public research
+  organization, public safety or health organization, environmental
+  protection organization or government institution for its teaching,
+  research and other operations.
+- **Free for Personal Trading:** a natural person may research, develop or
   backtest strategies and execute trades for their own account with their
   own capital. Their own account includes joint and household accounts
   (spouse or domestic partner, dependants), retirement and other
@@ -550,9 +547,14 @@ pineforge, LLC.
   capital includes margin and other ordinary borrowing from a broker or
   lender. A company's or fund's account is not a personal account, even if
   the person wholly owns the company.
-- **Commercial Use needs a commercial license:** any other use, such as
-  managing, advising on or trading anyone else's capital (outside their
-  household); use by, for or on
+- **Investment management is never free**, except Personal Trading:
+  managing, advising on or trading investment capital, or researching
+  strategies for it, whether the capital is a friend's, clients' or
+  investors', an endowment, a pension fund, a public fund or a foundation's
+  treasury, is Commercial Use for every individual and every organization,
+  noncommercial organizations included.
+- **Commercial Use needs a commercial license:** besides investment
+  management, any other use that is not free, such as use by, for or on
   behalf of a company, fund, partnership or other organization (including an
   individual's work for one); embedding the software or its output in a
   product or service made available to others; or operating a hosted,
@@ -564,10 +566,11 @@ This is source-available, not OSI open source.
 ### Buying a commercial license
 
 Commercial licenses are annual: Solo for one person, Team for an
-organization's own use, Fund for managers of others' capital (by assets under
-management) and OEM / Embedded for products and hosted services. Email
-**enterprise@pineforge.dev** with questions or for a quote. The
-commercial-license store (coming soon) will take orders online.
+organization's own use, Fund for managers of others' capital and for
+institutional investment capital such as endowments and pension or public
+funds (by assets under management), and OEM / Embedded for products and
+hosted services. Email **enterprise@pineforge.dev** with questions or for a
+quote. The commercial-license store (coming soon) will take orders online.
 
 ## Explicit Pine execution attachment
 

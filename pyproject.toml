@@ -13,14 +13,14 @@ requires-python = ">=3.11"
 authors = [
     { name = "PineForge", email = "luis@4pass.com.tw" },
 ]
-# PolyForm Noncommercial 1.0.0 + Personal Trading exception; see LICENSE.
+# PineForge Source License 1.0 (source-available); see LICENSE.
 license = { file = "LICENSE" }
 readme = "README.md"
 keywords = ["pinescript", "transpiler", "trading", "backtesting", "tradingview"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Financial and Insurance Industry",
-    "License :: Free for non-commercial use",
+    "License :: Other/Proprietary License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

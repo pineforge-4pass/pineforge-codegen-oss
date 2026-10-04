@@ -31,15 +31,17 @@ const release = JSON.parse(readFileSync(RELEASE, "utf8"));
 if (release.codegen !== VERSION) fail(`release.json codegen ${release.codegen} != VERSION ${VERSION}`);
 
 // 1. Clean payload (keep tracked manifest + index).
-for (const p of ["pineforge_codegen", "tables.json", "release.json", "glue.py", "transpile.worker.mjs"]) {
+for (const p of ["pineforge_codegen", "tables.json", "release.json", "glue.py", "transpile.worker.mjs", "LICENSE"]) {
   rmSync(join(NPM, p), { recursive: true, force: true });
 }
 const versionedArchive = `pineforge_codegen-${VERSION}.tar.gz`;
 rmSync(join(NPM, versionedArchive), { force: true });
 
-// 2. Validated archive (versioned filename) + release.json.
+// 2. Validated archive (versioned filename) + release.json, and the LICENSE that
+//    package.json names ("SEE LICENSE IN LICENSE").
 cpSync(SCRATCH_ARCHIVE, join(NPM, versionedArchive));
 cpSync(RELEASE, join(NPM, "release.json"));
+cpSync(join(ROOT, "LICENSE"), join(NPM, "LICENSE"));
 
 // 3. Unpacked source tree — extracted FROM the gate-validated archive (single
 //    source of truth). Never re-copy the working tree: it could have drifted
