@@ -1,34 +1,159 @@
-PineForge Codegen — License
+PineForge Source License 1.0
 ============================
 
-Copyright 2025 PineForge <luis@4pass.com.tw>
+Copyright 2025-2026 pineforge, LLC
 
-This software is made available under the **PolyForm Noncommercial License
-1.0.0** (reproduced in full below), as modified by the two supplemental
-sections that follow. In case of any conflict, the supplemental sections
-("Additional Permission" and "Commercial Use") control over the base license.
+Required Notice: Copyright 2025-2026 pineforge, LLC (https://github.com/pineforge-4pass/pineforge-codegen-oss)
 
-Required Notice: Copyright 2025 PineForge (https://github.com/pineforge-4pass/pineforge-codegen-oss)
+The software is free of charge for the permitted purposes below, including
+Personal Trading. Commercial Use, defined below, needs a separate commercial
+license from the licensor.
 
 
-Additional Permission — Personal Trading
-----------------------------------------
+## Acceptance
 
-Notwithstanding the limitation to noncommercial purposes in the base license,
-the licensor grants you, free of charge, an additional license to use the
-software for **Personal Trading**, and Personal Trading is hereby a permitted
-purpose under the base license — including its Copyright License, Distribution
-License, Changes and New Works License, and Patent License.
+In order to get any license under these terms, you must agree to them as both
+strict obligations and conditions to all your licenses.
 
-**Personal Trading** means use of the software by a natural person to research,
-develop, backtest, and execute trades in financial instruments, where:
 
-  (a) the trades are placed for that same natural person's own account; and
+## Copyright License
 
-  (b) the trades are funded solely by that person's own capital.
+The licensor grants you a copyright license for the software to do everything
+you might do with the software that would otherwise infringe the licensor's
+copyright in it for any permitted purpose. However, you may only distribute
+the software according to the Distribution License section, and make changes
+or new works based on the software according to the Changes and New Works
+License section.
 
-Personal Trading does **not** include, and this Additional Permission does
-**not** cover:
+
+## Distribution License
+
+The licensor grants you an additional copyright license to distribute copies
+of the software. Your license to distribute covers distributing the software
+with changes and new works permitted by the Changes and New Works License
+section. Distributing copies under this section is not Commercial Use, and it
+gives the people who get them no license beyond these terms.
+
+
+## Notices
+
+You must ensure that anyone who gets a copy of any part of the software from
+you also gets a copy of these terms or a link to them, as well as copies of
+any plain-text lines beginning with `Required Notice:` that the licensor
+provided with the software. For example:
+
+> Required Notice: Copyright Yoyodyne, Inc. (http://example.com)
+
+
+## Changes and New Works License
+
+The licensor grants you an additional copyright license to make changes and
+new works based on the software for any permitted purpose.
+
+
+## Patent License
+
+The licensor grants you a patent license for the software that covers patent
+claims the licensor can license, or becomes able to license, that you would
+infringe by using the software for a permitted purpose.
+
+
+## Permitted Purposes
+
+Each of the following is a permitted purpose:
+
+- **Noncommercial purposes.** Any noncommercial purpose.
+
+- **Personal uses.** Personal use for research, experiment, and testing for
+  the benefit of public knowledge, personal study, private entertainment,
+  hobby projects, amateur pursuits, or religious observance, without any
+  anticipated commercial application.
+
+- **Noncommercial organizations.** Use by any charitable organization,
+  educational institution, public research organization, public safety or
+  health organization, environmental protection organization, or government
+  institution for its teaching, research and other operations, regardless of
+  the source of funding or obligations resulting from the funding.
+
+- **Personal Trading**, as defined in the next section.
+
+Investment Management, defined in the Commercial Use section, is never a
+permitted purpose, except as Personal Trading. That is so even when it is done
+by a noncommercial organization or for a noncommercial purpose.
+
+
+## Personal Trading
+
+**Personal Trading** means use of the software by a natural person to do any
+of the following, solely for trades that meet conditions (a) and (b) below:
+research, develop or backtest trading strategies, or execute trades in
+securities, derivatives, currencies, crypto-assets, commodities or other
+financial instruments.
+
+  (a) The trades are, or will be, placed for that person's own account.
+
+  (b) The trades are, or will be, funded solely by that person's own
+      capital.
+
+For Personal Trading:
+
+  - A person's **household** is that person, their spouse or domestic
+    partner, and their dependants.
+
+  - A person's **own account** includes an account held by the person alone
+    or jointly with members of their household; an account of a member of
+    their household; and a retirement, pension, education-savings or other
+    tax-advantaged account, or an account of a revocable trust, held for the
+    benefit of the person or members of their household.
+
+  - A person's **own capital** includes capital belonging to members of
+    their household, and capital borrowed in the ordinary course from a
+    broker, bank or other lender, such as margin, leverage or credit on a
+    trading account, for which the person or their household is liable.
+    Money the person has received outright, such as pay, a gift or an
+    inheritance, is the person's own capital.
+
+  - Trading in the person's own name, for their own account and with their
+    own capital, is Personal Trading even when it is the person's business
+    or livelihood.
+
+  - Publishing or teaching about the person's own Personal Trading,
+    including its results, is part of Personal Trading even when the person
+    is paid for it, as long as they do not give Output to others.
+
+  - An account of a company, partnership, fund, trust or other
+    organization, other than an account described under own account above,
+    is not the person's own account, even if the person wholly owns or
+    controls it.
+
+  - Capital that an employer, a proprietary-trading firm, a funded-trader
+    program or anyone else outside the person's household provides or
+    allocates to the person to trade, and that the provider still owns or
+    whose losses the provider bears, is not the person's own capital, even
+    if the person shares in the profits.
+
+
+## Commercial Use
+
+**Investment Management** means using the software to manage, advise on, or
+trade investment capital; to research, develop or backtest strategies for
+investment capital that you, or anyone you do the work for, manage, advise on
+or trade; or to operate the software for others who do any of these things;
+in each case whoever the capital belongs to and whether or not for a fee.
+
+**Investment capital** means any money or other assets held for investment or
+trading, including capital belonging to any other person or entity, such as a
+friend or relative, clients or investors, an endowment, a pension or
+retirement fund, a sovereign or other public fund, or the treasury or reserves
+of a foundation or other organization.
+
+**Commercial Use** means any use of the software that is not a permitted
+purpose, other than distributing copies under the Distribution License
+section. Investment Management is Commercial Use for every individual and
+every organization, including the noncommercial organizations listed under
+Permitted Purposes, whatever its purpose, unless it is Personal Trading.
+Unless it is a permitted purpose, each of the following is also Commercial
+Use:
 
   (1) managing, advising on, or trading capital belonging to any other person
       or entity, whether or not for a fee;
@@ -37,161 +162,79 @@ Personal Trading does **not** include, and this Additional Permission does
       organization, including use by an individual in the course of work for
       such an organization;
 
-  (3) embedding the software, or output generated by it, into any product or
-      service made available to others; or
+  (3) embedding the software, or its Output, into any product or service
+      made available to others, including using the software to generate
+      Output for such a product or service; and
 
   (4) operating any hosted, software-as-a-service, or otherwise public-facing
-      service that uses the software.
+      service through which others can run the software or receive its
+      Output.
 
-The use described in (1)–(4) is Commercial Use.
-
-
-Commercial Use
---------------
-
-Any use that is not a permitted purpose under the base license and is not
-covered by the Additional Permission above — including the uses listed in
-(1)–(4) of that section — requires a separate commercial license from the
-licensor.
-
-To obtain a commercial license, contact: luis@4pass.com.tw
+Commercial Use requires a separate commercial license from the licensor. To
+obtain one, contact: enterprise@pineforge.dev
 
 
-================================================================================
-The remainder of this file is the verbatim text of the PolyForm Noncommercial
-License 1.0.0. Where it differs from the supplemental sections above, the
-supplemental sections control.
-================================================================================
+## Output
 
+**Output** means code that the software generates, such as the C++ source
+code it generates from PineScript, and any program or library built from that
+code. Backtest results, charts, reports and trade signals are not Output.
 
-# PolyForm Noncommercial License 1.0.0
-
-<https://polyformproject.org/licenses/noncommercial/1.0.0>
-
-## Acceptance
-
-In order to get any license under these terms, you must agree
-to them as both strict obligations and conditions to all
-your licenses.
-
-## Copyright License
-
-The licensor grants you a copyright license for the
-software to do everything you might do with the software
-that would otherwise infringe the licensor's copyright
-in it for any permitted purpose.  However, you may
-only distribute the software according to [Distribution
-License](#distribution-license) and make changes or new works
-based on the software according to [Changes and New Works
-License](#changes-and-new-works-license).
-
-## Distribution License
-
-The licensor grants you an additional copyright license
-to distribute copies of the software.  Your license
-to distribute covers distributing the software with
-changes and new works permitted by [Changes and New Works
-License](#changes-and-new-works-license).
-
-## Notices
-
-You must ensure that anyone who gets a copy of any part of
-the software from you also gets a copy of these terms or the
-URL for them above, as well as copies of any plain-text lines
-beginning with `Required Notice:` that the licensor provided
-with the software.  For example:
-
-> Required Notice: Copyright Yoyodyne, Inc. (http://example.com)
-
-## Changes and New Works License
-
-The licensor grants you an additional copyright license to
-make changes and new works based on the software for any
-permitted purpose.
-
-## Patent License
-
-The licensor grants you a patent license for the software that
-covers patent claims the licensor can license, or becomes able
-to license, that you would infringe by using the software.
-
-## Noncommercial Purposes
-
-Any noncommercial purpose is a permitted purpose.
-
-## Personal Uses
-
-Personal use for research, experiment, and testing for
-the benefit of public knowledge, personal study, private
-entertainment, hobby projects, amateur pursuits, or religious
-observance, without any anticipated commercial application,
-is use for a permitted purpose.
-
-## Noncommercial Organizations
-
-Use by any charitable organization, educational institution,
-public research organization, public safety or health
-organization, environmental protection organization,
-or government institution is use for a permitted purpose
-regardless of the source of funding or obligations resulting
-from the funding.
 
 ## Fair Use
 
-You may have "fair use" rights for the software under the
-law. These terms do not limit them.
+You may have "fair use" rights for the software under the law. These terms do
+not limit them.
+
 
 ## No Other Rights
 
-These terms do not allow you to sublicense or transfer any of
-your licenses to anyone else, or prevent the licensor from
-granting licenses to anyone else.  These terms do not imply
-any other licenses.
+These terms do not allow you to sublicense or transfer any of your licenses
+to anyone else, or prevent the licensor from granting licenses to anyone
+else. These terms do not imply any other licenses.
+
 
 ## Patent Defense
 
-If you make any written claim that the software infringes or
-contributes to infringement of any patent, your patent license
-for the software granted under these terms ends immediately. If
-your company makes such a claim, your patent license ends
-immediately for work on behalf of your company.
+If you make any written claim that the software infringes or contributes to
+infringement of any patent, your patent license for the software granted
+under these terms ends immediately. If your company makes such a claim, your
+patent license ends immediately for work on behalf of your company.
+
 
 ## Violations
 
-The first time you are notified in writing that you have
-violated any of these terms, or done anything with the software
-not covered by your licenses, your licenses can nonetheless
-continue if you come into full compliance with these terms,
-and take practical steps to correct past violations, within
-32 days of receiving notice.  Otherwise, all your licenses
-end immediately.
+The first time you are notified in writing that you have violated any of
+these terms, or done anything with the software not covered by your licenses,
+your licenses can nonetheless continue if you come into full compliance with
+these terms, and take practical steps to correct past violations, within 32
+days of receiving notice. Otherwise, all your licenses end immediately.
+
 
 ## No Liability
 
-***As far as the law allows, the software comes as is, without
-any warranty or condition, and the licensor will not be liable
-to you for any damages arising out of these terms or the use
-or nature of the software, under any kind of legal claim.***
+***As far as the law allows, the software comes as is, without any warranty
+or condition, and the licensor will not be liable to you for any damages
+arising out of these terms or the use or nature of the software, under any
+kind of legal claim.***
+
 
 ## Definitions
 
-The **licensor** is the individual or entity offering these
-terms, and the **software** is the software the licensor makes
-available under these terms.
+The **licensor** is pineforge, LLC, and the **software** is the software the
+licensor makes available under these terms.
 
-**You** refers to the individual or entity agreeing to these
-terms.
+**You** refers to the individual or entity agreeing to these terms.
 
-**Your company** is any legal entity, sole proprietorship,
-or other kind of organization that you work for, plus all
-organizations that have control over, are under the control of,
-or are under common control with that organization.  **Control**
-means ownership of substantially all the assets of an entity,
-or the power to direct its management and policies by vote,
-contract, or otherwise.  Control can be direct or indirect.
+**Your company** is any legal entity, sole proprietorship, or other kind of
+organization that you work for, plus all organizations that have control
+over, are under the control of, or are under common control with that
+organization. **Control** means ownership of substantially all the assets of
+an entity, or the power to direct its management and policies by vote,
+contract, or otherwise. Control can be direct or indirect.
 
-**Your licenses** are all the licenses granted to you for the
-software under these terms.
+**Your licenses** are all the licenses granted to you for the software under
+these terms.
 
-**Use** means anything you do with the software requiring one
-of your licenses.
+**Use** means anything you do with the software requiring one of your
+licenses.

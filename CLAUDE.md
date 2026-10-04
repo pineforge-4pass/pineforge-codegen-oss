@@ -63,8 +63,8 @@ Python entry points are `pineforge_codegen.transpile()` and
 `pineforge_codegen.transpile_full()`; the Pyodide package ships the
 `gate/glue.py` JSON protocol. See `docs/PUBLIC_CONTRACT.md`.
 
-This is the **source-available** half of the PineForge stack (PolyForm
-Noncommercial — see `LICENSE`). The runtime half (`pineforge-engine`,
+This is the **source-available** half of the PineForge stack (PineForge
+Source License 1.0 — see `LICENSE`). The runtime half (`pineforge-engine`,
 Apache-2.0) lives in a sibling repo and is typically checked out at
 `../pineforge-engine`. From 1.0.0 on, a released codegen `X.Y.Z` pairs only
 with engine `vX.Y.Z`; prereleases match exactly. Codegen 1.1.0 pairs with
