@@ -155,7 +155,7 @@
     "metaTitle": "Plans",
     "title": "Plans",
     "lead": "Each plan is a 12-month commercial license for PineForge Codegen. Prices are per year, for the scope shown.",
-    "placeholders": "Prices are placeholders while the site is in preview. Checkout runs in Stripe test mode and takes no real payment.",
+    "placeholders": "Prices are placeholders, and no real payment is taken while the site is in preview.",
     "covers": "Covers LICENSE {uses}.",
     "permitsLabel": "Permits",
     "notCoveredLabel": "Not covered",
@@ -203,7 +203,7 @@
     "reference": "Purchase order or reference (optional)",
     "acceptDraft": "I accept the Commercial License Agreement (draft)",
     "acceptFinal": "I accept the Commercial License Agreement",
-    "agreementNoteDraft": "Read the <link>Commercial License Agreement</link> first. It is a draft that counsel has not reviewed, and it says no one can accept it yet. Until it is final, checkout runs in Stripe test mode and grants no license.",
+    "agreementNoteDraft": "Read the <link>Commercial License Agreement</link> first. It is a draft that counsel has not reviewed, and it says no one can accept it yet. Until it is final, no real payment is taken while the site is in preview, and checkout grants no commercial license.",
     "agreementNoteFinal": "Read the <link>Commercial License Agreement</link> first.",
     "honeypot": "Leave this field empty",
     "submit": "Continue to payment",
@@ -225,13 +225,14 @@
   "order": {
     "metaTitle": "Your order",
     "title": "Your order",
-    "invoiceNote": "For a live purchase, Stripe creates an invoice for the payment; whether Stripe emails it to you depends on the seller's Stripe settings. Test-mode orders get no real invoice. Keep the license file from the download above: a live order also emails it to you, while a test-mode order emails it only to the addresses its test setup allows.",
+    "invoiceNote": "For a live purchase, Stripe creates an invoice for the payment; whether Stripe emails it to you depends on the seller's Stripe settings. Test-mode orders get no real invoice.",
     "status": {
       "pending": "Waiting for Stripe to confirm the payment. This page updates by itself.",
-      "pendingTimeout": "Stripe has not confirmed the payment yet. Reload this page in a few minutes; the license is also emailed to you once it is issued. If nothing arrives, write to {email}.",
+      "pendingTimeout": "Stripe has not confirmed the payment yet. Reload this page in a few minutes: once the license is issued, it appears here. If it does not, write to {email}.",
       "issued": "Your license is issued.",
       "refunded": "This order was refunded, and its license was revoked.",
       "revoked": "The license for this order was revoked.",
+      "closed": "This order was closed by the licensor; no license is active.",
       "expired": "The checkout session expired before payment. Nothing was charged.",
       "failed": "The payment failed. Nothing was charged.",
       "mismatch": "The payment did not match the order, so no license was issued. We have been alerted; write to {email} with your order details.",
@@ -252,7 +253,7 @@
     "certificate": "View the certificate",
     "download": "Download the signed license (JSON)",
     "verify": "Verify this license",
-    "keepFile": "Keep the signed license file: anyone can check its signature against the public keys, and the verify page checks it online."
+    "keepFile": "Keep the signed license file from the download above: anyone can check its signature against the public keys, and the verify page checks it online. A live order also emails it to you; a test-mode order emails it only to the addresses its test setup allows."
   },
   "verify": {
     "metaTitle": "Verify a license",
@@ -354,7 +355,7 @@
       },
       "preview": {
         "q": "Are the prices final?",
-        "a": "Not yet. While the site is in preview, prices are placeholders and checkout runs in Stripe test mode, so no real payment is taken and test licenses are not commercial licenses."
+        "a": "Not yet. While the site is in preview, prices are placeholders, no real payment is taken, and test licenses are not commercial licenses."
       }
     }
   },
@@ -369,7 +370,7 @@
       "payment": "Payment: you pay on Stripe's checkout page; card details are entered there, not on this site. For a live purchase Stripe creates an invoice; whether Stripe emails it depends on the seller's Stripe settings. Test-mode orders get no real invoice.",
       "delivery": "Delivery: the license is issued once Stripe confirms the payment. It is shown on the order page and emailed to you with the signed license file.",
       "refunds": "Refunds: as stated in the Commercial License Agreement. A license whose order is refunded in full is revoked.",
-      "preview": "Preview: while prices are placeholders, checkout runs in test mode, no real payment is taken, and test licenses are not commercial licenses.",
+      "preview": "Preview: while the site is in preview, prices are placeholders, no real payment is taken, and test licenses are not commercial licenses.",
       "control": "If this summary and the agreement differ, the agreement controls. Questions: {email}."
     },
     "agreementHeading": "Commercial License Agreement",

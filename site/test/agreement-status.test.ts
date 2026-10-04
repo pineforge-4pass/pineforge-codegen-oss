@@ -10,7 +10,7 @@ const body = (head: string) => `${head}
 Version: 2027-01-15
 
 **1. Parties.** PineForge Ltd, 1 Example Street, and the Licensee named on the Order.
-See the [LICENSE](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE).
+See the [license text](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE).
 `;
 const FINAL = body("Status: final");
 
@@ -70,4 +70,24 @@ test("marker removed and Status: final, but the version is still a draft version
 test("the agreement in this repository is a draft today", () => {
   const text = readFileSync(new URL("../legal/commercial-license-agreement.md", import.meta.url), "utf8");
   assert.equal(agreementStatus(text).isDraft, true);
+});
+
+test("residual draft forms: marker in any case, the notice paragraph, a draft version line", () => {
+  for (const extra of [
+    "> **Draft — requires review by counsel before go-live**",
+    "draft - requires review",
+    "It is not yet offered: no one can accept it until counsel has reviewed it.",
+    "This holds until this notice is removed.",
+  ]) {
+    assert.equal(agreementStatus(FINAL + `\n${extra}\n`).isDraft, true, extra);
+  }
+  assert.equal(agreementStatus(FINAL.replace("Version: 2027-01-15", "Version: 2027-01-15 (draft)")).isDraft, true);
+});
+
+test("ALL-CAPS bracket text is a placeholder in link, reference and footnote forms", () => {
+  for (const extra of ["[CITY][COUNTRY]", "[NAME](https://example.com)", "[NAME]: https://example.com", "text[^LEGAL ENTITY]"]) {
+    const s = agreementStatus(FINAL + `\n${extra}\n`);
+    assert.equal(s.isDraft, true, extra);
+    assert.ok(s.reasons.some((r) => r.includes("placeholder")), extra);
+  }
 });

@@ -7,7 +7,7 @@
 //
 // Control:     GET  /__control/health
 //              GET  /__control/emails[?to=<address>]  -> { emails: [{ id, created_at, from, to, subject, text, html, reply_to, attachments }] }
-//              POST /__control/fail-next { count, status?, to? } -> the next `count` POST /emails (only those
+//              POST /__control/fail-next { count, status?, to?, subject? } -> the next `count` POST /emails (only those
 //                   addressed to `to`, when given) answer `status` (default 503) and are not stored
 //              GET  /__control/failed  -> { failed: [{ at, status, to, subject }] }
 import http from "node:http";
@@ -55,7 +55,12 @@ export async function startResendFake(options = {}) {
           return sendJson(res, 422, { statusCode: 422, name: "validation_error", message: "Missing `text` or `html` field." });
         }
         const to = asList(body.to).map((t) => String(t).toLowerCase());
-        const rule = failRules.find((r) => r.remaining > 0 && (!r.to || to.some((t) => t.includes(r.to))));
+        const rule = failRules.find(
+          (r) =>
+            r.remaining > 0 &&
+            (!r.to || to.some((t) => t.includes(r.to))) &&
+            (!r.subject || String(body.subject ?? "").includes(r.subject)),
+        );
         if (rule) {
           rule.remaining -= 1;
           failed.push({ at: new Date().toISOString(), status: rule.status, to: body.to, subject: body.subject });
@@ -80,7 +85,12 @@ export async function startResendFake(options = {}) {
         if (!Number.isInteger(count) || count < 1 || !Number.isInteger(status) || status < 400 || status > 599) {
           return sendJson(res, 400, { error: "count >= 1 and a 4xx/5xx status required" });
         }
-        failRules.push({ remaining: count, status, to: body.to ? String(body.to).toLowerCase() : null });
+        failRules.push({
+          remaining: count,
+          status,
+          to: body.to ? String(body.to).toLowerCase() : null,
+          subject: body.subject ? String(body.subject) : null,
+        });
         return sendJson(res, 200, { ok: true, pending: failRules.filter((r) => r.remaining > 0).length });
       }
       if (req.method === "GET" && url.pathname === "/__control/failed") return sendJson(res, 200, { failed });

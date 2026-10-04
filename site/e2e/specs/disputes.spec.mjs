@@ -8,6 +8,7 @@ import {
   E,
   apiCheckout,
   dispute,
+  failNextEmails,
   fakeSession,
   getJson,
   isAlert,
@@ -156,4 +157,23 @@ test("a lost dispute on an order without a license, then a redelivered completed
   expect(after.body.status).not.toBe("pending");
   // Nothing went to the buyer: there is no license to send.
   expect((await listEmails(request)).filter((m) => JSON.stringify(m.to).toLowerCase().includes(buyer.email))).toEqual([]);
+});
+
+test("a dispute alert that fails to send answers 500; the redelivery alerts once", async ({ request }) => {
+  const o = await paidOrder(request, "dispute-alert-retry");
+  // Only this order's dispute alert fails (the subject names the order), so parallel tests keep their emails.
+  await failNextEmails(request, { count: 1, status: 503, subject: `payment disputed on order ${o.orderId}` });
+  const first = await dispute(request, o.paymentIntent, "created");
+  expect(first.delivery.status, first.delivery.body).toBe(500);
+  const match = alertsFor([first.dispute.id, o.orderId]);
+  expect((await listEmails(request)).filter(match)).toHaveLength(0);
+
+  // Stripe redelivers: the alert goes out now, once, and a further delivery adds nothing.
+  const second = await dispute(request, o.paymentIntent, "created");
+  expect(second.delivery.status, second.delivery.body).toBe(200);
+  await waitForEmails(request, match);
+  const third = await dispute(request, o.paymentIntent, "created");
+  expect(third.delivery.status, third.delivery.body).toBe(200);
+  await new Promise((r) => setTimeout(r, 1500));
+  expect((await listEmails(request)).filter(match)).toHaveLength(1);
 });

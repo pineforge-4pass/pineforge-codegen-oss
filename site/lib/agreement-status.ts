@@ -8,11 +8,16 @@
 //   - the DRAFT marker is absent;
 //   - a line exactly "Status: final" is present;
 //   - a "Version:" line exists and its value does not contain "draft";
-//   - no line contains "DRAFT" in capitals;
+//   - no line contains "DRAFT" in capitals, and no "draft — requires review"
+//     marker in any case;
+//   - the notice paragraph is gone ("no one can accept it", "this notice is
+//     removed");
 //   - no bracketed text remains other than Markdown links and references:
 //     "[text](url)", "[text][ref]", "[ref]: url" and footnotes "[^1]" are
 //     fine; any other "[...]", also one wrapped across lines ("[TBD]",
-//     "[30 days]", "[REFUND POLICY]"), is a placeholder.
+//     "[30 days]", "[REFUND POLICY]"), is a placeholder, and so is ALL-CAPS
+//     bracket text in any of those forms ("[CITY][COUNTRY]", "[NAME](",
+//     "[NAME]: ...", "[^NAME]").
 
 export const AGREEMENT_MARKER = "DRAFT — requires review by counsel before go-live";
 
@@ -34,10 +39,15 @@ export function agreementStatus(text: string): AgreementStatus {
   if (text.includes(AGREEMENT_MARKER)) reasons.push(`the "${AGREEMENT_MARKER}" marker is present`);
   if (!/^Status: final$/m.test(text.replace(/\r\n?/g, "\n"))) reasons.push('no line "Status: final"');
   const version = agreementVersion(text);
+  const versionLine = text.split(/\r\n?|\n/).find((line) => /^[\s>*_]*Version[\s*_]*:/i.test(line));
   if (!version) reasons.push('no "Version:" line');
-  else if (/draft/i.test(version)) reasons.push(`the version "${version}" is a draft version`);
-  const draftLine = text.split(/\r\n?|\n/).find((line) => line.includes("DRAFT"));
+  else if (/draft/i.test(versionLine ?? version)) reasons.push(`the version line "${(versionLine ?? version).trim()}" is a draft version`);
+  const lines = text.split(/\r\n?|\n/);
+  const draftLine = lines.find((line) => line.includes("DRAFT") || /draft\s*[—–-]+\s*requires review/i.test(line));
   if (draftLine !== undefined) reasons.push(`a line still says DRAFT: "${draftLine.trim().slice(0, 80)}"`);
+  if (/no one can accept it|this notice is removed/i.test(text.replace(/\s+/g, " "))) {
+    reasons.push("the draft notice paragraph is still present");
+  }
   const placeholders = bracketPlaceholders(text);
   if (placeholders.length) {
     reasons.push(`${placeholders.length} placeholder(s) remain, e.g. [${placeholders[0].replace(/\s+/g, " ")}]`);
@@ -55,6 +65,11 @@ export function bracketPlaceholders(text: string): string[] {
     const next = text.charAt(end);
     const prev = start > 0 ? text.charAt(start - 1) : "";
     const lineStart = start === 0 || text.charAt(start - 1) === "\n";
+    // ALL-CAPS bracket text is a placeholder whatever form it takes.
+    if (/^\^?[A-Z][A-Z ]*[A-Z]$/.test(inner.trim())) {
+      found.push(inner);
+      continue;
+    }
     if (next === "(" || next === "[") continue; // [text](url), [text][ref]
     if (prev === "]") continue; // the [ref] of [text][ref]
     if (inner.startsWith("^")) continue; // footnote [^1]

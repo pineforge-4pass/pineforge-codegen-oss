@@ -230,6 +230,13 @@ the keyring, a database error), one alert per order goes to
 
 ### D1 tables (`migrations/`)
 
+`migrations/0001_init.sql` changed while this site was being built, before
+its first deploy (licenses gained `emailed_at` and `email_claimed_at`; orders
+gained the `disputed` status). Wrangler applies a migration file only once, so
+any local `.wrangler` D1 state or preview database created from an earlier
+version of it must be deleted and recreated (`npm run d1:migrate:local`, or
+`--remote` for a recreated preview database).
+
 `orders` (pending, paid, refunded, expired, failed, mismatch, disputed), `licenses`
 (at most one per order; active or revoked), `stripe_events` (processed event
 ids), `quotes`, `email_log` (every email attempt and its result) and

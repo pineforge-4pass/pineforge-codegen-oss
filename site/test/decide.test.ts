@@ -25,6 +25,9 @@ test("a yes to (2) asks whether the organization is one the base license lists",
     "noncommercialOrg",
     "embedding",
   ]);
+  // A left-over answer counts only while (2) is yes.
+  assert.equal(decide({ ...uses(false, false, true, false), noncommercialOrg: true })?.id, "commercial-oem");
+  assert.equal(decide({ ...uses(true, false, false, false), noncommercialOrg: true })?.id, "commercial-fund");
   // A no to (2) never asks it, even if an earlier answer is left over.
   assert.deepEqual(path({ othersCapital: false, organization: false, noncommercialOrg: true }), [
     "othersCapital",

@@ -262,7 +262,11 @@ async function disputeClosed(env: Env, dispute: Dispute): Promise<void> {
   // redelivery can issue a license for it) and any active license is revoked.
   const now = nowIso();
   await env.DB.batch([
-    env.DB.prepare("UPDATE orders SET status = 'disputed', updated_at = ?1 WHERE id = ?2").bind(now, order.id),
+    // A refunded order stays refunded (it can never issue either).
+    env.DB.prepare("UPDATE orders SET status = 'disputed', updated_at = ?1 WHERE id = ?2 AND status <> 'refunded'").bind(
+      now,
+      order.id,
+    ),
     env.DB.prepare(
       "UPDATE licenses SET status = 'revoked', revoked_at = ?1, revoke_reason = 'dispute_lost' WHERE order_id = ?2 AND status = 'active'",
     ).bind(now, order.id),

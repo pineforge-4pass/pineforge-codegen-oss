@@ -9,7 +9,7 @@ import { apiError, json } from "../../server/http.ts";
 import { licenseByOrder, orderBySession, signedFromRow, type LicenseRow, type OrderRow } from "../../server/db.ts";
 import type { LicensePayload } from "../../lib/license.ts";
 
-type ApiStatus = "pending" | "issued" | "refunded" | "revoked" | "expired" | "failed" | "mismatch";
+type ApiStatus = "pending" | "issued" | "refunded" | "revoked" | "closed" | "expired" | "failed" | "mismatch";
 
 function apiStatus(order: OrderRow, license: LicenseRow | null): ApiStatus {
   switch (order.status) {
@@ -19,8 +19,9 @@ function apiStatus(order: OrderRow, license: LicenseRow | null): ApiStatus {
     case "pending":
       return "pending";
     case "disputed":
-      // Shown neutrally, as the verify page and certificate show it.
-      return "revoked";
+      // Shown neutrally, as the verify page and certificate show it; an order
+      // that never had a license was not "revoked", only closed.
+      return license ? "revoked" : "closed";
     default:
       return order.status;
   }

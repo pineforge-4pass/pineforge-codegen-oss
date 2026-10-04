@@ -51,7 +51,7 @@ type State =
 
 const POLL_MS = 1500;
 const POLL_LIMIT_MS = 120_000;
-const KNOWN = new Set(["pending", "issued", "refunded", "revoked", "expired", "failed", "mismatch"]);
+const KNOWN = new Set(["pending", "issued", "refunded", "revoked", "closed", "expired", "failed", "mismatch"]);
 
 export function OrderStatus() {
   const t = useTranslations("order");

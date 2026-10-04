@@ -99,7 +99,7 @@ export function nextQuestion(answers: Answers): QuestionId | null {
 export function decide(answers: Answers): Outcome | null {
   if (nextQuestion(answers) !== null) return null;
   const uses = USE_QUESTIONS.filter((q) => answers[q] === true).map((q) => USE_OF[q] as Use);
-  if (answers.noncommercialOrg === true) {
+  if (answers.organization === true && answers.noncommercialOrg === true) {
     // Never resolved either way, whatever else applies: the other uses the
     // answers name are quoted beside the clause and the conflict sentence.
     return {
