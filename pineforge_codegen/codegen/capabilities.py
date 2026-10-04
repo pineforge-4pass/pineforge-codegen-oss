@@ -3,7 +3,7 @@
 import json
 import math
 
-from ..ast_nodes import BoolLiteral, FuncCall, Identifier, MemberAccess, NumberLiteral, StrategyDecl, StringLiteral, UnaryOp, VarDecl
+from ..ast_nodes import BoolLiteral, FuncCall, Identifier, MemberAccess, NumberLiteral, StrategyDecl, StringLiteral, Subscript, UnaryOp, VarDecl
 from ..external_requests import CAPABILITY_UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
 
@@ -44,6 +44,8 @@ def _expression(node):
         return f"{_expression(node.object)}.{node.member}"
     if isinstance(node, FuncCall):
         return f"{_expression(node.callee)}({','.join(str(_expression(arg)) for arg in node.args)})"
+    if isinstance(node, Subscript):
+        return f"{_expression(node.object)}[{_expression(node.index)}]"
     return None
 
 
@@ -61,13 +63,41 @@ def _literal(node):
     return _expression(node), False
 
 
-def capabilities_document(emitter) -> str:
+def _order_shape(node, short_ids):
+    name = _expression(node.callee)
+    positional = {
+        "strategy.entry": ("id", "direction", "qty", "limit", "stop", "oca_name", "oca_type", "comment", "alert_message", "disable_alert"),
+        "strategy.exit": ("id", "from_entry", "qty", "qty_percent", "profit", "limit", "loss", "stop", "trail_price", "trail_points", "trail_offset"),
+        "strategy.close": ("id", "comment", "qty", "qty_percent", "alert_message", "immediately", "disable_alert"),
+        "strategy.close_all": ("comment", "alert_message", "immediately", "disable_alert"),
+    }.get(name, ())
+    arguments = dict(zip(positional, node.args))
+    arguments.update(node.kwargs)
+    if name == "strategy.entry" and _expression(arguments.get("direction")) in ("strategy.long", "strategy.short"):
+        priced = {key for key in ("limit", "stop") if key in arguments}
+        if len(priced) < 2 and not (set(arguments) & {"oca_name", "oca_type"}):
+            return "entry:" + (next(iter(priced)) if priced else "market")
+    if name == "strategy.exit":
+        if (set(arguments) & {"profit", "loss", "trail_price", "trail_points", "trail_offset", "qty", "qty_percent"}):
+            return name + " (unproven exit terms)"
+        if "limit" in arguments and "stop" in arguments and _expression(arguments.get("from_entry")) in short_ids:
+            return "exit:short_bracket"
+    if name in ("strategy.close", "strategy.close_all"):
+        immediate = arguments.get("immediately")
+        if immediate is None or isinstance(immediate, BoolLiteral) and not immediate.value:
+            if not (set(arguments) & {"qty", "qty_percent"}):
+                return "close:market"
+    return name + " (unproven order shape)"
+
+
+def capabilities_documents(emitter) -> tuple[str, str]:
     declarations = dict(DECLARATION_DEFAULTS)
     unresolved = []
     requests = []
     lower_symbols = {}
     intrabar = False
     recorded = False
+    order_nodes = []
     for node, _depth in iter_ast_nodes(emitter.ctx.ast):
         if isinstance(node, StrategyDecl):
             arguments = {STRATEGY_PARAMETERS[index] if index < len(STRATEGY_PARAMETERS)
@@ -92,6 +122,8 @@ def capabilities_document(emitter) -> str:
             intrabar |= node.is_varip
         elif isinstance(node, FuncCall):
             name, namespace = emitter._resolve_callee(node.callee)
+            if namespace == "strategy" and name in ("entry", "order", "exit", "close", "close_all", "cancel", "cancel_all"):
+                order_nodes.append(node)
             if namespace == "request" and name == "security_lower_tf":
                 expression = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
                 lower_symbols[id(expression)] = node.args[0] if node.args else node.kwargs.get("symbol")
@@ -118,22 +150,27 @@ def capabilities_document(emitter) -> str:
             unresolved.append(f"{_expression(node)} (stream endpoint is not batch-equivalent)")
 
     auxiliary = False
+    confirmed_requests = []
+    lowering_sites = {site["sec_id"]: site for site in emitter._security_eval_info}
     for site in emitter._security_calls:
+        lowering = lowering_sites[site["sec_id"]]
         symbol_node = site.get("symbol_node")
         if site.get("is_lower_tf_array"):
             symbol_node = lower_symbols.get(id(site.get("expr_node")), symbol_node)
         if isinstance(symbol_node, FuncCall) and site.get("heikinashi") and symbol_node.args:
             symbol_node = symbol_node.args[0]
         symbol = _expression(symbol_node) if symbol_node is not None else "syminfo.tickerid"
-        timeframe = _expression(site.get("tf_node"))
+        timeframe = lowering.get("tf")
+        if timeframe is None:
+            timeframe = "timeframe.period" if lowering.get("tf_expr") == "script_tf_" else _expression(site.get("tf_node"))
         lookahead = _expression(site.get("lookahead_node")) or "barmerge.lookahead_off"
         gaps = _expression(site.get("gaps_node")) or "barmerge.gaps_off"
         if isinstance(symbol_node, Identifier) and symbol_node.name not in emitter._global_mutable_infos:
             symbol = _expression((getattr(emitter.ctx, "global_expr_map", {}) or {}).get(
                 symbol_node.name, symbol_node))
-        feed = "chart" if symbol in ("syminfo.tickerid", "syminfo.ticker", "") else "auxiliary"
+        feed = "auxiliary" if lowering.get("foreign") else "chart"
         auxiliary |= feed == "auxiliary"
-        if not isinstance(site.get("tf_node"), StringLiteral) and timeframe != "timeframe.period":
+        if lowering.get("tf") is None and timeframe != "timeframe.period":
             unresolved.append(f"request.security[{site['sec_id']}].timeframe")
         if lookahead not in ("barmerge.lookahead_off", "barmerge.lookahead_on"):
             unresolved.append(f"request.security[{site['sec_id']}].lookahead")
@@ -143,9 +180,10 @@ def capabilities_document(emitter) -> str:
             "timeframe": timeframe,
             "lookahead": lookahead,
             "gaps": gaps,
-            "heikinashi": bool(site.get("heikinashi")),
+            "heikinashi": bool(lowering.get("heikinashi")),
             "feed": feed,
         })
+        confirmed_requests.append({**requests[-1], "expression": _expression(site.get("expr_node"))})
     for index, site in enumerate((emitter.ctx.ast.annotations or {}).get(CAPABILITY_UNPINNED_ANNOTATION, ())):
         requests.append({
             "function": site["function"],
@@ -166,13 +204,27 @@ def capabilities_document(emitter) -> str:
         "historical_probe_overrides": False,
         "intrabar_persistence": intrabar,
     }
-    return json.dumps({"version": 1, "declarations": declarations, "requests": requests,
-                       "requirements": requirements, "unresolved": sorted(set(unresolved))},
-                      sort_keys=True, separators=(",", ":"), allow_nan=False)
+    short_ids = {_expression(node.args[0]) for node in order_nodes
+                 if _expression(node.callee) == "strategy.entry" and len(node.args) > 1
+                 and _expression(node.args[1]) == "strategy.short"}
+    conflicting_ids = {_expression(node.args[0]) for node in order_nodes
+                       if _expression(node.callee) == "strategy.entry" and len(node.args) > 1
+                       and _expression(node.args[1]) != "strategy.short"}
+    confirmed = {"version": 1, "requests": confirmed_requests,
+                 "orders": sorted(set(_order_shape(node, short_ids - conflicting_ids) for node in order_nodes)),
+                 "intrabar_persistence": intrabar}
+    encode = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return (encode({"version": 1, "declarations": declarations, "requests": requests,
+                    "requirements": requirements, "unresolved": sorted(set(unresolved))}), encode(confirmed))
+
+
+def capabilities_document(emitter) -> str:
+    return capabilities_documents(emitter)[0]
 
 
 def emit_capabilities_exports(emitter, lines: list[str]) -> None:
-    literal = json.dumps(capabilities_document(emitter))
+    legacy, confirmed = capabilities_documents(emitter)
+    literal = json.dumps(legacy)
     lines.extend([
         "#ifdef PF_SETTINGS_API_VERSION",
         "#ifdef PF_CAPABILITIES_API_VERSION",
@@ -182,5 +234,12 @@ def emit_capabilities_exports(emitter, lines: list[str]) -> None:
         "        return ::pineforge::checked_settings::boundary(error, error_capacity, [&] {",
         '            ::pineforge::checked_settings::require(s != nullptr, "null strategy");',
         f"            ::pineforge::checked_settings::receipt({literal}, json, capacity, required);",
+        "        });", "    }",
+        "    uint32_t strategy_confirmed_bar_api_version(void) { return 1u; }",
+        "    int strategy_confirmed_bar_receipt(void* s, char* json, size_t capacity, size_t* required, char* error, size_t error_capacity) {",
+        "        if (required) *required = 0;",
+        "        return ::pineforge::checked_settings::boundary(error, error_capacity, [&] {",
+        '            ::pineforge::checked_settings::require(s != nullptr, "null strategy");',
+        f"            ::pineforge::checked_settings::receipt({json.dumps(confirmed)}, json, capacity, required);",
         "        });", "    }", "#endif", "#endif",
     ])

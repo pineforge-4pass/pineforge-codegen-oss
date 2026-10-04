@@ -21,6 +21,65 @@ def emitted_receipt(source):
     return receipt
 
 
+def emitted_confirmed_receipt(source):
+    cpp = transpile(source)
+    documents = re.findall(r'checked_settings::receipt\(("(?:[^"\\]|\\.)*"), json, capacity, required\);', cpp)
+    assert len(documents) == 2
+    assert 'strategy_confirmed_bar_api_version(void) { return 1u; }' in cpp
+    return json.loads(json.loads(documents[1]))
+
+
+@pytest.mark.parametrize(('body', 'clock', 'heikinashi', 'feed'), [
+    ('h = request.security(syminfo.tickerid, "5", close)', '5', False, 'chart'),
+    ('htf = "D"\nh = request.security(syminfo.tickerid, htf, close)', 'D', False, 'chart'),
+    ('f(tf) => request.security(syminfo.tickerid, tf, close)\nh = f("5")', '5', False, 'chart'),
+    ('sym = ticker.heikinashi(syminfo.tickerid)\nh = request.security(sym, "5", close)', '5', True, 'chart'),
+    ('h = request.security("", "5", close)', '5', False, 'auxiliary'),
+])
+def test_receipts_use_the_registration_lowering(body, clock, heikinashi, feed):
+    source = f'//@version=6\nstrategy("lowering")\n{body}\nif h > close\n    strategy.entry("L", strategy.long)'
+    receipt = emitted_receipt(source)
+    assert not receipt['unresolved']
+    request = receipt['requests'][0]
+    assert (request['timeframe'], request['heikinashi'], request['feed']) == (clock, heikinashi, feed)
+    confirmed = emitted_confirmed_receipt(source)
+    assert confirmed['requests'] == [{**request, 'expression': 'close'}]
+
+
+@pytest.mark.parametrize(('body', 'shape'), [
+    ('strategy.entry("L", strategy.long)', 'entry:market'),
+    ('strategy.entry("L", strategy.long, stop=high)', 'entry:stop'),
+    ('strategy.entry("L", strategy.long, limit=low)', 'entry:limit'),
+    ('strategy.entry("L", strategy.long, stop=high, limit=low)', 'strategy.entry (unproven order shape)'),
+    ('strategy.close_all()', 'close:market'),
+    ('strategy.close("L", immediately=true)', 'strategy.close (unproven order shape)'),
+    ('strategy.entry("S", strategy.short)\nstrategy.exit("X", "S", stop=high, limit=low)', 'exit:short_bracket'),
+    ('strategy.entry("L", strategy.long)\nstrategy.exit("X", "L", stop=high, limit=low)', 'strategy.exit (unproven order shape)'),
+    ('strategy.entry("S", strategy.short)\nstrategy.exit("X", "S", trail_points=2, trail_offset=1)', 'strategy.exit (unproven exit terms)'),
+])
+def test_confirmed_order_shapes_are_explicit(body, shape):
+    receipt = emitted_confirmed_receipt(f'//@version=6\nstrategy("orders", process_orders_on_close=true)\n{body}')
+    assert shape in receipt['orders']
+
+
+def test_confirmed_receipt_is_additive_and_metadata_only(monkeypatch):
+    from pineforge_codegen.codegen import capabilities
+    source = '//@version=6\nstrategy("metadata", process_orders_on_close=true)\nvarip int count = 0\ncount += 1\nstrategy.entry("L", strategy.long)'
+    with_receipts = transpile(source)
+    receipt = emitted_confirmed_receipt(source)
+    original = capabilities.emit_capabilities_exports
+    emitted = []
+    def capture(emitter, lines):
+        start = len(lines)
+        original(emitter, lines)
+        emitted.extend(lines[start:])
+    monkeypatch.setattr(capabilities, 'emit_capabilities_exports', capture)
+    assert transpile(source) == with_receipts
+    monkeypatch.setattr(capabilities, 'emit_capabilities_exports', lambda emitter, lines: None)
+    assert with_receipts.replace('\n'.join(emitted) + '\n', '', 1) == transpile(source)
+    assert receipt['version'] == 1 and receipt['intrabar_persistence'] is True
+
+
 @pytest.mark.parametrize(('name', 'value', 'expected'), [
     ('calc_on_every_tick', 'true', True),
     ('calc_on_order_fills', 'true', True),
