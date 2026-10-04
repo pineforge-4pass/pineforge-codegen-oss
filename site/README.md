@@ -20,25 +20,32 @@ advice.
   true`), and the site says so on every page.
 - The selling entity is not named yet (`seller.legalName: null`).
 - The Commercial License Agreement in `legal/commercial-license-agreement.md`
-  is a draft. It counts as final only when all of these hold
-  (`lib/agreement-status.ts`, shared by the build guard and the pages):
-  - the draft marker is gone, in any case or form ("DRAFT", "Draft —",
-    "draft - requires review", ...), and no line says "DRAFT";
-  - the draft notice paragraph is gone ("no one can accept it", "this notice
-    is removed");
+  is a draft. It counts as final only when its exact bytes were approved:
+  the file's sha256 must equal `agreementApprovedSha256` in
+  `config/commerce.json` (`null` today), so any edit after approval makes it
+  a draft again. The text checks of `lib/agreement-status.ts` (shared by the
+  build guard and the pages) must pass as well, as backstops:
+  - the marker `DRAFT — requires review by counsel before go-live` is absent,
+    no line contains "DRAFT" in capitals, and no line matches "draft",
+    a dash, "requires review" in any case;
+  - the phrases "no one can accept it" and "this notice is removed" are
+    absent;
   - a line exactly `Status: final` is present;
-  - neither the `Version:` line nor its value (also on the next line) says
-    "draft";
-  - no bracket placeholder is left: any `[...]` other than a Markdown link,
-    reference or footnote, and any bracket text in capitals or naming the
-    owner or counsel, in every form. All-caps link text such as
-    `[LICENSE](url)` is refused too, so word such links differently
-    (`[the license text](url)`).
+  - a `Version:` line exists, and no `Version:` line, nor the next non-empty
+    line when the value is not on the same line, contains "draft";
+  - none of these phrases appears anywhere, in any case: "owner to confirm",
+    "owner to provide", "owner to decide", "counsel to confirm", "set by
+    counsel", "template prepared for review", "not yet offered";
+  - no `[` is followed, before a `]`, by "owner" or "counsel";
+  - no bracket placeholder remains: any `[...]` other than a Markdown link,
+    reference, definition or footnote, and bracket text in capitals (two
+    letters or more; digits, spaces, `-`, `_` and dashes allowed) in any of
+    those forms. All-caps link text such as `[LICENSE](url)` is refused too,
+    so word such links differently (`[the license text](url)`).
 
-  Anything else reads as draft.
-
-While any of those holds, the site shows a preview notice on every page and
-live payments are refused twice over: `npm run build` fails when a live
+Until all three points above are resolved (real prices, a named seller and
+an approved final agreement), the site shows a preview notice on every page
+and live payments are refused twice over: `npm run build` fails when a live
 Stripe key is in its environment (or in `.dev.vars`), and at run time
 `/api/checkout` answers 503 and the webhook never issues a license from a
 live-mode event. See "Go-live checklist".
@@ -248,8 +255,11 @@ again: locally, delete `site/.wrangler/state/v3/d1` and run
 Cloudflare dashboard (or `npx wrangler d1 delete <name>`), create it again
 (`npx wrangler d1 create <name>`, then update its id where it is bound) and
 migrate it: `npm run d1:migrate:remote` for the production database
-`pineforge-license`, `npx wrangler d1 migrations apply <name> --remote` for a
-preview one.
+`pineforge-license`. A preview database has to be bound in a wrangler config
+that the migrate command reads: for example an `env.preview` block in
+`wrangler.jsonc` that binds it as `DB` (repeating `d1_databases` and `vars`),
+then `npx wrangler d1 migrations apply <name> --remote --env preview`; or run
+the command with `--config` pointing at a config that binds it.
 
 `orders` (pending, paid, refunded, expired, failed, mismatch, disputed), `licenses`
 (at most one per order; active or revoked), `stripe_events` (processed event
@@ -438,10 +448,12 @@ Owner decisions:
 - [ ] Real prices per tier in `config/commerce.json`, then
       `pricesArePlaceholders: false`.
 - [ ] The selling legal entity in `seller.legalName` (and on Stripe invoices).
-- [ ] Counsel's review of `legal/commercial-license-agreement.md`; only after
-      it: remove the DRAFT marker, fill every bracketed placeholder, give the
-      text a final `Version:` line (without "draft") and add the line
-      `Status: final`.
+- [ ] Counsel's review of `legal/commercial-license-agreement.md`. After
+      counsel approves the final text: remove every draft signal (the DRAFT
+      marker and notice, every bracketed placeholder, "draft" in the version),
+      add the line `Status: final`, run `npm run build` with a live key once
+      to have the guard print the file's sha256, and set
+      `agreementApprovedSha256` in `config/commerce.json` to that hash.
 - [ ] The refund policy wording (in the agreement and the FAQ).
 - [ ] The Stripe account: business details, payouts, tax settings and
       registrations, invoice template, and customer emails for successful

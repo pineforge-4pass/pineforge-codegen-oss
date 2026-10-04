@@ -1,7 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { AGREEMENT_MARKER, agreementStatus } from "../lib/agreement-status.ts";
+import { createHash } from "node:crypto";
+import { AGREEMENT_MARKER, agreementStatus as rawStatus } from "../lib/agreement-status.ts";
+
+const sha = (text: string) => createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
+// The text checks with this exact text approved, unless another approval is given.
+const agreementStatus = (text: string, approvedSha256: string | null = sha(text)) =>
+  rawStatus(text, { sha256: sha(text), approvedSha256 });
 
 const body = (head: string) => `${head}
 
@@ -69,7 +75,8 @@ test("marker removed and Status: final, but the version is still a draft version
 
 test("the agreement in this repository is a draft today", () => {
   const text = readFileSync(new URL("../legal/commercial-license-agreement.md", import.meta.url), "utf8");
-  assert.equal(agreementStatus(text).isDraft, true);
+  assert.equal(agreementStatus(text, null).isDraft, true, "not approved");
+  assert.equal(agreementStatus(text).isDraft, true, "even if its hash were approved, the text checks fail");
 });
 
 test("residual draft forms: marker in any case, the notice paragraph, a draft version line", () => {
@@ -110,5 +117,34 @@ test("placeholders in link forms: hyphens, underscores, digits, the agreement's 
     const s = agreementStatus(FINAL + `\n${extra}\n`);
     assert.equal(s.isDraft, true, extra);
     assert.ok(s.reasons.some((r) => r.includes("placeholder")), extra);
+  }
+});
+
+test("approval hash: null is draft; the approved bytes are final; any edit after approval is draft", () => {
+  assert.equal(agreementStatus(FINAL, null).isDraft, true);
+  assert.ok(agreementStatus(FINAL, null).reasons.some((r) => r.includes("agreementApprovedSha256")));
+  assert.equal(agreementStatus(FINAL, sha(FINAL)).isDraft, false);
+  assert.equal(agreementStatus(FINAL + " ", sha(FINAL)).isDraft, true, "one byte added after approval");
+  const drafty = FINAL + "\nThis DRAFT stays.\n";
+  assert.equal(agreementStatus(drafty, sha(drafty)).isDraft, true, "approved hash, draft signal left");
+});
+
+test("backstops: every Version line, open phrases anywhere, unclosed owner/counsel brackets", () => {
+  const twoVersions = FINAL + "\nVersion: draft-2027-02\n";
+  assert.equal(agreementStatus(twoVersions).isDraft, true, "a second Version line");
+  const nextLine = FINAL.replace("Version: 2027-01-15", "Version:\n\n  release 2027-01-15 (draft)");
+  assert.equal(agreementStatus(nextLine).isDraft, true, "value on the next non-empty line");
+  for (const phrase of [
+    "the owner to confirm",
+    "Owner To Provide",
+    "owner to\ndecide",
+    "counsel to confirm",
+    "as set by counsel",
+    "A template prepared for review.",
+    "It is not yet offered to anyone.",
+    "[LICENSOR ENTITY — owner to confirm",
+    "[the cap, per counsel",
+  ]) {
+    assert.equal(agreementStatus(FINAL + `\n${phrase}\n`).isDraft, true, phrase);
   }
 });

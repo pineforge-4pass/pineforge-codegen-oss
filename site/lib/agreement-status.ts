@@ -2,22 +2,28 @@
 // (scripts/guard-live.mjs) and the generated AGREEMENT_IS_DRAFT that the pages
 // and Functions read (scripts/gen-build-info.mjs).
 //
-// It fails closed: the agreement is final only when ALL of these hold, so a
-// marker that drifts (a hyphen for the em dash, a re-wrapped or reworded
-// line) still reads as draft.
-//   - the DRAFT marker is absent;
+// The agreement is final only when its exact bytes were approved: the sha256
+// of legal/commercial-license-agreement.md equals agreementApprovedSha256 in
+// config/commerce.json (null: not approved). Any edit after approval makes it
+// a draft again. On top of that, these text checks must all pass:
+//   - the marker "DRAFT — requires review by counsel before go-live" is absent,
+//     no line contains "DRAFT" in capitals, and no line matches
+//     "draft <dash> requires review" in any case;
+//   - the notice phrases "no one can accept it" and "this notice is removed"
+//     are absent;
 //   - a line exactly "Status: final" is present;
-//   - a "Version:" line exists and its value does not contain "draft";
-//   - no line contains "DRAFT" in capitals, and no "draft — requires review"
-//     marker in any case;
-//   - the notice paragraph is gone ("no one can accept it", "this notice is
-//     removed");
-//   - no bracketed text remains other than Markdown links and references:
-//     "[text](url)", "[text][ref]", "[ref]: url" and footnotes "[^1]" are
-//     fine; any other "[...]", also one wrapped across lines ("[TBD]",
-//     "[30 days]", "[REFUND POLICY]"), is a placeholder, and so is ALL-CAPS
-//     bracket text in any of those forms ("[CITY][COUNTRY]", "[NAME](",
-//     "[NAME]: ...", "[^NAME]").
+//   - a "Version:" line exists, and no "Version:" line, nor the next non-empty
+//     line when a value is not on the same line, contains "draft";
+//   - none of these phrases appears anywhere (any case): "owner to confirm",
+//     "owner to provide", "owner to decide", "counsel to confirm", "set by
+//     counsel", "template prepared for review", "not yet offered";
+//   - no "[" is followed, before any "]", by "owner" or "counsel" (closed or
+//     not);
+//   - no bracket placeholder: any "[...]" other than a Markdown link
+//     "[text](url)", reference "[text][ref]", definition "[ref]: url" or
+//     footnote "[^1]", and bracket text in capitals (two letters or more;
+//     digits, spaces, "-", "_" and dashes allowed; wrapped lines too) in any
+//     of those forms.
 
 export const AGREEMENT_MARKER = "DRAFT — requires review by counsel before go-live";
 
@@ -34,18 +40,49 @@ export function agreementVersion(text: string): string | null {
   return m ? m[1] : null;
 }
 
-export function agreementStatus(text: string): AgreementStatus {
+export interface AgreementApproval {
+  /** sha256 (hex) of the agreement file's exact bytes. */
+  sha256: string;
+  /** config/commerce.json agreementApprovedSha256; null when not approved. */
+  approvedSha256: string | null;
+}
+
+const OPEN_PHRASES = [
+  "owner to confirm",
+  "owner to provide",
+  "owner to decide",
+  "counsel to confirm",
+  "set by counsel",
+  "template prepared for review",
+  "not yet offered",
+];
+
+export function agreementStatus(text: string, approval: AgreementApproval): AgreementStatus {
   const reasons: string[] = [];
+  if (!approval.approvedSha256) {
+    reasons.push(`agreementApprovedSha256 is not set (the agreement's sha256 is ${approval.sha256})`);
+  } else if (approval.approvedSha256 !== approval.sha256) {
+    reasons.push(`the agreement's sha256 ${approval.sha256} is not the approved ${approval.approvedSha256}`);
+  }
+  const flatText = text.replace(/\s+/g, " ").toLowerCase();
+  for (const phrase of OPEN_PHRASES) {
+    if (flatText.includes(phrase)) reasons.push(`the text still says "${phrase}"`);
+  }
+  if (/\[[^\[\]]*\b(owner|counsel)\b/i.test(text)) reasons.push("a bracket naming the owner or counsel remains");
   if (text.includes(AGREEMENT_MARKER)) reasons.push(`the "${AGREEMENT_MARKER}" marker is present`);
   if (!/^Status: final$/m.test(text.replace(/\r\n?/g, "\n"))) reasons.push('no line "Status: final"');
   const version = agreementVersion(text);
-  const versionLine = text.split(/\r\n?|\n/).find((line) => /^[\s>*_]*Version[\s*_]*:/i.test(line));
-  if (!version) reasons.push('no "Version:" line');
-  // The value may sit on the line after "Version:", so both are checked.
-  else if (/draft/i.test(version) || /draft/i.test(versionLine ?? "")) {
-    reasons.push(`the version "${version}" is a draft version`);
-  }
   const lines = text.split(/\r\n?|\n/);
+  if (!version) reasons.push('no "Version:" line');
+  // Every Version: line, and the next non-empty line when its value is not on the same line.
+  lines.forEach((line, i) => {
+    const m = line.match(/^[\s>*_]*Version[\s*_]*:(.*)$/i);
+    if (!m) return;
+    const next = /[A-Za-z0-9]/.test(m[1]) ? "" : (lines.slice(i + 1).find((l) => l.trim() !== "") ?? "");
+    if (/draft/i.test(line) || /draft/i.test(next)) {
+      reasons.push(`a version line is a draft version: "${line.trim()}${next ? " " + next.trim() : ""}"`);
+    }
+  });
   const draftLine = lines.find((line) => line.includes("DRAFT") || /draft\s*[—–-]+\s*requires review/i.test(line));
   if (draftLine !== undefined) reasons.push(`a line still says DRAFT: "${draftLine.trim().slice(0, 80)}"`);
   if (/no one can accept it|this notice is removed/i.test(text.replace(/\s+/g, " "))) {

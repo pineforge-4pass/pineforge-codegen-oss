@@ -22,6 +22,8 @@ export interface Tier {
 
 export interface CommerceConfig {
   pricesArePlaceholders: boolean;
+  /** sha256 of the counsel-approved agreement file; null until approved (lib/agreement-status.ts). */
+  agreementApprovedSha256: string | null;
   currency: string;
   seller: { displayName: string; legalName: string | null; contactEmail: string };
   termMonths: number;
@@ -105,6 +107,9 @@ export function validateCommerceConfig(raw: unknown): string[] {
   const isObj = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
   if (!isObj(raw)) return ["config must be an object"];
   if (typeof raw.pricesArePlaceholders !== "boolean") errs.push("pricesArePlaceholders must be a boolean");
+  if (!(raw.agreementApprovedSha256 === null || (typeof raw.agreementApprovedSha256 === "string" && /^[0-9a-f]{64}$/.test(raw.agreementApprovedSha256)))) {
+    errs.push("agreementApprovedSha256 must be null or 64 lowercase hex characters");
+  }
   if (typeof raw.currency !== "string" || !TWO_DECIMAL_CURRENCIES.has(raw.currency)) {
     errs.push(`currency must be one of ${[...TWO_DECIMAL_CURRENCIES].join(", ")} (lowercase)`);
   }

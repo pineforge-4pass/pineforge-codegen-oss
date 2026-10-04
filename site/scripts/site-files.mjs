@@ -18,7 +18,8 @@ export async function agreementInfo() {
   const { agreementStatus } = await import("../lib/agreement-status.ts");
   const bytes = readFileSync(AGREEMENT_FILE);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
-  const status = agreementStatus(bytes.toString("utf8"));
+  const { agreementApprovedSha256 = null } = readCommerce();
+  const status = agreementStatus(bytes.toString("utf8"), { sha256, approvedSha256: agreementApprovedSha256 });
   return {
     isDraft: status.isDraft,
     draftReasons: status.reasons,
