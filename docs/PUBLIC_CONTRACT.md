@@ -52,6 +52,45 @@ NOT_COMPLETED; ordinary batch preparation failures keep their historical empty
 report, diagnostic and completed status. Legacy exception text is standard-
 library-dependent, and legacy run catches zero their output report.
 
+## Request discovery (unreleased)
+
+Development builds add a `requests` key to `transpile_full()`'s result and to
+`gate/glue.py`'s `transpile_json` success envelope, and `"kind": "symbol"` to
+each `input.symbol` entry of the input manifest (its other fields are
+unchanged). The emitted C++ does not change.
+
+`requests` lists, in source order, every request site that reads another
+symbol's feed: a `request.security` of another symbol whose value can reach a
+trade. A run supplies such bars as one feed per (symbol string, timeframe) and
+the engine matches both byte for byte, so each entry states them as the
+generated code computes them before the first bar:
+
+```json
+{"line": 7, "fn": "request.security",
+ "symbol":    {"kind": "input", "title": "Other symbol", "default": "BINANCE:ETHUSDT"},
+ "timeframe": {"kind": "chart"},
+ "lookahead": false, "gaps": false, "ignore_invalid_symbol": false}
+```
+
+| Field | Value |
+| --- | --- |
+| `line` | The 1-based line of the `request.security` call. A helper's request is listed once per symbol and timeframe its call paths pass, each at the request's line. |
+| `fn` | The Pine function, `"request.security"`. |
+| `symbol` | `{"kind": "literal", "value"}`: the exact key, exchange prefix and suffix kept (`"BINANCE:ETHUSDT.P"`). `{"kind": "input", "title", "default"}`: an `input.symbol`, `input.string` or string `input()` (`ticker.standard` / `ticker.inherit` of one too); the key is the run's value of the input, overridden under `title` (the manifest's override key), else `default`. `{"kind": "computed", "expr"[, "value"][, "inputs"]}`: `expr` spells the expression as written, `value` is its key at the inputs' defaults when literals and inputs compute it (string `+`, `==`, `!=`, `and`, `or`, `not`, `?:`; never the chart's own `syminfo.*` strings), and `inputs` names the override keys of the inputs it reads. `{"kind": "unresolvable", "expr"}`: a request whose symbol, timeframe or expression PineForge cannot key before the first bar; no feed serves it, and the run stops where its value is read. |
+| `timeframe` | `{"kind": "literal", "value"}` in the engine's spelling: whole minutes (`"240"`), `<n>D`, `<n>W`, `<n>M` or `<n>S` (`"1D"`), Pine's bare `"D"` / `"W"` / `"M"` / `"S"` as `"1D"` / `"1W"` / `"1M"` / `"1S"`; other text is kept as written and no feed matches it. `{"kind": "chart"}`: `timeframe.period` or `""`, the chart's timeframe. `{"kind": "input", "title", "default"}`: an input's raw value, spelled by the same rule, `""` the chart's. `{"kind": "computed", "expr"[, "value"][, "inputs"]}` as for the symbol; an empty `value` is the chart's timeframe. |
+| `lookahead`, `gaps` | Booleans: `barmerge.lookahead_on`, `barmerge.gaps_on`. |
+| `ignore_invalid_symbol` | `false` when omitted, else its value (at the inputs' defaults), `null` when not computable. |
+| `column` | Present for a `request.footprint` payload: the feed column it reads (`"fp_delta_100_70"`). |
+
+A request whose value reaches only plots, alerts, tables or logs is lowered to
+`na` and reads no feed; a request in a helper nothing calls never runs. Neither
+is listed. Nor are requests that read no other symbol's bars: the chart's own
+symbol (`syminfo.tickerid`, `syminfo.ticker` and `ticker.*` of them), a
+`request.security_lower_tf` of another symbol (the run stops where it is
+evaluated), and `request.earnings` / `dividends` / `splits` / `financial`
+(recorded series, not bars). A symbol string equal to the chart's at run time
+reads the chart.
+
 ## Released contract
 
 This is the contract that 1.0.0, released 2026-09-30, implements, and 1.0.1,

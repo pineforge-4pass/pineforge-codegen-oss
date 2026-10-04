@@ -858,6 +858,9 @@ def unpin_requests(program: Program, reasons: dict[int, str]) -> None:
             lowered.annotations = {**(lowered.annotations or {}),
                                    UNPINNED_ANNOTATION: marker["message"]}
         swaps[request_id] = lowered
+        # The request leaves the program; its lowering is the deferred
+        # refusal's now (``request_discovery`` lists it so).
+        request.annotations = {**(request.annotations or {}), LOWERING_ANNOTATION: "unpinned"}
         warnings.append(pass_warning(
             request,
             f"{spell_call(request)}: no data is pinned for this request; the run stops with "

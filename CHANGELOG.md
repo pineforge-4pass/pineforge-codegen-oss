@@ -20,6 +20,32 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## Unreleased
+
+### Request discovery
+
+- `transpile_full()` returns a new key, `requests`: every request site that
+  reads another symbol's feed, so a host can fetch the bars a run needs before
+  it starts it. Each entry gives the request's `line` and `fn`, its symbol
+  (`literal`, `input` with its override key and default, `computed` with its
+  value at the inputs' defaults where literals and inputs compute it, or
+  `unresolvable`), its timeframe (`literal` in the engine's feed spelling,
+  `chart`, `input` or `computed`), `lookahead`, `gaps` and
+  `ignore_invalid_symbol`. A request lowered to `na` (its value reaches only
+  plots and alerts) is not listed. See the
+  [public contract](docs/PUBLIC_CONTRACT.md#request-discovery-unreleased).
+- `gate/glue.py`'s `transpile_json` success envelope carries the same list
+  under `requests`.
+- The input manifest marks each `input.symbol` entry with `"kind": "symbol"`;
+  its `title`, `type` and `default` are unchanged.
+
+### Compatibility and migration
+
+- Additive only. The emitted C++ is unchanged: the engine's 325 public corpus
+  sources and this repository's 540 test-fixture `.pine` files transpile to the
+  same C++ as before, byte for byte, each in a fresh process (the 51 refused
+  before are refused with the same message).
+
 ## 1.0.1 — 2026-10-02
 
 A patch release of translation fixes. It covers the changes merged to `main`

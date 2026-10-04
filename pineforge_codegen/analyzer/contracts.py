@@ -196,6 +196,9 @@ class SecurityCallInfo:
     # ``symbol`` string and ``ignore_invalid_symbol`` (the node, or None).
     foreign: bool = False
     ignore_invalid: Any = None
+    # The request call's source location (``request_discovery`` names the
+    # site by its line).
+    loc: Any = None
 
 
 @dataclass

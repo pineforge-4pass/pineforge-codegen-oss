@@ -13,6 +13,7 @@ from .finite_ta_length import expand_finite_choice_extrema_lengths
 from .library_inline import inline_libraries
 from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
 from .pragmas import extract_pf_trace_pragmas
+from .request_discovery import discover_requests, request_sites
 from .security_contexts import specialize_security_contexts
 from .block_locals import rename_block_locals
 from .support_checker import check_support as _support_diagnostics
@@ -52,7 +53,9 @@ def _generate(pine_source: str, check_support: bool, filename: str,
     the member of its name cannot hold gets a name of its own, and the
     pipeline runs again (``block_locals``).
 
-    Returns ``(codegen, ctx, cpp, support_diagnostics)``."""
+    Returns ``(codegen, ctx, cpp, support_diagnostics, sites)``: ``sites``
+    are the requests of another symbol's data the support checker lowered
+    (``request_discovery.request_sites``)."""
     budget = None
     clones: frozenset[str] = frozenset()
     renamed: frozenset = frozenset()
@@ -67,6 +70,7 @@ def _generate(pine_source: str, check_support: bool, filename: str,
             if any(d.level == Level.ERROR for d in support_diagnostics):
                 raise CompileError(support_diagnostics)
         budget.check(phase=Phase.ANALYZER)
+        sites = request_sites(ast)
         ast = lower_no_data_requests(ast)
         ast = specialize_security_contexts(ast, filename=filename)
         ast = bind_builtin_keywords(expand_finite_choice_extrema_lengths(ast))
@@ -86,18 +90,18 @@ def _generate(pine_source: str, check_support: bool, filename: str,
         apart = gen.block_locals_needing_names - renamed
         if apart:
             renamed |= apart
-            del ast, ctx, gen, cpp
+            del ast, ctx, gen, cpp, sites
             continue
         needed = gen.session_functions_needing_clones
         if not needed:
-            return gen, ctx, cpp, support_diagnostics
+            return gen, ctx, cpp, support_diagnostics, sites
         # Only uncloned functions ask, so the set grows each time and the
         # loop ends by the time every function that reads a flag at an
         # offset is cloned.
         if needed <= clones:
             raise AssertionError("a cloned function asked for session clones again")
         clones |= needed
-        del ast, ctx, gen, cpp
+        del ast, ctx, gen, cpp, sites
 
 
 def transpile(pine_source: str, *, check_support: bool = True, filename: str = "<input>",
@@ -140,7 +144,8 @@ def transpile(pine_source: str, *, check_support: bool = True, filename: str = "
     Returns:
         Generated C++ source string.
     """
-    _gen, _ctx, cpp, _support = _generate(pine_source, check_support, filename, libraries)
+    _gen, _ctx, cpp, _support, _sites = _generate(pine_source, check_support, filename,
+                                                  libraries)
     return cpp
 
 
@@ -161,26 +166,36 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
       source order). Each has ``title`` / ``type`` /
       ``default`` and optionally ``min`` / ``max`` / ``step`` / ``options``
       (omitted when the corresponding signature argument is absent or
-      references a non-const value). See
-      :meth:`CodeGen.extract_input_manifest`.
+      references a non-const value); an ``input.symbol`` entry also has
+      ``kind: "symbol"``. See :meth:`CodeGen.extract_input_manifest`.
     - ``strategyParams``: the literal ``strategy(...)`` kwargs the analyzer
       surfaced (e.g. ``initial_capital``, ``pyramiding``).
     - ``diagnostics``: the warnings (:class:`~pineforge_codegen.errors.Diagnostic`,
       ``Level.WARNING``) the support checker and the analyzer raised for a
       script that transpiled -- e.g. an approximated ``ta.vwap`` anchor. An
       error still raises ``CompileError``, which carries the warnings too.
+    - ``requests``: every request site that reads another symbol's feed,
+      by line: its symbol and timeframe as registration computes them
+      before the first bar (``literal`` / ``input`` / ``computed`` /
+      ``unresolvable``; ``literal`` / ``chart`` / ``input`` / ``computed``),
+      ``lookahead``, ``gaps`` and ``ignore_invalid_symbol``. A site lowered
+      to ``na`` (its value reaches display sinks only) or in a helper
+      nothing reaches is not listed. See
+      :mod:`pineforge_codegen.request_discovery`.
 
     Args mirror :func:`transpile`.
 
     Returns:
         ``{"cpp": str, "inputs": list[dict], "strategyParams": dict,
-        "diagnostics": list[Diagnostic]}``.
+        "diagnostics": list[Diagnostic], "requests": list[dict]}``.
     """
-    gen, ctx, cpp, support_diagnostics = _generate(pine_source, check_support, filename, libraries)
+    gen, ctx, cpp, support_diagnostics, sites = _generate(
+        pine_source, check_support, filename, libraries)
     return {
         "cpp": cpp,
         "inputs": gen.extract_input_manifest(),
         "strategyParams": dict(ctx.strategy_params),
         "diagnostics": [d for d in (*support_diagnostics, *ctx.diagnostics)
                         if d.level == Level.WARNING],
+        "requests": discover_requests(gen, ctx, sites),
     }

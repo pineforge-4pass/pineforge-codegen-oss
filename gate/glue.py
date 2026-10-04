@@ -40,4 +40,5 @@ def transpile_json(source: str) -> str:
     # A script that transpiled carries its warnings in the same entry format.
     return json.dumps({"ok": True, "cpp": full["cpp"], "inputs": full["inputs"],
                        "strategyParams": full["strategyParams"],
-                       "diagnostics": _diagnostic_entries(full["diagnostics"])})
+                       "diagnostics": _diagnostic_entries(full["diagnostics"]),
+                       "requests": full["requests"]})

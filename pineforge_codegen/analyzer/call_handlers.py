@@ -876,6 +876,7 @@ class CallHandlers:
                 dead=bool(notes.get(DEAD_ANNOTATION)),
                 foreign=notes.get(LOWERING_ANNOTATION) == FEED_LOWERING,
                 ignore_invalid=node.kwargs.get("ignore_invalid_symbol"),
+                loc=node.loc,
             ))
 
             return PineType.STRING if string_result else PineType.FLOAT
@@ -998,6 +999,7 @@ class CallHandlers:
             is_lower_tf_array=True,
             context_resolved=context is not None,
             dead=bool(notes.get(DEAD_ANNOTATION)),
+            loc=node.loc,
         ))
 
         # ``request.security_lower_tf`` returns an array; the value-level

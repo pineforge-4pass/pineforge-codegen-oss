@@ -3797,6 +3797,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                     symbol=sec.symbol,
                     foreign=sec.foreign,
                     ignore_invalid=sec.ignore_invalid,
+                    loc=sec.loc,
                 )
                 new_calls.append(clone)
                 next_sec_id += 1
