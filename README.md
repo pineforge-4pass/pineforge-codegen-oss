@@ -208,9 +208,9 @@ from pineforge_codegen import diagnostics_catalog, transpile_full
 
 for d in transpile_full(source)["diagnostics"]:
     print(d.code, d.args, d.message)
-# PF-W1077 {'name': 'bar_index'} bar_index diverges from TradingView semantics in PineForge.
+# PF-W1067 {'name': 'bar_index'} bar_index diverges from TradingView semantics in PineForge.
 
-entry = diagnostics_catalog()["codes"]["PF-W1077"]
+entry = diagnostics_catalog()["codes"]["PF-W1067"]
 # {'severity': 'warning', 'area': 'support',
 #  'message': '{name} diverges from TradingView semantics in PineForge.',
 #  'hint': '...', 'explanation': '...', 'args': {'name': {'kind': 'identifier'}}}

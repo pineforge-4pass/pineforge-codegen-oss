@@ -58,6 +58,11 @@ unchanged.
   `message` and `hint` byte for byte, which keep their text. Codes are never
   reused (`tests/fixtures/diagnostic_codes_pin.json`). See
   [Diagnostic codes](docs/PUBLIC_CONTRACT.md#diagnostic-codes).
+- **First error in source order.** Since 1.1.0 the settings metadata visited
+  every input's `defval`, `options`, `minval`, `maxval` and `step` ahead of
+  the script body, so an error there (an unknown name in `minval`) was raised
+  before an error on an earlier line. The script's first error in source
+  order is raised again; no emitted C++ changes.
 
 ## 1.1.0 — 2026-10-04
 

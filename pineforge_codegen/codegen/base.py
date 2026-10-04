@@ -4414,7 +4414,44 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return None
 
     def generate(self) -> str:
-        """Generate C++ source from the AnalyzerContext."""
+        """Generate C++ source from the AnalyzerContext.
+
+        An error the settings metadata finds in an input's arguments (emitted
+        in the constructor, ahead of the body: ``checked_settings``) is held
+        until the rest is generated; the error raised is the first in source
+        order, as before that metadata visited the arguments."""
+        self._deferred_settings_errors: list[CompileError] | None = []
+        try:
+            try:
+                cpp = self._generate_cpp()
+            except CompileError as error:
+                first = self._first_settings_error_before(error)
+                if first is None:
+                    raise
+                raise first from None
+            if self._deferred_settings_errors:
+                raise self._deferred_settings_errors[0]
+            return cpp
+        finally:
+            self._deferred_settings_errors = None
+
+    def _defer_settings_error(self, error: CompileError) -> None:
+        held = getattr(self, "_deferred_settings_errors", None)
+        if held is None:   # outside generate(): nothing holds it
+            raise error
+        held.append(error)
+
+    def _first_settings_error_before(self, error: CompileError) -> CompileError | None:
+        """A held settings error located before ``error``, else None."""
+        def where(err: CompileError):
+            loc = err.diagnostics[0].location if err.diagnostics else None
+            return (loc.line, loc.col) if loc is not None else (float("inf"), 0)
+        held = sorted(self._deferred_settings_errors, key=where)
+        if held and where(held[0]) < where(error):
+            return held[0]
+        return None
+
+    def _generate_cpp(self) -> str:
         # Every input is keyed by its title: refuse a non-constant one first,
         # then flag inputs one override key would reach together.
         self._check_input_titles()

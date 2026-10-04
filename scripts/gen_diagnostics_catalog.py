@@ -608,6 +608,8 @@ _NAME_OVERRIDES = {
     "import_spelling(node)": "import_path", "import_spelling(stmt)": "import_path",
     "self._ta_signature_text(name)": "signature",
     "info.node.params[index]": "param",
+    "cur.value": "token", "cur.type.name": "token_type", "tt.name": "expected_token",
+    "tf_node.value": "timeframe", "seen[0][:12]": "found_sha", "sha[:12]": "sha",
 }
 
 
@@ -615,6 +617,21 @@ def arg_name(src: str) -> str:
     src = src.strip()
     if src in _NAME_OVERRIDES:
         return _NAME_OVERRIDES[src]
+    m = re.fullmatch(r"type\((.*)\)\.__name__", src)
+    if m:
+        return "node_type"
+    m = re.fullmatch(r"sorted\((.*)\)(?:\[\d+\])?", src, re.S)
+    if m:
+        return arg_name(m.group(1).split("&")[0].strip())
+    m = re.fullmatch(r"getattr\([^,]+,\s*['\"](\w+)['\"].*\)", src, re.S)
+    if m:
+        return m.group(1)
+    m = re.fullmatch(r"(?:self\.)?_spell\((.*)\)", src)
+    if m:
+        return "expr"
+    m = re.fullmatch(r"self\._type_spec_to_cpp\((\w+)\)", src)
+    if m:
+        return m.group(1).replace("_spec", "") + "_type"
     m = re.fullmatch(r"len\((.*)\)", src)
     if m:
         return _base(m.group(1)) + "_count"

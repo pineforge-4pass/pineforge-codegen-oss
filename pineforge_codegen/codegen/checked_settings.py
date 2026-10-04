@@ -1,6 +1,19 @@
 """Opt-in settings metadata, validation and exception-contained C exports."""
 
 from ..ast_nodes import Identifier, MemberAccess
+from ..errors import CompileError
+
+
+def _visit_setting_arg(emitter, expr) -> str:
+    """An input argument's C++ for the settings metadata. The metadata is
+    emitted in the constructor, ahead of the script body: an error here is
+    held until the body is generated (``CodeGen.generate``), so the script's
+    first error in source order is the one raised."""
+    try:
+        return emitter._visit_expr(expr)
+    except CompileError as error:
+        emitter._defer_settings_error(error)
+        return "0"
 
 
 def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> None:
@@ -38,7 +51,7 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
         key = emitter._input_key_literal(name)
         default = emitter._get_input_default(node)
         getter = emitter._input_getter_for_call(node, func_name, namespace)
-        default_cpp = emitter._visit_expr(default) if default is not None else "0"
+        default_cpp = _visit_setting_arg(emitter, default) if default is not None else "0"
         default_cpp = emitter._coerce_string_input_default(getter, default_cpp)
         value_type = {
             "get_input_int": "int", "get_input_int64": "int",
@@ -89,7 +102,7 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
             declared = getattr(arguments.get("options"), "elements", None)
             if declared:
                 for option in declared:
-                    option_cpp = emitter._visit_expr(option)
+                    option_cpp = _visit_setting_arg(emitter, option)
                     options.append(option_cpp if getter == "get_input_string" else
                                    f'::pineforge::checked_settings::number({option_cpp})')
             expression = f'{getter}({key}, {default_cpp})'
@@ -98,7 +111,7 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
         if default_serialized is None:
             default_serialized = (default_cpp if value_type in ("string", "source") else
                                   f'::pineforge::checked_settings::number({default_cpp})')
-        constraints = [emitter._visit_expr(arguments[name]) if arguments.get(name) is not None
+        constraints = [_visit_setting_arg(emitter, arguments[name]) if arguments.get(name) is not None
                        else "std::numeric_limits<double>::quiet_NaN()"
                        for name in ("minval", "maxval", "step")]
         metadata = (f'{{{key}, "{value_type}", {default_serialized}, '
