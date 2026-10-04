@@ -100,6 +100,24 @@ script ABI epoch `engine_script_run_v19`.
   <json>` for an invalid value, or `the strategy library has no
   strategy_set_syminfo_metadata, so syminfo.mincontract cannot be applied` for
   a library without that function.
+- The same harness also installs other symbols' bars for `request.security`
+  on another symbol: `--symbol-feeds <index.json>` (the image's
+  `PINEFORGE_SYMBOL_FEEDS`), a JSON index keyed by the exact symbol string the
+  script passes and by timeframe, each feed an OHLCV CSV, with the symbol's
+  catalog `syminfo`
+  ([pineforge-engine#327](https://github.com/pineforge-4pass/pineforge-engine/pull/327),
+  [pineforge-release#23](https://github.com/pineforge-4pass/pineforge-release/pull/23)).
+  It needs one feed per requested timeframe: nothing aggregates another
+  symbol's bars. It installs them through `strategy_set_symbol_facts` and
+  `strategy_set_symbol_feed`, C ABI calls since 1.0.0, so the generated C++
+  does not change for it. What it installed is recorded as
+  `applied_runtime.symbol_feeds`, `{"canonicalization": ..., "symbols":
+  {"<symbol>": {"facts": {...}, "feeds": {"<timeframe>": {"bars": ...,
+  "first_ts": ..., "last_ts": ..., "source_values_sha256": ...}}}}}`, present
+  only when it installed a symbol, so such a run has its own fingerprint. An
+  index or a feed it cannot install fails the run the same way: one stdout
+  line `{"engine":"pineforge","error":"--symbol-feeds: ..."}`, harness exit
+  status 1, image entrypoint exit status 4.
 - Between 1.0.1 and 1.1.0 a report's fingerprint differs in any case, since it
   records the engine and codegen versions and the generated C++'s hash, and
   the Pine adapter changes in engine `v1.1.0`
@@ -204,7 +222,9 @@ From [#159](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/159):
 - The README's parity scoreboard renders from the public facts tokens of
   [`pineforge-release`](https://github.com/pineforge-4pass/pineforge-release),
   and a release's grades are stated apart from the scoreboard of `main`
-  ([#160](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/160)).
+  ([#160](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/160));
+  no fact marker starts a line, so GitHub renders each sentence in its
+  paragraph ([#162](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/162)).
   Release 1.1.0 is graded on registry baseline
   `pineforge-parity-baseline-20261003-engine-dbd17b38`: 7,949 excellent and
   40 strong of 7,989 graded probes, with engine dbd17b38, whose library source
