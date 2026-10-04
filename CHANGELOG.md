@@ -28,25 +28,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   without the extension warn and run, including their requests, without proving
   eligibility. Default batch computation is unchanged.
 
-## Release note policy
+### Diagnostic codes
 
-- Keep a section for each released version, including prereleases. Use the exact
-  tag version and release date when published; leave a planned release marked
-  **Unreleased** until its tag exists.
-- Summarize changes users can observe: the Python and JSON contract, emitted C++
-  and engine requirements, support or warning changes, packaging, and security
-  fixes. Link the merged pull requests that supply each change.
-- Call out migration steps and compatibility limits explicitly. A pair change
-  requires regenerated C++ and relinked strategy libraries, even when the C
-  ABI number is unchanged.
-- Draft from merged changes since the previous release tag, then verify against
-  the release commit. A prerelease note describes changes since the preceding
-  prerelease or stable tag; the final stable note consolidates the series.
-
-## Unreleased
-
-Planned as 1.2.0, an additive change to the public API; the emitted C++ is
-unchanged.
+An additive change to the public API; it leaves the emitted C++ unchanged.
 
 - **Diagnostic codes.** Every transpile diagnostic carries a stable `code`
   (`PF-E1203` / `PF-W0412`) and named, raw `args`, in
@@ -63,6 +47,21 @@ unchanged.
   the script body, so an error there (an unknown name in `minval`) was raised
   before an error on an earlier line. The script's first error in source
   order is raised again; no emitted C++ changes.
+
+## Release note policy
+
+- Keep a section for each released version, including prereleases. Use the exact
+  tag version and release date when published; leave a planned release marked
+  **Unreleased** until its tag exists.
+- Summarize changes users can observe: the Python and JSON contract, emitted C++
+  and engine requirements, support or warning changes, packaging, and security
+  fixes. Link the merged pull requests that supply each change.
+- Call out migration steps and compatibility limits explicitly. A pair change
+  requires regenerated C++ and relinked strategy libraries, even when the C
+  ABI number is unchanged.
+- Draft from merged changes since the previous release tag, then verify against
+  the release commit. A prerelease note describes changes since the preceding
+  prerelease or stable tag; the final stable note consolidates the series.
 
 ## 1.1.0 — 2026-10-04
 
