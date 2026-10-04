@@ -175,6 +175,14 @@ def test_site_lowered_to_na_and_unreached_helper_are_not_listed():
     assert full["requests"] == []
     assert any("lowered to na" in d.message for d in full["diagnostics"])
     assert _requests('f(s) => request.security(s, "60", close)\nc = close\n' + TRADE) == []
+    # Registered all the same (its value reaches an order in the helper), but
+    # never read; a deferred refusal there never stops the run either.
+    for symbol in ('"BINANCE:ETHUSDT"', 's'):
+        assert _requests(
+            'f() =>\n    var string s = "A:B"\n    s := close > open ? "A:B" : "C:D"\n'
+            f'    v = request.security({symbol}, "60", close)\n'
+            '    if v > 0\n        strategy.entry("L", strategy.long)\n    v\n'
+            'c = close\n' + TRADE) == []
 
 
 @pytest.mark.parametrize("body", [
@@ -196,6 +204,7 @@ def test_requests_reading_no_feed_are_not_listed(body):
 
 @pytest.mark.parametrize("tf, expected", [
     ("timeframe.period", {"kind": "chart"}),
+    ("timeframe.main_period", {"kind": "chart"}),
     ('"240"', {"kind": "literal", "value": "240"}),
     ('"D"', {"kind": "literal", "value": "1D"}),
     ('"1D"', {"kind": "literal", "value": "1D"}),
@@ -222,10 +231,23 @@ def test_timeframe_global_input_and_computed():
     # The chart's timeframe at the defaults: an empty value.
     assert _only(computed.replace("input.bool(true", "input.bool(false"))["timeframe"] == {
         "kind": "computed", "expr": "tf", "value": "", "inputs": ["Use D"]}
-    # A switch is outside registration_value's grammar: no value, its inputs named.
-    assert _only('mode = input.string("a", "Mode")\ntf = switch mode\n    "a" => "60"\n'
-                 '    => "D"\nc = request.security("BINANCE:ETHUSDT", tf, close)\n'
-                 + TRADE)["timeframe"] == {"kind": "computed", "expr": "tf", "inputs": ["Mode"]}
+    # An empty string is the chart's timeframe.
+    assert _only('tf = ""\nc = request.security("BINANCE:ETHUSDT", tf, close)\n'
+                 + TRADE)["timeframe"] == {"kind": "chart"}
+
+
+@pytest.mark.parametrize("default, value", [("A", "60"), ("B", "1D"), ("C", "")])
+def test_switch_timeframe_takes_the_arm_registration_takes(default, value):
+    """As registration renders it: the matching arm, else the chart's
+    timeframe (an unmatched switch without a default is na)."""
+    entry = _only(f'mode = input.string("{default}", "Mode")\ntf = switch mode\n'
+                  '    "A" => "60"\n    "B" => "D"\n'
+                  'c = request.security("BINANCE:ETHUSDT", tf, close)\n' + TRADE)
+    assert entry["timeframe"] == {"kind": "computed", "expr": "tf", "value": value,
+                                  "inputs": ["Mode"]}
+    entry = _only('hi = input.bool(false, "Hi")\ntf = switch\n    hi => "D"\n    => "W"\n'
+                  'c = request.security("BINANCE:ETHUSDT", tf, close)\n' + TRADE)
+    assert entry["timeframe"]["value"] == "1W"
 
 
 def test_canonical_timeframe():

@@ -37,13 +37,13 @@ one from the same expression.
 from __future__ import annotations
 
 from .ast_nodes import (
-    BinOp, BoolLiteral, FuncCall, Identifier, MemberAccess, NaLiteral, NumberLiteral,
-    StringLiteral, Subscript, Ternary, UnaryOp,
+    BinOp, BoolLiteral, ExprStmt, FuncCall, Identifier, MemberAccess, NaLiteral,
+    NumberLiteral, StringLiteral, Subscript, SwitchStmt, Ternary, UnaryOp,
 )
-from .errors import Phase
+from .errors import CompileError, Phase
 from .external_requests import FEED_LOWERING, LOWERING_ANNOTATION, _nodes
 from .pine_spelling import is_input_call, pine_string_literal
-from .security_contexts import _REGISTRATION_INPUTS, ticker_symbol_arg
+from .security_contexts import _REGISTRATION_INPUTS, ScriptIndex, _reached, ticker_symbol_arg
 
 # A deferred refusal's lowering (``support_checker._lower_no_data_request``,
 # ``external_requests.unpin_requests``).
@@ -53,19 +53,39 @@ _CHART = object()
 _UNKNOWN = object()
 # A folded value longer than any symbol or timeframe is no key.
 _MAX_VALUE_CHARS = 1024
+# Names a fold follows, one through another, and nodes it visits, before it
+# gives up (the value is then unknown).
+_MAX_FOLD_DEPTH = 256
+_MAX_FOLD_STEPS = 100_000
+
+
+class _Fold:
+    """One value's fold: each name expanded and folded once."""
+
+    def __init__(self, gen) -> None:
+        self.gen = gen
+        self.names: dict[str, object] = {}
+        self.steps = 0
 _PRECEDENCE = {"or": 1, "and": 2, "==": 3, "!=": 3, "<": 4, "<=": 4, ">": 4, ">=": 4,
                "+": 5, "-": 5, "*": 6, "/": 6, "%": 6}
 
 
 def request_sites(program) -> list[FuncCall]:
     """The ``request.security`` calls the support checker lowered onto
-    another symbol's feed or to a deferred refusal: taken before the passes
-    that replace a refusal by its ``na`` (``lower_no_data_requests``) or turn
-    a feed back into one (``unpin_requests``), which mark it so."""
-    return [node for node in _nodes(program)
-            if isinstance(node, FuncCall) and _call_name(node) == ("request", "security")
-            and (node.annotations or {}).get(LOWERING_ANNOTATION)
-            in (FEED_LOWERING, _UNPINNED_LOWERING)]
+    another symbol's feed or to a deferred refusal, outside the helpers
+    nothing reaches: taken before the passes that replace a refusal by its
+    ``na`` (``lower_no_data_requests``) or turn a feed back into one
+    (``unpin_requests``), which mark it so."""
+    sites = [node for node in _nodes(program)
+             if isinstance(node, FuncCall) and _call_name(node) == ("request", "security")
+             and (node.annotations or {}).get(LOWERING_ANNOTATION)
+             in (FEED_LOWERING, _UNPINNED_LOWERING)]
+    if not sites:
+        return sites
+    index = ScriptIndex(program)
+    reached = _reached(index)
+    return [site for site in sites
+            if (owner := index.owner.get(id(site))) not in index.funcs or owner in reached]
 
 
 def discover_requests(gen, ctx, sites: list[FuncCall]) -> list[dict]:
@@ -82,18 +102,29 @@ def discover_requests(gen, ctx, sites: list[FuncCall]) -> list[dict]:
         entries.append(((*where, len(entries)), entry))
 
     budget = getattr(gen, "_budget", None)
+    foreign = [info for info in gen._security_eval_info if info.get("foreign")]
+    helpers: set[str] = set()
+    unreached: set[str] = set()
+    if any(getattr(calls.get(info["sec_id"]), "containing_func", "") for info in foreign):
+        # A helper nothing reaches never runs: its registration is never read.
+        index = ScriptIndex(ctx.ast)
+        helpers = set(index.funcs)
+        unreached = helpers - _reached(index)
     try:
-        for info in gen._security_eval_info:
-            if not info.get("foreign"):
+        for info in foreign:
+            helper = getattr(calls.get(info["sec_id"]), "containing_func", "")
+            if helper in helpers and helper in unreached:
                 continue
-            if budget is not None:
-                budget.check(phase=Phase.CODEGEN)
+            # Past the time budget the rest are listed as written, unexpanded:
+            # discovery never fails a script that transpiled.
+            expand = _within(budget)
             entry = {
-                "symbol": _guarded(_symbol, gen, info["symbol_node"]),
-                "timeframe": _guarded(_registered_timeframe, gen, info),
+                "symbol": _guarded(_symbol, gen, info["symbol_node"], expand=expand),
+                "timeframe": _guarded(_registered_timeframe, gen, info, expand=expand),
                 "lookahead": bool(info.get("lookahead_on")),
                 "gaps": bool(info.get("gaps_on")),
-                "ignore_invalid_symbol": _guarded(_flag, gen, info.get("ignore_invalid_node")),
+                "ignore_invalid_symbol": _guarded(
+                    _flag, gen, info.get("ignore_invalid_node"), expand=expand),
             }
             column = gen._security_footprint_column(info["sec_id"])
             if column:
@@ -102,8 +133,6 @@ def discover_requests(gen, ctx, sites: list[FuncCall]) -> list[dict]:
         for site in sites:
             if (site.annotations or {}).get(LOWERING_ANNOTATION) != _UNPINNED_LOWERING:
                 continue
-            if budget is not None:
-                budget.check(phase=Phase.CODEGEN)
             # The C++ never registered it, so nothing expands its names here:
             # its arguments are listed as written.
             symbol, timeframe = _request_args(site)
@@ -133,6 +162,17 @@ def discover_requests(gen, ctx, sites: list[FuncCall]) -> list[dict]:
 # Symbol and timeframe
 # ---------------------------------------------------------------------------
 
+def _within(budget) -> bool:
+    """Whether the transpile's time budget still holds."""
+    if budget is None:
+        return True
+    try:
+        budget.check(phase=Phase.CODEGEN)
+    except CompileError:
+        return False
+    return True
+
+
 def _guarded(classify, gen, node, **options):
     """``classify(gen, node)``; a shape it does not know is listed as
     computed, with no value: discovery never fails a script that
@@ -145,26 +185,30 @@ def _guarded(classify, gen, node, **options):
         return None if classify is _flag else {"kind": "computed", "expr": _spell(node)}
 
 
-def _symbol(gen, node) -> dict:
+def _symbol(gen, node, expand: bool = True) -> dict:
     """``literal`` / ``input`` / ``computed`` as registration computes the
     symbol string the run keys its feed on."""
-    resolved = _passthrough(_expand(gen, node))
+    resolved = _passthrough(_expand(gen, node) if expand else node)
     if isinstance(resolved, StringLiteral):
         return {"kind": "literal", "value": resolved.value}
     if _is_registered_input(resolved):
         return _input(gen, resolved)
+    if not expand:
+        return {"kind": "computed", "expr": _spell(node)}
     return _computed(gen, node, resolved, timeframe=False)
 
 
-def _registered_timeframe(gen, info: dict) -> dict:
+def _registered_timeframe(gen, info: dict, expand: bool = True) -> dict:
     """The timeframe a feed site registers with (``_resolve_security_tf``'s
-    ``tf`` / ``tf_expr``, ``configure_security_evaluators``)."""
+    ``tf`` / ``tf_expr``, ``configure_security_evaluators``). ``input_tf_``
+    is the chart's: a run reading another symbol's feed takes the chart's
+    bars unaggregated (the engine refuses it otherwise)."""
     tf, tf_expr = info.get("tf"), info.get("tf_expr")
     if tf:
         return {"kind": "literal", "value": canonical_timeframe(tf)}
     if tf == "" or tf_expr in ("input_tf_", "script_tf_"):
         return {"kind": "chart"}
-    return _timeframe(gen, info.get("tf_node"))
+    return _timeframe(gen, info.get("tf_node"), expand=expand)
 
 
 def _timeframe(gen, node, expand: bool = True) -> dict:
@@ -202,7 +246,7 @@ def _input(gen, call: FuncCall) -> dict:
 
 def _computed(gen, node, resolved, *, timeframe: bool) -> dict:
     out = {"kind": "computed", "expr": _spell(node)}
-    value = _fold(gen, resolved)
+    value = _fold(_Fold(gen), resolved)
     if value is _CHART and timeframe:
         out["value"] = ""
     elif isinstance(value, str):
@@ -217,12 +261,14 @@ def _computed(gen, node, resolved, *, timeframe: bool) -> dict:
     return out
 
 
-def _flag(gen, node) -> bool | None:
+def _flag(gen, node, expand: bool = True) -> bool | None:
     """``ignore_invalid_symbol`` as registration reads it: false when left
     out, else its value at the inputs' defaults (None when unknown)."""
     if node is None:
         return False
-    value = _fold(gen, _expand(gen, node))
+    if not expand:
+        return node.value if isinstance(node, BoolLiteral) else None
+    value = _fold(_Fold(gen), _expand(gen, node))
     return value if isinstance(value, bool) else None
 
 
@@ -281,38 +327,54 @@ def _input_calls(gen, node) -> list[FuncCall]:
                   if call.loc is not None else (0, 0))
 
 
-def _fold(gen, node):
+def _fold(state: _Fold, node, depth: int = 0):
     """The value at the inputs' defaults of an expression in
-    ``ScriptIndex.registration_value``'s grammar, else ``_UNKNOWN``. The
-    chart's own symbol strings are the chart's (unknown here);
-    ``timeframe.period`` is ``_CHART``."""
+    ``ScriptIndex.registration_value``'s grammar (and, for a timeframe, a
+    ``switch`` of single-expression arms, as registration renders it), else
+    ``_UNKNOWN``. The chart's own symbol strings are the chart's (unknown
+    here); ``timeframe.period`` is ``_CHART``."""
+    state.steps += 1
+    if depth > _MAX_FOLD_DEPTH or state.steps > _MAX_FOLD_STEPS:
+        return _UNKNOWN
+    depth += 1
     if isinstance(node, (StringLiteral, BoolLiteral)):
         return node.value
     if isinstance(node, NumberLiteral):
         return node.value
     if _is_timeframe_period(node):
         return _CHART
+    if isinstance(node, Identifier):
+        # A name registration expands (a switch's subject: the expansion
+        # leaves a switch as written); one it keeps has no value here.
+        if node.name not in state.names:
+            state.names[node.name] = _UNKNOWN  # a name read inside its own value
+            expanded = _expand(state.gen, node)
+            state.names[node.name] = (_UNKNOWN if expanded is node
+                                      else _fold(state, expanded, depth))
+        return state.names[node.name]
+    if isinstance(node, SwitchStmt):
+        return _fold_switch(state, node, depth)
     if isinstance(node, FuncCall):
         if is_input_call(node):
             ns, name = _call_name(node)
             if ns is None or name in _REGISTRATION_INPUTS or name == "timeframe":
-                return _input_default(gen, node)
+                return _input_default(state.gen, node)
             return _UNKNOWN
         passed = _passthrough(node)
-        return _UNKNOWN if passed is node else _fold(gen, passed)
+        return _UNKNOWN if passed is node else _fold(state, passed, depth)
     if isinstance(node, Ternary):
-        condition = _fold(gen, node.condition)
+        condition = _fold(state, node.condition, depth)
         if not isinstance(condition, bool):
             return _UNKNOWN
-        return _fold(gen, node.true_val if condition else node.false_val)
+        return _fold(state, node.true_val if condition else node.false_val, depth)
     if isinstance(node, UnaryOp):
-        operand = _fold(gen, node.operand)
+        operand = _fold(state, node.operand, depth)
         return (not operand) if node.op == "not" and isinstance(operand, bool) else _UNKNOWN
     if isinstance(node, BinOp) and node.op in ("+", "==", "!=", "and", "or"):
-        left = _fold(gen, node.left)
+        left = _fold(state, node.left, depth)
         if left is _UNKNOWN or left is _CHART:
             return _UNKNOWN
-        right = _fold(gen, node.right)
+        right = _fold(state, node.right, depth)
         if right is _UNKNOWN or right is _CHART:
             return _UNKNOWN
         if node.op == "+":
@@ -330,6 +392,37 @@ def _fold(gen, node):
     return _UNKNOWN
 
 
+def _fold_switch(state: _Fold, node: SwitchStmt, depth: int):
+    """A timeframe ``switch`` as registration renders it
+    (``_security_tf_switch_runtime_expr``): the first arm whose value equals
+    the subject (or whose condition holds), else the default arm, else the
+    chart's timeframe; every arm one expression."""
+    subject = None
+    if node.expr is not None:
+        subject = _fold(state, node.expr, depth)
+        if subject is _UNKNOWN or subject is _CHART:
+            return _UNKNOWN
+
+    def arm(body):
+        if len(body) != 1 or not isinstance(body[0], ExprStmt) or isinstance(
+                body[0].expr, NaLiteral):
+            return _UNKNOWN
+        return _fold(state, body[0].expr, depth)
+
+    default = node.default_body or None
+    for condition, body in node.cases:
+        if condition is None:
+            default = default or body
+            continue
+        value = _fold(state, condition, depth)
+        if value is _UNKNOWN or value is _CHART:
+            return _UNKNOWN
+        if (value is True if node.expr is None
+                else type(value) is type(subject) and value == subject):
+            return arm(body)
+    return arm(default) if default else _CHART
+
+
 # ---------------------------------------------------------------------------
 # Call shapes and spelling
 # ---------------------------------------------------------------------------
@@ -344,7 +437,8 @@ def _call_name(node: FuncCall) -> tuple[str | None, str | None]:
 
 
 def _is_timeframe_period(node) -> bool:
-    return (isinstance(node, MemberAccess) and node.member == "period"
+    """``timeframe.period`` or ``timeframe.main_period``: the chart's."""
+    return (isinstance(node, MemberAccess) and node.member in ("period", "main_period")
             and isinstance(node.object, Identifier) and node.object.name == "timeframe")
 
 
