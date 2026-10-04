@@ -4,7 +4,7 @@ Summary of licensing, third-party components, and trademarks for `pineforge-code
 
 ## License
 
-`pineforge-codegen` is **source-available**, **not** OSI "open source." It is distributed under the **PineForge Source License 1.0** — see [LICENSE](LICENSE), which is the controlling text.
+`pineforge-codegen` is **source-available**, **not** OSI "open source." It is distributed under the **PineForge Source License 1.1** — see [LICENSE](LICENSE), which is the controlling text.
 
 - **Noncommercial use** — any noncommercial purpose, and use by a charitable organization, educational institution, public research organization, public safety or health organization, environmental protection organization or government institution for its teaching, research and other operations, is free.
 - **Personal Trading** — free for a natural person to research, develop or backtest strategies and trade their **own** account with their **own** capital. Household, joint and retirement accounts and ordinary margin count as their own; a company's or fund's account does not, even a company they wholly own.
@@ -14,6 +14,8 @@ Summary of licensing, third-party components, and trademarks for `pineforge-code
 Describe this project as **"source-available"** rather than "open source." The runtime it targets, [`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine), is separate and **Apache-2.0**.
 
 Releases up to and including 1.1.0 were published under the license text that came with them (the PolyForm Noncommercial License 1.0.0 with a PineForge supplement); copies of those releases keep that license. The PineForge Source License 1.0 is a separate license and is not a PolyForm license.
+
+The PineForge Source License 1.1 replaces 1.0 for the code on `main` and in future releases; it clarifies one point, that distributing the software or its output, changed or not, embedded in or bundled with a product or service made available to others is Commercial Use, not free distribution, unless it is for a permitted purpose.
 
 ## Copyright and licensor
 

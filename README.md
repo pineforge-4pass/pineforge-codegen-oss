@@ -531,7 +531,7 @@ use `python -m pytest --collect-only -q` for the current collection count.
 
 ## License
 
-Source-available under the [PineForge Source License 1.0](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE);
+Source-available under the [PineForge Source License 1.1](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE);
 the `LICENSE` file is the controlling text. The licensor is pineforge, LLC.
 
 - **Free for noncommercial use:** any noncommercial purpose, and use by a
@@ -556,10 +556,10 @@ the `LICENSE` file is the controlling text. The licensor is pineforge, LLC.
 - **Commercial Use needs a commercial license:** besides investment
   management, any other use that is not free, such as use by, for or on
   behalf of a company, fund, partnership or other organization (including an
-  individual's work for one); embedding the software or its output in a
-  product or service made available to others; or operating a hosted,
-  software-as-a-service or other public-facing service through which others
-  run the software or receive its output.
+  individual's work for one); embedding the software or its output in, or
+  distributing either bundled with, a product or service made available to
+  others; or operating a hosted, software-as-a-service or other public-facing
+  service through which others run the software or receive its output.
 
 This is source-available, not OSI open source.
 
