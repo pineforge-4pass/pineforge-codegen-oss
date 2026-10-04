@@ -226,9 +226,10 @@ From [#159](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/159):
   no fact marker starts a line, so GitHub renders each sentence in its
   paragraph ([#162](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/162)).
   Release 1.1.0 is graded on registry baseline
-  `pineforge-parity-baseline-20261003-engine-dbd17b38`: 7,949 excellent and
-  40 strong of 7,989 graded probes, with engine dbd17b38, whose library source
-  is `v1.1.0`'s, and this repository at ee04fc6, the code of codegen 1.1.0.
+  `pineforge-parity-baseline-20261004-engine-7b596622`: 7,951 excellent and
+  38 strong of 7,989 graded probes, with engine 7b596622, whose library source
+  is `v1.1.0`'s, and this repository at c5d97ee, whose emitted C++ is
+  codegen 1.1.0's.
 - `docs/PUBLIC_CONTRACT.md` describes the checked settings functions and the
   exception handling
   ([#159](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/159)).
