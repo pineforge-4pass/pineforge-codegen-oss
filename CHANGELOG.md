@@ -231,9 +231,10 @@ From [#164](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/164):
   paragraph ([#162](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/162)).
   Release 1.1.0 is graded on registry baseline
   `pineforge-parity-baseline-20261004-engine-7b596622`: 7,951 excellent and
-  38 strong of 7,989 graded probes, with engine 7b596622, whose library source
-  is `v1.1.0`'s, and this repository at c5d97ee, whose emitted C++ is
-  codegen 1.1.0's.
+  38 strong of 7,989 graded probes, with engine 7b596622, which v1.1.0 equals
+  in behaviour: v1.1.0 adds a performance fix that its merge gate shows
+  changes no trade or report. This repository was at c5d97ee, whose emitted
+  C++ is codegen 1.1.0's.
 - `docs/PUBLIC_CONTRACT.md` describes the checked settings functions and the
   exception handling
   ([#159](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/159))
