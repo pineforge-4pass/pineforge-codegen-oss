@@ -23,7 +23,8 @@ advice.
   is a draft. It counts as final only when its exact bytes were approved:
   the file's sha256 must equal `agreementApprovedSha256` in
   `config/commerce.json` (`null` today), so any edit after approval makes it
-  a draft again. The text checks of `lib/agreement-status.ts` (shared by the
+  a draft again (`site/legal/.gitattributes` marks the file `-text`, so
+  line-ending conversion cannot change the hashed bytes). The text checks of `lib/agreement-status.ts` (shared by the
   build guard and the pages) must pass as well, as backstops:
   - the marker `DRAFT — requires review by counsel before go-live` is absent,
     no line contains "DRAFT" in capitals, and no line matches "draft",
@@ -448,12 +449,14 @@ Owner decisions:
 - [ ] Real prices per tier in `config/commerce.json`, then
       `pricesArePlaceholders: false`.
 - [ ] The selling legal entity in `seller.legalName` (and on Stripe invoices).
-- [ ] Counsel's review of `legal/commercial-license-agreement.md`. After
-      counsel approves the final text: remove every draft signal (the DRAFT
-      marker and notice, every bracketed placeholder, "draft" in the version),
-      add the line `Status: final`, run `npm run build` with a live key once
-      to have the guard print the file's sha256, and set
-      `agreementApprovedSha256` in `config/commerce.json` to that hash.
+- [ ] The agreement, in this order: (1) prepare the final
+      `legal/commercial-license-agreement.md`: every draft signal removed
+      (the DRAFT marker and notice, "draft" in the version), every
+      placeholder filled, a final `Version:` line and the line
+      `Status: final`; (2) counsel approves THAT file and its sha256
+      (`shasum -a 256 site/legal/commercial-license-agreement.md`, or the
+      sha256 the `/terms` page shows); (3) set `agreementApprovedSha256` in
+      `config/commerce.json` to that hash.
 - [ ] The refund policy wording (in the agreement and the FAQ).
 - [ ] The Stripe account: business details, payouts, tax settings and
       registrations, invoice template, and customer emails for successful

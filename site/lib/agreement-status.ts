@@ -74,6 +74,8 @@ export function agreementStatus(text: string, approval: AgreementApproval): Agre
   const version = agreementVersion(text);
   const lines = text.split(/\r\n?|\n/);
   if (!version) reasons.push('no "Version:" line');
+  // agreementVersion() also reads a value split from its label ("Version\n: x").
+  else if (/draft/i.test(version)) reasons.push(`the version "${version}" is a draft version`);
   // Every Version: line, and the next non-empty line when its value is not on the same line.
   lines.forEach((line, i) => {
     const m = line.match(/^[\s>*_]*Version[\s*_]*:(.*)$/i);

@@ -26,8 +26,10 @@ if (live.length && blockers.length) {
   console.error(`Live-payment guard: refusing to build with live Stripe keys: ${live.join(", ")}.`);
   console.error("Live payments stay disabled until every go-live condition holds:");
   for (const b of blockers) console.error(`  - ${b}`);
-  console.error(`The agreement's current sha256 is ${agreement.sha256}; after counsel approves this exact text,`);
-  console.error("copy it into config/commerce.json as agreementApprovedSha256.");
+  if (agreement.draftReasons.some((r) => r.includes("agreementApprovedSha256") || r.includes("is not the approved"))) {
+    console.error(`The agreement file's sha256 is ${agreement.sha256}. Once counsel has approved this exact file,`);
+    console.error("set agreementApprovedSha256 in config/commerce.json to it.");
+  }
   console.error("Use test-mode keys (sk_test_ / pk_test_), or finish the go-live checklist in README.md.");
   process.exit(1);
 }

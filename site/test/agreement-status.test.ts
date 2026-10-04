@@ -148,3 +148,9 @@ test("backstops: every Version line, open phrases anywhere, unclosed owner/couns
     assert.equal(agreementStatus(FINAL + `\n${phrase}\n`).isDraft, true, phrase);
   }
 });
+
+test("a draft version split from its label is a draft", () => {
+  for (const v of ["Version\n: draft-1", "**Version**\n: draft-1"]) {
+    assert.equal(agreementStatus(FINAL.replace("Version: 2027-01-15", v)).isDraft, true, v);
+  }
+});
