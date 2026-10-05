@@ -1,5 +1,13 @@
-PineForge Source License 1.1
+PineForge Source License 1.2
 ============================
+
+Version 1.2, 2026-10-05. Compared with 1.1, two places change. In the
+Personal Trading section, the last bullet now says that an account a
+proprietary-trading firm or funded-trader program provides or allocates,
+including a challenge, evaluation or simulated account, is not the
+person's own account or capital. In the Commercial Use section, the
+definition of investment capital now covers the capital in such an
+account, real or simulated.
 
 Copyright 2025-2026 pineforge, LLC
 
@@ -134,7 +142,12 @@ For Personal Trading:
     program or anyone else outside the person's household provides or
     allocates to the person to trade, and that the provider still owns or
     whose losses the provider bears, is not the person's own capital, even
-    if the person shares in the profits.
+    if the person shares in the profits. An account that a
+    proprietary-trading firm or a funded-trader program provides or
+    allocates to the person to trade, including a challenge, evaluation or
+    simulated account, whether the capital in it is real or simulated, is
+    likewise not the person's own account and is not funded by the
+    person's own capital.
 
 
 ## Commercial Use
@@ -149,7 +162,10 @@ in each case whoever the capital belongs to and whether or not for a fee.
 trading, including capital belonging to any other person or entity, such as a
 friend or relative, clients or investors, an endowment, a pension or
 retirement fund, a sovereign or other public fund, or the treasury or reserves
-of a foundation or other organization.
+of a foundation or other organization. The capital in an account that a
+proprietary-trading firm or a funded-trader program provides or allocates
+to a person or entity to trade, including a challenge, evaluation or
+simulated account, is investment capital whether it is real or simulated.
 
 **Commercial Use** means any use of the software that is not a permitted
 purpose, other than distributing copies under the Distribution License
