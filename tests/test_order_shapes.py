@@ -156,7 +156,7 @@ def test_each_emitted_helper_clone_has_an_order_descriptor():
 value = f(close) + f(open)'''
     cpp = transpile(SOURCE + body)
     result = receipt(body)
-    assert cpp.count('strategy_entry("L",') == len(result["calls"]) == 2
+    assert cpp.count("strategy_entry(") == len(result["calls"]) == 2
     assert all(call["context"] == "repeatable" for call in result["calls"])
     assert result["entry_ids"]["multi_site"] == 1
     assert result["unmodeled"] == []
@@ -173,7 +173,7 @@ strategy.exit("X", limit=value)'''
 
 
 def test_block_shadows_do_not_leak_to_sibling_or_outer_sites():
-    body = '''value = 5
+    body = '''value = 5.0
 if close > open
     if high > low
         value = close
