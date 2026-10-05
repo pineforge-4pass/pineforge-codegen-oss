@@ -5454,6 +5454,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if self._uses_session_market:
             lines.insert(_session_market_member_at, SESSION_MARKET_MEMBER)
             lines.insert(_session_market_at, SESSION_MARKET_CPP)
+            self._capabilities_export_at += 2
 
         from .capabilities import emit_capabilities_exports
         exports: list[str] = []

@@ -24,7 +24,7 @@ def emitted_receipt(source):
 def emitted_confirmed_receipt(source):
     cpp = transpile(source)
     documents = re.findall(r'checked_settings::receipt\(("(?:[^"\\]|\\.)*"), json, capacity, required\);', cpp)
-    assert len(documents) == 2
+    assert len(documents) == 3
     assert 'strategy_confirmed_bar_api_version(void) { return 1u; }' in cpp
     return json.loads(json.loads(documents[1]))
 
@@ -307,7 +307,7 @@ def test_capabilities_collect_facts_in_one_walk(monkeypatch):
 
 
 @pytest.mark.parametrize('declaration', ['calc_on_every_tick=true', 'process_orders_on_close=true'])
-@pytest.mark.parametrize('receipt_kind', ['capabilities', 'confirmed_bar'])
+@pytest.mark.parametrize('receipt_kind', ['capabilities', 'confirmed_bar', 'order_shapes'])
 def test_receipt_runtime_buffer_protocol_and_reused_handle(declaration, receipt_kind):
     cpp = transpile(f'''//@version=6
 strategy("runtime receipt", {declaration})
@@ -362,6 +362,10 @@ int main() {
     if receipt_kind == 'capabilities':
         name = declaration.split('=')[0]
         assert receipt['declarations'][name] is True
-    else:
+    elif receipt_kind == 'confirmed_bar':
         assert receipt == {'version': 1, 'requests': [], 'orders': ['entry:market'],
                            'intrabar_persistence': False}
+    else:
+        assert receipt['version'] == 1
+        assert receipt['process_orders_on_close'] is (declaration == 'process_orders_on_close=true')
+        assert receipt['calls'][0]['call'] == 'entry'

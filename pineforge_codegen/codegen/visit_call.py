@@ -3197,7 +3197,7 @@ class CallVisitor:
             comment_val = self._visit_expr(comment) if comment else '""'
             oca_name_val = self._visit_expr(oca_name) if oca_name else '""'
             oca_type_val = self._visit_expr(oca_type) if oca_type else "0"
-                qty_type_val = self._visit_expr(qty_type) if qty_type else "-1"
+            qty_type_val = self._visit_expr(qty_type) if qty_type else "-1"
             qty_val = self._visit_expr(qty) if qty else "na<double>()"
             if stop is not None or limit is not None or qty is not None or oca_name is not None or oca_type is not None or qty_type is not None:
                 limit_val = self._visit_expr(limit) if limit else "na<double>()"
