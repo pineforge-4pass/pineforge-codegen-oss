@@ -260,7 +260,7 @@ def capabilities_documents(emitter) -> tuple[str, str]:
             short_ids.add(identifier.value)
         else:
             conflicting_ids.add(identifier.value)
-    if dynamic_entry_id:
+    if dynamic_entry_id or conflicting_ids:
         short_ids.clear()
     orders = set(_order_shape(node, short_ids - conflicting_ids) for node in order_nodes)
     if declarations["process_orders_on_close"]:

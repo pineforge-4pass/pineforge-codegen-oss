@@ -56,6 +56,7 @@ def test_receipts_use_the_registration_lowering(body, clock, heikinashi, feed):
     ('strategy.entry("S", strategy.short)\nstrategy.exit("X", "S", stop=high, limit=low)', 'exit:short_bracket'),
     ('strategy.entry(id="S", direction=strategy.short)\nstrategy.exit(id="X", from_entry="S", stop=high, limit=low)', 'exit:short_bracket'),
     ('strategy.entry("S", strategy.short)\nstrategy.entry(id="S", direction=strategy.long)\nstrategy.exit("X", "S", stop=high, limit=low)', 'strategy.exit (unproven order shape)'),
+    ('strategy.entry("S", strategy.short)\nstrategy.entry("L", strategy.long)\nstrategy.exit("X", "S", stop=high, limit=low)', 'strategy.exit (unproven order shape)'),
     ('strategy.entry("L", strategy.long, oca_name="group", oca_type=strategy.oca.cancel)', 'strategy.entry (unproven order shape)'),
     ('strategy.entry("L", strategy.long)\nstrategy.exit("X", "L", stop=high, limit=low)', 'strategy.exit (unproven order shape)'),
     ('strategy.entry("S", strategy.short)\nstrategy.exit("X", "S", trail_points=2, trail_offset=1)', 'strategy.exit (unproven exit terms)'),
