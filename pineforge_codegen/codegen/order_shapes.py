@@ -104,7 +104,8 @@ class LoweredCall:
 
 def record_order_call(emitter, node, call, parameters, form=None) -> None:
     """Called only by a branch that lowers the corresponding order command."""
-    emitter._order_shape_calls.setdefault(id(node), LoweredCall(
+    key = (id(node), getattr(emitter, "_current_instance_name", None))
+    emitter._order_shape_calls.setdefault(key, LoweredCall(
         node, call, {name: LoweredParameter(*value) for name, value in parameters.items()},
         "repeatable" if getattr(emitter, "_current_func_body", None) is not None else "straight", form,
     ))
@@ -273,10 +274,11 @@ def order_shapes_document(emitter) -> str:
             call["order"] = "mixed" if before and after or not matching else "before" if before else "after"
     counts = Counter(name for _site, name, _direction in entries)
     settings, pooc = settings_echo(emitter._order_shape_constructor)
+    recorded_nodes = {id(record.node) for record in records}
     unmodeled = {_expression(node.callee) for node, _depth in iter_ast_nodes(emitter.ctx.ast)
                  if isinstance(node, FuncCall) and (_expression(node.callee) or "").startswith("strategy.")
                  and _expression(node.callee) not in READ_ONLY_STRATEGY_CALLS
-                 and id(node) not in emitter._order_shape_calls}
+                 and id(node) not in recorded_nodes}
     return json.dumps({
         "version": 1, "process_orders_on_close": pooc, "calls": calls,
         "entry_ids": {"long": len(long_ids), "short": len(short_ids),

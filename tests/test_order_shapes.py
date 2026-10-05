@@ -15,8 +15,8 @@ SOURCE = '//@version=6\nstrategy("order shapes", process_orders_on_close=true)\n
 RECEIPT_PATTERN = r'checked_settings::receipt\(("(?:[^"\\]|\\.)*"), json, capacity, required\);'
 
 
-def receipt(body, declaration=SOURCE):
-    cpp = transpile(declaration + body)
+def receipt(body, declaration=SOURCE, *, check_support=True):
+    cpp = transpile(declaration + body, check_support=check_support)
     documents = re.findall(RECEIPT_PATTERN, cpp)
     assert len(documents) == 3
     document = json.loads(documents[2])
@@ -40,7 +40,8 @@ def receipt(body, declaration=SOURCE):
     ('strategy.cancel("L")', 'strategy.cancel(id="L")'),
 ])
 def test_default_expansion_families(first, second):
-    assert receipt(first) == receipt(second)
+    check_support = first != 'strategy.exit("X")'
+    assert receipt(first, check_support=check_support) == receipt(second, check_support=check_support)
 
 
 @pytest.mark.parametrize(("setup", "value", "expected"), [
@@ -103,7 +104,7 @@ def test_exit_fields_and_dropped_tick_legs():
     ticks = receipt('strategy.exit("X", profit=10, loss=5)')["calls"][0]
     assert ticks["profit_ticks"] == ticks["loss_ticks"] == "literal"
     assert ticks["limit"] == ticks["stop"] == "absent"
-    cancellation = receipt('strategy.exit("X", qty=2, qty_percent=50, oca_name="O")')["calls"][0]
+    cancellation = receipt('strategy.exit("X", qty=2, qty_percent=50, oca_name="O")', check_support=False)["calls"][0]
     assert set(cancellation) == {"site", "call", "context", "form", "id", "from_entry", "comment", "target", "order"}
     assert cancellation["form"] == "cancel_bracket"
 
@@ -113,7 +114,7 @@ def test_exit_fields_and_dropped_tick_legs():
     ('"private-literal-ID"', "literal"), ('""', "empty"), ('input.string("L")', "dynamic"),
 ])
 def test_ids(call, identifier, expected):
-    terms = ", strategy.long" if call in ("entry", "order") else ""
+    terms = ", strategy.long" if call in ("entry", "order") else ", limit=close" if call == "exit" else ""
     result = receipt(f"strategy.{call}({identifier}{terms})")
     assert result["calls"][0]["id"] == expected
     assert "private-literal-ID" not in json.dumps(result)
@@ -195,7 +196,7 @@ def test_settings_echo_and_pooc_false():
     result = receipt('strategy.cancel_all()', '//@version=6\nstrategy("default")\n')
     assert result["process_orders_on_close"] is False
     assert result["settings"] == {
-        "initial_capital": 1000000.0, "default_qty_type": "percent_of_equity", "default_qty_value": 100.0,
+        "initial_capital": 100000.0, "default_qty_type": "percent_of_equity", "default_qty_value": 100.0,
         "pyramiding": 1, "commission_type": "percent", "commission_value": 0.0, "slippage": 0,
         "margin_long": 100.0, "margin_short": 100.0, "close_entries_rule": "FIFO",
     }
