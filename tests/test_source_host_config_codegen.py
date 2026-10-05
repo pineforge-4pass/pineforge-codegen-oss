@@ -131,7 +131,7 @@ strategy.risk.max_intraday_filled_orders(6)
 strategy.risk.max_position_size(7.0)
 ''')
     calls = [
-        line.strip() for line in cpp.splitlines() if "set_pine_risk_" in line
+        line.strip() for line in cpp.splitlines() if line.lstrip().startswith("set_pine_risk_")
     ]
     assert calls == [
         "set_pine_risk_direction(1);",
@@ -164,7 +164,7 @@ strategy.risk.allow_entry_in(strategy.direction.all)
 ''')
 
     calls = [
-        line.strip() for line in cpp.splitlines() if "set_pine_risk_direction" in line
+        line.strip() for line in cpp.splitlines() if line.lstrip().startswith("set_pine_risk_direction(")
     ]
     assert calls == [
         "set_pine_risk_direction(-1);",
@@ -183,7 +183,7 @@ strategy.risk.max_intraday_loss(500, strategy.cash)
 ''')
 
     calls = [
-        line.strip() for line in cpp.splitlines() if "set_pine_risk_max_" in line
+        line.strip() for line in cpp.splitlines() if line.lstrip().startswith("set_pine_risk_max_")
     ]
     assert calls == [
         "set_pine_risk_max_drawdown((double)(10), true);",
