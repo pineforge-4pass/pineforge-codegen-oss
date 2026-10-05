@@ -34,6 +34,27 @@ DECLARATION_DEFAULTS = {
     "calc_on_every_history_tick": False,
 }
 
+MODELED_ORDER_ARGUMENTS = {
+    "strategy.entry": frozenset(("id", "direction", "limit", "stop")),
+    "strategy.exit": frozenset(("id", "from_entry", "limit", "stop")),
+    "strategy.close": frozenset(("id", "immediately")),
+    "strategy.close_all": frozenset(("immediately",)),
+}
+READ_ONLY_STRATEGY_CALLS = frozenset(
+    f"strategy.{namespace}.{accessor}"
+    for namespace in ("opentrades", "closedtrades")
+    for accessor in ("entry_id", "entry_price", "entry_time", "entry_bar_index", "size",
+                     "profit", "profit_percent", "commission", "max_runup", "max_runup_percent",
+                     "max_drawdown", "max_drawdown_percent", "exit_id", "exit_price",
+                     "exit_time", "exit_bar_index", "entry_comment", "exit_comment")
+) | frozenset(("strategy.convert_to_account", "strategy.convert_to_symbol"))
+ORDER_SETTINGS = frozenset(("pyramiding", "default_qty_type", "default_qty_value", "initial_capital",
+                           "slippage", "commission_type", "commission_value", "close_entries_rule",
+                           "margin_long", "margin_short", "risk_free_rate"))
+MODELED_SETTING_DEFAULTS = {"default_qty_type": "strategy.fixed", "default_qty_value": 1,
+                            "slippage": 0, "commission_type": "strategy.commission.percent",
+                            "commission_value": 0}
+
 
 def _expression(node):
     if isinstance(node, (StringLiteral, NumberLiteral, BoolLiteral)):
@@ -67,11 +88,14 @@ def _order_arguments(node):
     name = _expression(node.callee)
     positional = {
         "strategy.entry": ("id", "direction", "qty", "limit", "stop", "oca_name", "oca_type", "comment", "alert_message", "disable_alert"),
-        "strategy.exit": ("id", "from_entry", "qty", "qty_percent", "profit", "limit", "loss", "stop", "trail_price", "trail_points", "trail_offset"),
+        "strategy.exit": ("id", "from_entry", "qty", "qty_percent", "profit", "limit", "loss", "stop", "trail_price", "trail_points", "trail_offset", "oca_name", "comment", "alert_message", "alert_profit", "alert_loss", "alert_trailing", "disable_alert"),
         "strategy.close": ("id", "comment", "qty", "qty_percent", "alert_message", "immediately", "disable_alert"),
         "strategy.close_all": ("comment", "alert_message", "immediately", "disable_alert"),
     }.get(name, ())
-    arguments = dict(zip(positional, node.args))
+    arguments = {positional[index] if index < len(positional) else f"positional_{index}": argument
+                 for index, argument in enumerate(node.args)}
+    if arguments.keys() & node.kwargs.keys():
+        arguments["duplicate_argument"] = None
     arguments.update(node.kwargs)
     return arguments
 
@@ -79,6 +103,8 @@ def _order_arguments(node):
 def _order_shape(node, short_ids):
     name = _expression(node.callee)
     arguments = _order_arguments(node)
+    if name not in MODELED_ORDER_ARGUMENTS or not set(arguments) <= MODELED_ORDER_ARGUMENTS[name]:
+        return name + (" (unproven exit terms)" if name == "strategy.exit" else " (unproven order shape)")
     if name == "strategy.entry" and _expression(arguments.get("direction")) in ("strategy.long", "strategy.short"):
         priced = {key for key in ("limit", "stop") if key in arguments}
         if len(priced) < 2 and not (set(arguments) & {"oca_name", "oca_type"}):
@@ -106,6 +132,7 @@ def capabilities_documents(emitter) -> tuple[str, str]:
     intrabar = False
     recorded = False
     order_nodes = []
+    order_settings = {}
     for node, _depth in iter_ast_nodes(emitter.ctx.ast):
         if isinstance(node, StrategyDecl):
             arguments = {STRATEGY_PARAMETERS[index] if index < len(STRATEGY_PARAMETERS)
@@ -113,6 +140,8 @@ def capabilities_documents(emitter) -> tuple[str, str]:
                          for index, argument in enumerate(node.args)}
             unresolved.extend(arguments.keys() & node.kwargs.keys())
             arguments.update(node.kwargs)
+            order_settings.update({name: _literal(argument)[0] for name, argument in arguments.items()
+                                   if name in ORDER_SETTINGS})
             for name, argument in arguments.items():
                 value, valid = _literal(argument)
                 default = DECLARATION_DEFAULTS.get(name)
@@ -130,7 +159,8 @@ def capabilities_documents(emitter) -> tuple[str, str]:
             intrabar |= node.is_varip
         elif isinstance(node, FuncCall):
             name, namespace = emitter._resolve_callee(node.callee)
-            if namespace == "strategy" and name in ("entry", "order", "exit", "close", "close_all", "cancel", "cancel_all"):
+            qualified = _expression(node.callee) or ""
+            if qualified.startswith("strategy.") and qualified not in READ_ONLY_STRATEGY_CALLS:
                 order_nodes.append(node)
             if namespace == "request" and name == "security_lower_tf":
                 expression = node.args[2] if len(node.args) > 2 else node.kwargs.get("expression")
@@ -191,7 +221,11 @@ def capabilities_documents(emitter) -> tuple[str, str]:
             "heikinashi": bool(lowering.get("heikinashi")),
             "feed": feed,
         })
-        confirmed_requests.append({**requests[-1], "expression": _expression(site.get("expr_node"))})
+        expression = _expression(site.get("expr_node"))
+        if expression in ("close", "close[1]", "ta.sma(close,4)", "ta.ema(close,3)") and "close" in (
+                getattr(emitter.ctx, "global_expr_map", {}) or {}):
+            unresolved.append("request.security.expression (user-bound close)")
+        confirmed_requests.append({**requests[-1], "expression": expression})
     for index, site in enumerate((emitter.ctx.ast.annotations or {}).get(CAPABILITY_UNPINNED_ANNOTATION, ())):
         requests.append({
             "function": site["function"],
@@ -228,8 +262,16 @@ def capabilities_documents(emitter) -> tuple[str, str]:
             conflicting_ids.add(identifier.value)
     if dynamic_entry_id:
         short_ids.clear()
+    orders = set(_order_shape(node, short_ids - conflicting_ids) for node in order_nodes)
+    if declarations["process_orders_on_close"]:
+        settings = {**MODELED_SETTING_DEFAULTS, **order_settings}
+        slipped = {**MODELED_SETTING_DEFAULTS, "default_qty_type": "strategy.percent_of_equity",
+                   "default_qty_value": 100, "slippage": 15}
+        if settings != MODELED_SETTING_DEFAULTS and not (orders == {"entry:market"} and settings == slipped
+                                                        and not confirmed_requests and not intrabar):
+            orders.add("strategy() (unproven POOC sizing, slippage or account settings)")
     confirmed = {"version": 1, "requests": confirmed_requests,
-                 "orders": sorted(set(_order_shape(node, short_ids - conflicting_ids) for node in order_nodes)),
+                 "orders": sorted(orders),
                  "intrabar_persistence": intrabar}
     encode = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return (encode({"version": 1, "declarations": declarations, "requests": requests,

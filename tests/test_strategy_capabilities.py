@@ -65,6 +65,55 @@ def test_confirmed_order_shapes_are_explicit(body, shape):
     assert shape in receipt['orders']
 
 
+@pytest.mark.parametrize('body', [
+    'strategy.risk.max_intraday_filled_orders(2)',
+    'strategy.risk.max_drawdown(5, strategy.percent_of_equity)',
+    'strategy.risk.allow_entry_in(strategy.direction.long)',
+    'strategy.risk.max_intraday_loss(5, strategy.percent_of_equity)',
+    'strategy.risk.max_position_size(2)',
+    'strategy.risk.max_cons_loss_days(2)',
+    'strategy.entry("S", strategy.short, qty=1)',
+    'strategy.entry("S", strategy.short, comment="unmodeled")',
+    'strategy.entry("S", strategy.short, alert_message="unmodeled")',
+    'strategy.entry("S", strategy.short, disable_alert=true)',
+    'strategy.exit("X", "S", stop=high, limit=low, oca_name="g")',
+    'strategy.exit("X", "S", stop=high, limit=low, comment="unmodeled")',
+    'strategy.exit("X", "S", stop=high, limit=low, alert_profit="unmodeled")',
+    'strategy.close("S", comment="unmodeled")',
+    'strategy.close_all(alert_message="unmodeled")',
+    'strategy.cancel_all()',
+])
+def test_unmodeled_strategy_calls_and_arguments_are_named(body):
+    receipt = emitted_confirmed_receipt('//@version=6\nstrategy("orders", process_orders_on_close=true)\n'
+                                       'strategy.entry("S", strategy.short)\n' + body)
+    assert any('unproven' in shape for shape in receipt['orders']), receipt
+
+
+@pytest.mark.parametrize('setting', [
+    'default_qty_type=strategy.percent_of_equity, default_qty_value=100', 'slippage=15',
+    'pyramiding=2', 'margin_short=50', 'margin_long=50', 'commission_value=1',
+    'initial_capital=5000', 'close_entries_rule="ANY"',
+])
+def test_priced_pooc_settings_require_their_own_proof(setting):
+    receipt = emitted_confirmed_receipt(f'//@version=6\nstrategy("orders", process_orders_on_close=true, {setting})\n'
+                                       'strategy.entry("S", strategy.short, stop=low)')
+    assert 'strategy() (unproven POOC sizing, slippage or account settings)' in receipt['orders']
+
+
+def test_shadowed_request_expression_is_not_a_proof():
+    receipt = emitted_receipt('//@version=6\nstrategy("shadow")\nclose = ta.ema(hl2, 10) * volume\n'
+                              'h = request.security(syminfo.tickerid, "5", close)\nstrategy.entry("L", strategy.long)')
+    assert 'request.security.expression (user-bound close)' in receipt['unresolved']
+
+
+def test_slipped_market_profile_does_not_compose_with_requests():
+    receipt = emitted_confirmed_receipt('//@version=6\nstrategy("composed", process_orders_on_close=true, '
+                                       'slippage=15, default_qty_type=strategy.percent_of_equity, default_qty_value=100)\n'
+                                       'h = request.security(syminfo.tickerid, "15", ta.sma(close, 4))\n'
+                                       'strategy.entry("S", strategy.short)')
+    assert 'strategy() (unproven POOC sizing, slippage or account settings)' in receipt['orders']
+
+
 def test_confirmed_receipt_is_additive_and_metadata_only(monkeypatch):
     from pineforge_codegen.codegen import capabilities
     source = '//@version=6\nstrategy("metadata", process_orders_on_close=true)\nvarip int count = 0\ncount += 1\nstrategy.entry("L", strategy.long)'

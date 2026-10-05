@@ -11,6 +11,10 @@ of batch configuration extraction. Every unresolved argument is named in
 `unresolved`. Runtime-lowered unpinned request sites retain their request kind,
 symbol and timeframe in `requests` with `feed: "unpinned"`, and in `unresolved`.
 The original receipt alone retains conservative request/POOC/varip refusals.
+Confirmed-bar order metadata is an allowlist of modeled strategy calls and
+arguments. Risk rules and unmodeled order arguments are named as unproven;
+POOC account/sizing/slippage declarations outside the tested profiles also
+produce an unproven marker. This changes receipts only, never trading code.
 New libraries also export an independently versioned confirmed-bar receipt;
 the paired runner admits only its explicitly proven security and order shapes,
 not arbitrary requests or observed-tick calculation.
