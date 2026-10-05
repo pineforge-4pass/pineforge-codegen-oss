@@ -10,9 +10,18 @@ Its `strategy()` positional arguments follow Pine signature order independently
 of batch configuration extraction. Every unresolved argument is named in
 `unresolved`. Runtime-lowered unpinned request sites retain their request kind,
 symbol and timeframe in `requests` with `feed: "unpinned"`, and in `unresolved`.
-The close-only runner retains its conservative refusal of every nonempty
-request array and `process_orders_on_close=true`; confirmed-bar runtime fixes
-and their equivalence tests do not automatically widen that admission policy.
+The original receipt alone retains conservative request/POOC/varip refusals.
+After 1.2.0, confirmed-bar order metadata is an allowlist of modeled strategy calls and
+arguments. Risk rules and unmodeled order arguments are named as unproven;
+POOC account/sizing/slippage declarations outside the tested literal profiles also
+produce an unproven marker. This changes receipts only, never trading code.
+New libraries (unreleased; after 1.2.0) also export an independently versioned confirmed-bar receipt;
+the paired runner admits only its explicitly proven same-chart security shapes
+and standalone close-only varip, not arbitrary requests or observed-tick calculation.
+`process_orders_on_close=true` remains refused for every order shape and
+request composition. Retained POOC order metadata and equivalence rows are
+evidence for future admission, not admitted shapes; nullable price legs,
+same-calculation brackets and empty entry IDs are not certified by the receipt.
 Legacy libraries without a receipt warn and run, including their requests.
 Realtime
 builtins are conservatively named and refused: generated `barstate.isrealtime`
@@ -33,6 +42,20 @@ return `PF_SETTINGS_BUFFER_TOO_SMALL`, `required` includes the NUL, and short
 buffers return no partial JSON. Canonical JSON is emitted from `strategy()`
 declarations and analyzed security/request sites, not guessed from a handle's
 runtime behavior. It is immutable across settings changes and fresh/reused runs.
+
+Unreleased (after 1.2.0): `strategy_confirmed_bar_api_version()` returns 1 and
+`strategy_confirmed_bar_receipt(handle, json, capacity, required, error, error_capacity)`
+uses the same immutable buffer protocol. Its JSON has `version`, `requests`
+(including the expression), sorted `orders` classifications and
+`intrabar_persistence`. Actual emitter `foreign`/`heikinashi` flags determine
+feed classification and static registration metadata resolves constant and
+single-call helper clocks. Symbol `""` is a foreign-feed requirement, not chart
+data. Runtime/input/mutable timeframes remain unresolved.
+
+No new fields are added to the original receipt: old runners ignore the extra
+symbols and retain their original policy. A new runner paired with an old
+library without these new symbols also retains its original admission policy.
+These exports add metadata only; generated trading code is unchanged.
 
 Version 1 has `version`, `declarations`, `requests`, `requirements` and `unresolved`
 keys. Declarations include calculation cadence, close execution, magnifier,

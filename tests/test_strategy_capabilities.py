@@ -21,6 +21,143 @@ def emitted_receipt(source):
     return receipt
 
 
+def emitted_confirmed_receipt(source):
+    cpp = transpile(source)
+    documents = re.findall(r'checked_settings::receipt\(("(?:[^"\\]|\\.)*"), json, capacity, required\);', cpp)
+    assert len(documents) == 2
+    assert 'strategy_confirmed_bar_api_version(void) { return 1u; }' in cpp
+    return json.loads(json.loads(documents[1]))
+
+
+@pytest.mark.parametrize(('body', 'clock', 'heikinashi', 'feed'), [
+    ('h = request.security(syminfo.tickerid, "5", close)', '5', False, 'chart'),
+    ('htf = "D"\nh = request.security(syminfo.tickerid, htf, close)', 'D', False, 'chart'),
+    ('f(tf) => request.security(syminfo.tickerid, tf, close)\nh = f("5")', '5', False, 'chart'),
+    ('sym = ticker.heikinashi(syminfo.tickerid)\nh = request.security(sym, "5", close)', '5', True, 'chart'),
+    ('h = request.security("", "5", close)', '5', False, 'auxiliary'),
+])
+def test_receipts_use_the_registration_lowering(body, clock, heikinashi, feed):
+    source = f'//@version=6\nstrategy("lowering")\n{body}\nif h > close\n    strategy.entry("L", strategy.long)'
+    receipt = emitted_receipt(source)
+    assert not receipt['unresolved']
+    request = receipt['requests'][0]
+    assert (request['timeframe'], request['heikinashi'], request['feed']) == (clock, heikinashi, feed)
+    confirmed = emitted_confirmed_receipt(source)
+    assert confirmed['requests'] == [{**request, 'expression': 'close'}]
+
+
+@pytest.mark.parametrize(('body', 'shape'), [
+    ('strategy.entry("L", strategy.long)', 'entry:market'),
+    ('strategy.entry("L", strategy.long, stop=high)', 'entry:stop'),
+    ('strategy.entry("L", strategy.long, limit=low)', 'entry:limit'),
+    ('strategy.entry("L", strategy.long, stop=high, limit=low)', 'strategy.entry (unproven order shape)'),
+    ('strategy.close_all()', 'close:market'),
+    ('strategy.close("L", immediately=true)', 'strategy.close (unproven order shape)'),
+    ('strategy.entry("S", strategy.short)\nstrategy.exit("X", "S", stop=high, limit=low)', 'exit:short_bracket'),
+    ('strategy.entry(id="S", direction=strategy.short)\nstrategy.exit(id="X", from_entry="S", stop=high, limit=low)', 'exit:short_bracket'),
+    ('strategy.entry("S", strategy.short)\nstrategy.entry(id="S", direction=strategy.long)\nstrategy.exit("X", "S", stop=high, limit=low)', 'strategy.exit (unproven order shape)'),
+    ('strategy.entry("S", strategy.short)\nstrategy.entry("L", strategy.long)\nstrategy.exit("X", "S", stop=high, limit=low)', 'strategy.exit (unproven order shape)'),
+    ('strategy.entry("L", strategy.long, oca_name="group", oca_type=strategy.oca.cancel)', 'strategy.entry (unproven order shape)'),
+    ('strategy.entry("L", strategy.long)\nstrategy.exit("X", "L", stop=high, limit=low)', 'strategy.exit (unproven order shape)'),
+    ('strategy.entry("S", strategy.short)\nstrategy.exit("X", "S", trail_points=2, trail_offset=1)', 'strategy.exit (unproven exit terms)'),
+])
+def test_confirmed_order_shapes_are_explicit(body, shape):
+    receipt = emitted_confirmed_receipt(f'//@version=6\nstrategy("orders", process_orders_on_close=true)\n{body}')
+    assert shape in receipt['orders']
+
+
+@pytest.mark.parametrize('body', [
+    'strategy.risk.max_intraday_filled_orders(2)',
+    'strategy.risk.max_drawdown(5, strategy.percent_of_equity)',
+    'strategy.risk.allow_entry_in(strategy.direction.long)',
+    'strategy.risk.max_intraday_loss(5, strategy.percent_of_equity)',
+    'strategy.risk.max_position_size(2)',
+    'strategy.risk.max_cons_loss_days(2)',
+    'strategy.entry("S", strategy.short, qty=1)',
+    'strategy.entry("S", strategy.short, comment="unmodeled")',
+    'strategy.entry("S", strategy.short, alert_message="unmodeled")',
+    'strategy.entry("S", strategy.short, disable_alert=true)',
+    'strategy.exit("X", "S", stop=high, limit=low, oca_name="g")',
+    'strategy.exit("X", "S", stop=high, limit=low, comment="unmodeled")',
+    'strategy.exit("X", "S", stop=high, limit=low, alert_profit="unmodeled")',
+    'strategy.close("S", comment="unmodeled")',
+    'strategy.close_all(alert_message="unmodeled")',
+    'strategy.cancel_all()',
+    'order_id = input.string("S")\nstrategy.entry(order_id, strategy.short)',
+    'order_id = input.string("S")\nstrategy.close(order_id)',
+    'order_id = input.string("X")\nstrategy.exit(order_id, "S", stop=high, limit=low)',
+])
+def test_unmodeled_strategy_calls_and_arguments_are_named(body):
+    receipt = emitted_confirmed_receipt('//@version=6\nstrategy("orders", process_orders_on_close=true)\n'
+                                       'strategy.entry("S", strategy.short)\n' + body)
+    assert any('unproven' in shape for shape in receipt['orders']), receipt
+
+
+@pytest.mark.parametrize('setting', [
+    'default_qty_type=strategy.percent_of_equity, default_qty_value=100', 'slippage=15',
+    'pyramiding=2', 'margin_short=50', 'margin_long=50', 'commission_value=1',
+    'initial_capital=5000', 'close_entries_rule="ANY"',
+])
+def test_priced_pooc_settings_require_their_own_proof(setting):
+    receipt = emitted_confirmed_receipt(f'//@version=6\nstrategy("orders", process_orders_on_close=true, {setting})\n'
+                                       'strategy.entry("S", strategy.short, stop=low)')
+    assert 'strategy() (unproven POOC sizing, slippage or account settings)' in receipt['orders']
+
+
+@pytest.mark.parametrize(('body', 'settings', 'proven'), [
+    ('strategy.entry("S", strategy.short)', '', True),
+    ('strategy.entry("S", strategy.short, stop=low)', '', True),
+    ('strategy.entry("S", strategy.short, limit=high)', '', True),
+    ('strategy.entry("S", strategy.short)', ', default_qty_type=strategy.fixed, default_qty_value=1', False),
+    ('strategy.entry("S", strategy.short, stop=low)', ', default_qty_type=strategy.fixed, default_qty_value=1', False),
+    ('strategy.entry("S", strategy.short, limit=high)', ', default_qty_type=strategy.fixed, default_qty_value=1', False),
+    ('strategy.entry("S", strategy.short)\nstrategy.close("S")', ', default_qty_type=strategy.fixed, default_qty_value=1', False),
+    ('strategy.entry("S", strategy.short)\nstrategy.exit("X", "S", stop=high, limit=low)', '', False),
+    ('strategy.entry("S", strategy.short)\nstrategy.exit("X", "S", stop=high, limit=low)',
+     ', default_qty_type=strategy.fixed, default_qty_value=1', False),
+    ('strategy.entry("S", strategy.short)\nstrategy.exit("X", "S", stop=high, limit=low)',
+     ', default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0', True),
+    ('strategy.entry("S", strategy.short)', ', slippage=15, default_qty_type=strategy.percent_of_equity, default_qty_value=100', True),
+    ('strategy.entry("S", strategy.short)', ', slippage=15', False),
+    ('strategy.entry("S", strategy.short)', ', slippage=0', False),
+])
+def test_pooc_settings_match_literal_proof_profiles(body, settings, proven):
+    receipt = emitted_confirmed_receipt(f'//@version=6\nstrategy("profiles", process_orders_on_close=true{settings})\n{body}')
+    assert ('strategy() (unproven POOC sizing, slippage or account settings)' not in receipt['orders']) is proven
+
+
+def test_shadowed_request_expression_is_not_a_proof():
+    receipt = emitted_receipt('//@version=6\nstrategy("shadow")\nclose = ta.ema(hl2, 10) * volume\n'
+                              'h = request.security(syminfo.tickerid, "5", close)\nstrategy.entry("L", strategy.long)')
+    assert 'request.security.expression (user-bound close)' in receipt['unresolved']
+
+
+def test_slipped_market_profile_does_not_compose_with_requests():
+    receipt = emitted_confirmed_receipt('//@version=6\nstrategy("composed", process_orders_on_close=true, '
+                                       'slippage=15, default_qty_type=strategy.percent_of_equity, default_qty_value=100)\n'
+                                       'h = request.security(syminfo.tickerid, "15", ta.sma(close, 4))\n'
+                                       'strategy.entry("S", strategy.short)')
+    assert 'strategy() (unproven POOC sizing, slippage or account settings)' in receipt['orders']
+
+
+def test_confirmed_receipt_is_additive_and_metadata_only(monkeypatch):
+    from pineforge_codegen.codegen import capabilities
+    source = '//@version=6\nstrategy("metadata", process_orders_on_close=true)\nvarip int count = 0\ncount += 1\nstrategy.entry("L", strategy.long)'
+    with_receipts = transpile(source)
+    receipt = emitted_confirmed_receipt(source)
+    original = capabilities.emit_capabilities_exports
+    emitted = []
+    def capture(emitter, lines):
+        start = len(lines)
+        original(emitter, lines)
+        emitted.extend(lines[start:])
+    monkeypatch.setattr(capabilities, 'emit_capabilities_exports', capture)
+    assert transpile(source) == with_receipts
+    monkeypatch.setattr(capabilities, 'emit_capabilities_exports', lambda emitter, lines: None)
+    assert with_receipts.replace('\n'.join(emitted) + '\n', '', 1) == transpile(source)
+    assert receipt['version'] == 1 and receipt['intrabar_persistence'] is True
+
+
 @pytest.mark.parametrize(('name', 'value', 'expected'), [
     ('calc_on_every_tick', 'true', True),
     ('calc_on_order_fills', 'true', True),
@@ -170,7 +307,8 @@ def test_capabilities_collect_facts_in_one_walk(monkeypatch):
 
 
 @pytest.mark.parametrize('declaration', ['calc_on_every_tick=true', 'process_orders_on_close=true'])
-def test_receipt_runtime_buffer_protocol_and_reused_handle(declaration):
+@pytest.mark.parametrize('receipt_kind', ['capabilities', 'confirmed_bar'])
+def test_receipt_runtime_buffer_protocol_and_reused_handle(declaration, receipt_kind):
     cpp = transpile(f'''//@version=6
 strategy("runtime receipt", {declaration})
 if bar_index % 3 == 0
@@ -219,6 +357,11 @@ int main() {
     std::cout << initial;
 }
 '''
+    driver = driver.replace('strategy_capabilities_', f'strategy_{receipt_kind}_')
     receipt = json.loads(run_emitted_tu(cpp, driver, opt='-O0'))
-    name = declaration.split('=')[0]
-    assert receipt['declarations'][name] is True
+    if receipt_kind == 'capabilities':
+        name = declaration.split('=')[0]
+        assert receipt['declarations'][name] is True
+    else:
+        assert receipt == {'version': 1, 'requests': [], 'orders': ['entry:market'],
+                           'intrabar_persistence': False}
