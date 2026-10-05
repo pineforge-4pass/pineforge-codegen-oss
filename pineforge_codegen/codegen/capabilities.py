@@ -51,9 +51,10 @@ READ_ONLY_STRATEGY_CALLS = frozenset(
 ORDER_SETTINGS = frozenset(("pyramiding", "default_qty_type", "default_qty_value", "initial_capital",
                            "slippage", "commission_type", "commission_value", "close_entries_rule",
                            "margin_long", "margin_short", "risk_free_rate"))
-MODELED_SETTING_DEFAULTS = {"default_qty_type": "strategy.fixed", "default_qty_value": 1,
-                            "slippage": 0, "commission_type": "strategy.commission.percent",
-                            "commission_value": 0}
+PROVEN_BRACKET_SETTINGS = {"default_qty_type": "strategy.fixed", "default_qty_value": 1,
+                          "commission_type": "strategy.commission.percent", "commission_value": 0}
+PROVEN_SLIPPED_SETTINGS = {"default_qty_type": "strategy.percent_of_equity",
+                          "default_qty_value": 100, "slippage": 15}
 
 
 def _expression(node):
@@ -266,11 +267,12 @@ def capabilities_documents(emitter) -> tuple[str, str]:
         short_ids.clear()
     orders = set(_order_shape(node, short_ids - conflicting_ids) for node in order_nodes)
     if declarations["process_orders_on_close"]:
-        settings = {**MODELED_SETTING_DEFAULTS, **order_settings}
-        slipped = {**MODELED_SETTING_DEFAULTS, "default_qty_type": "strategy.percent_of_equity",
-                   "default_qty_value": 100, "slippage": 15}
-        if settings != MODELED_SETTING_DEFAULTS and not (orders == {"entry:market"} and settings == slipped
-                                                        and not confirmed_requests and not intrabar):
+        bracket = orders == {"entry:market", "exit:short_bracket"}
+        proven = (not order_settings and not bracket) or (
+            bracket and order_settings == PROVEN_BRACKET_SETTINGS) or (
+            orders == {"entry:market"} and order_settings == PROVEN_SLIPPED_SETTINGS
+            and not confirmed_requests and not intrabar)
+        if not proven:
             orders.add("strategy() (unproven POOC sizing, slippage or account settings)")
     confirmed = {"version": 1, "requests": confirmed_requests,
                  "orders": sorted(orders),

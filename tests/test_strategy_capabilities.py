@@ -104,6 +104,28 @@ def test_priced_pooc_settings_require_their_own_proof(setting):
     assert 'strategy() (unproven POOC sizing, slippage or account settings)' in receipt['orders']
 
 
+@pytest.mark.parametrize(('body', 'settings', 'proven'), [
+    ('strategy.entry("S", strategy.short)', '', True),
+    ('strategy.entry("S", strategy.short, stop=low)', '', True),
+    ('strategy.entry("S", strategy.short, limit=high)', '', True),
+    ('strategy.entry("S", strategy.short)', ', default_qty_type=strategy.fixed, default_qty_value=1', False),
+    ('strategy.entry("S", strategy.short, stop=low)', ', default_qty_type=strategy.fixed, default_qty_value=1', False),
+    ('strategy.entry("S", strategy.short, limit=high)', ', default_qty_type=strategy.fixed, default_qty_value=1', False),
+    ('strategy.entry("S", strategy.short)\nstrategy.close("S")', ', default_qty_type=strategy.fixed, default_qty_value=1', False),
+    ('strategy.entry("S", strategy.short)\nstrategy.exit("X", "S", stop=high, limit=low)', '', False),
+    ('strategy.entry("S", strategy.short)\nstrategy.exit("X", "S", stop=high, limit=low)',
+     ', default_qty_type=strategy.fixed, default_qty_value=1', False),
+    ('strategy.entry("S", strategy.short)\nstrategy.exit("X", "S", stop=high, limit=low)',
+     ', default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0', True),
+    ('strategy.entry("S", strategy.short)', ', slippage=15, default_qty_type=strategy.percent_of_equity, default_qty_value=100', True),
+    ('strategy.entry("S", strategy.short)', ', slippage=15', False),
+    ('strategy.entry("S", strategy.short)', ', slippage=0', False),
+])
+def test_pooc_settings_match_literal_proof_profiles(body, settings, proven):
+    receipt = emitted_confirmed_receipt(f'//@version=6\nstrategy("profiles", process_orders_on_close=true{settings})\n{body}')
+    assert ('strategy() (unproven POOC sizing, slippage or account settings)' not in receipt['orders']) is proven
+
+
 def test_shadowed_request_expression_is_not_a_proof():
     receipt = emitted_receipt('//@version=6\nstrategy("shadow")\nclose = ta.ema(hl2, 10) * volume\n'
                               'h = request.security(syminfo.tickerid, "5", close)\nstrategy.entry("L", strategy.long)')
