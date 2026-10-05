@@ -545,6 +545,18 @@ ORDER_DIRECTION_MAP = {
     "descending": 'std::string("descending")',
 }
 
+NAME_ECHO_STRING_MEMBERS = {
+    "currency": frozenset({
+        "AED", "ARS", "AUD", "BDT", "BHD", "BRL", "BTC", "CAD", "CHF", "CLP",
+        "CNY", "COP", "CZK", "DKK", "EGP", "ETH", "EUR", "GBP", "HKD", "HUF",
+        "IDR", "ILS", "INR", "ISK", "JPY", "KES", "KRW", "KWD", "LKR", "MAD",
+        "MXN", "MYR", "NGN", "NOK", "NONE", "NZD", "PEN", "PHP", "PKR", "PLN",
+        "QAR", "RON", "RSD", "RUB", "SAR", "SEK", "SGD", "THB", "TND", "TRY",
+        "TWD", "USD", "USDT", "VES", "VND", "ZAR",
+    }),
+    "format": frozenset({"inherit", "price", "volume", "percent", "mintick"}),
+}
+
 
 # ---------------------------------------------------------------------------
 # Array / Map / Matrix method dispatch

@@ -4,7 +4,7 @@ import re
 
 from ..ast_nodes import Identifier, MemberAccess
 from ..errors import CompileError
-from .tables import ALERT_FREQ_VALUES, ORDER_DIRECTION_MAP
+from .tables import ALERT_FREQ_VALUES, NAME_ECHO_STRING_MEMBERS, ORDER_DIRECTION_MAP
 
 
 _QUOTED_STRING = r'"(?:[^"\\]|\\.)*"'
@@ -14,7 +14,7 @@ _STRING_LITERAL = re.compile(rf'(?:std::string\({_QUOTED_STRING}\)|{_QUOTED_STRI
 def _string_setting_arg(expr, lowered: str) -> str | None:
     """Use the body's known string constants, never its inert visual codes.
 
-    The generic member-name fallback is not a Pine string-value mapping.
+    Name-echo strings are accepted only for inventoried currency/format members.
     Unknown constants leave the checked input unsupported; legacy getters
     and setters retain their existing execution semantics.
     """
@@ -26,7 +26,7 @@ def _string_setting_arg(expr, lowered: str) -> str | None:
             namespace == "alert" and expr.member in ALERT_FREQ_VALUES
             or namespace == "order" and expr.member in ORDER_DIRECTION_MAP
             or namespace == "session" and expr.member in ("regular", "extended")
-            or namespace in ("currency", "format")
+            or expr.member in NAME_ECHO_STRING_MEMBERS.get(namespace, ())
         )
         if not known:
             return None

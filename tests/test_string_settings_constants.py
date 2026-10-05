@@ -11,7 +11,11 @@ import pytest
 from pineforge_codegen import transpile
 from pineforge_codegen.ast_nodes import Identifier, MemberAccess, StringLiteral
 from pineforge_codegen.codegen.checked_settings import _string_setting_arg
-from pineforge_codegen.codegen.tables import DRAWING_STYLE_NS, SKIP_NAMESPACES
+from pineforge_codegen.codegen.tables import (
+    DRAWING_STYLE_NS,
+    NAME_ECHO_STRING_MEMBERS,
+    SKIP_NAMESPACES,
+)
 from pineforge_codegen.codegen.visit_expr import _BUILTIN_NAMESPACE_NAMES
 from pineforge_codegen.support_checker import (
     UNSUPPORTED_CONST_NAMESPACES,
@@ -52,6 +56,18 @@ CONSTANT_FAMILIES = {
     "earnings": ("actual", None),
     "dividends": ("gross", None),
     "splits": ("denominator", None),
+}
+
+EXPECTED_NAME_ECHO_MEMBERS = {
+    "currency": frozenset({
+        "AED", "ARS", "AUD", "BDT", "BHD", "BRL", "BTC", "CAD", "CHF", "CLP",
+        "CNY", "COP", "CZK", "DKK", "EGP", "ETH", "EUR", "GBP", "HKD", "HUF",
+        "IDR", "ILS", "INR", "ISK", "JPY", "KES", "KRW", "KWD", "LKR", "MAD",
+        "MXN", "MYR", "NGN", "NOK", "NONE", "NZD", "PEN", "PHP", "PKR", "PLN",
+        "QAR", "RON", "RSD", "RUB", "SAR", "SEK", "SGD", "THB", "TND", "TRY",
+        "TWD", "USD", "USDT", "VES", "VND", "ZAR",
+    }),
+    "format": frozenset({"inherit", "price", "volume", "percent", "mintick"}),
 }
 
 SOURCE_INPUTS = {
@@ -102,6 +118,46 @@ def test_constant_family_inventory_tracks_builtin_tables():
     assert families <= _BUILTIN_NAMESPACE_NAMES
 
 
+def test_name_echo_member_inventory_is_finite_and_complete():
+    assert NAME_ECHO_STRING_MEMBERS == EXPECTED_NAME_ECHO_MEMBERS
+
+
+@pytest.mark.parametrize("namespace,member", [
+    (namespace, member)
+    for namespace, members in EXPECTED_NAME_ECHO_MEMBERS.items()
+    for member in sorted(members)
+])
+@pytest.mark.parametrize("placement", ["default", "options"])
+def test_inventoried_name_echo_members_remain_supported(namespace, member, placement):
+    constant = f"{namespace}.{member}"
+    arguments = (f'{constant}, "Choice"' if placement == "default" else
+                 f'"literal", "Choice", options=["literal", {constant}]')
+    cpp = transpile(f'//@version=6\nstrategy("known constants")\n'
+                    f'choice = input.string({arguments})\n')
+    metadata = _metadata(cpp, "Choice")
+    assert ", true, {}," in metadata
+    assert f'std::string("{member}")' in metadata
+    if placement == "default":
+        assert f'"string", std::string("{member}"), {{}}' in metadata
+    else:
+        assert f'{{std::string("literal"), std::string("{member}")}}' in metadata
+
+
+@pytest.mark.parametrize("namespace,member", [("format", "foo"), ("currency", "XYZ")])
+@pytest.mark.parametrize("placement", ["default", "options"])
+def test_unknown_name_echo_members_are_unsupported(namespace, member, placement):
+    constant = f"{namespace}.{member}"
+    arguments = (f'{constant}, "Choice"' if placement == "default" else
+                 f'"literal", "Choice", options=["literal", {constant}]')
+    cpp = transpile(f'//@version=6\nstrategy("unknown constants")\n'
+                    f'choice = input.string({arguments})\n', check_support=False)
+    metadata = _metadata(cpp, "Choice")
+    default = 'std::string("")' if placement == "default" else 'std::string("literal")'
+    assert f'"string", {default}, {{}}' in metadata
+    assert ", false, {}," in metadata
+    assert f'std::string("{member}")' not in metadata
+
+
 @pytest.mark.parametrize("namespace", CONSTANT_FAMILIES)
 @pytest.mark.parametrize("placement", ["default", "options"])
 def test_each_builtin_constant_family_is_string_or_unsupported(namespace, placement):
@@ -131,10 +187,43 @@ def test_non_string_literals_never_enter_string_metadata(lowered):
 
 
 @pytest.mark.parametrize("namespace", ["position", "size", "line", "shape", "text",
-                                       "alert", "order", "session"])
+                                       "alert", "order", "session", "format", "currency"])
 def test_unknown_builtin_members_do_not_fabricate_pine_strings(namespace):
     expression = MemberAccess(object=Identifier(name=namespace), member="unknown")
     assert _string_setting_arg(expression, 'std::string("unknown")') is None
+
+
+@pytest.mark.parametrize("optimization", ["-O0", "-O2"])
+def test_unknown_name_echo_receipts_preserve_runtime_values(optimization):
+    source = '''//@version=6
+strategy("unknown name echo")
+formatDefault = input.string(format.foo, "Format default")
+currencyDefault = input.string(currency.XYZ, "Currency default")
+formatOptions = input.string("literal", "Format options", options=["literal", format.foo])
+currencyOptions = input.string("literal", "Currency options", options=["literal", currency.XYZ])
+'''
+    driver = RECEIPT_DRIVER.replace(
+        "    std::cout << receipt.data();",
+        '''    const std::string before(receipt.data());
+    for (const char* name : {"Format default", "Currency default", "Format options", "Currency options"}) {
+        assert(strategy_set_input_checked(strategy, name, "foo", error,
+                                          sizeof(error)) == PF_SETTINGS_UNSUPPORTED);
+    }
+    assert(strategy_get_effective_settings(strategy, receipt.data(), receipt.size(), &required,
+                                           error, sizeof(error)) == PF_SETTINGS_OK);
+    assert(before == receipt.data());
+    std::cout << receipt.data();''',
+    )
+    receipt = json.loads(run_emitted_tu(transpile(source, check_support=False), driver,
+                                       opt=optimization, label="unknown name echo receipt"))
+    inputs = {entry["name"]: entry for entry in receipt["inputs"]}
+    for name, effective in [("Format default", "foo"), ("Currency default", "XYZ"),
+                            ("Format options", "literal"), ("Currency options", "literal")]:
+        entry = inputs[name]
+        assert entry["supported"] is False
+        assert entry["options"] == []
+        assert entry["default"] == ("" if name.endswith("default") else "literal")
+        assert entry["effective_value"] == effective
 
 
 @pytest.mark.parametrize("value", ["", "plain", 'quote"slash\\', "first\nsecond"])
