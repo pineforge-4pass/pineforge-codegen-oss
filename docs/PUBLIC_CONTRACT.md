@@ -2,8 +2,8 @@
 
 ## Optional compiled execution capabilities
 
-Availability: **since the next release**, with the paired engine's capability
-extension and receipt-based runner admission policy.
+Availability: **since 1.2.0**, with engine `v1.2.0`'s capability extension and
+the receipt-based admission policy of its live runner.
 
 The receipt proves declarations only, not general live-versus-batch equivalence.
 Its `strategy()` positional arguments follow Pine signature order independently
@@ -24,8 +24,9 @@ All six builtin uses are refused including display-only use (plots, labels,
 tables): the receipt records their use conservatively rather than certifying
 that display-only code cannot influence strategy execution.
 
-Paired development headers defining `PF_CAPABILITIES_API_VERSION` add
-`strategy_capabilities_api_version()` (version 1) and
+From 1.2.0 on, C++ compiled against headers that define both
+`PF_SETTINGS_API_VERSION` and `PF_CAPABILITIES_API_VERSION`, as engine
+`v1.2.0`'s do, adds `strategy_capabilities_api_version()` (version 1) and
 `strategy_capabilities_receipt(handle, json, capacity, required, error, error_capacity)`.
 The receipt uses the checked-settings status and buffer protocol: NULL/0 queries
 return `PF_SETTINGS_BUFFER_TOO_SMALL`, `required` includes the NUL, and short
@@ -41,7 +42,9 @@ feed source. Requirements name historical-only data and intrabar persistence;
 nonliteral contexts remain explicit rather than silently assuming defaults.
 See the paired engine's `docs/strategy-capabilities.md` for the exact schema and
 live-runner refusal policy. No batch dispatch, strategy calculation, matching,
-margin or numeric behavior changes. Old paired headers emit no capability extension.
+margin or numeric behavior changes. C++ compiled against headers without
+`PF_CAPABILITIES_API_VERSION`, such as engine `v1.1.0`'s, has no capability
+extension.
 
 ## Optional generated settings extension
 
@@ -77,7 +80,8 @@ reports remain empty; checked batch returns `PF_SETTINGS_RUN_FAILED`. Free and
 recreate the handle to recover. Legacy setters that do not throw keep their
 existing permissive behaviour.
 
-Engine `v1.1.0`, the pair of codegen 1.1.0, provides that header. Settings
+Engines `v1.1.0` and `v1.2.0`, the pairs of codegen 1.1.0 and 1.2.0, provide
+that header. Settings
 helper references are root-qualified and guarded by `PF_SETTINGS_API_VERSION`;
 old headers retain the standard-exception fallback and legacy batch precheck.
 Paired batch and stream refusals report NOT_COMPLETED through the shared native
@@ -143,7 +147,12 @@ released 2026-10-02, implements unchanged. 1.1.0, released 2026-10-04,
 implements it with the generated settings extension and request discovery
 above added: `transpile_full()`'s result and the JSON success envelope gain
 `requests`, and `input.symbol` manifest entries gain `kind`. No argument,
-result key or envelope is removed or renamed.
+result key or envelope is removed or renamed. 1.2.0, released 2026-10-05,
+implements it with the compiled execution capabilities and the diagnostic
+codes described here added: each `Diagnostic` and each JSON diagnostic gain
+`code` and `args`, and `pineforge_codegen` exports `diagnostics_catalog()`
+and `render_diagnostic()`. No argument, result key or envelope is removed or
+renamed.
 The last 0.x release, 0.10.4, has
 neither the `libraries` argument nor the `diagnostics` key described below.
 
@@ -263,7 +272,8 @@ Since 1.2.0 every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
 
 `diagnostics_catalog()` returns the catalog, which ships as
 `pineforge_codegen/diagnostics_catalog.json` (schema
-`pineforge-diagnostics-catalog/v1`) and is attached to each GitHub release.
+`pineforge-diagnostics-catalog/v1`) and is attached to each GitHub release
+(`diagnostics_catalog-v1.2.0.json` for 1.2.0).
 Per code it gives `severity`, `area`, the English ICU MessageFormat `message`
 template, the `hint` template or `null`, a one-line `explanation`, and `args`:
 per argument its `kind` — `identifier`, `type`, `keyword`, `number`, `vocab`

@@ -67,16 +67,16 @@ This is the **source-available** half of the PineForge stack (PineForge
 Source License 1.1 — see `LICENSE`). The runtime half (`pineforge-engine`,
 Apache-2.0) lives in a sibling repo and is typically checked out at
 `../pineforge-engine`. From 1.0.0 on, a released codegen `X.Y.Z` pairs only
-with engine `vX.Y.Z`; prereleases match exactly. Codegen 1.1.0 pairs with
-engine `v1.1.0` (the `pineforge-release` image `1.1.0`), codegen 1.0.1 with
-engine `v1.0.1` (the image `1.0.1`), and codegen 1.0.0 with engine `v1.0.0`
-(the image `1.0.0`). On the 0.x line the versions are independent: the last
-0.x release, codegen 0.10.4, pairs with engine `v0.13.1` (the
-`pineforge-release` image `0.1.25`). Use the paired release's generated
-headers and static library, and regenerate C++ and relink on every pair
-change. Equal `PF_ABI_VERSION` values are insufficient. Engines `v1.0.0`,
-`v1.0.1` and `v1.1.0` use the `engine_script_run_v19` C++ namespace; see
-`README.md` and `CONTRIBUTING.md`.
+with engine `vX.Y.Z`; prereleases match exactly. Codegen 1.2.0 pairs with
+engine `v1.2.0` (the `pineforge-release` image `1.2.0`), codegen 1.1.0 with
+engine `v1.1.0` (the image `1.1.0`), codegen 1.0.1 with engine `v1.0.1` (the
+image `1.0.1`), and codegen 1.0.0 with engine `v1.0.0` (the image `1.0.0`). On
+the 0.x line the versions are independent: the last 0.x release, codegen
+0.10.4, pairs with engine `v0.13.1` (the `pineforge-release` image `0.1.25`).
+Use the paired release's generated headers and static library, and regenerate
+C++ and relink on every pair change. Equal `PF_ABI_VERSION` values are
+insufficient. Engines `v1.0.0`, `v1.0.1`, `v1.1.0` and `v1.2.0` use the
+`engine_script_run_v19` C++ namespace; see `README.md` and `CONTRIBUTING.md`.
 
 ## Pipeline
 

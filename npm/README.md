@@ -16,6 +16,10 @@ Stable releases are on the `latest` dist-tag. A prerelease (for example
 - `transpile.worker.mjs` — an ES module worker that runs the glue in Pyodide.
 - `index.mjs` — exports `release`, `tables`, `archivePath`, `sourceRoot`, `codegenSourceDir`,
   `workerPath` and `glue`.
+- `pineforge_codegen/diagnostics_catalog.json` — the diagnostics catalog (since 1.2.0), also
+  importable as `@pineforge/codegen-pyodide/diagnostics_catalog.json`; the repository's
+  `docs/PUBLIC_CONTRACT.md` describes it.
+- `LICENSE` — the PineForge Source License 1.1 (since 1.2.0), which `package.json` names.
 
 ## Publishing (maintainers)
 A `v*` tag push, which the release workflow makes, publishes through npm OIDC Trusted
