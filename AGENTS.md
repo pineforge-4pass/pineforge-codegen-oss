@@ -338,8 +338,11 @@ come back as `transpile_full(...)["diagnostics"]` and in `transpile_json`'s
 success envelope under `diagnostics`, in the error envelope's entry format.
 
 Checked settings string defaults and options use only known C++ string literals
-from the existing builtin lowering, never inert visual integer codes or the
-generic member-name fallback. An unknown string default or option marks the
+from the existing builtin lowering, never inert visual integer codes. Only the
+`currency.*` and `format.*` members inventoried in `NAME_ECHO_STRING_MEMBERS`
+may publish their own names, matching the body's existing lowering; unlisted
+members remain unsupported even when the body echoes their names. An unknown
+string default or option marks the
 input `supported=false` and publishes no choices; its unavailable default is
 empty. Legacy getters/setters and generated strategy execution stay unchanged.
 
