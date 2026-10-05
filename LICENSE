@@ -1,4 +1,4 @@
-PineForge Source License 1.0
+PineForge Source License 1.1
 ============================
 
 Copyright 2025-2026 pineforge, LLC
@@ -31,8 +31,12 @@ License section.
 The licensor grants you an additional copyright license to distribute copies
 of the software. Your license to distribute covers distributing the software
 with changes and new works permitted by the Changes and New Works License
-section. Distributing copies under this section is not Commercial Use, and it
-gives the people who get them no license beyond these terms.
+section. Unless it is a permitted purpose, distributing the software, changed
+or not, embedded in or bundled with a product or service made available to
+others is Commercial Use under (3) of the Commercial Use section, which your
+license to distribute does not cover. Distributing copies under this section
+is not Commercial Use, and it gives the people who get them no license beyond
+these terms.
 
 
 ## Notices
@@ -162,9 +166,10 @@ Use:
       organization, including use by an individual in the course of work for
       such an organization;
 
-  (3) embedding the software, or its Output, into any product or service
-      made available to others, including using the software to generate
-      Output for such a product or service; and
+  (3) embedding the software or its Output, changed or not, into any product
+      or service made available to others, or distributing either bundled
+      with such a product or service, including using the software to
+      generate Output for such a product or service; and
 
   (4) operating any hosted, software-as-a-service, or otherwise public-facing
       service through which others can run the software or receive its
