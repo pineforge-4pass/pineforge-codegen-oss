@@ -240,6 +240,13 @@ and [#171](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/171):
   baseline `pineforge-parity-baseline-20261004-engine-6b77f061` (engine
   6b77f061, this repository at 285ac035), 7,970 excellent and 19 strong of
   7,989 graded probes, none below strong.
+  Release 1.2.0 is graded on registry baseline
+  `pineforge-parity-baseline-20261005-engine-52292db9`: 7,970 excellent and
+  19 strong of 7,989 graded probes, none below strong, with engine 52292db9
+  ([pineforge-engine#339](https://github.com/pineforge-4pass/pineforge-engine/pull/339)'s
+  merge), which v1.2.0 equals in behaviour, and this repository at 48e7a13b,
+  whose emitted C++ is codegen 1.2.0's: the release's remaining changes are
+  documentation.
 - `docs/PUBLIC_CONTRACT.md` describes the capability functions
   ([#167](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/167))
   and diagnostic codes
