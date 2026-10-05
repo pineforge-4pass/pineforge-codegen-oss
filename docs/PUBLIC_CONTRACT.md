@@ -11,11 +11,11 @@ of batch configuration extraction. Every unresolved argument is named in
 `unresolved`. Runtime-lowered unpinned request sites retain their request kind,
 symbol and timeframe in `requests` with `feed: "unpinned"`, and in `unresolved`.
 The original receipt alone retains conservative request/POOC/varip refusals.
-Confirmed-bar order metadata is an allowlist of modeled strategy calls and
+After 1.2.0, confirmed-bar order metadata is an allowlist of modeled strategy calls and
 arguments. Risk rules and unmodeled order arguments are named as unproven;
 POOC account/sizing/slippage declarations outside the tested literal profiles also
 produce an unproven marker. This changes receipts only, never trading code.
-New libraries also export an independently versioned confirmed-bar receipt;
+New libraries (unreleased; after 1.2.0) also export an independently versioned confirmed-bar receipt;
 the paired runner admits only its explicitly proven same-chart security shapes
 and standalone close-only varip, not arbitrary requests or observed-tick calculation.
 `process_orders_on_close=true` remains refused for every order shape and
@@ -43,7 +43,7 @@ buffers return no partial JSON. Canonical JSON is emitted from `strategy()`
 declarations and analyzed security/request sites, not guessed from a handle's
 runtime behavior. It is immutable across settings changes and fresh/reused runs.
 
-`strategy_confirmed_bar_api_version()` returns 1 and
+Unreleased (after 1.2.0): `strategy_confirmed_bar_api_version()` returns 1 and
 `strategy_confirmed_bar_receipt(handle, json, capacity, required, error, error_capacity)`
 uses the same immutable buffer protocol. Its JSON has `version`, `requests`
 (including the expression), sorted `orders` classifications and
