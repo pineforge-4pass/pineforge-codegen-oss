@@ -83,6 +83,9 @@ def test_confirmed_order_shapes_are_explicit(body, shape):
     'strategy.close("S", comment="unmodeled")',
     'strategy.close_all(alert_message="unmodeled")',
     'strategy.cancel_all()',
+    'order_id = input.string("S")\nstrategy.entry(order_id, strategy.short)',
+    'order_id = input.string("S")\nstrategy.close(order_id)',
+    'order_id = input.string("X")\nstrategy.exit(order_id, "S", stop=high, limit=low)',
 ])
 def test_unmodeled_strategy_calls_and_arguments_are_named(body):
     receipt = emitted_confirmed_receipt('//@version=6\nstrategy("orders", process_orders_on_close=true)\n'

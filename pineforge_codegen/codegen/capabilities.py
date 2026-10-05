@@ -105,6 +105,8 @@ def _order_shape(node, short_ids):
     arguments = _order_arguments(node)
     if name not in MODELED_ORDER_ARGUMENTS or not set(arguments) <= MODELED_ORDER_ARGUMENTS[name]:
         return name + (" (unproven exit terms)" if name == "strategy.exit" else " (unproven order shape)")
+    if name != "strategy.close_all" and not isinstance(arguments.get("id"), StringLiteral):
+        return name + " (unproven order id)"
     if name == "strategy.entry" and _expression(arguments.get("direction")) in ("strategy.long", "strategy.short"):
         priced = {key for key in ("limit", "stop") if key in arguments}
         if len(priced) < 2 and not (set(arguments) & {"oca_name", "oca_type"}):
