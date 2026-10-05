@@ -117,6 +117,11 @@ publishing is a separate release operation.
   engine.
 - Keep [CHANGELOG.md](CHANGELOG.md) current for user-visible changes. Its
   release-note policy applies to both stable and prerelease tags.
+- CI clears a pull request from a fork into `main` only when it changes
+  documentation or legal text alone (Markdown, `docs/`, `LICENSE`, `NOTICE`).
+  A fork's code change does not run in CI here: its `gate` check fails until a
+  maintainer pushes the branch to this repository and opens a pull request
+  from it, which runs the full gate.
 - The README describes the latest release and becomes the PyPI page of the
   next release: when a version is tagged, update its "Releases and this
   README" section, its engine-pairing table and its release markers.

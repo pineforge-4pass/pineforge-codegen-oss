@@ -2,10 +2,16 @@ version: 2
 updates:
   # Keep the SHA-pinned GitHub Actions in workflows up to date with
   # reviewable PRs (security review: pinned actions need a bump path).
+  # One grouped PR a month: the workflows are pineforge-workflow's templates,
+  # so every bump goes there too and needs a measured pr-gate here.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
   # The conformance-gate / npm-package tooling (pyodide pinned to PYODIDE_TARGET,
   # tar caret range) — get reviewable bump PRs. NOTE: a pyodide bump must move
   # PYODIDE_TARGET in lockstep (the gate validates against it), so review these.
