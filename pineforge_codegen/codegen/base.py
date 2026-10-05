@@ -240,6 +240,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     def __init__(self, ctx: AnalyzerContext,
                  budget: TimeBudget | None = None) -> None:
         self.ctx = ctx
+        self._order_shape_calls = {}
+        self._order_shape_host_reads: set[str] = set()
+        self._order_shape_constructor: list[str] = []
         self._budget = budget
         self._budget_visit_count = 0
         self._initialise_safe_names(ctx.ast)
@@ -4490,7 +4493,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._prepare_lazy_source_clock_sites()
         self.block_locals_needing_names = self._block_locals_needing_names()
 
-        lines: list[str] = []
+        from .order_shapes import HostReadLines
+        lines: list[str] = HostReadLines(self._order_shape_host_reads)
 
         # Series<T> ctor-arg suffix from any max_bars_back directive (empty when
         # absent, so directive-free output is byte-identical to before).
@@ -5451,6 +5455,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.insert(_session_market_member_at, SESSION_MARKET_MEMBER)
             lines.insert(_session_market_at, SESSION_MARKET_CPP)
 
+        from .capabilities import emit_capabilities_exports
+        exports: list[str] = []
+        emit_capabilities_exports(self, exports)
+        lines[self._capabilities_export_at:self._capabilities_export_at] = exports
         cpp = "\n".join(lines)
         self._settle_session_reads(cpp)
         return cpp

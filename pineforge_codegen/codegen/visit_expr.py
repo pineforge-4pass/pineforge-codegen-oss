@@ -952,6 +952,7 @@ class ExprVisitor:
                 if node.member == "isfirst":
                     return "(bar_index_ == 0)"
                 if node.member == "islast":
+                    self._order_shape_host_reads.add("barstate_islast_")
                     return "barstate_islast_"
                 if node.member == "isnew":
                     return "is_first_tick()"
@@ -962,6 +963,7 @@ class ExprVisitor:
                 if node.member == "isrealtime":
                     return "false"
                 if node.member == "islastconfirmedhistory":
+                    self._order_shape_host_reads.add("barstate_islast_")
                     return "barstate_islast_"
                 return "false"
             if ns in ("backadjustment", "settlement_as_close"):
@@ -1046,12 +1048,16 @@ class ExprVisitor:
                         return ismarket
                     return f"(!{ismarket} && {predicate})"
                 if node.member == "isfirstbar":
+                    self._order_shape_host_reads.add("session_isfirstbar_")
                     return "session_isfirstbar_"
                 if node.member == "islastbar":
+                    self._order_shape_host_reads.add("session_islastbar_")
                     return "session_islastbar_"
                 if node.member == "isfirstbar_regular":
+                    self._order_shape_host_reads.add("session_isfirstbar_regular_")
                     return "session_isfirstbar_regular_"
                 if node.member == "islastbar_regular":
+                    self._order_shape_host_reads.add("session_islastbar_regular_")
                     return "session_islastbar_regular_"
                 return "false"
             if ns == "syminfo":

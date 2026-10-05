@@ -432,6 +432,7 @@ class CallVisitor:
 
         close = "true" if func_name == "time_close" else "false"
         empty = 'std::string("")'
+        self._order_shape_host_reads.add("pine_time_offset")
         return (
             f"pine_time_offset(current_bar_.timestamp, {offset('bars_back')}, "
             f"{text('timeframe', 'script_tf_')}, {text('session', empty)}, "
@@ -3166,6 +3167,7 @@ class CallVisitor:
         return f"{token}ULL"
 
     def _visit_strategy_call(self, func_name: str, node: FuncCall) -> str:
+        from .order_shapes import record_order_call
         if func_name in ("convert_to_account", "convert_to_symbol"):
             p = self._resolve_func_args(node, f"strategy.{func_name}")
             v = self._visit_expr(p.get("value")) if p.get("value") is not None else "0.0"
@@ -3195,11 +3197,21 @@ class CallVisitor:
             comment_val = self._visit_expr(comment) if comment else '""'
             oca_name_val = self._visit_expr(oca_name) if oca_name else '""'
             oca_type_val = self._visit_expr(oca_type) if oca_type else "0"
-            qty_type_val = self._visit_expr(qty_type) if qty_type else "-1"
+                qty_type_val = self._visit_expr(qty_type) if qty_type else "-1"
             qty_val = self._visit_expr(qty) if qty else "na<double>()"
             if stop is not None or limit is not None or qty is not None or oca_name is not None or oca_type is not None or qty_type is not None:
                 limit_val = self._visit_expr(limit) if limit else "na<double>()"
                 stop_val = self._visit_expr(stop) if stop else "na<double>()"
+                record_order_call(self, node, "entry", {
+                    "id": (entry_id, p.get("id")), "direction": (direction, direction_node),
+                    "limit": (limit_val, limit, "na<double>()"),
+                    "stop": (stop_val, stop, "na<double>()"),
+                    "qty": (qty_val, qty, "na<double>()"),
+                    "comment": (comment_val, comment, '""'),
+                    "oca_name": (oca_name_val, oca_name, '""'),
+                    "oca_type": (oca_type_val, oca_type, "0"),
+                    "qty_type": (qty_type_val, qty_type, "-1"),
+                })
                 # pineforge-engine v0.2 dropped the vestigial `market_price`
                 # third positional from `BacktestEngine::strategy_entry`
                 # (the runtime never read it; fill price always came from
@@ -3207,6 +3219,15 @@ class CallVisitor:
                 # matches the new signature: (id, direction, limit, stop,
                 # qty, comment, oca_name, oca_type, qty_type).
                 return f"strategy_entry({entry_id}, {direction}, {limit_val}, {stop_val}, {qty_val}, {comment_val}, {oca_name_val}, {oca_type_val}, {qty_type_val})"
+            record_order_call(self, node, "entry", {
+                "id": (entry_id, p.get("id")), "direction": (direction, direction_node),
+                "limit": ("na<double>()", None, "na<double>()"),
+                "stop": ("na<double>()", None, "na<double>()"),
+                "qty": ("na<double>()", None, "na<double>()"),
+                "comment": (comment_val, comment, '""'),
+                "oca_name": ('""', None, '""'), "oca_type": ("0", None, "0"),
+                "qty_type": ("-1", None, "-1"),
+            })
             return f"strategy_entry({entry_id}, {direction}, na<double>(), na<double>(), na<double>(), {comment_val})"
 
         if func_name == "close":
@@ -3223,6 +3244,12 @@ class CallVisitor:
                 if immediately_node is not None else "false"
             )
             callsite = self._strategy_close_callsite_token(node)
+            record_order_call(self, node, "close", {
+                "id": (close_id, p.get("id")), "comment": (comment, p.get("comment"), '""'),
+                "qty": (qty, p.get("qty"), "na<double>()"),
+                "qty_percent": (qty_pct, p.get("qty_percent"), "na<double>()"),
+                "immediately": (immediately, immediately_node, "false"),
+            })
             return f"strategy_close({close_id}, {comment}, {qty}, {qty_pct}, {immediately}, {callsite})"
 
         if func_name == "close_all":
@@ -3235,6 +3262,12 @@ class CallVisitor:
                 )
                 if immediately_node is not None else "false"
             )
+            record_order_call(self, node, "close_all", {
+                "comment": (comment, p.get("comment"), '""'),
+                "qty": ("na<double>()", None, "na<double>()"),
+                "qty_percent": ("na<double>()", None, "na<double>()"),
+                "immediately": (immediately, immediately_node, "false"),
+            })
             # The engine's ID-less strategy_close path closes the complete
             # position. Reuse it so close_all preserves the Pine order comment
             # and same-tick fill flag instead of silently discarding both.
@@ -3278,18 +3311,38 @@ class CallVisitor:
                 if loss_n and not stop_n:
                     loss_ticks = self._visit_expr(loss_n)
 
+                record_order_call(self, node, "exit", {
+                    "id": (exit_id, p.get("id")), "from_entry": (from_id, p.get("from_entry")),
+                    "limit": (limit_val, limit_n, "na<double>()"),
+                    "stop": (stop_val, stop_n, "na<double>()"),
+                    "trail_points": (trail_pts, trail_pts_n, "na<double>()"),
+                    "trail_offset": (trail_off, trail_off_n, "na<double>()"),
+                    "trail_price": (trail_pr, trail_pr_n, "na<double>()"),
+                    "qty_percent": (qty_pct, qty_pct_n, "100.0"),
+                    "comment": (comment, comment_n, '""'),
+                    "qty": (qty_val, qty_n, "na<double>()"),
+                    "oca_name": (oca_val, oca_name_n, '""'),
+                    "profit_ticks": (profit_ticks, profit_n if not limit_n else None, "na<double>()"),
+                    "loss_ticks": (loss_ticks, loss_n if not stop_n else None, "na<double>()"),
+                }, form="levels")
                 return (f"strategy_exit({exit_id}, {from_id}, {limit_val}, {stop_val}, "
                         f"{trail_pts}, {trail_off}, {trail_pr}, {qty_pct}, {comment}, "
                         f"{qty_val}, {oca_val}, {profit_ticks}, {loss_ticks})")
             comment = self._visit_expr(comment_n) if comment_n is not None else '""'
+            record_order_call(self, node, "exit", {
+                "id": (exit_id, p.get("id")), "from_entry": (from_id, p.get("from_entry")),
+                "comment": (comment, comment_n, '""'),
+            }, form="cancel_bracket")
             return f"strategy_exit_cancel_bracket({exit_id}, {from_id}, {comment})"
 
         if func_name == "cancel":
             p = self._resolve_func_args(node, "strategy.close")  # same shape: id first
             cancel_id = self._visit_expr(p.get("id")) if "id" in p else '""'
+            record_order_call(self, node, "cancel", {"id": (cancel_id, p.get("id"))})
             return f"strategy_cancel({cancel_id})"
 
         if func_name == "cancel_all":
+            record_order_call(self, node, "cancel_all", {})
             return "strategy_cancel_all()"
 
         if func_name == "order":
@@ -3307,6 +3360,14 @@ class CallVisitor:
             stop_arg = self._visit_expr(p.get("stop")) if "stop" in p else "na<double>()"
             oca_name = self._visit_expr(p.get("oca_name")) if "oca_name" in p else '""'
             oca_type = self._visit_expr(p.get("oca_type")) if "oca_type" in p else "0"
+            record_order_call(self, node, "order", {
+                "id": (order_id, p.get("id")), "direction": (direction, direction_node),
+                "qty": (qty, p.get("qty"), "0"),
+                "limit": (limit_arg, p.get("limit"), "na<double>()"),
+                "stop": (stop_arg, p.get("stop"), "na<double>()"),
+                "oca_name": (oca_name, p.get("oca_name"), '""'),
+                "oca_type": (oca_type, p.get("oca_type"), "0"),
+            })
             return f"strategy_order({order_id}, {direction}, {qty}, {limit_arg}, {stop_arg}, {oca_name}, {oca_type})"
 
         if func_name == "risk":

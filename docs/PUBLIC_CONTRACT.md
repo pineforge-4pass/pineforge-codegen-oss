@@ -57,6 +57,35 @@ symbols and retain their original policy. A new runner paired with an old
 library without these new symbols also retains its original admission policy.
 These exports add metadata only; generated trading code is unchanged.
 
+Unreleased (after 1.2.0): `strategy_order_shapes_api_version()` returns 1 and
+`strategy_order_shapes_receipt(handle, json, capacity, required, error, error_capacity)`
+uses the same checked-settings buffer protocol. Every generated strategy includes
+this immutable receipt, whether closing-time order processing
+(`process_orders_on_close`) is enabled or not. The declaration and constructor
+settings echo describe the compiled defaults, not later input or setting overrides.
+
+The canonical JSON contains `version`, `process_orders_on_close`, `calls`,
+`entry_ids`, `host_reads`, `settings` and `unmodeled`. Each `calls` entry describes
+one lowered Pine `strategy.entry`, `strategy.order`, `strategy.exit`,
+`strategy.close`, `strategy.close_all`, `strategy.cancel` or `strategy.cancel_all`
+site, in source order. It classifies each parameter that the call actually passes:
+numeric values are default (`absent`), finite constants (`literal`), expressions
+from a conservative non-missing-value allowlist (`never_na`), or potentially
+missing (`maybe_na`). Text, enums, directions and IDs have separate classes.
+IDs are classified without exposing their literal strings. Entry counts and
+target relations distinguish direction, shared IDs, repeated sites and exit
+ordering. Loops and user functions or methods are marked `repeatable`.
+
+Defaults are compared per lowered parameter, including the expanded optional
+entry parameters. Dropped alert arguments do not affect the shape; an omitted
+`from_entry` and `from_entry=""` both target entries globally. An exit without
+price parameters records only its bracket-cancellation parameters. `host_reads`
+lists generated execution-member references, excluding strings and comments;
+`unmodeled` names other non-read-only `strategy.*` calls, including risk rules.
+The receipt is a static description, not an admission decision or proof that an
+arbitrary order shape is supported in a live run. Existing capability and
+confirmed-bar receipts, including their order classifications, remain unchanged.
+
 Version 1 has `version`, `declarations`, `requests`, `requirements` and `unresolved`
 keys. Declarations include calculation cadence, close execution, magnifier,
 standard-OHLC fill mode, limit verification, currency and clock settings. Requests
