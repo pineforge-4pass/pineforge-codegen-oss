@@ -78,8 +78,9 @@ ordering. Loops and user functions or methods are marked `repeatable`.
 
 Defaults are compared per lowered parameter, including the expanded optional
 entry parameters. Dropped alert arguments do not affect the shape; an omitted
-`from_entry` and `from_entry=""` both target entries globally. An exit without
-price parameters records only its bracket-cancellation parameters. `host_reads`
+`from_entry` and `from_entry=""` both target entries globally. An exit lowered as
+bracket cancellation records only its cancellation parameters; the receipt does
+not relax existing Pine support checks. `host_reads`
 lists generated execution-member references, excluding strings and comments;
 `unmodeled` names other non-read-only `strategy.*` calls, including risk rules.
 The receipt is a static description, not an admission decision or proof that an

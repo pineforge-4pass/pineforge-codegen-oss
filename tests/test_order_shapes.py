@@ -149,6 +149,41 @@ def test_context(body, context):
     assert receipt(body)["calls"][0]["context"] == context
 
 
+def test_each_emitted_helper_clone_has_an_order_descriptor():
+    body = '''f(float price) =>
+    strategy.entry("L", strategy.long, limit=price)
+    ta.sma(price, 2)
+value = f(close) + f(open)'''
+    cpp = transpile(SOURCE + body)
+    result = receipt(body)
+    assert cpp.count('strategy_entry("L",') == len(result["calls"]) == 2
+    assert all(call["context"] == "repeatable" for call in result["calls"])
+    assert result["entry_ids"]["multi_site"] == 1
+    assert result["unmodeled"] == []
+
+
+def test_immutable_global_is_not_mutated_by_a_same_named_local():
+    body = '''value = 5
+f(float value) =>
+    value := value + 1
+    value
+changed = f(close)
+strategy.exit("X", limit=value)'''
+    assert receipt(body)["calls"][0]["limit"] == "literal"
+
+
+def test_block_shadows_do_not_leak_to_sibling_or_outer_sites():
+    body = '''value = 5
+if close > open
+    if high > low
+        value = close
+        strategy.exit("local", limit=value)
+    strategy.exit("outer", limit=value)
+else
+    strategy.exit("sibling", limit=value)'''
+    assert [call["limit"] for call in receipt(body)["calls"]] == ["maybe_na", "literal", "literal"]
+
+
 def test_statement_order_and_relations():
     result = receipt('''strategy.exit("before", "L", limit=high)
 strategy.entry("L", strategy.long)
@@ -166,6 +201,17 @@ strategy.exit("dangling", "absent-id", stop=low)''')
     assert [calls[index]["target"] for index in (0, 2, 5, 7, 8, 9, 10)] == ["long", "long", "both", "long", "short", "both", "dangling"]
     assert result["entry_ids"] == {"long": 2, "short": 2, "shared": 1, "multi_site": 1}
     assert [call["site"] for call in calls] == list(range(len(calls)))
+
+
+def test_empty_cancel_is_not_a_global_close_target():
+    result = receipt('''strategy.entry("L", strategy.long)
+strategy.close("")
+strategy.cancel("")
+strategy.entry("", strategy.short)
+strategy.cancel("")''')
+    assert [result["calls"][index]["target"] for index in (1, 2, 4)] == ["both", "short", "short"]
+    without_empty_entry = receipt('strategy.entry("L", strategy.long)\nstrategy.cancel("")')
+    assert without_empty_entry["calls"][1]["target"] == "dangling"
 
 
 def test_close_all_and_cancel_all_parameters():
@@ -233,6 +279,29 @@ def test_host_strings_do_not_create_reads():
     lines = HostReadLines(reads)
     lines.extend(['/* session_islastbar_', 'pine_time_offset */', 'std::string("barstate_islast_");', "current_bar_.close;"])
     assert reads == {"current_bar_"}
+
+
+def test_host_recording_does_not_use_the_tu_crosscheck(monkeypatch):
+    def forbidden_scan(_cpp):
+        pytest.fail("emission must not depend on the cross-check scanner")
+
+    monkeypatch.setattr("pineforge_codegen.codegen.order_shapes.scan_host_reads", forbidden_scan)
+    result = receipt('value = session.ismarket\nstrategy.entry("L", strategy.long)')
+    assert "current_bar_" in result["host_reads"]
+
+
+@pytest.mark.parametrize(("expression", "expected"), [
+    ('""', "absent"), ('"exit"', "literal"), ('input.string("exit")', "dynamic"),
+])
+def test_comment_classes(expression, expected):
+    assert receipt(f'strategy.close("L", comment={expression})')["calls"][0]["comment"] == expected
+
+
+@pytest.mark.parametrize(("expression", "expected"), [
+    ("false", "absent"), ("true", "literal:true"), ("input.bool(false)", "dynamic"),
+])
+def test_immediately_classes(expression, expected):
+    assert receipt(f'strategy.close_all(immediately={expression})')["calls"][0]["immediately"] == expected
 
 
 def test_legacy_receipts_are_byte_identical():

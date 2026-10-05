@@ -1,14 +1,14 @@
 """Immutable facts about emitted order parameters and execution context."""
 
-from collections import Counter
+from collections import ChainMap, Counter
 from dataclasses import dataclass
 import json
 import math
 import re
 
 from ..ast_nodes import (
-    Assignment, BinOp, BoolLiteral, ForInStmt, ForStmt, FuncCall, FuncDef,
-    Identifier, MemberAccess, MethodDef, NumberLiteral, StringLiteral, TupleAssign,
+    BinOp, BoolLiteral, ForInStmt, ForStmt, FuncCall, FuncDef, Identifier, IfStmt,
+    MemberAccess, MethodDef, NumberLiteral, StringLiteral, SwitchStmt, TupleAssign,
     UnaryOp, VarDecl, WhileStmt,
 )
 from ..limits import iter_ast_nodes, syntax_children
@@ -82,7 +82,7 @@ class HostReadLines(list):
             self.append(fragment)
 
     def insert(self, index: int, fragment: str) -> None:
-        self.reads.update(scan_host_reads(fragment))
+        HostReadLines(self.reads)._record(fragment)
         super().insert(index, fragment)
 
 
@@ -179,37 +179,57 @@ def parameter_class(name, parameter, bindings):
     raise ValueError(f"unclassified lowered order parameter: {name}")
 
 
-def _site_facts(ast):
+def _site_facts(ast, mutable_globals, recorded_nodes):
     """Source ordering, lexical shadows, and repeatability for authored call sites."""
-    mutated = {node.target.name for node, _depth in iter_ast_nodes(ast)
-               if isinstance(node, Assignment) and isinstance(node.target, Identifier)}
     bindings = {}
     for node in ast.body:
         if isinstance(node, VarDecl):
             value = _literal(node.value, bindings)
             bindings[node.name] = (value if not node.is_var and not node.is_varip
-                                   and node.name not in mutated else None)
+                                   and node.name not in mutable_globals else None)
     facts = {}
-    stack = [(ast, False, bindings)]
-    while stack:
-        node, repeatable, visible = stack.pop()
-        if isinstance(node, FuncCall):
-            facts[id(node)] = (len(facts), "repeatable" if repeatable else "straight", visible)
-        nested = repeatable or isinstance(node, (FuncDef, MethodDef, ForStmt, ForInStmt, WhileStmt))
-        if isinstance(node, (FuncDef, MethodDef, ForStmt, ForInStmt, WhileStmt)) or hasattr(node, "body") and node is not ast:
-            visible = dict(visible)
-            if isinstance(node, (FuncDef, MethodDef)):
-                visible.update({name if isinstance(name, str) else name[0]: None for name in node.params})
-            for child, _depth in iter_ast_nodes(node):
-                if child is not node and isinstance(child, FuncDef):
-                    continue
-                if isinstance(child, VarDecl):
-                    visible[child.name] = None
-                if isinstance(child, TupleAssign):
-                    visible.update({name: None for name in child.names})
-            if isinstance(node, (ForStmt, ForInStmt)):
-                visible.update({name: None for name in ([node.var] if node.var else node.vars or [])})
-        stack.extend((child, nested, visible) for child in reversed(list(syntax_children(node))))
+
+    def block(statements, repeatable, visible, names=()):
+        local = {name: None for name in names}
+        scope = ChainMap(local, visible)
+        for statement in statements:
+            walk(statement, repeatable, scope)
+            if isinstance(statement, VarDecl):
+                local[statement.name] = None
+            elif isinstance(statement, TupleAssign):
+                local.update({name: None for name in statement.names})
+
+    def walk(node, repeatable, visible):
+        if id(node) in recorded_nodes:
+            facts[id(node)] = (len(facts), "repeatable" if repeatable else "straight", dict(visible))
+        if isinstance(node, (FuncDef, MethodDef)):
+            block(node.body, True, visible,
+                  (name if isinstance(name, str) else name[0] for name in node.params))
+        elif isinstance(node, (ForStmt, ForInStmt, WhileStmt)):
+            for field in ("start", "end", "step", "iterable", "condition"):
+                expression = getattr(node, field, None)
+                if expression is not None:
+                    walk(expression, True, visible)
+            names = ([node.var] if node.var else node.vars or []) if isinstance(node, (ForStmt, ForInStmt)) else ()
+            block(node.body, True, visible, names)
+        elif isinstance(node, IfStmt):
+            walk(node.condition, repeatable, visible)
+            block(node.body, repeatable, visible)
+            block(node.else_body, repeatable, visible)
+        elif isinstance(node, SwitchStmt):
+            if node.expr is not None:
+                walk(node.expr, repeatable, visible)
+            for condition, statements in node.cases:
+                if condition is not None:
+                    walk(condition, repeatable, visible)
+                block(statements, repeatable, visible)
+            block(node.default_body, repeatable, visible)
+        else:
+            for child in reversed(list(syntax_children(node))):
+                walk(child, repeatable, visible)
+
+    for statement in ast.body:
+        walk(statement, False, bindings)
     return facts
 
 
@@ -235,7 +255,8 @@ def settings_echo(constructor):
 
 
 def order_shapes_document(emitter) -> str:
-    facts = _site_facts(emitter.ctx.ast)
+    recorded_nodes = {id(record.node) for record in emitter._order_shape_calls.values()}
+    facts = _site_facts(emitter.ctx.ast, emitter.ctx.global_mutable_infos, recorded_nodes)
     records = sorted(emitter._order_shape_calls.values(), key=lambda record: (
         record.node.loc.line if record.node.loc else 0,
         record.node.loc.col if record.node.loc else 0,
@@ -262,8 +283,9 @@ def order_shapes_document(emitter) -> str:
         if call["call"] not in ("exit", "close", "cancel"):
             continue
         target = ids[site].get("from_entry" if call["call"] == "exit" else "id")
+        global_target = target == "" and call["call"] in ("exit", "close")
         matching = [(entry_site, direction) for entry_site, name, direction in entries
-                    if target == "" or target is not None and target == name]
+                    if global_target or target is not None and target == name]
         directions = {direction for _entry_site, direction in matching}
         call["target"] = ("both" if "dynamic" in directions or directions >= {"long", "short"}
                           else "long" if "long" in directions else "short" if "short" in directions
@@ -274,7 +296,6 @@ def order_shapes_document(emitter) -> str:
             call["order"] = "mixed" if before and after or not matching else "before" if before else "after"
     counts = Counter(name for _site, name, _direction in entries)
     settings, pooc = settings_echo(emitter._order_shape_constructor)
-    recorded_nodes = {id(record.node) for record in records}
     unmodeled = {_expression(node.callee) for node, _depth in iter_ast_nodes(emitter.ctx.ast)
                  if isinstance(node, FuncCall) and (_expression(node.callee) or "").startswith("strategy.")
                  and _expression(node.callee) not in READ_ONLY_STRATEGY_CALLS
