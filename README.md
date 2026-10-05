@@ -532,7 +532,7 @@ use `python -m pytest --collect-only -q` for the current collection count.
 
 ## License
 
-Source-available under the [PineForge Source License 1.1](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE);
+Source-available under the [PineForge Source License 1.2](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE);
 the `LICENSE` file is the controlling text. The licensor is pineforge, LLC.
 
 - **Free for noncommercial use:** any noncommercial purpose, and use by a
@@ -547,12 +547,18 @@ the `LICENSE` file is the controlling text. The licensor is pineforge, LLC.
   tax-advantaged accounts and a revocable trust for their benefit; their own
   capital includes margin and other ordinary borrowing from a broker or
   lender. A company's or fund's account is not a personal account, even if
-  the person wholly owns the company.
+  the person wholly owns the company. An account that a proprietary-trading
+  firm or funded-trader program provides or allocates to them, including a
+  challenge, evaluation or simulated account, is not their own account, and
+  its capital, real or simulated, is not their own capital, so trading it is
+  investment management, not Personal Trading.
 - **Investment management is never free**, except Personal Trading:
   managing, advising on or trading investment capital, or researching
   strategies for it, whether the capital is a friend's, clients' or
-  investors', an endowment, a pension fund, a public fund or a foundation's
-  treasury, is Commercial Use for every individual and every organization,
+  investors', an endowment, a pension fund, a public fund, a foundation's
+  treasury or an account a proprietary-trading firm or funded-trader program
+  provides or allocates (a challenge, evaluation or simulated account
+  included), is Commercial Use for every individual and every organization,
   noncommercial organizations included.
 - **Commercial Use needs a commercial license:** besides investment
   management, any other use that is not free, such as use by, for or on
