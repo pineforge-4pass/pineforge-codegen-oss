@@ -16,8 +16,12 @@ arguments. Risk rules and unmodeled order arguments are named as unproven;
 POOC account/sizing/slippage declarations outside the tested literal profiles also
 produce an unproven marker. This changes receipts only, never trading code.
 New libraries also export an independently versioned confirmed-bar receipt;
-the paired runner admits only its explicitly proven security and order shapes,
-not arbitrary requests or observed-tick calculation.
+the paired runner admits only its explicitly proven same-chart security shapes
+and standalone close-only varip, not arbitrary requests or observed-tick calculation.
+`process_orders_on_close=true` remains refused for every order shape and
+request composition. Retained POOC order metadata and equivalence rows are
+evidence for future admission, not admitted shapes; nullable price legs,
+same-calculation brackets and empty entry IDs are not certified by the receipt.
 Legacy libraries without a receipt warn and run, including their requests.
 Realtime
 builtins are conservatively named and refused: generated `barstate.isrealtime`
