@@ -73,8 +73,9 @@ numeric values are default (`absent`), finite constants (`literal`), expressions
 from a conservative non-missing-value allowlist (`never_na`), or potentially
 missing (`maybe_na`). Text, enums, directions and IDs have separate classes.
 IDs are classified without exposing their literal strings. Entry counts and
-target relations distinguish direction, shared IDs, repeated sites and exit
-ordering. Loops and user functions or methods are marked `repeatable`.
+target relations include IDs from both `strategy.entry` and `strategy.order`;
+they distinguish direction, shared IDs, repeated sites and exit ordering.
+Loops and user functions or methods are marked `repeatable`.
 
 Defaults are compared per lowered parameter, including the expanded optional
 entry parameters. Dropped alert arguments do not affect the shape; an omitted

@@ -184,14 +184,15 @@ else
     assert [call["limit"] for call in receipt(body)["calls"]] == ["maybe_na", "literal", "literal"]
 
 
-def test_statement_order_and_relations():
-    result = receipt('''strategy.exit("before", "L", limit=high)
-strategy.entry("L", strategy.long)
+@pytest.mark.parametrize("opening_call", ["entry", "order"])
+def test_statement_order_and_relations(opening_call):
+    result = receipt(f'''strategy.exit("before", "L", limit=high)
+strategy.{opening_call}("L", strategy.long)
 strategy.exit("after", "L", stop=low)
-strategy.entry("S", strategy.short)
-strategy.entry("shared", strategy.long)
+strategy.{opening_call}("S", strategy.short)
+strategy.{opening_call}("shared", strategy.long)
 strategy.exit("mixed", "shared", limit=high)
-strategy.entry("shared", strategy.short)
+strategy.{opening_call}("shared", strategy.short)
 strategy.close("L")
 strategy.cancel("S")
 strategy.exit("global", limit=high)
@@ -201,6 +202,48 @@ strategy.exit("dangling", "absent-id", stop=low)''')
     assert [calls[index]["target"] for index in (0, 2, 5, 7, 8, 9, 10)] == ["long", "long", "both", "long", "short", "both", "dangling"]
     assert result["entry_ids"] == {"long": 2, "short": 2, "shared": 1, "multi_site": 1}
     assert [call["site"] for call in calls] == list(range(len(calls)))
+
+
+@pytest.mark.parametrize(("first", "second"), [("entry", "order"), ("order", "entry"), ("order", "order")])
+def test_relations_share_ids_across_entry_and_order_sites(first, second):
+    result = receipt(f'''strategy.exit("before", "shared", limit=high)
+strategy.{first}("shared", strategy.long)
+strategy.exit("mixed", "shared", limit=high)
+strategy.{second}("shared", strategy.short)
+strategy.exit("after", "shared", limit=high)
+strategy.close("shared")
+strategy.cancel("shared")''')
+    calls = result["calls"]
+    assert [calls[index]["order"] for index in (0, 2, 4)] == ["before", "mixed", "after"]
+    assert all(calls[index]["target"] == "both" for index in (0, 2, 4, 5, 6))
+    assert result["entry_ids"] == {"long": 1, "short": 1, "shared": 1, "multi_site": 1}
+
+
+@pytest.mark.parametrize(("direction", "expected"), [
+    ("strategy.long", "long"), ("strategy.short", "short"), ("close > open", "both"),
+])
+def test_order_id_relations_include_direction(direction, expected):
+    result = receipt(f'''strategy.order("O", {direction})
+strategy.exit("X", "O", limit=high)
+strategy.close("O")
+strategy.cancel("O")''')
+    assert all(call["target"] == expected for call in result["calls"][1:])
+    assert result["calls"][1]["order"] == "after"
+
+
+def test_empty_order_id_and_dynamic_order_id_relations():
+    empty = receipt('''strategy.order("", strategy.short)
+strategy.exit("X", limit=high)
+strategy.close("")
+strategy.cancel("")''')
+    assert all(call["target"] == "short" for call in empty["calls"][1:])
+    assert empty["entry_ids"] == {"long": 0, "short": 1, "shared": 0, "multi_site": 0}
+    dynamic = receipt('''strategy.order(input.string("O"), strategy.long)
+strategy.exit("X", "O", limit=high)
+strategy.close("O")
+strategy.cancel("O")''')
+    assert all(call["target"] == "dangling" for call in dynamic["calls"][1:])
+    assert dynamic["entry_ids"] == {"long": 0, "short": 0, "shared": 0, "multi_site": 0}
 
 
 def test_empty_cancel_is_not_a_global_close_target():

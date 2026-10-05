@@ -322,7 +322,7 @@ def order_shapes_document(emitter) -> str:
         ids.append({name: _literal(parameter.node, bindings) if parameter.node is not None else ""
                     for name, parameter in record.parameters.items() if name in ("id", "from_entry")})
     entries = [(site, ids[site].get("id"), call.get("direction"))
-               for site, call in enumerate(calls) if call["call"] == "entry"
+               for site, call in enumerate(calls) if call["call"] in ("entry", "order")
                and call["id"] in ("literal", "empty")]
     long_ids = {name for _site, name, direction in entries if direction == "long"}
     short_ids = {name for _site, name, direction in entries if direction == "short"}
