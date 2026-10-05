@@ -1,7 +1,36 @@
 """Opt-in settings metadata, validation and exception-contained C exports."""
 
+import re
+
 from ..ast_nodes import Identifier, MemberAccess
 from ..errors import CompileError
+from .tables import ALERT_FREQ_VALUES, NAME_ECHO_STRING_MEMBERS, ORDER_DIRECTION_MAP
+
+
+_QUOTED_STRING = r'"(?:[^"\\]|\\.)*"'
+_STRING_LITERAL = re.compile(rf'(?:std::string\({_QUOTED_STRING}\)|{_QUOTED_STRING})')
+
+
+def _string_setting_arg(expr, lowered: str) -> str | None:
+    """Use the body's known string constants, never its inert visual codes.
+
+    Name-echo strings are accepted only for inventoried currency/format members.
+    Unknown constants leave the checked input unsupported; legacy getters
+    and setters retain their existing execution semantics.
+    """
+    if isinstance(expr, MemberAccess):
+        if not isinstance(expr.object, Identifier):
+            return None
+        namespace = expr.object.name
+        known = (
+            namespace == "alert" and expr.member in ALERT_FREQ_VALUES
+            or namespace == "order" and expr.member in ORDER_DIRECTION_MAP
+            or namespace == "session" and expr.member in ("regular", "extended")
+            or expr.member in NAME_ECHO_STRING_MEMBERS.get(namespace, ())
+        )
+        if not known:
+            return None
+    return lowered if _STRING_LITERAL.fullmatch(lowered) else None
 
 
 def _visit_setting_arg(emitter, expr) -> str:
@@ -51,7 +80,8 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
         key = emitter._input_key_literal(name)
         default = emitter._get_input_default(node)
         getter = emitter._input_getter_for_call(node, func_name, namespace)
-        default_cpp = _visit_setting_arg(emitter, default) if default is not None else "0"
+        default_lowered = _visit_setting_arg(emitter, default) if default is not None else "0"
+        default_cpp = default_lowered
         default_cpp = emitter._coerce_string_input_default(getter, default_cpp)
         value_type = {
             "get_input_int": "int", "get_input_int64": "int",
@@ -63,6 +93,11 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
         option_values = []
         supported = "true"
         default_serialized = None
+        if getter == "get_input_string":
+            default_serialized = _string_setting_arg(default, default_lowered)
+            if default_serialized is None:
+                default_serialized = 'std::string("")'
+                supported = "false"
         names, merged = emitter._merged_args(node, func_name, namespace)
         arguments = dict(zip(names or [], merged))
         arguments.update(node.kwargs)
@@ -103,8 +138,19 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
             if declared:
                 for option in declared:
                     option_cpp = _visit_setting_arg(emitter, option)
-                    options.append(option_cpp if getter == "get_input_string" else
-                                   f'::pineforge::checked_settings::number({option_cpp})')
+                    if getter == "get_input_string":
+                        option_cpp = _string_setting_arg(option, option_cpp)
+                        if option_cpp is None:
+                            supported = "false"
+                        else:
+                            options.append(option_cpp)
+                    else:
+                        options.append(f'::pineforge::checked_settings::number({option_cpp})')
+            if getter == "get_input_string":
+                if arguments.get("options") is not None and declared is None:
+                    supported = "false"
+                if supported == "false":
+                    options = []
             expression = f'{getter}({key}, {default_cpp})'
             effective = (expression if getter == "get_input_string" else
                          f'::pineforge::checked_settings::number({expression})')

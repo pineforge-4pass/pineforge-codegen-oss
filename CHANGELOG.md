@@ -20,6 +20,14 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## Unreleased
+
+- Strategy settings can be inspected without a startup crash when a string
+  dropdown uses built-in display constants. Constants with known string values
+  retain their exact defaults and choices; dropdowns whose values cannot be
+  represented faithfully are marked unsupported instead of publishing invalid
+  choices. Existing strategy execution and legacy input overrides are unchanged.
+
 ## 1.2.0 — 2026-10-05
 
 A minor release: generated strategy libraries gain the compiled execution
