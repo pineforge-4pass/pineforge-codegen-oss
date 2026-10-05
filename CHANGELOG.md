@@ -5,51 +5,6 @@ Release notes for `pineforge-codegen`. From 1.0.0 on, versions of codegen and
 supported as exact pairs; on the 0.x line they are independent. See the
 [pairing rule](README.md#engine-pairing).
 
-## Unreleased
-
-### Compiled execution capabilities
-
-- Emit the optional generated-strategy C ABI capability extension:
-  `strategy_capabilities_api_version()` and `strategy_capabilities_receipt()`,
-  versioned by the paired engine's `PF_CAPABILITIES_API_VERSION`. Its immutable
-  canonical JSON uses the checked-settings buffer protocol without changing the
-  base C ABI. Regenerate C++ and relink against the paired next-release engine.
-- Record `strategy()` execution declarations, including positional arguments in
-  Pine signature order, and analyzed request/feed, FX and intrabar requirements.
-  Name nonliteral arguments and unpinned runtime-lowered request sites in
-  `unresolved`; retain every request kind, symbol, timeframe and lookahead.
-  Record endpoint/realtime builtin use even in plots, labels and tables. The
-  receipt proves declarations only, not arbitrary live-versus-batch equivalence.
-- The paired close-only runner refuses intrabar/fill-policy declarations,
-  `process_orders_on_close`, every `request.*` site regardless of timeframe,
-  unsupported clock/feed/FX requirements, `varip`, unresolved declarations and
-  the six endpoint/realtime builtins before its ledger exists, naming the
-  requirement instead of silently changing the computation. Legacy libraries
-  without the extension warn and run, including their requests, without proving
-  eligibility. Default batch computation is unchanged.
-
-### Diagnostic codes
-
-An additive change to the public API; it leaves the emitted C++ unchanged.
-
-- **Diagnostic codes.** Every transpile diagnostic carries a stable `code`
-  (`PF-E1203` / `PF-W0412`) and named, raw `args`, in
-  `transpile_full(...)["diagnostics"]`, in `CompileError.diagnostics` and in
-  the `transpile_json` envelopes. `diagnostics_catalog()` and
-  `pineforge_codegen/diagnostics_catalog.json` (attached to each GitHub
-  release) give each code its severity, English ICU MessageFormat templates,
-  argument kinds and a one-line explanation; the templates render the
-  `message` and `hint` byte for byte, which keep their text. Codes are never
-  reused (`tests/fixtures/diagnostic_codes_pin.json`). See
-  [Diagnostic codes](docs/PUBLIC_CONTRACT.md#diagnostic-codes). A code is
-  read off its text in time linear in the text: a crafted script's text cannot
-  stall the classification, which a backtracking regex let it do.
-- **First error in source order.** Since 1.1.0 the settings metadata visited
-  every input's `defval`, `options`, `minval`, `maxval` and `step` ahead of
-  the script body, so an error there (an unknown name in `minval`) was raised
-  before an error on an earlier line. The script's first error in source
-  order is raised again; no emitted C++ changes.
-
 ## Release note policy
 
 - Keep a section for each released version, including prereleases. Use the exact
@@ -64,6 +19,237 @@ An additive change to the public API; it leaves the emitted C++ unchanged.
 - Draft from merged changes since the previous release tag, then verify against
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
+
+## 1.2.0 — 2026-10-05
+
+A minor release: generated strategy libraries gain the compiled execution
+capability receipt that engine `v1.2.0` adds to the C ABI, every diagnostic
+carries a stable code and named arguments, and the package is licensed under
+the PineForge Source License 1.1. It covers the changes merged to `main` since
+1.1.0:
+[#167](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/167)
+changes the emitted C++,
+[#166](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/166)
+adds diagnostic codes to the Python and JSON results and raises a script's
+first error in source order again,
+[#171](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/171)
+classifies diagnostic codes in linear time, moves to the PineForge Source
+License 1.1 and renders the README's scoreboard, and
+[#168](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/168)
+replaces the license. Codegen `1.2.0` supports only engine `v1.2.0`. Engine
+`v1.2.0` defines `PF_CAPABILITIES_API_VERSION` (1) and declares two functions
+in `<pineforge/pineforge.h>`
+([pineforge-engine#332](https://github.com/pineforge-4pass/pineforge-engine/pull/332))
+that the C++ of codegen 1.2.0 defines; the pair keeps C ABI version 4 and the
+script ABI epoch `engine_script_run_v19`.
+
+### Compatibility and migration
+
+- Regenerate C++ with 1.2.0 and relink it against engine `v1.2.0`'s headers
+  and `libpineforge.a`. The C++ defines the capability functions only when the
+  engine's `pineforge/pineforge.h` defines both `PF_SETTINGS_API_VERSION` and
+  `PF_CAPABILITIES_API_VERSION`, as engine `v1.2.0`'s does. Against headers
+  without `PF_CAPABILITIES_API_VERSION`, such as engine `v1.1.0`'s, that block
+  compiles to nothing and the library has no receipt; this does not make such
+  a pair supported. C++ generated by 1.1.0 has no receipt either. Engine
+  `v1.2.0`'s live runner warns that it cannot prove a library without a
+  receipt eligible, and runs it (see "Compiled execution capabilities").
+- Every generated C++ file changes: it gains the capability block. Beyond
+  that, the C++ does not change: for the engine's 325 public corpus sources
+  and this repository's 277 gate fixtures, each transpiled in a fresh process,
+  1.2.0's C++ with the capability block removed is 1.1.0's C++ byte for byte,
+  and the 13 fixtures the gate expects to be refused are refused with the same
+  message. A script name spelled `strategy_capabilities_api_version` or
+  `strategy_capabilities_receipt` is renamed in the C++ (for example
+  `pf_safe_strategy_capabilities_receipt`), so a script cannot shadow the new
+  functions; input keys are unaffected.
+- The Python and JSON contract is additive: each `Diagnostic` gains the
+  properties `code` and `args`, `pineforge_codegen` exports
+  `diagnostics_catalog()` and `render_diagnostic()`, and each JSON diagnostic
+  of `gate/glue.py`'s `transpile_json` success and error envelopes gains the
+  keys `code` and `args` (see "Diagnostic codes"). No argument, result key or
+  envelope is removed or renamed: `transpile()` and `transpile_full()` keep
+  their signatures and result keys, the envelopes keep every key they had, and
+  each diagnostic keeps its `message`, `hint`, severity and location. One
+  result changes: the error raised for a script with errors in more than one
+  place (see "First error in source order").
+- Report keys: the engine's Docker harness (`docker/run_json.py`, which the
+  `pineforge-release` image runs) is the same file in engine `v1.2.0` as in
+  `v1.1.0`, so no report key is added, removed or renamed;
+  `metrics.equity.sharpe_tv` and `sortino_tv` (`EQUITY_REPORT_KEYS`) are
+  unchanged, and the engine's ADR-0001 keeps serialized report keys as they
+  are. A report's fingerprint still differs between 1.1.0 and 1.2.0, since it
+  records the engine and codegen versions and the generated C++'s hash, and
+  the engine's Pine adapter changes since `v1.1.0` (such as
+  [pineforge-engine#330](https://github.com/pineforge-4pass/pineforge-engine/pull/330))
+  can change a run's trades.
+- 1.2.0 is the first release under the PineForge Source License 1.1. Releases
+  up to and including 1.1.0 keep the license they shipped with (see
+  "License").
+
+### Compiled execution capabilities
+
+From [#167](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/167):
+
+- Built against engine `v1.2.0`, a generated strategy library defines
+  `strategy_capabilities_api_version()`, which returns
+  `PF_CAPABILITIES_API_VERSION` (1), and `strategy_capabilities_receipt(s,
+  json, capacity, required, error, error_capacity)`, which writes the
+  strategy's capability receipt. It uses the statuses and the buffer protocol
+  of 1.1.0's `strategy_get_effective_settings`: called with a NULL buffer and
+  0, it returns `PF_SETTINGS_BUFFER_TOO_SMALL` and the size to allocate, the
+  NUL included; a short buffer gets an empty string, never partial JSON; a
+  NULL strategy returns `PF_SETTINGS_INVALID_ARGUMENT`; no exception gets
+  through. The base C ABI does not change.
+- The receipt is canonical JSON (sorted keys, compact separators) written
+  into the C++ when it is generated, not read from a running strategy: every
+  handle returns the same bytes, before and after runs and setting changes.
+  Version 1 has the keys `version`, `declarations`, `requests`,
+  `requirements` and `unresolved`. `declarations` holds the `strategy()`
+  values of `calc_on_every_tick`, `calc_on_order_fills`,
+  `calc_on_every_history_tick`, `process_orders_on_close`,
+  `use_bar_magnifier`, `fill_orders_on_standard_ohlc`,
+  `backtest_fill_limits_assumption`, `currency`, `timeframe`,
+  `timeframe_gaps` and `dynamic_requests`, Pine's defaults where omitted;
+  positional arguments are read in Pine's parameter order. `requests` lists
+  each `request.security` and `request.security_lower_tf` site, recorded
+  request and request lowered to a run-time stop, with its function, symbol,
+  timeframe, lookahead, gaps, Heikin-Ashi flag and feed (`chart`,
+  `auxiliary`, `recorded` or `unpinned`). `requirements` says whether the
+  script needs other symbols' feeds, an FX curve (a `currency` other than
+  `currency.NONE`), recorded series or intrabar persistence (`varip`).
+  `unresolved` names what the receipt cannot state as a literal (a nonliteral
+  `strategy()` argument, a request's nonliteral timeframe or lookahead, a
+  request lowered to a run-time stop) and every use of `barstate.isrealtime`,
+  `timenow`, `barstate.islast`, `barstate.islastconfirmedhistory`,
+  `last_bar_index` and `last_bar_time`, in plots, labels and tables too. The
+  receipt proves declarations only, not that a stream computes what a batch
+  run computes.
+- A host reads the receipt before it runs a strategy, to tell whether its
+  execution mode can honour what the strategy declares. Engine `v1.2.0`'s
+  live runner, `pineforge-live`, reads it before it opens its ledger
+  ([pineforge-engine#332](https://github.com/pineforge-4pass/pineforge-engine/pull/332))
+  and refuses, naming the requirement, intrabar calculation
+  (`calc_on_every_tick`, `calc_on_order_fills`, `calc_on_every_history_tick`),
+  `process_orders_on_close`, the bar magnifier, standard-OHLC fills, nonzero
+  limit-fill verification, a `currency` or a `timeframe` declared in
+  `strategy()`, every true requirement, every request whatever its
+  timeframe, and every name in `unresolved`. A library without the
+  extension, such as one generated by 1.1.0, gets a warning that its
+  eligibility cannot be proved, and runs, its requests included. A batch run
+  does not read the receipt, and its computation is unchanged. The engine's
+  `docs/strategy-capabilities.md` gives the schema and the runner's policy,
+  and the
+  [public contract](docs/PUBLIC_CONTRACT.md#optional-compiled-execution-capabilities)
+  the codegen side.
+
+### Diagnostic codes
+
+From [#166](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/166):
+
+- Every diagnostic carries a stable `code` (`PF-E1203` for an error,
+  `PF-W0412` for a warning) and `args`, the named raw values (identifiers,
+  types, keywords, numbers) its English `message` and `hint` were built from:
+  in `transpile_full(...)["diagnostics"]`, in `CompileError.diagnostics` and
+  in the JSON diagnostics of the `transpile_json` envelopes. They are read off
+  the diagnostic's text when first asked for, after the transpile, so the
+  emitted C++ does not depend on them; `message` and `hint` keep their text.
+- `diagnostics_catalog()` returns the catalog, and `render_diagnostic(code,
+  args)` the English `(message, hint)` a code renders, equal to the
+  diagnostic's byte for byte. The catalog (schema
+  `pineforge-diagnostics-catalog/v1`, 628 codes) gives each code its
+  severity, area, ICU MessageFormat message and hint templates, argument
+  kinds and a one-line explanation, so an application can translate a
+  diagnostic by its code. It ships in the package as
+  `pineforge_codegen/diagnostics_catalog.json`, in
+  `@pineforge/codegen-pyodide` as the `./diagnostics_catalog.json` export,
+  and with the GitHub release as `diagnostics_catalog-v1.2.0.json`.
+- A code is never removed or reused, and a changed meaning gets a new code
+  (`tests/fixtures/diagnostic_codes_pin.json`). See
+  [Diagnostic codes](docs/PUBLIC_CONTRACT.md#diagnostic-codes).
+
+### First error in source order
+
+- 1.1.0's settings metadata read every input's `defval`, `options`,
+  `minval`, `maxval` and `step` ahead of the script body, so an error there,
+  such as an unknown name in a later input's `minval`, was raised before an
+  error on an earlier line. 1.2.0 raises the script's first error in source
+  order again, as 1.0.1 did
+  ([#166](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/166)).
+  The emitted C++ does not change.
+
+### Security
+
+- Classifying a diagnostic's code no longer stalls on crafted script text
+  ([#171](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/171)).
+  As #166 merged it, the classifier matched each catalog template as a
+  backtracking regular expression over the message and hint, which carry text
+  the script spells: 1.8 KB of one template's text took 0.55 s to classify
+  and 3.4 KB took 23 s, a denial of service for `transpile_json`, which
+  classifies every diagnostic it returns, and for any host that reads
+  `code` or `args`. Classification now takes time linear in the text: the
+  same text grown to 6.6 MB classifies in milliseconds, with the same codes
+  and arguments. No release had the stall: it was on `main` from #166 to
+  #171, and 1.1.0 has no diagnostic codes.
+
+### License
+
+From [#168](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/168)
+and [#171](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/171):
+
+- 1.2.0 is the first release under the PineForge Source License 1.1, whose
+  licensor is pineforge, LLC. Releases up to and including 1.1.0 shipped
+  under "PineForge Codegen — License", the PolyForm Noncommercial License
+  1.0.0 with PineForge's supplemental sections, and copies of those releases
+  keep that license. The PineForge Source License is not a PolyForm license.
+  `LICENSE` is the controlling text; `LEGAL.md` summarizes it and is not
+  legal advice.
+- The permitted purposes, free of charge, are noncommercial purposes,
+  personal uses, use by the noncommercial organizations `LICENSE` lists for
+  their teaching, research and other operations, and Personal Trading: a
+  natural person's research, development and backtesting of strategies and
+  execution of trades for their own account with their own capital, as
+  `LICENSE` defines them. Investment Management (managing, advising on or
+  trading investment capital, researching, developing or backtesting
+  strategies for it, or operating the software for others who do, whoever
+  the capital belongs to and whether or not for a fee) is Commercial Use for
+  every individual and every organization, noncommercial organizations
+  included, unless it is Personal Trading. So is any other use that is not a
+  permitted purpose, such as use by, for or on behalf of a company, fund,
+  partnership or other organization. Commercial Use needs a commercial
+  license from pineforge, LLC (enterprise@pineforge.dev).
+- Distributing copies is not Commercial Use, except that distributing the
+  software, changed or not, embedded in or bundled with a product or service
+  made available to others is Commercial Use unless it is a permitted
+  purpose. That exception is what 1.1 adds to the PineForge Source License
+  1.0, which #168 put on `main` and no release carried.
+- `LICENSE` defines Output: the code the software generates, such as the
+  C++ it generates from PineScript, and any program or library built from
+  it; backtest results, charts, reports and trade signals are not Output.
+- Packaging: the PyPI classifier is `License :: Other/Proprietary License`
+  (it was `License :: Free for non-commercial use`), and
+  `@pineforge/codegen-pyodide`'s `package.json` says
+  `"license": "SEE LICENSE IN LICENSE"` (it said
+  `PolyForm-Noncommercial-1.0.0`) and the package contains `LICENSE`.
+
+### Documentation
+
+- The README's scoreboard of `main` renders from the facts tokens of
+  `pineforge-release` at 03b8dcc
+  ([#171](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/171)):
+  baseline `pineforge-parity-baseline-20261004-engine-6b77f061` (engine
+  6b77f061, this repository at 285ac035), 7,970 excellent and 19 strong of
+  7,989 graded probes, none below strong.
+- `docs/PUBLIC_CONTRACT.md` describes the capability functions
+  ([#167](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/167))
+  and diagnostic codes
+  ([#166](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/166)).
+  The README's License section and `LEGAL.md` name the PineForge Source
+  License and pineforge, LLC and give enterprise@pineforge.dev for commercial
+  licenses, and `CONTRIBUTING.md` names pineforge, LLC as the party a
+  Contributor License Agreement grants rights to
+  ([#168](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/168),
+  [#171](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/171)).
 
 ## 1.1.0 — 2026-10-04
 
