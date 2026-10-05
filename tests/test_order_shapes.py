@@ -290,6 +290,106 @@ def test_host_recording_does_not_use_the_tu_crosscheck(monkeypatch):
     assert "current_bar_" in result["host_reads"]
 
 
+@pytest.mark.parametrize("mutator", [
+    "append", "extend", "extend_generator", "insert", "setitem", "setslice",
+    "setslice_generator", "set_extended_slice", "iadd", "iadd_generator", "imul",
+])
+def test_host_line_writes_record_reads_and_preserve_list_behavior(mutator):
+    fragments = ['std::string("session_islastbar_"); current_bar_.close;']
+    reads = set()
+    lines = HostReadLines(reads)
+    expected = []
+    if mutator == "append":
+        lines.append(fragments[0])
+        expected.append(fragments[0])
+    elif mutator.startswith("extend"):
+        values = iter(fragments) if mutator.endswith("generator") else fragments
+        lines.extend(values)
+        expected.extend(fragments)
+    elif mutator == "insert":
+        lines.insert(0, fragments[0])
+        expected.insert(0, fragments[0])
+    elif mutator == "setitem":
+        lines.append("placeholder")
+        lines[0] = fragments[0]
+        expected = fragments
+    elif mutator.startswith("setslice"):
+        lines.extend(["first", "last"])
+        values = iter(fragments) if mutator.endswith("generator") else fragments
+        lines[1:1] = values
+        expected = ["first", *fragments, "last"]
+    elif mutator == "set_extended_slice":
+        lines.extend(["first", "last"])
+        lines[::2] = iter(fragments)
+        expected = [fragments[0], "last"]
+    elif mutator.startswith("iadd"):
+        original = lines
+        values = iter(fragments) if mutator.endswith("generator") else fragments
+        lines += values
+        assert lines is original
+        expected += fragments
+    elif mutator == "imul":
+        lines.extend(fragments)
+        reads.clear()
+        original = lines
+        lines *= 2
+        assert lines is original
+        expected = fragments * 2
+    assert lines == expected
+    assert reads == {"current_bar_"}
+
+
+@pytest.mark.parametrize("mutator", ["extend", "iadd"])
+def test_host_line_self_extension_is_bounded(mutator):
+    lines = HostReadLines(set())
+    lines.append("current_bar_.close;")
+    if mutator == "extend":
+        lines.extend(lines)
+    else:
+        lines += lines
+    assert lines == ["current_bar_.close;"] * 2
+    assert lines.reads == {"current_bar_"}
+
+
+@pytest.mark.parametrize("mutator", ["delitem", "delslice", "pop", "remove", "reverse", "sort"])
+def test_host_line_rewrites_record_newly_exposed_reads(mutator):
+    reads = set()
+    lines = HostReadLines(reads)
+    lines.extend(["/*", "current_bar_.close;", "*/"])
+    assert reads == set()
+    if mutator == "delitem":
+        del lines[0]
+    elif mutator == "delslice":
+        del lines[:1]
+    elif mutator == "pop":
+        assert lines.pop(0) == "/*"
+    elif mutator == "remove":
+        lines.remove("/*")
+    elif mutator == "reverse":
+        lines.reverse()
+    elif mutator == "sort":
+        lines.sort(key={"current_bar_.close;": 0, "/*": 1, "*/": 2}.__getitem__)
+    assert reads == {"current_bar_"}
+    assert scan_host_reads("\n".join(lines)) <= reads
+
+
+@pytest.mark.parametrize("mutator", ["clear", "imul_zero", "delall", "setslice"])
+def test_host_line_deletion_retains_reads_and_resets_comment_state(mutator):
+    lines = HostReadLines(set())
+    lines.extend(["current_bar_.close;", "/*"])
+    if mutator == "clear":
+        lines.clear()
+    elif mutator == "imul_zero":
+        lines *= 0
+    elif mutator == "delall":
+        del lines[:]
+    elif mutator == "setslice":
+        lines[:] = iter(())
+    assert lines == []
+    lines.append("barstate_islast_;")
+    assert lines.reads == {"current_bar_", "barstate_islast_"}
+
+
 @pytest.mark.parametrize(("expression", "expected"), [
     ('""', "absent"), ('"exit"', "literal"), ('input.string("exit")', "dynamic"),
 ])

@@ -78,12 +78,59 @@ class HostReadLines(list):
         super().append(fragment)
 
     def extend(self, fragments) -> None:
+        if fragments is self:
+            fragments = list(fragments)
         for fragment in fragments:
             self.append(fragment)
 
+    def _record_rewrite(self) -> None:
+        self.in_comment = False
+        for fragment in self:
+            self._record(fragment)
+
     def insert(self, index: int, fragment: str) -> None:
-        HostReadLines(self.reads)._record(fragment)
         super().insert(index, fragment)
+        self._record_rewrite()
+
+    def __setitem__(self, index, fragments) -> None:
+        super().__setitem__(index, fragments)
+        self._record_rewrite()
+
+    def __iadd__(self, fragments):
+        self.extend(fragments)
+        return self
+
+    def __imul__(self, count):
+        super().__imul__(count)
+        self._record_rewrite()
+        return self
+
+    def __delitem__(self, index) -> None:
+        super().__delitem__(index)
+        self._record_rewrite()
+
+    def clear(self) -> None:
+        super().clear()
+        self._record_rewrite()
+
+    def pop(self, index=-1):
+        fragment = super().pop(index)
+        self._record_rewrite()
+        return fragment
+
+    def remove(self, fragment) -> None:
+        super().remove(fragment)
+        self._record_rewrite()
+
+    def reverse(self) -> None:
+        super().reverse()
+        self._record_rewrite()
+
+    def sort(self, *, key=None, reverse=False) -> None:
+        try:
+            super().sort(key=key, reverse=reverse)
+        finally:
+            self._record_rewrite()
 
 
 @dataclass(frozen=True)
