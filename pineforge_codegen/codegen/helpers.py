@@ -434,6 +434,12 @@ class NamingHelper:
             .replace("\t", "\\t")
         )
 
+    @staticmethod
+    def _cpp_comment_escape(s: str) -> str:
+        """Keep text (a script's string rendered into it) inside the C++
+        ``/* ... */`` comment it is written in."""
+        return s.replace("/*", "/ *").replace("*/", "* /")
+
     def _initialise_safe_names(self, ast) -> None:
         """Reserve all authored spellings before assigning escaped ones.
 

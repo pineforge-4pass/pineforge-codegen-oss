@@ -2029,8 +2029,9 @@ class SecurityEmitter:
         parts = request.annotations[RECORDED_KEY_ANNOTATION]
         tail = (f"|{parts['field']}|{parts['period']}|gaps_{parts['gaps']}"
                 f"|lookahead_{parts['lookahead']}")
-        return (f'(std::string("{parts["fn"]}|") + {self._visit_expr(request.args[0])} + '
-                f'std::string("{tail}"))')
+        fn = self._cpp_string_escape(parts["fn"])
+        return (f'(std::string("{fn}|") + {self._visit_expr(request.args[0])} + '
+                f'std::string("{self._cpp_string_escape(tail)}"))')
 
     def _recorded_sites(self) -> dict[int, int]:
         """Each recorded request's index N: ``_pf_recorded`` sets its
@@ -2823,7 +2824,7 @@ class SecurityEmitter:
             if series_name in self._security_string_series
             else "_security_helper_series_"
         )
-        return f'{store}["{series_name}"]'
+        return f'{store}["{self._cpp_string_escape(series_name)}"]'
 
     def _security_helper_var_state_type(self, stmt: VarDecl) -> str:
         """The type family of a helper ``var`` whose declaration reads
@@ -6425,7 +6426,7 @@ class SecurityEmitter:
         if column is not None and self._security_foreign(sec_id):
             # request.footprint(...) of another symbol: the delta its feed
             # records for the requested bar (the value its delta() reads).
-            return f'_pf_symbol_column({sec_id}, "{column}")'
+            return f'_pf_symbol_column({sec_id}, "{self._cpp_string_escape(column)}")'
 
         if resolving is None:
             resolving = set()
