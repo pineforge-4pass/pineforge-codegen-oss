@@ -58,11 +58,17 @@ def test_every_cpp_keyword_compiles_or_pine_rejects_it(name: str) -> None:
     "NULL", "NAN", "INFINITY", "EOF", "INT_MAX", "EXIT_SUCCESS",
     "stdin", "stdout", "stderr", "assert",
     "GeneratedStrategy", "Bar", "Series", "on_source_bar", "std", "ta",
+    "strategy_capabilities_api_version", "strategy_capabilities_receipt",
+    "strategy_confirmed_bar_api_version", "strategy_confirmed_bar_receipt",
+    "strategy_order_shapes_api_version", "strategy_order_shapes_receipt",
+    "strategy_settings_api_version", "strategy_get_effective_settings",
     "__LINE__", "__FILE__",
 ])
 def test_header_macro_and_emitter_name_collisions_compile(name: str) -> None:
     cpp = transpile(BASE + f"{name} = 2\n", filename="name.pine")
     assert f"pf_safe_{name}" in cpp
+    if name.startswith("strategy_"):
+        assert f" {name}(" in cpp
     compile_cpp(cpp, label=f"cpp_collision_{name}", standard="c++20")
 
 
