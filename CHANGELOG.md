@@ -42,6 +42,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Generated run wrappers preserve the inner failure code, and latched setter
   failures and checked strategy construction retain their failure identity.
 
+## Unreleased
+
+- Transpile-time input manifests in the Python and Pyodide packages expose the checked-settings receipt's `supported` flag and string defaults/choices, including empty choices for unsupported dropdowns; source and enum choices are explicit. Document stable capability (`"D"`) and feed (`"1D"`) timeframe spellings. Generated strategy C++, strategy parameters and request discovery are unchanged.
+
 ## 1.3.0 — 2026-10-06
 
 A minor release: generated strategy libraries gain two receipts beside 1.2.0's

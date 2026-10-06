@@ -25,6 +25,7 @@ from ..ast_nodes import (
     MemberAccess,
     NumberLiteral,
     StringLiteral,
+    UnaryOp,
     VarDecl,
 )
 from .. import signatures as sigs
@@ -469,6 +470,10 @@ class InputHelper:
             return node.value
         if isinstance(node, NumberLiteral):
             return node.value
+        if isinstance(node, UnaryOp) and node.op in ("+", "-"):
+            value = self._literal_or_none(node.operand)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return value if node.op == "+" else -value
         # enum member ref like ``Dir.Up`` -> "Dir.Up" (string tag)
         if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
             return f"{node.object.name}.{node.member}"
@@ -503,7 +508,7 @@ class InputHelper:
         ``var = input.*(...)`` declaration and an inline call inside an
         expression (``ta.ema(close, input.int(9, "Fast"))``) alike.
 
-        Each entry: ``{title, type, default[, min, max, step, options]}``. The
+        Each entry: ``{title, type, default, supported[, min, max, step, options]}``. The
         optional keys are emitted only when the corresponding signature
         argument is a const literal; a bound/option referencing a non-literal
         is omitted (never crashes). ``title`` is the key the emitted C++ reads
@@ -581,4 +586,5 @@ class InputHelper:
                     # any non-const element -> omit the whole options list
                     if vals and all(isinstance(v, str) for v in vals):
                         entry["options"] = vals
+        entry.update(self._input_settings_metadata[id(node)])
         return entry

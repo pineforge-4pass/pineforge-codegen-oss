@@ -165,7 +165,7 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
     - ``inputs``: a list of ``InputDef`` dicts (one per global-scope
       ``input(...)`` / ``input.*(...)`` call, inline calls included, in
       source order). Each has ``title`` / ``type`` /
-      ``default`` and optionally ``min`` / ``max`` / ``step`` / ``options``
+      ``default`` / ``supported`` and optionally ``min`` / ``max`` / ``step`` / ``options``
       (omitted when the corresponding signature argument is absent or
       references a non-const value); an ``input.symbol`` entry also has
       ``kind: "symbol"``. See :meth:`CodeGen.extract_input_manifest`.

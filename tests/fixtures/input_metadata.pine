@@ -1,0 +1,20 @@
+//@version=6
+strategy("Input metadata")
+enum Side
+    long
+    short
+length = input.int(14, "Length", minval=1)
+threshold = input.float(-2.5, "Threshold")
+enabled = input.bool(true, "Enabled")
+source = input.source(hl2, "Source")
+side = input.enum(Side.long, "Side")
+symbol = input.symbol("NASDAQ:AAPL", "Symbol")
+frequency = input.string(alert.freq_all, "Frequency", options=[alert.freq_all, alert.freq_once_per_bar])
+direction = input.string(order.ascending, "Direction", options=[order.ascending, order.descending])
+currency = input.string(currency.USD, "Currency", options=[currency.USD, currency.EUR])
+sessionChoice = input.string(session.regular, "Session", options=[session.regular, session.extended])
+formatChoice = input.string(format.price, "Format", options=[format.price, format.percent])
+sizeChoice = input.string(size.small, "Size", options=[size.small, size.tiny])
+positionChoice = input.string(position.top_right, "Position", options=[position.top_right, position.bottom_right])
+mixedChoice = input.string("literal", "Mixed", options=["literal", size.small])
+plot(ta.sma(source, length))

@@ -186,7 +186,14 @@ It returns `{"cpp": str, "inputs": list[dict], "strategyParams": dict,
 returns the first three keys; `requests` is new in 1.1.0). `inputs` is the input
 manifest; its `title` is the actual override key, and an `input.symbol` entry
 also has `"kind": "symbol"` (since 1.1.0). `diagnostics` contains nonfatal
-warnings. `requests` lists the other symbols' feeds the script reads (see
+warnings. Each input also has `supported`, matching the checked-settings
+receipt. String defaults and choices use the receipt's values, not the Pine
+names of built-in constants. An unrepresentable string default is `""`; an
+unsupported dropdown has `options: []` (a representable default is retained).
+Consumers can exclude `supported: false` inputs from forms, parameter sweeps
+and optimization before running a strategy. The PyPI and Pyodide manifests
+use the same fields; no existing keys are renamed or removed.
+`requests` lists the other symbols' feeds the script reads (see
 [List the other symbols a script requests](#list-the-other-symbols-a-script-requests)).
 A rejected script raises `CompileError` with its diagnostics. The Pyodide
 package ships `gate/glue.py`'s `transpile_json(source) -> str`, whose JSON
@@ -229,6 +236,15 @@ A run reads another symbol's bars only from the feed it is given for that
 symbol string and timeframe, matched byte for byte. `transpile_full()`'s
 `requests` (new in 1.1.0) names those feeds before the run, one entry per
 request site:
+
+Timeframe spellings are stable on both surfaces: compiled capability receipts
+use Pine's `"D"`, while request discovery and feed keys use `"1D"` (likewise
+`"W"`/`"1W"`, `"M"`/`"1M"`, `"S"`/`"1S"`). Neither is renamed. The receipt's
+spelling is canonical for capabilities; consumers joining a receipt to feeds
+must map it at that boundary. Discovery performs the feed-side mapping in
+`pineforge_codegen.request_discovery.canonical_timeframe`; engine feed
+registration uses `canonical_symbol_timeframe`. Receipt serialization does
+not rewrite feed keys.
 
 ```python
 from pineforge_codegen import transpile_full

@@ -101,6 +101,16 @@ margin or numeric behavior changes. C++ compiled against headers without
 `PF_CAPABILITIES_API_VERSION`, such as engine `v1.1.0`'s, has no capability
 extension.
 
+Capability receipts retain Pine timeframe spelling: one day is `"D"`.
+[Request discovery](#request-discovery) and engine feed keys retain `"1D"`;
+the corresponding one-unit spellings are `"W"`/`"1W"`, `"M"`/`"1M"` and
+`"S"`/`"1S"`. Both surfaces are stable and neither is renamed. The receipt's
+spelling is canonical for capabilities. A consumer matching capability
+requests to discovered feeds must translate at that boundary; the receipt
+does not do the join. `pineforge_codegen.request_discovery.canonical_timeframe`
+maps the bare Pine spelling to a feed key during discovery, matching engine
+feed registration's `canonical_symbol_timeframe`.
+
 ## Optional generated settings extension
 
 From 1.1.0 on, C++ compiled against an engine providing
@@ -264,11 +274,24 @@ warnings and errors.
 ### Input manifest and override keys
 
 Each manifest entry has `title` (string), `type` (one of `int`, `float`,
-`bool`, `string`, `source`, `enum`), and `default` (a literal scalar or `None`).
+`bool`, `string`, `source`, `enum`), `default` (a literal scalar or `None`), and
+`supported` (boolean, matching the checked-settings receipt).
 It may also have `min`, `max`, `step` numeric values or a string `options`
 list. Since 1.1.0, an `input.symbol` entry also has `kind` equal to
 `"symbol"`. An optional field is omitted when its argument is absent or cannot be
-reduced to the supported literal form. The `title` is the **actual override
+reduced to the supported literal form. Source inputs publish their native
+source default and choices; enum inputs publish their choices, retaining the
+existing `Enum.member` default spelling (the receipt encodes that member
+numerically). Signed numeric literals retain their numeric type. String
+defaults and options come from the same descriptor that generates the native
+receipt: built-ins use their lowered string values. An unavailable string
+default is `""`, and an unsupported string dropdown has `options: []`; a
+representable default remains unchanged even if a choice is unsupported.
+Every input has `supported`, including inputs without options. Consumers may
+hide unsupported inputs and omit them from sweep/optimization spaces before
+creating a strategy. These fields are identical in PyPI's `transpile_full()`
+and the npm package's Pyodide/glue success envelope. Existing keys, numeric
+types, bounds and override keys are retained. The `title` is the **actual override
 key read by the emitted C++**:
 
 1. The value of an explicit compile-time constant `title`, if supplied.

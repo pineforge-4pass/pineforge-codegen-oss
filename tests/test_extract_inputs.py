@@ -39,11 +39,12 @@ def test_string_options():
     assert inp["options"] == ["a", "b", "c"]
 
 
-def test_non_const_options_omitted():
-    # options referencing a non-literal must be omitted, not crash
+def test_non_const_string_options_are_unsupported():
     r = _full("v = \"x\"\nmode = input.string(\"a\", \"Mode\", options=[v, \"b\"])\n")
     inp = next(i for i in r["inputs"] if i["title"] == "Mode")
-    assert "options" not in inp
+    assert inp["supported"] is False
+    assert inp["options"] == []
+    assert inp["default"] == "a"
 
 
 def test_source_type():

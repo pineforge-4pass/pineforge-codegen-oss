@@ -1,5 +1,6 @@
 """Opt-in settings metadata, validation and exception-contained C exports."""
 
+import json
 import re
 
 from ..ast_nodes import Identifier, MemberAccess
@@ -43,6 +44,11 @@ def _visit_setting_arg(emitter, expr) -> str:
     except CompileError as error:
         emitter._defer_settings_error(error)
         return "0"
+
+
+def _string_setting_value(lowered: str) -> str:
+    literal = lowered[len("std::string("):-1] if lowered.startswith("std::string(") else lowered
+    return json.loads(literal, strict=False)
 
 
 def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> None:
@@ -112,6 +118,7 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
         "    }",
     ])
     inputs = []
+    emitter._input_settings_metadata = {}
     for node, binding in emitter._global_input_calls_with_names():
         func_name, namespace = emitter._resolve_callee(node.callee)
         name = emitter._get_input_title(node, var_name=binding)
@@ -203,6 +210,17 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
                     f'{64 if getter == "get_input_int64" else 32}, {supported}, '
                     f'{{{", ".join(option_values)}}}, "{kind}"}}')
         inputs.append((metadata, effective))
+        manifest = {"supported": supported == "true"}
+        if getter == "get_input_string":
+            manifest["default"] = _string_setting_value(default_serialized)
+            if arguments.get("options") is not None or supported == "false":
+                manifest["options"] = [_string_setting_value(option) for option in options]
+        elif value_type == "source":
+            manifest["default"] = source
+            manifest["options"] = [_string_setting_value(option) for option in options]
+        elif value_type == "enum":
+            manifest["options"] = [_string_setting_value(option) for option in options]
+        emitter._input_settings_metadata[id(node)] = manifest
 
     overrides = [
         ("initial_capital", "float", "initial_capital", "initial_capital", "0.0"),
