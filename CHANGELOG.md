@@ -23,7 +23,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
 ## Unreleased
 
 - Generated C++ no longer depends on memory layout: requested-context history
-  resets and TA variant position ties preserve their traversal order.
+  resets and TA variant position ties preserve their traversal order. Refusal
+  diagnostics for conflicting scalar history and map locals are hash-seed
+  independent.
 
 ## 1.3.0 — 2026-10-06
 

@@ -36,6 +36,7 @@ on the fixed tree and >1 on pre-fix ``origin/main``.)
 from __future__ import annotations
 
 import ast
+import json
 import os
 import subprocess
 import sys
@@ -175,6 +176,7 @@ def test_synthetic_history_names_byte_identical_across_hash_seeds() -> None:
 
 
 _PERTURBED_CHILD = """
+import builtins
 import dataclasses
 import enum
 import json
@@ -197,6 +199,17 @@ def encode(value):
     raise TypeError(type(value).__name__)
 
 perturb()
+original_id = builtins.id
+identity_records = {}
+direction = int(sys.argv[3])
+
+def ordered_id(value):
+    address = original_id(value)
+    if address not in identity_records:
+        identity_records[address] = (value, len(identity_records) + 1)
+    return direction * identity_records[address][1]
+
+builtins.id = ordered_id
 sys.path.insert(0, sys.argv[1])
 sys.path.insert(0, sys.argv[1] + "/gate")
 from pineforge_codegen import transpile_full
@@ -216,13 +229,14 @@ sys.stdout.write(json.dumps({"full": full, "glue": glue}))
     "taila_nested_bucket_hull_lag.pine",
 ])
 def test_security_history_envelopes_ignore_memory_layout(fixture: str) -> None:
-    """Isolated children use fresh random hashes; -I ignores PYTHONHASHSEED."""
+    """Fixed hash seeds and opposite identity orders exercise both variations."""
     source = (_REPO_ROOT / "tests/fixtures/tail_a_tv" / fixture).read_text()
     outputs = []
-    for seed in _SEEDS[:4]:
+    variations = [(seed, direction) for seed in _SEEDS[:4] for direction in (1, -1)]
+    for seed, direction in variations:
         process = subprocess.run(
-            [sys.executable, "-I", "-c", _PERTURBED_CHILD,
-             str(_REPO_ROOT), str(seed)],
+            [sys.executable, "-s", "-P", "-c", _PERTURBED_CHILD,
+             str(_REPO_ROOT), str(seed), str(direction)],
             input=source,
             env={**os.environ, "PYTHONHASHSEED": str(seed)},
             capture_output=True,
@@ -231,6 +245,49 @@ def test_security_history_envelopes_ignore_memory_layout(fixture: str) -> None:
         )
         assert process.returncode == 0, process.stderr
         assert process.stdout
+        outputs.append(process.stdout)
+    assert len(set(outputs)) == 1
+
+
+_COLLISION_FIXTURE = """//@version=6
+strategy("Deterministic refusal")
+scalar_history() =>
+    alpha = close
+    beta = open
+    alpha[1] + beta[1]
+persistent_maps() =>
+    var map<string, float> alpha = map.new<string, float>()
+    var map<string, float> beta = map.new<string, float>()
+    alpha.size() + beta.size()
+plot(scalar_history() + persistent_maps())
+"""
+
+
+def test_collision_error_envelope_byte_identical_across_hash_seeds() -> None:
+    child = """
+import sys
+sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[1] + "/gate")
+from glue import transpile_json
+sys.stdout.write(transpile_json(sys.stdin.read()))
+"""
+    outputs = []
+    for seed in _SEEDS:
+        process = subprocess.run(
+            [sys.executable, "-s", "-P", "-c", child, str(_REPO_ROOT)],
+            input=_COLLISION_FIXTURE,
+            env={**os.environ, "PYTHONHASHSEED": str(seed)},
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert process.returncode == 0, process.stderr
+        envelope = json.loads(process.stdout)
+        assert envelope["ok"] is False
+        assert (
+            "History references on a scalar callable local named 'alpha'"
+            in envelope["error"]
+        )
         outputs.append(process.stdout)
     assert len(set(outputs)) == 1
 
