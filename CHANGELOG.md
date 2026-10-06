@@ -34,7 +34,8 @@ the receipts to the emitted C++,
 [#179](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/179)
 changes its checked settings metadata,
 [#177](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/177)
-replaces the license,
+replaces the license, string values derived from a script are validated and
+escaped wherever they are written into generated C++ (see "Hardening"),
 [#174](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/174)
 renders the README's scoreboard, and
 [#175](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/175)
@@ -66,7 +67,8 @@ functions, which a host looks up in the library by name.
   shapes none of those sources has. The trading code is unchanged.
 - The Python and JSON contract does not change: no argument, result key or
   envelope is added, removed or renamed. Since 1.2.0 the package's code
-  changed only in the code generator (`pineforge_codegen/codegen/`):
+  changed only in the code generator (`pineforge_codegen/codegen/`) and its
+  support checker (`pineforge_codegen/support_checker.py`):
   `pineforge_codegen/__init__.py`, `pineforge_codegen/errors.py`,
   `gate/glue.py` and `pineforge_codegen/diagnostics_catalog.json` (628 codes)
   are 1.2.0's files. For the 602 sources above, each in a fresh process,
@@ -191,6 +193,12 @@ From [#179](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/179):
   legacy `strategy_set_input`, the input getters and the strategy's execution
   are unchanged.
 
+### Hardening
+
+- String values derived from a script are validated and escaped wherever
+  they are written into generated C++. The generated C++ of the 602 sources
+  measured under "Compatibility and migration" does not change.
+
 ### License
 
 From [#177](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/177):
@@ -229,8 +237,9 @@ From [#177](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/177):
   ([pineforge-engine#347](https://github.com/pineforge-4pass/pineforge-engine/pull/347)'s
   merge), which v1.3.0 equals in behaviour, and this repository at <!-- pf:releases[1.3.0].scoreboard.codegenCommit|short -->3e50082f<!-- /pf -->
   ([#177](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/177)'s
-  merge), whose emitted trading code is codegen 1.3.0's: #178 adds only its
-  receipt functions, and the release's remaining changes are documentation.
+  merge). The pr-gates of the later code changes, #178's receipts and the
+  hardening of emitted string values, changed no graded probe, and the
+  release's other changes are documentation.
 - `docs/PUBLIC_CONTRACT.md` describes the confirmed-bar and order-shapes
   receipts ([#173](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/173),
   [#178](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/178)),
