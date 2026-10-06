@@ -101,15 +101,19 @@ margin or numeric behavior changes. C++ compiled against headers without
 `PF_CAPABILITIES_API_VERSION`, such as engine `v1.1.0`'s, has no capability
 extension.
 
-Capability receipts retain Pine timeframe spelling: one day is `"D"`.
-[Request discovery](#request-discovery) and engine feed keys retain `"1D"`;
-the corresponding one-unit spellings are `"W"`/`"1W"`, `"M"`/`"1M"` and
-`"S"`/`"1S"`. Both surfaces are stable and neither is renamed. The receipt's
-spelling is canonical for capabilities. A consumer matching capability
-requests to discovered feeds must translate at that boundary; the receipt
-does not do the join. `pineforge_codegen.request_discovery.canonical_timeframe`
-maps the bare Pine spelling to a feed key during discovery, matching engine
-feed registration's `canonical_symbol_timeframe`.
+Timeframe spellings differ by surface, and both are stable. A capability
+receipt records a request's `timeframe` as the script wrote it: a literal
+verbatim (`"D"` stays `"D"`, `"1D"` stays `"1D"`), anything else as its Pine
+expression (`timeframe.period`, a variable's name). [Request
+discovery](#request-discovery) and feed keys use the engine's spelling, in
+which Pine's bare `"D"` / `"W"` / `"M"` / `"S"` are `"1D"` / `"1W"` / `"1M"` /
+`"1S"` and any other text is kept. Discovery folds `literal` and `computed`
+values (`pineforge_codegen.request_discovery.canonical_timeframe`); the engine
+folds the requested timeframe when it looks a feed up, so a script's `"D"` and
+`"1D"` read the same feed, keyed `"1D"`. An `input` timeframe's `default` and
+its override are raw: fold them the same way. To match a receipt's request to a
+feed, fold the receipt's literal timeframe with that rule (folding twice
+changes nothing); never map a feed key back to `"D"`.
 
 ## Optional generated settings extension
 
@@ -274,25 +278,59 @@ warnings and errors.
 ### Input manifest and override keys
 
 Each manifest entry has `title` (string), `type` (one of `int`, `float`,
-`bool`, `string`, `source`, `enum`), `default` (a literal scalar or `None`), and
-`supported` (boolean, matching the checked-settings receipt).
-It may also have `min`, `max`, `step` numeric values or a string `options`
-list. Since 1.1.0, an `input.symbol` entry also has `kind` equal to
-`"symbol"`. An optional field is omitted when its argument is absent or cannot be
-reduced to the supported literal form. Source inputs publish their native
-source default and choices; enum inputs publish their choices, retaining the
-existing `Enum.member` default spelling (the receipt encodes that member
-numerically). Signed numeric literals retain their numeric type. String
-defaults and options come from the same descriptor that generates the native
-receipt: built-ins use their lowered string values. An unavailable string
-default is `""`, and an unsupported string dropdown has `options: []`; a
-representable default remains unchanged even if a choice is unsupported.
-Every input has `supported`, including inputs without options. Consumers may
-hide unsupported inputs and omit them from sweep/optimization spaces before
-creating a strategy. These fields are identical in PyPI's `transpile_full()`
-and the npm package's Pyodide/glue success envelope. Existing keys, numeric
-types, bounds and override keys are retained. The `title` is the **actual override
-key read by the emitted C++**:
+`bool`, `string`, `source`, `enum`), `default` (a literal scalar or `None`) and
+`supported` (boolean; the manifests of releases up to 1.3.0 lack it). It may
+also have `min`, `max`, `step` numeric values and an `options` list. Since 1.1.0,
+an `input.symbol` entry also has `kind` equal to `"symbol"`. An optional field
+is omitted when its argument is absent or cannot be reduced to the supported
+literal form.
+
+`supported` and the values below are those of the checked-settings receipt (what
+the compiled strategy's `strategy_get_effective_settings` reports): the manifest
+is read from the descriptor that generates the receipt, and PyPI's
+`transpile_full()` and the npm package's Pyodide/glue success envelope carry
+them identically.
+
+- `supported` is `false` for an input the compiled strategy cannot honour: a
+  string input whose default or a choice is neither a string literal nor a known
+  built-in constant (`size.small`, `position.top_right`, `na`, a reassigned
+  name), or an `input.enum` whose default or choices are not literal members of
+  one enum. Hide such inputs, and keep them out of sweep and optimization
+  spaces, before creating a strategy. Key on `supported` alone: every unsupported
+  string input has `options: []`, with or without `options=`, and so does a
+  supported input written `options=[]`.
+- A string input (`input.string`, `.timeframe`, `.session`, `.symbol`, ...)
+  publishes the lowered strings: a built-in constant its runtime value
+  (`alert.freq_all` is `"all"`, `currency.USD` `"USD"`, `format.price`
+  `"price"`, `order.ascending` `"ascending"`, `session.regular` `"regular"`) and
+  a named string constant its value. An unrepresentable default is `""`; a
+  representable default is kept when only a choice is unsupported.
+- A source input (`input.source(hl2)`, a plain `input(close)`) publishes its
+  series as `default` and the nine native sources (`close`, `high`, `hl2`,
+  `hlc3`, `hlcc4`, `low`, `ohlc4`, `open`, `volume`) as `options`; a plain
+  `input(close)` keeps its `string` type.
+- An enum input publishes its `Enum.member` choices in declaration order as
+  `options` and keeps its `Enum.member` `default`, which the receipt encodes as
+  the member's index (map it through the receipt's `option_values`).
+- A typed number or bool input (`input.int`, `.float`, `.price`, `.time`,
+  `.bool`) publishes `default`, `min`, `max`, `step` and the choices of an
+  `options=[...]` dropdown (a list of numbers) as numbers where the receipt's
+  value is a literal: a signed number (`-2.5`), a named constant (`LEN = 14`,
+  `minval=-RATIO`) or `timestamp("2024-01-02T00:00:00")` of a string literal. A
+  plain `input(-5)` or `input(-2.5)` is typed `int` or `float` by its literal, as
+  `input(5)` is; the compiled getter reads it as a double, so the receipt's
+  type for it is `float`.
+- Not published, because the receipt computes it at run time: arithmetic over
+  constants (`LEN * 2`), a call (`math.pow(2, 3)`), `timestamp(year, month,
+  ...)` (it reads the symbol's time zone) and `not true`. Such a `default` is
+  `None` and such a `min`, `max` or `options` is omitted. An `input.color`'s
+  `default` is its Pine spelling (`"color.red"`) and its `type` `string`, where
+  the receipt holds the packed integer, and a plain `input(...)` whose default
+  is not a literal is typed `string` with a `None` default.
+
+No key is renamed or removed and the override keys are unchanged; the values
+above are new or corrected values of existing keys, listed in the changelog.
+The `title` is the **actual override key read by the emitted C++**:
 
 1. The value of an explicit compile-time constant `title`, if supplied.
 2. Otherwise, the name of the declaration containing the input call.

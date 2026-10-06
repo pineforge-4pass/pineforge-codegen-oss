@@ -186,13 +186,22 @@ It returns `{"cpp": str, "inputs": list[dict], "strategyParams": dict,
 returns the first three keys; `requests` is new in 1.1.0). `inputs` is the input
 manifest; its `title` is the actual override key, and an `input.symbol` entry
 also has `"kind": "symbol"` (since 1.1.0). `diagnostics` contains nonfatal
-warnings. Each input also has `supported`, matching the checked-settings
-receipt. String defaults and choices use the receipt's values, not the Pine
-names of built-in constants. An unrepresentable string default is `""`; an
-unsupported dropdown has `options: []` (a representable default is retained).
-Consumers can exclude `supported: false` inputs from forms, parameter sweeps
-and optimization before running a strategy. The PyPI and Pyodide manifests
-use the same fields; no existing keys are renamed or removed.
+warnings. Each input also has `supported`, the checked-settings receipt's
+flag, so a consumer can hide the inputs the compiled strategy cannot honour
+and keep them out of parameter sweeps and optimization before running
+anything. Defaults, bounds and choices are the receipt's values where the
+receipt holds a literal: string inputs spell a built-in constant by its runtime
+value (`alert.freq_all` is `"all"`, not the Pine name), a source or enum input
+lists its choices, and a typed number input publishes a signed or named-constant
+default and bound and the numbers of an `options=[...]` dropdown. An
+unrepresentable string default is `""`, and every unsupported string input has
+`options: []` (a representable default is kept), so key on `supported`, not on
+`options`. A value the receipt computes at run time (arithmetic over
+constants, a call, `not true`, a color) is not published: `default` stays
+`None` and `min`, `max` and `options` are left out (the
+[contract](docs/PUBLIC_CONTRACT.md#input-manifest-and-override-keys) lists
+the shapes). The PyPI and Pyodide manifests carry the same fields; no key is
+renamed or removed, and the changelog lists the values that changed.
 `requests` lists the other symbols' feeds the script reads (see
 [List the other symbols a script requests](#list-the-other-symbols-a-script-requests)).
 A rejected script raises `CompileError` with its diagnostics. The Pyodide
@@ -237,15 +246,6 @@ symbol string and timeframe, matched byte for byte. `transpile_full()`'s
 `requests` (new in 1.1.0) names those feeds before the run, one entry per
 request site:
 
-Timeframe spellings are stable on both surfaces: compiled capability receipts
-use Pine's `"D"`, while request discovery and feed keys use `"1D"` (likewise
-`"W"`/`"1W"`, `"M"`/`"1M"`, `"S"`/`"1S"`). Neither is renamed. The receipt's
-spelling is canonical for capabilities; consumers joining a receipt to feeds
-must map it at that boundary. Discovery performs the feed-side mapping in
-`pineforge_codegen.request_discovery.canonical_timeframe`; engine feed
-registration uses `canonical_symbol_timeframe`. Receipt serialization does
-not rewrite feed keys.
-
 ```python
 from pineforge_codegen import transpile_full
 
@@ -267,7 +267,21 @@ timeframe is a `literal` in the engine's spelling (whole minutes such as
 `"240"`, `<n>D|W|M|S` such as `"1D"`, Pine's bare `"D"` as `"1D"`), the
 `chart`'s, an `input` or `computed` (an empty `value` is the chart's). A
 request whose value reaches only plots and alerts is lowered to `na` and
-reads no feed, so it is not listed. The
+reads no feed, so it is not listed.
+
+Timeframe spellings differ by surface, and both are stable. A capability
+receipt records a request's `timeframe` as the script wrote it: a literal
+verbatim (`"D"` stays `"D"`, `"1D"` stays `"1D"`), anything else as its Pine
+expression (`timeframe.period`, a variable's name). Request discovery and feed
+keys use the engine's spelling, in which Pine's bare `"D"` / `"W"` / `"M"` /
+`"S"` are `"1D"` / `"1W"` / `"1M"` / `"1S"` and any other text is kept.
+Discovery folds `literal` and `computed` values
+(`pineforge_codegen.request_discovery.canonical_timeframe`); the engine folds
+the requested timeframe when it looks a feed up, so a script's `"D"` and
+`"1D"` read the same feed, keyed `"1D"`. An `input` timeframe's `default` and
+its override are raw: fold them the same way. To match a receipt's request to a
+feed, fold the receipt's literal timeframe with that rule (folding twice
+changes nothing); never map a feed key back to `"D"`. The
 [public contract](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/docs/PUBLIC_CONTRACT.md)
 gives every field.
 

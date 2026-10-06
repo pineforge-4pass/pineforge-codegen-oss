@@ -354,9 +354,16 @@ string default or option marks the
 input `supported=false` and publishes no choices; its unavailable default is
 empty. Transpile-time input manifests reuse that descriptor's `supported`
 boolean and string defaults/options; source defaults/choices and enum choices
-are explicit, while enum defaults retain their member-name spelling. A
-representable string default survives an unsupported option. Legacy
-getters/setters and generated strategy execution stay unchanged.
+are explicit, while enum defaults retain their member-name spelling. A typed
+number or bool input publishes its default, bounds and `options=[...]` numbers
+where the descriptor's C++ is a plain literal
+(`checked_settings._numeric_setting_value`: a sign, a named constant the
+codegen inlined, a folded `timestamp("...")`); what the receipt computes at run
+time stays unpublished and is named in `KNOWN_LIMITS` of
+`tests/test_input_metadata_receipt.py`, which pins every other field of every
+input against the compiled receipt. A representable string default survives an
+unsupported option. Legacy getters/setters and generated strategy execution
+stay unchanged.
 
 Generated run stops use `codegen/run_stops.py`'s optional
 `PINEFORGE_HAS_RUN_FAILURE_CODES_V1` shims. Coded helpers receive only

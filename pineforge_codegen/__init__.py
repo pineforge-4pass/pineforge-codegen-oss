@@ -164,11 +164,12 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
     - ``cpp``: the generated C++ source (identical to :func:`transpile`).
     - ``inputs``: a list of ``InputDef`` dicts (one per global-scope
       ``input(...)`` / ``input.*(...)`` call, inline calls included, in
-      source order). Each has ``title`` / ``type`` /
-      ``default`` / ``supported`` and optionally ``min`` / ``max`` / ``step`` / ``options``
-      (omitted when the corresponding signature argument is absent or
-      references a non-const value); an ``input.symbol`` entry also has
-      ``kind: "symbol"``. See :meth:`CodeGen.extract_input_manifest`.
+      source order). Each has ``title`` / ``type`` / ``default`` /
+      ``supported`` (the checked-settings receipt's flag) and optionally
+      ``min`` / ``max`` / ``step`` / ``options`` (omitted when the
+      corresponding signature argument is absent or is not a literal the
+      receipt holds); an ``input.symbol`` entry also has ``kind: "symbol"``.
+      See :meth:`CodeGen.extract_input_manifest`.
     - ``strategyParams``: the literal ``strategy(...)`` kwargs the analyzer
       surfaced (e.g. ``initial_capital``, ``pyramiding``).
     - ``diagnostics``: the warnings (:class:`~pineforge_codegen.errors.Diagnostic`,
