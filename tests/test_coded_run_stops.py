@@ -287,6 +287,41 @@ int main() {
 
 
 @pytest.mark.parametrize("legacy", [False, True])
+def test_checked_substring_keeps_argument_single_evaluation_order(legacy):
+    cpp = transpile(PRELUDE + '''
+type State
+    int order
+var state = State.new(0)
+text() =>
+    state.order := state.order * 10 + 1
+    "abcd"
+begin() =>
+    state.order := state.order * 10 + 2
+    1
+end() =>
+    state.order := state.order * 10 + 3
+    3
+result = str.substring(text(), begin(), end())
+order_snapshot = state.order
+''')
+    if legacy:
+        cpp = _legacy_branch(cpp)
+    driver = r'''
+#include <cassert>
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.on_source_bar(bar);
+    assert(strategy.result == "bc");
+    assert(strategy.order_snapshot == 123);
+    std::cout << "substring arguments retained their order";
+}
+'''
+    assert run_emitted_tu(cpp, driver, opt="-O2", label="checked substring argument order") == "substring arguments retained their order"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
 def test_wrapper_keeps_the_inner_code_not_its_english(legacy):
     cpp = transpile(PRELUDE)
     before = "try { _pf_run_backtest_full_impl(s, bars, n, input_tf, script_tf, bar_magnifier, magnifier_samples, magnifier_dist, out); }"

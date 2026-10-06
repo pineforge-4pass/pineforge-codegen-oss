@@ -3649,14 +3649,19 @@ class CallVisitor:
             if len(args) in (2, 3):
                 end_parameter = ", auto _pf_substring_end" if len(args) == 3 else ""
                 count = ", _pf_substring_end - _pf_substring_begin" if len(args) == 3 else ""
-                return (
-                    f"[&](std::string _pf_substring_text, auto _pf_substring_begin{end_parameter}){{ "
-                    "try { return _pf_substring_text.substr(_pf_substring_begin"
-                    f"{count}); }} catch (const std::out_of_range& _pf_substring_error) {{ "
-                    '_PF_STRING_STOP("substring_out_of_range", _pf_substring_error.what()); '
-                    "return std::string(); } "
-                    "}(" + ", ".join(f"({arg})" for arg in args) + ")"
-                )
+
+                def checked_substring(bound):
+                    return (
+                        f"[&](std::string _pf_substring_text, auto _pf_substring_begin{end_parameter}){{ "
+                        "try { return _pf_substring_text.substr(_pf_substring_begin"
+                        f"{count}); }} catch (const std::out_of_range& _pf_substring_error) {{ "
+                        '_PF_STRING_STOP("substring_out_of_range", _pf_substring_error.what()); '
+                        "return std::string(); } "
+                        "}(" + ", ".join(f"({arg})" for arg in bound) + ")"
+                    )
+
+                return evaluate_args_once(
+                    args, range(len(args)), checked_substring, "_pf_substring_arg")
             return 'std::string("")'
 
         if func_name == "format":
