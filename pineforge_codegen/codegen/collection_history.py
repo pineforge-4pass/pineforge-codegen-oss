@@ -22,7 +22,7 @@ from ..collection_history import (
     history_annotation,
     literal_offset,
 )
-from ..ast_nodes import Assignment, FuncCall, FuncDef, Identifier, MemberAccess, MethodDef, VarDecl
+from ..ast_nodes import Assignment, FuncCall, FuncDef, Identifier, MemberAccess, MethodDef, Ternary, VarDecl
 from ..limits import iter_ast_nodes
 from ..symbols import TypeSpec
 
@@ -54,8 +54,14 @@ class CollectionHistoryEmitter:
             annotation = history_annotation(value)
             if annotation is not None and annotation["use"] == "reference":
                 specs[name] = annotation["spec"]
-            elif isinstance(value, Identifier):
-                bindings.setdefault(value.name, []).append(name)
+            else:
+                values = [value]
+                while values:
+                    source_value = values.pop()
+                    if isinstance(source_value, Identifier):
+                        bindings.setdefault(source_value.name, []).append(name)
+                    elif isinstance(source_value, Ternary):
+                        values.extend((source_value.true_val, source_value.false_val))
         pending = list(specs)
         while pending:
             source = pending.pop()
@@ -63,6 +69,9 @@ class CollectionHistoryEmitter:
                 if name not in specs:
                     specs[name] = specs[source]
                     pending.append(name)
+        for name, spec in specs.items():
+            self._array_vars.add(name)
+            self._collection_types[name] = spec
         self._array_history_value_specs = specs
         return specs
 
@@ -72,6 +81,21 @@ class CollectionHistoryEmitter:
             return None
         spec = self._widen_array_spec_for_name(name, spec)
         return f"_PFArrayHistoryValue<{self._type_spec_to_cpp(spec)}>"
+
+    def _array_history_value_expr_cpp_type(self, value) -> str | None:
+        values = [value]
+        while values:
+            source = values.pop()
+            if isinstance(source, Identifier):
+                if (self._collection_name_is_lexically_shadowed(source.name)
+                        or source.name in self._current_func_param_types):
+                    continue
+                cpp_type = self._array_history_value_cpp_type(source.name)
+                if cpp_type is not None:
+                    return cpp_type
+            elif isinstance(source, Ternary):
+                values.extend((source.true_val, source.false_val))
+        return None
 
     def _legacy_array_history_element(self, receiver: str, spec: TypeSpec,
                                       offset: str, mutable: bool = False) -> str:

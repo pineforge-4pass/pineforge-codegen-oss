@@ -128,6 +128,19 @@ if not na(b)
         total += value
 valid = bar_index == 0 ? na(b) : total == bar_index - 1
 """), 1),
+    "array_ternary": (witness("""a = array.from(float(bar_index))
+b = a[1]
+float result = 0.0
+if bar_index > 0
+    c = close > 0 ? b : a
+    result := c.get(0)
+valid = bar_index == 0 ? na(b) : result == bar_index - 1
+"""), 1),
+    "array_ternary_na": (witness("""a = array.from(float(bar_index))
+b = a[1]
+c = bar_index == 0 ? b : a
+valid = bar_index == 0 ? na(c) : not na(c) and c.get(0) == bar_index
+"""), 1),
     "legacy_assignment": (witness("""a = array.from(1.0, 2.0)
 a[1] := 3.0
 valid = a.get(1) == 3
