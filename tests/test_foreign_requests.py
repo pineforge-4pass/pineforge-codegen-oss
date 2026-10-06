@@ -134,7 +134,9 @@ def test_unresolvable_symbol_keeps_the_deferred_refusal():
     assert warnings and ("its symbol cannot be resolved before the first bar on the call "
                          "path f(): it reads 'close', a series") in warnings[-1].hint
     assert "register_security_eval" not in result["cpp"]
-    assert f'pine_runtime_error(std::string("request.security(sym, \\"60\\", ...) at line 3: {PINNED}"))' in result["cpp"]
+    # An unresolved symbol has no literal; the catalog supplies its line suffix.
+    call = 'request.security(sym, \\"60\\", ...)'
+    assert f'_PF_OTHER_SYMBOL_STOP("request.security", nullptr, "{call}", 3, "{call} at line 3: {PINNED}")' in result["cpp"]
 
 
 @pytest.mark.parametrize("body, hint", [
@@ -472,7 +474,9 @@ def test_symbol_that_can_select_the_chart_through_a_helper_keeps_the_chart_lower
     assert ('its symbol useOther ? "PF:A" : mysym on the call path f() is not a value '
             'registration computes before the first bar') in warning.hint
     assert not any("no data is pinned" in d.message for d in result["diagnostics"])
-    assert "pine_runtime_error" not in result["cpp"] and "_pf_symbol" not in result["cpp"]
+    # Ignore helper definitions; this chart-only body still emits no stop.
+    body = result["cpp"].split("class GeneratedStrategy", 1)[1]
+    assert "pine_runtime_error" not in body and "_PF_OTHER_SYMBOL_STOP" not in body and "_pf_symbol" not in body
 
 
 def test_reassigned_tuple_request_stops_where_it_is_evaluated(tmp_path_factory):

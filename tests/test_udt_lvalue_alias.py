@@ -132,7 +132,8 @@ plot(close)
     cpp = transpile(src)
     body = _func_body(cpp, "upd")
     assert "pivot p =" in body
-    assert "pine_runtime_error" in body
+    # Array checks now select the coded helper through the optional shim.
+    assert "_PF_ARRAY_STOP" in body
     assert "}((i)); }((pivots));" in body
     assert "pivot& p" not in body
     assert "pivot* p" not in body

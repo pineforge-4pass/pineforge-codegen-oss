@@ -44,9 +44,16 @@ def test_metadata_and_exception_wrappers_are_emitted():
     assert cpp.count('catch (...)') >= 7
     for entrypoint in ("run_backtest", "run_backtest_full", "strategy_set_input",
                        "strategy_set_override", "strategy_set_magnifier_volume_weighted"):
-        recorder = "_pf_record_setting_failure" if entrypoint.startswith("strategy_set_") else "_pf_record_failure"
-        assert f'{recorder}("{entrypoint}", _pf_error.what())' in cpp
-        assert f'{recorder}("{entrypoint}", "unknown C++ exception")' in cpp
+        # Non-parse setter failures omit the optional reason, retaining their text.
+        error = "_pf_error.what()" if entrypoint.startswith("strategy_set_") else "_pf_error"
+        if entrypoint.startswith("strategy_set_"):
+            recorder = '_PF_SETTING_FAILURE(static_cast<GeneratedStrategy*>(s), '
+            reason = ', nullptr'
+        else:
+            recorder = '_pf_record_failure('
+            reason = ''
+        assert f'{recorder}"{entrypoint}", {error}{reason})' in cpp
+        assert f'{recorder}"{entrypoint}", "unknown C++ exception"{reason})' in cpp
     assert 'bool _pf_setting_failed_ = false;' in cpp
     assert 'std::string _pf_setting_failure_;' in cpp
     assert 'throw ::pineforge::checked_settings::LatchedSettingsFailure(' in cpp
@@ -261,12 +268,18 @@ def test_settings_helpers_are_not_shadowed_by_script_declarations(shape):
 def test_settings_namespace_names_are_root_qualified_and_version_guarded():
     cpp = transpile(SOURCE)
     assert "using namespace pineforge::checked_settings" not in cpp
-    guarded = False
+    # Coded settings exceptions add a nested, optional feature guard.
+    guards = []
     for line in cpp.splitlines():
-        if line == "#ifdef PF_SETTINGS_API_VERSION":
-            guarded = True
-        elif line in ("#else", "#endif"):
-            guarded = False
+        if re.match(r"#if(?:def|ndef)?\b", line):
+            guards.append("PF_SETTINGS_API_VERSION" in line)
+        elif line.startswith("#elif"):
+            guards[-1] = "PF_SETTINGS_API_VERSION" in line
+        elif line == "#else":
+            guards[-1] = False
+        elif line == "#endif":
+            guards.pop()
+        guarded = any(guards)
         if "pineforge::checked_settings::" in line:
             assert guarded, line
             assert re.search(r"(?<!:)\bpineforge::checked_settings::", line) is None

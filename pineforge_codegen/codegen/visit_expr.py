@@ -87,6 +87,8 @@ classes from ``..ast_nodes``.
 
 from __future__ import annotations
 
+from .run_stops import request_stop
+
 from ..errors import Phase
 from ..symbols import TypeSpec
 from ..external_requests import UNPINNED_ANNOTATION
@@ -493,15 +495,14 @@ class ExprVisitor:
             value = self._visit_expr(node)
         finally:
             node.annotations = notes
-        if isinstance(marker, dict):
+        stop = request_stop(marker)
+        if "ref" in marker:
             # Evaluated first: a recorded request sets its flag where it is
             # evaluated, which may be this read.
-            stop = (f'pine_runtime_error(std::string('
-                    f'"{self._cpp_string_escape(marker["message"])}"))')
             return (f"([&]() {{ auto _pf_read = {value}; "
                     f"if ({self._request_data_missing(marker['ref'])}) {stop}; "
                     f"return _pf_read; }}())")
-        return (f'([&]() {{ pine_runtime_error(std::string("{self._cpp_string_escape(marker)}")); '
+        return (f'([&]() {{ {stop}; '
                 f"return {value}; }}())")
 
     def _identifier_reads_series(self, node: Identifier) -> bool:

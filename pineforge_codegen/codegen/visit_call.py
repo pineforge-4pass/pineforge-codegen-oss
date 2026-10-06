@@ -2108,7 +2108,22 @@ class CallVisitor:
                         init_val = self._array_init_value_expr(elem_spec, node.args[1])
                     else:
                         init_val = init_default
-                    return f"{cpp_type}((size_t)({size_arg}), {init_val})"
+                    return (
+                        "[&](auto _pf_array_new_size, auto _pf_array_new_value){ "
+                        "using _pf_array_new_size_type=decltype(_pf_array_new_size); "
+                        "if constexpr(!std::is_same_v<_pf_array_new_size_type,bool>) { "
+                        "if(is_na(_pf_array_new_size)) "
+                        '_PF_ARRAY_STOP("size_invalid", "new", "cannot create std::vector larger than max_size()"); '
+                        "} if(!std::isfinite((double)_pf_array_new_size)||"
+                        "_pf_array_new_size<0||"
+                        "(long double)_pf_array_new_size>(long double)std::numeric_limits<size_t>::max()) "
+                        '_PF_ARRAY_STOP("size_invalid", "new", "cannot create std::vector larger than max_size()"); '
+                        f"try {{ return {cpp_type}((size_t)(_pf_array_new_size), _pf_array_new_value); "
+                        "} catch (const std::length_error& _pf_array_new_error) { "
+                        '_PF_ARRAY_STOP("size_invalid", "new", _pf_array_new_error.what()); '
+                        f"return {cpp_type}(); }} "
+                        f"}}(({size_arg}), ({init_val}))"
+                    )
                 return f"{cpp_type}()"
             if func_name == "from":
                 spec = self._type_spec_from_expr(node) or TypeSpec.array(TypeSpec.primitive("float"))
@@ -2282,8 +2297,8 @@ class CallVisitor:
         # runtime.error() and other runtime.* calls
         if namespace == "runtime":
             if func_name == "error":
-                rt_args = [self._visit_expr(a) for a in node.args]
-                msg_arg = rt_args[0] if rt_args else '""'
+                message = node.args[0] if node.args else node.kwargs.get("message")
+                msg_arg = self._visit_expr(message) if message is not None else '""'
                 return f'pine_runtime_error({msg_arg})'
             return '"" /* unsupported runtime */'
 
@@ -3631,13 +3646,22 @@ class CallVisitor:
             return 'std::string("")'
 
         if func_name == "substring":
-            if len(args) == 3:
-                # begin_pos is read twice: evaluate it once.
+            if len(args) in (2, 3):
+                end_parameter = ", auto _pf_substring_end" if len(args) == 3 else ""
+                count = ", _pf_substring_end - _pf_substring_begin" if len(args) == 3 else ""
+
+                def checked_substring(bound):
+                    return (
+                        f"[&](const std::string& _pf_substring_text, auto _pf_substring_begin{end_parameter}){{ "
+                        "try { return _pf_substring_text.substr(_pf_substring_begin"
+                        f"{count}); }} catch (const std::out_of_range& _pf_substring_error) {{ "
+                        '_PF_STRING_STOP("substring_out_of_range", _pf_substring_error.what()); '
+                        "return std::string(); } "
+                        "}(" + ", ".join(f"({arg})" for arg in bound) + ")"
+                    )
+
                 return evaluate_args_once(
-                    args, (1,), lambda a: f"{a[0]}.substr({a[1]}, {a[2]} - {a[1]})",
-                    "_pf_str_a")
-            elif len(args) == 2:
-                return f"{args[0]}.substr({args[1]})"
+                    args, range(len(args)), checked_substring, "_pf_substring_arg")
             return 'std::string("")'
 
         if func_name == "format":

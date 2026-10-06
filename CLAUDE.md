@@ -354,6 +354,16 @@ string default or option marks the
 input `supported=false` and publishes no choices; its unavailable default is
 empty. Legacy getters/setters and generated strategy execution stay unchanged.
 
+Generated run stops use `codegen/run_stops.py`'s optional
+`PINEFORGE_HAS_RUN_FAILURE_CODES_V1` shims. Coded helpers receive only
+compile-time request provenance and closed metadata words, never computed
+symbols or the English as metadata; the fallback keeps the original throws.
+`runtime.error` passes positional and named `message` arguments (an omitted
+message stays empty), and `str.tonumber` evaluates its argument outside the
+numeric parser's narrow catches so a run stop propagates. Run wrappers preserve
+an inner exception's code; a legacy setter's first failure latches its text and
+`setting_rejected` identity for both batch and native execution.
+
 A change must never make a script that transpiles and compiles today fail
 to transpile: when the engine cannot express what such a script asks for, it
 keeps its current lowering and gets a WARNING naming the approximation and

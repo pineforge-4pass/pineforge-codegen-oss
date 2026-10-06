@@ -790,7 +790,11 @@ def test_the_runtime_stops_spell_the_message_constants():
         COLLECTION_HISTORY_GENERIC_MATRIX_CPP, COLLECTION_HISTORY_MATRIX_CPP,
         HISTORICAL_CHANGE_MESSAGE, NA_ARRAY_MESSAGE, NA_MATRIX_MESSAGE,
     )
-    assert f'"{HISTORICAL_CHANGE_MESSAGE}"' in COLLECTION_HISTORY_CLASS_CPP
+    # Traits own the stop now, so they can pass a literal collection kind.
+    for traits in (COLLECTION_HISTORY_CPP, COLLECTION_HISTORY_MATRIX_CPP,
+                   COLLECTION_HISTORY_GENERIC_MATRIX_CPP):
+        assert f'"{HISTORICAL_CHANGE_MESSAGE}"' in traits
+    assert "_PFCollectionTraits<T>::history_stop();" in COLLECTION_HISTORY_CLASS_CPP
     assert f'"{NA_ARRAY_MESSAGE}"' in COLLECTION_HISTORY_CPP
     assert f'"{NA_MATRIX_MESSAGE}"' in COLLECTION_HISTORY_MATRIX_CPP
     assert f'"{NA_MATRIX_MESSAGE}"' in COLLECTION_HISTORY_GENERIC_MATRIX_CPP

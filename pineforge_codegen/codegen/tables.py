@@ -565,6 +565,7 @@ NAME_ECHO_STRING_MEMBERS = {
 
 def _checked_array_index_prelude(
     *,
+    method: str,
     normalize_negative: bool = True,
     allow_size: bool = False,
     name: str = "index",
@@ -602,18 +603,18 @@ def _checked_array_index_prelude(
         f"using {raw_type}=std::decay_t<decltype({raw_value})>; "
         f"if constexpr(!std::is_same_v<{raw_type},bool>) {{ "
         f"if(is_na({raw_value})) "
-        "pine_runtime_error(std::string(\"Index na is out of bounds. Array size is \")+"
+        f'_PF_ARRAY_STOP("index_out_of_bounds", "{method}", std::string("Index na is out of bounds. Array size is ")+ '
         "std::to_string((int64_t)__pf_array.size())); } "
         f"if constexpr(std::is_floating_point_v<{raw_type}>) {{ "
         f"if(!std::isfinite({raw_value})) {{ "
         f"std::string {raw_text}={raw_value}>0?\"inf\":\"-inf\"; "
-        f"pine_runtime_error(std::string(\"Index \")+{raw_text}+"
+        f'_PF_ARRAY_STOP("index_out_of_bounds", "{method}", std::string("Index ")+{raw_text}+'
         "\" is out of bounds. Array size is \"+"
         "std::to_string((int64_t)__pf_array.size())); } "
         f"long double {raw_wide}=(long double){raw_value}; "
         f"if({raw_wide}<(long double)std::numeric_limits<int64_t>::min()||"
         f"{raw_wide}>(long double)std::numeric_limits<int64_t>::max()) "
-        "pine_runtime_error(std::string(\"Index \")+"
+        f'_PF_ARRAY_STOP("index_out_of_bounds", "{method}", std::string("Index ")+ '
         f"std::to_string((double){raw_value})+"
         "\" is out of bounds. Array size is \"+"
         "std::to_string((int64_t)__pf_array.size())); } "
@@ -621,12 +622,12 @@ def _checked_array_index_prelude(
         f"int64_t {size}=(int64_t)__pf_array.size(); "
         f"int64_t {checked}={checked_index}; "
         f"if({checked}<0||{checked}{upper}{size}) "
-        f"pine_runtime_error(std::string(\"Index \")+std::to_string({raw})+"
+        f'_PF_ARRAY_STOP("index_out_of_bounds", "{method}", std::string("Index ")+std::to_string({raw})+'
         f"\" is out of bounds. Array size is \"+std::to_string({size})); "
     )
 
 
-def _checked_array_range_prelude(*, reject_inverted: bool = True) -> str:
+def _checked_array_range_prelude(*, method: str, reject_inverted: bool = True) -> str:
     """Validate the half-open ``[index_from, index_to)`` range of fill/slice.
 
     Both endpoints are checked with ``allow_size`` (``index_to`` is exclusive,
@@ -637,14 +638,14 @@ def _checked_array_range_prelude(*, reject_inverted: bool = True) -> str:
     """
     return (
         _checked_array_index_prelude(
-            normalize_negative=False, allow_size=True, name="index_from"
+            method=method, normalize_negative=False, allow_size=True, name="index_from"
         )
         + _checked_array_index_prelude(
-            normalize_negative=False, allow_size=True, name="index_to"
+            method=method, normalize_negative=False, allow_size=True, name="index_to"
         )
         + (
             "if(__pf_array_index_from>__pf_array_index_to) "
-            "pine_runtime_error(\"Index 'from' should be less than index 'to'.\"); "
+            '_PF_ARRAY_STOP("slice_range_inverted", "slice", "Index \'from\' should be less than index \'to\'."); '
             if reject_inverted else ""
         )
     )
@@ -656,7 +657,7 @@ def _checked_array_insert(a: str, args: list[str], normalize_negative: bool = Tr
     ``index == size`` appends, so the bound is ``index <= size``; a negative
     index is end-relative, exactly as for ``get``/``set``/``remove``.
     """
-    check = _checked_array_index_prelude(allow_size=True,
+    check = _checked_array_index_prelude(method="insert", allow_size=True,
                                          normalize_negative=normalize_negative)
     return (
         "[&](auto&& __pf_array){ "
@@ -671,7 +672,7 @@ def _checked_array_insert(a: str, args: list[str], normalize_negative: bool = Tr
 
 def _checked_array_fill_range(a: str, args: list[str]) -> str:
     """``array.fill(id, value, index_from, index_to)`` — bounded range fill."""
-    check = _checked_array_range_prelude(reject_inverted=False)
+    check = _checked_array_range_prelude(method="fill", reject_inverted=False)
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_array_value){ "
@@ -691,7 +692,7 @@ def checked_array_slice(a: str, args: list[str], *, result_type: str) -> str:
     ``result_type`` stays caller-supplied so the typed method lane keeps
     emitting the receiver's own element type; only the bounds checks are new.
     """
-    check = _checked_array_range_prelude()
+    check = _checked_array_range_prelude(method="slice")
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_from_value){ "
@@ -704,7 +705,7 @@ def checked_array_slice(a: str, args: list[str], *, result_type: str) -> str:
 
 
 def _checked_array_get(a: str, args: list[str], normalize_negative: bool = True) -> str:
-    check = _checked_array_index_prelude(normalize_negative=normalize_negative)
+    check = _checked_array_index_prelude(method="get", normalize_negative=normalize_negative)
     return (
         "[&](auto&& __pf_array)->decltype(auto){ "
         "return [&](auto&& __pf_raw_index_value)->decltype(auto){ "
@@ -719,7 +720,7 @@ def _checked_array_get(a: str, args: list[str], normalize_negative: bool = True)
 
 
 def _checked_array_set(a: str, args: list[str], normalize_negative: bool = True) -> str:
-    check = _checked_array_index_prelude(normalize_negative=normalize_negative)
+    check = _checked_array_index_prelude(method="set", normalize_negative=normalize_negative)
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_value){ "
@@ -731,7 +732,7 @@ def _checked_array_set(a: str, args: list[str], normalize_negative: bool = True)
 
 
 def _checked_array_remove(a: str, args: list[str], normalize_negative: bool = True) -> str:
-    check = _checked_array_index_prelude(normalize_negative=normalize_negative)
+    check = _checked_array_index_prelude(method="remove", normalize_negative=normalize_negative)
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_value){ "
@@ -750,7 +751,7 @@ def _checked_array_end_get(a: str, method: str) -> str:
     access = "front" if method == "first" else "back"
     return (
         "[&](auto&& __pf_array)->decltype(auto){ "
-        f"if(__pf_array.empty()) pine_runtime_error(\"Cannot use {method}() "
+        f'if(__pf_array.empty()) _PF_ARRAY_STOP("empty_array_access", "{method}", "Cannot use {method}() '
         "if array is empty.\"); "
         "if constexpr(std::is_lvalue_reference_v<decltype(__pf_array)>) "
         f"return (__pf_array.{access}()); "
@@ -770,7 +771,7 @@ def _checked_array_end_remove(a: str, method: str) -> str:
     )
     return (
         "[&](auto&& __pf_array){ "
-        f"if(__pf_array.empty()) pine_runtime_error(\"Cannot use {method}() "
+        f'if(__pf_array.empty()) _PF_ARRAY_STOP("empty_array_access", "{method}", "Cannot use {method}() '
         "if array is empty.\"); "
         "using __pf_array_value_type=typename "
         "std::decay_t<decltype(__pf_array)>::value_type; "
@@ -781,7 +782,7 @@ def _checked_array_end_remove(a: str, method: str) -> str:
 
 def _checked_array_percentrank(a: str, args: list[str]) -> str:
     """Preserve degenerate results, then reject invalid PercentRank indices."""
-    check = _checked_array_index_prelude(normalize_negative=False)
+    check = _checked_array_index_prelude(method="percentrank", normalize_negative=False)
     return (
         "[&](auto&& __pf_array){ "
         "return [&](auto&& __pf_raw_index_value){ "
@@ -1128,10 +1129,11 @@ MATH_FUNC_MAP = {
 STR_FUNC_MAP = {
     "tostring":    None,  # handled separately (already works)
     "tonumber":    lambda args: (
-        f"[&](){{ "
-        f"try {{ return std::stod({args[0]}); }} "
-        f"catch (...) {{ return na<double>(); }} "
-        f"}}()"
+        f"[&](std::string _pf_number_text){{ "
+        f"try {{ return std::stod(_pf_number_text); }} "
+        f"catch (const std::invalid_argument&) {{ return na<double>(); }} "
+        f"catch (const std::out_of_range&) {{ return na<double>(); }} "
+        f"}}(({args[0]}))"
     ),
     "length":      lambda args: f"(int){args[0]}.length()",
     "contains":    lambda args: f"({args[0]}.find({args[1]}) != std::string::npos)",

@@ -1,8 +1,46 @@
-"""Compare frozen lowering bytes without additive settings/capabilities ABIs."""
+"""Compare frozen lowering bytes without additive settings/capabilities/stop ABIs."""
 import re
+
+from pineforge_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP
+
+
+def _without_run_failure_scaffold(cpp: str) -> str:
+    cpp = cpp.replace(RUN_STOP_SHIMS_CPP + '\n', '')
+    output = []
+    stack = []
+    active = True
+    for line in cpp.splitlines(keepends=True):
+        directive = line.strip()
+        if re.match(r'#if(?:def|ndef)?\b', directive):
+            feature = 'PINEFORGE_HAS_RUN_FAILURE_CODES_V1' in directive
+            stack.append({'feature': feature, 'parent': active, 'converted': False,
+                          'absent_branch': directive.startswith('#ifndef')})
+            if feature:
+                active = active and stack[-1]['absent_branch']
+                continue
+        elif directive.startswith('#elif') and stack[-1]['feature']:
+            active = stack[-1]['parent']
+            stack[-1]['converted'] = True
+            line = line.replace('#elif defined(PF_SETTINGS_API_VERSION)',
+                                '#ifdef PF_SETTINGS_API_VERSION')
+        elif directive == '#else' and stack[-1]['feature']:
+            active = stack[-1]['parent'] and (stack[-1]['converted'] or
+                                              not stack[-1]['absent_branch'])
+            if not stack[-1]['converted']:
+                continue
+        elif directive == '#endif':
+            frame = stack.pop()
+            active = frame['parent']
+            if frame['feature'] and not frame['converted']:
+                continue
+        if active:
+            output.append(line)
+    return ''.join(output)
 
 
 def legacy_cpp(cpp: str) -> str:
+    # Coded-stop ABIs are additive; retain their actual call-site changes.
+    cpp = _without_run_failure_scaffold(cpp)
     cpp = cpp.replace(
         '#if __has_include(<pineforge/checked_settings.hpp>)\n'
         '#include <pineforge/checked_settings.hpp>\n#endif\n', '')
