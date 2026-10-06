@@ -1100,10 +1100,8 @@ class StmtVisitor:
             # the backtest runtime. See: pineforge-codegen issue #10.
             if self._is_omitted_udt_field(node.target):
                 recv = self._visit_expr(node.target.object)
-                lines.append(
-                    f"{pad}/* drawing field assignment omitted: "
-                    f"{recv}.{node.target.member} {node.op} ... */"
-                )
+                omitted = self._cpp_comment_escape(f"{recv}.{node.target.member} {node.op}")
+                lines.append(f"{pad}/* drawing field assignment omitted: {omitted} ... */")
                 return
             # General expression target (e.g., member access)
             target_cpp = self._visit_mutable_expr(node.target)

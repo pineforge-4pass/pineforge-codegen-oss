@@ -1315,7 +1315,7 @@ class TopLevelEmitter:
                 tf = info.get("tf")
                 tf_expr = info.get("tf_expr")
                 if tf:
-                    tf_expr = f'"{tf}"'
+                    tf_expr = self._security_tf_literal(tf)
                 elif tf == "" and not tf_expr:
                     # An empty timeframe string is the chart's.
                     tf_expr = "input_tf_"
@@ -1422,7 +1422,7 @@ class TopLevelEmitter:
         sec_id = info["sec_id"]
         symbol = self._security_tf_runtime_expr(info["symbol_node"])
         column = self._security_footprint_column(sec_id)
-        column = f', "{column}"' if column else ""
+        column = f', "{self._cpp_string_escape(column)}"' if column else ""
         ignore_node = info.get("ignore_invalid_node")
         if ignore_node is None:
             ignore = "false"
@@ -1887,7 +1887,7 @@ class TopLevelEmitter:
         for pragma in pragmas:
             cpp_expr = self._visit_expr(pragma.expr_node)
             lines.append(
-                f'{inner}trace(std::string("{pragma.name}"), '
+                f'{inner}trace(std::string("{self._cpp_string_escape(pragma.name)}"), '
                 f"(double)({cpp_expr}));"
             )
         lines.append(f"{pad}}}")

@@ -1089,7 +1089,7 @@ class ExprVisitor:
             if ns in SKIP_NAMESPACES:
                 return "0"
             if ns == "currency":
-                return f'std::string("{node.member}")'
+                return f'std::string("{self._cpp_string_escape(node.member)}")'
             if ns == "order":
                 # order.ascending / order.descending. Unknown member -> "ascending".
                 return ORDER_DIRECTION_MAP.get(node.member, 'std::string("ascending")')
@@ -1169,7 +1169,7 @@ class ExprVisitor:
                 return f"{safe}.{node.member}"
             if name not in self.ctx.series_vars:
                 # Unknown identifier — likely an enum value
-                return f'std::string("{node.member}")'
+                return f'std::string("{self._cpp_string_escape(node.member)}")'
         return f"{obj}.{node.member}"
 
     def _operand_na_kind(self, node, cpp_type: str) -> str | None:

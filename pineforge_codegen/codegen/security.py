@@ -194,13 +194,19 @@ class SecurityEmitter:
         chart timeframe — its evaluator result is never read. Any other
         timeframe registration cannot compute is refused: it used to register
         the chart timeframe, silently.
+
+        Every timeframe string resolved from the script -- the literal, a
+        constant, a helper parameter's argument, a ternary or switch arm --
+        is a Pine timeframe (``_refuse_invalid_security_tf``).
         """
         if isinstance(tf_node, StringLiteral):
+            self._refuse_invalid_security_tf(tf_node.value, tf_node)
             return tf_node.value, None
         if isinstance(tf_node, SwitchStmt):
             # Keep diagnostics from the registration-time switch renderer
             # visible; the broad expression fallback below intentionally
             # catches ordinary unresolved expressions.
+            self._check_security_tf_arms(tf_node, set())
             return None, self._security_tf_runtime_expr(tf_node)
         if isinstance(tf_node, Identifier):
             name = tf_node.name
@@ -209,6 +215,7 @@ class SecurityEmitter:
             if (name in self._known_vars and name not in self._input_backed_vars
                     and not self._known_var_is_lexically_shadowed(name)
                     and isinstance(self._known_vars[name], str)):
+                self._refuse_invalid_security_tf(self._known_vars[name], tf_node)
                 return self._known_vars[name], None
             if (name in self._input_backed_vars
                     and name in self._input_var_to_call
@@ -216,6 +223,7 @@ class SecurityEmitter:
                 return None, self._visit_expr(self._input_var_to_call[name])
             global_expr_map = getattr(self.ctx, "global_expr_map", {}) or {}
             if name in global_expr_map:
+                self._check_security_tf_arms(global_expr_map[name], {name})
                 expanded = self._security_tf_runtime_expr(
                     global_expr_map[name], resolving={name}
                 )
@@ -238,12 +246,52 @@ class SecurityEmitter:
             self._security_tf_unresolved(tf_node, f"timeframe '{name}'")
         # any other expression — visit if it resolves at class scope
         try:
+            self._check_security_tf_arms(tf_node, set())
             expanded = self._security_tf_runtime_expr(tf_node)
             return None, expanded if expanded is not None else self._visit_expr(tf_node)
         except CompileError:
             raise
         except Exception:
             self._security_tf_unresolved(tf_node, "timeframe expression")
+
+    def _refuse_invalid_security_tf(self, value: str, node) -> None:
+        """Refuse a timeframe string resolved from the script that is not a
+        Pine timeframe, with the support checker's diagnostic for the same
+        string written in the call (``invalid_tf_literal``): it reaches the
+        C++ registration. An empty string registers the chart's timeframe."""
+        if not value:
+            return
+        from ..support_checker import invalid_tf_literal
+        fn_label = ("request.security_lower_tf" if getattr(self, "_security_tf_lower", False)
+                    else "request.security")
+        refusal = invalid_tf_literal(value, fn_label)
+        if refusal is not None:
+            message, hint = refusal
+            self._codegen_error(node, message, hint=hint)
+
+    def _check_security_tf_arms(self, node, resolving: set[str]) -> None:
+        """Refuse an invalid timeframe string a registration-time timeframe
+        expression can select: the expression itself, a ternary or switch
+        arm, read through the constants and globals it names."""
+        def check(value) -> None:
+            if isinstance(value, StringLiteral):
+                self._refuse_invalid_security_tf(value.value, value)
+            elif isinstance(value, Ternary):
+                check(value.true_val)
+                check(value.false_val)
+            elif isinstance(value, SwitchStmt):
+                arms = [body for _case, body in value.cases]
+                for body in arms + ([value.default_body] if value.default_body else []):
+                    if len(body) == 1 and isinstance(body[0], ExprStmt):
+                        check(self._substitute_tf_input_reads(body[0].expr, resolving))
+
+        check(node if isinstance(node, SwitchStmt)
+              else self._substitute_tf_input_reads(node, resolving))
+
+    def _security_tf_literal(self, tf: str) -> str:
+        """A timeframe string as the C++ string literal registration and the
+        evaluator's ``timeframe.*`` reads spell it."""
+        return f'"{self._cpp_string_escape(tf)}"'
 
     def _security_tf_unresolved(self, tf_node, what: str) -> None:
         """Refuse a request.security timeframe registration cannot compute."""
@@ -1981,8 +2029,9 @@ class SecurityEmitter:
         parts = request.annotations[RECORDED_KEY_ANNOTATION]
         tail = (f"|{parts['field']}|{parts['period']}|gaps_{parts['gaps']}"
                 f"|lookahead_{parts['lookahead']}")
-        return (f'(std::string("{parts["fn"]}|") + {self._visit_expr(request.args[0])} + '
-                f'std::string("{tail}"))')
+        fn = self._cpp_string_escape(parts["fn"])
+        return (f'(std::string("{fn}|") + {self._visit_expr(request.args[0])} + '
+                f'std::string("{self._cpp_string_escape(tail)}"))')
 
     def _recorded_sites(self) -> dict[int, int]:
         """Each recorded request's index N: ``_pf_recorded`` sets its
@@ -2709,7 +2758,7 @@ class SecurityEmitter:
         """C++ expression for the timeframe of a request.security evaluator."""
         info = self._security_eval_info[sec_id]
         if info.get("tf"):
-            return f'"{info["tf"]}"'
+            return self._security_tf_literal(info["tf"])
         if info.get("tf_expr"):
             return info["tf_expr"]
         return "input_tf_"
@@ -2775,7 +2824,7 @@ class SecurityEmitter:
             if series_name in self._security_string_series
             else "_security_helper_series_"
         )
-        return f'{store}["{series_name}"]'
+        return f'{store}["{self._cpp_string_escape(series_name)}"]'
 
     def _security_helper_var_state_type(self, stmt: VarDecl) -> str:
         """The type family of a helper ``var`` whose declaration reads
@@ -6377,7 +6426,7 @@ class SecurityEmitter:
         if column is not None and self._security_foreign(sec_id):
             # request.footprint(...) of another symbol: the delta its feed
             # records for the requested bar (the value its delta() reads).
-            return f'_pf_symbol_column({sec_id}, "{column}")'
+            return f'_pf_symbol_column({sec_id}, "{self._cpp_string_escape(column)}")'
 
         if resolving is None:
             resolving = set()
