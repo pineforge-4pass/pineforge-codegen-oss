@@ -47,7 +47,8 @@ def _generate(body: str) -> str:
 )
 def test_checked_methods_route_through_runtime_error_path(body: str):
     cpp = _generate(body)
-    assert "pine_runtime_error" in cpp
+    # Coded array stops retain the legacy exception path behind their shim.
+    assert "_PF_ARRAY_STOP" in cpp
 
 
 def test_checked_get_binds_temporary_receiver_and_index_once():
@@ -65,7 +66,7 @@ def test_checked_get_binds_temporary_receiver_and_index_once():
     assert assignment.count("std::vector<int>(__pf_array.begin()") == 1
     assert assignment.count("values") == 1
     assert assignment.count("idx()") == 1
-    assert "pine_runtime_error" in assignment
+    assert "_PF_ARRAY_STOP" in assignment
 
 
 @pytest.mark.parametrize(
@@ -86,7 +87,7 @@ def test_checked_get_supports_temporary_method_receiver(setup: str, receiver: st
         line for line in cpp.splitlines() if line.startswith("        x =")
     )
     assert "None(" not in assignment
-    assert "pine_runtime_error" in assignment
+    assert "_PF_ARRAY_STOP" in assignment
 
 
 def test_checked_set_emission_preserves_receiver_index_value_order():
@@ -144,7 +145,7 @@ def test_percentrank_checks_bounds_without_normalizing_negative_indices():
     assert "[&](auto&& __pf_array)" in assignment
     assert "return [&](auto&& __pf_raw_index_value)" in assignment
     assert "__pf_array.size()<=1" in assignment
-    assert "pine_runtime_error" in assignment
+    assert "_PF_ARRAY_STOP" in assignment
     assert "int64_t __pf_array_index=__pf_raw_index;" in assignment
     assert "__pf_raw_index<0?" not in assignment
 
@@ -187,7 +188,7 @@ def test_percentrank_keyword_forms_route_to_checked_lowering(expression: str):
     assignment = next(
         line for line in cpp.splitlines() if line.startswith("        rank =")
     )
-    assert "pine_runtime_error" in assignment
+    assert "_PF_ARRAY_STOP" in assignment
     assert "int64_t __pf_array_index=__pf_raw_index;" in assignment
     assert "__pf_array[(size_t)__pf_array_index]" in assignment
 
@@ -209,7 +210,7 @@ def test_checked_udt_lvalue_access_preserves_alias(access: str):
         "    array.push(pivots, Pivot.new(na))\n"
         "update(0)"
     )
-    assert re.search(r"Pivot p = .*pine_runtime_error", cpp)
+    assert re.search(r"Pivot p = .*_PF_ARRAY_STOP", cpp)
     assert "Pivot& p =" not in cpp
     assert "_pf_udt_Pivot.get(p).level = current_bar_.close;" in cpp
 
@@ -686,7 +687,7 @@ observed = probe()
 '''
     cpp = transpile(source)
     assert "Pivot& p =" not in cpp
-    assert re.search(r"Pivot p = .*pine_runtime_error", cpp)
+    assert re.search(r"Pivot p = .*_PF_ARRAY_STOP", cpp)
     driver = r"""
 #include <iostream>
 int main() {
@@ -718,7 +719,7 @@ mutate()
 observed = array.get(array.get(outer, 0), 0).level
 '''
     cpp = transpile(source)
-    assert re.search(r"Pivot p = .*pine_runtime_error", cpp)
+    assert re.search(r"Pivot p = .*_PF_ARRAY_STOP", cpp)
     assert "Pivot& p =" not in cpp
     driver = r"""
 #include <iostream>
@@ -911,7 +912,7 @@ def test_array_typed_udf_parameter_methods_route_by_typespec():
     # negative-index normalization expression.
     assert cpp.count("int64_t __pf_array_index=__pf_raw_index;") == 4
     assert "int64_t __pf_array_index=__pf_raw_index<0?" in cpp
-    assert cpp.count("pine_runtime_error") >= 2
+    assert cpp.count("_PF_ARRAY_STOP") >= 2
 
     # Read and mutation methods no longer leak as raw, invalid C++ member
     # calls.  Mutation still targets the reference parameter directly.
@@ -930,7 +931,7 @@ def test_array_typed_udf_parameter_methods_route_by_typespec():
         assert raw_call not in cpp
     assert "source.push_back(10);" in cpp
     assert "source.push_back(true);" in cpp
-    assert re.search(r"Pivot p = .*pine_runtime_error", cpp)
+    assert re.search(r"Pivot p = .*_PF_ARRAY_STOP", cpp)
     assert "Pivot& p =" not in cpp
 
     # The checked set wrapper evaluates index then value exactly once.  Its

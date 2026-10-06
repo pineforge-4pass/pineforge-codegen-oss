@@ -167,10 +167,11 @@ def test_heikin_ashi_request_inside_a_payload_stops_where_taken():
     chart, requested = _evaluators(cpp)
     # The chart's own request is unchanged; the payload's arm stops the run.
     assert chart == "_req_sec_0 = bar.close;"
-    assert ('((get_input_bool("HA", false)) ? (([&]() -> double { pine_runtime_error('
-            'std::string("request.security: a Heikin-Ashi request inside another '
+    # The requested-context stop adds its fixed reason and original source line.
+    assert ('((get_input_bool("HA", false)) ? (([&]() -> double { _PF_UNSUPPORTED_STOP('
+            '"nested_heikinashi_request", 8, "request.security: a Heikin-Ashi request inside another '
             "request's expression reads that request's Heikin-Ashi bars, which PineForge "
-            'does not build")); return na<double>(); }())) : (bar.close))') in requested
+            'does not build"); return na<double>(); }())) : (bar.close))') in requested
     compile_cpp(cpp, label="Heikin-Ashi request inside a payload")
 
 

@@ -243,6 +243,15 @@ struct _PFCollectionTraits<std::vector<E, A>> {
     static const char* na_message() {
         return "@NA_ARRAY_MESSAGE@";
     }
+    static void na_stop() {
+        _PF_COLLECTION_STOP("na_reference", "array", "@NA_ARRAY_MESSAGE@");
+    }
+    [[noreturn]] static void history_stop() {
+        _PF_COLLECTION_STOP("historical_modified", "array", "@HISTORICAL_CHANGE_MESSAGE@");
+#ifndef PINEFORGE_HAS_RUN_FAILURE_CODES_V1
+        throw 0;
+#endif
+    }
 };
 """
 
@@ -261,6 +270,15 @@ struct _PFCollectionTraits<PineMatrix> {
     static const char* na_message() {
         return "@NA_MATRIX_MESSAGE@";
     }
+    static void na_stop() {
+        _PF_COLLECTION_STOP("na_reference", "matrix", "@NA_MATRIX_MESSAGE@");
+    }
+    [[noreturn]] static void history_stop() {
+        _PF_COLLECTION_STOP("historical_modified", "matrix", "@HISTORICAL_CHANGE_MESSAGE@");
+#ifndef PINEFORGE_HAS_RUN_FAILURE_CODES_V1
+        throw 0;
+#endif
+    }
 };
 """
 
@@ -278,15 +296,24 @@ struct _PFCollectionTraits<PineGenericMatrix<E>> {
     static const char* na_message() {
         return "@NA_MATRIX_MESSAGE@";
     }
+    static void na_stop() {
+        _PF_COLLECTION_STOP("na_reference", "matrix", "@NA_MATRIX_MESSAGE@");
+    }
+    [[noreturn]] static void history_stop() {
+        _PF_COLLECTION_STOP("historical_modified", "matrix", "@HISTORICAL_CHANGE_MESSAGE@");
+#ifndef PINEFORGE_HAS_RUN_FAILURE_CODES_V1
+        throw 0;
+#endif
+    }
 };
 """
 
 COLLECTION_HISTORY_CLASS_CPP = r"""
 // A change to the history of an array or a matrix stops the run, as
 // TradingView's does (RE10051).
+template <typename T>
 [[noreturn]] inline void _pf_collection_history_changed() {
-    pine_runtime_error("@HISTORICAL_CHANGE_MESSAGE@");
-    throw 0;
+    _PFCollectionTraits<T>::history_stop();
 }
 
 template <typename T>
@@ -316,7 +343,7 @@ public:
     const T& at(int offset) const {
         std::shared_ptr<const T> slot = offset > 0 ? slots_[offset] : nullptr;
         if (!slot) {
-            pine_runtime_error(_PFCollectionTraits<T>::na_message());
+            _PFCollectionTraits<T>::na_stop();
         }
         return *slot;
     }
@@ -338,7 +365,7 @@ public:
     T& changed(int offset, T& current) const {
         if (offset == 0) return current;
         (void)at(offset);
-        _pf_collection_history_changed();
+        _pf_collection_history_changed<T>();
     }
 
 private:

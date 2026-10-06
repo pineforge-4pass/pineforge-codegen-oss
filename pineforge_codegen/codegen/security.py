@@ -7227,7 +7227,8 @@ class SecurityEmitter:
                 "request.security: a Heikin-Ashi request inside another request's "
                 "expression reads that request's Heikin-Ashi bars, which PineForge "
                 "does not build")
-            return (f'([&]() -> {cpp_t} {{ pine_runtime_error(std::string("{message}")); '
+            line = expr_node.loc.line if expr_node.loc else 1
+            return (f'([&]() -> {cpp_t} {{ _PF_UNSUPPORTED_STOP("nested_heikinashi_request", {line}, "{message}"); '
                     f"return {na_value}; }}())")
 
         site = self._get_ta_site(expr_node)

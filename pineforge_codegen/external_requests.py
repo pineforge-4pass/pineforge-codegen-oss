@@ -745,6 +745,21 @@ def unpinned_message(node: FuncCall) -> str:
     return f"{spell_call(node)}: no data is pinned for this request, and its value was read"
 
 
+def request_stop_marker(node: FuncCall) -> dict:
+    """Keep stop provenance before lowering replaces a request's arguments."""
+    namespace, function = _call_name(node)
+    other_symbol = function in ("security", "security_lower_tf")
+    symbol = node.args[0] if node.args else node.kwargs.get("symbol")
+    return {
+        "message": unpinned_message(node),
+        "kind": "other_symbol" if other_symbol else "no_data",
+        "function": f"{namespace}.{function}",
+        "call": spell_call(node),
+        "line": node.loc.line if node.loc else 1,
+        "symbol_literal": symbol.value if isinstance(symbol, StringLiteral) else None,
+    }
+
+
 def _na_of(request: FuncCall, funcs: dict[str, FuncDef]) -> ASTNode:
     """The ``na`` a request lowers to when no data is read for it."""
     payload = None if no_data_request(request) else (
@@ -799,7 +814,7 @@ def lower_no_data_requests(program: Program) -> Program:
             continue
         if lowering == ABSENT_LOWERING:
             _record_unpinned_capability(program, node)
-            node.annotations = {**node.annotations, UNPINNED_ANNOTATION: unpinned_message(node)}
+            node.annotations = {**node.annotations, UNPINNED_ANNOTATION: request_stop_marker(node)}
             continue
         swaps[id(node)] = _na_of(node, funcs)
         if lowering == "unpinned":
@@ -811,12 +826,12 @@ def lower_no_data_requests(program: Program) -> Program:
                         if isinstance(stmt, (VarDecl, TupleAssign))}
         for request in unpinned:
             _mark_reads(program, index, declarations, request, swaps[id(request)],
-                        unpinned_message(request))
+                        request_stop_marker(request))
         for request in backed:
             ref = RequestRef()
             request.annotations = {**(request.annotations or {}), REQUEST_REF_ANNOTATION: ref}
             _mark_reads(program, index, declarations, request, request,
-                        {"message": unpinned_message(request), "ref": ref})
+                        {**request_stop_marker(request), "ref": ref})
             if request.annotations.get(LOWERING_ANNOTATION) == RECORDED_LOWERING:
                 # The key's other parts are constants: the call keeps its
                 # symbol, the one part the run computes.
@@ -872,7 +887,7 @@ def unpin_requests(program: Program, reasons: dict[int, str]) -> None:
         marker = (request.annotations or {}).get(UNPINNED_ANNOTATION)
         if isinstance(marker, dict):
             lowered.annotations = {**(lowered.annotations or {}),
-                                   UNPINNED_ANNOTATION: marker["message"]}
+                                   UNPINNED_ANNOTATION: {k: v for k, v in marker.items() if k != "ref"}}
         swaps[request_id] = lowered
         # The request leaves the program; its lowering is the deferred
         # refusal's now (``request_discovery`` lists it so).
@@ -885,11 +900,12 @@ def unpin_requests(program: Program, reasons: dict[int, str]) -> None:
             f"registration computes before the first bar; {reasons[request_id]}."))
     for node in _nodes(program):
         marker = (node.annotations or {}).get(UNPINNED_ANNOTATION)
-        if isinstance(marker, dict) and id(marker["ref"]) in chart_refs:
+        if isinstance(marker, dict) and "ref" in marker and id(marker["ref"]) in chart_refs:
             node.annotations = {k: v for k, v in node.annotations.items()
                                 if k != UNPINNED_ANNOTATION}
-        elif isinstance(marker, dict) and id(marker["ref"]) in refs:
-            node.annotations = {**node.annotations, UNPINNED_ANNOTATION: marker["message"]}
+        elif isinstance(marker, dict) and "ref" in marker and id(marker["ref"]) in refs:
+            node.annotations = {**node.annotations,
+                                UNPINNED_ANNOTATION: {k: v for k, v in marker.items() if k != "ref"}}
     if swaps:
         replace_nodes(program, swaps)
     notes = program.annotations = dict(program.annotations or {})

@@ -28,6 +28,38 @@
 
 using namespace pineforge;
 
+
+#ifdef PINEFORGE_HAS_RUN_FAILURE_CODES_V1
+#define _PF_NO_DATA_STOP(function, call, line, english) ::pineforge::pine_no_data_stop(function, call, line, english)
+#define _PF_OTHER_SYMBOL_STOP(function, symbol, call, line, english) ::pineforge::pine_other_symbol_stop(function, symbol, call, line, english)
+#define _PF_ARRAY_STOP(reason, method, english) ::pineforge::pine_array_stop(reason, method, std::string(english).c_str())
+#define _PF_COLLECTION_STOP(reason, object, english) ::pineforge::pine_collection_stop(object, reason, english)
+#define _PF_NA_STOP(object, english) ::pineforge::pine_na_stop(object, english)
+#define _PF_LIMIT_STOP(limit, max, english) ::pineforge::pine_limit_stop(limit, max, english)
+#define _PF_UNSUPPORTED_STOP(reason, line, english) ::pineforge::pine_unsupported_stop(reason, line, english)
+#define _PF_STRING_STOP(reason, english) ::pineforge::pine_string_stop(reason, english)
+#define _PF_ENGINE_INVARIANT(english, legacy_type) ::pineforge::pine_engine_invariant(english)
+#define _PF_INVARIANT_AT(container, index) _pf_invariant_at(container, index)
+#define _PF_SETTING_FAILURE(strategy, entrypoint, message) (strategy)->_pf_record_setting_failure(entrypoint, message, [] { return ::pineforge::RunFailureInfo(::pineforge::RunFailureCode::setting_rejected, {{"entrypoint", entrypoint}, {"reason", "unparseable_value"}}); })
+template <typename Container, typename Index>
+decltype(auto) _pf_invariant_at(Container& container, Index index) {
+    try { return container.at(index); }
+    catch (const std::out_of_range& error) { ::pineforge::pine_engine_invariant(error.what()); }
+}
+#else
+#define _PF_NO_DATA_STOP(function, call, line, english) pine_runtime_error(std::string(english))
+#define _PF_OTHER_SYMBOL_STOP(function, symbol, call, line, english) pine_runtime_error(std::string(english))
+#define _PF_ARRAY_STOP(reason, method, english) pine_runtime_error(english)
+#define _PF_COLLECTION_STOP(reason, object, english) pine_runtime_error(english)
+#define _PF_NA_STOP(object, english) throw std::runtime_error(english)
+#define _PF_LIMIT_STOP(limit, max, english) throw std::length_error(english)
+#define _PF_UNSUPPORTED_STOP(reason, line, english) pine_runtime_error(std::string(english))
+#define _PF_STRING_STOP(reason, english) pine_runtime_error(std::string(english))
+#define _PF_ENGINE_INVARIANT(english, legacy_type) throw legacy_type(english)
+#define _PF_INVARIANT_AT(container, index) (container).at(index)
+#define _PF_SETTING_FAILURE(strategy, entrypoint, message) (strategy)->_pf_record_setting_failure(entrypoint, message)
+#endif
+
 // --- syminfo derivation helpers (PineForge G2) ---
 static inline std::string _pf_derive_prefix(const std::string& tickerid) {
     std::size_t colon = tickerid.find(':');
@@ -321,6 +353,13 @@ public:
         }
         pineforge::source::PineStrategyHost::set_strategy_override(overrides);
     }
+#ifdef PINEFORGE_HAS_RUN_FAILURE_CODES_V1
+    ::pineforge::RunFailureInfo _pf_setting_failure_info_{::pineforge::RunFailureCode::none, {}};
+    struct _pf_latched_setting_error : _pf_setting_error_base, ::pineforge::RunFailureInfo {
+        _pf_latched_setting_error(const std::string& text, const ::pineforge::RunFailureInfo& info)
+            : _pf_setting_error_base(text), ::pineforge::RunFailureInfo(info) {}
+    };
+#endif
 
 #ifndef PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1
 #error "Generated lifecycle reset requires a matching PineForge engine; rebuild with script-run preparation support"
@@ -389,7 +428,7 @@ public:
         covReady = ((!(is_na(cov11)) && !(is_na(cov12))) && !(is_na(cov22)));
         lam = na<double>();
         if (covReady) {
-            lam = ((([&]{ auto _pna_l = ((double)m.eigenvalues().size()); auto _pna_r = (0); double _pfc_l = static_cast<double>(_pna_l); double _pfc_r = static_cast<double>(_pna_r); bool _pfc_eq = (_pfc_l == _pfc_r) || (std::isfinite(_pfc_l) && std::isfinite(_pfc_r) && std::fabs(_pfc_l - _pfc_r) <= 1e-10); return !is_na(_pna_l) && !is_na(_pna_r) && ((_pfc_l > _pfc_r) && !_pfc_eq); }())) ? ([&](auto&& __pf_array)->decltype(auto){ return [&](auto&& __pf_raw_index_value)->decltype(auto){ using __pf_raw_index_type=std::decay_t<decltype(__pf_raw_index_value)>; if constexpr(!std::is_same_v<__pf_raw_index_type,bool>) { if(is_na(__pf_raw_index_value)) pine_runtime_error(std::string("Index na is out of bounds. Array size is ")+std::to_string((int64_t)__pf_array.size())); } if constexpr(std::is_floating_point_v<__pf_raw_index_type>) { if(!std::isfinite(__pf_raw_index_value)) { std::string __pf_raw_index_text=__pf_raw_index_value>0?"inf":"-inf"; pine_runtime_error(std::string("Index ")+__pf_raw_index_text+" is out of bounds. Array size is "+std::to_string((int64_t)__pf_array.size())); } long double __pf_raw_index_wide=(long double)__pf_raw_index_value; if(__pf_raw_index_wide<(long double)std::numeric_limits<int64_t>::min()||__pf_raw_index_wide>(long double)std::numeric_limits<int64_t>::max()) pine_runtime_error(std::string("Index ")+std::to_string((double)__pf_raw_index_value)+" is out of bounds. Array size is "+std::to_string((int64_t)__pf_array.size())); } int64_t __pf_raw_index=(int64_t)__pf_raw_index_value; int64_t __pf_array_size=(int64_t)__pf_array.size(); int64_t __pf_array_index=__pf_raw_index<0?__pf_raw_index+__pf_array_size:__pf_raw_index; if(__pf_array_index<0||__pf_array_index>=__pf_array_size) pine_runtime_error(std::string("Index ")+std::to_string(__pf_raw_index)+" is out of bounds. Array size is "+std::to_string(__pf_array_size)); if constexpr(std::is_lvalue_reference_v<decltype(__pf_array)>) return (__pf_array[(size_t)__pf_array_index]); else { using __pf_array_value_type=typename std::decay_t<decltype(__pf_array)>::value_type; return __pf_array_value_type(__pf_array[(size_t)__pf_array_index]); } }((0)); }((m.eigenvalues()))) : (na<double>()));
+            lam = ((([&]{ auto _pna_l = ((double)m.eigenvalues().size()); auto _pna_r = (0); double _pfc_l = static_cast<double>(_pna_l); double _pfc_r = static_cast<double>(_pna_r); bool _pfc_eq = (_pfc_l == _pfc_r) || (std::isfinite(_pfc_l) && std::isfinite(_pfc_r) && std::fabs(_pfc_l - _pfc_r) <= 1e-10); return !is_na(_pna_l) && !is_na(_pna_r) && ((_pfc_l > _pfc_r) && !_pfc_eq); }())) ? ([&](auto&& __pf_array)->decltype(auto){ return [&](auto&& __pf_raw_index_value)->decltype(auto){ using __pf_raw_index_type=std::decay_t<decltype(__pf_raw_index_value)>; if constexpr(!std::is_same_v<__pf_raw_index_type,bool>) { if(is_na(__pf_raw_index_value)) _PF_ARRAY_STOP("index_out_of_bounds", "get", std::string("Index na is out of bounds. Array size is ")+ std::to_string((int64_t)__pf_array.size())); } if constexpr(std::is_floating_point_v<__pf_raw_index_type>) { if(!std::isfinite(__pf_raw_index_value)) { std::string __pf_raw_index_text=__pf_raw_index_value>0?"inf":"-inf"; _PF_ARRAY_STOP("index_out_of_bounds", "get", std::string("Index ")+__pf_raw_index_text+" is out of bounds. Array size is "+std::to_string((int64_t)__pf_array.size())); } long double __pf_raw_index_wide=(long double)__pf_raw_index_value; if(__pf_raw_index_wide<(long double)std::numeric_limits<int64_t>::min()||__pf_raw_index_wide>(long double)std::numeric_limits<int64_t>::max()) _PF_ARRAY_STOP("index_out_of_bounds", "get", std::string("Index ")+ std::to_string((double)__pf_raw_index_value)+" is out of bounds. Array size is "+std::to_string((int64_t)__pf_array.size())); } int64_t __pf_raw_index=(int64_t)__pf_raw_index_value; int64_t __pf_array_size=(int64_t)__pf_array.size(); int64_t __pf_array_index=__pf_raw_index<0?__pf_raw_index+__pf_array_size:__pf_raw_index; if(__pf_array_index<0||__pf_array_index>=__pf_array_size) _PF_ARRAY_STOP("index_out_of_bounds", "get", std::string("Index ")+std::to_string(__pf_raw_index)+" is out of bounds. Array size is "+std::to_string(__pf_array_size)); if constexpr(std::is_lvalue_reference_v<decltype(__pf_array)>) return (__pf_array[(size_t)__pf_array_index]); else { using __pf_array_value_type=typename std::decay_t<decltype(__pf_array)>::value_type; return __pf_array_value_type(__pf_array[(size_t)__pf_array_index]); } }((0)); }((m.eigenvalues()))) : (na<double>()));
         }
         lamSma = (history_advances_new_bar() ? _ta_sma_6.compute(lam) : _ta_sma_6.recompute(lam));
         if ((((covReady && !(is_na(lam))) && !(is_na(lamSma))) && (history_advances_new_bar() ? _ta_crossover_7.compute(lam, lamSma) : _ta_crossover_7.recompute(lam, lamSma)))) {
@@ -404,8 +443,17 @@ public:
 };
 
 extern "C" {
+#if defined(PINEFORGE_HAS_RUN_FAILURE_CODES_V1) && defined(PF_SETTINGS_API_VERSION)
+    int strategy_create_checked(const char* params_json, void** out, char* error, size_t error_capacity);
+#endif
     void* strategy_create(const char* params_json) {
+#if defined(PINEFORGE_HAS_RUN_FAILURE_CODES_V1) && defined(PF_SETTINGS_API_VERSION)
+        void* out = nullptr;
+        strategy_create_checked(params_json, &out, nullptr, 0);
+        return out;
+#else
         return new GeneratedStrategy();
+#endif
     }
     void run_backtest(void* s, Bar* bars, int n, ReportC* out) {
         auto* strat = static_cast<GeneratedStrategy*>(s);

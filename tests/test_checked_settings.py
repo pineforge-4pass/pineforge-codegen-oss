@@ -44,9 +44,14 @@ def test_metadata_and_exception_wrappers_are_emitted():
     assert cpp.count('catch (...)') >= 7
     for entrypoint in ("run_backtest", "run_backtest_full", "strategy_set_input",
                        "strategy_set_override", "strategy_set_magnifier_volume_weighted"):
-        recorder = "_pf_record_setting_failure" if entrypoint.startswith("strategy_set_") else "_pf_record_failure"
-        assert f'{recorder}("{entrypoint}", _pf_error.what())' in cpp
-        assert f'{recorder}("{entrypoint}", "unknown C++ exception")' in cpp
+        # The optional setter shim retains its closed code and original text.
+        error = "_pf_error.what()" if entrypoint.startswith("strategy_set_") else "_pf_error"
+        if entrypoint.startswith("strategy_set_"):
+            recorder = '_PF_SETTING_FAILURE(static_cast<GeneratedStrategy*>(s), '
+        else:
+            recorder = '_pf_record_failure('
+        assert f'{recorder}"{entrypoint}", {error})' in cpp
+        assert f'{recorder}"{entrypoint}", "unknown C++ exception")' in cpp
     assert 'bool _pf_setting_failed_ = false;' in cpp
     assert 'std::string _pf_setting_failure_;' in cpp
     assert 'throw ::pineforge::checked_settings::LatchedSettingsFailure(' in cpp

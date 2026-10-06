@@ -134,7 +134,9 @@ def test_unresolvable_symbol_keeps_the_deferred_refusal():
     assert warnings and ("its symbol cannot be resolved before the first bar on the call "
                          "path f(): it reads 'close', a series") in warnings[-1].hint
     assert "register_security_eval" not in result["cpp"]
-    assert f'pine_runtime_error(std::string("request.security(sym, \\"60\\", ...) at line 3: {PINNED}"))' in result["cpp"]
+    # An unresolvable helper parameter has no literal symbol to publish.
+    call = 'request.security(sym, \\"60\\", ...) at line 3'
+    assert f'_PF_OTHER_SYMBOL_STOP("request.security", nullptr, "{call}", 3, "{call}: {PINNED}")' in result["cpp"]
 
 
 @pytest.mark.parametrize("body, hint", [

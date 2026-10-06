@@ -151,7 +151,9 @@ def test_trade_relevant_request_is_a_deferred_refusal():
     cpp = result["cpp"]
     message = 'request.security(..., timeframe.period, ...) at line 3: ' + PINNED
     # Two reads -- ``other`` and ``other[1]`` -- and no registration.
-    assert cpp.count(f'pine_runtime_error(std::string("{message}"))') == 2
+    # The optional stop helper retains the English and adds literal provenance.
+    call = 'request.security(..., timeframe.period, ...) at line 3'
+    assert cpp.count(f'_PF_OTHER_SYMBOL_STOP("request.security", nullptr, "{call}", 3, "{message}")') == 2
     assert "return other[0]; }())" in cpp and "return other[1]; }())" in cpp
     assert "register_security_eval" not in cpp
 
@@ -163,7 +165,9 @@ def test_trade_relevant_request_of_another_symbol_reads_its_feed():
     cpp = transpile(HEAD + WATCH + 'if other > close\n    strategy.entry("L", strategy.long)\n'
                     + 'if other[1] > open\n    strategy.close("L")\n')
     message = 'request.security(\\"BINANCE:BTCUSDT\\", timeframe.period, ...) at line 3: ' + PINNED
-    stop = f'if (_pf_sec_missing_0) pine_runtime_error(std::string("{message}"));'
+    # A literal symbol belongs to metadata, not the computed registration value.
+    call = 'request.security(\\"BINANCE:BTCUSDT\\", timeframe.period, ...) at line 3'
+    stop = f'if (_pf_sec_missing_0) _PF_OTHER_SYMBOL_STOP("request.security", "BINANCE:BTCUSDT", "{call}", 3, "{message}");'
     assert cpp.count(stop) == 2
     assert "auto _pf_read = other[0]; " in cpp and "auto _pf_read = other[1]; " in cpp
     assert 'const std::string _pf_symbol = std::string("BINANCE:BTCUSDT");' in cpp

@@ -26,6 +26,19 @@ supported as exact pairs; on the 0.x line they are independent. See the
   resets and TA variant position ties preserve their traversal order. Refusal
   diagnostics for conflicting scalar history and map locals are hash-seed
   independent.
+- Generated run stops use stable engine failure codes when the paired engine
+  advertises `PINEFORGE_HAS_RUN_FAILURE_CODES_V1`. No-data and other-symbol
+  stops carry compile-time request provenance; copying their English into
+  `runtime.error` cannot select their codes. Older engines keep the legacy
+  throws and English messages.
+- `runtime.error(message = "...")` now passes the named message. With the
+  coded engine and run harness, a run stopped by `runtime.error()` with an
+  empty or named message no longer reports success or exposes partial results.
+- `str.tonumber` no longer hides a stop raised while evaluating its argument;
+  only numeric parse failures become `na`. Invalid array sizes, substring
+  positions and overflowing format-placeholder indices have checked stops.
+- Generated run wrappers preserve the inner failure code, and latched setter
+  failures and checked strategy construction retain their failure identity.
 
 ## 1.3.0 — 2026-10-06
 

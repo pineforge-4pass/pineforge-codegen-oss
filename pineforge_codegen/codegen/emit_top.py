@@ -84,6 +84,8 @@ from __future__ import annotations
 
 import re
 
+from .run_stops import RUN_STOP_SHIMS_CPP
+
 from ..ast_nodes import (
     BoolLiteral, ExprStmt, ForInStmt, ForStmt, FuncCall, Identifier, IfStmt,
     MemberAccess, SwitchStmt, TupleAssign, TupleLiteral, VarDecl, WhileStmt,
@@ -218,6 +220,7 @@ class TopLevelEmitter:
         # in favour of fully qualified names emitted at each call site.
         lines.append("using namespace pineforge;")
         lines.append("")
+        lines.append(RUN_STOP_SHIMS_CPP)
         self._emit_ta_compat_shims(lines)
         if getattr(self, "_uses_drawing", False):
             lines.append(DRAWING_LIFETIME_CPP)
@@ -1894,8 +1897,17 @@ class TopLevelEmitter:
 
     def _emit_extern_c(self, lines: list[str]) -> None:
         lines.append('extern "C" {')
+        lines.append("#if defined(PINEFORGE_HAS_RUN_FAILURE_CODES_V1) && defined(PF_SETTINGS_API_VERSION)")
+        lines.append("    int strategy_create_checked(const char* params_json, void** out, char* error, size_t error_capacity);")
+        lines.append("#endif")
         lines.append("    void* strategy_create(const char* params_json) {")
+        lines.append("#if defined(PINEFORGE_HAS_RUN_FAILURE_CODES_V1) && defined(PF_SETTINGS_API_VERSION)")
+        lines.append("        void* out = nullptr;")
+        lines.append("        strategy_create_checked(params_json, &out, nullptr, 0);")
+        lines.append("        return out;")
+        lines.append("#else")
         lines.append("        try { return new GeneratedStrategy(); } catch (...) { return nullptr; }")
+        lines.append("#endif")
         lines.append("    }")
         lines.append("    void run_backtest(void* s, Bar* bars, int n, ReportC* out) {")
         lines.append("        try {")
@@ -1912,7 +1924,7 @@ class TopLevelEmitter:
         lines.append("        if (!strat->_pf_refuse_failed_setting(out)) strat->fill_report(out);")
         lines.append('        } catch (const std::exception& _pf_error) {')
         lines.append('            if (out) *out = ReportC{};')
-        lines.append('            if (s) static_cast<GeneratedStrategy*>(s)->_pf_record_failure("run_backtest", _pf_error.what());')
+        lines.append('            if (s) static_cast<GeneratedStrategy*>(s)->_pf_record_failure("run_backtest", _pf_error);')
         lines.append('        } catch (...) {')
         lines.append('            if (out) *out = ReportC{};')
         lines.append('            if (s) static_cast<GeneratedStrategy*>(s)->_pf_record_failure("run_backtest", "unknown C++ exception");')
@@ -1969,7 +1981,7 @@ class TopLevelEmitter:
             "    void run_backtest_full(void* s, Bar* bars, int n, const char* input_tf, const char* script_tf,",
             "                           int bar_magnifier, int magnifier_samples, int magnifier_dist, ReportC* out) {",
             "        try { _pf_run_backtest_full_impl(s, bars, n, input_tf, script_tf, bar_magnifier, magnifier_samples, magnifier_dist, out); }",
-            '        catch (const std::exception& _pf_error) { if (out) *out = ReportC{}; if (s) static_cast<GeneratedStrategy*>(s)->_pf_record_failure("run_backtest_full", _pf_error.what()); }',
+            '        catch (const std::exception& _pf_error) { if (out) *out = ReportC{}; if (s) static_cast<GeneratedStrategy*>(s)->_pf_record_failure("run_backtest_full", _pf_error); }',
             '        catch (...) { if (out) *out = ReportC{}; if (s) static_cast<GeneratedStrategy*>(s)->_pf_record_failure("run_backtest_full", "unknown C++ exception"); }',
             "    }",
         ])
@@ -1982,20 +1994,20 @@ class TopLevelEmitter:
         lines.append("    void strategy_set_input(void* s, const char* key, const char* value) {")
         lines.append("        if (!s || !key || !value) return;")
         lines.append("        try { static_cast<GeneratedStrategy*>(s)->set_input(key, value); }")
-        lines.append('        catch (const std::exception& _pf_error) { static_cast<GeneratedStrategy*>(s)->_pf_record_setting_failure("strategy_set_input", _pf_error.what()); }')
-        lines.append('        catch (...) { static_cast<GeneratedStrategy*>(s)->_pf_record_setting_failure("strategy_set_input", "unknown C++ exception"); }')
+        lines.append('        catch (const std::exception& _pf_error) { _PF_SETTING_FAILURE(static_cast<GeneratedStrategy*>(s), "strategy_set_input", _pf_error.what()); }')
+        lines.append('        catch (...) { _PF_SETTING_FAILURE(static_cast<GeneratedStrategy*>(s), "strategy_set_input", "unknown C++ exception"); }')
         lines.append("    }")
         lines.append("    void strategy_set_override(void* s, const char* key, const char* value) {")
         lines.append("        if (!s || !key || !value) return;")
         lines.append("        try { static_cast<GeneratedStrategy*>(s)->set_strategy_override(key, value); }")
-        lines.append('        catch (const std::exception& _pf_error) { static_cast<GeneratedStrategy*>(s)->_pf_record_setting_failure("strategy_set_override", _pf_error.what()); }')
-        lines.append('        catch (...) { static_cast<GeneratedStrategy*>(s)->_pf_record_setting_failure("strategy_set_override", "unknown C++ exception"); }')
+        lines.append('        catch (const std::exception& _pf_error) { _PF_SETTING_FAILURE(static_cast<GeneratedStrategy*>(s), "strategy_set_override", _pf_error.what()); }')
+        lines.append('        catch (...) { _PF_SETTING_FAILURE(static_cast<GeneratedStrategy*>(s), "strategy_set_override", "unknown C++ exception"); }')
         lines.append("    }")
         lines.append("    void strategy_set_magnifier_volume_weighted(void* s, int on) {")
         lines.append("        if (!s) return;")
         lines.append("        try { static_cast<GeneratedStrategy*>(s)->set_magnifier_volume_weighted(on != 0); }")
-        lines.append('        catch (const std::exception& _pf_error) { static_cast<GeneratedStrategy*>(s)->_pf_record_setting_failure("strategy_set_magnifier_volume_weighted", _pf_error.what()); }')
-        lines.append('        catch (...) { static_cast<GeneratedStrategy*>(s)->_pf_record_setting_failure("strategy_set_magnifier_volume_weighted", "unknown C++ exception"); }')
+        lines.append('        catch (const std::exception& _pf_error) { _PF_SETTING_FAILURE(static_cast<GeneratedStrategy*>(s), "strategy_set_magnifier_volume_weighted", _pf_error.what()); }')
+        lines.append('        catch (...) { _PF_SETTING_FAILURE(static_cast<GeneratedStrategy*>(s), "strategy_set_magnifier_volume_weighted", "unknown C++ exception"); }')
         lines.append("    }")
         from .checked_settings import emit_settings_exports
         emit_settings_exports(lines)

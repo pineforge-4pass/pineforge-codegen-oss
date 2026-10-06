@@ -55,7 +55,8 @@ def test_recorded_key_spellings(call, key):
     # The key is computed where the request is evaluated, which sets the
     # request's flag; its reads test the flag.
     assert f"v = _pf_recorded((std::string({key})), _pf_rec_missing_0);" in cpp
-    assert "if (_pf_rec_missing_0) pine_runtime_error" in cpp
+    # Recorded missing reads retain provenance instead of classifying English.
+    assert "if (_pf_rec_missing_0) _PF_NO_DATA_STOP" in cpp
     compile_cpp(cpp, label="recorded-key")
 
 

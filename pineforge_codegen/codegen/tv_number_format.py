@@ -60,7 +60,7 @@ static std::string _pf_tv_decimal(double value, int min_fraction,
     char buffer[128];
     const auto converted = std::to_chars(buffer, buffer + sizeof buffer, value);
     if (converted.ec != std::errc{})
-        throw std::runtime_error("shortest-decimal conversion failed");
+        _PF_ENGINE_INVARIANT("shortest-decimal conversion failed", std::runtime_error);
     std::string spelling(buffer, converted.ptr);
     const bool negative = !spelling.empty() && spelling[0] == '-';
     if (negative) spelling.erase(0, 1);
@@ -240,7 +240,14 @@ static std::string pine_str_format_tv(
             i = end + 1;
             continue;
         }
-        const size_t index = static_cast<size_t>(std::stoul(index_text));
+        size_t index = 0;
+        for (char _pf_digit : index_text) {
+            const size_t _pf_value = static_cast<size_t>(_pf_digit - '0');
+            if (index > (std::numeric_limits<size_t>::max() - _pf_value) / 10) {
+                _PF_STRING_STOP("format_index_overflow", "stoul");
+            }
+            index = index * 10 + _pf_value;
+        }
         if (index >= args.size()) {
             result += format_string.substr(i, end - i + 1);
             i = end + 1;

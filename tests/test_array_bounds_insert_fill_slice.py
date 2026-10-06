@@ -60,7 +60,8 @@ def _statement(cpp: str, needle: str) -> str:
     ],
 )
 def test_bounded_methods_route_through_runtime_error_path(body: str):
-    assert "pine_runtime_error" in _generate(body)
+    # Coded array stops retain the legacy exception path behind their shim.
+    assert "_PF_ARRAY_STOP" in _generate(body)
 
 
 @pytest.mark.parametrize(
