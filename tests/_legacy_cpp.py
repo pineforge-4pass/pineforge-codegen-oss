@@ -19,13 +19,13 @@ def _without_run_failure_scaffold(cpp: str) -> str:
                 active = active and stack[-1]['absent_branch']
                 continue
         elif directive.startswith('#elif') and stack[-1]['feature']:
-            active = stack[-1]['parent'] and (stack[-1]['converted'] or
-                                              not stack[-1]['absent_branch'])
+            active = stack[-1]['parent']
             stack[-1]['converted'] = True
             line = line.replace('#elif defined(PF_SETTINGS_API_VERSION)',
                                 '#ifdef PF_SETTINGS_API_VERSION')
         elif directive == '#else' and stack[-1]['feature']:
-            active = stack[-1]['parent']
+            active = stack[-1]['parent'] and (stack[-1]['converted'] or
+                                              not stack[-1]['absent_branch'])
             if not stack[-1]['converted']:
                 continue
         elif directive == '#endif':
