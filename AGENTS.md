@@ -331,8 +331,9 @@ tests/
 
 6. **Deterministic emission.** Node `id()` values are lookup keys, never
    ordering keys. Requested expression-history resets follow registration
-   order; TA variants follow binding source positions and retain traversal
-   order at ties. Inline TA identity keys are an unordered membership set.
+   order; TA variants follow binding source positions, then stable scope
+   snapshots, retaining traversal order at ties. Inline TA identity keys are
+   an unordered membership set.
 
 ## Support contracts
 

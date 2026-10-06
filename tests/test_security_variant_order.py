@@ -95,3 +95,20 @@ def test_expression_history_clear_order_preserves_registration_order():
     assert emitter._security_expr_hist_series_names(1) == [
         "_sec1_expr_hist_0", "_sec1_expr_hist_1",
     ]
+
+
+def test_variant_local_snapshots_keep_their_stable_order():
+    emitter = security_module.SecurityEmitter()
+    argument = {"src": Identifier(name="close")}
+    locals_frame = {"macd_val": Identifier(name="close"),
+                    "macd_sig": Identifier(name="open")}
+    stack = (argument, locals_frame)
+    signatures = [
+        ((("src", 9),), ()),
+        ((("src", 9),), ("macd_val",)),
+        ((("src", 9),), ("macd_sig", "macd_val")),
+    ]
+    assert sorted(
+        signatures,
+        key=lambda signature: emitter._security_variant_order_key(signature, stack),
+    ) == list(reversed(signatures))
