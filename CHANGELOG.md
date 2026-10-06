@@ -223,6 +223,14 @@ From [#177](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/177):
   baseline `pineforge-parity-baseline-20261005-input-reanchor-781b8f00`
   (engine 3c414528, this repository at 39545379), 7,975 excellent and 14
   strong of 7,989 graded probes, none below strong.
+  Release 1.3.0 is graded on registry baseline <!-- pf:releases[1.3.0].scoreboard.id|code -->`pineforge-parity-baseline-20261006-engine-7a1f01c0`<!-- /pf -->,
+  which holds <!-- pf:releases[1.3.0].scoreboard.excellent|int -->7,982<!-- /pf --> excellent and <!-- pf:releases[1.3.0].scoreboard.strong|int -->7<!-- /pf --> strong of <!-- pf:releases[1.3.0].scoreboard.graded|int -->7,989<!-- /pf --> graded probes,
+  and <!-- pf:releases[1.3.0].scoreboard.belowStrong|int -->0<!-- /pf --> below strong. It measured engine <!-- pf:releases[1.3.0].scoreboard.engineCommit|short -->7a1f01c0<!-- /pf -->
+  ([pineforge-engine#347](https://github.com/pineforge-4pass/pineforge-engine/pull/347)'s
+  merge), which v1.3.0 equals in behaviour, and this repository at <!-- pf:releases[1.3.0].scoreboard.codegenCommit|short -->3e50082f<!-- /pf -->
+  ([#177](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/177)'s
+  merge), whose emitted trading code is codegen 1.3.0's: #178 adds only its
+  receipt functions, and the release's remaining changes are documentation.
 - `docs/PUBLIC_CONTRACT.md` describes the confirmed-bar and order-shapes
   receipts ([#173](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/173),
   [#178](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/178)),
