@@ -322,7 +322,7 @@ public:
         : value_(value ? std::make_shared<T>(*value) : nullptr) {}
     bool is_na() const { return !value_; }
     T& get() const {
-        if (!value_) pine_runtime_error("@NA_ARRAY_MESSAGE@");
+        if (!value_) _PF_COLLECTION_STOP("na_reference", "array", "@NA_ARRAY_MESSAGE@");
         return *value_;
     }
     operator T&() const { return get(); }
@@ -359,6 +359,15 @@ struct _PFCollectionTraits<_PFArrayHistoryValue<T>> {
     }
     static bool is_na(const _PFArrayHistoryValue<T>& value) { return value.is_na(); }
     static const char* na_message() { return "@NA_ARRAY_MESSAGE@"; }
+    static void na_stop() {
+        _PF_COLLECTION_STOP("na_reference", "array", "@NA_ARRAY_MESSAGE@");
+    }
+    [[noreturn]] static void history_stop() {
+        _PF_COLLECTION_STOP("historical_modified", "array", "@HISTORICAL_CHANGE_MESSAGE@");
+#ifndef PINEFORGE_HAS_RUN_FAILURE_CODES_V1
+        throw 0;
+#endif
+    }
 };
 """
 

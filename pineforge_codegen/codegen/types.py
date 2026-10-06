@@ -2177,7 +2177,10 @@ class TypeInferer:
                     )
                 return lowered
 
-        return self._array_receiver_once_expr(array_expr, args, lower_receiver)
+        try:
+            return self._array_receiver_once_expr(array_expr, args, lower_receiver)
+        except IndexError:
+            self._codegen_error(node, f"array.{method}: wrong number of arguments")
 
     def _map_method_expr(
         self, map_expr: str, method: str, args: list[str], spec: TypeSpec | None = None,

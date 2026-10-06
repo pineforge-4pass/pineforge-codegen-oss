@@ -187,6 +187,42 @@ ERRORS = {
     "matrix_alias": (HEADER + MATRIX + "pb = m1[20]\nalias = pb\nresult = matrix.get(alias, 0, 0)\n", NA_MATRIX_MESSAGE),
 }
 
+SUCCESS.update({
+    "array_sort_namespace_keyword": witness(
+        "a = array.from(1.0, 3.0, 2.0)\narray.sort(a, order = order.descending)\n",
+        "a.get(0) == 3 and a.get(1) == 2 and a.get(2) == 1"),
+    "array_sort_method_keyword": witness(
+        "a = array.from(1.0, 3.0, 2.0)\na.sort(order = order.descending)\n",
+        "a.get(0) == 3 and a.get(1) == 2 and a.get(2) == 1"),
+    "array_sort_namespace_reversed_keywords": witness(
+        "a = array.from(1.0, 3.0, 2.0)\narray.sort(order = order.descending, id = a)\n",
+        "a.get(0) == 3 and a.get(1) == 2 and a.get(2) == 1"),
+    "array_sort_namespace_default": witness(
+        "a = array.from(1.0, 3.0, 2.0)\narray.sort(id = a)\n",
+        "a.get(0) == 1 and a.get(1) == 2 and a.get(2) == 3"),
+    "array_sort_method_default": witness(
+        "a = array.from(1.0, 3.0, 2.0)\na.sort()\n",
+        "a.get(0) == 1 and a.get(1) == 2 and a.get(2) == 3"),
+    "array_sort_method_ascending_keyword": witness(
+        "a = array.from(1.0, 3.0, 2.0)\na.sort(order = order.ascending)\n",
+        "a.get(0) == 1 and a.get(1) == 2 and a.get(2) == 3"),
+    "array_indexof_method_keyword": witness(
+        "a = array.from(1.0, 2.0)\nresult = a.indexof(value = 2.0)\n", "result == 1"),
+    "array_indexof_namespace_keyword": witness(
+        "a = array.from(1.0, 2.0)\nresult = array.indexof(id = a, value = 2.0)\n", "result == 1"),
+    "array_indexof_namespace_reversed_keywords": witness(
+        "a = array.from(1.0, 2.0)\nresult = array.indexof(value = 2.0, id = a)\n", "result == 1"),
+    "array_unshift_namespace_keyword": witness(
+        "a = array.from(2.0)\narray.unshift(a, value = 1.0)\n",
+        "a.size() == 2 and a.get(0) == 1 and a.get(1) == 2"),
+    "array_unshift_method_keyword": witness(
+        "a = array.from(2.0)\na.unshift(value = 1.0)\n",
+        "a.size() == 2 and a.get(0) == 1 and a.get(1) == 2"),
+    "array_unshift_namespace_reversed_keywords": witness(
+        "a = array.from(2.0)\narray.unshift(value = 1.0, id = a)\n",
+        "a.size() == 2 and a.get(0) == 1 and a.get(1) == 2"),
+})
+
 
 @pytest.mark.parametrize("name", sorted(SUCCESS))
 def test_review_shape_transpiles(name):
@@ -240,6 +276,17 @@ TWINS = [
     ("a.set(value = 4.0, index = 1)", "a.set(1, 4.0)"),
     ("a.insert(index = 1, value = 9.0)", "a.insert(1, 9.0)"),
     ("r = a.remove(index = 1)", "r = a.remove(1)"),
+    ("array.sort(a, order = order.descending)", "array.sort(a, order.descending)"),
+    ("a.sort(order = order.descending)", "a.sort(order.descending)"),
+    ("array.sort(order = order.descending, id = a)", "array.sort(a, order.descending)"),
+    ("array.sort(id = a)", "array.sort(a)"),
+    ("array.sort(id = a, order = order.ascending)", "array.sort(a, order.ascending)"),
+    ("a.sort(order = order.ascending)", "a.sort(order.ascending)"),
+    ("r = a.indexof(value = 2.0)", "r = a.indexof(2.0)"),
+    ("r = array.indexof(value = 2.0, id = a)", "r = array.indexof(a, 2.0)"),
+    ("a.unshift(value = 1.0)", "a.unshift(1.0)"),
+    ("array.unshift(a, value = 1.0)", "array.unshift(a, 1.0)"),
+    ("array.unshift(value = 1.0, id = a)", "array.unshift(a, 1.0)"),
 ]
 TWIN_PRELUDE = HEADER + """m1 = matrix.new<float>(2, 2, 1.0)
 m2 = matrix.new<float>(2, 2, 2.0)
@@ -251,6 +298,21 @@ a = array.from(1.0, 2.0, 3.0)
 @pytest.mark.parametrize("keyword,positional", TWINS, ids=[twin[0] for twin in TWINS])
 def test_keyword_form_lowers_like_its_positional_twin(keyword, positional):
     assert transpile(TWIN_PRELUDE + keyword + "\n") == transpile(TWIN_PRELUDE + positional + "\n")
+
+
+@pytest.mark.parametrize("call,method", [
+    ("a.indexof()", "indexof"), ("array.indexof(a)", "indexof"),
+    ("a.unshift()", "unshift"), ("array.unshift(a)", "unshift"),
+    ("a.lastindexof()", "lastindexof"), ("array.includes(a)", "includes"),
+])
+def test_array_template_missing_argument_is_a_located_refusal(call, method):
+    with pytest.raises(CompileError) as raised:
+        transpile(TWIN_PRELUDE + call + "\n")
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic.message == f"array.{method}: wrong number of arguments"
+    assert diagnostic.code
+    assert diagnostic.location.line == len(TWIN_PRELUDE.splitlines()) + 1
+    assert diagnostic.location.col > 0
 
 
 @pytest.mark.parametrize("call", [
@@ -274,6 +336,15 @@ def test_unconsumed_matrix_keyword_uses_existing_diagnostic(call):
     ("a.first(ignored = 1)", "unknown keyword argument"),
     ("a.fill(7.0, 0, index_from = 1)", "passed both positionally and by keyword"),
     ("a.slice(index_to = 1)", "missing required argument"),
+    ("array.sort(order = order.descending)", "missing required argument"),
+    ("array.indexof(value = 2.0)", "missing required argument"),
+    ("array.unshift(value = 1.0)", "missing required argument"),
+    ("a.sort(direction = order.descending)", "unknown keyword argument"),
+    ("a.indexof(needle = 2.0)", "unknown keyword argument"),
+    ("a.unshift(item = 1.0)", "unknown keyword argument"),
+    ("a.sort(order.ascending, order = order.descending)", "passed both positionally and by keyword"),
+    ("a.indexof(2.0, value = 1.0)", "passed both positionally and by keyword"),
+    ("array.unshift(a, 1.0, value = 2.0)", "passed both positionally and by keyword"),
 ])
 def test_unconsumed_array_keyword_uses_existing_diagnostic(call, message):
     with pytest.raises(CompileError, match=message) as error:
@@ -281,12 +352,9 @@ def test_unconsumed_array_keyword_uses_existing_diagnostic(call, message):
     assert all(diagnostic.code for diagnostic in error.value.diagnostics)
 
 
-def test_array_methods_outside_the_checked_table_keep_their_keywords_as_before():
-    # Pine's ``array.sort(id, order)`` has an ``order`` keyword the lowering
-    # does not read: such a call keeps the lowering it had instead of newly
-    # failing to transpile.
+def test_array_sort_keyword_keeps_its_previously_compiling_shape():
     source = HEADER + "a = array.from(2.0, 1.0)\narray.sort(a, order = order.descending)\n"
-    assert "std::sort" in transpile(source)
+    assert "std::greater<>()" in transpile(source)
 
 
 @pytest.mark.parametrize("shape", ["direct", "bound", "method", "untyped", "untyped_bound"])

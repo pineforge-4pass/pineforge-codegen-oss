@@ -901,6 +901,9 @@ CHECKED_ARRAY_METHOD_KWARGS: dict[str, list[str]] = {
     "last": [],
     "pop": [],
     "shift": [],
+    "sort": ["order"],
+    "indexof": ["value"],
+    "unshift": ["value"],
 }
 
 MAP_METHODS = {
@@ -1057,6 +1060,7 @@ MATRIX_OPTIONAL_PARAMS: dict[str, dict[str, int | None]] = {
 }
 ARRAY_OPTIONAL_PARAMS: dict[str, dict[str, int | None]] = {
     "fill": {"index_from": 0, "index_to": None},
+    "sort": {"order": None},
 }
 
 # Matrix mutators whose established C++ lowering returns ``void``.  A Pine

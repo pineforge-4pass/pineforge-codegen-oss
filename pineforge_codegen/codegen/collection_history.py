@@ -78,7 +78,8 @@ class CollectionHistoryEmitter:
                 and not self._collection_name_is_lexically_shadowed(receiver_node.name)
                 and receiver_node.name not in self._current_func_param_types):
             return (f'([&]() -> auto& {{ if (is_na({receiver})) '
-                    f'pine_runtime_error("{NA_MATRIX_MESSAGE}"); return {receiver}; }}())')
+                    f'_PF_COLLECTION_STOP("na_reference", "matrix", "{NA_MATRIX_MESSAGE}"); '
+                    f'return {receiver}; }}())')
         return receiver
 
     def _array_history_value_names(self) -> dict[str, TypeSpec]:
@@ -160,7 +161,8 @@ class CollectionHistoryEmitter:
                 f"const int _pf_history_offset = {offset}; "
                 f"if (_pf_history_offset < 0 || "
                 f"static_cast<size_t>(_pf_history_offset) >= _pf_history_array.size()) "
-                f'pine_runtime_error("Array history element index is out of bounds."); '
+                f'_PF_ARRAY_STOP("index_out_of_bounds", nullptr, '
+                f'"Array history element index is out of bounds."); '
                 f"return _pf_history_array.at(_pf_history_offset); }}())"
             )
         return (
