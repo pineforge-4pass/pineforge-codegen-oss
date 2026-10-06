@@ -71,6 +71,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Documents the timeframe spellings of two surfaces, both stable: a capability
   receipt records a request's timeframe as the script wrote it (`"D"`), and
   request discovery and feed keys use the engine's spelling (`"1D"`).
+- Preserve na array IDs when a history offset has no value, including aliases and `na()`-only bindings; array methods on those IDs report the existing runtime error instead of crashing. Bounds-check legacy collection-element reads and writes to prevent unchecked access.
 
 ## 1.3.0 — 2026-10-06
 

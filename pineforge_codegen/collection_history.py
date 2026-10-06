@@ -233,12 +233,17 @@ COLLECTION_HISTORY_CPP = r"""
 // for a var) opens a slot, and the end of the bar closes it with a copy.
 template <typename T>
 struct _PFCollectionTraits;
+template <typename T>
+class _PFArrayHistoryValue;
 template <typename E, typename A>
 struct _PFCollectionTraits<std::vector<E, A>> {
     static std::shared_ptr<const std::vector<E, A>> freeze(const std::vector<E, A>& value) {
         return std::make_shared<const std::vector<E, A>>(value);
     }
     static std::vector<E, A> copy(const std::vector<E, A>& value) { return value; }
+    static _PFArrayHistoryValue<std::vector<E, A>> reference(std::shared_ptr<const std::vector<E, A>> value) {
+        return _PFArrayHistoryValue<std::vector<E, A>>(value);
+    }
     static bool is_na(const std::vector<E, A>&) { return false; }
     static const char* na_message() {
         return "@NA_ARRAY_MESSAGE@";
@@ -308,6 +313,56 @@ struct _PFCollectionTraits<PineGenericMatrix<E>> {
 };
 """
 
+COLLECTION_HISTORY_ARRAY_VALUE_CPP = r"""
+template <typename T>
+class _PFArrayHistoryValue {
+public:
+    _PFArrayHistoryValue() = default;
+    _PFArrayHistoryValue(const T& value) : value_(std::make_shared<T>(value)) {}
+    _PFArrayHistoryValue(std::shared_ptr<const T> value)
+        : value_(value ? std::make_shared<T>(*value) : nullptr) {}
+    bool is_na() const { return !value_; }
+    T& get() const {
+        if (!value_) pine_runtime_error("@NA_ARRAY_MESSAGE@");
+        return *value_;
+    }
+    operator T&() const { return get(); }
+
+private:
+    std::shared_ptr<T> value_;
+};
+
+template <typename T>
+bool is_na(const _PFArrayHistoryValue<T>& value) { return value.is_na(); }
+
+template <typename T>
+T& _pf_array_id(T& value) { return value; }
+template <typename T>
+const T& _pf_array_id(const T& value) { return value; }
+template <typename T>
+T _pf_array_id(T&& value) { return std::move(value); }
+template <typename T>
+T& _pf_array_id(const _PFArrayHistoryValue<T>& value) { return value.get(); }
+template <typename T>
+T& _pf_array_id(_PFArrayHistoryValue<T>& value) { return value.get(); }
+template <typename T>
+T _pf_array_id(_PFArrayHistoryValue<T>&& value) { return value.get(); }
+
+template <typename T>
+struct _PFCollectionTraits<_PFArrayHistoryValue<T>> {
+    static std::shared_ptr<const _PFArrayHistoryValue<T>> freeze(const _PFArrayHistoryValue<T>& value) {
+        if (value.is_na()) return nullptr;
+        return std::make_shared<const _PFArrayHistoryValue<T>>(T(value.get()));
+    }
+    static _PFArrayHistoryValue<T> copy(const _PFArrayHistoryValue<T>& value) { return value; }
+    static _PFArrayHistoryValue<T> reference(std::shared_ptr<const _PFArrayHistoryValue<T>> value) {
+        return value ? *value : _PFArrayHistoryValue<T>{};
+    }
+    static bool is_na(const _PFArrayHistoryValue<T>& value) { return value.is_na(); }
+    static const char* na_message() { return "@NA_ARRAY_MESSAGE@"; }
+};
+"""
+
 COLLECTION_HISTORY_CLASS_CPP = r"""
 // A change to the history of an array or a matrix stops the run, as
 // TradingView's does (RE10051).
@@ -359,6 +414,13 @@ public:
     T value(int offset, const T& current) const {
         return offset == 0 ? current : value(offset);
     }
+    auto reference(int offset) const {
+        return _PFCollectionTraits<T>::reference(offset > 0 ? slots_[offset] : nullptr);
+    }
+    auto reference(int offset, const T& current) const {
+        return offset == 0 ? _PFCollectionTraits<T>::reference(
+            _PFCollectionTraits<T>::freeze(current)) : reference(offset);
+    }
     // The receiver of a built-in that changes it: the variable itself at a
     // zero offset, else the run stops, as TradingView's does (RE10051; a na
     // history stops it with RE10052 / RE10053 first).
@@ -393,6 +455,7 @@ def _with_messages(text: str) -> str:
 COLLECTION_HISTORY_CPP = _with_messages(COLLECTION_HISTORY_CPP)
 COLLECTION_HISTORY_MATRIX_CPP = _with_messages(COLLECTION_HISTORY_MATRIX_CPP)
 COLLECTION_HISTORY_GENERIC_MATRIX_CPP = _with_messages(COLLECTION_HISTORY_GENERIC_MATRIX_CPP)
+COLLECTION_HISTORY_ARRAY_VALUE_CPP = _with_messages(COLLECTION_HISTORY_ARRAY_VALUE_CPP)
 COLLECTION_HISTORY_CLASS_CPP = _with_messages(COLLECTION_HISTORY_CLASS_CPP)
 
 
@@ -1437,6 +1500,10 @@ class CollectionHistoryChecker:
         if use.how == "copy":
             if uses.change is not None:
                 return self._change_refusal(read, label, uses.change, "a name bound to it")
+            nullable = (uses.element is not None
+                        and all(not tag.startswith("render") for tag in uses.tags))
+            if (nullable and use.form != "parameter" and uses.other is None):
+                return Decision(SUPPORTED, "reference" if kind == "array" else "copy")
             if uses.needs_collection():
                 if uses.element is not None:
                     return Decision(
@@ -1449,7 +1516,7 @@ class CollectionHistoryChecker:
                     return Decision(REFUSED, node=uses.other.node or read.node,
                                     message=uses.other.message or
                                     f"{label} is not supported in PineForge here.")
-                return Decision(SUPPORTED, "copy")
+                return Decision(SUPPORTED, "reference" if kind == "array" else "copy")
             return None
         if kind == "matrix" and use.how == "discard":
             return Decision(SUPPORTED, "copy")

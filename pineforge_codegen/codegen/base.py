@@ -4984,6 +4984,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if name in self._global_collection_types
                 else self._callable_var_collection_spec(name)
             )
+            history_value_cpp = self._array_history_value_cpp_type(name)
+            if history_value_cpp is not None:
+                lines.append(f"    {history_value_cpp} {safe};")
+                continue
             if callable_collection_spec is not None:
                 lines.append(
                     f"    {self._type_spec_to_cpp(callable_collection_spec)} {safe};"
@@ -5182,7 +5186,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             seen_global.add(name)
             safe = self._safe_name(name)
             
-            if name in self._matrix_specs:
+            history_value_cpp = self._array_history_value_cpp_type(name)
+            if history_value_cpp is not None:
+                lines.append(f"    {history_value_cpp} {safe};")
+            elif name in self._matrix_specs:
                 lines.append(f"    {self._type_spec_to_cpp(self._matrix_specs[name])} {safe};")
             elif name in self._array_vars:
                 lines.append(f"    {self._type_spec_to_cpp(self._array_spec_for_name(name))} {safe};")

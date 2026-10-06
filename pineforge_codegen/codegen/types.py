@@ -2004,6 +2004,10 @@ class TypeInferer:
         spec: TypeSpec | None = None, node: ASTNode | None = None,
     ) -> str:
         """Lower ``arr.method(...)`` to its C++ form, validating numeric requirements."""
+        if self._array_history_value_names():
+            array_expr = f"_pf_array_id({array_expr})"
+            if method in ("covariance", "concat") and args:
+                args = [f"_pf_array_id({args[0]})", *args[1:]]
         spec = spec or TypeSpec.array(TypeSpec.primitive("float"))
         arr_cpp_type = self._type_spec_to_cpp(spec)
         elem_cpp = self._type_spec_to_cpp(spec.element) if spec.element is not None else "double"
@@ -2150,6 +2154,10 @@ class TypeInferer:
 
     def _type_for_decl(self, node: VarDecl) -> str:
         """Determine the C++ type for a ``VarDecl``: explicit hint, then symbol, then RHS inference."""
+        history_value_cpp = (self._array_history_value_cpp_type(node.name)
+                             if not getattr(self, "_active_func_name", None) else None)
+        if history_value_cpp is not None:
+            return history_value_cpp
         def promote_wide_int(cpp_type: str) -> str:
             if cpp_type != "int":
                 return cpp_type

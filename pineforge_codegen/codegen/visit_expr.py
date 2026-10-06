@@ -1961,7 +1961,13 @@ class ExprVisitor:
                     "collection IDs, so this result can differ from TradingView "
                     "and a missing index is not represented faithfully.",
                 )
-                return f"{self._collection_receiver_expr(name)}[{idx}]"
+                receiver = self._collection_receiver_expr(name)
+                if spec.kind == "array":
+                    return self._legacy_array_history_element(
+                        receiver, spec, series_idx,
+                        mutable=getattr(self, "_udt_assignment_target", None) is node,
+                    )
+                return f"{receiver}[{idx}]"
         # Handle strategy.* history access (e.g., strategy.position_size[1])
         if isinstance(node.object, MemberAccess):
             if isinstance(node.object.object, Identifier):
@@ -2101,4 +2107,10 @@ class ExprVisitor:
                 self._warn_untracked_reference_history(node)
                 return obj
         idx_int = self._history_offset_cpp(idx, node.index)
+        object_spec = self._type_spec_from_expr(node.object)
+        if object_spec is not None and object_spec.kind == "array":
+            return self._legacy_array_history_element(
+                obj, object_spec, idx_int,
+                mutable=getattr(self, "_udt_assignment_target", None) is node,
+            )
         return f"{obj}[{idx_int}]"
