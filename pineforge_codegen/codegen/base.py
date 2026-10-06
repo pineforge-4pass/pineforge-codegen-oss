@@ -1082,7 +1082,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # (index, signature) of each TA variant computed inline, and
                 # (index, _SECURITY_THROUGH_GLOBAL) of a global's site a
                 # multi-statement helper reads, which the prologue computes.
-                "inline_helper_ta_indices": sorted(inline_helper_ta_indices, key=repr),
+                "inline_helper_ta_indices": inline_helper_ta_indices,
                 "depends_on_mutable_globals": item.get("depends_on_mutable_globals", False),
                 "mutable_globals": list(item.get("mutable_globals", [])),
                 "is_lower_tf_array": bool(item.get("is_lower_tf_array", False)),

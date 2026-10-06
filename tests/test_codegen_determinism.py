@@ -35,10 +35,13 @@ on the fixed tree and >1 on pre-fix ``origin/main``.)
 
 from __future__ import annotations
 
+import ast
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 # Repo root = parent of this tests/ directory. Threaded into the child via
 # PYTHONPATH so ``import pineforge_codegen`` resolves regardless of how/where
@@ -169,3 +172,97 @@ def test_synthetic_history_names_byte_identical_across_hash_seeds() -> None:
         for seed in _SEEDS
     ]
     assert len(set(outputs)) == 1
+
+
+_PERTURBED_CHILD = """
+import dataclasses
+import enum
+import json
+import random
+import sys
+
+generator = random.Random(int(sys.argv[2]))
+retained = []
+
+def perturb():
+    for unused in range(generator.randrange(200, 18000)):
+        size = generator.randrange(1, 512)
+        retained.extend((bytearray(size), [None] * (size // 8), object()))
+
+def encode(value):
+    if isinstance(value, enum.Enum):
+        return value.value
+    if dataclasses.is_dataclass(value):
+        return dataclasses.asdict(value)
+    raise TypeError(type(value).__name__)
+
+perturb()
+sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[1] + "/gate")
+from pineforge_codegen import transpile_full
+from glue import transpile_json
+
+source = sys.stdin.read()
+perturb()
+full = json.dumps(transpile_full(source), default=encode)
+perturb()
+glue = transpile_json(source)
+sys.stdout.write(json.dumps({"full": full, "glue": glue}))
+"""
+
+
+@pytest.mark.parametrize("fixture", [
+    "taila_nested_bucket.pine",
+    "taila_nested_bucket_hull_lag.pine",
+])
+def test_security_history_envelopes_ignore_memory_layout(fixture: str) -> None:
+    """Isolated children use fresh random hashes; -I ignores PYTHONHASHSEED."""
+    source = (_REPO_ROOT / "tests/fixtures/tail_a_tv" / fixture).read_text()
+    outputs = []
+    for seed in _SEEDS[:4]:
+        process = subprocess.run(
+            [sys.executable, "-I", "-c", _PERTURBED_CHILD,
+             str(_REPO_ROOT), str(seed)],
+            input=source,
+            env={**os.environ, "PYTHONHASHSEED": str(seed)},
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert process.returncode == 0, process.stderr
+        assert process.stdout
+        outputs.append(process.stdout)
+    assert len(set(outputs)) == 1
+
+
+def test_emitters_do_not_sort_identity_mapping_keys() -> None:
+    """Guard direct identity-keyed stores, including stores in another mixin."""
+    trees = {
+        path: ast.parse(path.read_text())
+        for path in (_REPO_ROOT / "pineforge_codegen/codegen").glob("*.py")
+    }
+    identity_mappings = {
+        ast.unparse(node.value)
+        for tree in trees.values()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store)
+        and any(isinstance(part, ast.Call)
+                and isinstance(part.func, ast.Name) and part.func.id == "id"
+                for part in ast.walk(node.slice))
+    }
+    assert "self._security_expr_hist_by_node" in identity_mappings
+    violations = []
+    for path, tree in trees.items():
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "sorted" and node.args):
+                continue
+            argument = node.args[0]
+            if (isinstance(argument, ast.Call)
+                    and isinstance(argument.func, ast.Attribute)
+                    and argument.func.attr in {"keys", "items"}):
+                argument = argument.func.value
+            if ast.unparse(argument) in identity_mappings:
+                violations.append(f"{path.name}:{node.lineno}")
+    assert not violations, violations

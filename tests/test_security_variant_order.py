@@ -19,6 +19,8 @@ import pytest
 
 import pineforge_codegen.codegen.security as security_module
 from pineforge_codegen import transpile
+from pineforge_codegen.ast_nodes import Identifier
+from pineforge_codegen.errors import SourceLocation
 
 SOURCES = {
     "arguments": ('//@version=6\nstrategy("variants")\n'
@@ -61,3 +63,35 @@ def test_variants_follow_the_binding_positions():
     body = cpp[cpp.index("void _eval_security_0"):]
     for i, field in enumerate(("close", "open", "high")):
         assert f"_sec0__ta_sma_1_v{i}.compute(bar.{field})" in body, (i, field)
+
+
+def test_variant_position_ties_preserve_traversal_order():
+    emitter = security_module.SecurityEmitter()
+    location = SourceLocation(file="<input>", line=3, col=5, end_col=10)
+    bindings = [
+        ((("src", 9),), ({"src": Identifier(name="close", loc=location)},)),
+        ((("src", 1),), ({"src": Identifier(name="open", loc=location)},)),
+    ]
+    ordered = sorted(
+        bindings, key=lambda item: emitter._security_variant_order_key(*item),
+    )
+    assert ordered == bindings
+    reversed_bindings = [
+        (_reversed_ids(signature), stack) for signature, stack in bindings
+    ]
+    assert sorted(
+        reversed_bindings,
+        key=lambda item: emitter._security_variant_order_key(*item),
+    ) == reversed_bindings
+
+
+def test_expression_history_clear_order_preserves_registration_order():
+    emitter = security_module.SecurityEmitter()
+    emitter._security_expr_hist_by_node = {
+        (1, 9): {"name": "_sec1_expr_hist_0"},
+        (0, 5): {"name": "_sec0_expr_hist_0"},
+        (1, 1): {"name": "_sec1_expr_hist_1"},
+    }
+    assert emitter._security_expr_hist_series_names(1) == [
+        "_sec1_expr_hist_0", "_sec1_expr_hist_1",
+    ]

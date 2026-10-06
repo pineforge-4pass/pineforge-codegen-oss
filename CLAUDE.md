@@ -329,6 +329,11 @@ tests/
    `KNOWN_TRANSPILE_FAILURES` / `KNOWN_COMPILE_FAILURES` with a
    one-line rationale.
 
+6. **Deterministic emission.** Node `id()` values are lookup keys, never
+   ordering keys. Requested expression-history resets follow registration
+   order; TA variants follow binding source positions and retain traversal
+   order at ties. Inline TA identity keys are an unordered membership set.
+
 ## Support contracts
 
 `pineforge_codegen.support_checker` is the gate. Its job is to fail
