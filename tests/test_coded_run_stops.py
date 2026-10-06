@@ -149,6 +149,9 @@ def test_legacy_normalization_keeps_actual_stop_calls_and_nested_settings_guards
     assert 'pine_runtime_error(std::string("named"))' in normalized
     assert "#ifdef PF_SETTINGS_API_VERSION" in normalized
     assert "checked_settings::LatchedSettingsFailure" in normalized
+    conditional = ("#ifndef PINEFORGE_HAS_RUN_FAILURE_CODES_V1\nlegacy_only();\n"
+                   "#else\ncoded_only();\n#endif\n")
+    assert _without_run_failure_scaffold(conditional) == "legacy_only();\n"
 
 
 def test_setter_stop_metadata_has_only_literal_entrypoints_and_reasons():

@@ -13,12 +13,14 @@ def _without_run_failure_scaffold(cpp: str) -> str:
         directive = line.strip()
         if re.match(r'#if(?:def|ndef)?\b', directive):
             feature = 'PINEFORGE_HAS_RUN_FAILURE_CODES_V1' in directive
-            stack.append({'feature': feature, 'parent': active, 'converted': False})
+            stack.append({'feature': feature, 'parent': active, 'converted': False,
+                          'absent_branch': directive.startswith('#ifndef')})
             if feature:
-                active = False
+                active = active and stack[-1]['absent_branch']
                 continue
         elif directive.startswith('#elif') and stack[-1]['feature']:
-            active = stack[-1]['parent']
+            active = stack[-1]['parent'] and (stack[-1]['converted'] or
+                                              not stack[-1]['absent_branch'])
             stack[-1]['converted'] = True
             line = line.replace('#elif defined(PF_SETTINGS_API_VERSION)',
                                 '#ifdef PF_SETTINGS_API_VERSION')
