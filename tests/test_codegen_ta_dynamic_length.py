@@ -33,6 +33,11 @@ from tests._compile import compile_cpp
 from tests._e2e import reference_codegen, transpile_json
 
 
+# Accepted scaffold for whole-C++ noninterference only; historical semantic
+# and compile comparisons keep their separate pre-feature references.
+CPP_IDENTITY_REFERENCE = "1e6eb83354b74ede1326fe55e576e91ea81f156b"
+
+
 def _member_type(cpp: str, member: str) -> str:
     match = re.search(rf"^\s*(\S.*?)\s+{re.escape(member)};$", cpp, re.M)
     assert match, member
@@ -371,9 +376,10 @@ plot(hi + r + st + dir + e)
 
 
 def test_constant_and_input_lengths_keep_their_cpp(tmp_path: Path) -> None:
-    parent = reference_codegen("7a39cb3")
+    parent = reference_codegen(CPP_IDENTITY_REFERENCE)
     if parent is None:
-        pytest.skip("git or commit 7a39cb3 unavailable")
+        pytest.fail(f"required C++ identity reference {CPP_IDENTITY_REFERENCE} unavailable; "
+                    "restore git history")
     pine = tmp_path / "strategy.pine"
     pine.write_text(_CONSTANT_AND_INPUT, encoding="utf-8")
     ours = transpile_json(pine)
