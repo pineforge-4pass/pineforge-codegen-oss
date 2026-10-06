@@ -160,7 +160,7 @@ def test_helper_names_are_reserved(helper):
 @pytest.mark.parametrize("helper", ["_PF_NO_DATA_STOP", "_pf_invariant_at"])
 def test_script_function_with_emitter_name_is_reserved(helper):
     cpp = transpile(PRELUDE + f"{helper}(value) => value + 1\n"
-                    + f"result = {helper}(close)\n")
+                    + f"result = {helper}(41)\n")
     assert not re.search(rf"\bdouble {helper}\(", cpp)
     driver = r'''
 #include <cassert>
@@ -221,7 +221,11 @@ def test_setter_stop_metadata_has_only_literal_entrypoints_and_reasons():
     for entrypoint in ("strategy_set_input", "strategy_set_override",
                        "strategy_set_magnifier_volume_weighted"):
         assert f'_PF_SETTING_FAILURE(static_cast<GeneratedStrategy*>(s), "{entrypoint}",' in cpp
-    assert '{"reason", "unparseable_value"}' in RUN_STOP_SHIMS_CPP
+    assert '{"reason", reason}' in RUN_STOP_SHIMS_CPP
+    assert '_PF_SETTING_FAILURE(static_cast<GeneratedStrategy*>(s), "strategy_set_override", _pf_error.what(), "unparseable_value")' in cpp
+    for entrypoint in ("strategy_set_input", "strategy_set_override",
+                       "strategy_set_magnifier_volume_weighted"):
+        assert f'_PF_SETTING_FAILURE(static_cast<GeneratedStrategy*>(s), "{entrypoint}", _pf_error.what(), nullptr)' in cpp
 
 
 @pytest.mark.parametrize("method, arguments", [
