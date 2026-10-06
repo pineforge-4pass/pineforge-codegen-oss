@@ -423,7 +423,7 @@ int main() {
     assert(strategy.last_error() == "run_backtest_full: copied text");
 #ifdef PINEFORGE_HAS_RUN_FAILURE_CODES_V1
     assert(std::string(run_failure_code_of(strategy)) == "no_data_request");
-    assert(std::string(run_failure_args_of(strategy)) == R"({"call":"request.financial(...)","function":"request.financial","line":3})");
+    assert(std::string(run_failure_args_of(strategy)) == R"args({"call":"request.financial(...)","function":"request.financial","line":3})args");
 #endif
     std::cout << "wrapper kept failure";
 }
