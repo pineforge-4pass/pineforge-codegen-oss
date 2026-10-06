@@ -538,9 +538,10 @@ def test_regular_flags_read_the_regular_day(tmp_path: Path) -> None:
                                 "b = session.isfirstbar or session.islastbar\n"
                                 "if a or b\n"
                                 '    strategy.entry("L", strategy.long)\n')["cpp"]
+    class_body = cpp[:cpp.index('extern "C"')]
 
     def reads(member: str) -> int:
-        return len(re.findall(rf"(?<![\w.]){member}(?!\w)", cpp))
+        return len(re.findall(rf"(?<![\w.]){member}(?!\w)", class_body))
 
     assert reads("session_isfirstbar_regular_") == 1
     assert reads("session_isfirstbar_") == 1 and reads("session_islastbar_") == 1
@@ -588,4 +589,3 @@ def test_security_payload_prepost_warning_names_no_break(tmp_path: Path) -> None
     assert "session break" not in message
     assert "a D/W/M bar, never pre-market on TradingView, reads its open's time of day" in message
     assert "own weekday" not in message and "2400" not in message
-

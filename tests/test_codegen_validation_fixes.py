@@ -216,7 +216,7 @@ def test_security_param_tf_mixed_literals_cloned_per_callsite():
         "b = f(\"15\")\n"
         "plot(a + b)"
     )
-    assert cpp.count("register_security_eval") == 2
+    assert cpp.count("register_security_eval(") == 2
     assert 'register_security_eval(0, "5", input_tf_, false, false)' in cpp
     assert 'register_security_eval(1, "15", input_tf_, false, false)' in cpp
     assert "f_cs0" in cpp and "f_cs1" in cpp
@@ -252,7 +252,7 @@ def test_security_param_tf_six_distinct_literals_cloned_per_callsite():
         "g = scoreFromRange(\"W\")\n"
         "plot(a + b + c + d + e + g)"
     )
-    assert cpp.count("register_security_eval") == 6
+    assert cpp.count("register_security_eval(") == 6
     for cs_idx, tf in enumerate(("5", "15", "60", "240", "D", "W")):
         assert f'register_security_eval({cs_idx}, "{tf}", input_tf_, false, false)' in cpp
         assert f"scoreFromRange_cs{cs_idx}" in cpp
@@ -279,7 +279,7 @@ def test_security_param_tf_nested_ta_six_distinct_literals_cloned_per_callsite()
         "plot(a + b + c + d + e + g)"
     )
     # 2 request.security calls x 6 call sites = 12 evaluators.
-    assert cpp.count("register_security_eval") == 12
+    assert cpp.count("register_security_eval(") == 12
     for cs_idx, tf in enumerate(("5", "15", "60", "240", "D", "W")):
         assert f"scoreFromRange_cs{cs_idx}" in cpp
 

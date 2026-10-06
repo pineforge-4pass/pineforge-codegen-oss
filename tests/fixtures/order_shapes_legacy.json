@@ -1,0 +1,8 @@
+{
+  "base": "c1df8a69346a1fe59e65e357bd9cbd099932fcf9",
+  "source": "//@version=6\nstrategy(\"frozen receipts\", process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1)\nvarip int count = 0\ncount += 1\nvalue = request.security(syminfo.tickerid, \"5\", close)\nstrategy.entry(\"private-L\", strategy.long)\nstrategy.close(\"private-L\")\n",
+  "documents": [
+    "{\"declarations\":{\"backtest_fill_limits_assumption\":0,\"calc_on_every_history_tick\":false,\"calc_on_every_tick\":false,\"calc_on_order_fills\":false,\"currency\":\"currency.NONE\",\"dynamic_requests\":true,\"fill_orders_on_standard_ohlc\":false,\"process_orders_on_close\":true,\"timeframe\":\"\",\"timeframe_gaps\":true,\"use_bar_magnifier\":false},\"requests\":[{\"feed\":\"chart\",\"function\":\"request.security\",\"gaps\":\"barmerge.gaps_off\",\"heikinashi\":false,\"lookahead\":\"barmerge.lookahead_off\",\"symbol\":\"syminfo.tickerid\",\"timeframe\":\"5\"}],\"requirements\":{\"auxiliary_security_feeds\":false,\"fx_curve\":false,\"historical_probe_overrides\":false,\"intrabar_persistence\":true,\"native_security_feeds\":false,\"recorded_series\":false},\"unresolved\":[],\"version\":1}",
+    "{\"intrabar_persistence\":true,\"orders\":[\"close:market\",\"entry:market\",\"strategy() (unproven POOC sizing, slippage or account settings)\"],\"requests\":[{\"expression\":\"close\",\"feed\":\"chart\",\"function\":\"request.security\",\"gaps\":\"barmerge.gaps_off\",\"heikinashi\":false,\"lookahead\":\"barmerge.lookahead_off\",\"symbol\":\"syminfo.tickerid\",\"timeframe\":\"5\"}],\"version\":1}"
+  ]
+}

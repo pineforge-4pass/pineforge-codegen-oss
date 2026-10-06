@@ -307,3 +307,13 @@ def emit_capabilities_exports(emitter, lines: list[str]) -> None:
         f"            ::pineforge::checked_settings::receipt({json.dumps(confirmed)}, json, capacity, required);",
         "        });", "    }", "#endif", "#endif",
     ])
+    from .order_shapes import order_shapes_document
+    lines[-2:-2] = [
+        "    uint32_t strategy_order_shapes_api_version(void) { return 1u; }",
+        "    int strategy_order_shapes_receipt(void* s, char* json, size_t capacity, size_t* required, char* error, size_t error_capacity) {",
+        "        if (required) *required = 0;",
+        "        return ::pineforge::checked_settings::boundary(error, error_capacity, [&] {",
+        '            ::pineforge::checked_settings::require(s != nullptr, "null strategy");',
+        f"            ::pineforge::checked_settings::receipt({json.dumps(order_shapes_document(emitter))}, json, capacity, required);",
+        "        });", "    }",
+    ]
