@@ -1129,12 +1129,11 @@ MATH_FUNC_MAP = {
 STR_FUNC_MAP = {
     "tostring":    None,  # handled separately (already works)
     "tonumber":    lambda args: (
-        f"[&](){{ "
-        f"std::string _pf_number_text={args[0]}; "
+        f"[&](std::string _pf_number_text){{ "
         f"try {{ return std::stod(_pf_number_text); }} "
         f"catch (const std::invalid_argument&) {{ return na<double>(); }} "
         f"catch (const std::out_of_range&) {{ return na<double>(); }} "
-        f"}}()"
+        f"}}(({args[0]}))"
     ),
     "length":      lambda args: f"(int){args[0]}.length()",
     "contains":    lambda args: f"({args[0]}.find({args[1]}) != std::string::npos)",

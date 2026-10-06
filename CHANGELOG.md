@@ -37,6 +37,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - `str.tonumber` no longer hides a stop raised while evaluating its argument;
   only numeric parse failures become `na`. Invalid array sizes, substring
   positions and overflowing format-placeholder indices have checked stops.
+  String parsing and checked substring calls do not capture authored helper-like
+  names; substring arguments retain source order without copying the source text.
 - Generated run wrappers preserve the inner failure code, and latched setter
   failures and checked strategy construction retain their failure identity.
 

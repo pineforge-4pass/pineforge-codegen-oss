@@ -6,8 +6,13 @@ import re
 import pytest
 
 from pineforge_codegen import transpile
-from pineforge_codegen.codegen.helpers import CPP_EMITTER_NAMES, CPP_STANDARD_MACROS
+from pineforge_codegen.codegen.helpers import (
+    CPP_EMITTER_NAMES, CPP_STANDARD_MACROS, is_emitter_temporary,
+)
 from pineforge_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP, request_stop
+from pineforge_codegen.external_requests import request_stop_marker
+from pineforge_codegen.lexer import Lexer
+from pineforge_codegen.parser import Parser
 from tests._compile import compile_cpp, run_emitted_tu
 from tests._legacy_cpp import _without_run_failure_scaffold
 
@@ -18,6 +23,20 @@ HELPERS = (
     "pine_collection_stop", "pine_na_stop", "pine_limit_stop",
     "pine_unsupported_stop", "pine_string_stop", "pine_engine_invariant",
     "note_run_failure", "note_run_failure_unknown",
+    "_pf_invariant_at", "_pf_setting_failure_info_",
+    "_pf_setting_error_base", "_pf_latched_setting_error",
+)
+SHIMS = (
+    "_PF_NO_DATA_STOP", "_PF_OTHER_SYMBOL_STOP", "_PF_ARRAY_STOP",
+    "_PF_COLLECTION_STOP", "_PF_NA_STOP", "_PF_LIMIT_STOP",
+    "_PF_UNSUPPORTED_STOP", "_PF_STRING_STOP", "_PF_ENGINE_INVARIANT",
+    "_PF_INVARIANT_AT", "_PF_SETTING_FAILURE",
+)
+TEMPORARIES = (
+    "_pf_number_text", "_pf_substring_text", "_pf_substring_begin",
+    "_pf_substring_end", "_pf_substring_error", "_pf_substring_arg0",
+    "_pf_array_new_size", "_pf_array_new_value", "_pf_array_new_size_type",
+    "_pf_array_new_error",
 )
 
 
@@ -66,8 +85,10 @@ fail() =>
 amount = str.tonumber(fail())
 strategy.entry("L", strategy.long, qty=amount)
 ''')
-    statement = next(line for line in cpp.splitlines() if "_pf_number_text=" in line)
-    assert statement.index("_pf_number_text=") < statement.index("try {")
+    statement = next(line for line in cpp.splitlines()
+                     if "[&](std::string _pf_number_text)" in line)
+    assert "_pf_number_text=" not in statement
+    assert re.search(r"}\(\(.*fail\(\).*\)\)", statement)
     assert "std::stod(_pf_number_text)" in statement
     assert "catch (const std::invalid_argument&)" in statement
     assert "catch (const std::out_of_range&)" in statement
@@ -104,9 +125,9 @@ void stop(Action action, const char* expected_code) {
     }
 }
 int main() {
-    stop([] { _PF_NO_DATA_STOP("request.financial", "request.financial(...) at line 3", 3, "unchanged"); }, "no_data_request");
-    stop([] { _PF_OTHER_SYMBOL_STOP("request.security", "A:X", "request.security(...) at line 3", 3, "unchanged"); }, "other_symbol_request");
-    stop([] { _PF_OTHER_SYMBOL_STOP("request.security_lower_tf", nullptr, "request.security_lower_tf(...) at line 3", 3, "unchanged"); }, "other_symbol_request");
+    stop([] { _PF_NO_DATA_STOP("request.financial", "request.financial(...)", 3, "unchanged"); }, "no_data_request");
+    stop([] { _PF_OTHER_SYMBOL_STOP("request.security", "A:X", "request.security(...)", 3, "unchanged"); }, "other_symbol_request");
+    stop([] { _PF_OTHER_SYMBOL_STOP("request.security_lower_tf", nullptr, "request.security_lower_tf(...)", 3, "unchanged"); }, "other_symbol_request");
     stop([] { _PF_ARRAY_STOP("index_out_of_bounds", "get", "unchanged"); }, "pine_array_error");
     stop([] { _PF_ARRAY_STOP("slice_range_inverted", "slice", "unchanged"); }, "pine_array_error");
     stop([] { _PF_ARRAY_STOP("empty_array_access", "first", "unchanged"); }, "pine_array_error");
@@ -127,12 +148,53 @@ int main() {
     assert run_emitted_tu(cpp, driver, opt="-O2", label="both run-stop branches") == "all stops propagated"
 
 
-@pytest.mark.parametrize("helper", HELPERS)
+@pytest.mark.parametrize("helper", HELPERS + SHIMS + TEMPORARIES)
 def test_helper_names_are_reserved(helper):
-    assert helper in CPP_EMITTER_NAMES
+    assert (helper in CPP_EMITTER_NAMES or helper in CPP_STANDARD_MACROS
+            or is_emitter_temporary(helper))
     cpp = transpile(PRELUDE + f"{helper} = close\nplot({helper})\n")
     assert not re.search(rf"\bdouble {helper}\b", cpp)
     compile_cpp(cpp, label=f"reserved {helper}")
+
+
+@pytest.mark.parametrize("helper", ["_PF_NO_DATA_STOP", "_pf_invariant_at"])
+def test_script_function_with_emitter_name_is_reserved(helper):
+    cpp = transpile(PRELUDE + f"{helper}(value) => value + 1\n"
+                    + f"result = {helper}(close)\n")
+    assert not re.search(rf"\bdouble {helper}\(", cpp)
+    driver = r'''
+#include <cassert>
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{41.0, 41.0, 41.0, 41.0, 1.0, 0};
+    strategy.on_source_bar(bar);
+    assert(strategy.result == 42.0);
+    std::cout << "reserved function ran";
+}
+'''
+    assert run_emitted_tu(cpp, driver, opt="-O2", label="reserved function") == "reserved function ran"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_tonumber_script_temporary_name_is_not_captured(legacy):
+    cpp = transpile(PRELUDE + '_pf_number_text = "12.5"\n'
+                    + 'result = str.tonumber(_pf_number_text)\n')
+    assert "_pf_number_text=_pf_number_text" not in cpp
+    if legacy:
+        cpp = _legacy_branch(cpp)
+    driver = r'''
+#include <cassert>
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    strategy.on_source_bar(bar);
+    assert(strategy.result == 12.5);
+    std::cout << "number argument was not captured";
+}
+'''
+    assert run_emitted_tu(cpp, driver, opt="-O2", label="tonumber argument name") == "number argument was not captured"
 
 
 def test_feature_macro_is_reserved_and_shim_is_emitted_once():
@@ -226,11 +288,27 @@ def test_forged_english_does_not_select_a_request_stop():
 
 def test_request_stop_escapes_only_compile_time_metadata():
     marker = {"function": "request.security", "kind": "other_symbol", "symbol_literal": 'A:"X',
-              "call": 'request.security("A:\"X", "60", ...) at line 7', "line": 7,
+              "call": 'request.security("A:\"X", "60", ...)', "line": 7,
               "message": 'quote " and newline\n'}
     stop = request_stop(marker)
     assert '\\"' in stop and '\\n' in stop
     assert '\n' not in stop
+
+
+@pytest.mark.parametrize("expression, expected", [
+    ('request.financial("A:X", "TOTAL_SHARES_OUTSTANDING", "FQ")',
+     'request.financial("A:X", "TOTAL_SHARES_OUTSTANDING", ...)'),
+    ('request.security(input.symbol("A:X"), "60", close)',
+     'request.security(input.symbol("A:X") at line 3, "60", ...)'),
+])
+def test_request_call_omits_only_its_top_level_line_suffix(expression, expected):
+    source = PRELUDE + f"price = {expression}\n"
+    program = Parser(Lexer(source).tokenize(), source=source).parse()
+    marker = request_stop_marker(program.body[-1].value)
+    call, line, english = marker["call"], marker["line"], marker["message"]
+    assert call == expected
+    assert line == 3
+    assert f"{call} at line {line}: no data is pinned for this request, and its value was read" == english
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -243,6 +321,7 @@ overflow = str.tonumber("1e9999")
 formatted = str.format("{0} {1}", "text", 7)
 items = array.new_int(2, 3)
 ''')
+    assert "[&](const std::string& _pf_substring_text," in cpp
     if legacy:
         cpp = _legacy_branch(cpp)
     driver = r'''
@@ -325,7 +404,7 @@ int main() {
 def test_wrapper_keeps_the_inner_code_not_its_english(legacy):
     cpp = transpile(PRELUDE)
     before = "try { _pf_run_backtest_full_impl(s, bars, n, input_tf, script_tf, bar_magnifier, magnifier_samples, magnifier_dist, out); }"
-    after = 'try { _PF_NO_DATA_STOP("request.financial", "request.financial(...) at line 3", 3, "copied text"); }'
+    after = 'try { _PF_NO_DATA_STOP("request.financial", "request.financial(...)", 3, "copied text"); }'
     assert cpp.count(before) == 1
     cpp = cpp.replace(before, after)
     if legacy:
@@ -340,7 +419,7 @@ int main() {
     assert(strategy.last_error() == "run_backtest_full: copied text");
 #ifdef PINEFORGE_HAS_RUN_FAILURE_CODES_V1
     assert(std::string(run_failure_code_of(strategy)) == "no_data_request");
-    assert(std::string(run_failure_args_of(strategy)) == R"({"call":"request.financial(...) at line 3","function":"request.financial","line":3})");
+    assert(std::string(run_failure_args_of(strategy)) == R"({"call":"request.financial(...)","function":"request.financial","line":3})");
 #endif
     std::cout << "wrapper kept failure";
 }
@@ -381,6 +460,38 @@ int main() {
 }
 '''
     assert run_emitted_tu(cpp, driver, opt="-O2", label="setter failure code") == "first setting refusal retained"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("entrypoint, original, exception", [
+    ("strategy_set_input", "set_input(key, value)", 'std::runtime_error("not a parse")'),
+    ("strategy_set_magnifier_volume_weighted", "set_magnifier_volume_weighted(on != 0)", "17"),
+])
+def test_nonparse_setter_failure_omits_the_parse_reason(legacy, entrypoint, original, exception):
+    cpp = transpile(PRELUDE)
+    before = f"try {{ static_cast<GeneratedStrategy*>(s)->{original}; }}"
+    assert cpp.count(before) == 1
+    cpp = cpp.replace(before, f"try {{ throw {exception}; }}")
+    if legacy:
+        cpp = _legacy_branch(cpp)
+    invocation = ('strategy_set_input(&strategy, "value", "text");'
+                  if entrypoint == "strategy_set_input" else
+                  'strategy_set_magnifier_volume_weighted(&strategy, 1);')
+    driver = r'''
+#include <cassert>
+#include <iostream>
+int main() {
+    GeneratedStrategy strategy;
+    INVOCATION
+#ifdef PINEFORGE_HAS_RUN_FAILURE_CODES_V1
+    assert(std::string(run_failure_code_of(strategy)) == "setting_rejected");
+    assert(std::string(run_failure_args_of(strategy)) == R"({"entrypoint":"ENTRYPOINT"})");
+#endif
+    assert(!strategy.last_error().empty());
+    std::cout << "nonparse setting refusal retained";
+}
+'''.replace("INVOCATION", invocation).replace("ENTRYPOINT", entrypoint)
+    assert run_emitted_tu(cpp, driver, opt="-O2", label="nonparse setter reason") == "nonparse setting refusal retained"
 
 
 @pytest.mark.parametrize("legacy", [False, True])

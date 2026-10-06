@@ -359,7 +359,7 @@ def no_data_request(node) -> str | None:
     return None
 
 
-def spell_call(node: FuncCall) -> str:
+def spell_call_spelling(node: FuncCall) -> str:
     """The call as a message names it: callee and its first arguments."""
     ns, name = _call_name(node)
     head = f"{ns}.{name}" if ns else str(name)
@@ -379,8 +379,13 @@ def spell_call(node: FuncCall) -> str:
     shown = [arg(a) for a in node.args[:2]]
     if len(node.args) > 2 or node.kwargs:
         shown.append("...")
+    return f"{head}({', '.join(shown)})"
+
+
+def spell_call(node: FuncCall) -> str:
+    """The message's call spelling and its top-level source-line suffix."""
     line = f" at line {node.loc.line}" if node.loc is not None else ""
-    return f"{head}({', '.join(shown)}){line}"
+    return f"{spell_call_spelling(node)}{line}"
 
 
 class TradeSlice:
@@ -754,7 +759,7 @@ def request_stop_marker(node: FuncCall) -> dict:
         "message": unpinned_message(node),
         "kind": "other_symbol" if other_symbol else "no_data",
         "function": f"{namespace}.{function}",
-        "call": spell_call(node),
+        "call": spell_call_spelling(node),
         "line": node.loc.line if node.loc else 1,
         "symbol_literal": symbol.value if isinstance(symbol, StringLiteral) else None,
     }

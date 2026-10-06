@@ -15,7 +15,7 @@ RUN_STOP_SHIMS_CPP = r"""
 #define _PF_STRING_STOP(reason, english) ::pineforge::pine_string_stop(reason, english)
 #define _PF_ENGINE_INVARIANT(english, legacy_type) ::pineforge::pine_engine_invariant(english)
 #define _PF_INVARIANT_AT(container, index) _pf_invariant_at(container, index)
-#define _PF_SETTING_FAILURE(strategy, entrypoint, message) (strategy)->_pf_record_setting_failure(entrypoint, message, [] { return ::pineforge::RunFailureInfo(::pineforge::RunFailureCode::setting_rejected, {{"entrypoint", entrypoint}, {"reason", "unparseable_value"}}); })
+#define _PF_SETTING_FAILURE(strategy, entrypoint, message, reason) (strategy)->_pf_record_setting_failure(entrypoint, message, [] { return reason ? ::pineforge::RunFailureInfo(::pineforge::RunFailureCode::setting_rejected, {{"entrypoint", entrypoint}, {"reason", reason}}) : ::pineforge::RunFailureInfo(::pineforge::RunFailureCode::setting_rejected, {{"entrypoint", entrypoint}}); })
 template <typename Container, typename Index>
 decltype(auto) _pf_invariant_at(Container& container, Index index) {
     try { return container.at(index); }
@@ -32,7 +32,7 @@ decltype(auto) _pf_invariant_at(Container& container, Index index) {
 #define _PF_STRING_STOP(reason, english) pine_runtime_error(std::string(english))
 #define _PF_ENGINE_INVARIANT(english, legacy_type) throw legacy_type(english)
 #define _PF_INVARIANT_AT(container, index) (container).at(index)
-#define _PF_SETTING_FAILURE(strategy, entrypoint, message) (strategy)->_pf_record_setting_failure(entrypoint, message)
+#define _PF_SETTING_FAILURE(strategy, entrypoint, message, reason) (strategy)->_pf_record_setting_failure(entrypoint, message)
 #endif
 """
 

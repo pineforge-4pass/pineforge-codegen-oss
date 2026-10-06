@@ -3652,7 +3652,7 @@ class CallVisitor:
 
                 def checked_substring(bound):
                     return (
-                        f"[&](std::string _pf_substring_text, auto _pf_substring_begin{end_parameter}){{ "
+                        f"[&](const std::string& _pf_substring_text, auto _pf_substring_begin{end_parameter}){{ "
                         "try { return _pf_substring_text.substr(_pf_substring_begin"
                         f"{count}); }} catch (const std::out_of_range& _pf_substring_error) {{ "
                         '_PF_STRING_STOP("substring_out_of_range", _pf_substring_error.what()); '

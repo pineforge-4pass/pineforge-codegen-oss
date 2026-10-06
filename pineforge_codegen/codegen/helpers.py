@@ -263,6 +263,9 @@ CPP_STANDARD_MACROS = frozenset("""
     PINEFORGE_HAS_AUX_SECURITY_FEED_V1 PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1
     PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1
     PINEFORGE_HAS_RUN_FAILURE_CODES_V1
+    _PF_NO_DATA_STOP _PF_OTHER_SYMBOL_STOP _PF_ARRAY_STOP _PF_COLLECTION_STOP
+    _PF_NA_STOP _PF_LIMIT_STOP _PF_UNSUPPORTED_STOP _PF_STRING_STOP
+    _PF_ENGINE_INVARIANT _PF_INVARIANT_AT _PF_SETTING_FAILURE
     PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1
     PINEFORGE_NO_STRATEGY_DECLS PF_PINE_TIME_HAS_SESSION_DAY
     PF_PINE_TIME_SESSION_DAY_ARGS PF_VWAP_HAS_SESSION_ANCHOR
@@ -321,7 +324,8 @@ CPP_EMITTER_NAMES = frozenset("""
     get_input_int get_input_float get_input_bool get_input_string
     _pf_record_failure _pf_refuse_failed_setting _pf_settings_declared_config
     _pf_record_setting_failure _pf_require_settings_ok
-    _pf_setting_failed_ _pf_setting_failure_
+    _pf_setting_failed_ _pf_setting_failure_ _pf_setting_failure_info_
+    _pf_setting_error_base _pf_latched_setting_error _pf_invariant_at
     _pf_settings_inputs _pf_settings_overrides _pf_set_input_checked
     _pf_set_override_checked _pf_settings_receipt
     _pf_close_entries_rule_word _pf_default_qty_type_word _pf_commission_type_word
@@ -373,12 +377,16 @@ CPP_TEMPORARY_NAMES = frozenset("""
     __pf_s __pf_r __pf_p __pf_i __pf_j __pf_t __pf_it __pf_m __pf_c __pf_n
     __pf_k __pf_b __pf_ma __pf_mb __pf_f __pf_d __pf_best __pf_bc __pf_rank
     __pf_idx __pf_occ
+    _pf_number_text
+    _pf_substring_text _pf_substring_begin _pf_substring_end _pf_substring_error
+    _pf_array_new_size _pf_array_new_value _pf_array_new_size_type _pf_array_new_error
 """.split())
 _CPP_TEMPORARY_PATTERN = re.compile(
     r"_v\d+|_secval_\d+(?:_v\d+)?|_tuple_result_\d+|_tuple_unused_\d+|__switch_val_\d+"
     r"|_for_(?:start|end|end_eval)_\d+|_pf_(?:str|array|round)_a\d+"
     r"|_pf_every_bar_ta_\d+|_pf_shared_\d+_\d+|__pf_array\w*|__pf_raw_\w+"
     r"|_pf_collection_hist_\w+"
+    r"|_pf_substring_arg\d+"
 )
 
 
