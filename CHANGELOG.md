@@ -41,6 +41,36 @@ supported as exact pairs; on the 0.x line they are independent. See the
   names; substring arguments retain source order without copying the source text.
 - Generated run wrappers preserve the inner failure code, and latched setter
   failures and checked strategy construction retain their failure identity.
+- The transpile-time input manifest (`transpile_full()["inputs"]` and the JSON
+  envelope of the Pyodide package) gains `supported`, the checked-settings
+  receipt's flag, on every input, and reads its defaults, choices and bounds
+  from the descriptor that generates the receipt, so the two agree for every
+  input of the public corpus and the repository's fixtures. Generated C++,
+  `strategyParams` and `requests` are unchanged and no key is renamed or
+  removed, but these values of existing keys change:
+  - Source inputs (`input.source`, a plain `input(close)`): `default` is the
+    series name, where it was `null`, and `options` lists the nine native
+    sources, where it was absent.
+  - Enum inputs: `options` lists the `Enum.member` choices, where it was
+    absent.
+  - String inputs: a built-in constant publishes its runtime value
+    (`alert.freq_all` is `"all"`, `currency.USD` is `"USD"`; the manifest held
+    the Pine names), a named string constant its value, and the choices of
+    `input.timeframe` and `input.session` are listed. What the receipt cannot
+    represent (`size.small`, `position.top_right`, `na`) is `default: ""`,
+    `options: []` and `supported: false`.
+  - Typed `int`, `float`, `price`, `time` and `bool` inputs: a signed or
+    named-constant `default` is a number, where it was `null`; `min`, `max` and
+    `step` appear for signed and named-constant bounds (`minval=-80` was left
+    out); an `options=[...]` dropdown lists its numbers.
+  - A plain `input(-5)` or `input(-2.5)` is typed `int` or `float` with its
+    number as `default`, where it was `string` with `null`.
+
+  Values the receipt computes at run time (`LEN * 2`, `not true`,
+  `timestamp(year, month, ...)`, a color) stay unpublished, as before.
+- Documents the timeframe spellings of two surfaces, both stable: a capability
+  receipt records a request's timeframe as the script wrote it (`"D"`), and
+  request discovery and feed keys use the engine's spelling (`"1D"`).
 
 ## 1.3.0 — 2026-10-06
 

@@ -84,7 +84,8 @@ def test_input_symbol_is_keyed_by_the_title_its_override_uses():
     }]
     manifest = {entry["title"]: entry for entry in full["inputs"]}
     assert manifest["Other symbol"] == {"title": "Other symbol", "type": "string",
-                                        "default": "BINANCE:ETHUSDT", "kind": "symbol"}
+                                        "default": "BINANCE:ETHUSDT", "kind": "symbol",
+                                        "supported": True}
     assert 'const std::string _pf_symbol = get_input_string("Other symbol", ' in full["cpp"]
     assert resolve(full["requests"], "240", {"Other symbol": "BINANCE:SOLUSDT"}) == {
         ("BINANCE:SOLUSDT", "240")}

@@ -1,5 +1,6 @@
 """Opt-in settings metadata, validation and exception-contained C exports."""
 
+import json
 import re
 
 from ..ast_nodes import Identifier, MemberAccess
@@ -43,6 +44,38 @@ def _visit_setting_arg(emitter, expr) -> str:
     except CompileError as error:
         emitter._defer_settings_error(error)
         return "0"
+
+
+def _string_setting_value(lowered: str) -> str:
+    literal = lowered[len("std::string("):-1] if lowered.startswith("std::string(") else lowered
+    return json.loads(literal, strict=False)
+
+
+_NUMERIC_LITERAL = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?(?:LL|ULL|L|UL|[fF])?")
+_NUMERIC_SUFFIX = re.compile(r"(?:LL|ULL|L|UL|[fF])$")
+
+
+def _numeric_setting_value(lowered: str) -> int | float | bool | None:
+    """The number or bool a lowered C++ setting expression is, or None.
+
+    Only a plain literal, signed or in parentheses, is read: what the codegen
+    emits for a literal or for a named constant it inlines. Anything the C++
+    computes at run time (an arithmetic expression, a call, a series) stays
+    with the receipt, which evaluates it.
+    """
+    text = lowered.strip()
+    while text.startswith("(") and text.endswith(")"):
+        text = text[1:-1].strip()
+    if text in ("true", "false"):
+        return text == "true"
+    if not _NUMERIC_LITERAL.fullmatch(text):
+        return None
+    text = _NUMERIC_SUFFIX.sub("", text)
+    return float(text) if re.search(r"[.eE]", text) else int(text)
+
+
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> None:
@@ -112,6 +145,7 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
         "    }",
     ])
     inputs = []
+    emitter._input_settings_metadata = {}
     for node, binding in emitter._global_input_calls_with_names():
         func_name, namespace = emitter._resolve_callee(node.callee)
         name = emitter._get_input_title(node, var_name=binding)
@@ -128,6 +162,7 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
         }[getter]
         kind = emitter._FORM_TYPE.get(func_name, value_type) if namespace == "input" else value_type
         options = []
+        numeric_options = []
         option_values = []
         supported = "true"
         default_serialized = None
@@ -184,6 +219,7 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
                             options.append(option_cpp)
                     else:
                         options.append(f'::pineforge::checked_settings::number({option_cpp})')
+                        numeric_options.append(option_cpp)
             if getter == "get_input_string":
                 if arguments.get("options") is not None and declared is None:
                     supported = "false"
@@ -203,6 +239,31 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
                     f'{64 if getter == "get_input_int64" else 32}, {supported}, '
                     f'{{{", ".join(option_values)}}}, "{kind}"}}')
         inputs.append((metadata, effective))
+        manifest = {}
+        if getter == "get_input_string":
+            manifest["default"] = _string_setting_value(default_serialized)
+            if arguments.get("options") is not None or supported == "false":
+                manifest["options"] = [_string_setting_value(option) for option in options]
+        elif value_type == "source":
+            manifest["default"] = source
+            manifest["options"] = [_string_setting_value(option) for option in options]
+        elif value_type == "enum":
+            manifest["options"] = [_string_setting_value(option) for option in options]
+        elif namespace == "input" and kind in ("int", "float", "bool"):
+            # A typed numeric or bool input publishes the numbers the receipt
+            # holds, where its C++ is a plain literal.
+            default_value = _numeric_setting_value(default_cpp) if default is not None else None
+            if default_value is not None and isinstance(default_value, bool) == (kind == "bool"):
+                manifest["default"] = default_value
+            for field, lowered in zip(("min", "max", "step"), constraints):
+                bound = _numeric_setting_value(lowered)
+                if _is_number(bound):
+                    manifest[field] = bound
+            values = [_numeric_setting_value(option) for option in numeric_options]
+            if values and all(_is_number(value) for value in values):
+                manifest["options"] = values
+        manifest["supported"] = supported == "true"
+        emitter._input_settings_metadata[id(node)] = manifest
 
     overrides = [
         ("initial_capital", "float", "initial_capital", "initial_capital", "0.0"),

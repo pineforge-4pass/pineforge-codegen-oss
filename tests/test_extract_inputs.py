@@ -39,11 +39,12 @@ def test_string_options():
     assert inp["options"] == ["a", "b", "c"]
 
 
-def test_non_const_options_omitted():
-    # options referencing a non-literal must be omitted, not crash
+def test_const_identifier_string_options_match_the_receipt():
     r = _full("v = \"x\"\nmode = input.string(\"a\", \"Mode\", options=[v, \"b\"])\n")
     inp = next(i for i in r["inputs"] if i["title"] == "Mode")
-    assert "options" not in inp
+    assert inp["supported"] is True
+    assert inp["options"] == ["x", "b"]
+    assert inp["default"] == "a"
 
 
 def test_source_type():
@@ -80,15 +81,37 @@ def test_plain_input_string_form_type():
     assert inp["default"] == "a"
 
 
-def test_non_const_minval_bound_omitted():
-    # minval bound referencing a prior const-assigned identifier is non-literal
-    # at the call site -> "min" omitted, no crash, other facets unaffected.
+def test_named_constant_bound_is_published():
+    # A named constant the codegen inlines is the receipt's own minimum: the
+    # manifest publishes it, the other facets unaffected.
     r = _full("somevar = 2\nlen = input.int(14, \"Len\", minval=somevar, maxval=200, step=2)\n")
+    inp = next(i for i in r["inputs"] if i["title"] == "Len")
+    assert inp["default"] == 14
+    assert inp["min"] == 2
+    assert inp["max"] == 200
+    assert inp["step"] == 2
+
+
+def test_computed_minval_bound_omitted():
+    # A bound the C++ computes (a call, an expression) is not a literal the
+    # manifest can publish: "min" omitted, no crash, other facets unaffected.
+    r = _full("len = input.int(14, \"Len\", minval=math.max(1, 2), maxval=200, step=2)\n")
     inp = next(i for i in r["inputs"] if i["title"] == "Len")
     assert inp["default"] == 14
     assert "min" not in inp
     assert inp["max"] == 200
     assert inp["step"] == 2
+
+
+def test_non_constant_options_are_unsupported():
+    # A reassigned name or an array variable is no literal choice list: the
+    # input is unsupported with no choices, as the receipt has it.
+    for body in ("v = \"x\"\nv := \"y\"\nmode = input.string(\"a\", \"Mode\", options=[v, \"b\"])\n",
+                 "opts = array.from(\"a\", \"b\")\nmode = input.string(\"a\", \"Mode\", options=opts)\n"):
+        inp = next(i for i in _full(body)["inputs"] if i["title"] == "Mode")
+        assert inp["supported"] is False
+        assert inp["options"] == []
+        assert inp["default"] == "a"
 
 
 def test_zero_inputs():
