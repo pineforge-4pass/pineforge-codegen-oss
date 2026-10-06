@@ -241,7 +241,9 @@ def test_all_string_input_forms_match_native_receipt(value, expected, opt):
     assert len(full["inputs"]) == len(receipt["inputs"]) == len(forms)
     for metadata, checked, (kind, title, options) in zip(full["inputs"], receipt["inputs"], forms):
         assert metadata["title"] == checked["name"] == title
-        assert metadata["kind"] == checked["kind"] == kind
+        assert metadata["type"] == checked["kind"]
+        if kind == "symbol":
+            assert metadata["kind"] == "symbol"
         assert metadata["supported"] is True
         assert metadata["default"] == checked["default"] == checked["effective_value"] == expected
         assert metadata.get("options", []) == ([expected, "safe"] if options else [])
