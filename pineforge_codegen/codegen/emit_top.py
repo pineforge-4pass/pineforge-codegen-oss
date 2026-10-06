@@ -1903,7 +1903,7 @@ class TopLevelEmitter:
         lines.append("    void* strategy_create(const char* params_json) {")
         lines.append("#if defined(PINEFORGE_HAS_RUN_FAILURE_CODES_V1) && defined(PF_SETTINGS_API_VERSION)")
         lines.append("        void* out = nullptr;")
-        lines.append("        strategy_create_checked(params_json, &out, nullptr, 0);")
+        lines.append("        strategy_create_checked(nullptr, &out, nullptr, 0);")
         lines.append("        return out;")
         lines.append("#else")
         lines.append("        try { return new GeneratedStrategy(); } catch (...) { return nullptr; }")

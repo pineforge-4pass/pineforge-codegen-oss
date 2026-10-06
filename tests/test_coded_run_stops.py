@@ -408,6 +408,33 @@ int main() {
 
 
 @pytest.mark.parametrize("legacy", [False, True])
+def test_legacy_construction_keeps_ignoring_reserved_params_json(legacy):
+    cpp = transpile(PRELUDE)
+    if legacy:
+        cpp = _legacy_branch(cpp)
+    driver = r'''
+#include <cassert>
+#include <iostream>
+int main() {
+    const char* parameter_values[] = {nullptr, "", "{}", "{\"legacy\":1}"};
+    for (const char* parameters : parameter_values) {
+        void* strategy = strategy_create(parameters);
+        assert(strategy != nullptr);
+        strategy_free(strategy);
+    }
+#ifdef PF_SETTINGS_API_VERSION
+    void* strategy = nullptr;
+    char error[128];
+    assert(strategy_create_checked("{}", &strategy, error, sizeof(error)) == PF_SETTINGS_UNSUPPORTED);
+    assert(strategy == nullptr);
+#endif
+    std::cout << "legacy creation still ignores reserved parameters";
+}
+'''
+    assert run_emitted_tu(cpp, driver, opt="-O2", label="legacy create compatibility") == "legacy creation still ignores reserved parameters"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
 def test_matrix_collection_history_uses_its_literal_collection(legacy):
     cpp = transpile(PRELUDE + 'var values = matrix.new<float>(1, 1, 2.0)\ncount = matrix.rows(values[1])\n')
     assert '_PF_COLLECTION_STOP("historical_modified", "matrix",' in cpp
