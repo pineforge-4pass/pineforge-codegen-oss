@@ -20,6 +20,13 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## Unreleased
+
+- Generated C++ no longer depends on memory layout: requested-context history
+  resets and TA variant position ties preserve their traversal order. Refusal
+  diagnostics for conflicting scalar history and map locals are hash-seed
+  independent.
+
 ## 1.3.0 — 2026-10-06
 
 A minor release: generated strategy libraries gain two receipts beside 1.2.0's

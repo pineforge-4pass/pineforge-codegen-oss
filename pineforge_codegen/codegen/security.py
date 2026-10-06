@@ -2655,7 +2655,7 @@ class SecurityEmitter:
 
     def _security_expr_hist_series_names(self, sec_id: int) -> list[str]:
         names = []
-        for (sid, _node_id), meta in sorted(self._security_expr_hist_by_node.items()):
+        for (sid, _node_id), meta in self._security_expr_hist_by_node.items():
             if sid == sec_id:
                 names.append(meta["name"])
         return names
@@ -7886,8 +7886,9 @@ class SecurityEmitter:
     def _security_variant_order_key(self, signature: tuple, binding_stack) -> tuple:
         """The order of a TA site's requested-context variants (``_v0``,
         ``_v1``, ...): where each argument binding's value is written in the
-        source, then the signature. The signature names a bound node by its
-        ``id()``, so ordering by its ``repr`` followed memory addresses, and
+        source, then the signature's stable scope snapshot, preserving
+        traversal order at ties. The signature names a bound node by its
+        ``id()``, so ordering by its raw ``repr`` followed memory addresses, and
         the same script could number its variants differently from run to
         run or between CPython and Pyodide."""
         frames = []
@@ -7909,4 +7910,9 @@ class SecurityEmitter:
                 frames.append(("arguments", tuple(items)))
             else:
                 frames.append(("locals", tuple(sorted(frame.keys()))))
-        return tuple(frames), repr(signature)
+        def stable_part(value):
+            if isinstance(value, tuple):
+                return tuple(stable_part(item) for item in value)
+            return 0 if isinstance(value, int) else value
+
+        return tuple(frames), repr(stable_part(signature))

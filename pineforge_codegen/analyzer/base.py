@@ -1758,7 +1758,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
             for collection_owner, collection_names in persistent_collections.items():
                 if series_owner == collection_owner:
                     continue
-                for exact_name in exact_series_names & collection_names:
+                for exact_name in sorted(exact_series_names & collection_names):
                     raw_name = next(
                         (
                             name for name in names
