@@ -454,7 +454,7 @@ class InputHelper:
     # Input manifest extraction (host UI override-form source of truth)
     # ------------------------------------------------------------------
 
-    def _literal_or_none(self, node):
+    def _literal_or_none(self, node, *, signed: bool = False):
         """Return a JSON scalar for a *const* literal AST node, else None.
 
         ``None`` signals non-const (an identifier, computed expression, …) so
@@ -470,8 +470,8 @@ class InputHelper:
             return node.value
         if isinstance(node, NumberLiteral):
             return node.value
-        if isinstance(node, UnaryOp) and node.op in ("+", "-"):
-            value = self._literal_or_none(node.operand)
+        if signed and isinstance(node, UnaryOp) and node.op in ("+", "-"):
+            value = self._literal_or_none(node.operand, signed=True)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 return value if node.op == "+" else -value
         # enum member ref like ``Dir.Up`` -> "Dir.Up" (string tag)
@@ -533,7 +533,7 @@ class InputHelper:
         title = self._get_input_title(node, var_name=var_name)
         default_node = self._get_input_default(node)
         default_val = (
-            self._literal_or_none(default_node)
+            self._literal_or_none(default_node, signed=True)
             if default_node is not None
             else None
         )

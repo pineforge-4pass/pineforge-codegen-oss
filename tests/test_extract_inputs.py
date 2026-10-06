@@ -39,11 +39,11 @@ def test_string_options():
     assert inp["options"] == ["a", "b", "c"]
 
 
-def test_non_const_string_options_are_unsupported():
+def test_const_identifier_string_options_match_the_receipt():
     r = _full("v = \"x\"\nmode = input.string(\"a\", \"Mode\", options=[v, \"b\"])\n")
     inp = next(i for i in r["inputs"] if i["title"] == "Mode")
-    assert inp["supported"] is False
-    assert inp["options"] == []
+    assert inp["supported"] is True
+    assert inp["options"] == ["x", "b"]
     assert inp["default"] == "a"
 
 
