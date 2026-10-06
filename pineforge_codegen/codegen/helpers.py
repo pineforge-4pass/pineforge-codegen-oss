@@ -444,6 +444,7 @@ class NamingHelper:
             .replace("\n", "\\n")
             .replace("\r", "\\r")
             .replace("\t", "\\t")
+            .replace("\0", "\\000")
         )
 
     @staticmethod

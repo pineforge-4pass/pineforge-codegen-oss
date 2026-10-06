@@ -589,7 +589,8 @@ class Parser:
 
         if (len(tokens) in (5, 7) and word(0) and word(2)
                 and values[1] == values[3] == "/"
-                and tokens[4].type == TokenType.NUMBER and values[4].isdigit()
+                and tokens[4].type == TokenType.NUMBER
+                and values[4].isascii() and values[4].isdecimal()
                 and (len(tokens) == 5 or (values[5] == "as" and word(6)))):
             node.user, node.name, node.version = values[0], values[2], int(values[4])
             node.path = f"{node.user}/{node.name}/{node.version}"

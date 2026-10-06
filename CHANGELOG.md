@@ -74,6 +74,12 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Bind keyword arguments of the matrix methods and the checked array methods to their own parameter slot, with the omitted optional parameters taking their defaults in place (`matrix.sort(m, order = order.descending)`, `m.submatrix(to_column = 1)`, `a.fill(7.0, index_to = 1)` no longer drop or shift a keyword), and refuse a keyword that names no parameter, or a parameter given twice, with the existing argument diagnostics. A defaulted `submatrix` evaluates its receiver once, an index-only `add_row` / `add_col` takes any numeric index, and a bound `array.concat` result (`c = a.concat(b)`, `c := array.concat(a, b)`) keeps the unsupported-function refusal. An array history that reaches a user function's or method's parameter keeps its earlier copy lowering and the earlier refusal of a callee that checks it with `na()`; a bound missing-history matrix reports the recorded na-ID runtime error.
 - Compile matrix/matrix and matrix/scalar `matrix.sum` overloads with matrix-valued results, including helpers and history. Support scalar `matrix.diff`/`matrix.mult` and omitted optional arguments to matrix row/column insertion, submatrix, sort and array fill; unsupported matrix/vector multiplication and bound `array.concat` results report an existing unsupported-function diagnostic instead of failing C++ compilation.
 - Preserve na array IDs when a history offset has no value, including aliases and `na()`-only bindings; array methods on those IDs report the existing runtime error instead of crashing. Bounds-check legacy collection-element reads and writes to prevent unchecked access.
+- Return the prefix of the supplied symbol in `syminfo.prefix(symbol)` instead
+  of always reading the chart symbol; the variable form stays unchanged.
+- Refuse malformed library versions with the existing import diagnostic instead
+  of allowing them to raise outside the JSON gate.
+- Escape embedded NUL values in generated C++ string literals, and strengthen
+  emitted-string regression tests with explicit emitter reach and round trips.
 
 ## 1.3.0 — 2026-10-06
 

@@ -2698,7 +2698,18 @@ class CallVisitor:
 
         if namespace == "syminfo":
             if func_name == "prefix":
-                return "_pf_derive_prefix(syminfo_.tickerid)"
+                symbol = node.args[0] if node.args else node.kwargs.get("symbol")
+                symbol_expr = self._visit_expr(symbol) if symbol is not None else "syminfo_.tickerid"
+                if symbol_expr == "syminfo_.tickerid":
+                    return "_pf_derive_prefix(syminfo_.tickerid)"
+                return (
+                    "([](const std::string& _pf_symbol) { "
+                    "const auto _pf_colon = _pf_symbol.find(':'); "
+                    "return _pf_colon == std::string::npos "
+                    "|| _pf_colon + 1 == _pf_symbol.size() "
+                    "? std::string() : _pf_symbol.substr(0, _pf_colon); "
+                    f"}})({symbol_expr})"
+                )
             if func_name == "ticker":
                 return "syminfo_.ticker"
             return f"na<double>() /* unsupported: syminfo.{func_name} */"

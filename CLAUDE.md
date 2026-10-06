@@ -1059,6 +1059,11 @@ A string a script spells reaches the C++ only as a string literal's
 value (`_cpp_string_escape`) or as comment text (`_cpp_comment_escape`):
 escape every script-derived value where it is written into a literal or
 a comment, a validated one too (`tests/test_emitted_string_literals.py`).
+The string escape spells NUL as a fixed three-digit octal escape. The tests
+check that benign values actually reach their emitter and that accepted samples
+round-trip through the C++ literal; intentionally un-emitted metadata is separate.
+`syminfo.prefix(symbol)` derives the prefix from its argument (positional or
+keyword); the variable form still derives it from the chart's ticker ID.
 - **Helper underscores.** Codegen-internal helpers in `codegen/tables.py`
 are underscore-prefixed (`_matrix_add_row`, `_merge_kwargs`); they
 are not part of the package's external surface.
