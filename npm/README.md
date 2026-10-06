@@ -20,7 +20,7 @@ Stable releases are on the `latest` dist-tag. A prerelease (for example
   importable as `@pineforge/codegen-pyodide/diagnostics_catalog.json`; the repository's
   `docs/PUBLIC_CONTRACT.md` describes it.
 - `LICENSE` — the PineForge Source License (since 1.2.0), which `package.json` names:
-  version 1.1 in release 1.2.0, version 1.2 in later releases.
+  version 1.1 in release 1.2.0, version 1.2 from release 1.3.0 on.
 
 ## Publishing (maintainers)
 A `v*` tag push, which the release workflow makes, publishes through npm OIDC Trusted

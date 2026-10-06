@@ -11,12 +11,12 @@ of batch configuration extraction. Every unresolved argument is named in
 `unresolved`. Runtime-lowered unpinned request sites retain their request kind,
 symbol and timeframe in `requests` with `feed: "unpinned"`, and in `unresolved`.
 The original receipt alone retains conservative request/POOC/varip refusals.
-After 1.2.0, confirmed-bar order metadata is an allowlist of modeled strategy calls and
+From 1.3.0 on, confirmed-bar order metadata is an allowlist of modeled strategy calls and
 arguments. Risk rules and unmodeled order arguments are named as unproven;
 POOC account/sizing/slippage declarations outside the tested literal profiles also
 produce an unproven marker. This changes receipts only, never trading code.
-New libraries (unreleased; after 1.2.0) also export an independently versioned confirmed-bar receipt;
-the paired runner admits only its explicitly proven same-chart security shapes
+From 1.3.0 on, libraries also export an independently versioned confirmed-bar receipt;
+engine `v1.3.0`'s runner admits only its explicitly proven same-chart security shapes
 and standalone close-only varip, not arbitrary requests or observed-tick calculation.
 `process_orders_on_close=true` remains refused for every order shape and
 request composition. Retained POOC order metadata and equivalence rows are
@@ -43,7 +43,7 @@ buffers return no partial JSON. Canonical JSON is emitted from `strategy()`
 declarations and analyzed security/request sites, not guessed from a handle's
 runtime behavior. It is immutable across settings changes and fresh/reused runs.
 
-Unreleased (after 1.2.0): `strategy_confirmed_bar_api_version()` returns 1 and
+From 1.3.0 on, with engine `v1.3.0`, `strategy_confirmed_bar_api_version()` returns 1 and
 `strategy_confirmed_bar_receipt(handle, json, capacity, required, error, error_capacity)`
 uses the same immutable buffer protocol. Its JSON has `version`, `requests`
 (including the expression), sorted `orders` classifications and
@@ -57,7 +57,7 @@ symbols and retain their original policy. A new runner paired with an old
 library without these new symbols also retains its original admission policy.
 These exports add metadata only; generated trading code is unchanged.
 
-Unreleased (after 1.2.0): `strategy_order_shapes_api_version()` returns 1 and
+From 1.3.0 on, with engine `v1.3.0`, `strategy_order_shapes_api_version()` returns 1 and
 `strategy_order_shapes_receipt(handle, json, capacity, required, error, error_capacity)`
 uses the same checked-settings buffer protocol. Every generated strategy includes
 this immutable receipt, whether closing-time order processing
@@ -85,8 +85,9 @@ not relax existing Pine support checks. `host_reads`
 lists generated execution-member references, excluding strings and comments;
 `unmodeled` names other non-read-only `strategy.*` calls, including risk rules.
 The receipt is a static description, not an admission decision or proof that an
-arbitrary order shape is supported in a live run. Existing capability and
-confirmed-bar receipts, including their order classifications, remain unchanged.
+arbitrary order shape is supported in a live run; engine `v1.3.0` does not read it.
+Existing capability and confirmed-bar receipts, including their order
+classifications, remain unchanged.
 
 Version 1 has `version`, `declarations`, `requests`, `requirements` and `unresolved`
 keys. Declarations include calculation cadence, close execution, magnifier,
@@ -134,8 +135,8 @@ reports remain empty; checked batch returns `PF_SETTINGS_RUN_FAILED`. Free and
 recreate the handle to recover. Legacy setters that do not throw keep their
 existing permissive behaviour.
 
-Engines `v1.1.0` and `v1.2.0`, the pairs of codegen 1.1.0 and 1.2.0, provide
-that header. Settings
+Engines `v1.1.0`, `v1.2.0` and `v1.3.0`, the pairs of codegen 1.1.0, 1.2.0 and
+1.3.0, provide that header. Settings
 helper references are root-qualified and guarded by `PF_SETTINGS_API_VERSION`;
 old headers retain the standard-exception fallback and legacy batch precheck.
 Paired batch and stream refusals report NOT_COMPLETED through the shared native
@@ -206,7 +207,9 @@ implements it with the compiled execution capabilities and the diagnostic
 codes described here added: each `Diagnostic` and each JSON diagnostic gain
 `code` and `args`, and `pineforge_codegen` exports `diagnostics_catalog()`
 and `render_diagnostic()`. No argument, result key or envelope is removed or
-renamed.
+renamed. 1.3.0, released 2026-10-06, implements it unchanged, with the
+confirmed-bar and order-shapes receipts described here added to the generated
+C++: no argument, result key or envelope is added, removed or renamed.
 The last 0.x release, 0.10.4, has
 neither the `libraries` argument nor the `diagnostics` key described below.
 
@@ -327,7 +330,7 @@ Since 1.2.0 every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
 `diagnostics_catalog()` returns the catalog, which ships as
 `pineforge_codegen/diagnostics_catalog.json` (schema
 `pineforge-diagnostics-catalog/v1`) and is attached to each GitHub release
-(`diagnostics_catalog-v1.2.0.json` for 1.2.0).
+(`diagnostics_catalog-v1.3.0.json` for 1.3.0).
 Per code it gives `severity`, `area`, the English ICU MessageFormat `message`
 template, the `hint` template or `null`, a one-line `explanation`, and `args`:
 per argument its `kind` — `identifier`, `type`, `keyword`, `number`, `vocab`
