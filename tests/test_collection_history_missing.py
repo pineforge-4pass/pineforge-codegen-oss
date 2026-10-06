@@ -159,16 +159,23 @@ for element, value, expected in (
     ), 1)
 
 
+for helper_name, binding, argument in (
+    ("array_helper", "b = a[1]\n", "b"),
+    ("array_direct_helper", "", "a[1]"),
+):
+    SUCCESS[helper_name] = (witness(
+        "read(array<float> x) => x.size()\na = array.from(close)\n"
+        + binding + f"r = read({argument})\nvalid = r == (bar_index == 0 ? 0 : 1)\n"), 1)
+
+
 ERRORS = {
     "array_direct_method": (HEADER + "var a = array.new<float>()\nr = (a[1]).size()\n", NA_ARRAY_MESSAGE),
     "array_bound_method": (HEADER + "var a = array.new<float>()\nb = a[1]\nr = b.size()\n", NA_ARRAY_MESSAGE),
     "array_bound_namespace": (HEADER + "var a = array.new<float>()\nb = a[1]\nr = array.size(b)\n", NA_ARRAY_MESSAGE),
     "array_bound_far": (HEADER + "a = array.from(close)\nb = a[bar_index + 10]\nr = b.get(0)\n", NA_ARRAY_MESSAGE),
     "array_bound_na_branch": (HEADER + "var a = array.new<float>()\nb = a[1]\nr = na(b) ? b.size() : 0\n", NA_ARRAY_MESSAGE),
-    "array_helper": (HEADER + "read(array<float> x) => x.size()\na = array.from(close)\nb = a[1]\nr = read(b)\n", NA_ARRAY_MESSAGE),
-    "array_direct_helper": (HEADER + "read(array<float> x) => x.size()\na = array.from(close)\nr = read(a[1])\n", NA_ARRAY_MESSAGE),
     "matrix_direct": (HEADER + "a = matrix.new<float>(1, 1, close)\nr = (a[1]).get(0, 0)\n", NA_MATRIX_MESSAGE),
-    "matrix_bound": (HEADER + "a = matrix.new<int>(1, 1, bar_index)\nb = a[20]\nr = b.get(0, 0)\n", "matrix operation on na ID"),
+    "matrix_bound": (HEADER + "a = matrix.new<int>(1, 1, bar_index)\nb = a[20]\nr = b.get(0, 0)\n", NA_MATRIX_MESSAGE),
     "udt_field": (HEADER + "type Cell\n    int value\na = Cell.new(bar_index)\nb = a[20]\nr = b.value\n", "UDT access on na"),
     "legacy_assignment_missing": (HEADER + "a = array.new<float>()\na[20] := 3.0\n", "Array history element index is out of bounds."),
 }
@@ -177,7 +184,12 @@ ERRORS = {
 @pytest.mark.parametrize("name", sorted(SUCCESS))
 def test_success_shapes_transpile_and_compile(name):
     cpp = transpile(SUCCESS[name][0])
-    if name.startswith("array") or name in ("probe", "empty_array"):
+    if name in ("array_helper", "array_direct_helper"):
+        # A history that reaches a user function's parameter stays the copy
+        # it was (a ``std::vector&`` holds no na array).
+        assert "_pf_collection_hist_a.value(1)" in cpp
+        assert "_pf_collection_hist_a.reference(1)" not in cpp
+    elif name.startswith("array") or name in ("probe", "empty_array"):
         assert "_PFArrayHistoryValue<std::vector<" in cpp
         assert "b = a[1];" not in cpp
     compile_cpp(cpp, label=name)

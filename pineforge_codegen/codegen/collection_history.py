@@ -19,6 +19,7 @@ from ..collection_history import (
     COLLECTION_HISTORY_CPP,
     COLLECTION_HISTORY_GENERIC_MATRIX_CPP,
     COLLECTION_HISTORY_MATRIX_CPP,
+    NA_MATRIX_MESSAGE,
     history_annotation,
     literal_offset,
 )
@@ -29,6 +30,56 @@ from ..symbols import TypeSpec
 
 class CollectionHistoryEmitter:
     """CodeGen mixin: the history members of array and matrix variables."""
+
+    def _matrix_history_value_names(self) -> set[str]:
+        cached = getattr(self, "_matrix_history_value_bindings", None)
+        if cached is not None:
+            return cached
+        names = set()
+        bindings = {}
+        callable_depth = None
+        for node, depth in iter_ast_nodes(self.ctx.ast):
+            if callable_depth is not None:
+                if depth > callable_depth:
+                    continue
+                callable_depth = None
+            if isinstance(node, (FuncDef, MethodDef)):
+                callable_depth = depth
+                continue
+            if isinstance(node, VarDecl):
+                name, value = node.name, node.value
+            elif isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                name, value = node.target.name, node.value
+            else:
+                continue
+            values = [value]
+            while values:
+                source = values.pop()
+                annotation = history_annotation(source)
+                if annotation is not None and annotation["kind"] == "matrix":
+                    names.add(name)
+                elif isinstance(source, Identifier):
+                    bindings.setdefault(source.name, []).append(name)
+                elif isinstance(source, Ternary):
+                    values.extend((source.true_val, source.false_val))
+        pending = list(names)
+        while pending:
+            source = pending.pop()
+            for name in bindings.get(source, ()):
+                if name not in names:
+                    names.add(name)
+                    pending.append(name)
+        self._matrix_history_value_bindings = names
+        return names
+
+    def _checked_matrix_history_receiver(self, receiver, receiver_node):
+        if (isinstance(receiver_node, Identifier)
+                and receiver_node.name in self._matrix_history_value_names()
+                and not self._collection_name_is_lexically_shadowed(receiver_node.name)
+                and receiver_node.name not in self._current_func_param_types):
+            return (f'([&]() -> auto& {{ if (is_na({receiver})) '
+                    f'pine_runtime_error("{NA_MATRIX_MESSAGE}"); return {receiver}; }}())')
+        return receiver
 
     def _array_history_value_names(self) -> dict[str, TypeSpec]:
         cached = getattr(self, "_array_history_value_specs", None)
@@ -283,17 +334,11 @@ class CollectionHistoryEmitter:
         """A matrix method called on a matrix's history, lowered as the
         variable's own method call is (visit_call: a matrix variable's
         method)."""
-        from .tables import MATRIX_METHOD_KWARGS, MATRIX_METHODS, _merge_kwargs
-
         recv = self._visit_expr(receiver)
         self._check_matrix_method_allowed(method, spec, node)
-        param_names = MATRIX_METHOD_KWARGS.get(method)
-        raw_args = (
-            _merge_kwargs(node.args, node.kwargs, param_names, lambda a: a)
-            if param_names and node.kwargs else list(node.args)
-        )
+        raw_args = self._matrix_method_arg_nodes(method, node)
         args = self._matrix_bool_value_args(
-            method, [self._visit_expr(a) for a in raw_args], raw_args, spec)
+            method, [self._visit_expr(a) if a is not None else None for a in raw_args], raw_args, spec)
         try:
             return self._matrix_method_expr(recv, method, args, raw_args, node)
         except IndexError:

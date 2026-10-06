@@ -977,20 +977,86 @@ def _matrix_sum(receiver: str, arguments: list[str]) -> str:
 
 
 def _matrix_submatrix(receiver: str, arguments: list[str]) -> str:
-    defaults = ["0", f"{receiver}.rows()", "0", f"{receiver}.columns()"]
     if len(arguments) > 4:
         raise IndexError("matrix.submatrix")
-    arguments = arguments + defaults[len(arguments):]
-    return f"{receiver}.submatrix({', '.join(_matrix_int_arg(argument) for argument in arguments)})"
+    if len(arguments) == 4 and all(argument is not None for argument in arguments):
+        return f"{receiver}.submatrix({', '.join(_matrix_int_arg(argument) for argument in arguments)})"
+    defaults = ["0", "_pf_matrix_target.rows()", "0", "_pf_matrix_target.columns()"]
+    arguments = arguments + [None] * (4 - len(arguments))
+    bounds = [argument if argument is not None else defaults[index]
+              for index, argument in enumerate(arguments)]
+    return ("[&](auto&& _pf_matrix_target) { return _pf_matrix_target.submatrix("
+            f"{', '.join(_matrix_int_arg(argument) for argument in bounds)}); }}({receiver})")
 
 
-# Keyword parameter order for matrix methods (Pine v6); used by ``_merge_kwargs``.
+# Parameter order of the matrix methods (Pine v6), receiver excluded: the
+# slots ``CallVisitor._collection_arg_nodes`` binds keyword arguments to. A
+# method absent here takes only its receiver. ``fill`` names its range
+# parameters so that a keyword one binds as a positional one does: the
+# lowering reads only ``value`` (the engine fills the whole matrix), a
+# pre-existing approximation of both spellings that the call does not refuse.
 MATRIX_METHOD_KWARGS: dict[str, list[str]] = {
-    "add_row": ["row_index", "array_id"],
-    "add_col": ["col_index", "array_id"],
+    "add_row": ["row", "array_id"],
+    "add_col": ["column", "array_id"],
+    "sort": ["column", "order"],
+    "submatrix": ["from_row", "to_row", "from_column", "to_column"],
     "sum": ["id2"],
     "diff": ["id2"],
     "mult": ["id2"],
+    "get": ["row", "column"],
+    "set": ["row", "column", "value"],
+    "fill": ["value", "from_row", "to_row", "from_column", "to_column"],
+    "row": ["row"],
+    "col": ["column"],
+    "remove_row": ["row"],
+    "remove_col": ["column"],
+    "swap_rows": ["row1", "row2"],
+    "swap_columns": ["column1", "column2"],
+    "reshape": ["rows", "columns"],
+    "concat": ["id2", "vertical"],
+    "pow": ["power"],
+    "kron": ["id2"],
+}
+
+# Keyword spellings an earlier build bound that Pine's reference does not
+# name; they keep binding to the same slot.
+MATRIX_METHOD_KWARG_ALIASES: dict[str, dict[str, str]] = {
+    "add_row": {"row_index": "row"},
+    "add_col": {"col_index": "column"},
+}
+
+# The receiver's own keyword in the namespace form (``matrix.diff(id1=m, ...)``).
+MATRIX_RECEIVER_KEYWORD: dict[str, str] = {
+    "sum": "id1", "diff": "id1", "mult": "id1", "concat": "id1", "kron": "id1",
+}
+
+
+def _matrix_functional_receiver(method: str, node):
+    """The receiver node of ``matrix.<method>(...)``: its first positional
+    argument, else its keyword."""
+    return node.args[0] if node.args else node.kwargs.get(
+        MATRIX_RECEIVER_KEYWORD.get(method, "id"))
+
+
+# The optional parameters of the collection methods whose keywords bind by
+# position, and what a gap left before one stands for when only a later
+# keyword is written (``m.sort(order = order.descending)`` leaves ``column``
+# open): a number is Pine's default, ``None`` an omitted argument the method's
+# template defaults from the receiver's own extent (``_matrix_submatrix``'s
+# ``to_row`` / ``to_column``, the defaulted ``add_row`` / ``add_col`` of
+# ``TypeInferer._matrix_method_expr``). A parameter that is not listed is
+# required: a gap before it is refused.
+MATRIX_OPTIONAL_PARAMS: dict[str, dict[str, int | None]] = {
+    "sort": {"column": 0, "order": None},
+    "submatrix": {"from_row": 0, "to_row": None, "from_column": 0, "to_column": None},
+    "add_row": {"row": None, "array_id": None},
+    "add_col": {"column": None, "array_id": None},
+    "fill": {"from_row": None, "to_row": None, "from_column": None, "to_column": None},
+    "sum": {"id2": None},
+    "concat": {"vertical": None},
+}
+ARRAY_OPTIONAL_PARAMS: dict[str, dict[str, int | None]] = {
+    "fill": {"index_from": 0, "index_to": None},
 }
 
 # Matrix mutators whose established C++ lowering returns ``void``.  A Pine

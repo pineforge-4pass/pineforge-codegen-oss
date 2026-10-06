@@ -546,6 +546,9 @@ class Use:
     needs_collection: bool = False
     form: str | None = None        # read / change / slice: receiver or argument;
                                    # render: tostring or format
+    crosses_callable: bool = False  # a copy given to a user function's or
+                                    # method's parameter (a method's receiver
+                                    # is its first)
 
     def tag(self) -> str:
         """The use's class, by which ``_ELEMENT_LOWERING_FAILS`` and its
@@ -572,11 +575,13 @@ class NameUses:
     change: Use | None = None
     reject: Use | None = None
     other: Use | None = None
+    crosses_parameter: bool = False
     tags: dict[str, Use] = field(default_factory=dict)   # every use's class
 
     def merge(self, other: "NameUses | None") -> None:
         if other is None:
             return
+        self.crosses_parameter |= other.crosses_parameter
         for key in ("collection", "element", "change", "reject", "other"):
             if getattr(self, key) is None and getattr(other, key) is not None:
                 setattr(self, key, getattr(other, key))
@@ -605,6 +610,7 @@ class NameUses:
                 if use.names.element is not None or use.names.other is not None:
                     self.merge(NameUses(other=use.names.element or use.names.other))
         elif how in ("copy", "flow"):
+            self.crosses_parameter |= use.crosses_callable
             self.merge(use.names)
             if use.needs_collection:
                 self.merge(NameUses(collection=use))
@@ -958,7 +964,8 @@ class CollectionHistoryChecker:
         if method in self._methods:
             definitions = self._definitions_for(self._methods[method], 0, None, kind)
             return Use("copy", node, names=self._parameter_uses(
-                definitions, 0, None, kind), needs_collection=True, form="receiver")
+                definitions, 0, None, kind), needs_collection=True, form="receiver",
+                crosses_callable=True)
         return Use("other", node,
                    f"{label}.{method}(): no array or matrix method of that name.",
                    needs_collection=True)
@@ -986,7 +993,7 @@ class CollectionHistoryChecker:
                            names=self._parameter_uses(definitions, positional, keyword, kind),
                            needs_collection=self._parameter_is_collection(
                                definitions, positional, keyword),
-                           form="parameter")
+                           form="parameter", crosses_callable=True)
             if name in _SCALAR_FUNCTIONS:
                 return self._reject(
                     node, f"{label} is {_a(kind)}, which TradingView refuses as an "
@@ -1050,7 +1057,7 @@ class CollectionHistoryChecker:
             return Use("copy", node, names=self._parameter_uses(
                 definitions, position, keyword, kind),
                 needs_collection=self._parameter_is_collection(
-                    definitions, position, keyword))
+                    definitions, position, keyword), crosses_callable=True)
         if (namespace not in _BUILTIN_NAMESPACES and namespace not in self._types
                 and (member in self._array_methods or member in self._matrix_methods)):
             # A built-in method on another collection (``c.concat(a[1])``,
@@ -1490,7 +1497,11 @@ class CollectionHistoryChecker:
                 return self._change_refusal(read, label, uses.change, "a name bound to it")
             nullable = (uses.element is not None
                         and all(not tag.startswith("render") for tag in uses.tags))
-            if (nullable and use.form != "parameter" and uses.other is None):
+            # A value that reaches a user callable's parameter, directly or
+            # through a name, stays the copy it was: the parameter is a
+            # ``std::vector&``, which holds no na array and answers no na().
+            parameter_copy = uses.crosses_parameter
+            if (nullable and not parameter_copy and uses.other is None):
                 return Decision(SUPPORTED, "reference" if kind == "array" else "copy")
             if uses.needs_collection():
                 if uses.element is not None:
@@ -1504,7 +1515,7 @@ class CollectionHistoryChecker:
                     return Decision(REFUSED, node=uses.other.node or read.node,
                                     message=uses.other.message or
                                     f"{label} is not supported in PineForge here.")
-                return Decision(SUPPORTED, "reference" if kind == "array" else "copy")
+                return Decision(SUPPORTED, "reference" if kind == "array" and not parameter_copy else "copy")
             return None
         if kind == "matrix" and use.how == "discard":
             return Decision(SUPPORTED, "copy")

@@ -549,6 +549,20 @@ def _qualified_name(callee: ASTNode) -> tuple[str | None, str | None]:
     return None, None
 
 
+# The ``array.*`` functions whose value is a new array.
+_ARRAY_VALUED_FUNCTIONS = frozenset({"new", "from", "copy", "slice"})
+
+
+def _is_array_valued_call(node) -> bool:
+    """Whether ``node`` is a call of ``array.new``, ``array.new_<type>``,
+    ``array.from``, ``array.copy`` or ``array.slice``."""
+    if not isinstance(node, FuncCall):
+        return False
+    namespace, function = _qualified_name(node.callee)
+    return namespace == "array" and function is not None and (
+        function in _ARRAY_VALUED_FUNCTIONS or function.startswith("new_"))
+
+
 def _resolve_member_chain(node: ASTNode) -> str | None:
     """Flatten a MemberAccess/Identifier chain into a dotted name."""
     if isinstance(node, Identifier):
@@ -661,6 +675,11 @@ class SupportChecker:
         # then ``request.security(haTicker, ...)``, or ``reqSym = cond ? other :
         # syminfo.tickerid``. First binding wins (closest to declaration).
         self._scalar_defs: dict[str, ASTNode] = {}
+        # Variables declared an array (by an array-valued call or an
+        # ``array<...>`` type), and the names the script binds exactly once:
+        # the receivers ``_check_bound_array_concat`` resolves by name.
+        self._array_names: set[str] = set()
+        self._bound_once: set[str] | None = None
         # EVERY reassignment value bound to a scalar name (``name := <expr>``
         # and the compound forms). A declaration alone does not pin the value a
         # ``request.security`` symbol argument actually carries: the engine is
@@ -1335,9 +1354,10 @@ class SupportChecker:
 
     def _visit_VarDecl(self, node: VarDecl) -> None:
         self._check_tuple_literal_value(node.value)
-        if isinstance(node.value, FuncCall) and _qualified_name(node.value.callee) == ("array", "concat"):
-            name = "concat"
-            self._err(node.value, f"array.{name}(...) is not implemented in PineForge runtime.")
+        self._check_bound_array_concat(node.value)
+        if node.name and (_is_array_valued_call(node.value)
+                          or (node.type_hint or "").startswith("array<")):
+            self._array_names.add(node.name)
         if node.name and node.value is not None:
             self._scalar_defs.setdefault(node.name, node.value)
         if node.name and (node.is_var or node.is_varip):
@@ -1370,6 +1390,7 @@ class SupportChecker:
         self._visit_children(node)
 
     def _visit_Assignment(self, node: Assignment) -> None:
+        self._check_bound_array_concat(node.value)
         if isinstance(node.target, TupleLiteral):
             # ``[p, q] := f()`` reached the C++ as an assignment to a
             # temporary tuple, a silent no-op. TradingView rejects it
@@ -1392,6 +1413,64 @@ class SupportChecker:
         # self-consistent for any caller that drives visitors directly.)
         self._record_scalar_rebind(node)
         self._visit_children(node)
+
+    def _check_bound_array_concat(self, value) -> None:
+        """Refuse the value of ``array.concat``: PineForge lowers the call as
+        the statement that appends to the first array (``a.concat(b)`` or
+        ``array.concat(a, b)``), which has no value to bind. The namespace
+        call is refused wherever its value is bound; the method form only on a
+        receiver known to be an array (a call that builds one, or a variable
+        declared as one that the script binds exactly once, so that a
+        parameter or a local of another type never shares the name), and never
+        when the script defines a method of that name."""
+        if not isinstance(value, FuncCall):
+            return
+        if isinstance(value.callee, MemberAccess):
+            # ``_qualified_name`` names no call receiver (``array.copy(a).concat(b)``).
+            method = value.callee.member
+            namespace = (value.callee.object.name
+                         if isinstance(value.callee.object, Identifier) else None)
+        else:
+            namespace, method = _qualified_name(value.callee)
+        if method != "concat":
+            return
+        if namespace != "array":
+            if method in self._user_methods or not isinstance(value.callee, MemberAccess):
+                return
+            receiver = value.callee.object
+            while isinstance(receiver, Subscript):
+                receiver = receiver.object
+            if not (_is_array_valued_call(receiver)
+                    or (isinstance(receiver, Identifier)
+                        and receiver.name in self._array_names
+                        and receiver.name in self._names_bound_once())):
+                return
+        name = method
+        self._err(value, f"array.{name}(...) is not implemented in PineForge runtime.")
+
+    def _names_bound_once(self) -> set[str]:
+        """The names the script binds exactly once: by one declaration, with
+        no function or method parameter, loop variable, tuple element or
+        second declaration (a local beside a global) sharing the name."""
+        if self._bound_once is None:
+            counts: dict[str, int] = {}
+            for item in _walk_nodes(self._ast):
+                if isinstance(item, VarDecl):
+                    names = (item.name,)
+                elif isinstance(item, TupleAssign):
+                    names = tuple(item.names)
+                elif isinstance(item, (FuncDef, MethodDef)):
+                    names = tuple(getattr(param, "name", param) for param in item.params)
+                elif isinstance(item, ForStmt):
+                    names = (item.var,)
+                elif isinstance(item, ForInStmt):
+                    names = tuple(item.vars or ()) + ((item.var,) if item.var else ())
+                else:
+                    continue
+                for name in names:
+                    counts[name] = counts.get(name, 0) + 1
+            self._bound_once = {name for name, count in counts.items() if count == 1}
+        return self._bound_once
 
     def _check_tuple_literal_value(self, value) -> None:
         """Refuse a tuple literal or a ternary of tuples as a declaration's

@@ -70,6 +70,7 @@ from .tables import (
     MATRIX_RETURNING_METHODS,
     PINE_TYPE_TO_CPP,
     TA_RETURNS_BOOL,
+    _matrix_functional_receiver,
     checked_array_slice,
 )
 
@@ -1967,21 +1968,45 @@ class TypeInferer:
     # ------------------------------------------------------------------
 
     def _matrix_method_expr(self, receiver, method, arguments, argument_nodes, node):
+        functional = (isinstance(node.callee, MemberAccess)
+                      and isinstance(node.callee.object, Identifier)
+                      and node.callee.object.name == "matrix")
+        receiver_node = (_matrix_functional_receiver(method, node)
+                         if functional else node.callee.object)
+        receiver = self._checked_matrix_history_receiver(receiver, receiver_node)
+        if method in ("add_row", "add_col") and len(arguments) == 2 and arguments[0] is None:
+            # Only ``array_id`` is written (``m.add_row(array_id = a)``): the
+            # call is the array-only form, which appends it.
+            arguments = [arguments[1]]
+            argument_nodes = [argument_nodes[1]]
         if method in ("add_row", "add_col") and len(arguments) < 2:
             argument_spec = (self._type_spec_from_expr(argument_nodes[0])
                              if argument_nodes else None)
-            if not arguments or (argument_spec is not None and argument_spec.kind == "primitive"):
-                receiver_node = (node.args[0] if isinstance(node.callee, MemberAccess)
-                                 and isinstance(node.callee.object, Identifier)
-                                 and node.callee.object.name == "matrix" else node.callee.object)
-                receiver_spec = self._type_spec_from_expr(receiver_node)
+            # An index-only call: the argument is a number whose spec the
+            # analysis knows, or one it cannot type that reads as a number
+            # (a call, an input, ``bar_index % 2``): the generated lambda then
+            # tells an index from an array by the argument's C++ type.
+            typed_index = not arguments or (
+                argument_spec is not None and argument_spec.kind == "primitive")
+            untyped_number = (argument_spec is None and bool(arguments)
+                              and self._infer_type(argument_nodes[0]) in ("double", "int", "int64_t"))
+            receiver_spec = self._type_spec_from_expr(receiver_node)
+            if ((typed_index or untyped_number) and receiver_spec is not None
+                    and receiver_spec.element is not None):
                 element_spec = receiver_spec.element
                 element_cpp = self._type_spec_to_cpp(element_spec)
                 count = "columns" if method == "add_row" else "rows"
                 append = "rows" if method == "add_row" else "columns"
-                index = arguments[0] if arguments else f"_pf_matrix_target.{append}()"
                 values = (f"std::vector<{element_cpp}>((size_t)_pf_matrix_target.{count}(), "
                           f"{self._array_init_value_expr(element_spec, NaLiteral())})")
+                if untyped_number:
+                    inserted = MATRIX_METHODS[method]("_pf_matrix_target", ["_pf_matrix_arg", values])
+                    appended = MATRIX_METHODS[method]("_pf_matrix_target", ["_pf_matrix_arg"])
+                    return (
+                        "[&](auto&& _pf_matrix_target, auto&& _pf_matrix_arg) { "
+                        "if constexpr (std::is_arithmetic_v<std::decay_t<decltype(_pf_matrix_arg)>>) { "
+                        f"{inserted}; }} else {{ {appended}; }} }}({receiver}, {arguments[0]})")
+                index = arguments[0] if arguments else f"_pf_matrix_target.{append}()"
                 mutation = MATRIX_METHODS[method]("_pf_matrix_target", [index, values])
                 return f"[&](auto&& _pf_matrix_target) {{ {mutation}; }}({receiver})"
         if method in ("sum", "diff", "mult") and argument_nodes:
