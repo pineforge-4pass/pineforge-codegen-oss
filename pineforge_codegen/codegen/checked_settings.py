@@ -1,6 +1,5 @@
 """Opt-in settings metadata, validation and exception-contained C exports."""
 
-import json
 import re
 
 from ..ast_nodes import Identifier, MemberAccess
@@ -8,8 +7,12 @@ from ..errors import CompileError
 from .tables import ALERT_FREQ_VALUES, NAME_ECHO_STRING_MEMBERS, ORDER_DIRECTION_MAP
 
 
-_QUOTED_STRING = r'"(?:[^"\\]|\\.)*"'
+_QUOTED_STRING = r'"(?:[^"\\\x00\r\n]|\\(?:["\\nrt]|000))*"'
 _STRING_LITERAL = re.compile(rf'(?:std::string\({_QUOTED_STRING}\)|{_QUOTED_STRING})')
+_STRING_ESCAPE = re.compile(r'\\(?:["\\nrt]|000)')
+_STRING_ESCAPE_VALUES = {
+    r'\"': '"', r'\\': '\\', r'\n': '\n', r'\r': '\r', r'\t': '\t', r'\000': '\0',
+}
 
 
 def _string_setting_arg(expr, lowered: str) -> str | None:
@@ -47,8 +50,17 @@ def _visit_setting_arg(emitter, expr) -> str:
 
 
 def _string_setting_value(lowered: str) -> str:
+    """Decode the emitter's literals as native std::string(const char*) values.
+
+    Only the serializer's escape grammar is accepted; Unicode stays literal.
+    The receipt's string constructors stop at the first NUL, including one
+    followed by digits, while an escaped backslash remains ordinary data.
+    """
+    if not _STRING_LITERAL.fullmatch(lowered):
+        raise ValueError("setting value is not an emitted C++ string literal")
     literal = lowered[len("std::string("):-1] if lowered.startswith("std::string(") else lowered
-    return json.loads(literal, strict=False)
+    decoded = _STRING_ESCAPE.sub(lambda match: _STRING_ESCAPE_VALUES[match.group()], literal[1:-1])
+    return decoded.partition("\0")[0]
 
 
 _NUMERIC_LITERAL = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?(?:LL|ULL|L|UL|[fF])?")
