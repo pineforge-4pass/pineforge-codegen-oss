@@ -16,15 +16,59 @@ from tests.test_string_settings_constants import RECEIPT_DRIVER
 ROOT = Path(__file__).resolve().parents[1]
 GLUE = runpy.run_path(str(ROOT / "gate" / "glue.py"))["transpile_json"]
 
+NUMERIC = "input_metadata_numeric.pine"
+COMPUTED = "the receipt evaluates it at run time; the manifest publishes only a literal"
+
+# Inputs whose receipt value the transpiler does not publish: source file name
+# and input title -> field -> (the manifest's value, why). The pin asserts the
+# documented value and that the receipt still differs, so a gap that is closed
+# fails the pin until its entry is removed. Every other field of every input
+# must equal the receipt's.
+KNOWN_LIMITS = {
+    (NUMERIC, "Negated bool"): {
+        "default": (None, f"`not true`: {COMPUTED}")},
+    (NUMERIC, "Tint"): {
+        "default": ("color.red", "a color is published by its Pine spelling; "
+                                 "the receipt holds the packed integer")},
+    (NUMERIC, "Expression default"): {
+        "default": (None, f"`LEN * 2`: {COMPUTED}")},
+    (NUMERIC, "Expression option"): {
+        "options": ([], f"`LEN * 2` among the options: {COMPUTED}")},
+    (NUMERIC, "Expression bound"): {
+        "min": (None, f"`LEN - 10`: {COMPUTED}"),
+        "max": (None, f"`LEN * 2`: {COMPUTED}")},
+    (NUMERIC, "Time from parts"): {
+        "default": (None, "`timestamp(year, month, ...)` reads the symbol's time zone "
+                          "when the receipt is read")},
+    (NUMERIC, "Plain constant"): {
+        "default": (None, "a plain `input()` is typed and published by a literal default only")},
+}
+
 
 def _sources():
+    """Every source once: a copy of one already listed adds no case."""
     sources = [(path, False) for directory in (ROOT / "tests" / "fixtures",
                                               ROOT / "tests" / "gate-corpus")
                for path in sorted(directory.rglob("*.pine"))]
     corpus = _resolve_corpus_root()
     if corpus is not None:
         sources.extend((path, True) for path in sorted(corpus.rglob("strategy.pine")))
-    return sources
+    unique, seen = [], set()
+    for path, is_corpus in sources:
+        text = path.read_text()
+        if text not in seen:
+            seen.add(text)
+            unique.append((path, is_corpus))
+    return unique
+
+
+def _case_id(value):
+    if not isinstance(value, Path):
+        return None
+    for base in (ROOT, _resolve_corpus_root()):
+        if base is not None and base in value.parents:
+            return str(value.relative_to(base))
+    return str(value)
 
 
 def _default(entry, value):
@@ -41,8 +85,29 @@ def _default(entry, value):
     return value
 
 
-@pytest.mark.parametrize("path,is_corpus", _sources(),
-                         ids=lambda value: str(value) if isinstance(value, Path) else None)
+def _manifest_view(metadata):
+    return {"supported": metadata["supported"], "default": metadata["default"],
+            "options": metadata.get("options", []), "min": metadata.get("min"),
+            "max": metadata.get("max"), "step": metadata.get("step")}
+
+
+def _receipt_view(checked):
+    number = {"int": int, "float": float}.get(checked["type"])
+    return {"supported": checked["supported"], "default": _default(checked, checked["default"]),
+            "options": [number(option) for option in checked["options"]] if number
+            else checked["options"],
+            "min": checked["min"], "max": checked["max"], "step": checked["step"]}
+
+
+def _limits(path):
+    limits = {}
+    for (name, title), fields in KNOWN_LIMITS.items():
+        if name == path.name:
+            limits[title] = fields
+    return limits
+
+
+@pytest.mark.parametrize("path,is_corpus", _sources(), ids=_case_id)
 def test_input_metadata_matches_receipt_for_every_source(path, is_corpus):
     source = path.read_text()
     try:
@@ -61,11 +126,32 @@ def test_input_metadata_matches_receipt_for_every_source(path, is_corpus):
                                        label=str(path)))
     assert [entry["title"] for entry in full["inputs"]] == [
         entry["name"] for entry in receipt["inputs"]]
+    limits = _limits(path)
+    seen = set()
     for metadata, checked in zip(full["inputs"], receipt["inputs"]):
         key = metadata["title"]
-        assert metadata["supported"] is checked["supported"], key
-        assert metadata["default"] == _default(checked, checked["default"]), key
-        assert metadata.get("options", []) == checked["options"], key
+        manifest, expected = _manifest_view(metadata), _receipt_view(checked)
+        for field, value in manifest.items():
+            limit = limits.get(key, {}).get(field)
+            if limit is None:
+                assert value == expected[field], f"{key}.{field}"
+                continue
+            seen.add((key, field))
+            documented, _reason = limit
+            assert value == documented, f"{key}.{field}"
+            assert value != expected[field], (
+                f"{key}.{field}: the limit is closed, remove it from KNOWN_LIMITS")
+    assert seen == {(title, field) for title, fields in limits.items() for field in fields}
+
+
+def test_known_limits_name_inputs_of_a_pinned_source():
+    for (name, title), fields in KNOWN_LIMITS.items():
+        path = next(path for path, _is_corpus in _sources() if path.name == name)
+        inputs = {entry["title"]: entry for entry in transpile_full(path.read_text())["inputs"]}
+        assert title in inputs, (name, title)
+        for field, (documented, reason) in fields.items():
+            assert reason
+            assert _manifest_view(inputs[title])[field] == documented, (title, field)
 
 
 def test_public_corpus_input_metadata_inventory_is_available():

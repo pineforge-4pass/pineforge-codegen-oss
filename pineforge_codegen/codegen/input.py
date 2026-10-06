@@ -508,12 +508,17 @@ class InputHelper:
         ``var = input.*(...)`` declaration and an inline call inside an
         expression (``ta.ema(close, input.int(9, "Fast"))``) alike.
 
-        Each entry: ``{title, type, default, supported[, min, max, step, options]}``. The
-        optional keys are emitted only when the corresponding signature
-        argument is a const literal; a bound/option referencing a non-literal
-        is omitted (never crashes). ``title`` is the key the emitted C++ reads
-        the input by: the title argument, else the name of the declaration
-        holding the call (``pine_spelling.input_binding_names``), else "".
+        Each entry: ``{title, type, default, supported[, min, max, step,
+        options]}``. ``supported``, a string input's default and options, a
+        source input's default and choices, an enum's choices and a typed
+        numeric input's literal default, bounds and options are the values
+        of the checked-settings receipt (the descriptor ``generate()``
+        builds with it). The optional keys are emitted only when the
+        corresponding signature argument is a const literal; a bound/option
+        referencing a non-literal is omitted (never crashes). ``title`` is
+        the key the emitted C++ reads the input by: the title argument, else
+        the name of the declaration holding the call
+        (``pine_spelling.input_binding_names``), else "".
         """
         return [self._input_manifest_entry(node, name)
                 for node, name in self._global_input_calls_with_names()]
@@ -586,5 +591,9 @@ class InputHelper:
                     # any non-const element -> omit the whole options list
                     if vals and all(isinstance(v, str) for v in vals):
                         entry["options"] = vals
-        entry.update(self._input_settings_metadata[id(node)])
+        descriptors = getattr(self, "_input_settings_metadata", None)
+        if descriptors is None:
+            raise RuntimeError("the input manifest reads the settings descriptors "
+                               "generate() builds: call generate() first")
+        entry.update(descriptors[id(node)])
         return entry

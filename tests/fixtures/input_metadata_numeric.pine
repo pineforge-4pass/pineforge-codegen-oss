@@ -1,0 +1,27 @@
+//@version=6
+strategy("Numeric input metadata")
+LEN = 14
+RATIO = 0.5
+// The receipt's literals: a default, bounds and a dropdown's choices, named
+// constants and signs included, are published as numbers.
+dropInt = input.int(5, "Dropdown int", options=[1, 5, 10])
+dropFloat = input.float(0.5, "Dropdown float", options=[-1.5, 0.5, 2.0])
+dropConst = input.int(5, "Dropdown constant", options=[LEN, 5])
+signedInt = input.int(-5, "Signed int", minval=-10, maxval=-1, step=1)
+signedFloat = input.float(-2.5, "Signed float", minval=-5.0)
+constFloat = input.float(RATIO, "Float constant", minval=-RATIO, maxval=RATIO)
+constInt = input.int(LEN, "Int constant", minval=1)
+foldedTime = input.time(timestamp("2024-01-02T00:00:00"), "Folded time")
+plainPrice = input.price(100.5, "Price")
+plainSigned = input(-5, "Plain signed")
+plainSignedFloat = input(-2.5, "Plain signed float")
+// What the receipt computes at run time and the manifest does not: each of
+// these keeps the previous manifest value (see KNOWN_LIMITS in the pin test).
+negatedBool = input.bool(not true, "Negated bool")
+tint = input.color(color.red, "Tint")
+exprDefault = input.int(LEN * 2, "Expression default")
+exprOption = input.int(5, "Expression option", options=[LEN * 2, 5])
+exprBound = input.int(5, "Expression bound", minval=LEN - 10, maxval=LEN * 2)
+partsTime = input.time(timestamp(2024, 1, 2, 0, 0), "Time from parts")
+plainConst = input(LEN, "Plain constant")
+plot(close)
