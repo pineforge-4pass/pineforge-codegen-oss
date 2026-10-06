@@ -148,6 +148,7 @@ HOST_MEMBER_NAMES = frozenset({
     "set_pine_risk_max_intraday_filled_orders",
     "set_pine_risk_max_intraday_loss",
     "set_pine_risk_max_position_size",
+    "set_recorded_series",
     "set_strategy_override",
     "signed_position_size",
     "snapshot_script_state",

@@ -313,12 +313,18 @@ class ExprVisitor:
         while isinstance(links[-1].false_val, Ternary):
             links.append(links[-1].false_val)
         string_na = self._ternary_string_na(links)
+        array_history_type = self._array_history_value_expr_cpp_type(node)
         if len(links) < self._FLAT_TERNARY_CHAIN:
             c = self._coerce_bool_expr(
                 self._visit_expr(node.condition), node.condition
             )
             t = self._ternary_arm(node.true_val, string_na)
             f = self._ternary_arm(node.false_val, string_na)
+            if array_history_type is not None:
+                t = (f"{array_history_type}{{}}" if self._is_na_expr(node.true_val)
+                     else f"{array_history_type}({t})")
+                f = (f"{array_history_type}{{}}" if self._is_na_expr(node.false_val)
+                     else f"{array_history_type}({f})")
             return f"(({c}) ? ({t}) : ({f}))"
         arms = []
         for link in links:
@@ -326,8 +332,15 @@ class ExprVisitor:
                 self._visit_expr(link.condition), link.condition
             )
             t = self._ternary_arm(link.true_val, string_na)
+            if array_history_type is not None:
+                t = (f"{array_history_type}{{}}" if self._is_na_expr(link.true_val)
+                     else f"{array_history_type}({t})")
             arms.append(f"({c}) ? ({t}) : ")
-        return f"({''.join(arms)}({self._ternary_arm(links[-1].false_val, string_na)}))"
+        tail = self._ternary_arm(links[-1].false_val, string_na)
+        if array_history_type is not None:
+            tail = (f"{array_history_type}{{}}" if self._is_na_expr(links[-1].false_val)
+                    else f"{array_history_type}({tail})")
+        return f"({''.join(arms)}({tail}))"
 
     def _ternary_string_na(self, links: list[Ternary]) -> bool:
         """A ``?:`` chain whose every value arm but a bare ``na`` is a
@@ -1961,7 +1974,13 @@ class ExprVisitor:
                     "collection IDs, so this result can differ from TradingView "
                     "and a missing index is not represented faithfully.",
                 )
-                return f"{self._collection_receiver_expr(name)}[{idx}]"
+                receiver = self._collection_receiver_expr(name)
+                if spec.kind == "array":
+                    return self._legacy_array_history_element(
+                        receiver, spec, series_idx,
+                        mutable=getattr(self, "_udt_assignment_target", None) is node,
+                    )
+                return f"{receiver}[{idx}]"
         # Handle strategy.* history access (e.g., strategy.position_size[1])
         if isinstance(node.object, MemberAccess):
             if isinstance(node.object.object, Identifier):
@@ -2101,4 +2120,10 @@ class ExprVisitor:
                 self._warn_untracked_reference_history(node)
                 return obj
         idx_int = self._history_offset_cpp(idx, node.index)
+        object_spec = self._type_spec_from_expr(node.object)
+        if object_spec is not None and object_spec.kind == "array":
+            return self._legacy_array_history_element(
+                obj, object_spec, idx_int,
+                mutable=getattr(self, "_udt_assignment_target", None) is node,
+            )
         return f"{obj}[{idx_int}]"

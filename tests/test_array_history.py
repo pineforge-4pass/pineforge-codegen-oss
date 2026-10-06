@@ -123,6 +123,11 @@ SHAPES = {
     "bound": (
         "a = array.from(close)\n"
         "float r = 0.0\nif bar_index > 0\n    pb = a[1]\n    r := pb.get(0) + pb.size()\n"),
+    "bound_na": (
+        "a = array.from(close)\npb = a[1]\nr = na(pb) ? 0 : 1\n"),
+    "bound_read_both_ways": (
+        "a = array.from(close)\nfloat r = 0.0\n"
+        "if bar_index > 0\n    pb = a[1]\n    r := pb.size() + (na(pb) ? 1 : 0)\n"),
     "bound_in_loop_and_switch": (
         "a = array.from(close, open)\nm = matrix.new<float>(2, 2, close)\n"
         "float r = 0.0\nif bar_index > 0\n"
@@ -479,10 +484,6 @@ NOT_SUPPORTED = {
     "string_parameter_get_bound": (
         "f(array<string> x) =>\n    v = array.get(x[1], 0)\n    str.length(v)\n"
         "s = array.from(\"a\")\nr = f(s)\n", "parameter"),
-    "bound_read_both_ways": (
-        "a = array.from(close)\nfloat r = 0.0\n"
-        "if bar_index > 0\n    pb = a[1]\n    r := pb.size() + (na(pb) ? 1 : 0)\n",
-        "na()"),
     "block_var": (
         "float r = 0.0\nif close > open\n    var bv = array.new<float>()\n"
         "    bv.push(close)\n    r := na(bv[1]) ? 0.0 : (bv[1]).size()\n", "var"),
@@ -544,8 +545,6 @@ EARLIER_LOWERING = {
     "format": (
         "a = array.from(close)\nr = str.length(str.format(\"{0}\", a[1]))\n",
         CURRENT_ELEMENT),
-    "bound_na": (
-        "a = array.from(close)\npb = a[1]\nr = na(pb) ? 0 : 1\n", CURRENT_ELEMENT),
     "bound_tostring": (
         "a = array.from(close)\npb = a[1]\nr = str.length(str.tostring(pb))\n",
         CURRENT_ELEMENT),

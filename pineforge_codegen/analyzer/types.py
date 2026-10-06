@@ -45,6 +45,7 @@ from ..ast_nodes import (
     SwitchStmt, TupleLiteral, UnaryOp,
 )
 from ..errors import Phase
+from ..matrix_overloads import matrix_sum_has_rhs
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 
 # Drawing-objects-as-data type names (spec §4.1). Defined locally — the
@@ -537,8 +538,10 @@ class TypeHelper:
                 else:
                     elem = TypeSpec.primitive("float")
                 return TypeSpec.matrix(elem)
-            if ns == "matrix" and func in _MATRIX_RETURNING_METHODS:
-                receiver = value.args[0] if value.args else value.kwargs.get("id")
+            if ns == "matrix" and (func in _MATRIX_RETURNING_METHODS or (
+                    func == "sum" and matrix_sum_has_rhs(value, namespace=True))):
+                receiver = (value.args[0] if value.args else
+                            value.kwargs.get("id1", value.kwargs.get("id")))
                 receiver_spec = self._type_spec_from_expr(receiver)
                 if receiver_spec is not None and receiver_spec.kind == "matrix":
                     return receiver_spec
@@ -607,7 +610,8 @@ class TypeHelper:
                     if func == "size":
                         return TypeSpec.primitive("int")
                 if recv_spec is not None and recv_spec.kind == "matrix":
-                    if func in _MATRIX_RETURNING_METHODS:
+                    if func in _MATRIX_RETURNING_METHODS or (
+                            func == "sum" and matrix_sum_has_rhs(value)):
                         return recv_spec
                     if func in ("row", "col"):
                         return TypeSpec.array(recv_spec.element)

@@ -823,7 +823,7 @@ ARRAY_METHODS = {
     "size":      lambda a, args: f"(double){a}.size()",
     "clear":     lambda a, args: f"{a}.clear()",
     "fill":      lambda a, args: f"std::fill({a}.begin(), {a}.end(), {args[0]})" if len(args) == 1
-                                 else _checked_array_fill_range(a, args),
+                                 else _checked_array_fill_range(a, args + [f"(int){a}.size()"] if len(args) == 2 else args),
     "includes":  lambda a, args: f"(std::find({a}.begin(), {a}.end(), {args[0]}) != {a}.end())",
     "indexof":   lambda a, args: f"[&](){{ auto __pf_it=std::find({a}.begin(),{a}.end(),{args[0]}); return __pf_it!={a}.end()?(double)(__pf_it-{a}.begin()):-1.0; }}()",
     "lastindexof": lambda a, args: f"[&](){{ for(int __pf_i=(int){a}.size()-1;__pf_i>=0;__pf_i--)if({a}[__pf_i]=={args[0]})return(double)__pf_i; return -1.0; }}()",
@@ -901,6 +901,9 @@ CHECKED_ARRAY_METHOD_KWARGS: dict[str, list[str]] = {
     "last": [],
     "pop": [],
     "shift": [],
+    "sort": ["order"],
+    "indexof": ["value"],
+    "unshift": ["value"],
 }
 
 MAP_METHODS = {
@@ -955,10 +958,109 @@ def _matrix_add_col(m: str, args: list) -> str:
     raise IndexError("matrix.add_col")
 
 
-# Keyword parameter order for matrix methods (Pine v6); used by ``_merge_kwargs``.
+def _matrix_sum(receiver: str, arguments: list[str]) -> str:
+    """Use the runtime's exposed Eigen arithmetic for matrix/scalar sums."""
+    if not arguments:
+        return f"{receiver}.sum()"
+    if len(arguments) != 1:
+        raise IndexError("matrix.sum")
+    return (
+        "([](const auto& _pf_sum_left, const auto& _pf_sum_right) { "
+        "auto _pf_sum_result = _pf_sum_left.copy(); "
+        "if constexpr (std::is_arithmetic_v<std::decay_t<decltype(_pf_sum_right)>>) { "
+        "_pf_sum_result.data().array() += _pf_sum_right; "
+        "} else { "
+        "if (_pf_sum_left.rows() != _pf_sum_right.rows() || "
+        "_pf_sum_left.columns() != _pf_sum_right.columns()) "
+        'throw std::runtime_error("Cannot sum matrices with different dimensions."); '
+        "_pf_sum_result.data() += _pf_sum_right.data(); "
+        "} return _pf_sum_result; "
+        f"}}({receiver}, {arguments[0]}))"
+    )
+
+
+def _matrix_submatrix(receiver: str, arguments: list[str]) -> str:
+    if len(arguments) > 4:
+        raise IndexError("matrix.submatrix")
+    if len(arguments) == 4 and all(argument is not None for argument in arguments):
+        return f"{receiver}.submatrix({', '.join(_matrix_int_arg(argument) for argument in arguments)})"
+    defaults = ["0", "_pf_matrix_target.rows()", "0", "_pf_matrix_target.columns()"]
+    arguments = arguments + [None] * (4 - len(arguments))
+    bounds = [argument if argument is not None else defaults[index]
+              for index, argument in enumerate(arguments)]
+    return ("[&](auto&& _pf_matrix_target) { return _pf_matrix_target.submatrix("
+            f"{', '.join(_matrix_int_arg(argument) for argument in bounds)}); }}({receiver})")
+
+
+# Parameter order of the matrix methods (Pine v6), receiver excluded: the
+# slots ``CallVisitor._collection_arg_nodes`` binds keyword arguments to. A
+# method absent here takes only its receiver. ``fill`` names its range
+# parameters so that a keyword one binds as a positional one does: the
+# lowering reads only ``value`` (the engine fills the whole matrix), a
+# pre-existing approximation of both spellings that the call does not refuse.
 MATRIX_METHOD_KWARGS: dict[str, list[str]] = {
-    "add_row": ["row_index", "array_id"],
-    "add_col": ["col_index", "array_id"],
+    "add_row": ["row", "array_id"],
+    "add_col": ["column", "array_id"],
+    "sort": ["column", "order"],
+    "submatrix": ["from_row", "to_row", "from_column", "to_column"],
+    "sum": ["id2"],
+    "diff": ["id2"],
+    "mult": ["id2"],
+    "get": ["row", "column"],
+    "set": ["row", "column", "value"],
+    "fill": ["value", "from_row", "to_row", "from_column", "to_column"],
+    "row": ["row"],
+    "col": ["column"],
+    "remove_row": ["row"],
+    "remove_col": ["column"],
+    "swap_rows": ["row1", "row2"],
+    "swap_columns": ["column1", "column2"],
+    "reshape": ["rows", "columns"],
+    "concat": ["id2", "vertical"],
+    "pow": ["power"],
+    "kron": ["id2"],
+}
+
+# Keyword spellings an earlier build bound that Pine's reference does not
+# name; they keep binding to the same slot.
+MATRIX_METHOD_KWARG_ALIASES: dict[str, dict[str, str]] = {
+    "add_row": {"row_index": "row"},
+    "add_col": {"col_index": "column"},
+}
+
+# The receiver's own keyword in the namespace form (``matrix.diff(id1=m, ...)``).
+MATRIX_RECEIVER_KEYWORD: dict[str, str] = {
+    "sum": "id1", "diff": "id1", "mult": "id1", "concat": "id1", "kron": "id1",
+}
+
+
+def _matrix_functional_receiver(method: str, node):
+    """The receiver node of ``matrix.<method>(...)``: its first positional
+    argument, else its keyword."""
+    return node.args[0] if node.args else node.kwargs.get(
+        MATRIX_RECEIVER_KEYWORD.get(method, "id"))
+
+
+# The optional parameters of the collection methods whose keywords bind by
+# position, and what a gap left before one stands for when only a later
+# keyword is written (``m.sort(order = order.descending)`` leaves ``column``
+# open): a number is Pine's default, ``None`` an omitted argument the method's
+# template defaults from the receiver's own extent (``_matrix_submatrix``'s
+# ``to_row`` / ``to_column``, the defaulted ``add_row`` / ``add_col`` of
+# ``TypeInferer._matrix_method_expr``). A parameter that is not listed is
+# required: a gap before it is refused.
+MATRIX_OPTIONAL_PARAMS: dict[str, dict[str, int | None]] = {
+    "sort": {"column": 0, "order": None},
+    "submatrix": {"from_row": 0, "to_row": None, "from_column": 0, "to_column": None},
+    "add_row": {"row": None, "array_id": None},
+    "add_col": {"column": None, "array_id": None},
+    "fill": {"from_row": None, "to_row": None, "from_column": None, "to_column": None},
+    "sum": {"id2": None},
+    "concat": {"vertical": None},
+}
+ARRAY_OPTIONAL_PARAMS: dict[str, dict[str, int | None]] = {
+    "fill": {"index_from": 0, "index_to": None},
+    "sort": {"order": None},
 }
 
 # Matrix mutators whose established C++ lowering returns ``void``.  A Pine
@@ -1025,17 +1127,17 @@ MATRIX_METHODS = {
     "swap_rows": lambda m, args: f"{m}.swap_rows({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])})",
     "swap_columns": lambda m, args: f"{m}.swap_columns({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])})",
     "copy":      lambda m, args: f"{m}.copy()",
-    "submatrix": lambda m, args: f"{m}.submatrix({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])}, {_matrix_int_arg(args[2])}, {_matrix_int_arg(args[3])})",
+    "submatrix": _matrix_submatrix,
     "reshape":   lambda m, args: f"{m}.reshape({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])})",
     "reverse":   lambda m, args: f"{m}.reverse()",
     "transpose": lambda m, args: f"{m}.transpose()",
-    "sort":      lambda m, args: f"{m}.sort({_matrix_int_arg(args[0])}, {args[1]} != \"descending\")" if len(args)>1 else f"{m}.sort({_matrix_int_arg(args[0])})",
+    "sort":      lambda m, args: f"{m}.sort({_matrix_int_arg(args[0])}, {args[1]} != \"descending\")" if len(args)>1 else f"{m}.sort({_matrix_int_arg(args[0])})" if args else f"{m}.sort(0)",
     "concat":    lambda m, args: f"{m}.concat({args[0]}, {pine_truth_cast(args[1])})" if len(args)>1 else f"{m}.concat({args[0]}, true)",
     "avg":       lambda m, args: f"{m}.avg()",
     "min":       lambda m, args: f"{m}.min()",
     "max":       lambda m, args: f"{m}.max()",
     "mode":      lambda m, args: f"{m}.mode()",
-    "sum":       lambda m, args: f"{m}.sum()",
+    "sum":       _matrix_sum,
     "diff":      lambda m, args: f"{m}.diff({args[0]})",
     "mult":      lambda m, args: f"{m}.mult({args[0]})",
     "pow":       lambda m, args: f"{m}.pow({_matrix_int_arg(args[0])})",

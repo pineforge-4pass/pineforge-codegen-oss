@@ -204,7 +204,6 @@ _STRING_PARAMETER_LOWERING_FAILS = _PARAMETER_LOWERING_FAILS | frozenset(
 _MATRIX_RECEIVER_LOWERING_FAILS = frozenset({
     "read:receiver", "change:receiver", "render", "copy:untyped",
     "read:argument:det", "read:argument:copy", "change:argument",
-    "other:collection",  # matrix.sum (_matrix_sum_use)
 })
 
 
@@ -233,12 +232,17 @@ COLLECTION_HISTORY_CPP = r"""
 // for a var) opens a slot, and the end of the bar closes it with a copy.
 template <typename T>
 struct _PFCollectionTraits;
+template <typename T>
+class _PFArrayHistoryValue;
 template <typename E, typename A>
 struct _PFCollectionTraits<std::vector<E, A>> {
     static std::shared_ptr<const std::vector<E, A>> freeze(const std::vector<E, A>& value) {
         return std::make_shared<const std::vector<E, A>>(value);
     }
     static std::vector<E, A> copy(const std::vector<E, A>& value) { return value; }
+    static _PFArrayHistoryValue<std::vector<E, A>> reference(std::shared_ptr<const std::vector<E, A>> value) {
+        return _PFArrayHistoryValue<std::vector<E, A>>(value);
+    }
     static bool is_na(const std::vector<E, A>&) { return false; }
     static const char* na_message() {
         return "@NA_ARRAY_MESSAGE@";
@@ -308,6 +312,65 @@ struct _PFCollectionTraits<PineGenericMatrix<E>> {
 };
 """
 
+COLLECTION_HISTORY_ARRAY_VALUE_CPP = r"""
+template <typename T>
+class _PFArrayHistoryValue {
+public:
+    _PFArrayHistoryValue() = default;
+    _PFArrayHistoryValue(const T& value) : value_(std::make_shared<T>(value)) {}
+    _PFArrayHistoryValue(std::shared_ptr<const T> value)
+        : value_(value ? std::make_shared<T>(*value) : nullptr) {}
+    bool is_na() const { return !value_; }
+    T& get() const {
+        if (!value_) _PF_COLLECTION_STOP("na_reference", "array", "@NA_ARRAY_MESSAGE@");
+        return *value_;
+    }
+    operator T&() const { return get(); }
+
+private:
+    std::shared_ptr<T> value_;
+};
+
+template <typename T>
+bool is_na(const _PFArrayHistoryValue<T>& value) { return value.is_na(); }
+
+template <typename T>
+T& _pf_array_id(T& value) { return value; }
+template <typename T>
+const T& _pf_array_id(const T& value) { return value; }
+template <typename T>
+T _pf_array_id(T&& value) { return std::move(value); }
+template <typename T>
+T& _pf_array_id(const _PFArrayHistoryValue<T>& value) { return value.get(); }
+template <typename T>
+T& _pf_array_id(_PFArrayHistoryValue<T>& value) { return value.get(); }
+template <typename T>
+T _pf_array_id(_PFArrayHistoryValue<T>&& value) { return value.get(); }
+
+template <typename T>
+struct _PFCollectionTraits<_PFArrayHistoryValue<T>> {
+    static std::shared_ptr<const _PFArrayHistoryValue<T>> freeze(const _PFArrayHistoryValue<T>& value) {
+        if (value.is_na()) return nullptr;
+        return std::make_shared<const _PFArrayHistoryValue<T>>(T(value.get()));
+    }
+    static _PFArrayHistoryValue<T> copy(const _PFArrayHistoryValue<T>& value) { return value; }
+    static _PFArrayHistoryValue<T> reference(std::shared_ptr<const _PFArrayHistoryValue<T>> value) {
+        return value ? *value : _PFArrayHistoryValue<T>{};
+    }
+    static bool is_na(const _PFArrayHistoryValue<T>& value) { return value.is_na(); }
+    static const char* na_message() { return "@NA_ARRAY_MESSAGE@"; }
+    static void na_stop() {
+        _PF_COLLECTION_STOP("na_reference", "array", "@NA_ARRAY_MESSAGE@");
+    }
+    [[noreturn]] static void history_stop() {
+        _PF_COLLECTION_STOP("historical_modified", "array", "@HISTORICAL_CHANGE_MESSAGE@");
+#ifndef PINEFORGE_HAS_RUN_FAILURE_CODES_V1
+        throw 0;
+#endif
+    }
+};
+"""
+
 COLLECTION_HISTORY_CLASS_CPP = r"""
 // A change to the history of an array or a matrix stops the run, as
 // TradingView's does (RE10051).
@@ -359,6 +422,13 @@ public:
     T value(int offset, const T& current) const {
         return offset == 0 ? current : value(offset);
     }
+    auto reference(int offset) const {
+        return _PFCollectionTraits<T>::reference(offset > 0 ? slots_[offset] : nullptr);
+    }
+    auto reference(int offset, const T& current) const {
+        return offset == 0 ? _PFCollectionTraits<T>::reference(
+            _PFCollectionTraits<T>::freeze(current)) : reference(offset);
+    }
     // The receiver of a built-in that changes it: the variable itself at a
     // zero offset, else the run stops, as TradingView's does (RE10051; a na
     // history stops it with RE10052 / RE10053 first).
@@ -393,6 +463,7 @@ def _with_messages(text: str) -> str:
 COLLECTION_HISTORY_CPP = _with_messages(COLLECTION_HISTORY_CPP)
 COLLECTION_HISTORY_MATRIX_CPP = _with_messages(COLLECTION_HISTORY_MATRIX_CPP)
 COLLECTION_HISTORY_GENERIC_MATRIX_CPP = _with_messages(COLLECTION_HISTORY_GENERIC_MATRIX_CPP)
+COLLECTION_HISTORY_ARRAY_VALUE_CPP = _with_messages(COLLECTION_HISTORY_ARRAY_VALUE_CPP)
 COLLECTION_HISTORY_CLASS_CPP = _with_messages(COLLECTION_HISTORY_CLASS_CPP)
 
 
@@ -484,6 +555,9 @@ class Use:
     needs_collection: bool = False
     form: str | None = None        # read / change / slice: receiver or argument;
                                    # render: tostring or format
+    crosses_callable: bool = False  # a copy given to a user function's or
+                                    # method's parameter (a method's receiver
+                                    # is its first)
 
     def tag(self) -> str:
         """The use's class, by which ``_ELEMENT_LOWERING_FAILS`` and its
@@ -510,11 +584,13 @@ class NameUses:
     change: Use | None = None
     reject: Use | None = None
     other: Use | None = None
+    crosses_parameter: bool = False
     tags: dict[str, Use] = field(default_factory=dict)   # every use's class
 
     def merge(self, other: "NameUses | None") -> None:
         if other is None:
             return
+        self.crosses_parameter |= other.crosses_parameter
         for key in ("collection", "element", "change", "reject", "other"):
             if getattr(self, key) is None and getattr(other, key) is not None:
                 setattr(self, key, getattr(other, key))
@@ -543,6 +619,7 @@ class NameUses:
                 if use.names.element is not None or use.names.other is not None:
                     self.merge(NameUses(other=use.names.element or use.names.other))
         elif how in ("copy", "flow"):
+            self.crosses_parameter |= use.crosses_callable
             self.merge(use.names)
             if use.needs_collection:
                 self.merge(NameUses(collection=use))
@@ -888,8 +965,6 @@ class CollectionHistoryChecker:
             return Use("other", node, f"{label}.{method}: {_a(kind)} has no fields.",
                        needs_collection=True)
         if method in self._builtin_methods(kind):
-            if kind == "matrix" and method == "sum":
-                return self._matrix_sum_use(node, label)
             if kind == "array" and method == "slice":
                 return self._slice_use(call, node, label, "receiver")
             if self._changing(kind, method):
@@ -898,17 +973,11 @@ class CollectionHistoryChecker:
         if method in self._methods:
             definitions = self._definitions_for(self._methods[method], 0, None, kind)
             return Use("copy", node, names=self._parameter_uses(
-                definitions, 0, None, kind), needs_collection=True, form="receiver")
+                definitions, 0, None, kind), needs_collection=True, form="receiver",
+                crosses_callable=True)
         return Use("other", node,
                    f"{label}.{method}(): no array or matrix method of that name.",
                    needs_collection=True)
-
-    def _matrix_sum_use(self, node, label: str) -> Use:
-        """``matrix.sum(m[k], m2)``: its matrix result does not compile,
-        history or not (the earlier build refused the history)."""
-        return Use("other", node,
-                   f"matrix.sum of {label} is not supported in PineForge: the "
-                   "matrix it returns does not compile.", needs_collection=True)
 
     def _slice_use(self, call: FuncCall, node, label: str, form: str) -> Use:
         """``(a[k]).slice(...)``: TradingView's slice shares the history's
@@ -933,7 +1002,7 @@ class CollectionHistoryChecker:
                            names=self._parameter_uses(definitions, positional, keyword, kind),
                            needs_collection=self._parameter_is_collection(
                                definitions, positional, keyword),
-                           form="parameter")
+                           form="parameter", crosses_callable=True)
             if name in _SCALAR_FUNCTIONS:
                 return self._reject(
                     node, f"{label} is {_a(kind)}, which TradingView refuses as an "
@@ -949,8 +1018,6 @@ class CollectionHistoryChecker:
                 return self._reject(
                     node, f"{label} is {_a(kind)}, which TradingView refuses as an "
                     "element of array.from (CE10122).")
-            if namespace == "matrix" and member == "sum" and kind == "matrix":
-                return self._matrix_sum_use(node, label)
             if member in methods:
                 return self._builtin_slot_use(
                     namespace, member, positional, keyword, node, kind, label)
@@ -999,7 +1066,7 @@ class CollectionHistoryChecker:
             return Use("copy", node, names=self._parameter_uses(
                 definitions, position, keyword, kind),
                 needs_collection=self._parameter_is_collection(
-                    definitions, position, keyword))
+                    definitions, position, keyword), crosses_callable=True)
         if (namespace not in _BUILTIN_NAMESPACES and namespace not in self._types
                 and (member in self._array_methods or member in self._matrix_methods)):
             # A built-in method on another collection (``c.concat(a[1])``,
@@ -1437,6 +1504,14 @@ class CollectionHistoryChecker:
         if use.how == "copy":
             if uses.change is not None:
                 return self._change_refusal(read, label, uses.change, "a name bound to it")
+            nullable = (uses.element is not None
+                        and all(not tag.startswith("render") for tag in uses.tags))
+            # A value that reaches a user callable's parameter, directly or
+            # through a name, stays the copy it was: the parameter is a
+            # ``std::vector&``, which holds no na array and answers no na().
+            parameter_copy = uses.crosses_parameter
+            if (nullable and not parameter_copy and uses.other is None):
+                return Decision(SUPPORTED, "reference" if kind == "array" else "copy")
             if uses.needs_collection():
                 if uses.element is not None:
                     return Decision(
@@ -1449,7 +1524,7 @@ class CollectionHistoryChecker:
                     return Decision(REFUSED, node=uses.other.node or read.node,
                                     message=uses.other.message or
                                     f"{label} is not supported in PineForge here.")
-                return Decision(SUPPORTED, "copy")
+                return Decision(SUPPORTED, "reference" if kind == "array" and not parameter_copy else "copy")
             return None
         if kind == "matrix" and use.how == "discard":
             return Decision(SUPPORTED, "copy")

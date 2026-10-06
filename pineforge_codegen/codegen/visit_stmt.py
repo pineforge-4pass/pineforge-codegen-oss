@@ -1822,6 +1822,9 @@ class StmtVisitor:
         self._current_counted_loop_vars = (
             self._current_counted_loop_vars - {node.var, *(node.vars or ())})
         iterable_spec = self._type_spec_from_expr(node.iterable)
+        if (iterable_spec is not None and iterable_spec.kind == "array"
+                and self._array_history_value_names()):
+            iterable = f"_pf_array_id({iterable})"
         elem_spec = (
             iterable_spec.element
             if iterable_spec is not None and iterable_spec.kind == "array"

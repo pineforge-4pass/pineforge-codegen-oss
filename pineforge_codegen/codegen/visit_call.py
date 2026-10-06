@@ -169,6 +169,7 @@ from .helpers import (
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_METHODS,
+    ARRAY_OPTIONAL_PARAMS,
     BAR_FIELDS,
     BAR_SERIES_PUSH,
     CHECKED_ARRAY_METHOD_KWARGS,
@@ -179,7 +180,10 @@ from .tables import (
     MATH_FUNC_MAP,
     MATRIX_METHODS,
     MATRIX_METHOD_KWARGS,
+    MATRIX_METHOD_KWARG_ALIASES,
     MATRIX_NUMERIC_ONLY,
+    MATRIX_OPTIONAL_PARAMS,
+    MATRIX_RECEIVER_KEYWORD,
     SKIP_FUNC_NAMES,
     SKIP_NAMESPACES,
     SKIP_VAR_TYPES,
@@ -188,6 +192,7 @@ from .tables import (
     TIME_FIELD_EXPRS,
     _math_minmax_na_expr,
     _math_round_digits_expr,
+    _matrix_functional_receiver,
     _merge_kwargs,
 )
 
@@ -690,10 +695,73 @@ class CallVisitor:
 
     def _array_method_arg_nodes(self, method: str, node: FuncCall) -> list:
         """Merge checked-array method kwargs into Pine signature order."""
-        param_names = CHECKED_ARRAY_METHOD_KWARGS.get(method)
-        if param_names is None:
+        return self._collection_arg_nodes("array", method, node, False)
+
+    def _collection_arg_nodes(self, namespace, method, node, functional):
+        """The arguments of a matrix or checked-array method call in Pine's
+        parameter order (the receiver first in the namespace form).
+
+        A keyword argument binds to its parameter's own slot, never shifted
+        left over a gap, and the gap before a later argument takes the
+        omitted optional parameter's default (a ``None`` default is the
+        receiver's own extent, which the method's template reads). A keyword
+        the lowering does not consume -- an unknown name, a parameter given
+        twice -- is refused, as is a gap before a required parameter. A call
+        without keywords, and an array method outside the checked-index
+        table, keep their arguments as written."""
+        if not node.kwargs:
             return list(node.args)
-        return _merge_kwargs(node.args, node.kwargs, param_names, lambda arg: arg)
+        if namespace == "matrix":
+            slots = list(MATRIX_METHOD_KWARGS.get(method, []))
+            optional = MATRIX_OPTIONAL_PARAMS.get(method, {})
+            aliases = MATRIX_METHOD_KWARG_ALIASES.get(method, {})
+            receiver = MATRIX_RECEIVER_KEYWORD.get(method, "id")
+        elif method in CHECKED_ARRAY_METHOD_KWARGS:
+            slots = list(CHECKED_ARRAY_METHOD_KWARGS[method])
+            optional = ARRAY_OPTIONAL_PARAMS.get(method, {})
+            aliases = {}
+            receiver = "id"
+        else:
+            return list(node.args)
+        if functional:
+            slots.insert(0, receiver)
+        arguments = list(node.args)
+        for name, value in node.kwargs.items():
+            slot = aliases.get(name, name)
+            if slot not in slots:
+                self._collection_argument_error(node, namespace, method, "unknown", name)
+            index = slots.index(slot)
+            if index < len(arguments) and arguments[index] is not None:
+                self._collection_argument_error(node, namespace, method, "twice", name)
+            arguments.extend([None] * (index + 1 - len(arguments)))
+            arguments[index] = value
+        for index, argument in enumerate(arguments):
+            if argument is not None:
+                continue
+            if slots[index] not in optional:
+                self._collection_argument_error(node, namespace, method, "missing", slots[index])
+            default = optional[slots[index]]
+            arguments[index] = None if default is None else NumberLiteral(value=default)
+        return arguments
+
+    def _collection_argument_error(self, node, namespace, method, problem, name):
+        """Refuse a collection call's keyword binding with the diagnostic its
+        namespace already reports for a call that does not bind."""
+        if namespace == "matrix":
+            self._codegen_error(
+                node, f"matrix.{method}: wrong number of arguments",
+                hint="Check Pine v6 matrix method signature (positional vs keyword).")
+        key = ".".join((namespace, method))
+        if problem == "unknown":
+            self._codegen_error(node, f"{key}: unknown keyword argument '{name}'")
+        if problem == "twice":
+            self._codegen_error(
+                node, f"{key}: argument '{name}' passed both positionally and by keyword")
+        self._codegen_error(node, f"{key}: missing required argument '{name}'")
+
+    def _matrix_method_arg_nodes(self, method, node, functional=False):
+        arguments = self._collection_arg_nodes("matrix", method, node, functional)
+        return arguments[1:] if functional else arguments
 
     def _matrix_bool_value_args(
         self, method: str, args: list[str], arg_nodes: list,
@@ -740,12 +808,7 @@ class CallVisitor:
                 "array.copy: expected exactly one receiver 'id'",
                 hint="Use array.copy(source) or array.copy(id=source).",
             )
-        param_names = CHECKED_ARRAY_METHOD_KWARGS.get(method)
-        if param_names is None:
-            return list(node.args)
-        return _merge_kwargs(
-            node.args, node.kwargs, ["id", *param_names], lambda arg: arg
-        )
+        return self._collection_arg_nodes("array", method, node, True)
 
     def _map_identifier_is_visible_binding(self, node: FuncCall) -> bool:
         """Whether ``map`` is a lexical value at this exact source position.
@@ -1663,6 +1726,18 @@ class CallVisitor:
                 return self._matrix_history_method_expr(
                     callee.object, callee.member, recv_spec, node)
 
+        if (isinstance(callee, MemberAccess)
+                and isinstance(callee.object, (FuncCall, Ternary))
+                and callee.member in MATRIX_METHODS):
+            receiver_spec = self._type_spec_from_expr(callee.object)
+            if receiver_spec is not None and receiver_spec.kind == "matrix":
+                self._check_matrix_method_allowed(callee.member, receiver_spec, node)
+                raw_args = self._matrix_method_arg_nodes(callee.member, node)
+                arguments = self._matrix_bool_value_args(
+                    callee.member, [self._visit_expr(arg) if arg is not None else None for arg in raw_args], raw_args, receiver_spec)
+                return self._matrix_method_expr(
+                    self._visit_expr(callee.object), callee.member, arguments, raw_args, node)
+
         # chart.point.now/new/from_index/from_time/copy — REAL data (a ChartPoint
         # aggregate). Routed here BEFORE the obj.field.method receiver logic,
         # which would otherwise mis-treat ``chart.point`` as a receiver object
@@ -1821,20 +1896,16 @@ class CallVisitor:
                     ):
                         arr = self._collection_receiver_expr(oname)
                         self._check_matrix_method_allowed(meth_raw, recv_spec, node)
-                        param_names = MATRIX_METHOD_KWARGS.get(meth_raw)
-                        raw_args = (
-                            _merge_kwargs(node.args, node.kwargs, param_names, lambda a: a)
-                            if param_names and node.kwargs else list(node.args)
-                        )
+                        raw_args = self._matrix_method_arg_nodes(meth_raw, node)
                         margs = self._matrix_bool_value_args(
                             meth_raw,
-                            [self._visit_expr(a) for a in raw_args],
+                            [self._visit_expr(a) if a is not None else None for a in raw_args],
                             raw_args,
                             recv_spec,
                         )
                         fn = MATRIX_METHODS[meth_raw]
                         try:
-                            return fn(arr, margs)
+                            return self._matrix_method_expr(arr, meth_raw, margs, raw_args, node)
                         except IndexError:
                             self._codegen_error(
                                 node,
@@ -2054,20 +2125,16 @@ class CallVisitor:
         ):
             arr = self._collection_receiver_expr(namespace)
             self._check_matrix_method_allowed(func_name, namespace_spec, node)
-            param_names = MATRIX_METHOD_KWARGS.get(func_name)
-            raw_args = (
-                _merge_kwargs(node.args, node.kwargs, param_names, lambda a: a)
-                if param_names and node.kwargs else list(node.args)
-            )
+            raw_args = self._matrix_method_arg_nodes(func_name, node)
             args = self._matrix_bool_value_args(
                 func_name,
-                [self._visit_expr(a) for a in raw_args],
+                [self._visit_expr(a) if a is not None else None for a in raw_args],
                 raw_args,
                 namespace_spec,
             )
             fn = MATRIX_METHODS[func_name]
             try:
-                return fn(arr, args)
+                return self._matrix_method_expr(arr, func_name, args, raw_args, node)
             except IndexError:
                 self._codegen_error(
                     node,
@@ -2658,41 +2725,48 @@ class CallVisitor:
                     if len(args_e) > 2 else self._default_for_spec(elem_spec)
                 )
                 return f"PineGenericMatrix<{cpp_t}>::new_({rows}, {cols}, {init})"
-            if func_name in MATRIX_METHODS and node.args:
+            matrix_receiver = _matrix_functional_receiver(func_name, node)
+            if func_name in MATRIX_METHODS and matrix_receiver is None:
+                self._codegen_error(
+                    node, f"matrix.{func_name}: wrong number of arguments",
+                    hint="Check Pine v6 matrix method signature (positional vs keyword).")
+            if func_name in MATRIX_METHODS and matrix_receiver is not None:
                 from ..ast_nodes import Identifier as _Ident
                 if func_name in MATRIX_NUMERIC_ONLY:
-                    recv_node = node.args[0]
+                    recv_node = matrix_receiver
                     if history_annotation(recv_node) is not None:
                         # A matrix's history is a matrix of its type.
                         recv_node = recv_node.object
-                    if not isinstance(recv_node, _Ident):
-                        self._codegen_error(node, f"matrix.{func_name} receiver must be a variable reference")
-                    recv_name = recv_node.name
-                    recv_spec = self._collection_spec_for_name(recv_name)
-                    if recv_spec is None or recv_spec.kind != "matrix":
-                        self._codegen_error(node, f"matrix.{func_name}: receiver '{recv_name}' is not a known matrix variable")
+                    if func_name == "sum":
+                        recv_spec = self._type_spec_from_expr(recv_node)
+                        if recv_spec is None or recv_spec.kind != "matrix":
+                            name = func_name
+                            self._codegen_error(node, f"matrix.{name}(...) is not implemented in PineForge runtime.")
+                    else:
+                        if not isinstance(recv_node, _Ident):
+                            self._codegen_error(node, f"matrix.{func_name} receiver must be a variable reference")
+                        recv_name = recv_node.name
+                        recv_spec = self._collection_spec_for_name(recv_name)
+                        if recv_spec is None or recv_spec.kind != "matrix":
+                            self._codegen_error(node, f"matrix.{func_name}: receiver '{recv_name}' is not a known matrix variable")
                     self._check_matrix_method_allowed(func_name, recv_spec, node)
                 if func_name == "sort":
-                    if isinstance(node.args[0], _Ident):
-                        recv_name = node.args[0].name
+                    if isinstance(matrix_receiver, _Ident):
+                        recv_name = matrix_receiver.name
                         recv_spec = self._collection_spec_for_name(recv_name)
                         if recv_spec is not None and recv_spec.kind == "matrix":
                             self._check_matrix_method_allowed(func_name, recv_spec, node)
-                obj = self._visit_expr(node.args[0])
-                param_names = MATRIX_METHOD_KWARGS.get(func_name)
-                raw_rest = (
-                    _merge_kwargs(node.args[1:], node.kwargs, param_names, lambda a: a)
-                    if param_names else list(node.args[1:])
-                )
+                obj = self._visit_expr(matrix_receiver)
+                raw_rest = self._matrix_method_arg_nodes(func_name, node, True)
                 rest = self._matrix_bool_value_args(
                     func_name,
-                    [self._visit_expr(a) for a in raw_rest],
+                    [self._visit_expr(a) if a is not None else None for a in raw_rest],
                     raw_rest,
-                    self._type_spec_from_expr(node.args[0]),
+                    self._type_spec_from_expr(matrix_receiver),
                 )
                 fn = MATRIX_METHODS[func_name]
                 try:
-                    return fn(obj, rest)
+                    return self._matrix_method_expr(obj, func_name, rest, raw_rest, node)
                 except IndexError:
                     self._codegen_error(
                         node,

@@ -149,7 +149,10 @@ def test_pivot_point_levels_global_initializes_as_vector():
     assert "Series<double> _s_high;" in cpp
     assert "Series<double> _s_low;" in cpp
     assert "Series<double> _s_close;" in cpp
-    assert "x = levels[0];" in cpp
+    assert "x = levels[0];" not in cpp
+    assert "const auto& _pf_history_array = levels;" in cpp
+    assert ("static_cast<size_t>(_pf_history_offset) >= _pf_history_array.size()) "
+            "return na<double>();") in cpp
 
 
 def test_pivot_point_levels_developing_and_kwargs_use_runtime_ohlc_shape():

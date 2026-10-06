@@ -107,7 +107,7 @@ int loopSum = 0
 for v in b[1]
     loopSum += v
 pb = b[1]
-bound = pb.size()
+bound = na(pb) ? -1 : pb.size()
 if bar_index == 3
     strategy.entry("L", strategy.long)
 // @pf-trace prevNa=prevNa
@@ -126,7 +126,7 @@ def test_history_values_bar_by_bar(tmp_path):
     # one element shorter than the array; a matrix's history holds the
     # previous bar's value; a for...in loop over b[1] sums the current
     # [bar_index, bar_index * 10]; a variable bound to the history holds a
-    # copy of it (an empty array on the first bar, where TradingView's is na).
+    # copy of it (an na array reference on the first bar).
     engine = skip_unless_e2e_env()
     feed = chart_feed_head(engine, tmp_path, 6)
     runs = execute_all(engine, feed, tmp_path, {"hist": Build(SYNTHETIC, trace=True)})
@@ -140,7 +140,7 @@ def test_history_values_bar_by_bar(tmp_path):
         "varLag": [-1, 1, 1, 1, 1, 1],
         "mPrev": [-1, 0, 3, 6, 9, 12],
         "loopSum": [0, 11, 22, 33, 44, 55],
-        "bound": [0, 2, 2, 2, 2, 2],
+        "bound": [-1, 2, 2, 2, 2, 2],
     }
 
 

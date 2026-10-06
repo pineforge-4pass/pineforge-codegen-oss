@@ -14,19 +14,166 @@ TradingView's read-only history (fixtures/array_history_tv).
 from __future__ import annotations
 
 from ..collection_history import (
+    COLLECTION_HISTORY_ARRAY_VALUE_CPP,
     COLLECTION_HISTORY_CLASS_CPP,
     COLLECTION_HISTORY_CPP,
     COLLECTION_HISTORY_GENERIC_MATRIX_CPP,
     COLLECTION_HISTORY_MATRIX_CPP,
+    NA_MATRIX_MESSAGE,
     history_annotation,
     literal_offset,
 )
-from ..ast_nodes import FuncCall, Identifier, MemberAccess
+from ..ast_nodes import Assignment, FuncCall, FuncDef, Identifier, MemberAccess, MethodDef, Ternary, VarDecl
+from ..limits import iter_ast_nodes
 from ..symbols import TypeSpec
 
 
 class CollectionHistoryEmitter:
     """CodeGen mixin: the history members of array and matrix variables."""
+
+    def _matrix_history_value_names(self) -> set[str]:
+        cached = getattr(self, "_matrix_history_value_bindings", None)
+        if cached is not None:
+            return cached
+        names = set()
+        bindings = {}
+        callable_depth = None
+        for node, depth in iter_ast_nodes(self.ctx.ast):
+            if callable_depth is not None:
+                if depth > callable_depth:
+                    continue
+                callable_depth = None
+            if isinstance(node, (FuncDef, MethodDef)):
+                callable_depth = depth
+                continue
+            if isinstance(node, VarDecl):
+                name, value = node.name, node.value
+            elif isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                name, value = node.target.name, node.value
+            else:
+                continue
+            values = [value]
+            while values:
+                source = values.pop()
+                annotation = history_annotation(source)
+                if annotation is not None and annotation["kind"] == "matrix":
+                    names.add(name)
+                elif isinstance(source, Identifier):
+                    bindings.setdefault(source.name, []).append(name)
+                elif isinstance(source, Ternary):
+                    values.extend((source.true_val, source.false_val))
+        pending = list(names)
+        while pending:
+            source = pending.pop()
+            for name in bindings.get(source, ()):
+                if name not in names:
+                    names.add(name)
+                    pending.append(name)
+        self._matrix_history_value_bindings = names
+        return names
+
+    def _checked_matrix_history_receiver(self, receiver, receiver_node):
+        if (isinstance(receiver_node, Identifier)
+                and receiver_node.name in self._matrix_history_value_names()
+                and not self._collection_name_is_lexically_shadowed(receiver_node.name)
+                and receiver_node.name not in self._current_func_param_types):
+            return (f'([&]() -> auto& {{ if (is_na({receiver})) '
+                    f'_PF_COLLECTION_STOP("na_reference", "matrix", "{NA_MATRIX_MESSAGE}"); '
+                    f'return {receiver}; }}())')
+        return receiver
+
+    def _array_history_value_names(self) -> dict[str, TypeSpec]:
+        cached = getattr(self, "_array_history_value_specs", None)
+        if cached is not None:
+            return cached
+        bindings = {}
+        specs = {}
+        callable_depth = None
+        for node, depth in iter_ast_nodes(self.ctx.ast):
+            if callable_depth is not None:
+                if depth > callable_depth:
+                    continue
+                callable_depth = None
+            if isinstance(node, (FuncDef, MethodDef)):
+                callable_depth = depth
+                continue
+            if isinstance(node, VarDecl):
+                name, value = node.name, node.value
+            elif isinstance(node, Assignment) and isinstance(node.target, Identifier):
+                name, value = node.target.name, node.value
+            else:
+                continue
+            annotation = history_annotation(value)
+            if annotation is not None and annotation["use"] == "reference":
+                specs[name] = annotation["spec"]
+            else:
+                values = [value]
+                while values:
+                    source_value = values.pop()
+                    if isinstance(source_value, Identifier):
+                        bindings.setdefault(source_value.name, []).append(name)
+                    elif isinstance(source_value, Ternary):
+                        values.extend((source_value.true_val, source_value.false_val))
+        pending = list(specs)
+        while pending:
+            source = pending.pop()
+            for name in bindings.get(source, ()):
+                if name not in specs:
+                    specs[name] = specs[source]
+                    pending.append(name)
+        for name, spec in specs.items():
+            self._array_vars.add(name)
+            self._collection_types[name] = spec
+        self._array_history_value_specs = specs
+        return specs
+
+    def _array_history_value_cpp_type(self, name: str) -> str | None:
+        spec = self._array_history_value_names().get(name)
+        if spec is None:
+            return None
+        spec = self._widen_array_spec_for_name(name, spec)
+        return f"_PFArrayHistoryValue<{self._type_spec_to_cpp(spec)}>"
+
+    def _array_history_value_expr_cpp_type(self, value) -> str | None:
+        values = [value]
+        while values:
+            source = values.pop()
+            if isinstance(source, Identifier):
+                if (self._collection_name_is_lexically_shadowed(source.name)
+                        or source.name in self._current_func_param_types):
+                    continue
+                cpp_type = self._array_history_value_cpp_type(source.name)
+                if cpp_type is not None:
+                    return cpp_type
+            elif isinstance(source, Ternary):
+                values.extend((source.true_val, source.false_val))
+        return None
+
+    def _legacy_array_history_element(self, receiver: str, spec: TypeSpec,
+                                      offset: str, mutable: bool = False) -> str:
+        element_cpp = self._type_spec_to_cpp(spec.element)
+        if self._array_history_value_names():
+            receiver = f"_pf_array_id({receiver})"
+        if mutable:
+            return (
+                f"([&]() -> decltype(auto) {{ "
+                f"auto& _pf_history_array = {receiver}; "
+                f"const int _pf_history_offset = {offset}; "
+                f"if (_pf_history_offset < 0 || "
+                f"static_cast<size_t>(_pf_history_offset) >= _pf_history_array.size()) "
+                f'_PF_ARRAY_STOP("index_out_of_bounds", nullptr, '
+                f'"Array history element index is out of bounds."); '
+                f"return _pf_history_array.at(_pf_history_offset); }}())"
+            )
+        return (
+            f"([&]() -> {element_cpp} {{ "
+            f"const auto& _pf_history_array = {receiver}; "
+            f"const int _pf_history_offset = {offset}; "
+            f"if (_pf_history_offset < 0 || "
+            f"static_cast<size_t>(_pf_history_offset) >= _pf_history_array.size()) "
+            f"return na<{element_cpp}>(); "
+            f"return _pf_history_array[_pf_history_offset]; }}())"
+        )
 
     def _collection_history_variables(self) -> list:
         """The declarations whose history the script reads, in key order."""
@@ -59,11 +206,12 @@ class CollectionHistoryEmitter:
 
     def _emit_collection_history_helper(self, lines: list[str]) -> None:
         variables = self._collection_history_variables()
-        if not variables:
+        if not variables and not self._array_history_value_names():
             return
         float_spec = TypeSpec.primitive("float")
         matrices = [v.spec for v in variables if v.kind == "matrix"]
         lines.append(COLLECTION_HISTORY_CPP.strip("\n"))
+        lines.append(COLLECTION_HISTORY_ARRAY_VALUE_CPP.strip("\n"))
         if any(spec.element == float_spec for spec in matrices):
             lines.append(COLLECTION_HISTORY_MATRIX_CPP.strip("\n"))
         if any(spec.element != float_spec for spec in matrices):
@@ -146,6 +294,9 @@ class CollectionHistoryEmitter:
         current = self._visit_expr(node.object)
         use = annotation["use"]
         offset = literal_offset(node)
+        if use == "reference" and offset == 0:
+            cpp_type = self._type_spec_to_cpp(annotation["spec"])
+            return f"_PFArrayHistoryValue<{cpp_type}>({current})"
         if use == "loop" or offset == 0:
             return current
         member = self._collection_history_member(self._collection_history_of(annotation))
@@ -153,6 +304,9 @@ class CollectionHistoryEmitter:
         dynamic = offset is None
         if use == "change":
             return f"{member}.changed({index}, {current})"
+        if use == "reference":
+            return (f"{member}.reference({index}, {current})" if dynamic
+                    else f"{member}.reference({index})")
         if use == "copy":
             return (f"{member}.value({index}, {current})" if dynamic
                     else f"{member}.value({index})")
@@ -168,7 +322,10 @@ class CollectionHistoryEmitter:
         current = self._visit_expr(node.object)
         offset = literal_offset(node)
         if offset == 0:
-            return f"is_na({current})" if annotation["kind"] == "matrix" else "false"
+            nullable_array = (isinstance(node.object, Identifier)
+                              and node.object.name in self._array_history_value_names())
+            return (f"is_na({current})" if annotation["kind"] == "matrix"
+                    or nullable_array else "false")
         member = self._collection_history_member(self._collection_history_of(annotation))
         index = self._collection_history_offset_cpp(node)
         if offset is None:
@@ -179,19 +336,13 @@ class CollectionHistoryEmitter:
         """A matrix method called on a matrix's history, lowered as the
         variable's own method call is (visit_call: a matrix variable's
         method)."""
-        from .tables import MATRIX_METHOD_KWARGS, MATRIX_METHODS, _merge_kwargs
-
         recv = self._visit_expr(receiver)
         self._check_matrix_method_allowed(method, spec, node)
-        param_names = MATRIX_METHOD_KWARGS.get(method)
-        raw_args = (
-            _merge_kwargs(node.args, node.kwargs, param_names, lambda a: a)
-            if param_names and node.kwargs else list(node.args)
-        )
+        raw_args = self._matrix_method_arg_nodes(method, node)
         args = self._matrix_bool_value_args(
-            method, [self._visit_expr(a) for a in raw_args], raw_args, spec)
+            method, [self._visit_expr(a) if a is not None else None for a in raw_args], raw_args, spec)
         try:
-            return MATRIX_METHODS[method](recv, args)
+            return self._matrix_method_expr(recv, method, args, raw_args, node)
         except IndexError:
             self._codegen_error(
                 node,
