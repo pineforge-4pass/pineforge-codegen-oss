@@ -2843,8 +2843,9 @@ class SupportChecker:
             # Bare suffix shorthand — Pine treats "D"/"W"/"M"/"S" as 1<suffix>.
             # Accept the same shorthand here.
             return None
-        if not digits.isdigit():
-            # catches "1.5", "-15", "abc", etc.
+        if not digits.isdecimal():
+            # catches "1.5", "-15", "abc", and digits int() does not read
+            # ("²"), etc.
             return f"non-integer timeframe magnitude '{digits}'"
         n = int(digits)
         if n <= 0:
@@ -2859,15 +2860,11 @@ class SupportChecker:
             return
         if not isinstance(tf_node, StringLiteral):
             return
-        err = self._validate_pine_tf_literal(tf_node.value)
-        if err is None:
+        refusal = invalid_tf_literal(tf_node.value, fn_label)
+        if refusal is None:
             return
-        self._err(
-            tf_node,
-            f"{fn_label}: invalid timeframe literal '{tf_node.value}'. "
-            "Expected Pine TF format like '1', '15', '1H', '1D', '15S'.",
-            hint=err,
-        )
+        message, hint = refusal
+        self._err(tf_node, message, hint=hint)
 
     def _check_request_security_lower_tf_symbol(self, node: FuncCall) -> None:
         """``request.security_lower_tf`` reads the chart's intrabars: the
@@ -2910,6 +2907,18 @@ class SupportChecker:
         if tf_node is None and len(node.args) > 1:
             tf_node = node.args[1]
         self._check_tf_literal(tf_node, "request.security_lower_tf")
+
+
+def invalid_tf_literal(tf_str: str, fn_label: str) -> tuple[str, str] | None:
+    """``(message, hint)`` refusing ``tf_str`` as the timeframe of
+    ``fn_label`` (``request.security`` / ``request.security_lower_tf``), or
+    None when it is a Pine timeframe. The codegen refuses a timeframe string
+    it resolves from a constant or a helper parameter with the same text."""
+    err = SupportChecker._validate_pine_tf_literal(tf_str)
+    if err is None:
+        return None
+    return (f"{fn_label}: invalid timeframe literal '{tf_str}'. "
+            "Expected Pine TF format like '1', '15', '1H', '1D', '15S'.", err)
 
 
 # ---------------------------------------------------------------------------

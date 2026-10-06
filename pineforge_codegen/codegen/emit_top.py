@@ -1315,7 +1315,7 @@ class TopLevelEmitter:
                 tf = info.get("tf")
                 tf_expr = info.get("tf_expr")
                 if tf:
-                    tf_expr = f'"{tf}"'
+                    tf_expr = self._security_tf_literal(tf)
                 elif tf == "" and not tf_expr:
                     # An empty timeframe string is the chart's.
                     tf_expr = "input_tf_"
