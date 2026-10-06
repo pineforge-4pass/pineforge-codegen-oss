@@ -1663,6 +1663,19 @@ class CallVisitor:
                 return self._matrix_history_method_expr(
                     callee.object, callee.member, recv_spec, node)
 
+        if (isinstance(callee, MemberAccess)
+                and isinstance(callee.object, (FuncCall, Ternary))
+                and callee.member in MATRIX_METHODS):
+            receiver_spec = self._type_spec_from_expr(callee.object)
+            if receiver_spec is not None and receiver_spec.kind == "matrix":
+                self._check_matrix_method_allowed(callee.member, receiver_spec, node)
+                param_names = MATRIX_METHOD_KWARGS.get(callee.member)
+                raw_args = (_merge_kwargs(node.args, node.kwargs, param_names, lambda arg: arg)
+                            if param_names else list(node.args))
+                arguments = [self._visit_expr(arg) for arg in raw_args]
+                return self._matrix_method_expr(
+                    self._visit_expr(callee.object), callee.member, arguments, raw_args, node)
+
         # chart.point.now/new/from_index/from_time/copy — REAL data (a ChartPoint
         # aggregate). Routed here BEFORE the obj.field.method receiver logic,
         # which would otherwise mis-treat ``chart.point`` as a receiver object
@@ -1834,7 +1847,7 @@ class CallVisitor:
                         )
                         fn = MATRIX_METHODS[meth_raw]
                         try:
-                            return fn(arr, margs)
+                            return self._matrix_method_expr(arr, meth_raw, margs, raw_args, node)
                         except IndexError:
                             self._codegen_error(
                                 node,
@@ -2067,7 +2080,7 @@ class CallVisitor:
             )
             fn = MATRIX_METHODS[func_name]
             try:
-                return fn(arr, args)
+                return self._matrix_method_expr(arr, func_name, args, raw_args, node)
             except IndexError:
                 self._codegen_error(
                     node,
@@ -2658,19 +2671,27 @@ class CallVisitor:
                     if len(args_e) > 2 else self._default_for_spec(elem_spec)
                 )
                 return f"PineGenericMatrix<{cpp_t}>::new_({rows}, {cols}, {init})"
-            if func_name in MATRIX_METHODS and node.args:
+            matrix_receiver = (node.args[0] if node.args else
+                               node.kwargs.get("id1") if func_name in ("sum", "diff", "mult") else None)
+            if func_name in MATRIX_METHODS and matrix_receiver is not None:
                 from ..ast_nodes import Identifier as _Ident
                 if func_name in MATRIX_NUMERIC_ONLY:
-                    recv_node = node.args[0]
+                    recv_node = matrix_receiver
                     if history_annotation(recv_node) is not None:
                         # A matrix's history is a matrix of its type.
                         recv_node = recv_node.object
-                    if not isinstance(recv_node, _Ident):
-                        self._codegen_error(node, f"matrix.{func_name} receiver must be a variable reference")
-                    recv_name = recv_node.name
-                    recv_spec = self._collection_spec_for_name(recv_name)
-                    if recv_spec is None or recv_spec.kind != "matrix":
-                        self._codegen_error(node, f"matrix.{func_name}: receiver '{recv_name}' is not a known matrix variable")
+                    if func_name == "sum":
+                        recv_spec = self._type_spec_from_expr(recv_node)
+                        if recv_spec is None or recv_spec.kind != "matrix":
+                            name = func_name
+                            self._codegen_error(node, f"matrix.{name}(...) is not implemented in PineForge runtime.")
+                    else:
+                        if not isinstance(recv_node, _Ident):
+                            self._codegen_error(node, f"matrix.{func_name} receiver must be a variable reference")
+                        recv_name = recv_node.name
+                        recv_spec = self._collection_spec_for_name(recv_name)
+                        if recv_spec is None or recv_spec.kind != "matrix":
+                            self._codegen_error(node, f"matrix.{func_name}: receiver '{recv_name}' is not a known matrix variable")
                     self._check_matrix_method_allowed(func_name, recv_spec, node)
                 if func_name == "sort":
                     if isinstance(node.args[0], _Ident):
@@ -2678,7 +2699,7 @@ class CallVisitor:
                         recv_spec = self._collection_spec_for_name(recv_name)
                         if recv_spec is not None and recv_spec.kind == "matrix":
                             self._check_matrix_method_allowed(func_name, recv_spec, node)
-                obj = self._visit_expr(node.args[0])
+                obj = self._visit_expr(matrix_receiver)
                 param_names = MATRIX_METHOD_KWARGS.get(func_name)
                 raw_rest = (
                     _merge_kwargs(node.args[1:], node.kwargs, param_names, lambda a: a)
@@ -2688,11 +2709,11 @@ class CallVisitor:
                     func_name,
                     [self._visit_expr(a) for a in raw_rest],
                     raw_rest,
-                    self._type_spec_from_expr(node.args[0]),
+                    self._type_spec_from_expr(matrix_receiver),
                 )
                 fn = MATRIX_METHODS[func_name]
                 try:
-                    return fn(obj, rest)
+                    return self._matrix_method_expr(obj, func_name, rest, raw_rest, node)
                 except IndexError:
                     self._codegen_error(
                         node,

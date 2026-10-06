@@ -1335,6 +1335,9 @@ class SupportChecker:
 
     def _visit_VarDecl(self, node: VarDecl) -> None:
         self._check_tuple_literal_value(node.value)
+        if isinstance(node.value, FuncCall) and _qualified_name(node.value.callee) == ("array", "concat"):
+            name = "concat"
+            self._err(node.value, f"array.{name}(...) is not implemented in PineForge runtime.")
         if node.name and node.value is not None:
             self._scalar_defs.setdefault(node.name, node.value)
         if node.name and (node.is_var or node.is_varip):

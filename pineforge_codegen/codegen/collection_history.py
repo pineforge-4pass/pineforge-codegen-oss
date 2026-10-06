@@ -295,7 +295,7 @@ class CollectionHistoryEmitter:
         args = self._matrix_bool_value_args(
             method, [self._visit_expr(a) for a in raw_args], raw_args, spec)
         try:
-            return MATRIX_METHODS[method](recv, args)
+            return self._matrix_method_expr(recv, method, args, raw_args, node)
         except IndexError:
             self._codegen_error(
                 node,

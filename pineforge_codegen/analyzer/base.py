@@ -4999,7 +4999,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 # ``exit_scope()`` can bind a same-named top-level collection
                 # and falsely turn a scalar UDF return into an array.
                 ret_spec = terminal_direct_return_spec
-                if ret_spec is not None and ret_spec.kind == "array":
+                if ret_spec is not None and ret_spec.kind in ("array", "matrix"):
                     self._func_return_type_specs[node.name] = ret_spec
             if (terminal_direct_return_spec is not None
                     and terminal_direct_return_spec.kind == "map"):
@@ -5150,7 +5150,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
                 ret_type = self._statement_value_type(node.body[-1], ret_type)
             if terminal_ret_expr is not None:
                 terminal_spec = self._type_spec_from_expr(terminal_ret_expr)
-                if terminal_spec is not None and terminal_spec.kind == "map":
+                if terminal_spec is not None and terminal_spec.kind in ("map", "matrix"):
                     return_type_spec = terminal_spec
                 if terminal_spec is not None and terminal_spec.kind == "udt":
                     # Methods may return ``self`` or another UDT-typed

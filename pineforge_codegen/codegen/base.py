@@ -31,6 +31,7 @@ from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from ..limits import TimeBudget, iter_ast_nodes
+from ..matrix_overloads import matrix_sum_has_rhs
 from ..session_reads import emitted_session_reads
 from ..block_locals import block_declarations, decl_key
 from ..pine_spelling import (
@@ -2156,6 +2157,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 # to the analyzer's default ``double`` and the emitted C++
                 # fails to compile (``double = PineMatrix``).
                 or fn in MATRIX_RETURNING_METHODS
+                or (fn == "sum" and matrix_sum_has_rhs(expr, namespace=True))
             ):
                 if fn == "new":
                     targs = self._template_args_from_call(expr) if hasattr(expr, "annotations") else []
@@ -2213,7 +2215,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 outer_callee = expr.callee
                 if (
                     isinstance(outer_callee, MemberAccess)
-                    and outer_callee.member in MATRIX_RETURNING_METHODS
+                    and (outer_callee.member in MATRIX_RETURNING_METHODS or (
+                        outer_callee.member == "sum" and matrix_sum_has_rhs(expr)))
                 ):
                     recv_name2 = self._extract_receiver_name(expr)
                     if recv_name2 is not None and recv_name2 in self._matrix_specs:

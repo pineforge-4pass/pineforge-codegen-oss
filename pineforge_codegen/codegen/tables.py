@@ -823,7 +823,7 @@ ARRAY_METHODS = {
     "size":      lambda a, args: f"(double){a}.size()",
     "clear":     lambda a, args: f"{a}.clear()",
     "fill":      lambda a, args: f"std::fill({a}.begin(), {a}.end(), {args[0]})" if len(args) == 1
-                                 else _checked_array_fill_range(a, args),
+                                 else _checked_array_fill_range(a, args + [f"(int){a}.size()"] if len(args) == 2 else args),
     "includes":  lambda a, args: f"(std::find({a}.begin(), {a}.end(), {args[0]}) != {a}.end())",
     "indexof":   lambda a, args: f"[&](){{ auto __pf_it=std::find({a}.begin(),{a}.end(),{args[0]}); return __pf_it!={a}.end()?(double)(__pf_it-{a}.begin()):-1.0; }}()",
     "lastindexof": lambda a, args: f"[&](){{ for(int __pf_i=(int){a}.size()-1;__pf_i>=0;__pf_i--)if({a}[__pf_i]=={args[0]})return(double)__pf_i; return -1.0; }}()",
@@ -955,10 +955,42 @@ def _matrix_add_col(m: str, args: list) -> str:
     raise IndexError("matrix.add_col")
 
 
+def _matrix_sum(receiver: str, arguments: list[str]) -> str:
+    """Use the runtime's exposed Eigen arithmetic for matrix/scalar sums."""
+    if not arguments:
+        return f"{receiver}.sum()"
+    if len(arguments) != 1:
+        raise IndexError("matrix.sum")
+    return (
+        "([](const auto& _pf_sum_left, const auto& _pf_sum_right) { "
+        "auto _pf_sum_result = _pf_sum_left.copy(); "
+        "if constexpr (std::is_arithmetic_v<std::decay_t<decltype(_pf_sum_right)>>) { "
+        "_pf_sum_result.data().array() += _pf_sum_right; "
+        "} else { "
+        "if (_pf_sum_left.rows() != _pf_sum_right.rows() || "
+        "_pf_sum_left.columns() != _pf_sum_right.columns()) "
+        'throw std::runtime_error("Cannot sum matrices with different dimensions."); '
+        "_pf_sum_result.data() += _pf_sum_right.data(); "
+        "} return _pf_sum_result; "
+        f"}}({receiver}, {arguments[0]}))"
+    )
+
+
+def _matrix_submatrix(receiver: str, arguments: list[str]) -> str:
+    defaults = ["0", f"{receiver}.rows()", "0", f"{receiver}.columns()"]
+    if len(arguments) > 4:
+        raise IndexError("matrix.submatrix")
+    arguments = arguments + defaults[len(arguments):]
+    return f"{receiver}.submatrix({', '.join(_matrix_int_arg(argument) for argument in arguments)})"
+
+
 # Keyword parameter order for matrix methods (Pine v6); used by ``_merge_kwargs``.
 MATRIX_METHOD_KWARGS: dict[str, list[str]] = {
     "add_row": ["row_index", "array_id"],
     "add_col": ["col_index", "array_id"],
+    "sum": ["id2"],
+    "diff": ["id2"],
+    "mult": ["id2"],
 }
 
 # Matrix mutators whose established C++ lowering returns ``void``.  A Pine
@@ -1025,17 +1057,17 @@ MATRIX_METHODS = {
     "swap_rows": lambda m, args: f"{m}.swap_rows({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])})",
     "swap_columns": lambda m, args: f"{m}.swap_columns({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])})",
     "copy":      lambda m, args: f"{m}.copy()",
-    "submatrix": lambda m, args: f"{m}.submatrix({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])}, {_matrix_int_arg(args[2])}, {_matrix_int_arg(args[3])})",
+    "submatrix": _matrix_submatrix,
     "reshape":   lambda m, args: f"{m}.reshape({_matrix_int_arg(args[0])}, {_matrix_int_arg(args[1])})",
     "reverse":   lambda m, args: f"{m}.reverse()",
     "transpose": lambda m, args: f"{m}.transpose()",
-    "sort":      lambda m, args: f"{m}.sort({_matrix_int_arg(args[0])}, {args[1]} != \"descending\")" if len(args)>1 else f"{m}.sort({_matrix_int_arg(args[0])})",
+    "sort":      lambda m, args: f"{m}.sort({_matrix_int_arg(args[0])}, {args[1]} != \"descending\")" if len(args)>1 else f"{m}.sort({_matrix_int_arg(args[0])})" if args else f"{m}.sort(0)",
     "concat":    lambda m, args: f"{m}.concat({args[0]}, {pine_truth_cast(args[1])})" if len(args)>1 else f"{m}.concat({args[0]}, true)",
     "avg":       lambda m, args: f"{m}.avg()",
     "min":       lambda m, args: f"{m}.min()",
     "max":       lambda m, args: f"{m}.max()",
     "mode":      lambda m, args: f"{m}.mode()",
-    "sum":       lambda m, args: f"{m}.sum()",
+    "sum":       _matrix_sum,
     "diff":      lambda m, args: f"{m}.diff({args[0]})",
     "mult":      lambda m, args: f"{m}.mult({args[0]})",
     "pow":       lambda m, args: f"{m}.pow({_matrix_int_arg(args[0])})",

@@ -204,7 +204,6 @@ _STRING_PARAMETER_LOWERING_FAILS = _PARAMETER_LOWERING_FAILS | frozenset(
 _MATRIX_RECEIVER_LOWERING_FAILS = frozenset({
     "read:receiver", "change:receiver", "render", "copy:untyped",
     "read:argument:det", "read:argument:copy", "change:argument",
-    "other:collection",  # matrix.sum (_matrix_sum_use)
 })
 
 
@@ -951,8 +950,6 @@ class CollectionHistoryChecker:
             return Use("other", node, f"{label}.{method}: {_a(kind)} has no fields.",
                        needs_collection=True)
         if method in self._builtin_methods(kind):
-            if kind == "matrix" and method == "sum":
-                return self._matrix_sum_use(node, label)
             if kind == "array" and method == "slice":
                 return self._slice_use(call, node, label, "receiver")
             if self._changing(kind, method):
@@ -965,13 +962,6 @@ class CollectionHistoryChecker:
         return Use("other", node,
                    f"{label}.{method}(): no array or matrix method of that name.",
                    needs_collection=True)
-
-    def _matrix_sum_use(self, node, label: str) -> Use:
-        """``matrix.sum(m[k], m2)``: its matrix result does not compile,
-        history or not (the earlier build refused the history)."""
-        return Use("other", node,
-                   f"matrix.sum of {label} is not supported in PineForge: the "
-                   "matrix it returns does not compile.", needs_collection=True)
 
     def _slice_use(self, call: FuncCall, node, label: str, form: str) -> Use:
         """``(a[k]).slice(...)``: TradingView's slice shares the history's
@@ -1012,8 +1002,6 @@ class CollectionHistoryChecker:
                 return self._reject(
                     node, f"{label} is {_a(kind)}, which TradingView refuses as an "
                     "element of array.from (CE10122).")
-            if namespace == "matrix" and member == "sum" and kind == "matrix":
-                return self._matrix_sum_use(node, label)
             if member in methods:
                 return self._builtin_slot_use(
                     namespace, member, positional, keyword, node, kind, label)

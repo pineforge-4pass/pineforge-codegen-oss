@@ -46,6 +46,7 @@ from ..collection_history import history_annotation
 from ..errors import Phase
 from ..external_requests import UNPINNED_ANNOTATION
 from ..limits import iter_ast_nodes
+from ..matrix_overloads import matrix_sum_has_rhs
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from .helpers import (
     NA_PRESERVING_INT_TYPES,
@@ -59,6 +60,7 @@ from .tables import (
     ARRAY_ARGS_READ_REPEATEDLY,
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_METHODS,
+    MATRIX_METHODS,
     V5_ARRAY_INDEX_METHODS,
     BAR_BUILTINS,
     BAR_FIELDS,
@@ -1776,8 +1778,10 @@ class TypeInferer:
                     if func_name in ("copy", "slice"):
                         return arg_spec
                     return arg_spec.element
-            if namespace == "matrix" and func_name in MATRIX_RETURNING_METHODS:
-                receiver_node = node.args[0] if node.args else node.kwargs.get("id")
+            if namespace == "matrix" and (func_name in MATRIX_RETURNING_METHODS or (
+                    func_name == "sum" and matrix_sum_has_rhs(node, namespace=True))):
+                receiver_node = (node.args[0] if node.args else
+                                 node.kwargs.get("id1", node.kwargs.get("id")))
                 receiver_spec = self._type_spec_from_expr(receiver_node)
                 if receiver_spec is not None and receiver_spec.kind == "matrix":
                     return receiver_spec
@@ -1869,7 +1873,8 @@ class TypeInferer:
                     method = (member_name
                               if history_annotation(node.callee.object) is not None
                               else func_name)
-                    if method in MATRIX_RETURNING_METHODS:
+                    if method in MATRIX_RETURNING_METHODS or (
+                            method == "sum" and matrix_sum_has_rhs(node)):
                         return recv_spec
                     if method in ("row", "col"):
                         return TypeSpec.array(recv_spec.element)
@@ -1960,6 +1965,46 @@ class TypeInferer:
     # ------------------------------------------------------------------
     # Method lowering for collection types (used by visit_call paths)
     # ------------------------------------------------------------------
+
+    def _matrix_method_expr(self, receiver, method, arguments, argument_nodes, node):
+        if method in ("add_row", "add_col") and len(arguments) < 2:
+            argument_spec = (self._type_spec_from_expr(argument_nodes[0])
+                             if argument_nodes else None)
+            if not arguments or (argument_spec is not None and argument_spec.kind == "primitive"):
+                receiver_node = (node.args[0] if isinstance(node.callee, MemberAccess)
+                                 and isinstance(node.callee.object, Identifier)
+                                 and node.callee.object.name == "matrix" else node.callee.object)
+                receiver_spec = self._type_spec_from_expr(receiver_node)
+                element_spec = receiver_spec.element
+                element_cpp = self._type_spec_to_cpp(element_spec)
+                count = "columns" if method == "add_row" else "rows"
+                append = "rows" if method == "add_row" else "columns"
+                index = arguments[0] if arguments else f"_pf_matrix_target.{append}()"
+                values = (f"std::vector<{element_cpp}>((size_t)_pf_matrix_target.{count}(), "
+                          f"{self._array_init_value_expr(element_spec, NaLiteral())})")
+                mutation = MATRIX_METHODS[method]("_pf_matrix_target", [index, values])
+                return f"[&](auto&& _pf_matrix_target) {{ {mutation}; }}({receiver})"
+        if method in ("sum", "diff", "mult") and argument_nodes:
+            other_spec = self._type_spec_from_expr(argument_nodes[0])
+            if (method == "mult" and other_spec is not None
+                    and other_spec.kind == "array"):
+                name = method
+                self._codegen_error(
+                    node, f"matrix.{name}(...) is not implemented in PineForge runtime.")
+            numeric_scalar = ((other_spec is not None and other_spec.kind == "primitive"
+                               and other_spec.name in ("int", "float"))
+                              or (other_spec is None and self._infer_type(argument_nodes[0])
+                                  in ("double", "int", "int64_t")))
+            if method in ("diff", "mult") and len(arguments) == 1 and numeric_scalar:
+                operation = "-=" if method == "diff" else "*="
+                return (
+                    "([](const auto& _pf_matrix_left, const auto _pf_matrix_right) { "
+                    "auto _pf_matrix_result = _pf_matrix_left.copy(); "
+                    f"_pf_matrix_result.data().array() {operation} _pf_matrix_right; "
+                    "return _pf_matrix_result; "
+                    f"}}({receiver}, {arguments[0]}))"
+                )
+        return MATRIX_METHODS[method](receiver, arguments)
 
     def _array_receiver_once_expr(
         self, array_expr: str, args: list[str], lower_receiver,
