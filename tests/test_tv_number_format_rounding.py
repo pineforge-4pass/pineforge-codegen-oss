@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 from pineforge_codegen.codegen.tv_number_format import TV_NUMBER_FORMAT_CPP
+from pineforge_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP
 from tests import _compile as compile_env
 
 
@@ -121,12 +122,16 @@ template <class T> T na() { return std::numeric_limits<T>::quiet_NaN(); }
 std::string pine_str_tostring(double, const std::string&, double) {
     return "unused mintick stub";
 }
+[[noreturn]] void pine_runtime_error(const std::string& english) {
+    throw std::runtime_error(english);
+}
 """
     lines = ["int main() {"]
     for name, expression, _ in CASES:
         lines.append(f'    std::cout << "{name}\\t" << ({expression}) << "\\n";')
     lines.append("}")
-    return prelude + TV_NUMBER_FORMAT_CPP + "\n" + "\n".join(lines) + "\n"
+    # The standalone formatter now needs the same legacy stop shim as a TU.
+    return prelude + RUN_STOP_SHIMS_CPP + TV_NUMBER_FORMAT_CPP + "\n" + "\n".join(lines) + "\n"
 
 
 def test_shortest_decimal_half_up_edge_battery(tmp_path: Path) -> None:

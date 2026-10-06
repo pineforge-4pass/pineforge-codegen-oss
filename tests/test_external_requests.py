@@ -185,7 +185,8 @@ def test_request_reassigned_or_inside_an_expression_stops_where_it_is_evaluated(
                  f'x = nz(request.financial(syminfo.tickerid, {fid}, "FQ"), 1)\n'):
         cpp = transpile(HEAD + body + 'strategy.entry("L", strategy.long, qty = x)\n')
         assert cpp.count(PINNED) == 1
-        assert f'{PINNED}")); return na<double>(); }}())' in cpp
+        # The stop shim retains the read position without a string wrapper.
+        assert f'{PINNED}"); return na<double>(); }}())' in cpp
 
 
 def _tape_trades(name: str) -> list[tuple[int, int, float, float]]:

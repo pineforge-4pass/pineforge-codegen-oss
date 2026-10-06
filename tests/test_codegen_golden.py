@@ -36,7 +36,7 @@ MATRIX_EIGEN_CORPUS_SOURCE = next(
 
 
 def test_matrix_eigen_pca_byte_identical():
-    # The golden includes optional coded stops and checked array/string lowering.
+    # The golden keeps coded call sites, excluding additive run-failure scaffolds.
     src = MATRIX_EIGEN_FIXTURE.read_text()
     expected = (GOLDEN_ROOT / "matrix_eigen_pca.cpp").read_text()
     assert legacy_cpp(transpile(src)) == expected

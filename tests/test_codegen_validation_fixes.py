@@ -344,8 +344,9 @@ def test_drawing_array_constructors_emit_typed_vectors():
     assert "std::vector<Line> lns" in cpp
     assert "lns = std::vector<Line>()" in cpp
     assert "std::vector<Label> lbs" in cpp
-    # size + default-init element: Label{}
-    assert "std::vector<Label>((size_t)(3), Label{})" in cpp
+    # Checked constructors still retain their typed default and size.
+    assert "return std::vector<Label>((size_t)(_pf_array_new_size), _pf_array_new_value);" in cpp
+    assert "}((3), (Label{}))" in cpp
     assert "std::vector<Box> bxs" in cpp
     assert "std::vector<Linefill> lfs" in cpp
 
@@ -355,7 +356,9 @@ def test_drawing_array_constructor_default_value_arg():
         "var box[] bxs = array.new_box(2, box.new(bar_index, high, bar_index + 1, low))\n"
         "plot(array.size(bxs))"
     )
-    assert "std::vector<Box>((size_t)(2)" in cpp
+    # The checked constructor evaluates the drawing initializer once.
+    assert "return std::vector<Box>((size_t)(_pf_array_new_size), _pf_array_new_value);" in cpp
+    assert "}((2), (" in cpp
 
 
 def test_untyped_var_drawing_array_constructor_emits_typed_member():
@@ -386,9 +389,15 @@ def test_comma_separated_statements_and_array_fill_emit_all_side_effects():
     )
     assert "a = 1;" in cpp
     assert "b = 2;" in cpp
-    assert "xs = std::vector<double>((size_t)(3), na<double>());" in cpp
-    assert "ys = std::vector<int>((size_t)(2), na<int>());" in cpp
-    assert "lbs = std::vector<Label>((size_t)(2), Label{});" in cpp
+    # Size checks wrap constructors without changing their na initializers.
+    for name, value_type, size, initial in (
+        ("xs", "double", 3, "na<double>()"),
+        ("ys", "int", 2, "na<int>()"),
+        ("lbs", "Label", 2, "Label{}"),
+    ):
+        assert f"{name} = [&]" in cpp
+        assert f"return std::vector<{value_type}>((size_t)(_pf_array_new_size), _pf_array_new_value);" in cpp
+        assert f"}}(({size}), ({initial}));" in cpp
     assert "std::fill(xs.begin(), xs.end(), na<double>());" in cpp
     assert "}((7)); }((1)); }((xs));" in cpp
     assert "std::fill(ys.begin(), ys.end(), na<int>());" in cpp

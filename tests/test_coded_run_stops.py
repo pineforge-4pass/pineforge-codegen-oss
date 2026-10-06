@@ -9,6 +9,7 @@ from pineforge_codegen import transpile
 from pineforge_codegen.codegen.helpers import CPP_EMITTER_NAMES, CPP_STANDARD_MACROS
 from pineforge_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP, request_stop
 from tests._compile import compile_cpp, run_emitted_tu
+from tests._legacy_cpp import _without_run_failure_scaffold
 
 
 PRELUDE = '//@version=6\nstrategy("coded stops")\n'
@@ -139,6 +140,23 @@ def test_feature_macro_is_reserved_and_shim_is_emitted_once():
     cpp = transpile(PRELUDE + "PINEFORGE_HAS_RUN_FAILURE_CODES_V1 = close\n")
     assert cpp.count(RUN_STOP_SHIMS_CPP) == 1
     assert not re.search(r"\bdouble PINEFORGE_HAS_RUN_FAILURE_CODES_V1\b", cpp)
+
+
+def test_legacy_normalization_keeps_actual_stop_calls_and_nested_settings_guards():
+    cpp = transpile(PRELUDE + 'runtime.error(message="named")\n')
+    normalized = _without_run_failure_scaffold(cpp)
+    assert "PINEFORGE_HAS_RUN_FAILURE_CODES_V1" not in normalized
+    assert 'pine_runtime_error(std::string("named"))' in normalized
+    assert "#ifdef PF_SETTINGS_API_VERSION" in normalized
+    assert "checked_settings::LatchedSettingsFailure" in normalized
+
+
+def test_setter_stop_metadata_has_only_literal_entrypoints_and_reasons():
+    cpp = transpile(PRELUDE)
+    for entrypoint in ("strategy_set_input", "strategy_set_override",
+                       "strategy_set_magnifier_volume_weighted"):
+        assert f'_PF_SETTING_FAILURE(static_cast<GeneratedStrategy*>(s), "{entrypoint}",' in cpp
+    assert '{"reason", "unparseable_value"}' in RUN_STOP_SHIMS_CPP
 
 
 @pytest.mark.parametrize("method, arguments", [
@@ -302,24 +320,24 @@ def test_setter_latch_retains_its_first_code_and_native_exception_type(legacy):
 #include <iostream>
 int main() {
     GeneratedStrategy strategy;
-    strategy_set_input(&strategy, "Quantity", "invalid");
-    assert(strategy.last_error() == "strategy_set_input: stod");
     strategy_set_override(&strategy, "initial_capital", "invalid");
-    assert(strategy.last_error() == "strategy_set_input: stod");
+    assert(strategy.last_error() == "strategy_set_override: stod");
+    strategy_set_override(&strategy, "slippage", "invalid");
+    assert(strategy.last_error() == "strategy_set_override: stod");
     try { strategy._pf_require_settings_ok(); assert(false); }
 #ifdef PF_SETTINGS_API_VERSION
     catch (const checked_settings::LatchedSettingsFailure& error) {
 #else
     catch (const std::runtime_error& error) {
 #endif
-        assert(std::string(error.what()) == "strategy_set_input: stod");
+        assert(std::string(error.what()) == "strategy_set_override: stod");
 #ifdef PINEFORGE_HAS_RUN_FAILURE_CODES_V1
         assert(classify_run_failure(error).code == RunFailureCode::setting_rejected);
 #endif
     }
 #ifdef PINEFORGE_HAS_RUN_FAILURE_CODES_V1
     assert(std::string(run_failure_code_of(strategy)) == "setting_rejected");
-    assert(std::string(run_failure_args_of(strategy)) == R"({"entrypoint":"strategy_set_input","reason":"unparseable_value"})");
+    assert(std::string(run_failure_args_of(strategy)) == R"({"entrypoint":"strategy_set_override","reason":"unparseable_value"})");
 #endif
     std::cout << "first setting refusal retained";
 }

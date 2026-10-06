@@ -214,7 +214,8 @@ for i = 0 to 0
         ),
         (
             _NESTED_LEXICAL_MAP_ROOT_SOURCE,
-            "f03b4d737fe1a215ce8733bc2b0297d2b8866ad5aa7afb45b04119697e4ae7ca",
+            # The Holder arena now calls coded UDT stop helpers.
+            "ef7d12496ae3c8e07e8bbf7c20efb5a3aaee2f69f786c67747d804aec57e4e45",
             7.0,
         ),
         (

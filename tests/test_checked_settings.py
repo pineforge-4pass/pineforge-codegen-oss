@@ -266,12 +266,18 @@ def test_settings_helpers_are_not_shadowed_by_script_declarations(shape):
 def test_settings_namespace_names_are_root_qualified_and_version_guarded():
     cpp = transpile(SOURCE)
     assert "using namespace pineforge::checked_settings" not in cpp
-    guarded = False
+    # Coded settings exceptions add a nested, optional feature guard.
+    guards = []
     for line in cpp.splitlines():
-        if line == "#ifdef PF_SETTINGS_API_VERSION":
-            guarded = True
-        elif line in ("#else", "#endif"):
-            guarded = False
+        if re.match(r"#if(?:def|ndef)?\b", line):
+            guards.append("PF_SETTINGS_API_VERSION" in line)
+        elif line.startswith("#elif"):
+            guards[-1] = "PF_SETTINGS_API_VERSION" in line
+        elif line == "#else":
+            guards[-1] = False
+        elif line == "#endif":
+            guards.pop()
+        guarded = any(guards)
         if "pineforge::checked_settings::" in line:
             assert guarded, line
             assert re.search(r"(?<!:)\bpineforge::checked_settings::", line) is None
