@@ -204,6 +204,10 @@ def test_entry_point_transpiles_with_a_benign_string(name):
                    if kind == "comment")
     elif name == "financial_id":
         assert any(f"|{benign}|FQ|" in value for value in string_values(cpp))
+    elif name == "lower_tf_timeframe_constant":
+        (registration,) = [line.strip() for line in cpp.splitlines()
+                           if line.strip().startswith("register_security_lower_tf_eval(")]
+        assert string_values(registration) == [benign]
     else:
         assert benign in string_values(cpp)
     if name == "pf_trace_expression":

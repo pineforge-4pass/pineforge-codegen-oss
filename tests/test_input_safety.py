@@ -62,6 +62,8 @@ def test_every_cpp_keyword_compiles_or_pine_rejects_it(name: str) -> None:
     "strategy_confirmed_bar_api_version", "strategy_confirmed_bar_receipt",
     "strategy_order_shapes_api_version", "strategy_order_shapes_receipt",
     "strategy_settings_api_version", "strategy_get_effective_settings",
+    "PF_ABI_VERSION", "PF_NATIVE_API_VERSION",
+    "PF_CAPABILITIES_API_VERSION", "PF_SETTINGS_API_VERSION",
     "__LINE__", "__FILE__",
 ])
 def test_header_macro_and_emitter_name_collisions_compile(name: str) -> None:
