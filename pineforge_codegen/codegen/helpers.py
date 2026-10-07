@@ -272,6 +272,8 @@ CPP_STANDARD_MACROS = frozenset("""
     PF_VWAP_SESSION_ANCHOR_ARGS PF_ALMA_HAS_FLOOR
     PF_KC_HAS_USE_TRUE_RANGE PF_VWAP_HAS_ANCHOR_INPUT
     PF_PIVOT_LEVELS_HAS_ANCHOR
+    PF_ABI_VERSION PF_NATIVE_API_VERSION
+    PF_CAPABILITIES_API_VERSION PF_SETTINGS_API_VERSION
 """.split())
 
 # Identifiers used by the emitter as class/type names, namespaces, and
@@ -287,6 +289,9 @@ CPP_EMITTER_NAMES = frozenset("""
     commit_script_state set_strategy_override set_input
     set_magnifier_volume_weighted strategy_declares_bar_magnifier fill_report run
     strategy_capabilities_api_version strategy_capabilities_receipt
+    strategy_confirmed_bar_api_version strategy_confirmed_bar_receipt
+    strategy_order_shapes_api_version strategy_order_shapes_receipt
+    strategy_settings_api_version strategy_get_effective_settings
     precalculate
     strategy_entry strategy_close strategy_close_all strategy_exit
     strategy_exit_cancel_bracket strategy_cancel strategy_cancel_all strategy_order
@@ -444,6 +449,7 @@ class NamingHelper:
             .replace("\n", "\\n")
             .replace("\r", "\\r")
             .replace("\t", "\\t")
+            .replace("\0", "\\000")
         )
 
     @staticmethod

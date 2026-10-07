@@ -252,6 +252,10 @@ class TestGetParamNames:
             pnames = sigs.get_param_names("map", name)
             assert pnames is not None, f"map.{name} has no param names"
 
+    @pytest.mark.parametrize("name", ["prefix", "ticker"])
+    def test_syminfo_symbol_parameter(self, name):
+        assert sigs.get_param_names("syminfo", name) == ["symbol"]
+
     def test_all_input_have_param_names(self):
         for name, func in sigs.INPUT_FUNCTIONS.items():
             pnames = sigs.get_param_names("input", name)

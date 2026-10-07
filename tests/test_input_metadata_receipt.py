@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from pineforge_codegen import transpile_full
+from pineforge_codegen.ast_nodes import StringLiteral
+from pineforge_codegen.codegen.checked_settings import _string_setting_arg, _string_setting_value
+from pineforge_codegen.codegen.helpers import NamingHelper
 from pineforge_codegen.errors import CompileError
+from pineforge_codegen.pine_spelling import pine_string_literal
 from tests._compile import run_emitted_tu
 from tests.test_compile_corpus import _resolve_corpus_root
 from tests.test_string_settings_constants import RECEIPT_DRIVER
@@ -175,3 +179,72 @@ def test_unrepresentable_strings_match_receipt_in_both_envelopes():
     assert by_key["Mixed"]["options"] == []
     assert all(entry["supported"] is True for entry in inputs
                if entry["title"] not in ("Size", "Position", "Mixed"))
+
+
+STRING_VALUES = [
+    pytest.param("", "", id="empty"),
+    pytest.param('quote " and slash \\', 'quote " and slash \\', id="quote-backslash"),
+    pytest.param("line\nreturn\rtab\t", "line\nreturn\rtab\t", id="whitespace"),
+    pytest.param("café 中文 😀\b\f", "café 中文 😀\b\f", id="unicode-controls"),
+    pytest.param("x\0" + "70189", "x", id="nul-digits"),
+    pytest.param("\0" + "0123456789", "", id="leading-nul-digits"),
+    pytest.param("x\0", "x", id="trailing-nul"),
+    pytest.param(r"x\00070189", r"x\00070189", id="literal-octal-text"),
+    pytest.param(r"\n\r\t\u2603\x41\012", r"\n\r\t\u2603\x41\012",
+                 id="literal-escape-text"),
+    pytest.param("x\\\0" + "789", "x\\", id="backslash-before-nul"),
+    pytest.param("x\0y\0z", "x", id="multiple-nuls"),
+]
+
+
+@pytest.mark.parametrize("value,expected", STRING_VALUES)
+@pytest.mark.parametrize("wrapped", [False, True], ids=["literal", "std-string"])
+def test_emitted_string_setting_decoder(value, expected, wrapped):
+    literal = '"' + NamingHelper._cpp_string_escape(value) + '"'
+    lowered = f"std::string({literal})" if wrapped else literal
+    assert _string_setting_arg(StringLiteral(value=value), lowered) == lowered
+    assert _string_setting_value(lowered) == expected
+
+
+@pytest.mark.parametrize("lowered", [
+    "0", "nullptr", 'std::string("x", 1)', '"x" + other', '"x" "y"',
+    r'"\u2603"', r'"\x41"', r'"\012"', r'"\0"', r'"\a"',
+    '"x\\"', '"x\ny"', '"x\ry"', '"x\0y"',
+])
+def test_string_setting_decoder_refuses_non_emitted_forms(lowered):
+    assert _string_setting_arg(StringLiteral(value="x"), lowered) is None
+    with pytest.raises(ValueError, match="not an emitted C\\+\\+ string literal"):
+        _string_setting_value(lowered)
+
+
+@pytest.mark.parametrize("value,expected", STRING_VALUES)
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+def test_all_string_input_forms_match_native_receipt(value, expected, opt):
+    literal = pine_string_literal(value)
+    forms = [
+        ("string", "String default", ""),
+        ("symbol", "Symbol default", ""),
+        ("session", "Session default", ""),
+        ("timeframe", "Timeframe default", ""),
+        ("text_area", "Text area default", ""),
+        ("string", "String option", f', options=[{literal}, "safe"]'),
+    ]
+    source = '//@version=6\nstrategy("literal settings")\n'
+    source += "".join(f'choice_{index} = input.{kind}({literal}, "{title}"{options})\n'
+                      for index, (kind, title, options) in enumerate(forms))
+    full = transpile_full(source)
+    envelope = json.loads(GLUE(source))
+    assert envelope["ok"] is True
+    assert envelope["inputs"] == full["inputs"]
+    receipt = json.loads(run_emitted_tu(full["cpp"], RECEIPT_DRIVER, opt=opt,
+                                       label="literal settings receipt"))
+    assert len(full["inputs"]) == len(receipt["inputs"]) == len(forms)
+    for metadata, checked, (kind, title, options) in zip(full["inputs"], receipt["inputs"], forms):
+        assert metadata["title"] == checked["name"] == title
+        assert metadata["type"] == checked["kind"]
+        if kind == "symbol":
+            assert metadata["kind"] == "symbol"
+        assert metadata["supported"] is True
+        assert metadata["default"] == checked["default"] == checked["effective_value"] == expected
+        assert metadata.get("options", []) == ([expected, "safe"] if options else [])
+        assert _manifest_view(metadata) == _receipt_view(checked)

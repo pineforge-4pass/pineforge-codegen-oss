@@ -404,8 +404,8 @@ SYMINFO_FUNCTIONS: dict[str, IntrinsicFunc] = {}
 def _syminfo_fn(short_name: str, *sigs: FuncSig) -> None:
     SYMINFO_FUNCTIONS[short_name] = _func(f"syminfo.{short_name}", *sigs)
 
-_syminfo_fn("prefix", _sig([], ret=S))
-_syminfo_fn("ticker", _sig([], ret=S))
+_syminfo_fn("prefix", _sig([("symbol", S)], ret=S))
+_syminfo_fn("ticker", _sig([("symbol", S)], ret=S))
 
 
 # ============================================================================
