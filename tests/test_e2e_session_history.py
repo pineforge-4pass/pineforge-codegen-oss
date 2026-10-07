@@ -72,6 +72,9 @@ FUNCTIONS = "cgs2-histfn-aapl-15-ext"
 SESSION, TIMEZONE = "0930-1600", "America/New_York"
 # codegen before this lane: every session.*[k] read failed the C++ compile.
 LEGACY = "7a39cb3cfe18cfbd393a380babacdcbc3b62667f"
+# Accepted scaffold for whole-C++ noninterference only; historical semantic
+# and compile comparisons keep their separate pre-feature references.
+CPP_IDENTITY_REFERENCE = "1e6eb83354b74ede1326fe55e576e91ea81f156b"
 FLAGS = ("ismarket", "ispremarket", "ispostmarket", "isfirstbar", "islastbar",
          "isfirstbar_regular", "islastbar_regular")
 GROUPS = (("C", "c", 0), ("H", "h", 1), ("T", "t", 2))
@@ -845,21 +848,20 @@ def test_a_read_reached_through_a_callers_clone_gets_clones_too(tmp_path: Path) 
 
 @pytest.mark.parametrize("place", KEPT)
 def test_scripts_without_a_read_keep_their_cpp(place: str, tmp_path: Path) -> None:
-    """A script with no session.<flag>[k] keeps its C++ (7a39cb3's), even with
-    a name spelled like a generated history member."""
-    legacy = reference_codegen(LEGACY)
-    if legacy is None:
-        pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
+    """A script with no session.<flag>[k] keeps the accepted scaffold's C++, even
+    with a name spelled like a generated history member."""
+    reference = reference_codegen(CPP_IDENTITY_REFERENCE)
+    if reference is None:
+        pytest.fail(f"required C++ identity reference {CPP_IDENTITY_REFERENCE} unavailable; "
+                    "restore git history")
     pine = tmp_path / "strategy.pine"
-    # The sizing is declared so that the comparison is one of session reads
-    # alone: 7a39cb3 left an omitted initial_capital / default_qty_type /
-    # default_qty_value to the host's defaults, which are not TradingView's
-    # Pine v6 defaults (lane TV-DEFAULTS, test_e2e_strategy_defaults).
+    # Keep the probe's explicit sizing so the comparison covers session-read
+    # noninterference with fixed strategy settings.
     pine.write_text('//@version=6\nstrategy("session history", overlay=true, '
                     'initial_capital=1000000, default_qty_type=strategy.fixed, '
                     'default_qty_value=1)\n' + KEPT[place]
                     + 'if x\n    strategy.entry("L", strategy.long)\n', encoding="utf-8")
-    now, before = transpile_json(pine), transpile_json(pine, legacy)
+    now, before = transpile_json(pine), transpile_json(pine, reference)
     assert now["ok"] and before["ok"], (now["diagnostics"], before["diagnostics"])
     assert now["cpp"] == before["cpp"]
     compile_cpp(now["cpp"], label=place)

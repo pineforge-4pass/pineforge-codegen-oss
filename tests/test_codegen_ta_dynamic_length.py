@@ -33,6 +33,11 @@ from tests._compile import compile_cpp
 from tests._e2e import reference_codegen, transpile_json
 
 
+# Accepted scaffold for whole-C++ noninterference only; historical semantic
+# and compile comparisons keep their separate pre-feature references.
+CPP_IDENTITY_REFERENCE = "1e6eb83354b74ede1326fe55e576e91ea81f156b"
+
+
 def _member_type(cpp: str, member: str) -> str:
     match = re.search(rf"^\s*(\S.*?)\s+{re.escape(member)};$", cpp, re.M)
     assert match, member
@@ -350,10 +355,12 @@ def test_other_series_lengths_stay_refused(call: str) -> None:
         transpile(src)
 
 
-# The sizing is declared so that the comparison with 7a39cb3 is one of TA
-# lengths alone: that build left an omitted initial_capital /
+# Explicit sizing originally isolated TA lengths from LEGACY (7a39cb3):
+# that build left an omitted initial_capital /
 # default_qty_type / default_qty_value to the host's defaults, which are not
 # TradingView's Pine v6 defaults (lane TV-DEFAULTS, test_e2e_strategy_defaults).
+# The active whole-C++ comparison uses the immutable accepted scaffold pinned
+# by CPP_IDENTITY_REFERENCE; the probe's original sizing remains unchanged.
 _CONSTANT_AND_INPUT = """//@version=6
 strategy("constant and input lengths", initial_capital=1000000, default_qty_type=strategy.fixed, default_qty_value=1)
 len = input.int(14, "Length")
@@ -371,9 +378,10 @@ plot(hi + r + st + dir + e)
 
 
 def test_constant_and_input_lengths_keep_their_cpp(tmp_path: Path) -> None:
-    parent = reference_codegen("7a39cb3")
+    parent = reference_codegen(CPP_IDENTITY_REFERENCE)
     if parent is None:
-        pytest.skip("git or commit 7a39cb3 unavailable")
+        pytest.fail(f"required C++ identity reference {CPP_IDENTITY_REFERENCE} unavailable; "
+                    "restore git history")
     pine = tmp_path / "strategy.pine"
     pine.write_text(_CONSTANT_AND_INPUT, encoding="utf-8")
     ours = transpile_json(pine)
