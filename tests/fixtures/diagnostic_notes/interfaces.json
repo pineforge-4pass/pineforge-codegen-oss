@@ -1,5 +1,5 @@
 {
-  "status": "NOT FROZEN: public shape awaits APP-TOP",
+  "status": "FROZEN: user_message carries a template, never pre-rendered English",
   "cases": [
     {
       "name": "chart_ema",

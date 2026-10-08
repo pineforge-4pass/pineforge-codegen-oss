@@ -1,0 +1,10 @@
+{
+  "scope": "Contract fixtures only; these are not an app E2E receipt.",
+  "cases": [
+    {"code": "PF-FUTURE", "severity": "note", "user_message": "Data is unavailable for {name}.", "args": {"name": "台灣 <b> & ' {x}"}, "expected_severity": "note", "expected_text": "Data is unavailable for 台灣 <b> & ' {x}."},
+    {"code": "PF-FUTURE", "severity": "warning", "user_message": "Check the value of {name}.", "args": {"name": "length"}, "expected_severity": "warning", "expected_text": "Check the value of length."},
+    {"code": "PF-FUTURE", "severity": "error", "user_message": "The value is invalid.", "args": {}, "expected_severity": "error", "expected_text": "The value is invalid."},
+    {"code": "PF-FUTURE", "severity": "future-level", "user_message": "Check {name}.", "args": {"name": "輸入"}, "expected_severity": "warning", "expected_text": "Check 輸入."},
+    {"code": "PF-W1508", "severity": "future-level", "user_message": "{name} is not drawn in backtests.", "args": {"name": "plot"}, "expected_severity": "warning", "expected_text": "plot is not drawn in backtests."}
+  ]
+}

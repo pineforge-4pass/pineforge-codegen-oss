@@ -1,5 +1,5 @@
 {
-  "status": "NOT FROZEN: pending APP-TOP acknowledgement via TOP",
+  "status": "FROZEN: user_message is an existing-args template; APP-TOP approval relayed through TOP and WIN-CX",
   "allowed_added_fields": [
     "user_message"
   ],
