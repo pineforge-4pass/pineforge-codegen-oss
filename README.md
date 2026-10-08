@@ -11,12 +11,14 @@ A pure-Python library that turns a PineScript v6 strategy into a complete C++
 source file you can compile against the [`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine)
 runtime.
 
-**Measured <!-- pf:scoreboard.date -->2026-10-06<!-- /pf -->** on main engine <!-- pf:scoreboard.engineCommit|short-code -->`7a1f01c0`<!-- /pf --> with codegen-oss <!-- pf:scoreboard.codegenCommit|short-code -->`3e50082f`<!-- /pf --> (baseline <!-- pf:scoreboard.id|code -->`pineforge-parity-baseline-20261006-engine-7a1f01c0`<!-- /pf -->, snapshot <!-- pf:scoreboard.snapshotSha256|short-code -->`e7921e24`<!-- /pf -->): <!-- pf:scoreboard.excellent|int -->7,982<!-- /pf --> of <!-- pf:scoreboard.graded|int -->7,989<!-- /pf --> TradingView probes
-graded excellent and <!-- pf:scoreboard.strong|int -->7<!-- /pf --> strong, with <!-- pf:scoreboard.belowStrong|int -->0<!-- /pf --> below strong; <!-- pf:scoreboard.anomaliesExcluded|int -->17<!-- /pf --> more probes are held out as TradingView-side anomalies.
+**Measured <!-- pf:scoreboard.date -->2026-10-07<!-- /pf -->** on main engine <!-- pf:scoreboard.engineCommit|short-code -->`b3192bfc`<!-- /pf --> with codegen-oss <!-- pf:scoreboard.codegenCommit|short-code -->`bfc4ddce`<!-- /pf --> (baseline <!-- pf:scoreboard.id|code -->`pineforge-parity-baseline-20261007-engine-b3192bfc`<!-- /pf -->, snapshot <!-- pf:scoreboard.snapshotSha256|short-code -->`28ba8dbd`<!-- /pf -->): <!-- pf:scoreboard.excellent|int -->7,983<!-- /pf --> of <!-- pf:scoreboard.graded|int -->7,989<!-- /pf --> TradingView probes
+graded excellent and <!-- pf:scoreboard.strong|int -->6<!-- /pf --> strong, with <!-- pf:scoreboard.belowStrong|int -->0<!-- /pf --> below strong; <!-- pf:scoreboard.anomaliesExcluded|int -->17<!-- /pf --> more probes are held out as TradingView-side anomalies.
 A probe is a strategy exported from TradingView with its trade list and replayed
 trade for trade on the same bars.
 
-Release **1.3.0 grades <!-- pf:releases[1.3.0].scoreboard.excellent|int -->7,982<!-- /pf --> excellent / <!-- pf:releases[1.3.0].scoreboard.strong|int -->7<!-- /pf --> strong until the next release**, on <!-- pf:releases[1.3.0].scoreboard.graded|int -->7,989<!-- /pf --> probes (baseline <!-- pf:releases[1.3.0].scoreboard.id|code -->`pineforge-parity-baseline-20261006-engine-7a1f01c0`<!-- /pf -->, <!-- pf:releases[1.3.0].scoreboard.date -->2026-10-06<!-- /pf -->). A main scoreboard advance does not change release results.
+Planned release **1.4.0 grades <!-- pf:releases[1.4.0].scoreboard.excellent|int -->7,983<!-- /pf --> excellent / <!-- pf:releases[1.4.0].scoreboard.strong|int -->6<!-- /pf --> strong**, on <!-- pf:releases[1.4.0].scoreboard.graded|int -->7,989<!-- /pf --> probes (baseline <!-- pf:releases[1.4.0].scoreboard.id|code -->`pineforge-parity-baseline-20261007-engine-b3192bfc`<!-- /pf -->, <!-- pf:releases[1.4.0].scoreboard.date -->2026-10-07<!-- /pf -->). These are the prepared pair's recorded grading outcomes, not a published tag or a promise about arbitrary scripts. A main scoreboard advance does not change release results.
+
+Release 1.3.0 recorded <!-- pf:releases[1.3.0].scoreboard.excellent|int -->7,982<!-- /pf --> excellent / <!-- pf:releases[1.3.0].scoreboard.strong|int -->7<!-- /pf --> strong on <!-- pf:releases[1.3.0].scoreboard.graded|int -->7,989<!-- /pf --> probes; its historical result remains scoped to that pair.
 
 The quantities above render from the public [facts tokens](https://github.com/pineforge-4pass/pineforge-release/blob/main/facts/facts.json). Maintain them with `lab facts render --repo . --facts <local facts file or pinned raw URL>`; `lab facts check` with the same inputs reports drift. Grades are registry-derived; the authored-script and closed-trade inventory is explicitly sourced to a historical public README for the identical population, not to registry row or slug totals.
 
@@ -40,7 +42,7 @@ for the changes in each release from 1.0.0 on and the release-note policy.
 ## Releases and this README
 
 <!-- Release lane: before a release is tagged, add it to the Engine pairing
-table and update every line that names `1.3.0` or `v1.3.0` as the current
+table and update every line that names `1.4.0` or `v1.4.0` as the current
 release or pair (this section's version and date, the baseline paragraph at
 the top, the engine `src/source/` link, the `@pf-trace` note, the clone
 command and its example output, "This section describes …", the timing note)
@@ -50,14 +52,44 @@ hosted-server line name no version. -->
 
 This README ships with each release as its package description on PyPI
 (`pineforge-codegen`); releases from 0.7.0 on are also on npm as
-`@pineforge/codegen-pyodide`. It describes 1.3.0 (2026-10-06) and what changed
-since 0.10.4. The
+`@pineforge/codegen-pyodide`. It describes the planned 1.4.0 pair (**Unreleased**)
+and what changed since 0.10.4. The candidate is codegen `bfc4ddce` with engine
+`b3192bfc`, excluding engine request #356; both candidate `VERSION` files still
+read `1.3.0` until the release workflows set them. Historical measurements
+below retain the versions on which they were run. The
 [PyPI release history](https://pypi.org/project/pineforge-codegen/#history)
 lists every release; the
 [changelog](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/CHANGELOG.md)
 covers 1.0.0 on and links the notes of earlier releases. A source install
 reports the version in `VERSION`, which the release workflow sets when it tags
 a release.
+
+### Upgrading from 1.3.0
+
+After the 1.4.0 pair is published, regenerate C++ and relink against engine
+`v1.4.0`'s generated headers and runtime, even though C ABI version 4 and the
+script ABI epoch are retained. Emission and input manifests change; neither
+generated C++ nor Python/Pyodide envelopes are promised byte-identical. Every
+input row now has `supported`: when false, hide it, exclude it from sweeps and
+optimization, and do not send a value. Its compiled default is used; a supplied
+value is refused with `setting_unsupported`. A true flag still requires type,
+bounds and options validation, and does not detect duplicate keys. Account for
+corrected source/enum choices, string values, signed bounds and plain-input types.
+
+Give each input a unique title; different `group=` labels do not separate
+override keys. The paired checked path refuses a shared key and returns a null
+fingerprint for a completed run of such a script even without an override.
+The [1.4.0 migration notes](CHANGELOG.md#140--unreleased) cover this change,
+new refusals of some previously accepted settings, and color's string manifest
+versus packed-integer native value. Check stored presets before submitting them.
+Users of `pineforge-hpo` 0.11.0 must preserve the manifest's number type for
+each option at its input boundary; see the [known issue](CHANGELOG.md#known-issues-with-consumers).
+
+The paired engine adds coded run failures and typed fingerprint provenance.
+Its run harness returns failure `code` and typed `args` beside `error`; an
+empty message still means failure. Transpile-time diagnostics remain a separate
+Python/JSON surface. Read the [1.4.0 changelog](CHANGELOG.md#140--unreleased)
+for migration details and inherited collection/metadata limitations.
 
 ### Upgrading from 0.10.4
 
@@ -90,8 +122,9 @@ It does **not** own execution semantics. Order lifecycle, bracket legs,
 fill-price and slippage rules, `process_orders_on_close` / `calc_on_order_fills`,
 margin revival and trail/stop behaviour — everything TradingView parity depends
 on at run time — live in the engine's source-adapter runtime
-([`src/source/`](https://github.com/pineforge-4pass/pineforge-engine/tree/v1.3.0/src/source)
-in engine `v1.3.0`), which maps them onto the engine's Pine-agnostic kernel. See
+([`src/source/`](https://github.com/pineforge-4pass/pineforge-engine/tree/v1.4.0/src/source)
+for the planned engine `v1.4.0` pair), which maps them onto the engine's Pine-agnostic kernel. The tag link becomes available when that release is
+published. See
 the engine's [architecture notes](https://github.com/pineforge-4pass/pineforge-engine#architecture-kernel-vs-parity).
 
 ---
@@ -186,21 +219,31 @@ It returns `{"cpp": str, "inputs": list[dict], "strategyParams": dict,
 returns the first three keys; `requests` is new in 1.1.0). `inputs` is the input
 manifest; its `title` is the actual override key, and an `input.symbol` entry
 also has `"kind": "symbol"` (since 1.1.0). `diagnostics` contains nonfatal
-warnings. Each input also has `supported`, the checked-settings receipt's
-flag, so a consumer can hide the inputs the compiled strategy cannot honour
-and keep them out of parameter sweeps and optimization before running
-anything. Defaults, bounds and choices are the receipt's values where the
-receipt holds a literal: string inputs spell a built-in constant by its runtime
+warnings. Since 1.4.0, each input also has `supported`, the checked-settings receipt's
+flag. Hide inputs with a false flag, exclude them from sweeps and optimization,
+and do not send a value: the compiled default is used, and the paired engine
+refuses a supplied value with `setting_unsupported`. A true flag is not a full
+validation or duplicate-key check. Defaults, bounds and choices are the
+receipt's values where it holds a literal: string inputs spell a built-in constant by its runtime
 value (`alert.freq_all` is `"all"`, not the Pine name), a source or enum input
 lists its choices, and a typed number input publishes a signed or named-constant
 default and bound and the numbers of an `options=[...]` dropdown. An
 unrepresentable string default is `""`, and every unsupported string input has
 `options: []` (a representable default is kept), so key on `supported`, not on
-`options`. A value the receipt computes at run time (arithmetic over
-constants, a call, `not true`, a color) is not published: `default` stays
-`None` and `min`, `max` and `options` are left out (the
-[contract](docs/PUBLIC_CONTRACT.md#input-manifest-and-override-keys) lists
-the shapes). The PyPI and Pyodide manifests carry the same fields; no key is
+`options`. Plain `input(-5)` and `input(-2.5)` now publish `int` and `float`
+manifest types and numeric defaults; their compiled getters and checked
+receipts retain the existing float type. A plain `input(close)` publishes
+source choices but retains its `string` manifest type. String metadata
+follows native C-string construction: an
+embedded NUL truncates the published default/choice at the first NUL; it is
+not a lossless-string promise. Literal Unicode and escaped backslashes are
+retained. Run-time arithmetic, `not true` and calendar-part `timestamp` values
+still have no published default or unfoldable bounds; a folded
+`timestamp("...")` is a literal. The whole numeric `options` field is omitted
+if any choice is unfoldable. Colors retain their Pine spelling and `string`
+manifest type, while the checked native setter requires a packed integer.
+The [contract](docs/PUBLIC_CONTRACT.md#input-manifest-and-override-keys) lists
+these retained limits. The PyPI and Pyodide manifests carry the same fields; no key is
 renamed or removed, and the changelog lists the values that changed.
 `requests` lists the other symbols' feeds the script reads (see
 [List the other symbols a script requests](#list-the-other-symbols-a-script-requests)).
@@ -473,6 +516,7 @@ Generated C++ compiles only against the engine it was generated for:
 | 1.1.0 (PyPI, 2026-10-04) | `v1.1.0` | The pair the `pineforge-release` image `1.1.0` ships. Its C++ defines the checked settings functions that engine `v1.1.0` adds to `<pineforge/pineforge.h>`; regenerate and relink. |
 | 1.2.0 (PyPI, 2026-10-05) | `v1.2.0` | The pair the `pineforge-release` image `1.2.0` ships. Its C++ defines the compiled execution capability functions that engine `v1.2.0` adds to `<pineforge/pineforge.h>`; regenerate and relink. |
 | 1.3.0 (PyPI, 2026-10-06) | `v1.3.0` | The pair the `pineforge-release` image `1.3.0` ships. Its C++ adds the confirmed-bar receipt, which engine `v1.3.0`'s live runner reads, and the order-shapes receipt; engine `v1.3.0`'s `<pineforge/pineforge.h>` is `v1.2.0`'s. Regenerate and relink. |
+| 1.4.0 (planned, Unreleased) | `v1.4.0` | Prepared from codegen `bfc4ddce` and engine `b3192bfc`. Adds paired coded failures, corrected input manifests and collection lowering. C ABI 4 does not authorize a mixed pair. Regenerate and relink after publication. |
 | Later `X.Y.Z` releases | `vX.Y.Z` of the same version | See below. |
 
 On the 0.x line the engine and codegen versions are independent, and the
@@ -498,8 +542,8 @@ Pine as `strategy.pine`, write `strategy.generated.cpp` with the
 [file example](#transpile-a-file-to-a-cpp) above, then from the same directory:
 
 ```bash
-# 1.3.0 pairs with engine v1.3.0. For 0.10.4 use --branch v0.13.1.
-git clone --branch v1.3.0 https://github.com/pineforge-4pass/pineforge-engine.git
+# After publication: 1.4.0 pairs with engine v1.4.0. For 0.10.4 use v0.13.1.
+git clone --branch v1.4.0 https://github.com/pineforge-4pass/pineforge-engine.git
 cd pineforge-engine
 cp ../strategy.generated.cpp tutorial/macd/generated.cpp   # the tutorial's strategy slot
 bash tutorial/run.sh    # needs cmake, a C++17 compiler and python3
@@ -508,7 +552,8 @@ bash tutorial/run.sh    # needs cmake, a C++17 compiler and python3
 `run.sh` configures CMake once, builds `libpineforge.a` and
 `tutorial/macd/strategy.so`, and runs `tutorial/run.py`, which loads the `.so`,
 feeds it the bars and reads back the closed trades. For the quick-start SMA
-cross, 1.3.0 with engine `v1.3.0` prints:
+cross, the following output was measured on 1.3.0 with engine `v1.3.0`; it
+has not been re-measured for this 1.4.0 documentation change:
 
 ```
 MACD(12,26,9) on BTCUSDT 15m — 672 bars, 2026-04-29 18:15 → 2026-05-06 18:00 UTC
@@ -612,7 +657,7 @@ quote. The commercial-license store (coming soon) will take orders online.
 
 ## Explicit Pine execution attachment
 
-This section describes 1.3.0 and engine `v1.3.0`. The Pine execution adapter is
+This section describes the planned 1.4.0 and engine `v1.4.0` pair. The Pine execution adapter is
 the engine's full Pine execution runtime (`PineExecutionAdapter` and
 `PineStrategyHost` in the engine's `src/source/`): order lifecycle, bracket
 legs, fill-price and slippage rules, POOC / `calc_on_order_fills`, margin
@@ -635,10 +680,11 @@ Regenerate old generated C++ before using a new engine for Pine execution. C++
 generated before the source-layer cut
 ([#129](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/129)),
 0.10.4's included, derives from `BacktestEngine` and does not compile against
-engine `v1.3.0`; old cap-only C++ does not attach the priority rule, and
+engine `v1.4.0`; old cap-only C++ does not attach the priority rule, and
 metadata cannot silently restore it. Rebuild all modules against the
-new matching C++ layout (`engine_script_run_v19` in engine `v1.3.0`); old
-fingerprint versions are not comparable. The extraction preserves Pine policy
+new matching C++ layout (`engine_script_run_v19` in engine `v1.4.0`). Retaining
+that epoch does not promise equal fingerprints, state hashes or trades across
+releases. The extraction preserves Pine policy
 under explicit attachment; it does not implement the generic native
 child-activation scheduler or prove campaign neutrality. Compile-only corpus
 checks do not run Pine backtests.
