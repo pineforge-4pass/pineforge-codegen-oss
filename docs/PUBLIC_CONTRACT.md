@@ -1,9 +1,9 @@
 # Public contract for 1.0
 
 The supported Python/JSON contract began in 1.0.0; the sections below identify
-later additions. This revision includes the planned 1.4.0 pair (codegen
-`bfc4ddce`, engine `b3192bfc`, **Unreleased**), not an already published tag.
-The candidate version files still read `1.3.0` until release dispatch.
+later additions. This revision includes the 1.4.0 pair (2026-10-08).
+Pre-tag validation used codegen `bfc4ddce` and engine `b3192bfc`, whose
+version files at that point read `1.3.0`.
 
 ## Optional compiled execution capabilities
 
@@ -122,7 +122,7 @@ changes nothing); never map a feed key back to `"D"`.
 
 ## Optional coded run failures
 
-Availability: **planned 1.4.0**, with engine `v1.4.0`'s
+Availability: **since 1.4.0**, with engine `v1.4.0`'s
 `PINEFORGE_HAS_RUN_FAILURE_CODES_V1` feature. The feature is optional in emitted
 source; that fallback is not an exception to exact release pairing.
 

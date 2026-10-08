@@ -20,10 +20,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
-## 1.4.0 — Unreleased
+## 1.4.0 — 2026-10-08
 
-A minor release of the exact engine/codegen pair, prepared from codegen
-`bfc4ddce` and engine `b3192bfc`. It consolidates the seven requests landed
+A minor release of the exact engine/codegen pair. Its behavior was validated
+before tagging on codegen `bfc4ddce` and engine `b3192bfc`.
+It consolidates the seven requests landed
 since `v1.3.0`: [#183](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/183)
 (emission ordering), [#184](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/184)
 (coded run stops), [#185](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/185)
@@ -32,9 +33,8 @@ since `v1.3.0`: [#183](https://github.com/pineforge-4pass/pineforge-codegen-oss/
 (CI history), [#189](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/189)
 (reference tests), and [#190](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/190)
 (emitted-string regressions and edge cases). Recorded-output support from
-engine request #356 is excluded. This planned release has not been tagged;
-its candidate `VERSION` files still read `1.3.0` until the release workflows
-set them.
+engine request #356 is excluded. The pre-tag validation used these commits
+with `VERSION` equal to `1.3.0`; those results are not post-tag measurements.
 
 ### Compatibility and migration
 
@@ -244,7 +244,7 @@ These are recorded grading outcomes, not a statement that no internal attempt
 ever failed. Baseline <!-- pf:releases[1.4.0].scoreboard.id|code -->`pineforge-parity-baseline-20261007-engine-b3192bfc`<!-- /pf -->
 measures engine <!-- pf:releases[1.4.0].scoreboard.engineCommit|short-code -->`b3192bfc`<!-- /pf -->
 and codegen <!-- pf:releases[1.4.0].scoreboard.codegenCommit|short-code -->`bfc4ddce`<!-- /pf -->;
-these quantities render from the prepared release facts, not numeric overrides.
+these quantities render from the public release facts, not numeric overrides.
 
 ## 1.3.0 — 2026-10-06
 

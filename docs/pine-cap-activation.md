@@ -4,9 +4,9 @@ This note came with the explicit cap attachment
 ([#127](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/127)). It
 now also covers the execution-adapter attachment that followed
 ([#128](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/128)) and
-describes the planned codegen 1.4.0 / engine `v1.4.0` pair. The release
-is **Unreleased**: candidate codegen `bfc4ddce` and engine `b3192bfc` still
-have `VERSION` equal to `1.3.0`; they are not tagged 1.4.0 artifacts.
+describes the codegen 1.4.0 / engine `v1.4.0` pair (2026-10-08).
+Pre-tag validation used codegen `bfc4ddce` and engine `b3192bfc`, whose
+version files then read `1.3.0`.
 
 Generated strategies explicitly select Pine intraday-cap compatibility in
 their constructor. When the engine defines
@@ -22,7 +22,7 @@ The expression is evaluated only where the source executes it, and limit
 updates preserve the existing quota and pending obligations. Selection does
 not evaluate a limit or move a conditional statement into the constructor.
 
-The 1.4.0 engine candidate, like released engine `v1.3.0`, defines both macros
+Engine `v1.4.0`, like `v1.3.0`, defines both macros
 in `pineforge/source/pine_strategy_host.hpp`,
 the header the generated C++ includes; every engine commit with that header
 does, since the header and the macros arrived there together (engine #253). So
@@ -33,10 +33,10 @@ capability, bare native construction leaves the Pine cap unselected. Matching
 runtime headers and library are required; this source bridge does not make
 stale compiled C++ objects compatible across internal ABI versions.
 
-The 1.4.0 engine candidate, like released `v1.3.0`, `v1.0.0`, `v1.0.1`,
+Engine `v1.4.0`, like `v1.3.0`, `v1.0.0`, `v1.0.1`,
 `v1.1.0` and `v1.2.0`, no longer has the `script_has_strategy_close_` member
 that the C++ of codegen 0.10.4 and earlier assigns, so that C++ does not
-compile there. For the planned release, regenerate with codegen 1.4.0 and
+compile there. Regenerate with codegen 1.4.0 and
 relink with the exact paired engine release; unchanged interface numbers
 do not authorize mixing releases.
 
