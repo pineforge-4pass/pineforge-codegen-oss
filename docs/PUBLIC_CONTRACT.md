@@ -452,8 +452,10 @@ argument.
 
 ## Diagnostic codes
 
-Since 1.2.0 every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
-`CompileError`'s `diagnostics`, and in the glue envelopes) carries:
+Every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
+`CompileError`'s `diagnostics`, and in the glue envelopes) carries the stable
+`code` and `args` introduced in 1.2.0. The NOTE/template extension adds
+`user_message`:
 
 - `code`: a stable string `PF-<S><NNNN>`. `E` and `W` are historical identity
   prefixes; notes retain their existing `PF-W` codes. Read the declared
@@ -479,8 +481,8 @@ Since 1.2.0 every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
 (`diagnostics_catalog-v1.3.0.json` for 1.3.0).
 Per code it gives `severity`, `area`, the English ICU MessageFormat `message`
 template, the `hint` template or `null`, a one-line `explanation`, `args` and
-the short `user_message` template. `args` describes
-per argument its `kind` — `identifier`, `type`, `keyword`, `number`, `vocab`
+the short `user_message` template. `args` gives each argument's
+`kind` — `identifier`, `type`, `keyword`, `number`, `vocab`
 (an English word or phrase the transpiler picks from the closed set listed in
 `values`, which an application may translate) or `text` (open English text the
 transpiler builds, such as a nested reason; shown as is). The templates use
