@@ -79,11 +79,11 @@ corrected source/enum choices, string values, signed bounds and plain-input type
 Give each input a unique title; different `group=` labels do not separate
 override keys. The paired checked path refuses a shared key and returns a null
 fingerprint for a completed run of such a script even without an override.
-The [migration notes](CHANGELOG.md#compatibility-and-migration) cover this change,
+The [1.4.0 migration notes](CHANGELOG.md#140--unreleased) cover this change,
 new refusals of some previously accepted settings, and color's string manifest
 versus packed-integer native value. Check stored presets before submitting them.
-Users of `pineforge-hpo` 0.11.0 must also preserve floating-point option values
-at its input boundary; see the [known issue](CHANGELOG.md#known-issues-with-consumers).
+Users of `pineforge-hpo` 0.11.0 must preserve the manifest's number type for
+each option at its input boundary; see the [known issue](CHANGELOG.md#known-issues-with-consumers).
 
 The paired engine adds coded run failures and typed fingerprint provenance.
 Its run harness returns failure `code` and typed `args` beside `error`; an

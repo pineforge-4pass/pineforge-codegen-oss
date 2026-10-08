@@ -65,14 +65,14 @@ set them.
   `group=` labels do not separate keys. On the paired 1.4.0 engine's normal
   checked path, a completed run of such a script has `fingerprint: null` even
   without an override. Supplying the shared key fails before execution with
-  `setting_rejected`, reason `ambiguous_key`. The retained request
+  `setting_rejected`, reason `ambiguous_key`. For example,
   `Period="7"` returned a success report on 1.3.0, whose legacy setter applied
   a shared key to all matching inputs. Legacy-path unresolved provenance rows
   may still appear inside a fingerprint; that differs from the whole
   fingerprint being null on the checked path.
 - The paired engine's run harness now uses the checked settings API. Stored
   presets and sweep values must satisfy the compiled input's type, bounds and
-  options. Two other retained requests that succeeded on 1.3.0 now fail with
+  options. Two other examples that succeeded on 1.3.0 now fail with
   `setting_rejected`: `Color="color.blue"` (`expected_integer`) and
   `Choice="15"` for options `[10, 20, 30]` (`invalid_input_option`). A color's
   manifest still has `type: "string"` and a Pine spelling such as `"color.red"`
@@ -90,10 +90,10 @@ set them.
   when the English message is empty; do not accept a stopped run's partial
   output as success or parse the English to recover a code. These run failures
   are distinct from transpile-time `CompileError` diagnostics.
-  The setting refusals above are catalog class `input`; a deliberate
-  `runtime.error` is `strategy_runtime_error`, class `strategy`. The installed
-  engine entrypoint returns exit 4 for both classes: exit 4 alone does not
-  select a billing or refund decision.
+  `setting_rejected` is catalog class `input`; `setting_unsupported` is class
+  `unsupported`. A deliberate `runtime.error` is `strategy_runtime_error`,
+  class `strategy`. The installed engine entrypoint returns exit 4 for all
+  three codes: exit 4 alone does not select a billing or refund decision.
 - The paired engine certifies scalar input/override types in fingerprint
   provenance; unresolved values remain explicit rather than being treated as
   certified native values. This is an engine report change, not another field
@@ -211,14 +211,21 @@ a new arbitrary-source security guarantee. No exploit payloads are included.
 The new numeric options expose an exact-type comparison in
 `pineforge-hpo` 0.11.0: a JSON integer `20` is refused with
 `invalid_input_option` for an `input.float` choice `20.0`, although the
-numbers are equal. This can affect a caller that reads the manifest's
-default and sends it back through JavaScript's ordinary JSON serialization,
-which writes a whole-number value as `20`, losing its float spelling.
-Preserve a floating-point value at the HPO boundary, for example `20.0` in
-explicit JSON or a Python float. Writing `20.0` in JavaScript before ordinary
-serialization does not preserve that distinction. Upgrade to the planned
-HPO 0.11.1 fix or a later release containing it when available; that fix is
-separate from this engine/codegen release and is not yet claimed released.
+numbers are equal. For HPO 0.11.0, send each selected value with the number
+type the original manifest publishes for that option: `20.0` when it lists
+`20.0` (explicit JSON `20.0` or a Python float), and integer `20` when it lists
+`20`. A float input written with whole-number-literal options such as
+`options=[10, 20, 30]` publishes integer options; mixed lists retain mixed
+number types. The input's `float` type alone does not choose the workaround.
+
+This can affect a caller that reads a float-spelled manifest default and
+sends it back through JavaScript's ordinary JSON serialization, which writes
+a whole-number value as `20`, losing its float spelling. Writing `20.0` in
+JavaScript before ordinary serialization does not preserve that distinction;
+preserve each option's original number type at the HPO boundary. Upgrade to
+HPO 0.11.1 or a later release containing the fix when available. This fix is
+separate from the engine/codegen release; HPO 0.11.1 has not been released at
+the time of writing.
 
 ### Recorded validation and grades
 

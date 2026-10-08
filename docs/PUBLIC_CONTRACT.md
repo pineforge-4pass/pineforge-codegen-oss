@@ -160,10 +160,11 @@ enum values. An input with `supported: false` rejects a supplied value with
 These examples do not imply that every invalid request used to succeed.
 `initial_capital="abc"` and `initial_capital="-1"` already failed on 1.3.0;
 the paired engine now reports `setting_rejected` with
-`expected_finite_decimal` and `value_below_minimum`, respectively. Setting
-refusals are catalog class `input`; `strategy_runtime_error` is class
-`strategy`. The installed engine entrypoint maps both to exit 4, so that exit
-alone does not determine billing or refund treatment.
+`expected_finite_decimal` and `value_below_minimum`, respectively.
+`setting_rejected` is catalog class `input`; `setting_unsupported` is class
+`unsupported`. A deliberate `runtime.error` is `strategy_runtime_error`,
+class `strategy`. The installed engine entrypoint returns exit 4 for all
+three codes: exit 4 alone does not select a billing or refund decision.
 
 ## Optional generated settings extension
 
