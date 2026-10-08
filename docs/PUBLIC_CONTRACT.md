@@ -145,6 +145,26 @@ This is a runtime failure channel, distinct from the `CompileError` and
 `diagnostics` contract of transpilation. Regenerate and relink for the new pair;
 C ABI version 4 alone does not authorize reusing a 1.3.0 strategy library.
 
+The paired 1.4.0 harness uses the checked settings API for generated libraries;
+the 1.3.0 harness used the legacy setters. Some requests that previously
+returned success now fail before execution: a shared `Period` key set to `"7"`
+is `setting_rejected` with reason `ambiguous_key`, textual color `"color.blue"`
+is `expected_integer`, and `"15"` outside choices `[10, 20, 30]` is
+`invalid_input_option`. The color manifest's `string` type and Pine-spelling
+default do not describe the native setter's packed-integer encoding. Validate
+presets against the compiled settings, including types, bounds and options;
+the checked path also refuses unknown keys and invalid numeric, boolean or
+enum values. An input with `supported: false` rejects a supplied value with
+`setting_unsupported`; leave it at its compiled default.
+
+These examples do not imply that every invalid request used to succeed.
+`initial_capital="abc"` and `initial_capital="-1"` already failed on 1.3.0;
+the paired engine now reports `setting_rejected` with
+`expected_finite_decimal` and `value_below_minimum`, respectively. Setting
+refusals are catalog class `input`; `strategy_runtime_error` is class
+`strategy`. The installed engine entrypoint maps both to exit 4, so that exit
+alone does not determine billing or refund treatment.
+
 ## Optional generated settings extension
 
 From 1.1.0 on, C++ compiled against an engine providing
@@ -326,10 +346,13 @@ them identically.
   string input whose default or a choice is neither a string literal nor a known
   built-in constant (`size.small`, `position.top_right`, `na`, a reassigned
   name), or an `input.enum` whose default or choices are not literal members of
-  one enum. Hide such inputs, and keep them out of sweep and optimization
-  spaces, before creating a strategy. Key on `supported` alone: every unsupported
+  one enum. Hide such inputs, exclude them from sweeps and optimization, and
+  do not send a value: the strategy uses its compiled default, and the paired
+  engine rejects a supplied value with `setting_unsupported`. Use `supported`
+  to determine eligibility rather than `options` emptiness: every unsupported
   string input has `options: []`, with or without `options=`, and so does a
-  supported input written `options=[]`.
+  supported input written `options=[]`. A true flag does not validate a value's
+  type, bounds or choices, or detect duplicate override keys.
 - A string input (`input.string`, `.timeframe`, `.session`, `.symbol`, ...)
   publishes the lowered strings: a built-in constant its runtime value
   (`alert.freq_all` is `"all"`, `currency.USD` `"USD"`, `format.price`
@@ -339,7 +362,7 @@ them identically.
   descriptor decodes only the emitter's C++ string-literal escape grammar,
   preserves literal Unicode and escaped backslashes, and stops at the first
   embedded NUL, matching native `std::string(const char*)` construction. The
-  emitter spells NUL as fixed three-digit octal `\000`, including before
+  emitter spells NUL as fixed three-digit octal `\000` (one backslash), including before
   digits. This is current manifest/receipt consistency, not lossless storage
   of a string containing NUL.
 - A source input (`input.source(hl2)`, a plain `input(close)`) publishes its
@@ -353,20 +376,24 @@ them identically.
   numeric `default`, `min`, `max`, `step` and the numeric choices of an
   `options=[...]` dropdown where the receipt's value is a literal: a signed number (`-2.5`), a named constant (`LEN = 14`,
   `minval=-RATIO`) or `timestamp("2024-01-02T00:00:00")` of a string literal. A
-  plain `input(-5)` or `input(-2.5)` is typed `int` or `float` by its literal, as
-  `input(5)` is; the compiled getter reads it as a double, so the receipt's
-  type for it is `float`. An `input.bool` default is a boolean when the
+  plain `input(-5)` or `input(-2.5)` is typed `int` or `float` by its literal;
+  these signed forms retain a double getter and a `float` receipt type.
+  A plain `input(5)` uses an int getter and receipt.
+  An `input.bool` default is a boolean when the
   descriptor lowers it to literal `true` or `false`, including an inlined
   constant; `not true` remains a run-time expression.
 - Not published, because the receipt computes it at run time: arithmetic over
   constants (`LEN * 2`), a call (`math.pow(2, 3)`), `timestamp(year, month,
   ...)` (it reads the symbol's time zone) and `not true`. Such a `default` is
-  `None` and such a `min` or `max` is omitted. Numeric choices containing
-  an unfoldable expression can publish `options: []`, not its computed
-  values. These gaps are pinned in `tests/test_input_metadata_receipt.py`'s
-  `KNOWN_LIMITS`. An `input.color`'s
+  `None` and such a `min` or `max` is omitted. The whole numeric `options`
+  field is omitted when any choice is unfoldable. These gaps are pinned in
+  `tests/test_input_metadata_receipt.py`'s `KNOWN_LIMITS`; its test view maps
+  an absent options field to `[]`, which is not the public manifest shape.
+  An `input.color`'s
   `default` is its Pine spelling (`"color.red"`) and its `type` `string`, where
-  the receipt holds the packed integer. Apart from the source-input case
+  the receipt holds the packed integer required by the checked native setter.
+  Do not submit the manifest's Pine-spelling string as a native color value.
+  Apart from the source-input case
   above, a plain `input(...)` whose default is not a literal is typed
   `string` with a `None` default.
 
@@ -380,9 +407,16 @@ The `title` is the **actual override key read by the emitted C++**:
 
 For example, `length = input.int(14)` has key `"length"`, and
 `ta.ema(close, input.int(9, "Fast"))` has key `"Fast"`. The manifest includes
-both declared and inline global-scope calls. If several calls share a key,
-one override sets all of them; the translator emits a warning naming the
-colliding inputs. Different `group=` labels do not separate override keys.
+both declared and inline global-scope calls, one row per call. If several
+calls share a title or fallback key, those rows retain the same `title` and
+their per-input `supported` flags do not reflect the collision. The translator
+warns about the colliding inputs. The legacy setters apply a shared override
+to all matching inputs; the checked setters refuse the key as ambiguous.
+On the paired 1.4.0 engine's normal checked path, a supplied shared key fails
+with `setting_rejected`, reason `ambiguous_key`; a completed run with no such
+override still reports the whole `fingerprint` as `null`. This differs from
+legacy-path unresolved provenance rows, which may remain inside a fingerprint.
+Give each input a unique title. Different `group=` labels do not separate keys.
 An explicit title that is not a compile-time string constant raises
 `CompileError`.
 

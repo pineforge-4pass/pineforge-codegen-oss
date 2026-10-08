@@ -43,14 +43,46 @@ set them.
   The pair retains C ABI version 4, settings/capability API version 1 and the
   `engine_script_run_v19` epoch; equal version numbers for those interfaces
   do not make mixed engine/codegen releases supported.
+  A report's fingerprint records engine/codegen versions, generated C++'s
+  hash and the paired engine's corrected provenance values. The retained
+  epoch and hash domain tags do not promise equal fingerprints, state-hash
+  values or trades across 1.3.0 and 1.4.0.
 - Emitted C++ changes, including common run-stop shims and collection history
   wrappers. Do not reuse a 1.3.0 strategy library or assume source identity.
   The public Python call signatures and override keys stay the same, but
   `inputs` values and the Python/Pyodide success envelopes change as described
   below. These are not blanket byte-identity promises for emission or envelopes.
-- Use `inputs[].supported` when deciding which inputs to offer or optimize.
-  Do not infer support from empty `options`; a supported empty dropdown and
-  an unsupported string input can both have `options: []`.
+- Every manifest row now carries `supported`. When it is `false`, hide the
+  input, exclude it from sweeps and optimization, and do not send a value:
+  the strategy uses its compiled default, and the paired engine refuses a
+  supplied value with `setting_unsupported`. `supported: true` alone does
+  not validate the value's type, bounds or options, or make a shared key safe.
+  A supported empty dropdown and an unsupported string input can both have
+  `options: []`; that list does not determine support.
+- Give each input a unique title before upgrading. Calls with the same title
+  or fallback declaration key still produce separate manifest rows with the
+  same `title`; their `supported` flags do not detect the collision. Different
+  `group=` labels do not separate keys. On the paired 1.4.0 engine's normal
+  checked path, a completed run of such a script has `fingerprint: null` even
+  without an override. Supplying the shared key fails before execution with
+  `setting_rejected`, reason `ambiguous_key`. The retained request
+  `Period="7"` returned a success report on 1.3.0, whose legacy setter applied
+  a shared key to all matching inputs. Legacy-path unresolved provenance rows
+  may still appear inside a fingerprint; that differs from the whole
+  fingerprint being null on the checked path.
+- The paired engine's run harness now uses the checked settings API. Stored
+  presets and sweep values must satisfy the compiled input's type, bounds and
+  options. Two other retained requests that succeeded on 1.3.0 now fail with
+  `setting_rejected`: `Color="color.blue"` (`expected_integer`) and
+  `Choice="15"` for options `[10, 20, 30]` (`invalid_input_option`). A color's
+  manifest still has `type: "string"` and a Pine spelling such as `"color.red"`
+  as its default, but the checked native input requires the packed integer;
+  do not forward that manifest string as a native color value. The checked
+  API also validates parseable numbers, booleans, enum members and known keys.
+  This does not mean all invalid settings previously succeeded:
+  `initial_capital="abc"` and `initial_capital="-1"` already failed on 1.3.0;
+  they now report `expected_finite_decimal` and `value_below_minimum` reasons.
+  Legacy C setters retain their existing behavior.
 - The paired engine adds `strategy_get_last_error_code` and
   `strategy_get_last_error_args` beside the existing English error getter,
   under `PINEFORGE_HAS_RUN_FAILURE_CODES_V1`. Its run harness exposes `code`
@@ -58,6 +90,10 @@ set them.
   when the English message is empty; do not accept a stopped run's partial
   output as success or parse the English to recover a code. These run failures
   are distinct from transpile-time `CompileError` diagnostics.
+  The setting refusals above are catalog class `input`; a deliberate
+  `runtime.error` is `strategy_runtime_error`, class `strategy`. The installed
+  engine entrypoint returns exit 4 for both classes: exit 4 alone does not
+  select a billing or refund decision.
 - The paired engine certifies scalar input/override types in fingerprint
   provenance; unresolved values remain explicit rather than being treated as
   certified native values. This is an engine report change, not another field
@@ -118,13 +154,13 @@ set them.
     `bool` default publishes a boolean, not a number.
   - A plain `input(-5)` or `input(-2.5)` is typed `int` or `float` with its
     number as `default`, where it was `string` with `null`. The compiled
-    getter and checked receipt keep their existing float type for plain
-    numeric inputs; this manifest correction does not change that lowering.
+    getter and checked receipt keep their existing float type for these
+    signed plain inputs; this manifest correction does not change that lowering.
 
   Values the receipt computes at run time (`LEN * 2`, `not true`,
   `timestamp(year, month, ...)`) stay unpublished: the default remains
-  `None`/JSON `null`, an unfoldable bound is omitted, and an unsupported
-  numeric options expression can leave an empty list. An `input.color`
+  `None`/JSON `null`, an unfoldable bound is omitted, and the whole `options`
+  field is omitted when any numeric choice is unfoldable. An `input.color`
   retains its Pine spelling as a string default, not the receipt's packed
   integer; other nonliteral plain `input()` calls remain `string` with no
   published default (the source case above is the exception). A folded
@@ -170,11 +206,26 @@ The hardening wording remains scoped to the previously documented emitted-string
 validation and escaping; these edge-case repairs and regression checks are not
 a new arbitrary-source security guarantee. No exploit payloads are included.
 
+### Known issues with consumers
+
+The new numeric options expose an exact-type comparison in
+`pineforge-hpo` 0.11.0: a JSON integer `20` is refused with
+`invalid_input_option` for an `input.float` choice `20.0`, although the
+numbers are equal. This can affect a caller that reads the manifest's
+default and sends it back through JavaScript's ordinary JSON serialization,
+which writes a whole-number value as `20`, losing its float spelling.
+Preserve a floating-point value at the HPO boundary, for example `20.0` in
+explicit JSON or a Python float. Writing `20.0` in JavaScript before ordinary
+serialization does not preserve that distinction. Upgrade to the planned
+HPO 0.11.1 fix or a later release containing it when available; that fix is
+separate from this engine/codegen release and is not yet claimed released.
+
 ### Recorded validation and grades
 
 The landed #190 candidate recorded 9,254 engine-enabled pytest passes with
 12 audited skips, 2,164 focused passes each under GCC and Clang without skips,
-314 public corpus compilation passes, and 279 JSON/Pyodide fixtures. Those
+314 public corpus compilation passes, and 279 fixtures in each of the JSON
+and Pyodide fixture-parity checks. Those
 are the request's retained native measurements, not a new native suite run
 for this documentation change. The release-pair baseline records
 excellent: <!-- pf:releases[1.4.0].scoreboard.excellent|int -->7,983<!-- /pf -->;

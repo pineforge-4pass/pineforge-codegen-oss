@@ -69,9 +69,21 @@ a release.
 After the 1.4.0 pair is published, regenerate C++ and relink against engine
 `v1.4.0`'s generated headers and runtime, even though C ABI version 4 and the
 script ABI epoch are retained. Emission and input manifests change; neither
-generated C++ nor Python/Pyodide envelopes are promised byte-identical. Use
-`inputs[].supported` for UI/optimization eligibility and account for corrected
-source/enum choices, string values, signed numeric bounds and plain-input types.
+generated C++ nor Python/Pyodide envelopes are promised byte-identical. Every
+input row now has `supported`: when false, hide it, exclude it from sweeps and
+optimization, and do not send a value. Its compiled default is used; a supplied
+value is refused with `setting_unsupported`. A true flag still requires type,
+bounds and options validation, and does not detect duplicate keys. Account for
+corrected source/enum choices, string values, signed bounds and plain-input types.
+
+Give each input a unique title; different `group=` labels do not separate
+override keys. The paired checked path refuses a shared key and returns a null
+fingerprint for a completed run of such a script even without an override.
+The [migration notes](CHANGELOG.md#compatibility-and-migration) cover this change,
+new refusals of some previously accepted settings, and color's string manifest
+versus packed-integer native value. Check stored presets before submitting them.
+Users of `pineforge-hpo` 0.11.0 must also preserve floating-point option values
+at its input boundary; see the [known issue](CHANGELOG.md#known-issues-with-consumers).
 
 The paired engine adds coded run failures and typed fingerprint provenance.
 Its run harness returns failure `code` and typed `args` beside `error`; an
@@ -208,10 +220,11 @@ returns the first three keys; `requests` is new in 1.1.0). `inputs` is the input
 manifest; its `title` is the actual override key, and an `input.symbol` entry
 also has `"kind": "symbol"` (since 1.1.0). `diagnostics` contains nonfatal
 warnings. Since 1.4.0, each input also has `supported`, the checked-settings receipt's
-flag, so a consumer can hide the inputs the compiled strategy cannot honour
-and keep them out of parameter sweeps and optimization before running
-anything. Defaults, bounds and choices are the receipt's values where the
-receipt holds a literal: string inputs spell a built-in constant by its runtime
+flag. Hide inputs with a false flag, exclude them from sweeps and optimization,
+and do not send a value: the compiled default is used, and the paired engine
+refuses a supplied value with `setting_unsupported`. A true flag is not a full
+validation or duplicate-key check. Defaults, bounds and choices are the
+receipt's values where it holds a literal: string inputs spell a built-in constant by its runtime
 value (`alert.freq_all` is `"all"`, not the Pine name), a source or enum input
 lists its choices, and a typed number input publishes a signed or named-constant
 default and bound and the numbers of an `options=[...]` dropdown. An
@@ -226,8 +239,9 @@ embedded NUL truncates the published default/choice at the first NUL; it is
 not a lossless-string promise. Literal Unicode and escaped backslashes are
 retained. Run-time arithmetic, `not true` and calendar-part `timestamp` values
 still have no published default or unfoldable bounds; a folded
-`timestamp("...")` is a literal. Numeric computed choices can leave an empty
-list, and colors retain their Pine spelling, not their packed native value.
+`timestamp("...")` is a literal. The whole numeric `options` field is omitted
+if any choice is unfoldable. Colors retain their Pine spelling and `string`
+manifest type, while the checked native setter requires a packed integer.
 The [contract](docs/PUBLIC_CONTRACT.md#input-manifest-and-override-keys) lists
 these retained limits. The PyPI and Pyodide manifests carry the same fields; no key is
 renamed or removed, and the changelog lists the values that changed.
@@ -668,8 +682,9 @@ generated before the source-layer cut
 0.10.4's included, derives from `BacktestEngine` and does not compile against
 engine `v1.4.0`; old cap-only C++ does not attach the priority rule, and
 metadata cannot silently restore it. Rebuild all modules against the
-new matching C++ layout (`engine_script_run_v19` in engine `v1.4.0`); old
-fingerprint versions are not comparable. The extraction preserves Pine policy
+new matching C++ layout (`engine_script_run_v19` in engine `v1.4.0`). Retaining
+that epoch does not promise equal fingerprints, state hashes or trades across
+releases. The extraction preserves Pine policy
 under explicit attachment; it does not implement the generic native
 child-activation scheduler or prove campaign neutrality. Compile-only corpus
 checks do not run Pine backtests.
