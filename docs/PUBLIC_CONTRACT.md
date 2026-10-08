@@ -1,5 +1,10 @@
 # Public contract for 1.0
 
+The supported Python/JSON contract began in 1.0.0; the sections below identify
+later additions. This revision includes the planned 1.4.0 pair (codegen
+`bfc4ddce`, engine `b3192bfc`, **Unreleased**), not an already published tag.
+The candidate version files still read `1.3.0` until release dispatch.
+
 ## Optional compiled execution capabilities
 
 Availability: **since 1.2.0**, with engine `v1.2.0`'s capability extension and
@@ -114,6 +119,31 @@ folds the requested timeframe when it looks a feed up, so a script's `"D"` and
 its override are raw: fold them the same way. To match a receipt's request to a
 feed, fold the receipt's literal timeframe with that rule (folding twice
 changes nothing); never map a feed key back to `"D"`.
+
+## Optional coded run failures
+
+Availability: **planned 1.4.0**, with engine `v1.4.0`'s
+`PINEFORGE_HAS_RUN_FAILURE_CODES_V1` feature. The feature is optional in emitted
+source; that fallback is not an exception to exact release pairing.
+
+Generated no-data/other-symbol, collection, UDT, unsupported-request and
+checked-string stops carry compile-time provenance through coded helpers.
+A script's `runtime.error` always selects `strategy_runtime_error`; neither
+its message nor an English message copied from another failure selects a
+code. Named `message` arguments are passed, and an omitted message stays empty.
+`str.tonumber` evaluates its argument outside the numeric parser's narrow
+catches so a run stop propagates; only numeric parsing failures become `na`.
+The generated run wrappers retain inner codes. A legacy setter's first failure
+latches its English and `setting_rejected` identity for subsequent begins.
+
+The paired engine provides `strategy_get_last_error_code` and
+`strategy_get_last_error_args` beside `strategy_get_last_error`; its run harness
+adds `code` and typed `args` beside failure `error`. An empty English message
+does not make the run successful or authorize use of its partial results.
+Without the feature, generated shims retain the legacy exceptions and English.
+This is a runtime failure channel, distinct from the `CompileError` and
+`diagnostics` contract of transpilation. Regenerate and relink for the new pair;
+C ABI version 4 alone does not authorize reusing a 1.3.0 strategy library.
 
 ## Optional generated settings extension
 
@@ -285,7 +315,8 @@ an `input.symbol` entry also has `kind` equal to `"symbol"`. An optional field
 is omitted when its argument is absent or cannot be reduced to the supported
 literal form.
 
-`supported` and the values below are those of the checked-settings receipt (what
+From 1.4.0, `supported` and the values below come from the checked-settings
+descriptor, subject to the explicit retained limits below (what
 the compiled strategy's `strategy_get_effective_settings` reports): the manifest
 is read from the descriptor that generates the receipt, and PyPI's
 `transpile_full()` and the npm package's Pyodide/glue success envelope carry
@@ -304,7 +335,13 @@ them identically.
   (`alert.freq_all` is `"all"`, `currency.USD` `"USD"`, `format.price`
   `"price"`, `order.ascending` `"ascending"`, `session.regular` `"regular"`) and
   a named string constant its value. An unrepresentable default is `""`; a
-  representable default is kept when only a choice is unsupported.
+  representable default is kept when only a choice is unsupported. The
+  descriptor decodes only the emitter's C++ string-literal escape grammar,
+  preserves literal Unicode and escaped backslashes, and stops at the first
+  embedded NUL, matching native `std::string(const char*)` construction. The
+  emitter spells NUL as fixed three-digit octal `\000`, including before
+  digits. This is current manifest/receipt consistency, not lossless storage
+  of a string containing NUL.
 - A source input (`input.source(hl2)`, a plain `input(close)`) publishes its
   series as `default` and the nine native sources (`close`, `high`, `hl2`,
   `hlc3`, `hlcc4`, `low`, `ohlc4`, `open`, `volume`) as `options`; a plain
@@ -312,21 +349,26 @@ them identically.
 - An enum input publishes its `Enum.member` choices in declaration order as
   `options` and keeps its `Enum.member` `default`, which the receipt encodes as
   the member's index (map it through the receipt's `option_values`).
-- A typed number or bool input (`input.int`, `.float`, `.price`, `.time`,
-  `.bool`) publishes `default`, `min`, `max`, `step` and the choices of an
-  `options=[...]` dropdown (a list of numbers) as numbers where the receipt's
-  value is a literal: a signed number (`-2.5`), a named constant (`LEN = 14`,
+- A typed numeric input (`input.int`, `.float`, `.price`, `.time`) publishes
+  numeric `default`, `min`, `max`, `step` and the numeric choices of an
+  `options=[...]` dropdown where the receipt's value is a literal: a signed number (`-2.5`), a named constant (`LEN = 14`,
   `minval=-RATIO`) or `timestamp("2024-01-02T00:00:00")` of a string literal. A
   plain `input(-5)` or `input(-2.5)` is typed `int` or `float` by its literal, as
   `input(5)` is; the compiled getter reads it as a double, so the receipt's
-  type for it is `float`.
+  type for it is `float`. An `input.bool` default is a boolean when the
+  descriptor lowers it to literal `true` or `false`, including an inlined
+  constant; `not true` remains a run-time expression.
 - Not published, because the receipt computes it at run time: arithmetic over
   constants (`LEN * 2`), a call (`math.pow(2, 3)`), `timestamp(year, month,
   ...)` (it reads the symbol's time zone) and `not true`. Such a `default` is
-  `None` and such a `min`, `max` or `options` is omitted. An `input.color`'s
+  `None` and such a `min` or `max` is omitted. Numeric choices containing
+  an unfoldable expression can publish `options: []`, not its computed
+  values. These gaps are pinned in `tests/test_input_metadata_receipt.py`'s
+  `KNOWN_LIMITS`. An `input.color`'s
   `default` is its Pine spelling (`"color.red"`) and its `type` `string`, where
-  the receipt holds the packed integer, and a plain `input(...)` whose default
-  is not a literal is typed `string` with a `None` default.
+  the receipt holds the packed integer. Apart from the source-input case
+  above, a plain `input(...)` whose default is not a literal is typed
+  `string` with a `None` default.
 
 No key is renamed or removed and the override keys are unchanged; the values
 above are new or corrected values of existing keys, listed in the changelog.
