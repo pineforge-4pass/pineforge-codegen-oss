@@ -16,7 +16,7 @@ graded excellent and <!-- pf:scoreboard.strong|int -->6<!-- /pf --> strong, with
 A probe is a strategy exported from TradingView with its trade list and replayed
 trade for trade on the same bars.
 
-Planned release **1.4.0 grades <!-- pf:releases[1.4.0].scoreboard.excellent|int -->7,983<!-- /pf --> excellent / <!-- pf:releases[1.4.0].scoreboard.strong|int -->6<!-- /pf --> strong**, on <!-- pf:releases[1.4.0].scoreboard.graded|int -->7,989<!-- /pf --> probes (baseline <!-- pf:releases[1.4.0].scoreboard.id|code -->`pineforge-parity-baseline-20261007-engine-b3192bfc`<!-- /pf -->, <!-- pf:releases[1.4.0].scoreboard.date -->2026-10-07<!-- /pf -->). These are the prepared pair's recorded grading outcomes, not a published tag or a promise about arbitrary scripts. A main scoreboard advance does not change release results.
+Release **1.4.0 grades <!-- pf:releases[1.4.0].scoreboard.excellent|int -->7,983<!-- /pf --> excellent / <!-- pf:releases[1.4.0].scoreboard.strong|int -->6<!-- /pf --> strong**, on <!-- pf:releases[1.4.0].scoreboard.graded|int -->7,989<!-- /pf --> probes (baseline <!-- pf:releases[1.4.0].scoreboard.id|code -->`pineforge-parity-baseline-20261007-engine-b3192bfc`<!-- /pf -->, <!-- pf:releases[1.4.0].scoreboard.date -->2026-10-07<!-- /pf -->). These are the pair's recorded grading outcomes, not a promise about arbitrary scripts. A main scoreboard advance does not change release results.
 
 Release 1.3.0 recorded <!-- pf:releases[1.3.0].scoreboard.excellent|int -->7,982<!-- /pf --> excellent / <!-- pf:releases[1.3.0].scoreboard.strong|int -->7<!-- /pf --> strong on <!-- pf:releases[1.3.0].scoreboard.graded|int -->7,989<!-- /pf --> probes; its historical result remains scoped to that pair.
 
@@ -52,10 +52,10 @@ hosted-server line name no version. -->
 
 This README ships with each release as its package description on PyPI
 (`pineforge-codegen`); releases from 0.7.0 on are also on npm as
-`@pineforge/codegen-pyodide`. It describes the planned 1.4.0 pair (**Unreleased**)
-and what changed since 0.10.4. The candidate is codegen `bfc4ddce` with engine
-`b3192bfc`, excluding engine request #356; both candidate `VERSION` files still
-read `1.3.0` until the release workflows set them. Historical measurements
+`@pineforge/codegen-pyodide`. It describes 1.4.0 (2026-10-08)
+and what changed since 0.10.4. The release's behavior was validated before
+tagging on codegen `bfc4ddce` with engine `b3192bfc`, excluding engine
+request #356. Those validation builds reported `1.3.0`; historical measurements
 below retain the versions on which they were run. The
 [PyPI release history](https://pypi.org/project/pineforge-codegen/#history)
 lists every release; the
@@ -66,7 +66,7 @@ a release.
 
 ### Upgrading from 1.3.0
 
-After the 1.4.0 pair is published, regenerate C++ and relink against engine
+For the 1.4.0 pair, regenerate C++ and relink against engine
 `v1.4.0`'s generated headers and runtime, even though C ABI version 4 and the
 script ABI epoch are retained. Emission and input manifests change; neither
 generated C++ nor Python/Pyodide envelopes are promised byte-identical. Every
@@ -79,7 +79,7 @@ corrected source/enum choices, string values, signed bounds and plain-input type
 Give each input a unique title; different `group=` labels do not separate
 override keys. The paired checked path refuses a shared key and returns a null
 fingerprint for a completed run of such a script even without an override.
-The [1.4.0 migration notes](CHANGELOG.md#140--unreleased) cover this change,
+The [1.4.0 migration notes](CHANGELOG.md#140--2026-10-08) cover this change,
 new refusals of some previously accepted settings, and color's string manifest
 versus packed-integer native value. Check stored presets before submitting them.
 Users of `pineforge-hpo` 0.11.0 must preserve the manifest's number type for
@@ -88,7 +88,7 @@ each option at its input boundary; see the [known issue](CHANGELOG.md#known-issu
 The paired engine adds coded run failures and typed fingerprint provenance.
 Its run harness returns failure `code` and typed `args` beside `error`; an
 empty message still means failure. Transpile-time diagnostics remain a separate
-Python/JSON surface. Read the [1.4.0 changelog](CHANGELOG.md#140--unreleased)
+Python/JSON surface. Read the [1.4.0 changelog](CHANGELOG.md#140--2026-10-08)
 for migration details and inherited collection/metadata limitations.
 
 ### Upgrading from 0.10.4
@@ -123,8 +123,8 @@ fill-price and slippage rules, `process_orders_on_close` / `calc_on_order_fills`
 margin revival and trail/stop behaviour — everything TradingView parity depends
 on at run time — live in the engine's source-adapter runtime
 ([`src/source/`](https://github.com/pineforge-4pass/pineforge-engine/tree/v1.4.0/src/source)
-for the planned engine `v1.4.0` pair), which maps them onto the engine's Pine-agnostic kernel. The tag link becomes available when that release is
-published. See
+in engine `v1.4.0`), which maps them onto the engine's Pine-agnostic kernel.
+See
 the engine's [architecture notes](https://github.com/pineforge-4pass/pineforge-engine#architecture-kernel-vs-parity).
 
 ---
@@ -516,7 +516,7 @@ Generated C++ compiles only against the engine it was generated for:
 | 1.1.0 (PyPI, 2026-10-04) | `v1.1.0` | The pair the `pineforge-release` image `1.1.0` ships. Its C++ defines the checked settings functions that engine `v1.1.0` adds to `<pineforge/pineforge.h>`; regenerate and relink. |
 | 1.2.0 (PyPI, 2026-10-05) | `v1.2.0` | The pair the `pineforge-release` image `1.2.0` ships. Its C++ defines the compiled execution capability functions that engine `v1.2.0` adds to `<pineforge/pineforge.h>`; regenerate and relink. |
 | 1.3.0 (PyPI, 2026-10-06) | `v1.3.0` | The pair the `pineforge-release` image `1.3.0` ships. Its C++ adds the confirmed-bar receipt, which engine `v1.3.0`'s live runner reads, and the order-shapes receipt; engine `v1.3.0`'s `<pineforge/pineforge.h>` is `v1.2.0`'s. Regenerate and relink. |
-| 1.4.0 (planned, Unreleased) | `v1.4.0` | Prepared from codegen `bfc4ddce` and engine `b3192bfc`. Adds paired coded failures, corrected input manifests and collection lowering. C ABI 4 does not authorize a mixed pair. Regenerate and relink after publication. |
+| 1.4.0 (PyPI, 2026-10-08) | `v1.4.0` | Adds paired coded failures, corrected input manifests and collection lowering. C ABI 4 does not authorize a mixed pair. Regenerate and relink. |
 | Later `X.Y.Z` releases | `vX.Y.Z` of the same version | See below. |
 
 On the 0.x line the engine and codegen versions are independent, and the
@@ -542,7 +542,7 @@ Pine as `strategy.pine`, write `strategy.generated.cpp` with the
 [file example](#transpile-a-file-to-a-cpp) above, then from the same directory:
 
 ```bash
-# After publication: 1.4.0 pairs with engine v1.4.0. For 0.10.4 use v0.13.1.
+# 1.4.0 pairs with engine v1.4.0. For 0.10.4 use v0.13.1.
 git clone --branch v1.4.0 https://github.com/pineforge-4pass/pineforge-engine.git
 cd pineforge-engine
 cp ../strategy.generated.cpp tutorial/macd/generated.cpp   # the tutorial's strategy slot
@@ -553,7 +553,7 @@ bash tutorial/run.sh    # needs cmake, a C++17 compiler and python3
 `tutorial/macd/strategy.so`, and runs `tutorial/run.py`, which loads the `.so`,
 feeds it the bars and reads back the closed trades. For the quick-start SMA
 cross, the following output was measured on 1.3.0 with engine `v1.3.0`; it
-has not been re-measured for this 1.4.0 documentation change:
+was not re-measured for the 1.4.0 release notes:
 
 ```
 MACD(12,26,9) on BTCUSDT 15m — 672 bars, 2026-04-29 18:15 → 2026-05-06 18:00 UTC
@@ -657,7 +657,7 @@ quote. The commercial-license store (coming soon) will take orders online.
 
 ## Explicit Pine execution attachment
 
-This section describes the planned 1.4.0 and engine `v1.4.0` pair. The Pine execution adapter is
+This section describes the 1.4.0 and engine `v1.4.0` pair. The Pine execution adapter is
 the engine's full Pine execution runtime (`PineExecutionAdapter` and
 `PineStrategyHost` in the engine's `src/source/`): order lifecycle, bracket
 legs, fill-price and slippage rules, POOC / `calc_on_order_fills`, margin
