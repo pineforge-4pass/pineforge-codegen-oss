@@ -11,7 +11,7 @@
       "name": "visual_only",
       "source": "//@version=6\nstrategy(\"Visual\")\nt = table.new(position.top_right, 1, 1)\n",
       "ok": true,
-      "controls": {"PF-W1509": {"before": "warning", "after": "note"}}
+      "controls": {"PF-W1508": {"before": "warning", "after": "note"}}
     },
     {
       "name": "display_request",

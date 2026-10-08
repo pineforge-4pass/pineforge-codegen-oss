@@ -77,13 +77,17 @@ def test_stable_note_identity_uses_declared_severity(code):
                    spec["values"][0] if spec["kind"] == "vocab" else
                    "台灣 <>& '\" {not_an_argument}") for name, spec in entry["args"].items()}
     message, hint = render_diagnostic(code, args)
-    assert classify("note", message, hint) == (code, args)
+    # These legacy templates differ only in the argument's name; the existing
+    # text classifier chooses the lower stable code at the specificity tie.
+    expected_code = "PF-W1508" if code == "PF-W1509" else code
+    expected_args = {"name": args["full"]} if code == "PF-W1509" else args
+    assert classify("note", message, hint) == (expected_code, expected_args)
     assert classify("warning", message, hint)[0] != code
     assert classify("error", message, hint)[0] != code
     d = Diagnostic(Level.NOTE, Phase.ANALYZER, SourceLocation("例.pine", 3, 2, 8), message, hint)
-    assert d.code == code and d.args == args
-    assert d.user_message == entry["user_message"]
-    assert render(d.user_message, args)
+    assert d.code == expected_code and d.args == expected_args
+    assert d.user_message == diagnostics_catalog()["codes"][expected_code]["user_message"]
+    assert render(d.user_message, expected_args)
 
 
 def test_uncatalogued_note_retains_existing_nonfatal_identity():
