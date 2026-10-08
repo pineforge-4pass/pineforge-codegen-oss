@@ -11,6 +11,7 @@ EMA.
 from __future__ import annotations
 
 from pineforge_codegen import transpile, transpile_full
+from pineforge_codegen.errors import Level
 
 from tests._compile import run_emitted_tu
 
@@ -56,7 +57,8 @@ def test_kc_middle_warms_without_changing_standalone_ema() -> None:
     assert warm_m == warm_e
 
 
-def test_standalone_ema_warmup_gap_warns() -> None:
+def test_standalone_ema_warmup_gap_is_a_note() -> None:
     diagnostics = transpile_full(_PINE)["diagnostics"]
-    assert any("ta.ema initial warmup is approximated" in d.message
+    assert any(d.code == "PF-W1505" and d.level == Level.NOTE
+               and "ta.ema initial warmup is approximated" in d.message
                for d in diagnostics)

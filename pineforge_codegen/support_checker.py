@@ -1183,6 +1183,15 @@ class SupportChecker:
             hint=hint,
         ))
 
+    def _note(self, node: ASTNode | None, message: str, hint: str | None = None) -> None:
+        self._diagnostics.append(Diagnostic(
+            level=Level.NOTE,
+            phase=Phase.ANALYZER,
+            location=_loc(node, self._filename),
+            message=message,
+            hint=hint,
+        ))
+
     def _reject_if_in(
         self,
         table: dict,
@@ -1858,7 +1867,7 @@ class SupportChecker:
         if ns == "ta":
             self._check_ta_call(node, name)
             if name == "ema":
-                self._warn(
+                self._note(
                     node,
                     "ta.ema initial warmup is approximated: PineForge may "
                     "return a finite value before TradingView does.",
@@ -1990,20 +1999,20 @@ class SupportChecker:
             self._visit_children_const_ok(node)
             return
 
-        # Drawing / charting / alert namespaces — codegen drops silently. Warn,
+        # Drawing / charting / alert namespaces — codegen drops silently. Note,
         # don't error: many strategies include these for the TradingView UI.
         # Their argument subtrees legitimately carry constant-namespace
         # members (plot.style_*, text.align_*, alert.freq_*, ...), so visit
         # children with those reads allowed.
         if ns is None and name in SKIP_FUNC_NAMES:
-            self._warn(
+            self._note(
                 node,
                 f"{name}(...) has no effect in PineForge backtests (visual only).",
             )
             self._visit_children_const_ok(node)
             return
         if ns is not None and ns in SKIP_NAMESPACES:
-            self._warn(
+            self._note(
                 node,
                 f"{full}(...) has no effect in PineForge backtests (visual only).",
             )
@@ -2321,7 +2330,7 @@ class SupportChecker:
     def _lower_no_data_request(self, node: FuncCall, at: ASTNode, why: str,
                                reason: str | None | object = ...) -> None:
         """A request PineForge has no data for: lowered to na, with a
-        warning, when its value reaches display and alert sinks only; else a
+        note, when its value reaches display and alert sinks only; else a
         deferred refusal whose first read stops the run
         (``external_requests``). ``reason`` is the trade slice's, when the
         caller has it."""
@@ -2332,7 +2341,7 @@ class SupportChecker:
         lowering = "inert" if reason is None else "unpinned"
         node.annotations = {**(node.annotations or {}), LOWERING_ANNOTATION: lowering}
         if reason is None:
-            self._warn(
+            self._note(
                 at,
                 f"{spell_call(node)}: value reaches only display/alert sinks; "
                 "lowered to na; trades are unaffected.",

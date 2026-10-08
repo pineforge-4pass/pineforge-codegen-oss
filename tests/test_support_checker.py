@@ -726,10 +726,14 @@ def test_ta_stoch_tuple_assignment_rejected():
 # Visual-skip warnings (not errors)
 # ---------------------------------------------------------------------------
 
-def test_plot_emits_warning_not_error():
+def test_plot_emits_note_not_warning_or_error():
     src = PRELUDE + "plot(close)\n"
     assert _errors(src) == []
-    assert any("visual only" in d.message for d in _warnings(src))
+    assert _warnings(src) == []
+    diagnostics = _check(src)
+    assert [d.code for d in diagnostics] == ["PF-W1508"]
+    assert all(d.level == Level.NOTE for d in diagnostics)
+    assert "visual only" in diagnostics[0].message
 
 
 def test_label_geometry_accepted_visual_setter_warns():

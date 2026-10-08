@@ -27,6 +27,8 @@ def _diagnostic_entries(diagnostics) -> list:
             # message (and the hint after " — ") render from.
             "code": d.code,
             "args": d.args,
+            # A template for translation/fallback, not pre-rendered English.
+            "user_message": d.user_message,
         }
         end_col = getattr(loc, "end_col", None) if loc else None
         if end_col is not None:
@@ -41,7 +43,7 @@ def transpile_json(source: str) -> str:
     except CompileError as e:
         return json.dumps({"ok": False, "error": str(e),
                            "diagnostics": _diagnostic_entries(e.diagnostics)})
-    # A script that transpiled carries its warnings in the same entry format.
+    # A script that transpiled carries warnings and notes in the same format.
     return json.dumps({"ok": True, "cpp": full["cpp"], "inputs": full["inputs"],
                        "strategyParams": full["strategyParams"],
                        "diagnostics": _diagnostic_entries(full["diagnostics"]),

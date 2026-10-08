@@ -4,6 +4,7 @@ import json
 import copy
 import hashlib
 import re
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ CASES = json.loads((FIXTURES / "interfaces.json").read_text())["cases"]
 DELTA = json.loads((FIXTURES / "delta.json").read_text())
 NOTE_CODES = set(DELTA["severity_changes"])
 BEFORE = json.loads((FIXTURES / "catalog.before.json").read_text())["codes"]
+PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
 
 
 def _assert_catalog_delta(catalog):
@@ -55,6 +57,23 @@ def test_exact_catalog_delta_and_legacy_pin():
         meaning = json.dumps([entry["severity"], entry["message"], entry.get("hint"),
                               sorted(entry["args"])], ensure_ascii=False)
         assert hashlib.sha256(meaning.encode()).hexdigest() == legacy[code]
+
+
+def test_catalog_legacy_bytes_only_have_the_declared_delta():
+    path = Path(__file__).resolve().parents[1] / "pineforge_codegen" / "diagnostics_catalog.json"
+    catalog = diagnostics_catalog()["codes"]
+    restored = []
+    for line in path.read_text().splitlines(keepends=True):
+        match = re.match(r'  "(PF-[EW][0-9]{4})": ', line)
+        if match:
+            code = match[1]
+            field = ', "user_message": ' + json.dumps(catalog[code]["user_message"], ensure_ascii=False)
+            assert line.count(field) == 1
+            line = line.replace(field, "")
+            if code in NOTE_CODES:
+                line = line.replace('"severity": "note"', '"severity": "warning"', 1)
+        restored.append(line)
+    assert "".join(restored).encode() == (FIXTURES / "catalog.before.json").read_bytes()
 
 
 @pytest.mark.parametrize("mutation", ["message", "hint", "explanation", "args", "severity", "user_message"])
@@ -165,11 +184,13 @@ def test_note_enum_and_catalog_short_sentences():
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])
 def test_real_interfaces_keep_notes_and_short_sentences(case):
     source = case["source"]
+    failure = None
     try:
         diagnostics = transpile_full(source)["diagnostics"]
         ok = True
     except CompileError as exc:
         diagnostics, ok = exc.diagnostics, False
+        failure = exc
     envelope = json.loads(_glue()(source))
     assert ok == envelope["ok"] == case["ok"]
     assert len(diagnostics) == len(envelope["diagnostics"])
@@ -187,3 +208,22 @@ def test_real_interfaces_keep_notes_and_short_sentences(case):
         assert entry["user_message"] == diagnostics_catalog()["codes"][diagnostic.code]["user_message"]
         assert entry["message"] == (diagnostic.message + " — " + diagnostic.hint
                                     if diagnostic.hint else diagnostic.message)
+    baseline = PRODUCT_BEFORE["interfaces"][case["name"]]
+    normalized = copy.deepcopy(envelope)
+    python_rows = []
+    for d, row in zip(diagnostics, normalized["diagnostics"]):
+        row.pop("user_message")
+        level = "warning" if d.code in NOTE_CODES else d.level.value
+        row["severity"] = level
+        python_rows.append({"severity": level, "phase": d.phase.value,
+                            "location": asdict(d.location) if d.location else None,
+                            "message": d.message, "hint": d.hint, "code": d.code, "args": d.args})
+    assert python_rows == baseline["python"]
+    assert json.dumps(normalized) == PRODUCT_BEFORE["wire"][case["name"]]
+    if failure:
+        text = PRODUCT_BEFORE["text"][case["name"]]
+        assert str(failure) == text["error"]
+        legacy_levels = [replace(d, level=Level.WARNING) if d.code in NOTE_CODES else d for d in diagnostics]
+        assert CompileError(legacy_levels).format(source) == text["format"]
+        if any(d.level == Level.NOTE for d in diagnostics):
+            assert "note[ANALYZER]:" in failure.format(source)

@@ -38,10 +38,10 @@ PKG = ROOT / "pineforge_codegen"
 sys.path.insert(0, str(ROOT))
 
 from pineforge_codegen.diagnostic_codes import (  # noqa: E402
-    CATALOG_PATH, CATALOG_SCHEMA, UNCATALOGUED, escape_literal,
+    CATALOG_PATH, CATALOG_SCHEMA, UNCATALOGUED, escape_literal, parse_template,
 )
 
-ERR, WARN = "error", "warning"
+ERR, WARN, NOTE = "error", "warning", "note"
 MAX_VARIANTS = 48
 
 # Area digit of a code, by the module that spells the template.
@@ -82,6 +82,7 @@ def area_of(path: str) -> int:
 # index of a positional argument, its keyword being "message" / "hint".
 def emitter(name: str, path: str):
     table = {
+        "_note": (NOTE, 1, 2),
         "_err": (ERR, 1, 2), "_codegen_error": (ERR, 1, 2), "_codegen_warning": (WARN, 1, 2),
         "_codegen_error_diagnostic": (ERR, 1, 2), "_reject": (ERR, 1, 2),
         "_feed_warning": (WARN, 2, 3), "pass_warning": (WARN, 1, 2),
@@ -712,6 +713,8 @@ def _level_of(mod: Module, call: ast.Call) -> list[str]:
         out.append(ERR)
     if "WARNING" in src:
         out.append(WARN)
+    if "NOTE" in src:
+        out.append(NOTE)
     return out
 
 
@@ -750,7 +753,7 @@ def extract() -> list[dict]:
                 message, hint = _reject_if_in_message(mod, call)
             if message is None or _forwards_parameter(mod, message):
                 continue
-            severities = [severity] if severity in (ERR, WARN) else _level_of(mod, call)
+            severities = [severity] if severity in (ERR, WARN, NOTE) else _level_of(mod, call)
             if severity_choices:
                 severities = severity_choices
             if name == "ParseError" or name == "MethodBindError" or name == "LibraryResolveError":
@@ -877,10 +880,12 @@ def load_catalog() -> dict:
 
 
 def _next_code(codes: dict, severity: str, area: int) -> str:
-    letter = "E" if severity == ERR else "W"
+    # The declared severity drives allocation; historical W identities are
+    # shared by warnings and notes, and existing identities never move.
+    letter = {ERR: "E", WARN: "W", NOTE: "W"}[severity]
     used = {int(c[4:]) for c in codes if c.startswith(f"PF-{letter}{area}")}
     start = area * 1000 + 1
-    if area == 1 and severity == WARN:
+    if area == 1 and severity in (WARN, NOTE):
         start = 1000 + SWITCH_ARM_TWIN_LIMIT
     if area == 1 and severity == ERR:
         limit = 1000 + SWITCH_ARM_TWIN_LIMIT
@@ -912,6 +917,9 @@ def merge(catalog: dict, templates: list[dict]) -> list[str]:
             "message": t["message"], "hint": t["hint"],
             "explanation": "",
             "args": {name: {"kind": _guess_kind(name, src)} for name, src in t["sources"].items()},
+            # New templates need an authored short sentence; never copy a
+            # possibly unbounded raw diagnostic into the presentation field.
+            "user_message": "",
         }
         by_key[key] = code
         added.append(code)
@@ -987,7 +995,30 @@ def ensure_uncatalogued(catalog: dict) -> None:
             "explanation": ("A diagnostic whose text no catalog template renders; the "
                             "test suite refuses it, so a release never emits it."),
             "args": {"message": {"kind": "text"}, "hint": {"kind": "text"}},
+            "user_message": ("PineForge reported an unrecognized compilation error."
+                             if severity == ERR else "PineForge reported an unrecognized diagnostic."),
         })
+
+
+def invalid_user_messages(catalog: dict) -> list[str]:
+    """Require short ICU templates over existing argument names for every code."""
+    invalid = []
+    for code, entry in catalog["codes"].items():
+        template = entry.get("user_message")
+        if (not isinstance(template, str) or not template or len(template) > 180
+                or template != template.strip() or "\n" in template or not template.endswith(".")):
+            invalid.append(code)
+            continue
+        try:
+            parts = parse_template(template)
+        except ValueError:
+            invalid.append(code)
+            continue
+        names = {part[0] for part in parts if isinstance(part, tuple)}
+        if (not names <= set(entry.get("args", {}))
+                or not any(isinstance(part, str) and part.strip(" .") for part in parts)):
+            invalid.append(code)
+    return invalid
 
 
 def dump(catalog: dict) -> str:
@@ -995,7 +1026,7 @@ def dump(catalog: dict) -> str:
     codes = sorted(catalog["codes"].items())
     lines = [f'{{"schema": {json.dumps(CATALOG_SCHEMA)},', ' "codes": {']
     for i, (code, entry) in enumerate(codes):
-        ordered = {k: entry[k] for k in ("severity", "area", "message", "hint", "explanation", "args")
+        ordered = {k: entry[k] for k in ("severity", "area", "message", "hint", "explanation", "args", "user_message")
                    if k in entry}
         tail = "," if i < len(codes) - 1 else ""
         lines.append(f"  {json.dumps(code)}: {json.dumps(ordered, ensure_ascii=False)}{tail}")
@@ -1023,12 +1054,18 @@ def main(argv=None) -> int:
         write_pin(catalog)
         CATALOG_PATH.write_text(dump(catalog), encoding="utf-8")
         print(f"{len(added)} code(s) added; {len(catalog['codes'])} in the catalog")
-        return 0
+        invalid = invalid_user_messages(catalog)
+        for code in invalid:
+            print(f"author a short user_message template over existing args: {code}")
+        return 1 if invalid else 0
     have = {(e["severity"], e["message"], e.get("hint")) for e in catalog["codes"].values()}
     missing = [t for t in templates if (t["severity"], t["message"], t["hint"]) not in have]
     for t in missing:
         print(f"no code: [{t['severity']}] {t['message']!r} hint={t['hint']!r} at {', '.join(t['sites'])}")
-    return 1 if missing else 0
+    invalid = invalid_user_messages(catalog)
+    for code in invalid:
+        print(f"invalid or missing user_message: {code}")
+    return 1 if missing or invalid else 0
 
 
 if __name__ == "__main__":

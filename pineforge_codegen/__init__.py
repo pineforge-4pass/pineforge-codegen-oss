@@ -172,10 +172,10 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
       See :meth:`CodeGen.extract_input_manifest`.
     - ``strategyParams``: the literal ``strategy(...)`` kwargs the analyzer
       surfaced (e.g. ``initial_capital``, ``pyramiding``).
-    - ``diagnostics``: the warnings (:class:`~pineforge_codegen.errors.Diagnostic`,
-      ``Level.WARNING``) the support checker and the analyzer raised for a
+    - ``diagnostics``: the warnings and notes (:class:`~pineforge_codegen.errors.Diagnostic`,
+      ``Level.WARNING`` / ``Level.NOTE``) the support checker and the analyzer raised for a
       script that transpiled -- e.g. an approximated ``ta.vwap`` anchor. An
-      error still raises ``CompileError``, which carries the warnings too.
+      error still raises ``CompileError``, which carries nonfatal diagnostics too.
     - ``requests``: every request site that reads another symbol's feed,
       by line: its symbol and timeframe as registration computes them
       before the first bar (``literal`` / ``input`` / ``computed`` /
@@ -198,6 +198,6 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
         "inputs": gen.extract_input_manifest(),
         "strategyParams": dict(ctx.strategy_params),
         "diagnostics": [d for d in (*support_diagnostics, *ctx.diagnostics)
-                        if d.level == Level.WARNING],
+                        if d.level in (Level.WARNING, Level.NOTE)],
         "requests": discover_requests(gen, ctx, sites),
     }
