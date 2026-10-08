@@ -118,6 +118,34 @@ def test_receiver_compatibility_vectors():
         assert render(case["user_message"], case["args"]) == case["expected_text"]
 
 
+def test_typed_warmup_handoff_keeps_identity_range_units_and_inputs():
+    import runpy
+    types = runpy.run_path(str(FIXTURES / "warmup_consumer.py"))
+    fixture = json.loads((FIXTURES / "warmup_handoff.json").read_text())
+    sites = fixture["sites"]
+    assert {site["context"] for site in sites} == {"chart", "same_symbol_request", "other_symbol_request"}
+    assert {site["length"]["kind"] for site in sites} == {"constant", "input", "unknown"}
+    for site in sites:
+        assert set(site) == types["Site"].__required_keys__
+        assert set(site["source_range"]) == types["SourceRange"].__required_keys__
+        assert site["startup_unit"] == "bars_of_evaluation_context_timeframe"
+        assert site["required_startup_bars"] is None  # no invented convergence threshold
+        assert site["recursive_adequacy"] == "unknown" and site["has_unbounded_state"]
+        diagnostic = {"call_site_id": site["call_site_id"], "source_range": dict(site["source_range"])}
+        assert types["same_site"](diagnostic, site)
+        diagnostic["source_range"]["end_col"] += 1
+        assert not types["same_site"](diagnostic, site)
+        assert not types["same_site"]({"message": "This EMA may need more earlier bars to initialize."}, site)
+    input_site = next(site for site in sites if site["length"]["kind"] == "input")
+    assert input_site["length"]["input_name"] and input_site["length"]["expression"]
+    assert input_site["length"]["value"] is None
+    assert {row["scope"] for row in fixture["effective_inputs"]} == {"run", "trial", "study"}
+    for row in fixture["effective_inputs"]:
+        assert set(row) == types["ResolvedLength"].__required_keys__
+        assert types["same_site"](row, input_site)
+        assert row["searched_range"] if row["scope"] == "study" else row["submitted_value"]
+
+
 def _glue():
     namespace = {}
     path = Path(__file__).resolve().parents[1] / "gate" / "glue.py"

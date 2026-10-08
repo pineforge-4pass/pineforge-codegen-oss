@@ -1,0 +1,19 @@
+{
+  "scope": "Typed consumer handoff only, not emitted sidecar code or measured TA startup requirements; W4 inventory comes first.",
+  "rules": {
+    "startup_presentation": "Only known finite shortfall measured in bars of the site's evaluation-context timeframe may trigger PF-W1505 presentation.",
+    "absence": "Absence of the startup note is not parity or recursive adequacy.",
+    "binding": "The trusted compile path binds Pine/generated hashes and copies call_site_id plus the exact same source range to the diagnostic and sidecar.",
+    "input": "Resolve the named input/expression from the submitted run/trial value or the study searched range, never only its default."
+  },
+  "sites": [
+    {"call_site_id": "chart-ema", "source_range": {"line": 3, "col": 5, "end_line": 3, "end_col": 22}, "code": "PF-W1505", "length": {"kind": "constant", "value": 20, "input_name": null, "expression": null}, "context": "chart", "timeframe": "15", "seeding": "first_value", "startup_unit": "bars_of_evaluation_context_timeframe", "required_startup_bars": null, "recursive_adequacy": "unknown", "has_unbounded_state": true},
+    {"call_site_id": "same-symbol-ema", "source_range": {"line": 5, "col": 42, "end_line": 5, "end_col": 64}, "code": "PF-W1505", "length": {"kind": "input", "value": null, "input_name": "Length", "expression": "lengthInput"}, "context": "same_symbol_request", "timeframe": "D", "seeding": "first_value", "startup_unit": "bars_of_evaluation_context_timeframe", "required_startup_bars": null, "recursive_adequacy": "unknown", "has_unbounded_state": true},
+    {"call_site_id": "other-symbol-ema", "source_range": {"line": 7, "col": 48, "end_line": 7, "end_col": 72}, "code": "PF-W1505", "length": {"kind": "unknown", "value": null, "input_name": null, "expression": "dynamicLength"}, "context": "other_symbol_request", "timeframe": "60", "seeding": "sma", "startup_unit": "bars_of_evaluation_context_timeframe", "required_startup_bars": null, "recursive_adequacy": "unknown", "has_unbounded_state": true}
+  ],
+  "effective_inputs": [
+    {"call_site_id": "same-symbol-ema", "source_range": {"line": 5, "col": 42, "end_line": 5, "end_col": 64}, "scope": "run", "submitted_value": 37, "searched_range": null},
+    {"call_site_id": "same-symbol-ema", "source_range": {"line": 5, "col": 42, "end_line": 5, "end_col": 64}, "scope": "trial", "submitted_value": 41, "searched_range": null},
+    {"call_site_id": "same-symbol-ema", "source_range": {"line": 5, "col": 42, "end_line": 5, "end_col": 64}, "scope": "study", "submitted_value": null, "searched_range": [10, 100]}
+  ]
+}
