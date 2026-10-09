@@ -12,12 +12,12 @@
     "PF-W1508": {
       "before": "warning",
       "after": "note",
-      "user_message": "{name} is not drawn in backtests."
+      "user_message": "{name}() does nothing in a backtest."
     },
     "PF-W1509": {
       "before": "warning",
       "after": "note",
-      "user_message": "{full} is not drawn in backtests."
+      "user_message": "{full}() does nothing in a backtest."
     },
     "PF-W1525": {
       "before": "warning",

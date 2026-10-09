@@ -13,6 +13,7 @@ from pineforge_codegen import diagnostics_catalog, transpile_full
 from pineforge_codegen.errors import CompileError, Level
 from pineforge_codegen.errors import Diagnostic, Phase, SourceLocation
 from pineforge_codegen.diagnostic_codes import classify, parse_template, render, render_diagnostic
+from tests import _e2e
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diagnostic_notes"
@@ -410,3 +411,98 @@ def test_array_history_in_a_request_is_described_as_array_history_not_references
     envelope = json.loads(_glue()(ARRAY_HISTORY_IN_REQUEST))
     assert envelope["ok"] is False
     assert {e["user_message"] for e in envelope["diagnostics"] if e["code"] == "PF-E6062"} == {sentence}
+
+
+# -- A call PineForge skips: the sentence names the call and says it does nothing -----
+#
+# PF-W1508 (a bare call) and PF-W1509 (the same template, spelled for a namespaced one)
+# first said "{name} is not drawn in backtests.". The support checker emits the note for
+# alert() and alertcondition() as well as plot() and table.new(), and an alert draws
+# nothing on a chart, so the sentence described a drawing that never existed.
+# "{name}() does nothing in a backtest." holds for every call the note covers. `name` is
+# the call's bare or dotted name and never carries parentheses (the checker spells
+# "{name}(...)" itself, SupportChecker._visit_FuncCall), so the template's "()" is the
+# only pair a rendered sentence has.
+
+# The head the sentence was amended on: the reference for the C++ and the diagnostic
+# fields. A squash landing drops this commit from history, so the test then needs a new
+# pin (v1.4.0's 8663272 is the candidate: no analyzer or code-generation file differs
+# from it) or has to go.
+NO_EFFECT_PARENT = "5a252e738452c0043c35f181578e8333ba7cdbf5"
+NO_EFFECT_TEMPLATES = {"PF-W1508": "{name}() does nothing in a backtest.",
+                       "PF-W1509": "{full}() does nothing in a backtest."}
+# (script, the name its note carries): the two calls the old sentence was wrong for, and
+# plot and table.new, which the note always covered.
+NO_EFFECT_CASES = [
+    pytest.param(HEAD + 'alert("go", alert.freq_once_per_bar)\n', "alert", id="alert"),
+    pytest.param(HEAD + 'alertcondition(close > open, "up", "close is above open")\n',
+                 "alertcondition", id="alertcondition"),
+    pytest.param(HEAD + "plot(close)\n", "plot", id="plot"),
+    pytest.param(HEAD + "t = table.new(position.top_right, 1, 1)\n", "table.new", id="table_new"),
+]
+
+
+def _but(mapping, key):
+    return {k: v for k, v in mapping.items() if k != key}
+
+
+@pytest.mark.parametrize("source, name", NO_EFFECT_CASES)
+def test_a_skipped_call_note_names_the_call_and_says_it_does_nothing(source, name):
+    template = NO_EFFECT_TEMPLATES["PF-W1508"]
+    sentence = f"{name}() does nothing in a backtest."
+    out = transpile_full(source)
+    notes = [d for d in out["diagnostics"] if d.code == "PF-W1508"]
+    assert len(notes) == 1, [(d.code, d.message) for d in out["diagnostics"]]
+    note = notes[0]
+    # Identity, level, arguments and the English text are what they were.
+    assert note.level == Level.NOTE
+    assert note.args == {"name": name}
+    assert note.message == f"{name}(...) has no effect in PineForge backtests (visual only)."
+    assert note.hint is None
+    # user_message is the raw catalog template; a receiver renders it with args as text.
+    assert note.user_message == template
+    assert render(note.user_message, note.args) == sentence
+    envelope = json.loads(_glue()(source))
+    assert envelope["ok"] is True
+    wire = [e for e in envelope["diagnostics"] if e["code"] == "PF-W1508"]
+    assert len(wire) == 1
+    assert wire[0]["severity"] == "note"
+    assert wire[0]["args"] == {"name": name}
+    assert wire[0]["message"] == note.message
+    assert wire[0]["user_message"] == template
+    assert render(wire[0]["user_message"], wire[0]["args"]) == sentence
+
+
+def test_the_alias_template_is_the_same_sentence_over_its_own_argument():
+    """PF-W1509 is never classified (the text classifier picks PF-W1508 where the two
+    templates tie), but it is a catalog entry a receiver can be handed."""
+    catalog = diagnostics_catalog()["codes"]
+    for code, argument in (("PF-W1508", "name"), ("PF-W1509", "full")):
+        entry = catalog[code]
+        assert entry["severity"] == "note" and list(entry["args"]) == [argument], code
+        assert entry["user_message"] == NO_EFFECT_TEMPLATES[code], code
+        assert "drawn" not in entry["user_message"], code
+        assert render(entry["user_message"], {argument: "table.new"}) == \
+            "table.new() does nothing in a backtest."
+    assert (catalog["PF-W1509"]["user_message"].replace("{full}", "{name}")
+            == catalog["PF-W1508"]["user_message"])
+
+
+@pytest.mark.parametrize("source, name", NO_EFFECT_CASES)
+def test_the_sentence_is_the_only_change_to_the_parent_heads_output(tmp_path, source, name):
+    parent = _e2e.reference_codegen(NO_EFFECT_PARENT)
+    if parent is None:
+        pytest.fail(f"required reference {NO_EFFECT_PARENT} unavailable; restore git history")
+    pine = tmp_path / "strategy.pine"
+    pine.write_text(source, encoding="utf-8")
+    ours, before = _e2e.transpile_json(pine), _e2e.transpile_json(pine, parent)
+    assert ours["ok"] is True and before["ok"] is True
+    # The generated C++ and every other key of the envelope are the parent's...
+    assert ours["cpp"] and ours["cpp"] == before["cpp"]
+    assert _but(ours, "diagnostics") == _but(before, "diagnostics")
+    # ...and so is every diagnostic field, but the sentence of the PF-W1508 notes.
+    assert len(ours["diagnostics"]) == len(before["diagnostics"])
+    for now, then in zip(ours["diagnostics"], before["diagnostics"]):
+        assert _but(now, "user_message") == _but(then, "user_message")
+        assert (now["user_message"] != then["user_message"]) == (now["code"] == "PF-W1508"), (now, then)
+    assert [d["args"] for d in ours["diagnostics"] if d["code"] == "PF-W1508"] == [{"name": name}]

@@ -59,7 +59,7 @@ diagnostics only; no analyzer or code-generation file differs.
 - **`user_message` is a raw ICU template over `args`.** Every catalog entry,
   every `Diagnostic` (`Diagnostic.user_message`) and every JSON diagnostic gains
   `user_message`: a short English ICU template that uses only that diagnostic's
-  existing `args` names and may be constant (`{name} is not drawn in backtests.`
+  existing `args` names and may be constant (`{name}() does nothing in a backtest.`
   with `args.name = "plot"`). It is not pre-rendered English. Render it with
   `args` as plain text, never as template syntax or markup, or translate by
   `code`; do not display the unrendered template. It does not replace `message`

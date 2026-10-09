@@ -492,7 +492,7 @@ Every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
   uses only the diagnostic's existing `args` names and may be constant. It is
   the raw template over `args`, not pre-rendered English; it does not replace
   `message` and `hint`, and it never substitutes the unbounded raw diagnostic
-  as its whole sentence. For example, `"{name} is not drawn in backtests."`
+  as its whole sentence. For example, `"{name}() does nothing in a backtest."`
   travels with `args.name = "plot"`; a receiver renders or translates it.
 
 `diagnostics_catalog()` returns the catalog, which ships as
