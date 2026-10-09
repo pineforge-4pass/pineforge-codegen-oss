@@ -91,6 +91,31 @@ diagnostics only; no analyzer or code-generation file differs.
   this entry, and no diagnostic carries a call-site identifier or a startup
   length.
 
+## Planned 1.4.0-line patch — Unreleased
+
+A planned patch release of the 1.4.0 pair. It has no tag, date or version yet,
+and these notes are a plan, not a record. This documentation change adds no
+Python, JSON, diagnostic or emitted-C++ change of its own. The diagnostic
+additions under 1.5.0 — Unreleased are a separate change and are not part of
+this planned patch. The engine side is a report fix, in preparation, that engine
+`v1.4.0` does not carry.
+
+### Documentation
+
+- The [public contract](docs/PUBLIC_CONTRACT.md#a-report-belongs-to-the-call-that-returned-it)
+  states that a report belongs to the call that returned it. A call the engine
+  refuses without beginning gets the empty report, never an earlier run's rows;
+  a run that began and then failed keeps its partial rows; the explicit stream
+  snapshot keeps the owner's rows; recorded outputs keep their own record of
+  the last run that began.
+- Read the error text, the error code **and** the run status after every run.
+  A refusal the engine makes before it admits the begin leaves the status at its
+  earlier value (0 after a completed run), so the status alone misses it. The
+  README's "Compile & run against the engine" section says the same.
+- Pairing is unchanged in kind: regenerate the strategy C++ and relink against
+  the engine release's headers and `libpineforge.a` on a pair change (README
+  [Engine pairing](README.md#engine-pairing)).
+
 ## 1.4.0 — 2026-10-08
 
 A minor release of the exact engine/codegen pair. Its behavior was validated

@@ -609,6 +609,18 @@ presence of `strategy.close` or `strategy.close_all` in the source. Older C++
 has removed; regenerate it before compiling there. Reachable close commands
 keep their ordinary runtime lowering.
 
+Check how a run ended before you use its report. Read the error text
+(`strategy_get_last_error`), the error code (`strategy_get_last_error_code`)
+**and** the run status (`strategy_last_run_status`): the run failed when the
+text or the code is non-empty or the status is 1. A refusal the engine makes
+before it admits the begin, such as a bar array with a non-finite price, leaves
+the status at its earlier value, so a rerun on a handle whose last run completed
+can read status 0 beside a non-empty error. An engine without the report gate
+(`v1.4.0` and earlier) can also hand a refused rerun on a reused handle the
+previous run's rows. The
+[public contract](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/docs/PUBLIC_CONTRACT.md#a-report-belongs-to-the-call-that-returned-it)
+states the report rule and the engine release that carries it.
+
 Prefer no local build? [pineforge.dev](https://www.pineforge.dev) runs a free
 hosted MCP server, with a weekly backtest quota, whose `backtest_pine` tool
 transpiles and backtests a strategy for an AI agent. The

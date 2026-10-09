@@ -3,7 +3,9 @@
 The supported Python/JSON contract began in 1.0.0; the sections below identify
 later additions. This revision includes the 1.4.0 pair (2026-10-08).
 Pre-tag validation used codegen `bfc4ddce` and engine `b3192bfc`, whose
-version files at that point read `1.3.0`.
+version files at that point read `1.3.0`. One section,
+[A report belongs to the call that returned it](#a-report-belongs-to-the-call-that-returned-it),
+describes a paired engine fix that is not yet released.
 
 Text marked **since 1.5.0** describes diagnostic additions that 1.4.0 and
 earlier releases do not have: the `note` severity, the `user_message` template
@@ -171,6 +173,83 @@ the paired engine now reports `setting_rejected` with
 `unsupported`. A deliberate `runtime.error` is `strategy_runtime_error`,
 class `strategy`. The installed engine entrypoint returns exit 4 for all
 three codes: exit 4 alone does not select a billing or refund decision.
+
+## A report belongs to the call that returned it
+
+Availability: **not yet released.** This is the contract of a report fix in the
+paired engine that is in preparation. Engine `v1.4.0` and earlier do not carry
+it; this section applies to the first engine release that does. The report fix
+itself changes neither the generated C++ nor the transpiler's Python and JSON
+contract: the wrappers still run the strategy and then ask the engine for its
+report.
+<!-- Release lane: when the engine release that carries the report gate is
+tagged, replace "not yet released" and the sentence naming `v1.4.0` with "since
+X.Y.Z, with engine `vX.Y.Z`" and add the release to the README's Engine pairing
+table. -->
+
+A generated `run_backtest` and `run_backtest_full` run the strategy and then
+ask the paired engine for its report. The engine hands out the rows of the
+attempt that call began. For a call that did not begin (a bar array or run
+option it rejects, a handle that is not Ready, a calendar or timezone refusal,
+a begin over a live stream) it hands out the empty report instead: every array
+`NULL`, every count 0, overwritten and never freed. The report never answers a
+refused call with the rows of an earlier run. A refused call on a fresh handle
+already read empty; the rule extends that to a handle that has run before.
+
+A refusal records its cause on the failure channel, `strategy_get_last_error`
+(text) and `strategy_get_last_error_code` (code), and most refusals also set
+`strategy_last_run_status` to 1. Not all do. A call the engine refuses before it
+admits the begin writes the text and the code and leaves the run status as it
+was: a bar array whose open, high, low or close is not finite (the source host
+that a generated strategy derives from validates the array first) and a
+repeated stream begin on a stream that is already realtime are two. A rerun on
+a handle whose last run completed then reads status 0 together with a non-empty
+error, the same status that the settings extension below calls "completed" for
+an ordinary batch preparation failure. Read the error text, the error code
+**and** the run status after every run. The run failed when the text is
+non-empty, the code is non-empty, or the status is 1. The status alone misses
+the refusals that leave it at 0, and the report alone does not tell a failed run
+from a completed one. The paired engine's run harness applies this rule.
+
+What a refusal does to the handle depends on why the call was refused, and the
+report fix changes none of it. A begin on a Completed, Failed or unconfigured
+handle, and a rejected bar array or run option, leave the lifecycle, the run
+identity and the retained rows as they were. A calendar or timezone failure
+inside the begin itself comes after the consumed run-number high-water moved
+and fails the lifecycle; a calendar or timezone parse failure at configure time
+comes earlier, fails the lifecycle there, and leaves the high-water where it
+was. A batch begin over a live stream, or a begin made from a callback, is a
+contract failure that latches Failed, so the stream cannot be driven on
+afterwards, although its snapshot stays readable. A repeated stream begin on a
+stream that is already realtime is the exception: the engine refuses it before
+it admits the begin, latches nothing, and the stream stays running.
+
+A run that began owns its rows whatever became of it: a completed report and the
+partial rows of a run that began and then failed are handed out as they are, and
+the failure is on the same channel. The engine's explicit stream snapshot,
+`strategy_stream_fill_report`, asks for the rows' own owner. A live stream's
+rows survive a batch call refused over it, which itself reads empty, and the
+batch reader stays empty after the snapshot until the next run call. When no
+live attempt owns rows (a refusal with nothing running) the snapshot is the
+empty report. A run call made from inside a running run's callback reads empty
+in the same way, while the outer run, which began, hands out its own rows when
+it ends. The snapshot returns 0 when it wrote its output and -1 for a NULL
+handle or output and for an exception contained at the C boundary. In that
+case the output may hold the arrays built before the exception, so pass a
+zero-initialized `pf_report_t` and release it with the library's `report_free`
+(the engine's `strategy_native_report_free_v1` for a host that links the kernel
+archive on its own) whatever the result.
+
+Recorded outputs (`strategy_outputs_*`), on an engine that provides them, keep
+their own record, the last run that began, and their own documentation. The
+rule above does not cover them and this section does not change them. Engine
+`v1.4.0` does not provide them.
+
+This needs an engine release that carries the report gate: the first release
+that contains this change. Against an older engine, a rerun on a reused handle
+can return the previous run's rows together with the refusal, so read the
+failure channel and the status after every run. Regenerate the strategy C++ and
+relink against the new engine as for any pair change.
 
 ## Optional generated settings extension
 
