@@ -24,9 +24,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 The planned number of the next release; it stays **Unreleased** until its tag
 exists, and the package version is unchanged. This entry records the diagnostic
-additions below and nothing else: the engine pairing, the rest of the content
-and the date of 1.5.0 are set when the release is prepared. It changes
-diagnostics only; no analyzer or code-generation file differs.
+additions below and the report-contract documentation for the paired engine
+fix, and nothing else: the engine pairing, the rest of the content and the date
+of 1.5.0 are set when the release is prepared. The codegen change is
+diagnostics only; the report documentation adds no Python, JSON, diagnostic or
+emitted-C++ change of its own, and no analyzer or code-generation file differs.
 
 ### Compatibility and migration
 
@@ -90,6 +92,25 @@ diagnostics only; no analyzer or code-generation file differs.
   can show a startup sentence only for a known finite shortfall, are not part of
   this entry, and no diagnostic carries a call-site identifier or a startup
   length.
+
+### Documentation
+
+The engine side of the report-ownership text below is a report fix, in
+preparation, that engine `v1.4.0` does not carry.
+
+- The [public contract](docs/PUBLIC_CONTRACT.md#a-report-belongs-to-the-call-that-returned-it)
+  states that a report belongs to the call that returned it. A call the engine
+  refuses without beginning gets the empty report, never an earlier run's rows;
+  a run that began and then failed keeps its partial rows; the explicit stream
+  snapshot keeps the owner's rows; recorded outputs keep their own record of
+  the last run that began.
+- Read the error text, the error code **and** the run status after every run.
+  A refusal the engine makes before it admits the begin leaves the status at its
+  earlier value (0 after a completed run), so the status alone misses it. The
+  README's "Compile & run against the engine" section says the same.
+- Pairing is unchanged in kind: regenerate the strategy C++ and relink against
+  the engine release's headers and `libpineforge.a` on a pair change (README
+  [Engine pairing](README.md#engine-pairing)).
 
 ## 1.4.0 — 2026-10-08
 
