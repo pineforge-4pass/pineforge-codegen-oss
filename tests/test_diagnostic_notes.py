@@ -21,6 +21,10 @@ DELTA = json.loads((FIXTURES / "delta.json").read_text())
 NOTE_CODES = set(DELTA["severity_changes"])
 BEFORE = json.loads((FIXTURES / "catalog.before.json").read_text())["codes"]
 PRODUCT_BEFORE = json.loads((FIXTURES / "product.before.json").read_text())
+# The support checker warns, inside a switch arm, what it refuses elsewhere:
+# PF-W1nnn is PF-E1nnn there. Read off the live catalog, so a twin added later
+# is covered by the sentence tests below without an edit here.
+TWINS = sorted("PF-W" + code[4:] for code in diagnostics_catalog()["codes"] if code.startswith("PF-E1"))
 
 
 def _assert_catalog_delta(catalog):
@@ -227,3 +231,182 @@ def test_real_interfaces_keep_notes_and_short_sentences(case):
         assert CompileError(legacy_levels).format(source) == text["format"]
         if any(d.level == Level.NOTE for d in diagnostics):
             assert "note[ANALYZER]:" in failure.format(source)
+
+
+# -- Warning twins: the sentence says what the warning does ---------------------------
+#
+# A problem the support checker finds in a switch arm is accepted with a warning
+# (``SupportChecker._err``): PF-W1nnn is PF-E1nnn's template as a warning, and the
+# generator creates a twin as a copy of the error's entry. Authoring both with one
+# sentence is the easy mistake -- the first authoring copied each error's sentence
+# into its twin, and it said PineForge refused a call in a script that had just
+# transpiled. Each twin needs a sentence of its own.
+
+REFUSAL = re.compile(r"\b(?:refus|reject)\w*", re.IGNORECASE)
+TRADINGVIEW_REFUSAL = re.compile(r"\bTradingView (?:refus|reject)\w*", re.IGNORECASE)
+
+
+def _asserts_refusal(template):
+    """Whether a sentence says something is refused. What TradingView refuses is a
+    fact about TradingView (``a call TradingView rejects``) and may stay."""
+    return bool(REFUSAL.search(TRADINGVIEW_REFUSAL.sub("", template)))
+
+
+def _assert_twin_sentence(catalog, twin_code):
+    error_code = "PF-E" + twin_code[4:]
+    twin, error = catalog[twin_code], catalog[error_code]
+    sentence = twin["user_message"]
+    assert twin["severity"] == "warning", twin_code
+    assert sentence != error["user_message"], f"{twin_code} copies the sentence of {error_code}"
+    assert not _asserts_refusal(sentence), (twin_code, sentence)
+    assert re.search(r"\bwarns?\b", sentence), (twin_code, sentence)
+    if "inside a switch arm" in twin["explanation"]:
+        # The catalog's own meaning of the twin: it warns and the arm keeps its lowering.
+        assert "switch arm" in sentence and "lowering" in sentence, (twin_code, sentence)
+    else:
+        # A warning everywhere (bar_index, last_bar_index, timenow): no arm to name.
+        assert "switch arm" not in sentence, (twin_code, sentence)
+
+
+def test_every_switch_arm_twin_is_covered():
+    catalog = diagnostics_catalog()["codes"]
+    assert len(TWINS) >= 97 and len(set(TWINS)) == len(TWINS)
+    assert all(code in catalog for code in TWINS)
+
+
+@pytest.mark.parametrize("twin_code", TWINS)
+def test_switch_arm_twin_sentence_is_its_own_and_is_not_a_refusal(twin_code):
+    _assert_twin_sentence(diagnostics_catalog()["codes"], twin_code)
+
+
+def test_no_nonfatal_sentence_claims_a_refusal():
+    """A warning or a note means the script transpiled."""
+    for code, entry in diagnostics_catalog()["codes"].items():
+        if entry["severity"] != "error":
+            assert not _asserts_refusal(entry["user_message"]), (code, entry["user_message"])
+
+
+@pytest.mark.parametrize("sentence, refuses", [
+    ("PineForge cannot load external seed data feeds, so request.seed is refused.", True),
+    ("PineForge has no implementation of this ta.* function, so the call is refused instead "
+     "of compiling to a silent stub.", True),
+    ("A call whose arguments match none of TradingView''s signatures is refused, "
+     "as TradingView refuses it.", True),
+    ("The timeframe string of request.security is not a valid Pine timeframe, "
+     "so PineForge rejects it.", True),
+    ("TradingView rejects a method call written straight after a history index, x[k].method().", False),
+    ("The missing str.repeat count produces an empty string for a call TradingView rejects.", False),
+    ("PineForge cannot load external seed data feeds, so request.seed cannot return any. "
+     "In a switch arm PineForge only warns and keeps the arm''s lowering.", False),
+])
+def test_refusal_wording_detector(sentence, refuses):
+    assert _asserts_refusal(sentence) is refuses
+
+
+@pytest.mark.parametrize("twin_code", ["PF-W1003", "PF-W1013", "PF-W1027", "PF-W1090", "PF-W1096"])
+def test_twin_check_rejects_the_sentence_copied_from_the_error(twin_code):
+    catalog = diagnostics_catalog()["codes"]
+    catalog[twin_code]["user_message"] = catalog["PF-E" + twin_code[4:]]["user_message"]
+    with pytest.raises(AssertionError):
+        _assert_twin_sentence(catalog, twin_code)
+
+
+@pytest.mark.parametrize("twin_code, sentence", [
+    # refusal wording behind a correct switch-arm clause
+    ("PF-W1027", "request.seed is refused. In a switch arm PineForge only warns and keeps the arm''s lowering."),
+    # neither a warning nor a switch-arm clause
+    ("PF-W1027", "PineForge cannot load external seed data feeds, so request.seed cannot return any."),
+    # a switch-arm clause that does not say it only warns
+    ("PF-W1027", "PineForge has no seed data. In a switch arm PineForge keeps the arm''s lowering."),
+    # a switch-arm clause on a warning that is not about a switch arm
+    ("PF-W1067", "PineForge warns that bar_index differs. In a switch arm PineForge only warns "
+                 "and keeps the arm''s lowering."),
+])
+def test_twin_check_rejects_other_false_sentences(twin_code, sentence):
+    catalog = diagnostics_catalog()["codes"]
+    catalog[twin_code]["user_message"] = sentence
+    with pytest.raises(AssertionError):
+        _assert_twin_sentence(catalog, twin_code)
+
+
+HEAD = '//@version=6\nstrategy("T", overlay = true)\n'
+TAIL = 'if x > 0\n    strategy.entry("L", strategy.long)\n'
+# The accepted-arm shapes tests/test_tail_f_rules.py pins at the Python interface.
+ARM_SEED = (HEAD + 'k = bar_index % 2\nx = switch k\n'
+            '    0 => request.seed("seed_crypto_santiment", "BTC", close)\n'
+            '    => 1.0\n' + TAIL)
+ARM_TEXT_CONSTANT = (HEAD + 'm = close > open ? "L" : "R"\nta_ = switch m\n'
+                     '    "L" => text.align_left\n    "R" => text.align_right\n'
+                     'if barstate.islast\n    label.new(bar_index, close, "x", textalign = ta_)\n'
+                     'x = 1\n' + TAIL)
+OUTSIDE_ARM_SEED = HEAD + 'x = request.seed("seed_crypto_santiment", "BTC", close)\n' + TAIL
+ARM_CASES = {
+    "request.seed": (ARM_SEED, "PF-W1027", "request.seed"),
+    "text constant": (ARM_TEXT_CONSTANT, "PF-W1078", "text.align_left"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(ARM_CASES))
+def test_an_accepted_switch_arm_warns_with_a_sentence_that_says_so(name):
+    source, code, needle = ARM_CASES[name]
+    catalog = diagnostics_catalog()["codes"]
+    out = transpile_full(source)  # a refusal would raise CompileError
+    assert out["cpp"]
+    found = [d for d in out["diagnostics"] if d.code == code]
+    assert found and any(needle in d.message for d in found), \
+        [(d.code, d.message) for d in out["diagnostics"]]
+    sentence = catalog[code]["user_message"]
+    assert "switch arm" in sentence and re.search(r"\bwarns?\b", sentence)
+    assert not _asserts_refusal(sentence)
+    for d in found:
+        assert d.level == Level.WARNING
+        assert d.user_message == sentence
+    envelope = json.loads(_glue()(source))
+    assert envelope["ok"] is True
+    wire = [e for e in envelope["diagnostics"] if e["code"] == code]
+    assert len(wire) == len(found)
+    assert all(e["severity"] == "warning" and e["user_message"] == sentence for e in wire)
+    # Nothing an accepted script carries says that something was refused.
+    assert not [e["code"] for e in envelope["diagnostics"] if _asserts_refusal(e["user_message"])]
+
+
+def test_the_same_call_outside_a_switch_arm_keeps_the_error_sentence():
+    catalog = diagnostics_catalog()["codes"]
+    with pytest.raises(CompileError) as refused:
+        transpile_full(OUTSIDE_ARM_SEED)
+    errors = [d for d in refused.value.diagnostics if d.code == "PF-E1027"]
+    assert errors, [(d.code, d.message) for d in refused.value.diagnostics]
+    assert all(d.level == Level.ERROR for d in errors)
+    assert errors[0].user_message == catalog["PF-E1027"]["user_message"]
+    assert errors[0].user_message != catalog["PF-W1027"]["user_message"]
+    envelope = json.loads(_glue()(OUTSIDE_ARM_SEED))
+    assert envelope["ok"] is False
+    assert any(e["code"] == "PF-E1027" and e["severity"] == "error" for e in envelope["diagnostics"])
+
+
+ARRAY_HISTORY_IN_REQUEST = (
+    '//@version=6\nstrategy("shape", overlay = true, max_lines_count = 500)\n'
+    "a = array.from(close)\n"
+    'r = request.security(syminfo.tickerid, "60", (a[1]).size())\n'
+    "if r > 0\n"
+    '    strategy.entry("L", strategy.long)\n')
+
+
+def test_array_history_in_a_request_is_described_as_array_history_not_references():
+    """PF-E6062 is the array and matrix history scope check (collection_history.py,
+    tests/test_array_history.py ``request_security_size``); the history of a
+    user-defined type or drawing reference in a request is PF-E3043's."""
+    catalog = diagnostics_catalog()["codes"]
+    with pytest.raises(CompileError) as refused:
+        transpile_full(ARRAY_HISTORY_IN_REQUEST)
+    found = [d for d in refused.value.diagnostics if d.code == "PF-E6062"]
+    assert found, [(d.code, d.message) for d in refused.value.diagnostics]
+    assert all("inside a request.security expression" in d.message for d in found)
+    sentence = catalog["PF-E6062"]["user_message"]
+    assert all(d.level == Level.ERROR and d.user_message == sentence for d in found)
+    assert "array" in sentence and "matrix" in sentence and "request.security" in sentence
+    assert "user-defined" not in sentence and "drawing" not in sentence
+    assert sentence != catalog["PF-E3043"]["user_message"]
+    envelope = json.loads(_glue()(ARRAY_HISTORY_IN_REQUEST))
+    assert envelope["ok"] is False
+    assert {e["user_message"] for e in envelope["diagnostics"] if e["code"] == "PF-E6062"} == {sentence}
