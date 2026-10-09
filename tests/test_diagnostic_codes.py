@@ -55,7 +55,12 @@ def test_catalog_entries_are_well_formed():
     assert diagnostics_catalog()["schema"] == "pineforge-diagnostics-catalog/v1"
     for code, entry in CATALOG.items():
         assert re.fullmatch(r"PF-[EW][0-9]{4}", code), code
-        assert entry["severity"] == {"E": "error", "W": "warning"}[code[3]], code
+        # Stable historical W identities also carry notes, so the letter fixes
+        # only error versus nonfatal; warning versus note is the declared
+        # severity, never read off the W (the pin and the explicit migration
+        # delta keep it).
+        assert entry["severity"] in {"error", "warning", "note"}, code
+        assert (entry["severity"] == "error") == (code[3] == "E"), code
         assert entry["area"], code
         explanation = entry["explanation"]
         assert explanation and "\n" not in explanation and len(explanation) <= 300, code

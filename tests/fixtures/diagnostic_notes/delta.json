@@ -1,0 +1,63 @@
+{
+  "status": "FROZEN: user_message is an existing-args template; APP-TOP approval relayed through TOP and WIN-CX",
+  "allowed_added_fields": [
+    "user_message"
+  ],
+  "severity_changes": {
+    "PF-W1505": {
+      "before": "warning",
+      "after": "note",
+      "user_message": "This EMA may need more earlier bars to initialize."
+    },
+    "PF-W1508": {
+      "before": "warning",
+      "after": "note",
+      "user_message": "{name}() does nothing in a backtest."
+    },
+    "PF-W1509": {
+      "before": "warning",
+      "after": "note",
+      "user_message": "{full}() does nothing in a backtest."
+    },
+    "PF-W1525": {
+      "before": "warning",
+      "after": "note",
+      "user_message": "Display-only corporate-action data is unavailable for {call}."
+    },
+    "PF-W1526": {
+      "before": "warning",
+      "after": "note",
+      "user_message": "Display-only corporate-action data is unavailable for {call}."
+    },
+    "PF-W1527": {
+      "before": "warning",
+      "after": "note",
+      "user_message": "Display-only financial data is unavailable for {call}."
+    },
+    "PF-W1528": {
+      "before": "warning",
+      "after": "note",
+      "user_message": "Display-only financial data is unavailable for {call}."
+    },
+    "PF-W1529": {
+      "before": "warning",
+      "after": "note",
+      "user_message": "Display-only footprint data is unavailable for {call}."
+    },
+    "PF-W1530": {
+      "before": "warning",
+      "after": "note",
+      "user_message": "Display-only footprint data is unavailable for {call}."
+    },
+    "PF-W1531": {
+      "before": "warning",
+      "after": "note",
+      "user_message": "Display-only symbol data is unavailable for {call}."
+    },
+    "PF-W1532": {
+      "before": "warning",
+      "after": "note",
+      "user_message": "Display-only symbol data is unavailable for {call}."
+    }
+  }
+}

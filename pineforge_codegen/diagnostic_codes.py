@@ -1,7 +1,7 @@
 """Stable codes and named arguments for every transpile diagnostic.
 
 Every :class:`~pineforge_codegen.errors.Diagnostic` carries a ``code``
-(``PF-E1203`` for an error, ``PF-W0412`` for a warning) and ``args``, the
+(``PF-E1203`` / ``PF-W0412``) and ``args``, the
 named data its English ``message`` and ``hint`` were built from. The codes,
 their severities, English ICU MessageFormat templates and one-line
 explanations live in ``diagnostics_catalog.json`` beside this module, which
@@ -40,7 +40,9 @@ from typing import Any
 
 CATALOG_PATH = Path(__file__).with_name("diagnostics_catalog.json")
 CATALOG_SCHEMA = "pineforge-diagnostics-catalog/v1"
-UNCATALOGUED = {"error": "PF-E0000", "warning": "PF-W0000"}
+# Notes keep historical PF-W identities. The nonfatal fallback is shared;
+# its catalog severity remains warning, while a Diagnostic retains its level.
+UNCATALOGUED = {"error": "PF-E0000", "warning": "PF-W0000", "note": "PF-W0000"}
 
 
 @lru_cache(maxsize=1)
@@ -52,14 +54,20 @@ def _load() -> dict:
 def diagnostics_catalog() -> dict:
     """The diagnostics catalog: ``{"schema", "codes": {code: entry}}``.
 
-    Each entry gives ``severity`` (``error`` / ``warning``), ``area``, the
+    Each entry gives ``severity`` (``error`` / ``warning`` / ``note``), ``area``, the
     English ICU MessageFormat ``message`` template, the ``hint`` template or
     ``None``, a one-line ``explanation`` and ``args``: per argument name its
     ``kind`` (``identifier``, ``type``, ``keyword``, ``number``, ``vocab`` or
-    ``text``) and, for ``vocab``, its closed set of ``values``. A fresh copy
-    is returned on every call.
+    ``text``) and, for ``vocab``, its closed set of ``values``. ``user_message``
+    is a short ICU template over those same arguments, not rendered English.
+    A fresh copy is returned on every call.
     """
     return json.loads(json.dumps(_load()))
+
+
+def _user_message_template(code: str) -> str:
+    """The short presentation template; never classify from or render it here."""
+    return _load()["codes"][code]["user_message"]
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +316,7 @@ class _Matcher:
 
 @lru_cache(maxsize=1)
 def _matchers() -> dict[str, list[_Matcher]]:
-    by_severity: dict[str, list[_Matcher]] = {"error": [], "warning": []}
+    by_severity: dict[str, list[_Matcher]] = {"error": [], "warning": [], "note": []}
     for code, entry in _load()["codes"].items():
         if code in UNCATALOGUED.values():
             continue
@@ -323,8 +331,10 @@ def _matchers() -> dict[str, list[_Matcher]]:
 def classify(severity: str, message: str, hint: str | None = None) -> tuple[str, dict]:
     """The ``(code, args)`` of a diagnostic's English text.
 
-    ``severity`` is ``"error"`` or ``"warning"``. A text no catalog template
-    renders gets ``PF-E0000`` / ``PF-W0000`` with its text as ``args``.
+    ``severity`` is ``"error"``, ``"warning"`` or ``"note"``; the catalog's
+    declared severity selects the templates, never a code's prefix. A text
+    no template renders gets ``PF-E0000`` for an error or ``PF-W0000`` for
+    a warning/note, with its text as ``args`` and no new fallback identity.
     """
     for matcher in _matchers().get(severity, ()):
         if matcher.has_hint != (hint is not None):

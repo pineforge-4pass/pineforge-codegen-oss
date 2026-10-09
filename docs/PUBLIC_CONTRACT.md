@@ -5,6 +5,12 @@ later additions. This revision includes the 1.4.0 pair (2026-10-08).
 Pre-tag validation used codegen `bfc4ddce` and engine `b3192bfc`, whose
 version files at that point read `1.3.0`.
 
+Text marked **since 1.5.0** describes diagnostic additions that 1.4.0 and
+earlier releases do not have: the `note` severity, the `user_message` template
+and the eleven codes that became notes. 1.5.0 is the planned number of the
+release that carries them; until that tag exists, this text describes the
+source tree, not a published package.
+
 ## Optional compiled execution capabilities
 
 Availability: **since 1.2.0**, with engine `v1.2.0`'s capability extension and
@@ -300,7 +306,9 @@ transpile_full(pine_source: str, *, check_support: bool = True,
 `pineforge_codegen.errors.CompileError` for a located parse, support, analysis,
 or generation error; its `diagnostics` attribute carries `Diagnostic` objects.
 `filename` appears in their source locations and in `str(error)`.
-`transpile()` does not return nonfatal warnings.
+`transpile()` returns no nonfatal diagnostics, neither warnings nor (since
+1.5.0) notes; use `transpile_full()` to read them. The `diagnostics` of a
+`CompileError` can carry them beside its errors.
 
 `libraries` maps a Pine library's import path to its source
 (`{"user/name/version": source_text}`); each import the script uses is inlined
@@ -318,13 +326,14 @@ success:
 | `cpp` | `str` | The generated source, identical to `transpile()` for the same inputs. |
 | `inputs` | `list[dict]` | Input manifest in global source order, one entry per global-scope input call, including inline calls. |
 | `strategyParams` | `dict` | Values extracted from the `strategy(...)` declaration; a nonliteral value can be `None`, and an omitted argument is absent even where the C++ applies a default. |
-| `diagnostics` | `list[Diagnostic]` | Nonfatal warnings only, with `Level.WARNING` and source locations. |
+| `diagnostics` | `list[Diagnostic]` | Nonfatal diagnostics with source locations: warnings (`Level.WARNING`) and, since 1.5.0, notes (`Level.NOTE`). |
 | `requests` | `list[dict]` | Since 1.1.0: the other symbols' feeds the script reads, one entry per request site; see [Request discovery](#request-discovery). |
 
 An error still raises `CompileError`; there is no partial success dict. The
-diagnostic severity enum values are `"warning"` and `"error"`. A successful
-`transpile_full()` returns only warnings; a `CompileError` can carry both
-warnings and errors.
+diagnostic severity enum values are `"warning"`, `"error"` and, since 1.5.0,
+`"note"` ([Diagnostic codes](#diagnostic-codes)). A successful
+`transpile_full()` returns warnings and notes; a `CompileError` can carry
+errors together with either nonfatal level.
 
 ### Input manifest and override keys
 
@@ -437,41 +446,65 @@ success and compile-error envelopes are:
 
 `ok` is a boolean. On success, `cpp`, `inputs`, `strategyParams` and (since
 1.1.0) `requests` have the same meanings as in `transpile_full()`, and
-`diagnostics` contains warnings. On a `CompileError`, `error` is `str(error)`
-and `diagnostics` contains the error's diagnostics; `cpp`, `inputs`,
+`diagnostics` contains warnings and, since 1.5.0, notes. On a `CompileError`,
+`error` is `str(error)` and `diagnostics` contains the error's diagnostics,
+nonfatal ones collected with the errors included; `cpp`, `inputs`,
 `strategyParams` and `requests` are absent. Every JSON diagnostic has 1-based
 integer `line` and `col`, a `message` string, and `severity` equal to
-`"warning"` or `"error"`. `endCol` is included when the
+`"warning"`, `"error"` or, since 1.5.0, `"note"`. `endCol` is included when the
 source location provides it. A diagnostic hint, when present, is appended to
 `message` after ` — `. Since 1.2.0 every JSON diagnostic also has `code` and
-`args` ([Diagnostic codes](#diagnostic-codes)). The glue catches
+`args`; since 1.5.0 it also has `user_message`, the short ICU template
+([Diagnostic codes](#diagnostic-codes)). The glue catches
 `CompileError`; an unexpected Python exception may propagate instead of
 producing an envelope. The JSON entry point does not accept a `filename`
 argument.
 
 ## Diagnostic codes
 
-Since 1.2.0 every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
-`CompileError`'s `diagnostics`, and in the glue envelopes) carries:
+Every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
+`CompileError`'s `diagnostics`, and in the glue envelopes) carries the stable
+`code` and `args` introduced in 1.2.0. Since 1.5.0 it also carries
+`user_message`, and its severity can be `note`:
 
-- `code`: a stable string `PF-<S><NNNN>`, `S` being `E` for an error and `W`
-  for a warning. Its first digit is the area that spells the text: `0`
+- `code`: a stable string `PF-<S><NNNN>`. `E` and `W` are historical identity
+  prefixes, not the severity: the eleven codes that became notes in 1.5.0
+  keep their `PF-W` codes. Its first digit is the area that spells the text: `0`
   source (lexer, parser, limits), `1` support checker and requests, `2`
   analysis, `3` `request.security`, `4` libraries and imports, `5` code
   generation, `6` array and matrix history, `7` `ta.*`. The support checker
   reports what it refuses inside a `switch` arm as a warning: `PF-W1nnn` with
   `nnn` below 500 is `PF-E1nnn` there.
+- Severity (`Diagnostic.level`, the `severity` of a glue diagnostic and of a
+  catalog entry): `"error"`, `"warning"` or, since 1.5.0, `"note"`. An error is
+  fatal and raises `CompileError`. A warning and a note are nonfatal: a script
+  that transpiles with either returns its C++ (`ok: true` in the glue
+  envelope), and a `CompileError` can carry them beside its errors. The catalog
+  declares each code's severity and the diagnostic carries it; read it, never
+  infer it from the `E` / `W` prefix or from the words of a message ("visual
+  only", "display"). A note is a classification, not a statement that results
+  are unaffected: PF-W1505, a note, still describes a warmup approximation.
 - `args`: an object of named values, raw: identifiers, types, keywords and
   Pine spellings as strings, counts as JSON numbers; never quoting, backticks
   or a formatted number.
+- `user_message` (since 1.5.0): one short English ICU **template**, identical
+  on the catalog entry, `Diagnostic.user_message` and the JSON diagnostic. It
+  uses only the diagnostic's existing `args` names and may be constant. It is
+  the raw template over `args`, not pre-rendered English; it does not replace
+  `message` and `hint`, and it never substitutes the unbounded raw diagnostic
+  as its whole sentence. For example, `"{name}() does nothing in a backtest."`
+  travels with `args.name = "plot"`; a receiver renders or translates it.
 
 `diagnostics_catalog()` returns the catalog, which ships as
 `pineforge_codegen/diagnostics_catalog.json` (schema
-`pineforge-diagnostics-catalog/v1`) and is attached to each GitHub release
+`pineforge-diagnostics-catalog/v1`, whose id the 1.5.0 additions do not
+change) and is attached to each GitHub release
 (`diagnostics_catalog-v1.3.0.json` for 1.3.0).
-Per code it gives `severity`, `area`, the English ICU MessageFormat `message`
-template, the `hint` template or `null`, a one-line `explanation`, and `args`:
-per argument its `kind` — `identifier`, `type`, `keyword`, `number`, `vocab`
+Per code it gives `severity` (`error`, `warning` or, since 1.5.0, `note`),
+`area`, the English ICU MessageFormat `message` template, the `hint` template
+or `null`, a one-line `explanation`, `args` and, since 1.5.0, the short
+`user_message` template. `args` gives each argument's
+`kind` — `identifier`, `type`, `keyword`, `number`, `vocab`
 (an English word or phrase the transpiler picks from the closed set listed in
 `values`, which an application may translate) or `text` (open English text the
 transpiler builds, such as a nested reason; shown as is). The templates use
@@ -482,12 +515,92 @@ decimal digits. `render_diagnostic(code, args)` returns the English
 byte; in the glue envelope `message` is the message, plus ` — ` and the hint
 when there is one.
 
+From 1.5.0 on, receivers translate by stable code using their own locale
+catalogs; the English `user_message` template is the translation source and
+fallback for an unknown code. An unknown code is shown at its declared
+recognized severity. An unknown severity is read as `warning`, including when
+the code is known; code prefixes do not override that rule. Render the
+template with the separate argument values as text, not as new template syntax
+or markup.
+The receiver examples in `tests/fixtures/diagnostic_notes/receiver.json`
+specify this compatibility rule; they are not evidence of an app deployment.
+
+Since 1.5.0 the reviewed warning-to-note migration is exactly PF-W1505,
+PF-W1508, PF-W1509, PF-W1525, PF-W1526, PF-W1527, PF-W1528, PF-W1529,
+PF-W1530, PF-W1531 and PF-W1532, each a warning in 1.4.0. All other
+severities, all stable codes and every existing message, hint, explanation and
+argument definition are unchanged, and no existing key of a `Diagnostic`, a
+JSON diagnostic, the catalog or the envelopes is renamed or removed: `severity`
+gains the value `note` and `user_message` is added, while `code`, `args`,
+`message`, `hint`, `line`, `col` and `endCol` keep their values.
+The prior catalog and pin remain explicit legacy fixtures beside the exact
+delta in `tests/fixtures/diagnostic_notes/`. PF-W1509 remains a legacy
+template alias: the existing text classifier selects PF-W1508 when those
+two templates tie. The migration does not invent a new emitted identity.
+
+Those eleven are the only codes the catalog declares as notes; a message that
+says "visual only" or "display" does not make its code one. PF-W1508 and
+PF-W1509 describe a call PineForge skips as visual only (`plot(...)`,
+`table.new(...)`). PF-W1525 to PF-W1532 describe an earnings, dividends,
+splits, financial, footprint or other-symbol request whose value reaches only
+display and alert sinks and is lowered to `na`. PF-W1505 describes the
+`ta.ema` warmup approximation, a note by the explicit acceptance of the
+initialization-note foundation. Five diagnostics that also speak of
+visual-only or display-only handling remain warnings: PF-W1502 (a `color(...)`
+cast), PF-W1506 (`color.from_gradient`), PF-W1507 (a drawing setter that drops
+color, style or size), PF-W1078 (a visual or style constant) and PF-W1552 (a
+`request.security_lower_tf` whose symbol can be another symbol's and whose
+value reaches only display and alert sinks). Every other diagnostic keeps its
+declared severity as well: executable missing feeds, partial risk support,
+ignored trading values, repainting, numerical approximations, lossy values and
+invalid arguments stay warnings or errors.
+
+PF-W1505 is a static note: the support checker emits it at each `ta.ema` call
+it visits, with no condition on the run, an input or the timeframe, and nothing
+in this revision suppresses or qualifies it per call. It still carries its
+original compile-time EMA caveat. This foundation does not establish startup
+adequacy or change seeding. The selected-window consumer may show its startup
+sentence only for a known finite shortfall in bars of that site's
+evaluation-context timeframe; absence is not parity. No sidecar exists yet, at
+compile time or at run time: this revision emits no `call_site_id` and no
+startup fact. The subsequent startup inventory and extraction must bind a
+versioned sidecar to Pine/generated identities, and share `call_site_id` and
+the exact source range with the diagnostic rather than joining by text; until
+that work lands, the static notes stay as they are. Input-bound lengths retain
+the input name or expression; runs/trials resolve submitted values and studies
+retain searched ranges. Recursive adequacy and seeding facts remain separate
+and may be unknown. The typed consumer fixtures (`warmup_consumer.py` and
+`warmup_handoff.json` in `tests/fixtures/diagnostic_notes/`) describe that
+later handoff; they are contract examples, not transpiler output.
+
 A code is never removed or reused, and a changed meaning gets a new code
-(`tests/fixtures/diagnostic_codes_pin.json` pins each code's templates). A
-text no template renders carries `PF-E0000` / `PF-W0000` with the text in
-`args.message` (and `args.hint`); the test suite refuses it. The `message`
-text itself is unchanged and stays the English rendering; `runtime.error`
-text a strategy authors is not a transpile diagnostic.
+(`tests/fixtures/diagnostic_codes_pin.json` pins each code's severity,
+`message` and `hint` templates and argument names; it does not pin
+`user_message`). Since 1.5.0 the `user_message` templates are checked as
+follows. The templates of the eleven migrated codes are fixed string for string
+by `tests/fixtures/diagnostic_notes/delta.json`. Every template is checked for
+form: a short, parseable sentence over the entry's own argument names. Each of
+the 97 warning twins of an error (`PF-W1nnn` for `PF-E1nnn`) has a sentence of
+its own, not its error's, that says PineForge warns; the 91 that warn only
+inside a `switch` arm also say that PineForge keeps the arm's lowering, and
+PF-W1067 to PF-W1072, which warn everywhere, name no arm. No warning or note
+template says that PineForge refuses or rejects something, though one may say
+what TradingView refuses or rejects. Beyond these checks a template's exact
+wording is not pinned. A text no template
+renders carries `PF-E0000` / `PF-W0000` with the text in `args.message` (and
+`args.hint`); the test suite refuses it. The `message` text itself is
+unchanged and stays the English rendering; `runtime.error` text a strategy
+authors is not a transpile diagnostic. Since 1.5.0 an uncatalogued note uses
+the existing PF-W0000 fallback with its actual `note` level preserved;
+PF-W0000's catalog severity remains `warning`. The diagnostic level is the
+wire authority in that fallback case. No new fallback code is allocated.
+
+`scripts/gen_diagnostics_catalog.py --write` adds identities for newly
+spelled templates and preserves existing pins. Since 1.5.0 new entries require
+an authored `user_message`; the generator reports missing, malformed or
+unknown-argument presentation templates rather than copying raw diagnostics.
+The eleven reviewed severity pin changes above are explicit fixture-backed
+exceptions, not a general permission to regenerate existing pins.
 
 ## Compatibility boundary
 

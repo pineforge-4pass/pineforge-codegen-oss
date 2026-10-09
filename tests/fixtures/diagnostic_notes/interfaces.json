@@ -1,0 +1,41 @@
+{
+  "status": "FROZEN: user_message carries a template, never pre-rendered English",
+  "cases": [
+    {
+      "name": "chart_ema",
+      "source": "//@version=6\nstrategy(\"EMA 診斷\")\nx = ta.ema(close, 20)\nplot(x)\n",
+      "ok": true,
+      "controls": {"PF-W1505": {"before": "warning", "after": "note"}}
+    },
+    {
+      "name": "visual_only",
+      "source": "//@version=6\nstrategy(\"Visual\")\nt = table.new(position.top_right, 1, 1)\n",
+      "ok": true,
+      "controls": {"PF-W1508": {"before": "warning", "after": "note"}}
+    },
+    {
+      "name": "display_request",
+      "source": "//@version=6\nstrategy(\"Display\")\nx = request.financial(\"NASDAQ:AAPL\", \"TOTAL_REVENUE\", \"FQ\")\nplot(x)\n",
+      "ok": true,
+      "controls": {"PF-W1528": {"before": "warning", "after": "note"}}
+    },
+    {
+      "name": "actionable_warning",
+      "source": "//@version=6\nstrategy(\"Risk\")\nstrategy.risk.max_drawdown(10, strategy.percent_of_equity)\n",
+      "ok": true,
+      "controls": {"PF-W1503": {"before": "warning", "after": "warning"}}
+    },
+    {
+      "name": "error_with_note",
+      "source": "//@version=6\nstrategy(\"Mixed\")\nx = ta.ema(close, 20)\ny = request.seed(\"x\", \"y\", close)\n",
+      "ok": false,
+      "controls": {"PF-W1505": {"before": "warning", "after": "note"}}
+    },
+    {
+      "name": "unicode_escape_error",
+      "source": "//@version=6\nstrategy(\"引號 \\\" and braces {}\")\nx = close +\n",
+      "ok": false,
+      "controls": {}
+    }
+  ]
+}

@@ -7,6 +7,7 @@ from enum import Enum
 class Level(Enum):
     ERROR = "error"
     WARNING = "warning"
+    NOTE = "note"
 
 
 class Phase(Enum):
@@ -45,6 +46,16 @@ class Diagnostic:
     def args(self) -> dict:
         return self._coded()[1]
 
+    @property
+    def user_message(self) -> str:
+        """The catalog's short ICU template, with values supplied by ``args``.
+
+        This is intentionally not rendered English: receivers translate by
+        stable code or render the template with the existing named arguments.
+        """
+        from .diagnostic_codes import _user_message_template
+        return _user_message_template(self.code)
+
     def _coded(self) -> tuple[str, dict]:
         severity = getattr(self.level, "value", self.level)
         key = (severity, self.message, self.hint)
@@ -81,7 +92,7 @@ class CompileError(Exception):
 
         for d in self.diagnostics:
             loc = d.location
-            level_str = d.level.value          # "error" or "warning"
+            level_str = d.level.value          # "error", "warning" or "note"
             phase_str = d.phase.value          # "ANALYZER", etc.
 
             # Header: error[ANALYZER]: message
