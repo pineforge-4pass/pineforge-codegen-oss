@@ -24,9 +24,11 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 The planned number of the next release; it stays **Unreleased** until its tag
 exists, and the package version is unchanged. This entry records the diagnostic
-additions below and nothing else: the engine pairing, the rest of the content
-and the date of 1.5.0 are set when the release is prepared. It changes
-diagnostics only; no analyzer or code-generation file differs.
+additions below and the report-contract documentation for the paired engine
+fix, and nothing else: the engine pairing, the rest of the content and the date
+of 1.5.0 are set when the release is prepared. The codegen change is
+diagnostics only; the report documentation adds no Python, JSON, diagnostic or
+emitted-C++ change of its own, and no analyzer or code-generation file differs.
 
 ### Compatibility and migration
 
@@ -91,16 +93,10 @@ diagnostics only; no analyzer or code-generation file differs.
   this entry, and no diagnostic carries a call-site identifier or a startup
   length.
 
-## Planned 1.4.0-line patch — Unreleased
-
-A planned patch release of the 1.4.0 pair. It has no tag, date or version yet,
-and these notes are a plan, not a record. This documentation change adds no
-Python, JSON, diagnostic or emitted-C++ change of its own. The diagnostic
-additions under 1.5.0 — Unreleased are a separate change and are not part of
-this planned patch. The engine side is a report fix, in preparation, that engine
-`v1.4.0` does not carry.
-
 ### Documentation
+
+The engine side of the report-ownership text below is a report fix, in
+preparation, that engine `v1.4.0` does not carry.
 
 - The [public contract](docs/PUBLIC_CONTRACT.md#a-report-belongs-to-the-call-that-returned-it)
   states that a report belongs to the call that returned it. A call the engine
