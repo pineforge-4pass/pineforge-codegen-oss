@@ -348,12 +348,12 @@ warnings and notes of a script that transpiles (support checker, then analyzer a
 codegen `ctx.diagnostics` -- the codegen appends through `_codegen_warning`)
 come back as `transpile_full(...)["diagnostics"]` and in `transpile_json`'s
 success envelope under `diagnostics`, in the error envelope's entry format.
-A note (`Level.NOTE`, raised through `SupportChecker._note`) is nonfatal and
+A note (`Level.NOTE`, since 1.5.0, raised through `SupportChecker._note`) is nonfatal and
 informational. Only PF-W1505, PF-W1508, PF-W1509 and PF-W1525 to PF-W1532 are
 notes, each keeping its `PF-W` code; every other diagnostic keeps its level,
 the other visual-only and display-only ones included (for example PF-W1078,
-PF-W1502, PF-W1506, PF-W1507, PF-W1552). The `PF-E` / `PF-W` prefix is an
-identity, not the severity: read the declared one.
+PF-W1502, PF-W1506, PF-W1507, PF-W1552). A `PF-E` code is an error; a
+`PF-W` code can be a warning or a note, so read its declared severity.
 
 Checked settings string defaults and options use only known C++ string literals
 from the existing builtin lowering, never inert visual integer codes. Only the
