@@ -36,8 +36,8 @@ for the changes in each release from 1.0.0 on and the release-note policy.
   `transpile_full()` are the supported Python entry points.
 - **Located diagnostics** — the support checker rejects unsupported Pine with
   a `file:line:col` location before any C++ is emitted, and
-  `transpile_full()` returns warnings for supported scripts with documented
-  approximations.
+  `transpile_full()` returns nonfatal warnings and notes for supported scripts,
+  including those with documented approximations.
 
 ## Releases and this README
 
@@ -190,8 +190,8 @@ transpile(
 Returns the generated C++ source as a string. Raises
 `pineforge_codegen.errors.CompileError` on a rejected construct and, since 1.0.0,
 on a syntax error or an input limit (0.10.4 recovers from some syntax errors
-and has no input limits). It does not return nonfatal warnings; use
-`transpile_full()` to inspect them.
+and has no input limits). It does not return nonfatal diagnostics (warnings and
+notes); use `transpile_full()` to inspect them.
 
 `libraries` is new in 1.0.0. It maps an import path to the library's
 source (`{"user/name/version": source_text}`), and each import the script uses
@@ -218,8 +218,8 @@ It returns `{"cpp": str, "inputs": list[dict], "strategyParams": dict,
 "diagnostics": list[Diagnostic], "requests": list[dict]}` on success (0.10.4
 returns the first three keys; `requests` is new in 1.1.0). `inputs` is the input
 manifest; its `title` is the actual override key, and an `input.symbol` entry
-also has `"kind": "symbol"` (since 1.1.0). `diagnostics` contains nonfatal
-warnings. Since 1.4.0, each input also has `supported`, the checked-settings receipt's
+also has `"kind": "symbol"` (since 1.1.0). `diagnostics` contains the nonfatal
+warnings and notes. Since 1.4.0, each input also has `supported`, the checked-settings receipt's
 flag. Hide inputs with a false flag, exclude them from sweeps and optimization,
 and do not send a value: the compiled default is used, and the paired engine
 refuses a supplied value with `setting_unsupported`. A true flag is not a full
@@ -250,17 +250,29 @@ renamed or removed, and the changelog lists the values that changed.
 A rejected script raises `CompileError` with its diagnostics. The Pyodide
 package ships `gate/glue.py`'s `transpile_json(source) -> str`, whose JSON
 success and error envelopes carry the same manifest and, since 1.0.0, the same
-warnings; since 1.1.0 the success envelope also carries `requests`. See the
+warnings; since 1.1.0 the success envelope also carries `requests`. Notes, the
+informational level described under [Diagnostic codes](#diagnostic-codes),
+travel in the same `diagnostics` lists with `"severity": "note"`. See the
 [1.0 public contract](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/docs/PUBLIC_CONTRACT.md)
 for the exact fields, severity values, and input key rules. There is no
 installed CLI or exit-code contract.
 
 ### Diagnostic codes
 
-Every diagnostic carries a stable `code` and named `args` (since 1.2.0):
-`PF-E1203` for an error, `PF-W0412` for a warning, and the data its English
-`message` and `hint` were built from — identifiers, types, keywords and
-numbers, raw.
+Every diagnostic carries a stable `code` (of the form `PF-E1203` or `PF-W0412`)
+and named `args` (since 1.2.0): the data its English `message` and `hint` were
+built from — identifiers, types, keywords and numbers, raw.
+
+The `E` or `W` of a code is a historical identity prefix, not the severity: read
+`level` (`severity` in the JSON entries and the catalog), which is `error`,
+`warning` or `note`. A note is a nonfatal, informational diagnostic, and it keeps
+the `PF-W` code it had as a warning. Eleven codes are notes: PF-W1505 (the
+`ta.ema` initial-warmup approximation, reported at every `ta.ema` call as a
+general caveat, not a measured shortfall), PF-W1508 and PF-W1509 (a call such as
+`plot` or `alert` that has no effect in a backtest) and PF-W1525 to PF-W1532 (a
+request for outside data whose value reaches only display and alert sinks,
+lowered to `na`). Every other diagnostic keeps its severity, the other
+visual-only and display-only ones included; the catalog is authoritative.
 
 ```python
 from pineforge_codegen import diagnostics_catalog, transpile_full
@@ -272,15 +284,21 @@ for d in transpile_full(source)["diagnostics"]:
 entry = diagnostics_catalog()["codes"]["PF-W1067"]
 # {'severity': 'warning', 'area': 'support',
 #  'message': '{name} diverges from TradingView semantics in PineForge.',
-#  'hint': '...', 'explanation': '...', 'args': {'name': {'kind': 'identifier'}}}
+#  'hint': '...', 'explanation': '...', 'args': {'name': {'kind': 'identifier'}},
+#  'user_message': '...'}
 ```
 
 The catalog (`pineforge_codegen/diagnostics_catalog.json`, also attached to
 each GitHub release) gives each code its severity, English ICU MessageFormat
-templates and a one-line explanation; rendering the templates with `args`
-gives the `message` and `hint` byte for byte, so an application can translate
-a diagnostic by its code. Codes are never reused. See
-[Diagnostic codes](docs/PUBLIC_CONTRACT.md#diagnostic-codes).
+`message` and `hint` templates, a one-line explanation and a short
+`user_message` template; rendering the `message` and `hint` templates with
+`args` gives the diagnostic's `message` and `hint` byte for byte, so an
+application can translate a diagnostic by its code. `user_message` is a
+separate short English ICU template over the same `args` (it may be constant):
+the translation source and the fallback for a code an application does not
+know. It is a template, not pre-rendered English, and each `Diagnostic` and
+JSON diagnostic entry carries it as `user_message` too. Codes are never reused.
+See [Diagnostic codes](docs/PUBLIC_CONTRACT.md#diagnostic-codes).
 
 ### List the other symbols a script requests
 
@@ -371,7 +389,8 @@ transpile(src, filename="my_strategy.pine")
 
 Not every request for outside data is refused. A
 `request.financial()` whose value reaches only plots, alerts, tables or logs
-transpiles with a warning and reads `na`; 0.10.4 refuses it. The
+transpiles with a note (a warning in earlier releases) and reads `na`; 0.10.4
+refuses it. The
 [changelog](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/CHANGELOG.md)
 lists what 1.0.0 reads, warns about or refuses for such requests.
 

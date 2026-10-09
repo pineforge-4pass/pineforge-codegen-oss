@@ -108,7 +108,7 @@ def test_payload_with_side_effects_is_not_inert():
     assert "runtime.error" in TradeSlice(program).reason(request)
 
 
-def test_inert_requests_are_lowered_with_a_warning():
+def test_inert_requests_are_lowered_with_a_note():
     result = transpile_full(
         HEAD + WATCH + 'plot(other)\nplot(shares)\n' + TRADE)
     warnings = [d.message for d in result["diagnostics"]]
