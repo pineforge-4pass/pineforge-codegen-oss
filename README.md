@@ -64,6 +64,10 @@ covers 1.0.0 on and links the notes of earlier releases. A source install
 reports the version in `VERSION`, which the release workflow sets when it tags
 a release.
 
+Text that says "since 1.5.0" describes the source tree on `main`, not a
+published package: 1.5.0 is the planned number of the next release, and the
+statements about 1.4.0 keep their historical meaning.
+
 ### Upgrading from 1.3.0
 
 For the 1.4.0 pair, regenerate C++ and relink against engine

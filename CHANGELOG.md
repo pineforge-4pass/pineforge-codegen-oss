@@ -63,8 +63,14 @@ diagnostics only; no analyzer or code-generation file differs.
   with `args.name = "plot"`). It is not pre-rendered English. Render it with
   `args` as plain text, never as template syntax or markup, or translate by
   `code`; do not display the unrendered template. It does not replace `message`
-  and `hint`. Its wording is pinned for the eleven migrated codes only; the
-  template of any other code is checked for form, not for wording.
+  and `hint`. The templates of the eleven migrated codes are fixed string for
+  string by a delta fixture. Every template is checked for form (short,
+  parseable, over that code's own `args` names). Each of the 97 warning twins
+  of an error (`PF-W1nnn` for `PF-E1nnn`) has a sentence of its own that says
+  PineForge warns, and the 91 that warn only inside a `switch` arm also say it
+  keeps the arm's lowering. No warning or note template says that PineForge
+  refuses or rejects something, though one may say what TradingView refuses or
+  rejects. Beyond these checks a template's exact wording is not pinned.
 - **Legacy fields are stable.** `code`, `args`, `message`, `hint`, `line`,
   `col`, `endCol`, `ok`, `error` and the envelope keys keep their meaning and
   values: no key is renamed or removed, and no code is renumbered or reused (the

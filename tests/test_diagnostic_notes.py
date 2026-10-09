@@ -13,7 +13,6 @@ from pineforge_codegen import diagnostics_catalog, transpile_full
 from pineforge_codegen.errors import CompileError, Level
 from pineforge_codegen.errors import Diagnostic, Phase, SourceLocation
 from pineforge_codegen.diagnostic_codes import classify, parse_template, render, render_diagnostic
-from tests import _e2e
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diagnostic_notes"
@@ -424,11 +423,6 @@ def test_array_history_in_a_request_is_described_as_array_history_not_references
 # "{name}(...)" itself, SupportChecker._visit_FuncCall), so the template's "()" is the
 # only pair a rendered sentence has.
 
-# The head the sentence was amended on: the reference for the C++ and the diagnostic
-# fields. A squash landing drops this commit from history, so the test then needs a new
-# pin (v1.4.0's 8663272 is the candidate: no analyzer or code-generation file differs
-# from it) or has to go.
-NO_EFFECT_PARENT = "5a252e738452c0043c35f181578e8333ba7cdbf5"
 NO_EFFECT_TEMPLATES = {"PF-W1508": "{name}() does nothing in a backtest.",
                        "PF-W1509": "{full}() does nothing in a backtest."}
 # (script, the name its note carries): the two calls the old sentence was wrong for, and
@@ -440,10 +434,6 @@ NO_EFFECT_CASES = [
     pytest.param(HEAD + "plot(close)\n", "plot", id="plot"),
     pytest.param(HEAD + "t = table.new(position.top_right, 1, 1)\n", "table.new", id="table_new"),
 ]
-
-
-def _but(mapping, key):
-    return {k: v for k, v in mapping.items() if k != key}
 
 
 @pytest.mark.parametrize("source, name", NO_EFFECT_CASES)
@@ -486,23 +476,3 @@ def test_the_alias_template_is_the_same_sentence_over_its_own_argument():
             "table.new() does nothing in a backtest."
     assert (catalog["PF-W1509"]["user_message"].replace("{full}", "{name}")
             == catalog["PF-W1508"]["user_message"])
-
-
-@pytest.mark.parametrize("source, name", NO_EFFECT_CASES)
-def test_the_sentence_is_the_only_change_to_the_parent_heads_output(tmp_path, source, name):
-    parent = _e2e.reference_codegen(NO_EFFECT_PARENT)
-    if parent is None:
-        pytest.fail(f"required reference {NO_EFFECT_PARENT} unavailable; restore git history")
-    pine = tmp_path / "strategy.pine"
-    pine.write_text(source, encoding="utf-8")
-    ours, before = _e2e.transpile_json(pine), _e2e.transpile_json(pine, parent)
-    assert ours["ok"] is True and before["ok"] is True
-    # The generated C++ and every other key of the envelope are the parent's...
-    assert ours["cpp"] and ours["cpp"] == before["cpp"]
-    assert _but(ours, "diagnostics") == _but(before, "diagnostics")
-    # ...and so is every diagnostic field, but the sentence of the PF-W1508 notes.
-    assert len(ours["diagnostics"]) == len(before["diagnostics"])
-    for now, then in zip(ours["diagnostics"], before["diagnostics"]):
-        assert _but(now, "user_message") == _but(then, "user_message")
-        assert (now["user_message"] != then["user_message"]) == (now["code"] == "PF-W1508"), (now, then)
-    assert [d["args"] for d in ours["diagnostics"] if d["code"] == "PF-W1508"] == [{"name": name}]

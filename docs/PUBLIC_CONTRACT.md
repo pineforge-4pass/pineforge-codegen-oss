@@ -576,10 +576,17 @@ later handoff; they are contract examples, not transpiler output.
 A code is never removed or reused, and a changed meaning gets a new code
 (`tests/fixtures/diagnostic_codes_pin.json` pins each code's severity,
 `message` and `hint` templates and argument names; it does not pin
-`user_message`). Since 1.5.0 the `user_message` templates of the eleven
-migrated codes are fixed by `tests/fixtures/diagnostic_notes/delta.json`; the
-template of every other code is checked for form (a short, parseable sentence
-over the entry's own argument names), not for its wording. A text no template
+`user_message`). Since 1.5.0 the `user_message` templates are checked as
+follows. The templates of the eleven migrated codes are fixed string for string
+by `tests/fixtures/diagnostic_notes/delta.json`. Every template is checked for
+form: a short, parseable sentence over the entry's own argument names. Each of
+the 97 warning twins of an error (`PF-W1nnn` for `PF-E1nnn`) has a sentence of
+its own, not its error's, that says PineForge warns; the 91 that warn only
+inside a `switch` arm also say that PineForge keeps the arm's lowering, and
+PF-W1067 to PF-W1072, which warn everywhere, name no arm. No warning or note
+template says that PineForge refuses or rejects something, though one may say
+what TradingView refuses or rejects. Beyond these checks a template's exact
+wording is not pinned. A text no template
 renders carries `PF-E0000` / `PF-W0000` with the text in `args.message` (and
 `args.hint`); the test suite refuses it. The `message` text itself is
 unchanged and stays the English rendering; `runtime.error` text a strategy
