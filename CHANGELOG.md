@@ -20,6 +20,71 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## 1.5.0 — Unreleased
+
+The planned number of the next release; it stays **Unreleased** until its tag
+exists, and the package version is unchanged. This entry records the diagnostic
+additions below and nothing else: the engine pairing, the rest of the content
+and the date of 1.5.0 are set when the release is prepared. It changes
+diagnostics only; no analyzer or code-generation file differs.
+
+### Compatibility and migration
+
+- **`note` is a third diagnostic severity, and it is nonfatal.** A diagnostic
+  is now an `error`, a `warning` or a `note`: `Level.NOTE` in Python and `"note"`
+  as the `severity` of a catalog entry and of a JSON diagnostic. A note is
+  nonfatal like a warning. `transpile_full()["diagnostics"]` and the success
+  envelope's `diagnostics` list warnings and notes, a script with only notes
+  still returns `ok: true` and its C++, and a `CompileError` can carry notes
+  beside its errors. `transpile()` still returns no nonfatal diagnostics.
+  `CompileError.format()` prints `note[...]` where it printed `warning[...]` for
+  the codes below. Code written for two severities must handle `note`: read an
+  unknown severity as a warning, never as an error. A note does not mean that
+  results are unaffected; PF-W1505 describes a warmup approximation.
+- **Exactly eleven codes change from warning to note:** PF-W1505, PF-W1508,
+  PF-W1509, PF-W1525, PF-W1526, PF-W1527, PF-W1528, PF-W1529, PF-W1530,
+  PF-W1531 and PF-W1532. They describe calls PineForge skips as visual only
+  (`plot(...)`, `table.new(...)`), earnings, dividends, splits, financial,
+  footprint and other-symbol requests whose value reaches only display and alert
+  sinks and is lowered to `na`, and the `ta.ema` warmup approximation. Every
+  other code keeps its severity. PF-W1502 (`color(...)` cast), PF-W1506
+  (`color.from_gradient`), PF-W1507 (drawing setters that drop color, style or
+  size), PF-W1078 (visual or style constants) and PF-W1552 (a
+  `request.security_lower_tf` whose value reaches only display and alert sinks)
+  also speak of visual-only or display-only handling and remain warnings: a
+  message's wording does not classify it. A consumer that tallied these eleven
+  codes as warnings, to gate a run, count warnings or color a banner, now
+  receives notes. PF-W1509 still classifies as PF-W1508 where the two templates
+  tie, so no new emitted code appears.
+- **`user_message` is a raw ICU template over `args`.** Every catalog entry,
+  every `Diagnostic` (`Diagnostic.user_message`) and every JSON diagnostic gains
+  `user_message`: a short English ICU template that uses only that diagnostic's
+  existing `args` names and may be constant (`{name} is not drawn in backtests.`
+  with `args.name = "plot"`). It is not pre-rendered English. Render it with
+  `args` as plain text, never as template syntax or markup, or translate by
+  `code`; do not display the unrendered template. It does not replace `message`
+  and `hint`. Its wording is pinned for the eleven migrated codes only; the
+  template of any other code is checked for form, not for wording.
+- **Legacy fields are stable.** `code`, `args`, `message`, `hint`, `line`,
+  `col`, `endCol`, `ok`, `error` and the envelope keys keep their meaning and
+  values: no key is renamed or removed, and no code is renumbered or reused (the
+  notes keep their `PF-W` codes, and the prefix is not the severity).
+  `render_diagnostic()` still returns the unchanged English `message` and
+  `hint`. The catalog schema id stays `pineforge-diagnostics-catalog/v1`, so a
+  reader that checks `severity` against two values or rejects unknown entry
+  fields must accept `note` and `user_message`. The receiver examples in
+  `tests/fixtures/diagnostic_notes/receiver.json` specify the compatibility
+  rule; they are not evidence of any application's behavior.
+- **The warmup sidecar is later work.** No compile-time or runtime sidecar
+  exists in this entry. PF-W1505 stays the static `ta.ema` note it was, with
+  only its severity changed: the support checker emits it at each `ta.ema` call
+  it visits, with no per-call condition or suppression and no call-site
+  identifier. The startup inventory and extraction that would bind a versioned
+  sidecar to a diagnostic by `call_site_id` and source range, so that a consumer
+  can show a startup sentence only for a known finite shortfall, are not part of
+  this entry, and no diagnostic carries a call-site identifier or a startup
+  length.
+
 ## 1.4.0 — 2026-10-08
 
 A minor release of the exact engine/codegen pair. Its behavior was validated
