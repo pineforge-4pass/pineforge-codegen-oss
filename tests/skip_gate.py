@@ -1,4 +1,4 @@
-"""Session-end pytest gate that fails the run on compile-environment skips.
+"""Session-end pytest gate that fails the run on ANY unallowed skip.
 
 Hosted CI runs ``python -m pytest -q`` on a machine with no engine library,
 no Eigen and no clang, so every test that compiles an emitted translation
@@ -6,27 +6,37 @@ unit *skips*.  Because they skip, pytest exits 0 and the badge is green while
 roughly a third of the suite never runs.  A gate that can pass on missing
 input is not a gate.
 
-This module turns the skips into a verdict.  At session end it collects every
-skipped test's reason from the terminal reporter, normalises each reason to a
-class (a reason is in the COMPILE-ENVIRONMENT class when it mentions a
-compile-environment knob, see ``COMPILE_ENV_PATTERNS``), and compares the
-*exact* reason text against the allowance file
+This module turns the skips into a verdict, and it is **DEFAULT-DENY**: every
+skip reason that occurs, whatever its wording, is a row the allowance must
+name with its exact count.  There is no allow-list of "known" wordings -- an
+earlier version keyed only on compile-environment patterns, so a skip reason
+the list did not know passed silently (a spot run produced 2,261 skips under
+a wording the list missed).  At session end the gate collects every skipped
+test's reason from the terminal reporter and compares the *exact* reason text
+and count against the selected profile of the allowance file
 ``tests/ci_env_skip_allowance.json``:
 
     {"default": {"<exact reason text>": <count>, ...},
-     "engine_built": {"<exact reason text>": 0, ...}}
+     "engine_built": {"<exact reason text>": <count>, ...}}
 
-The exact reason TEXT -- not the class -- is the key, so a reason that was
+The exact reason TEXT -- not a class -- is the key, so a reason that was
 reworded is drift too.  The profile is chosen by ``PINEFORGE_SKIP_PROFILE``
 (default ``default``); the CI ``engine-built`` job sets ``engine_built``.
 
+``classify`` and ``COMPILE_ENV_PATTERNS`` remain, but only to LABEL the log
+lines (and to name, for the ``engine_built`` profile, the reasons that must be
+zero there).  They never decide pass or fail: the decision is the table below
+alone.
+
 The session FAILS (non-zero exit) when:
 
-  (a) a COMPILE-ENVIRONMENT skip's exact reason is not a key of the profile;
-  (b) a listed reason's count differs from what was actually observed;
+  (a) an observed skip reason is not a key of the selected profile;
+  (b) a listed reason's count differs from what was observed;
   (c) a listed reason with count > 0 was NOT observed (a stale allowance);
   (d) the session reported no skip summary at all, while the profile lists
-      any reason with count > 0 (a plugin that never ran is not a gate).
+      any reason with count > 0 (a plugin that never ran is not a gate);
+  (e) the selected profile is missing or empty, or the allowance file is
+      missing or unreadable.
 
 The gate is ON by default and may be turned off only with
 ``PINEFORGE_SKIP_GATE=off`` -- the CI workflow asserts that variable is not
@@ -44,9 +54,12 @@ from pathlib import Path
 ALLOWANCE_PATH = Path(__file__).resolve().parent / "ci_env_skip_allowance.json"
 
 # A skip reason is in the COMPILE-ENVIRONMENT class when it mentions any of
-# these knobs (case-insensitive substring match).  The list is deliberately
-# exhaustive about *wording families*: the engine library archive, the Eigen
-# and generated headers, the compiler/AST tooling, the parity corpus and the
+# these knobs (case-insensitive substring match).  This list is NO LONGER a
+# decision: the gate is default-deny, so an unknown reason fails wherever it
+# comes from.  The class only LABELS the log lines and names the reasons the
+# ``engine_built`` profile pins at 0.  It is deliberately exhaustive about
+# *wording families*: the engine library archive, the Eigen and generated
+# headers, the compiler/AST tooling, the parity corpus and the
 # population-sources directory a compile or byte-comparison test needs.
 COMPILE_ENV_PATTERNS = (
     # Added 10-11 04:20 after a spot run proved the list was incomplete: on a machine with NO
@@ -87,8 +100,10 @@ def classify(reason):
     """Return the class of a skip reason, or ``None`` when it is not compile-env.
 
     Matching is a case-insensitive substring test against
-    ``COMPILE_ENV_PATTERNS`` (the allowance keys on the *exact* reason text;
-    this only decides which reasons the gate must see in the file).
+    ``COMPILE_ENV_PATTERNS``.  This is used ONLY to label the log lines and to
+    name the reasons the ``engine_built`` profile pins at 0 -- it never
+    decides whether the gate passes.  The decision keys on the *exact* reason
+    text against the selected profile.
     """
     if not reason:
         return None
@@ -113,16 +128,19 @@ def load_allowance(path=ALLOWANCE_PATH):
 def profile_entries(allowance, profile_name):
     """Return ``{reason: count}`` for a profile, or ``None`` when it is absent.
 
-    Keys beginning with ``_`` are file metadata (a ``_note`` comment field)
-    and are ignored, so the allowance can carry human notes without polluting
-    the reason set.
+    A missing profile, a profile that is not a mapping, and an EMPTY profile
+    all return ``None``: an empty table allows nothing and explains nothing,
+    so the gate treats it as a fail (condition (e)).  Keys beginning with
+    ``_`` are file metadata (a ``_note`` comment field) and are ignored, so the
+    allowance can carry human notes without polluting the reason set.
     """
     if not isinstance(allowance, dict):
         return None
     profile = allowance.get(profile_name)
     if not isinstance(profile, dict):
         return None
-    return {k: v for k, v in profile.items() if not str(k).startswith("_")}
+    entries = {k: v for k, v in profile.items() if not str(k).startswith("_")}
+    return entries or None
 
 
 def skip_reason(report):
@@ -158,6 +176,8 @@ def observed_counts(skipped_reports):
 def check(profile, observed, *, summary_present=True):
     """Compare observed skip counts against a profile; return a problem list.
 
+    DEFAULT-DENY: this does not consult ``classify`` or any pattern list --
+    EVERY observed reason must be a key of the profile, with the exact count.
     ``profile`` maps an exact reason text to its expected count; ``observed``
     maps an exact reason text to its count.  An empty list means PASS.
     """
@@ -175,12 +195,10 @@ def check(profile, observed, *, summary_present=True):
             f"profile lists {listed} reason(s) with count > 0"
         )
 
-    # (a) a compile-environment skip whose exact reason is unlisted.
+    # (a) ANY observed reason the profile does not list (default-deny).
     for reason, count in sorted(observed.items()):
-        if classify(reason) == CLASS_COMPILE_ENV and reason not in profile:
-            problems.append(
-                f"unlisted {CLASS_COMPILE_ENV} skip reason ({count}x): {reason!r}"
-            )
+        if reason not in profile:
+            problems.append(f"unlisted skip reason ({count}x): {reason!r}")
 
     # (b) / (c) listed reasons that did not match the observation.
     for reason, expected in sorted(profile.items()):
@@ -206,7 +224,7 @@ def check(profile, observed, *, summary_present=True):
 def _format_counts(counts):
     """Render a ``{reason: count}`` mapping as one ``n x reason`` line."""
     if not counts:
-        return "(no compile-environment skips)"
+        return "(none)"
     return "; ".join(f"{n}x {reason!r}" for reason, n in sorted(counts.items()))
 
 
@@ -236,7 +254,7 @@ def run_gate(terminalreporter, allowance_path=ALLOWANCE_PATH, env=None):
     profile = profile_entries(allowance, profile_name)
     if profile is None:
         return (
-            [f"the allowance file has no {profile_name!r} profile"],
+            [f"the allowance file has no usable {profile_name!r} profile (missing or empty)"],
             observed,
         )
 
@@ -281,12 +299,20 @@ def pytest_sessionfinish(session, exitstatus):
 
     if problems:
         _emit(terminalreporter, [""])
-        _emit(terminalreporter, ["compile-environment skip gate FAILED:"])
+        _emit(
+            terminalreporter,
+            ["skip gate FAILED (default-deny: every observed skip reason must "
+             "be an allowance key with its exact count):"],
+        )
         for problem in problems:
             _emit(terminalreporter, [f"  - {problem}"])
         _emit(
             terminalreporter,
-            [f"  observed compile-environment skips: {_format_counts(compile_env)}"],
+            [f"  compile-environment skips: {_format_counts(compile_env)}"],
+        )
+        _emit(
+            terminalreporter,
+            [f"  observed skips: {_format_counts(observed)}"],
         )
         session.exitstatus = 1
         return
@@ -294,8 +320,9 @@ def pytest_sessionfinish(session, exitstatus):
     _emit(
         terminalreporter,
         [
-            "compile-environment skip gate OK: "
-            f"observed={len(observed)} reason(s) total, "
-            f"{_format_counts(compile_env)}"
+            "skip gate OK (default-deny): "
+            f"observed={len(observed)} reason(s), "
+            f"compile-environment={len(compile_env)}, "
+            f"observed skips: {_format_counts(observed)}"
         ],
     )
