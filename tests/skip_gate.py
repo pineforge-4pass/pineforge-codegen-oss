@@ -21,12 +21,14 @@ and count against the selected profile of the allowance file
 
 The exact reason TEXT -- not a class -- is the key, so a reason that was
 reworded is drift too.  The profile is chosen by ``PINEFORGE_SKIP_PROFILE``
-(default ``default``); the CI ``engine-built`` job sets ``engine_built``.
+(default ``default``); the CI ``engine-shard`` matrix sets
+``engine_built_shard_<i>`` for each of its legs (the single-job ``engine_built``
+profile is kept only for a manual run, not for CI).
 
 ``classify`` and ``COMPILE_ENV_PATTERNS`` remain, but only to LABEL the log
-lines (and to name, for the ``engine_built`` profile, the reasons that must be
-zero there).  They never decide pass or fail: the decision is the table below
-alone.
+lines and to enforce, for an ``engine_built*`` profile, that every
+compile-environment reason is pinned at 0.  They never decide pass or fail
+otherwise: the decision is the table below alone.
 
 The session FAILS (non-zero exit) when:
 
@@ -36,7 +38,10 @@ The session FAILS (non-zero exit) when:
   (d) the session reported no skip summary at all, while the profile lists
       any reason with count > 0 (a plugin that never ran is not a gate);
   (e) the selected profile is missing or empty, or the allowance file is
-      missing or unreadable.
+      missing or unreadable;
+  (f) the selected profile's name starts with ``engine_built`` and it allows
+      a nonzero count for any compile-environment reason (building the engine
+      must remove every one, so a nonzero allowance fails the run).
 
 The gate is ON by default and may be turned off only with
 ``PINEFORGE_SKIP_GATE=off`` -- the CI workflow asserts that variable is not
@@ -87,10 +92,10 @@ DEFAULT_PROFILE = "default"
 def gate_disabled(env=None):
     """True when the gate is turned off via ``PINEFORGE_SKIP_GATE=off``.
 
-    This is the single source of truth for the disable switch: the workflow
-    assertion imports and calls it, so the CI check and the gate can never
-    disagree about the normalization (a shell reimplementation could, e.g.
-    on whitespace or a non-ASCII case).
+    This is the single source of truth for the disable switch: the gate
+    normalizes the variable here.  CI does not call this; it asserts the
+    variable itself with a short inline check that the value is not ``off``,
+    so a workflow cannot turn the gate off silently.
     """
     env = os.environ if env is None else env
     return str(env.get(GATE_ENV, "")).strip().lower() == "off"
@@ -100,10 +105,10 @@ def classify(reason):
     """Return the class of a skip reason, or ``None`` when it is not compile-env.
 
     Matching is a case-insensitive substring test against
-    ``COMPILE_ENV_PATTERNS``.  This is used ONLY to label the log lines and to
-    name the reasons the ``engine_built`` profile pins at 0 -- it never
-    decides whether the gate passes.  The decision keys on the *exact* reason
-    text against the selected profile.
+    ``COMPILE_ENV_PATTERNS``.  It labels the log lines and, for an
+    ``engine_built*`` profile, enforces that every compile-environment reason
+    is pinned at 0 (see ``check``); otherwise the decision keys on the *exact*
+    reason text against the selected profile.
     """
     if not reason:
         return None
@@ -173,13 +178,17 @@ def observed_counts(skipped_reports):
     return counts
 
 
-def check(profile, observed, *, summary_present=True):
+def check(profile, observed, *, summary_present=True, profile_name=None):
     """Compare observed skip counts against a profile; return a problem list.
 
     DEFAULT-DENY: this does not consult ``classify`` or any pattern list --
     EVERY observed reason must be a key of the profile, with the exact count.
     ``profile`` maps an exact reason text to its expected count; ``observed``
     maps an exact reason text to its count.  An empty list means PASS.
+
+    When ``profile_name`` starts with ``engine_built``, any compile-environment
+    reason (per ``classify``) allowed a NONZERO count is a problem: building the
+    engine and pinning the corpus must remove every such skip.
     """
     if not isinstance(profile, dict):
         return ["the selected allowance profile is missing or empty"]
@@ -215,6 +224,22 @@ def check(profile, observed, *, summary_present=True):
             problems.append(
                 f"count mismatch: {reason!r} expected {expected}, observed {got}"
             )
+
+    # (f) an engine_built profile must pin every compile-environment reason at 0:
+    # building the engine is exactly what removes them, so a nonzero allowance
+    # is a broken gate, not a tolerance.
+    if profile_name is not None and str(profile_name).startswith("engine_built"):
+        for reason, expected in sorted(profile.items()):
+            if (
+                isinstance(expected, int)
+                and expected != 0
+                and classify(reason) == CLASS_COMPILE_ENV
+            ):
+                problems.append(
+                    f"engine_built profile {profile_name!r} allows {expected} "
+                    f"compile-environment skip(s) for {reason!r}; the engine build "
+                    "must remove every one, so the allowance must pin it at 0"
+                )
 
     return problems
 
@@ -262,7 +287,9 @@ def run_gate(terminalreporter, allowance_path=ALLOWANCE_PATH, env=None):
             observed,
         )
 
-    problems = check(profile, observed, summary_present=summary_present)
+    problems = check(
+        profile, observed, summary_present=summary_present, profile_name=profile_name
+    )
     return problems, observed
 
 

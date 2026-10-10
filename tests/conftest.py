@@ -8,7 +8,7 @@ an emitted translation unit, pytest exits 0, and the suite looks green while a
 third of it never ran.
 
 The gate is ON by default; ``PINEFORGE_SKIP_GATE=off`` disables it, and the CI
-workflow asserts that variable is not set the gate cannot be turned off
+workflow asserts that the variable is not set, so the gate cannot be turned off
 silently.
 """
 
