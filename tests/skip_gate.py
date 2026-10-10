@@ -186,13 +186,11 @@ def check(profile, observed, *, summary_present=True):
 
     problems: list[str] = []
 
-    # (d) no skip summary at all while the profile expects occurrences.
-    expects_any = any(isinstance(v, int) and v > 0 for v in profile.values())
-    if not summary_present and expects_any:
-        listed = sum(1 for v in profile.values() if isinstance(v, int) and v > 0)
+    # (d) no skip summary at all: a session with no summary ALWAYS fails,
+    # whatever the profile expects -- a plugin that never ran is not a gate.
+    if not summary_present:
         problems.append(
-            "no skip summary was reported by the terminal reporter, but the "
-            f"profile lists {listed} reason(s) with count > 0"
+            "no skip summary was reported by the terminal reporter"
         )
 
     # (a) ANY observed reason the profile does not list (default-deny).
@@ -236,6 +234,12 @@ def run_gate(terminalreporter, allowance_path=ALLOWANCE_PATH, env=None):
     """
     env = os.environ if env is None else env
     if gate_disabled(env):
+        # A workflow must not be able to turn the gate off: keyed on the GitHub
+        # Actions variable, so the refusal stands even if the workflow deletes
+        # its own assertion step.  Only reached when the gate is disabled, so a
+        # normal Actions run (gate on) is unaffected.
+        if env.get("GITHUB_ACTIONS") == "true":
+            return ["PINEFORGE_SKIP_GATE=off is not allowed under GitHub Actions"], {}
         return None, {}
 
     stats = getattr(terminalreporter, "stats", None)
@@ -289,6 +293,10 @@ def pytest_sessionfinish(session, exitstatus):
     problems, observed = run_gate(terminalreporter)
 
     if problems is None:  # gate disabled
+        _emit(
+            terminalreporter,
+            ["skip gate DISABLED (PINEFORGE_SKIP_GATE=off): no skip verdict was produced"],
+        )
         return
 
     compile_env = {

@@ -135,7 +135,10 @@ jobs:
               sys.exit(1)
           PY
       - name: Run test suite
-        run: python -m pytest -q -rs
+        run: |
+          set -eo pipefail
+          python -m pytest -q -rs 2>&1 | tee pytest.log
+          grep -q '^skip gate OK (default-deny)' pytest.log
 
   gate:
     if: always()

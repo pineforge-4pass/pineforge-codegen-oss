@@ -95,8 +95,11 @@ jobs:
               sys.stderr.write("PINEFORGE_SKIP_GATE=off is not allowed in CI: the skip gate must run\n")
               sys.exit(1)
           PY
-      - name: Run test suite (single interpreter: the default allowance was measured on 3.12)
-        run: python -m pytest -q -rs
+      - name: "Run test suite (single interpreter: the default allowance was measured on 3.12)"
+        run: |
+          set -eo pipefail
+          python -m pytest -q -rs 2>&1 | tee pytest.log
+          grep -q '^skip gate OK (default-deny)' pytest.log
 
   # Engine-building job. Unlike the engine-less `pytest` job this one KEEPS the
   # 3.11-3.14 matrix: with the engine present the compile-environment allowance
@@ -161,4 +164,7 @@ jobs:
               sys.exit(1)
           PY
       - name: Run the test suite with the engine present
-        run: python -m pytest -q -rs
+        run: |
+          set -eo pipefail
+          python -m pytest -q -rs 2>&1 | tee pytest.log
+          grep -q '^skip gate OK (default-deny)' pytest.log
