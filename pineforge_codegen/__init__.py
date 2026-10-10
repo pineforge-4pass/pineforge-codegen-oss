@@ -15,6 +15,7 @@ from .library_inline import inline_libraries
 from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
 from .pragmas import extract_pf_trace_pragmas
 from .request_discovery import discover_requests, request_sites
+from .request_feed_inventory import build_request_feed_inventory
 from .security_contexts import specialize_security_contexts
 from .block_locals import rename_block_locals
 from .support_checker import check_support as _support_diagnostics
@@ -200,4 +201,59 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
         "diagnostics": [d for d in (*support_diagnostics, *ctx.diagnostics)
                         if d.level in (Level.WARNING, Level.NOTE)],
         "requests": discover_requests(gen, ctx, sites),
+    }
+
+
+def transpile_with_request_inventory(pine_source: str, *, check_support: bool = True,
+                                     filename: str = "<input>",
+                                     libraries: Mapping[str, str] | None = None,
+                                     primary_chart_timeframe: str | None = None) -> dict:
+    """Transpile like :func:`transpile_full`, plus the request-feed inventory
+    bound to the C++ it returns (``pineforge_codegen.request_feed_inventory``).
+
+    Runs the pipeline once (``_generate``) and returns six keys, the five
+    :func:`transpile_full` returns computed from that one generation by the
+    same expressions, and the inventory:
+
+    - ``cpp``: the generated C++ source (identical to :func:`transpile`).
+    - ``inputs``: the input manifest, as :func:`transpile_full` lists it.
+    - ``strategyParams``: the literal ``strategy(...)`` kwargs, as
+      :func:`transpile_full` lists them.
+    - ``diagnostics``: the warnings and notes, as :func:`transpile_full` lists
+      them.
+    - ``requests``: the other-symbol feed projection of
+      :func:`transpile_full` (``request_discovery.discover_requests``). It
+      leaves out the same-ticker requests, so it is not the strategy's
+      complete request list.
+    - ``request_feed_inventory``: the request-feed inventory bound to ``cpp``
+      (``build_request_feed_inventory``). It lists every bar request the
+      compiled strategy can make, same ticker included, from the same
+      registration context as ``requests``. Its ``artifact_sha256`` is null
+      until the trusted compile pipeline binds it after linking with
+      :func:`pineforge_codegen.request_feed_inventory.bind_request_feed_inventory`.
+
+    :func:`transpile` and :func:`transpile_full` are unchanged.
+
+    Args mirror :func:`transpile_full`, plus:
+        primary_chart_timeframe: The chart timeframe the compiled artifact is
+            bound to, as a wire token (a request that reads the chart's own
+            timeframe is then that token; without it, ``unknown``). A value
+            that is no wire token raises ``RequestFeedInventoryError``.
+
+    Returns:
+        ``{"cpp": str, "inputs": list[dict], "strategyParams": dict,
+        "diagnostics": list[Diagnostic], "requests": list[dict],
+        "request_feed_inventory": dict}``.
+    """
+    gen, ctx, cpp, support_diagnostics, sites = _generate(
+        pine_source, check_support, filename, libraries)
+    return {
+        "cpp": cpp,
+        "inputs": gen.extract_input_manifest(),
+        "strategyParams": dict(ctx.strategy_params),
+        "diagnostics": [d for d in (*support_diagnostics, *ctx.diagnostics)
+                        if d.level in (Level.WARNING, Level.NOTE)],
+        "requests": discover_requests(gen, ctx, sites),
+        "request_feed_inventory": build_request_feed_inventory(
+            gen, ctx, sites, cpp, primary_chart_timeframe=primary_chart_timeframe),
     }
