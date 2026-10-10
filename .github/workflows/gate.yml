@@ -150,30 +150,35 @@ jobs:
   # shape as the engine-less `pytest` job above: the fork-guard clause in `if:`,
   # a read-only `permissions: contents: read` (the workflow default is
   # `permissions: {}`), a checkout of the PR head with `persist-credentials:
-  # false`, and no secret anywhere. Unlike the engine-less `pytest` job it KEEPS
-  # the 3.11-3.14 matrix: with the engine present the compile-environment
-  # allowance is zero, so no counted skip can move with the interpreter, and the
-  # matrix costs nothing but proves the build on every supported version.
-  engine-built:
+  # false`, and no secret anywhere.
+  #
+  # It BUILDS ONCE and SPLITS; the running happens in `engine-shard` below. One
+  # job cannot both build and run the whole suite inside a hosted runner's
+  # hours: the engine-less run measured 2843.49s (0:47:23) with 1,181 skips,
+  # building the engine turns 1,131 of those into real work, the corpus adds
+  # ~314 compile tests, and a hosted runner has at most 4 vCPUs. So this job
+  # builds the engine, pins its corpus, computes the deterministic shard split
+  # and publishes all of it as the `engine-env` artifact the shard matrix
+  # consumes -- no shard rebuilds anything.
+  engine-build:
     needs: preflight-docs
     if: needs.preflight-docs.outputs.docs_only != 'true' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
-    # The suite is minutes-to-hours: the engine-less run alone took 47 minutes
-    # with 1,181 skips, and building the engine turns 1,131 of those skips into
-    # real work (plus the corpus's compile tests), on a 4-vCPU hosted runner.
-    # 360 is GitHub's maximum for a hosted job.
+    # The clone + LFS pull + engine build, the collect-only sweep and the
+    # artifact upload. 360 is GitHub's maximum for a hosted job.
     timeout-minutes: 360
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
     env:
       PYTHONHASHSEED: "0"
       ENGINE_COMMIT: 4e01e96b5165b5d5e46d72bfbbf88ae6c035a6e9
       CORPUS_COMMIT: b40aa8ecbe3caa9ad05244cdfd9ee8138da845e4
-      PINEFORGE_SKIP_PROFILE: engine_built
+      # The shard count the split below writes and the matrix of `engine-shard`
+      # mirrors. 10: the engine-built full run is 2-4 hours of work on a 4-vCPU
+      # runner (the ruling's own assumption), so a tenth is ~18 minutes of
+      # nominal work -- wide headroom under the 120-minute shard timeout even
+      # for the shard that draws the heaviest modules.
+      SHARD_COUNT: "10"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
@@ -182,7 +187,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
       - name: Install with dev extras
         run: python -m pip install -e ".[dev]"
       - name: Install the compile toolchain, Eigen and git-lfs
@@ -251,17 +256,178 @@ jobs:
               sys.stderr.write("PINEFORGE_SKIP_GATE=off is not allowed in CI: the skip gate must run\n")
               sys.exit(1)
           PY
-      - name: Run the test suite with the engine present
+      - name: Split the collected test files into deterministic shards
+        run: |
+          set -euo pipefail
+          # Collect with the engine env set, so the corpus tests are collected
+          # as real work (an unresolved engine collects none of them).
+          python -m pytest --collect-only -q > collect.txt
+          # The collected TEST FILES. `--collect-only -q` emits one line per
+          # collected node id ("tests/x.py::test_y") on pytest 8 and one
+          # "tests/x.py: <count>" per file on pytest 9, so accept BOTH shapes
+          # and nothing else: a "::" line contributes its path prefix, a
+          # "path: <digits>" line contributes its path. The warnings summary
+          # and any other prose line matches neither and drops out. `sort -u`
+          # makes the split a pure function of the SORTED list: never `ls`,
+          # never filesystem order, never a hash of anything.
+          mkdir -p shards
+          awk '/::/ { t=$1; sub(/::.*/, "", t); if (t ~ /\.py$/) print t; next }
+               /^[^ ]*\.py: [0-9]+$/ { t=$1; sub(/:$/, "", t); print t }' \
+            collect.txt | sort -u > shards/all.txt
+          test -s shards/all.txt || { echo "collection produced no test files" >&2; exit 1; }
+          n="$SHARD_COUNT"
+          for i in $(seq 0 $((n - 1))); do : > "shards/shard-$i.txt"; done
+          # Round-robin on the sorted list: file k goes to shard k % n.
+          i=0
+          while IFS= read -r f; do
+            printf '%s\n' "$f" >> "shards/shard-$((i % n)).txt"
+            i=$((i + 1))
+          done < shards/all.txt
+          # UNION CHECK. `cat shards/shard-*.txt | sort | uniq | wc -l` must
+          # equal `wc -l < shards/all.txt`, and the total line count across the
+          # shards must equal it too, so every collected file sits in exactly
+          # one shard: no file lost, none duplicated. The diff proves the union
+          # IS all.txt, not merely the same size.
+          all_count="$(wc -l < shards/all.txt)"
+          union_count="$(cat shards/shard-*.txt | sort -u | wc -l)"
+          placed_count="$(cat shards/shard-*.txt | wc -l)"
+          echo "collected test files: $all_count"
+          echo "union across shards:  $union_count"
+          echo "lines across shards:  $placed_count"
+          [ "$union_count" -eq "$all_count" ] || {
+            echo "the shard union does not cover every collected test file" >&2; exit 1; }
+          [ "$placed_count" -eq "$all_count" ] || {
+            echo "a collected test file sits in more than one shard" >&2; exit 1; }
+          diff -u <(sort shards/all.txt) <(cat shards/shard-*.txt | sort -u) || {
+            echo "the shard union differs from the collected file list" >&2; exit 1; }
+          # INDEPENDENT CROSS-CHECK. The union equality above alone cannot fail
+          # on a parse that silently DROPPED a collected file: the shards are
+          # built from all.txt, so a short all.txt yields a short union that
+          # still matches. Compare against the test files on disk instead --
+          # `find tests -name 'test_*.py'` is the whole tree pytest collects
+          # from here -- so a dropped file fails the build loudly.
+          disk_count="$(find tests -name 'test_*.py' | wc -l)"
+          echo "test files on disk:   $disk_count"
+          [ "$disk_count" -eq "$all_count" ] || {
+            echo "the collected file list does not cover every tests/**/test_*.py on disk" >&2; exit 1; }
+          diff -u <(find tests -name 'test_*.py' | sort) shards/all.txt || {
+            echo "the collected file list differs from the test files on disk" >&2; exit 1; }
+          # A shard that runs NOTHING must not pass.
+          for i in $(seq 0 $((n - 1))); do
+            test -s "shards/shard-$i.txt" || { echo "shard $i is empty" >&2; exit 1; }
+          done
+          # Record the split in the job log (the lists are small).
+          for i in $(seq 0 $((n - 1))); do
+            echo "--- shard $i: $(wc -l < "shards/shard-$i.txt") file(s)"
+            sed 's/^/    /' "shards/shard-$i.txt"
+          done
+      - name: Stage the engine environment for the shards
+        run: |
+          set -euo pipefail
+          # Sized deliberately so a shard runs WITHOUT rebuilding: the engine
+          # headers and the CMake-generated version header a compile test needs,
+          # the built runtime the e2e tests link, the engine `scripts/` the e2e
+          # harness imports (run_strategy.py, derive_corpus_feeds.py), the
+          # corpus's `.pine` strategy tree (the compile and emit sweeps glob it)
+          # and `corpus/data` (the e2e 1m feed and its derived 15m feed). The
+          # corpus's ~437 MB of per-strategy TradingView tapes under
+          # validation/ are NOT shipped: no test reads them.
+          mkdir -p engine-env/build/include engine-env/build/lib engine-env/corpus
+          cp -a engine/include engine-env/include
+          cp -a build/include/pineforge engine-env/build/include/pineforge
+          cp -a build/lib/libpineforge.a engine-env/build/lib/libpineforge.a
+          cp -a engine/scripts engine-env/scripts
+          rm -rf engine-env/scripts/__pycache__
+          rsync -a --exclude='/data' --include='*/' --include='*.pine' --exclude='*' \
+            engine/corpus/ engine-env/corpus/
+          rsync -a engine/corpus/data/ engine-env/corpus/data/
+          cp -a shards engine-env/shards
+          du -sh engine-env
+          test -f engine-env/include/pineforge/engine.hpp
+          test -f engine-env/build/include/pineforge/version.h
+          test -f engine-env/build/lib/libpineforge.a
+          test -f engine-env/scripts/run_strategy.py
+          test -d engine-env/corpus/data
+      - name: Upload the engine environment
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: engine-env
+          path: engine-env/
+          if-no-files-found: error
+
+  # The shard matrix: N jobs that each run ONE slice of the suite the build job
+  # pinned, against the `engine-env` artifact -- no shard rebuilds the engine.
+  # `fail-fast: false` so every shard reports; a failing shard must be visible
+  # as a failure, never absorbed. Same safety shape as `engine-build`: fork
+  # guard, read-only contents, head-sha checkout, no secret.
+  engine-shard:
+    needs: [preflight-docs, engine-build]
+    if: needs.preflight-docs.outputs.docs_only != 'true' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors SHARD_COUNT in `engine-build`; the allowance file carries one
+        # `engine_built_shard_<i>` profile per entry, for the same N.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    env:
+      PYTHONHASHSEED: "0"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16e87065
+        with:
+          python-version: "3.12"
+      - name: Install with dev extras
+        run: python -m pip install -e ".[dev]"
+      - name: Install Eigen, clang and g++
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libeigen3-dev clang g++
+      - name: Download the engine environment
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: engine-env
+          path: engine-env
+      - name: Export the engine environment for this shard
+        run: |
+          set -euo pipefail
+          test -f engine-env/include/pineforge/engine.hpp || { echo "artifact has no engine headers" >&2; exit 1; }
+          test -f engine-env/build/lib/libpineforge.a || { echo "artifact has no libpineforge.a" >&2; exit 1; }
+          test -d engine-env/corpus/data || { echo "artifact has no corpus data" >&2; exit 1; }
+          test -f engine-env/scripts/run_strategy.py || { echo "artifact has no engine scripts" >&2; exit 1; }
+          test -s "engine-env/shards/shard-${{ matrix.shard }}.txt" || { echo "shard ${{ matrix.shard }} is empty" >&2; exit 1; }
+          echo "PINEFORGE_ENGINE_LIB=$PWD/engine-env/build/lib/libpineforge.a" >> "$GITHUB_ENV"
+          echo "PINEFORGE_ENGINE_INCLUDE=$PWD/engine-env/include" >> "$GITHUB_ENV"
+          echo "PINEFORGE_ENGINE_CORPUS=$PWD/engine-env/corpus" >> "$GITHUB_ENV"
+          echo "PINEFORGE_SKIP_PROFILE=engine_built_shard_${{ matrix.shard }}" >> "$GITHUB_ENV"
+      - name: Assert the compile-environment skip gate is enabled
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          value = os.environ.get("PINEFORGE_SKIP_GATE", "").strip().lower()
+          if value == "off":
+              sys.stderr.write("PINEFORGE_SKIP_GATE=off is not allowed in CI: the skip gate must run\n")
+              sys.exit(1)
+          PY
+      - name: Run this shard with the engine present
         run: |
           set -eo pipefail
-          python -m pytest -q -rs 2>&1 | tee pytest.log
+          python -m pytest -q -rs $(cat "engine-env/shards/shard-${{ matrix.shard }}.txt") 2>&1 | tee pytest.log
           # Anchored to line start: the gate emits a leading empty line, since
           # pytest's -q progress line (".....[100%]") can lack a trailing newline.
           grep -q '^skip gate OK (default-deny)' pytest.log
 
   gate:
     if: always()
-    needs: [preflight-docs, differential, pytest, engine-built]
+    needs: [preflight-docs, differential, pytest, engine-build, engine-shard]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -276,19 +442,25 @@ jobs:
           DOCS_ONLY: ${{ needs.preflight-docs.outputs.docs_only }}
           DIFFERENTIAL_RESULT: ${{ needs.differential.result }}
           PYTEST_RESULT: ${{ needs.pytest.result }}
-          ENGINE_BUILT_RESULT: ${{ needs.engine-built.result }}
+          # `needs.<job>.result` for a MATRIX job is the WORST result across the
+          # matrix, so `engine-shard` reading `success` means EVERY shard
+          # succeeded (with `fail-fast: false` one failed shard makes it
+          # `failure`). A build that fails leaves the shards `skipped`, which is
+          # not `success` either, so a failed build fails the gate too.
+          ENGINE_BUILD_RESULT: ${{ needs.engine-build.result }}
+          ENGINE_SHARD_RESULT: ${{ needs.engine-shard.result }}
           SAME_REPO: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           set -euo pipefail
           state=failure
           description='Codegen gate did not pass'
           if [ "$PREFLIGHT_RESULT" = success ]; then
-            if [ "$DOCS_ONLY" = true ] && [ "$DIFFERENTIAL_RESULT" = skipped ] && [ "$PYTEST_RESULT" = skipped ] && [ "$ENGINE_BUILT_RESULT" = skipped ]; then
+            if [ "$DOCS_ONLY" = true ] && [ "$DIFFERENTIAL_RESULT" = skipped ] && [ "$PYTEST_RESULT" = skipped ] && [ "$ENGINE_BUILD_RESULT" = skipped ] && [ "$ENGINE_SHARD_RESULT" = skipped ]; then
               state=success
               description='docs-only preflight+docs; no sweep'
-            elif [ "$DOCS_ONLY" != true ] && [ "$SAME_REPO" = true ] && [ "$DIFFERENTIAL_RESULT" = success ] && [ "$PYTEST_RESULT" = success ] && [ "$ENGINE_BUILT_RESULT" = success ]; then
+            elif [ "$DOCS_ONLY" != true ] && [ "$SAME_REPO" = true ] && [ "$DIFFERENTIAL_RESULT" = success ] && [ "$PYTEST_RESULT" = success ] && [ "$ENGINE_BUILD_RESULT" = success ] && [ "$ENGINE_SHARD_RESULT" = success ]; then
               state=success
-              description='Full codegen differential gate, pytest and engine-built suite passed'
+              description='Full codegen differential gate, pytest and every engine-built shard passed'
             fi
           fi
           if [ "$state" != success ] && [ "$SAME_REPO" != true ]; then
