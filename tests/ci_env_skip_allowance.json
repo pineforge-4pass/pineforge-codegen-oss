@@ -1,18 +1,29 @@
 {
-  "_note": "Allowance for the compile-environment skip gate (tests/skip_gate.py). Keys are the EXACT skip reason text (not a normalised class) so a renamed reason is drift too. 'default' is the profile the engine-less hosted-CI pytest job runs; 'engine_built' is the profile the engine-built job runs and lists every reason at 0, so any compile-environment skip fails it. UNMEASURED: every count below is a placeholder written without a spot run; the supervisor replaces them from the measured run before the PR opens, and the gate fails loudly on any mismatch. Reasons were read from the pytest.skip(...) / pytestmark skipif calls in tests/.",
-  "_unmeasured": true,
+  "_note": "Allowance for the compile-environment skip gate (tests/skip_gate.py). Keys are the EXACT skip reason text (a renamed reason is drift too). 'default' is the profile the engine-less hosted-CI pytest job runs; its counts were MEASURED on a spot box on 2026-10-11 04:19 Taipei (c7i.4xlarge, Ubuntu 24.04, python 3.12, no engine variables set at all) - which is the same shape as the engine-less CI job, except that CI runs a python 3.11-3.14 matrix, so a count that moves with the interpreter is EXPECTED to differ there and the gate will say so by name. 'engine_built' lists every reason at 0 for the CI job that clones and builds the engine, so any compile-environment skip fails that job.",
+  "_unmeasured": false,
+  "_measured_on": "2026-10-11T04:19+08:00 spot c7i.4xlarge ap-southeast-1a, engine-less, no PINEFORGE_* set",
   "default": {
-    "No built libpineforge.a. Set PINEFORGE_ENGINE_LIB to the archive (or configure a build*/lib/ beside the engine checkout) to run the emitted translation unit.": 1131,
-    "built libpineforge not found; set PINEFORGE_ENGINE_LIB": 20,
-    "deriving the host members needs clang's AST dump; no clang++ found": 1,
-    "set PINEFORGE_ENGINE_INCLUDE plus a valid pineforge-engine corpus checkout (PINEFORGE_ENGINE_CORPUS, or sibling ../pineforge-engine/corpus). 162-strategy corpus is a private submodule of pineforge-engine; public clones do not include it.": 0,
-    "population sources require PINEFORGE_STRING_SETTINGS_SOURCES": 0
-  },
-  "engine_built": {
+    "PINEFORGE_ENGINE_INCLUDE not set or invalid. Point it at pineforge-engine/include (containing pineforge/engine.hpp).": 148,
+    "set PINEFORGE_ENGINE_INCLUDE (and ensure Eigen3 + a C++ compiler are reachable)": 43,
+    "set PINEFORGE_ENGINE_INCLUDE plus a valid pineforge-engine corpus checkout (PINEFORGE_ENGINE_CORPUS, or sibling ../pineforge-engine/corpus). 162-strategy corpus is a private submodule of pineforge-engine; public clones do not include it.": 1,
+    "PINEFORGE_ENGINE_CORPUS is needed for emitted-byte comparison": 1,
+    "input receipt corpus pin requires PINEFORGE_ENGINE_CORPUS": 1,
+    "population sources require PINEFORGE_STRING_SETTINGS_SOURCES": 6,
+    "engine include / compiler unavailable": 0,
     "No built libpineforge.a. Set PINEFORGE_ENGINE_LIB to the archive (or configure a build*/lib/ beside the engine checkout) to run the emitted translation unit.": 0,
     "built libpineforge not found; set PINEFORGE_ENGINE_LIB": 0,
-    "deriving the host members needs clang's AST dump; no clang++ found": 0,
+    "deriving the host members needs clang's AST dump; no clang++ found": 0
+  },
+  "engine_built": {
+    "PINEFORGE_ENGINE_INCLUDE not set or invalid. Point it at pineforge-engine/include (containing pineforge/engine.hpp).": 0,
+    "set PINEFORGE_ENGINE_INCLUDE (and ensure Eigen3 + a C++ compiler are reachable)": 0,
     "set PINEFORGE_ENGINE_INCLUDE plus a valid pineforge-engine corpus checkout (PINEFORGE_ENGINE_CORPUS, or sibling ../pineforge-engine/corpus). 162-strategy corpus is a private submodule of pineforge-engine; public clones do not include it.": 0,
-    "population sources require PINEFORGE_STRING_SETTINGS_SOURCES": 0
+    "PINEFORGE_ENGINE_CORPUS is needed for emitted-byte comparison": 0,
+    "input receipt corpus pin requires PINEFORGE_ENGINE_CORPUS": 0,
+    "population sources require PINEFORGE_STRING_SETTINGS_SOURCES": 0,
+    "engine include / compiler unavailable": 0,
+    "No built libpineforge.a. Set PINEFORGE_ENGINE_LIB to the archive (or configure a build*/lib/ beside the engine checkout) to run the emitted translation unit.": 0,
+    "built libpineforge not found; set PINEFORGE_ENGINE_LIB": 0,
+    "deriving the host members needs clang's AST dump; no clang++ found": 0
   }
 }

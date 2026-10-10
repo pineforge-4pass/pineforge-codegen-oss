@@ -49,6 +49,13 @@ ALLOWANCE_PATH = Path(__file__).resolve().parent / "ci_env_skip_allowance.json"
 # and generated headers, the compiler/AST tooling, the parity corpus and the
 # population-sources directory a compile or byte-comparison test needs.
 COMPILE_ENV_PATTERNS = (
+    # Added 10-11 04:20 after a spot run proved the list was incomplete: on a machine with NO
+    # engine variables set at all, the tests skip at the INCLUDE check, not at the library check,
+    # and those skips were invisible to this gate (191 of them in one run) - a hole of exactly the
+    # class the gate exists to close. The include check comes first, so its wording, not the
+    # library's, is what hosted CI actually produces.
+    "PINEFORGE_ENGINE_INCLUDE",
+    "engine include / compiler unavailable",
     "No built libpineforge.a",
     "set PINEFORGE_ENGINE_LIB",
     "no clang++",
