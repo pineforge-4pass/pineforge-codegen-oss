@@ -16,7 +16,7 @@
 // (hour==23, minute==45) closes all. ≥10 cycles over 36k bars.
 //
 // TV setup: 15m chart, ETH-USDT-USDT, same window as
-// data/ohlcv_ETH-USDT-USDT_15m.csv. Manual TV capture later.
+// data/ohlcv_ETH-USDT-USDT_15m.csv. TradingView strategy report for this window.
 //@version=6
 strategy("PF Pyramid carry 02 - cash fractional", shorttitle="PYR_p02_CASH", overlay=true,
      initial_capital=1000000, currency=currency.USD,
