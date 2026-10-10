@@ -125,8 +125,18 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install with dev extras
         run: python -m pip install -e ".[dev]"
+      - name: Assert the compile-environment skip gate is enabled
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          value = os.environ.get("PINEFORGE_SKIP_GATE", "").strip().lower()
+          if value == "off":
+              sys.stderr.write("PINEFORGE_SKIP_GATE=off is not allowed in CI: the skip gate must run\n")
+              sys.exit(1)
+          PY
       - name: Run test suite
-        run: python -m pytest -q
+        run: python -m pytest -q -rs
 
   gate:
     if: always()

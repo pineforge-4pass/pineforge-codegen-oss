@@ -1,0 +1,18 @@
+{
+  "_note": "Allowance for the compile-environment skip gate (tests/skip_gate.py). Keys are the EXACT skip reason text (not a normalised class) so a renamed reason is drift too. 'default' is the profile the engine-less hosted-CI pytest job runs; 'engine_built' is the profile the engine-built job runs and lists every reason at 0, so any compile-environment skip fails it. UNMEASURED: every count below is a placeholder written without a spot run; the supervisor replaces them from the measured run before the PR opens, and the gate fails loudly on any mismatch. Reasons were read from the pytest.skip(...) / pytestmark skipif calls in tests/.",
+  "_unmeasured": true,
+  "default": {
+    "No built libpineforge.a. Set PINEFORGE_ENGINE_LIB to the archive (or configure a build*/lib/ beside the engine checkout) to run the emitted translation unit.": 1131,
+    "built libpineforge not found; set PINEFORGE_ENGINE_LIB": 20,
+    "deriving the host members needs clang's AST dump; no clang++ found": 1,
+    "set PINEFORGE_ENGINE_INCLUDE plus a valid pineforge-engine corpus checkout (PINEFORGE_ENGINE_CORPUS, or sibling ../pineforge-engine/corpus). 162-strategy corpus is a private submodule of pineforge-engine; public clones do not include it.": 0,
+    "population sources require PINEFORGE_STRING_SETTINGS_SOURCES": 0
+  },
+  "engine_built": {
+    "No built libpineforge.a. Set PINEFORGE_ENGINE_LIB to the archive (or configure a build*/lib/ beside the engine checkout) to run the emitted translation unit.": 0,
+    "built libpineforge not found; set PINEFORGE_ENGINE_LIB": 0,
+    "deriving the host members needs clang's AST dump; no clang++ found": 0,
+    "set PINEFORGE_ENGINE_INCLUDE plus a valid pineforge-engine corpus checkout (PINEFORGE_ENGINE_CORPUS, or sibling ../pineforge-engine/corpus). 162-strategy corpus is a private submodule of pineforge-engine; public clones do not include it.": 0,
+    "population sources require PINEFORGE_STRING_SETTINGS_SOURCES": 0
+  }
+}
