@@ -138,6 +138,8 @@ jobs:
         run: |
           set -eo pipefail
           python -m pytest -q -rs 2>&1 | tee pytest.log
+          # Anchored to line start: the gate emits a leading empty line, since
+          # pytest's -q progress line (".....[100%]") can lack a trailing newline.
           grep -q '^skip gate OK (default-deny)' pytest.log
 
   gate:

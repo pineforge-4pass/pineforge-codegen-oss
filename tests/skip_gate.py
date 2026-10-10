@@ -293,6 +293,9 @@ def pytest_sessionfinish(session, exitstatus):
     problems, observed = run_gate(terminalreporter)
 
     if problems is None:  # gate disabled
+        # Leading empty line: pytest's -q progress output (".....[100%]") can
+        # lack a trailing newline, which would glue this verdict to it.
+        _emit(terminalreporter, [""])
         _emit(
             terminalreporter,
             ["skip gate DISABLED (PINEFORGE_SKIP_GATE=off): no skip verdict was produced"],
@@ -306,6 +309,8 @@ def pytest_sessionfinish(session, exitstatus):
     }
 
     if problems:
+        # Leading empty line: pytest's -q progress output (".....[100%]") can
+        # lack a trailing newline, which would glue this verdict to it.
         _emit(terminalreporter, [""])
         _emit(
             terminalreporter,
@@ -325,6 +330,9 @@ def pytest_sessionfinish(session, exitstatus):
         session.exitstatus = 1
         return
 
+    # Leading empty line: pytest's -q progress output (".....[100%]") can lack
+    # a trailing newline, which would glue this verdict to it.
+    _emit(terminalreporter, [""])
     _emit(
         terminalreporter,
         [
