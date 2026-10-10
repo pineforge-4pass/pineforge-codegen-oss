@@ -158,7 +158,11 @@ jobs:
     needs: preflight-docs
     if: needs.preflight-docs.outputs.docs_only != 'true' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The suite is minutes-to-hours: the engine-less run alone took 47 minutes
+    # with 1,181 skips, and building the engine turns 1,131 of those skips into
+    # real work (plus the corpus's compile tests), on a 4-vCPU hosted runner.
+    # 360 is GitHub's maximum for a hosted job.
+    timeout-minutes: 360
     permissions:
       contents: read
     strategy:
@@ -190,6 +194,15 @@ jobs:
           set -euo pipefail
           git clone https://github.com/pineforge-4pass/pineforge-engine.git engine
           git -C engine checkout "$ENGINE_COMMIT"
+          # The corpus must live INSIDE the engine checkout, at <engine
+          # root>/corpus: the e2e harness (tests/_e2e.py) and the engine's own
+          # derive_corpus_feeds.py both resolve it there, so a corpus fetched
+          # beside the engine leaves engine/corpus an empty gitlink and every
+          # e2e test skips for want of its 1m feed. The engine's .gitmodules
+          # already points the `corpus` submodule at the public HTTPS URL, so
+          # no URL rewrite is needed; the update checks out the pinned gitlink.
+          git -C engine submodule update --init corpus
+          git -C engine/corpus checkout "$CORPUS_COMMIT"
           cmake -B build -S engine -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j"$(nproc)"
           lib="$(find "$PWD/build" -name libpineforge.a -print -quit)"
@@ -200,14 +213,14 @@ jobs:
           echo "libpineforge.a at: $lib"
           echo "PINEFORGE_ENGINE_LIB=$lib" >> "$GITHUB_ENV"
           echo "PINEFORGE_ENGINE_INCLUDE=$PWD/engine/include" >> "$GITHUB_ENV"
-      - name: Clone the public parity corpus at the engine's pinned gitlink
+          echo "PINEFORGE_ENGINE_CORPUS=$PWD/engine/corpus" >> "$GITHUB_ENV"
+      - name: Assert the public parity corpus is present under the engine
         run: |
           set -euo pipefail
-          git clone https://github.com/pineforge-4pass/pineforge-corpus.git corpus
-          git -C corpus checkout "$CORPUS_COMMIT"
-          # The corpus resolver requires a `data/` directory under the root.
-          test -d corpus/data || { echo "no data/ under the pinned corpus checkout" >&2; exit 1; }
-          echo "PINEFORGE_ENGINE_CORPUS=$PWD/corpus" >> "$GITHUB_ENV"
+          # The corpus resolver and the e2e harness require a `data/` tree
+          # under the root the harness resolves: <engine root>/corpus/data.
+          test -d "$PINEFORGE_ENGINE_CORPUS/data" || { echo "no data/ under $PINEFORGE_ENGINE_CORPUS" >&2; exit 1; }
+          test -f "$PINEFORGE_ENGINE_CORPUS/data/ohlcv_ETH-USDT-USDT_1m.csv" || { echo "the corpus is missing its 1m feed" >&2; exit 1; }
       - name: Assert the built library exists
         run: |
           set -euo pipefail
