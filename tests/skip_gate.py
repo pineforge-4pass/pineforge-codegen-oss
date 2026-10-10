@@ -27,8 +27,10 @@ profile is kept only for a manual run, not for CI).
 
 ``classify`` and ``COMPILE_ENV_PATTERNS`` remain, but only to LABEL the log
 lines and to enforce, for an ``engine_built*`` profile, that every
-compile-environment reason is pinned at 0.  They never decide pass or fail
-otherwise: the decision is the table below alone.
+compile-environment reason building the engine removes is pinned at 0 -- the
+ones it cannot remove (``ENGINE_BUILD_KEEPS``: the population-string-settings
+sources, which are not public) keep their measured count.  They never decide
+pass or fail otherwise: the decision is the table below alone.
 
 The session FAILS (non-zero exit) when:
 
@@ -40,8 +42,11 @@ The session FAILS (non-zero exit) when:
   (e) the selected profile is missing or empty, or the allowance file is
       missing or unreadable;
   (f) the selected profile's name starts with ``engine_built`` and it allows
-      a nonzero count for any compile-environment reason (building the engine
-      must remove every one, so a nonzero allowance fails the run).
+      a nonzero count for any compile-environment reason building the engine
+      must remove -- that is, every such reason EXCEPT the ones it cannot
+      remove (``ENGINE_BUILD_KEEPS``: the population-string-settings sources,
+      which are not public), each of which keeps its measured count.  A
+      nonzero allowance for a reason the build removes fails the run.
 
 The gate is ON by default and may be turned off only with
 ``PINEFORGE_SKIP_GATE=off`` -- the CI workflow asserts that variable is not
@@ -62,7 +67,9 @@ ALLOWANCE_PATH = Path(__file__).resolve().parent / "ci_env_skip_allowance.json"
 # these knobs (case-insensitive substring match).  This list is NO LONGER a
 # decision: the gate is default-deny, so an unknown reason fails wherever it
 # comes from.  The class only LABELS the log lines and names the reasons the
-# ``engine_built`` profile pins at 0.  It is deliberately exhaustive about
+# ``engine_built`` profile pins at 0 -- apart from ``ENGINE_BUILD_KEEPS``, the
+# compile-environment reasons building the engine cannot remove, which keep
+# their measured count.  It is deliberately exhaustive about
 # *wording families*: the engine library archive, the Eigen and generated
 # headers, the compiler/AST tooling, the parity corpus and the
 # population-sources directory a compile or byte-comparison test needs.
@@ -83,6 +90,11 @@ COMPILE_ENV_PATTERNS = (
 )
 
 CLASS_COMPILE_ENV = "COMPILE-ENVIRONMENT"
+
+# Compile-environment reasons that building the engine does NOT remove: the population
+# sources the string-settings tests read are not public, so those six skips stay real in an
+# engine-built run and an engine_built* profile pins them at their measured count, not at 0.
+ENGINE_BUILD_KEEPS = ("PINEFORGE_STRING_SETTINGS_SOURCES", "population sources require")
 
 GATE_ENV = "PINEFORGE_SKIP_GATE"
 PROFILE_ENV = "PINEFORGE_SKIP_PROFILE"
@@ -107,8 +119,10 @@ def classify(reason):
     Matching is a case-insensitive substring test against
     ``COMPILE_ENV_PATTERNS``.  It labels the log lines and, for an
     ``engine_built*`` profile, enforces that every compile-environment reason
-    is pinned at 0 (see ``check``); otherwise the decision keys on the *exact*
-    reason text against the selected profile.
+    building the engine removes is pinned at 0 -- the ones it cannot remove
+    (``ENGINE_BUILD_KEEPS``) keep their measured count (see ``check``);
+    otherwise the decision keys on the *exact* reason text against the
+    selected profile.
     """
     if not reason:
         return None
@@ -181,14 +195,19 @@ def observed_counts(skipped_reports):
 def check(profile, observed, *, summary_present=True, profile_name=None):
     """Compare observed skip counts against a profile; return a problem list.
 
-    DEFAULT-DENY: this does not consult ``classify`` or any pattern list --
-    EVERY observed reason must be a key of the profile, with the exact count.
+    DEFAULT-DENY: the table alone decides -- EVERY observed reason must be a
+    key of the profile, with the exact count.  (``classify`` and
+    ``ENGINE_BUILD_KEEPS`` are consulted only by the extra ``engine_built`` rule
+    below, never to decide pass or fail on their own.)
     ``profile`` maps an exact reason text to its expected count; ``observed``
     maps an exact reason text to its count.  An empty list means PASS.
 
     When ``profile_name`` starts with ``engine_built``, any compile-environment
-    reason (per ``classify``) allowed a NONZERO count is a problem: building the
-    engine and pinning the corpus must remove every such skip.
+    reason (per ``classify``) allowed a NONZERO count is a problem -- EXCEPT the
+    reasons building the engine cannot remove (``ENGINE_BUILD_KEEPS``: the
+    population-string-settings sources, which are not public), which keep their
+    measured count: building the engine and pinning the corpus must remove every
+    other such skip.
     """
     if not isinstance(profile, dict):
         return ["the selected allowance profile is missing or empty"]
@@ -225,15 +244,18 @@ def check(profile, observed, *, summary_present=True, profile_name=None):
                 f"count mismatch: {reason!r} expected {expected}, observed {got}"
             )
 
-    # (f) an engine_built profile must pin every compile-environment reason at 0:
-    # building the engine is exactly what removes them, so a nonzero allowance
-    # is a broken gate, not a tolerance.
+    # (f) an engine_built profile must pin every compile-environment reason at 0
+    # EXCEPT the reasons building the engine cannot remove (``ENGINE_BUILD_KEEPS``:
+    # the population-string-settings sources, which are not public): building the
+    # engine removes every other one, so a nonzero allowance for one is a broken
+    # gate, not a tolerance.
     if profile_name is not None and str(profile_name).startswith("engine_built"):
         for reason, expected in sorted(profile.items()):
             if (
                 isinstance(expected, int)
                 and expected != 0
                 and classify(reason) == CLASS_COMPILE_ENV
+                and not any(p.lower() in str(reason).lower() for p in ENGINE_BUILD_KEEPS)
             ):
                 problems.append(
                     f"engine_built profile {profile_name!r} allows {expected} "
