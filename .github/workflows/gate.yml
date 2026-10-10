@@ -185,10 +185,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install with dev extras
         run: python -m pip install -e ".[dev]"
-      - name: Install the compile toolchain and Eigen
+      - name: Install the compile toolchain, Eigen and git-lfs
         run: |
           sudo apt-get update
-          sudo apt-get install -y libeigen3-dev clang cmake g++ ninja-build
+          sudo apt-get install -y libeigen3-dev clang cmake g++ ninja-build git-lfs
+          git lfs install --skip-repo
       - name: Clone and build the paired engine
         run: |
           set -euo pipefail
@@ -203,6 +204,12 @@ jobs:
           # no URL rewrite is needed; the update checks out the pinned gitlink.
           git -C engine submodule update --init corpus
           git -C engine/corpus checkout "$CORPUS_COMMIT"
+          # The corpus's 1m feed is stored in Git LFS: a plain clone/submodule
+          # update leaves a ~130-byte POINTER at data/ohlcv_ETH-USDT-USDT_1m.csv
+          # that passes a bare `test -f`, while the ~176 MB of data the e2e
+          # harness needs is absent. Pull the pinned commit's LFS objects so the
+          # real feed is on disk; the assertion below then re-checks its size.
+          git -C engine/corpus lfs pull
           cmake -B build -S engine -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j"$(nproc)"
           lib="$(find "$PWD/build" -name libpineforge.a -print -quit)"
@@ -220,7 +227,15 @@ jobs:
           # The corpus resolver and the e2e harness require a `data/` tree
           # under the root the harness resolves: <engine root>/corpus/data.
           test -d "$PINEFORGE_ENGINE_CORPUS/data" || { echo "no data/ under $PINEFORGE_ENGINE_CORPUS" >&2; exit 1; }
-          test -f "$PINEFORGE_ENGINE_CORPUS/data/ohlcv_ETH-USDT-USDT_1m.csv" || { echo "the corpus is missing its 1m feed" >&2; exit 1; }
+          # A bare `test -f` is not enough: the feed is stored in Git LFS, so an
+          # unsmudged ~130-byte pointer satisfies it while the data is absent.
+          # Mirror the harness (tests/_e2e.py: `feed.stat().st_size < 1_000_000`)
+          # and require a real file of at least 1,000,000 bytes.
+          feed="$PINEFORGE_ENGINE_CORPUS/data/ohlcv_ETH-USDT-USDT_1m.csv"
+          if [ ! -f "$feed" ] || [ "$(stat -c%s "$feed")" -lt 1000000 ]; then
+            echo "the corpus 1m feed is missing or an unsmudged LFS pointer (need >= 1000000 bytes): $feed" >&2
+            exit 1
+          fi
       - name: Assert the built library exists
         run: |
           set -euo pipefail
