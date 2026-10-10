@@ -14,7 +14,7 @@
 // exit on EMA cross-under. ≥10 cycles over 36k bars.
 //
 // TV setup: 15m chart, ETH-USDT-USDT, same window as
-// data/ohlcv_ETH-USDT-USDT_15m.csv. Manual TV capture later.
+// data/ohlcv_ETH-USDT-USDT_15m.csv. TradingView strategy report for this window.
 //@version=6
 strategy("PF process-orders 01 - on_close=false", shorttitle="POC_p01_FALSE", overlay=true,
      initial_capital=1000000, currency=currency.USD,

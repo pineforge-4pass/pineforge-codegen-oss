@@ -15,7 +15,7 @@
 // bars.
 //
 // TV setup: 15m chart, ETH-USDT-USDT, same window as
-// data/ohlcv_ETH-USDT-USDT_15m.csv. Manual TV capture later.
+// data/ohlcv_ETH-USDT-USDT_15m.csv. TradingView strategy report for this window.
 //@version=6
 strategy("PF process-orders 02 - on_close=true", shorttitle="POC_p02_TRUE", overlay=true,
      initial_capital=1000000, currency=currency.USD,

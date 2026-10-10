@@ -18,7 +18,7 @@
 // next bar after the flat reset.
 //
 // TV setup: 15m chart, ETH-USDT-USDT, same window as
-// data/ohlcv_ETH-USDT-USDT_15m.csv. Manual TV capture later.
+// data/ohlcv_ETH-USDT-USDT_15m.csv. TradingView strategy report for this window.
 //@version=6
 strategy("PF Pyramid carry 01 - deferred flip", shorttitle="PYR_p01_FLIP", overlay=true,
      initial_capital=1000000, currency=currency.USD,
