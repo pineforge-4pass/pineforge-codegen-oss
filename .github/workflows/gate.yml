@@ -5,7 +5,9 @@ on:
   schedule:
     - cron: "27 5 * * *"
   pull_request_target:
-    types: [opened, synchronize, reopened, edited, ready_for_review]
+    # `edited` is deliberately absent: an edit to a PR's title or body used to
+    # re-run this whole workflow, LFS pull and engine build included.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions: {}
 
@@ -195,7 +197,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libeigen3-dev clang cmake g++ ninja-build git-lfs
           git lfs install --skip-repo
-      - name: Clone and build the paired engine
+      - name: Clone the paired engine and check out its pinned corpus
         run: |
           set -euo pipefail
           git clone https://github.com/pineforge-4pass/pineforge-engine.git engine
@@ -209,12 +211,31 @@ jobs:
           # no URL rewrite is needed; the update checks out the pinned gitlink.
           git -C engine submodule update --init corpus
           git -C engine/corpus checkout "$CORPUS_COMMIT"
-          # The corpus's 1m feed is stored in Git LFS: a plain clone/submodule
-          # update leaves a ~130-byte POINTER at data/ohlcv_ETH-USDT-USDT_1m.csv
-          # that passes a bare `test -f`, while the ~176 MB of data the e2e
-          # harness needs is absent. Pull the pinned commit's LFS objects so the
-          # real feed is on disk; the assertion below then re-checks its size.
+      # The corpus's 1m feed is stored in Git LFS: a plain clone/submodule
+      # update leaves a ~130-byte POINTER at data/ohlcv_ETH-USDT-USDT_1m.csv
+      # that passes a bare `test -f`, while the ~176 MB of data the e2e
+      # harness needs is absent. `corpus` is a SUBMODULE, so its LFS store is
+      # the submodule's own git dir, engine/.git/modules/corpus/lfs/objects
+      # (not engine/corpus/.git/...): cache exactly that store, keyed by the
+      # pinned gitlink sha the job already exports as CORPUS_COMMIT. The key is
+      # content-addressed, so the objects are pulled only when CORPUS_COMMIT
+      # moves; a restored cache turns the `lfs pull` below into a no-op, and
+      # the >= 1000000-byte feed assert that follows re-checks the real bytes.
+      # The cache step MUST sit before the pull.
+      - name: Restore the corpus LFS object cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: engine/.git/modules/corpus/lfs/objects
+          key: corpus-lfs-${{ env.CORPUS_COMMIT }}
+      # The pull still runs: it is what smudges the pointer files into the real
+      # feed on disk, and with a cache hit it downloads nothing.
+      - name: Pull the pinned corpus LFS objects
+        run: |
+          set -euo pipefail
           git -C engine/corpus lfs pull
+      - name: Build the paired engine
+        run: |
+          set -euo pipefail
           cmake -B build -S engine -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j"$(nproc)" --target pineforge
           lib="$(find "$PWD/build" -name libpineforge.a -print -quit)"
