@@ -35,19 +35,37 @@
     "got empty parameter set for (pine_file)": 1
   },
   "engine_built_shard_0": {
-    "_note": "MEASURED: engine_built_shard_0 is the profile the `engine-shard` matrix job runs for shard 0 of 10, and these are that shard's OWN observed skip rows from run 38099268385. A shard runs only its own hash slice of the collected test files, so it lists exactly the reasons its slice produced. The compile-environment rows are absent or 0 because the shard extracts the built engine and the pinned public corpus from the `engine-env` artifact, which removes every one. This shard's skip population is EMPTY, which is correct: with a summary present and no skips, default-deny passes.",
+    "_note": "MEASURED: engine_built_shard_0 is the profile the `engine-shard` matrix job runs for shard 0 of 10, and these are that shard's OWN observed skip rows from run 38099268385. A shard runs only its own hash slice of the collected test files, so it lists exactly the reasons its slice produced. The compile-environment rows are absent or 0 because the shard extracts the built engine and the pinned public corpus from the `engine-env` artifact, which removes every one. The shard observed no skips; the profile carries the six compile-environment rows at 0 because the gate rejects a profile with no reason rows at all, so the zero rows are what makes an observing-nothing shard legal.",
     "_unmeasured": false,
-    "_measured_on": "MEASURED on run 38099268385, shard 0 (engine-shard matrix leg), 2026-10-11"
+    "_measured_on": "MEASURED on run 38099268385, shard 0 (engine-shard matrix leg), 2026-10-11",
+    "PINEFORGE_ENGINE_INCLUDE not set or invalid. Point it at pineforge-engine/include (containing pineforge/engine.hpp).": 0,
+    "set PINEFORGE_ENGINE_INCLUDE (and ensure Eigen3 + a C++ compiler are reachable)": 0,
+    "PINEFORGE_ENGINE_CORPUS is needed for emitted-byte comparison": 0,
+    "set PINEFORGE_ENGINE_INCLUDE plus a valid pineforge-engine corpus checkout (PINEFORGE_ENGINE_CORPUS, or sibling ../pineforge-engine/corpus). 162-strategy corpus is a private submodule of pineforge-engine; public clones do not include it.": 0,
+    "input receipt corpus pin requires PINEFORGE_ENGINE_CORPUS": 0,
+    "engine include / compiler unavailable": 0
   },
   "engine_built_shard_1": {
-    "_note": "MEASURED: engine_built_shard_1 is the profile the `engine-shard` matrix job runs for shard 1 of 10, and these are that shard's OWN observed skip rows from run 38099268385. A shard runs only its own hash slice of the collected test files, so it lists exactly the reasons its slice produced. The compile-environment rows are absent or 0 because the shard extracts the built engine and the pinned public corpus from the `engine-env` artifact, which removes every one. This shard's skip population is EMPTY, which is correct: with a summary present and no skips, default-deny passes.",
+    "_note": "MEASURED: engine_built_shard_1 is the profile the `engine-shard` matrix job runs for shard 1 of 10, and these are that shard's OWN observed skip rows from run 38099268385. A shard runs only its own hash slice of the collected test files, so it lists exactly the reasons its slice produced. The compile-environment rows are absent or 0 because the shard extracts the built engine and the pinned public corpus from the `engine-env` artifact, which removes every one. The shard observed no skips; the profile carries the six compile-environment rows at 0 because the gate rejects a profile with no reason rows at all, so the zero rows are what makes an observing-nothing shard legal.",
     "_unmeasured": false,
-    "_measured_on": "MEASURED on run 38099268385, shard 1 (engine-shard matrix leg), 2026-10-11"
+    "_measured_on": "MEASURED on run 38099268385, shard 1 (engine-shard matrix leg), 2026-10-11",
+    "PINEFORGE_ENGINE_INCLUDE not set or invalid. Point it at pineforge-engine/include (containing pineforge/engine.hpp).": 0,
+    "set PINEFORGE_ENGINE_INCLUDE (and ensure Eigen3 + a C++ compiler are reachable)": 0,
+    "PINEFORGE_ENGINE_CORPUS is needed for emitted-byte comparison": 0,
+    "set PINEFORGE_ENGINE_INCLUDE plus a valid pineforge-engine corpus checkout (PINEFORGE_ENGINE_CORPUS, or sibling ../pineforge-engine/corpus). 162-strategy corpus is a private submodule of pineforge-engine; public clones do not include it.": 0,
+    "input receipt corpus pin requires PINEFORGE_ENGINE_CORPUS": 0,
+    "engine include / compiler unavailable": 0
   },
   "engine_built_shard_2": {
-    "_note": "MEASURED: engine_built_shard_2 is the profile the `engine-shard` matrix job runs for shard 2 of 10, and these are that shard's OWN observed skip rows from run 38099268385. A shard runs only its own hash slice of the collected test files, so it lists exactly the reasons its slice produced. The compile-environment rows are absent or 0 because the shard extracts the built engine and the pinned public corpus from the `engine-env` artifact, which removes every one. This shard's skip population is EMPTY, which is correct: with a summary present and no skips, default-deny passes.",
+    "_note": "MEASURED: engine_built_shard_2 is the profile the `engine-shard` matrix job runs for shard 2 of 10, and these are that shard's OWN observed skip rows from run 38099268385. A shard runs only its own hash slice of the collected test files, so it lists exactly the reasons its slice produced. The compile-environment rows are absent or 0 because the shard extracts the built engine and the pinned public corpus from the `engine-env` artifact, which removes every one. The shard observed no skips; the profile carries the six compile-environment rows at 0 because the gate rejects a profile with no reason rows at all, so the zero rows are what makes an observing-nothing shard legal.",
     "_unmeasured": false,
-    "_measured_on": "MEASURED on run 38099268385, shard 2 (engine-shard matrix leg), 2026-10-11"
+    "_measured_on": "MEASURED on run 38099268385, shard 2 (engine-shard matrix leg), 2026-10-11",
+    "PINEFORGE_ENGINE_INCLUDE not set or invalid. Point it at pineforge-engine/include (containing pineforge/engine.hpp).": 0,
+    "set PINEFORGE_ENGINE_INCLUDE (and ensure Eigen3 + a C++ compiler are reachable)": 0,
+    "PINEFORGE_ENGINE_CORPUS is needed for emitted-byte comparison": 0,
+    "set PINEFORGE_ENGINE_INCLUDE plus a valid pineforge-engine corpus checkout (PINEFORGE_ENGINE_CORPUS, or sibling ../pineforge-engine/corpus). 162-strategy corpus is a private submodule of pineforge-engine; public clones do not include it.": 0,
+    "input receipt corpus pin requires PINEFORGE_ENGINE_CORPUS": 0,
+    "engine include / compiler unavailable": 0
   },
   "engine_built_shard_3": {
     "_note": "MEASURED: engine_built_shard_3 is the profile the `engine-shard` matrix job runs for shard 3 of 10, and these are that shard's OWN observed skip rows from run 38099268385. A shard runs only its own hash slice of the collected test files, so it lists exactly the reasons its slice produced. The compile-environment rows are absent or 0 because the shard extracts the built engine and the pinned public corpus from the `engine-env` artifact, which removes every one.",
@@ -68,9 +86,15 @@
     "the pre-lane codegen (7a39cb3cfe18) is not in this checkout's history": 25
   },
   "engine_built_shard_6": {
-    "_note": "MEASURED: engine_built_shard_6 is the profile the `engine-shard` matrix job runs for shard 6 of 10, and these are that shard's OWN observed skip rows from run 38099268385. A shard runs only its own hash slice of the collected test files, so it lists exactly the reasons its slice produced. The compile-environment rows are absent or 0 because the shard extracts the built engine and the pinned public corpus from the `engine-env` artifact, which removes every one. This shard's skip population is EMPTY, which is correct: with a summary present and no skips, default-deny passes.",
+    "_note": "MEASURED: engine_built_shard_6 is the profile the `engine-shard` matrix job runs for shard 6 of 10, and these are that shard's OWN observed skip rows from run 38099268385. A shard runs only its own hash slice of the collected test files, so it lists exactly the reasons its slice produced. The compile-environment rows are absent or 0 because the shard extracts the built engine and the pinned public corpus from the `engine-env` artifact, which removes every one. The shard observed no skips; the profile carries the six compile-environment rows at 0 because the gate rejects a profile with no reason rows at all, so the zero rows are what makes an observing-nothing shard legal.",
     "_unmeasured": false,
-    "_measured_on": "MEASURED on run 38099268385, shard 6 (engine-shard matrix leg), 2026-10-11"
+    "_measured_on": "MEASURED on run 38099268385, shard 6 (engine-shard matrix leg), 2026-10-11",
+    "PINEFORGE_ENGINE_INCLUDE not set or invalid. Point it at pineforge-engine/include (containing pineforge/engine.hpp).": 0,
+    "set PINEFORGE_ENGINE_INCLUDE (and ensure Eigen3 + a C++ compiler are reachable)": 0,
+    "PINEFORGE_ENGINE_CORPUS is needed for emitted-byte comparison": 0,
+    "set PINEFORGE_ENGINE_INCLUDE plus a valid pineforge-engine corpus checkout (PINEFORGE_ENGINE_CORPUS, or sibling ../pineforge-engine/corpus). 162-strategy corpus is a private submodule of pineforge-engine; public clones do not include it.": 0,
+    "input receipt corpus pin requires PINEFORGE_ENGINE_CORPUS": 0,
+    "engine include / compiler unavailable": 0
   },
   "engine_built_shard_7": {
     "_note": "MEASURED: engine_built_shard_7 is the profile the `engine-shard` matrix job runs for shard 7 of 10, and these are that shard's OWN observed skip rows from run 38099268385. A shard runs only its own hash slice of the collected test files, so it lists exactly the reasons its slice produced. The compile-environment rows are absent or 0 because the shard extracts the built engine and the pinned public corpus from the `engine-env` artifact, which removes every one. The 'population sources require PINEFORGE_STRING_SETTINGS_SOURCES' row is 6 because that knob's sources are not public, so the build cannot close it (ENGINE_BUILD_KEEPS in tests/skip_gate.py).",
@@ -83,7 +107,7 @@
     "_note": "MEASURED: engine_built_shard_8 is the profile the `engine-shard` matrix job runs for shard 8 of 10, and these are that shard's OWN observed skip rows from run 38099268385. A shard runs only its own hash slice of the collected test files, so it lists exactly the reasons its slice produced. The compile-environment rows are absent or 0 because the shard extracts the built engine and the pinned public corpus from the `engine-env` artifact, which removes every one.",
     "_unmeasured": false,
     "_measured_on": "MEASURED on run 38099268385, shard 8 (engine-shard matrix leg), 2026-10-11",
-    "the pre-lane codegen (7a39cb3cfe18) is not in this checkout's history": 1,
+    "the pre-lane codegen (7a39cb3) is not in this checkout's history": 1,
     "got empty parameter set for (case_name)": 2
   },
   "engine_built_shard_9": {

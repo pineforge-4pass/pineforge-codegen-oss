@@ -53,6 +53,13 @@ def test_engine_built_profiles_pass_the_gate_on_their_own_counts():
 
     failures = []
     for name in names:
+        # A profile with no usable reason rows (missing or empty) is rejected by
+        # the gate's real path: ``profile_entries`` returns None and the profile
+        # would silently allow nothing.  Fail here instead of passing silently.
+        assert skip_gate.profile_entries(allowance, name) is not None, (
+            f"{name} has no usable reason rows "
+            "(profile_entries returned None)"
+        )
         rows = _rows(allowance[name])
         problems = skip_gate.check(
             rows, rows, summary_present=True, profile_name=name
