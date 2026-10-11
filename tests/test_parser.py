@@ -1,7 +1,6 @@
 """Tests for the rewritten PineScript v6 parser (Tasks 5 & 6)."""
 
-import glob
-import os
+import functools
 import re
 
 import pytest
@@ -9,6 +8,7 @@ import pytest
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from pineforge_codegen.ast_nodes import *
+from tests._e2e import engine_root
 
 
 def _parse_expr(src: str):
@@ -344,11 +344,48 @@ def test_parse_series_float_param_single_name():
     assert fd.params == ["src", "fast"]
 
 
-BASIC_STRATEGIES = sorted(glob.glob("pineforge-engine/corpus/basic/*/strategy.pine"))
+# The strategies to parse are the paired engine's corpus, found from the engine
+# checkout the suite already resolves (tests/_e2e.py engine_root():
+# PINEFORGE_ENGINE_INCLUDE, else a sibling checkout), never from the working
+# directory: a glob against it matched nothing wherever pytest started outside a
+# directory holding a `pineforge-engine` checkout, and pytest reported the empty
+# parameter set as one silent skip. The public corpus keeps its verified
+# strategies under `corpus/validation/` (the `corpus/basic/` this test is named
+# for went with the private-era layout). No engine checkout is the one skip; an
+# engine checkout with no strategy there (corpus submodule not initialised, a
+# renamed bucket) is one failing case, naming the path.
+_CORPUS_BUCKET = "validation"
+_ENGINE_ROOT = engine_root()
+_CORPUS_DIR = None if _ENGINE_ROOT is None else _ENGINE_ROOT / "corpus" / _CORPUS_BUCKET
+BASIC_STRATEGIES = [] if _CORPUS_DIR is None else sorted(_CORPUS_DIR.glob("*/strategy.pine"))
+
+if _CORPUS_DIR is None:
+    _BASIC_PARAMS = [pytest.param(None, id="no-engine-checkout", marks=pytest.mark.skip(
+        reason="no engine checkout: PINEFORGE_ENGINE_INCLUDE is not set or invalid "
+               "and no sibling pineforge-engine was found; point it at "
+               "pineforge-engine/include to parse the engine corpus"))]
+elif not BASIC_STRATEGIES:
+    _BASIC_PARAMS = [pytest.param(None, id="corpus-missing")]
+else:
+    _BASIC_PARAMS = [pytest.param(str(p), id=p.parent.name) for p in BASIC_STRATEGIES]
 
 
-@pytest.mark.parametrize("pine_file", BASIC_STRATEGIES,
-                         ids=[os.path.basename(os.path.dirname(p)) for p in BASIC_STRATEGIES])
+def _fails_without_corpus(test):
+    """Run ``test``, but fail the case that stands for a corpus holding no strategy."""
+    @functools.wraps(test)
+    def run(pine_file):
+        if pine_file is None:
+            pytest.fail(
+                f"no strategy.pine under {_CORPUS_DIR}/*/: the engine checkout at "
+                f"{_ENGINE_ROOT} has no corpus to parse (corpus submodule not "
+                "initialised? `git submodule update --init corpus` in it)",
+                pytrace=False)
+        return test(pine_file)
+    return run
+
+
+@pytest.mark.parametrize("pine_file", _BASIC_PARAMS)
+@_fails_without_corpus
 def test_parse_basic_strategy(pine_file):
     """Parse each basic strategy without errors."""
     src = open(pine_file).read()
