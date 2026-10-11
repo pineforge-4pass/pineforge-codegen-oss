@@ -198,6 +198,8 @@ jobs:
           sudo apt-get install -y libeigen3-dev clang cmake g++ ninja-build git-lfs
           git lfs install --skip-repo
       - name: Clone the paired engine and check out its pinned corpus
+        env:
+          GIT_LFS_SKIP_SMUDGE: "1"
         run: |
           set -euo pipefail
           git clone https://github.com/pineforge-4pass/pineforge-engine.git engine
@@ -220,10 +222,10 @@ jobs:
       # pinned gitlink sha the job already exports as CORPUS_COMMIT. The key is
       # content-addressed, so the objects are pulled only when CORPUS_COMMIT
       # moves; a restored cache turns the `lfs pull` below into a no-op, and
-      # the >= 1000000-byte feed assert that follows re-checks the real bytes.
+      # the >= 1000000-byte feed assert that follows re-checks the real size.
       # The cache step MUST sit before the pull.
       - name: Restore the corpus LFS object cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: engine/.git/modules/corpus/lfs/objects
           key: corpus-lfs-${{ env.CORPUS_COMMIT }}
