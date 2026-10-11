@@ -354,6 +354,7 @@ def test_parse_series_float_param_single_name():
 # for went with the private-era layout). No engine checkout is the one skip; an
 # engine checkout with no strategy there (corpus submodule not initialised, a
 # renamed bucket) is one failing case, naming the path.
+# The bucket is `validation` because it holds the corpus's 312 verified strategies (corpus README); `draft-probes/` are staged probes, not verified strategies, so they are not parsed here (the compile sweep covers them).
 _CORPUS_BUCKET = "validation"
 _ENGINE_ROOT = engine_root()
 _CORPUS_DIR = None if _ENGINE_ROOT is None else _ENGINE_ROOT / "corpus" / _CORPUS_BUCKET
