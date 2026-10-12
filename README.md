@@ -53,9 +53,9 @@ hosted-server line name no version. -->
 This README ships with each release as its package description on PyPI
 (`pineforge-codegen`); releases from 0.7.0 on are also on npm as
 `@pineforge/codegen-pyodide`. It describes 1.5.0 (2026-10-12)
-and what changed since 0.10.4. The release's behavior was validated before
-tagging on codegen `bfc4ddce` with engine `b3192bfc`, excluding engine
-request #356. Those validation builds reported `1.3.0`; historical measurements
+and what changed since 0.10.4. The 1.4.0 release's behavior was validated
+before tagging on codegen `bfc4ddce` with engine `b3192bfc`, excluding engine
+request #356; those validation builds reported `1.3.0`. Historical measurements
 below retain the versions on which they were run. The
 [PyPI release history](https://pypi.org/project/pineforge-codegen/#history)
 lists every release; the
