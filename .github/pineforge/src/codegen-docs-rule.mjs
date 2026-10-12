@@ -19,7 +19,7 @@ const GIT_FLAGS = ['-c', 'core.commitGraph=false', '-c', 'advice.graftFileDeprec
 
 function git(dir, args, { binary = false } = {}) {
   const result = spawnSync('git', ['-C', dir, ...GIT_FLAGS, ...args], {
-    encoding: binary ? null : 'utf8', timeout: 10_000, maxBuffer: 32 * 1024 * 1024,
+    encoding: binary ? null : 'utf8', maxBuffer: 32 * 1024 * 1024,
     env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: '/dev/null' },
   });
   if (result.error || result.status !== 0) {

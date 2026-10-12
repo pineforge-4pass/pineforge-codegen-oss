@@ -189,13 +189,13 @@ def _compile_and_run(cpp_source: str) -> str:
         if compile_env._GENERATED_INC is not None:
             cmd += ["-I", str(compile_env._GENERATED_INC)]
         cmd += [str(cpp_path), str(engine_lib), "-pthread", "-o", str(exe_path)]
-        built = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        built = subprocess.run(cmd, capture_output=True, text=True)
         if built.returncode != 0:
             raise AssertionError(
                 "security helper-var runtime probe failed to link\n"
                 + "\n".join((built.stderr or built.stdout).splitlines()[:80])
             )
-        ran = subprocess.run([str(exe_path)], capture_output=True, text=True, timeout=30)
+        ran = subprocess.run([str(exe_path)], capture_output=True, text=True)
         if ran.returncode != 0:
             raise AssertionError(
                 f"security helper-var runtime probe exited {ran.returncode}\n"

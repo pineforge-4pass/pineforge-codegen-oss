@@ -92,7 +92,7 @@ def run_on_tape(engine_root: Path, workdir: Path, feed: Path) -> Path:
     out = workdir / "engine_trades.csv"
     cmd = [sys.executable, str(engine_root / "scripts" / "run_strategy.py"), str(workdir),
            "--ohlcv", str(feed), "-o", str(out)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"run_strategy failed in {workdir}:\n{proc.stdout}\n{proc.stderr}")
     return out

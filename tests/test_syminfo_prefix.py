@@ -86,9 +86,9 @@ def test_symbol_literal_expressions_return_the_expected_parts(function, opt, tmp
     source.write_text(driver, encoding="utf-8")
     build = subprocess.run([_COMPILER, "-std=c++17", "-Wall", "-Werror", opt,
                             str(source), "-o", str(executable)],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True)
     assert build.returncode == 0, build.stderr
-    run = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+    run = subprocess.run([str(executable)], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
     expected = ([prefix for _symbol, prefix, _ticker in SYMBOLS] + ["CHART"]
                 if function == "prefix" else

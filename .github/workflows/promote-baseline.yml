@@ -254,12 +254,15 @@ jobs:
           chmod +x /tmp/cloud-sql-proxy
           /tmp/cloud-sql-proxy --port 5433 \
             gen-lang-client-0864094636:asia-east1:pineforge-workflow-pg &
-          for _ in $(seq 1 30); do
+          proxy_pid=$!
+          while true; do
             if (exec 3<>/dev/tcp/127.0.0.1/5433) 2>/dev/null; then exit 0; fi
+            if ! kill -0 "$proxy_pid" 2>/dev/null; then
+              echo "cloud-sql-proxy exited before it became ready" >&2
+              exit 1
+            fi
             sleep 1
           done
-          echo "cloud-sql-proxy did not become ready" >&2
-          exit 1
 
       - name: Install campaign dependencies
         if: steps.ci.outputs.green == 'true'

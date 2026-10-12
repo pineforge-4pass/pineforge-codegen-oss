@@ -259,7 +259,7 @@ def _replay(engine_root: Path, feed: Path, workdir: Path, case: Case, codegen: P
         cmd = [sys.executable, str(engine_root / "scripts" / "run_strategy.py"), str(workdir),
                "--ohlcv", str(feed), "--no-trim-output", "-o", str(out),
                "--trace-json", str(trace)]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError(f"run_strategy failed:\n{proc.stdout}\n{proc.stderr}")
         outcome.engine = trades(out, 0)

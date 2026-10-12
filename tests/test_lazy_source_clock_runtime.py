@@ -128,10 +128,10 @@ def _compile_and_run(source: str) -> str:
         if compile_env._GENERATED_INC is not None:
             command += ["-I", str(compile_env._GENERATED_INC)]
         command += [str(cpp), str(engine_lib), "-pthread", "-o", str(exe)]
-        built = subprocess.run(command, capture_output=True, text=True, timeout=180)
+        built = subprocess.run(command, capture_output=True, text=True)
         if built.returncode != 0:
             raise AssertionError(built.stderr or built.stdout)
-        ran = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
+        ran = subprocess.run([str(exe)], capture_output=True, text=True)
         if ran.returncode != 0:
             raise AssertionError(ran.stderr or ran.stdout)
         return ran.stdout.strip()

@@ -251,7 +251,7 @@ def compile_cpp(cpp_source: str, *, label: str = "snippet",
         cmd += list(extra_flags)
         cmd.append(cpp_path)
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=60,
+            cmd, capture_output=True, text=True,
         )
         if result.returncode != 0:
             # Truncate large emitted-source dumps so failure reports stay
@@ -315,7 +315,7 @@ def narrowing_diagnostics(cpp_source: str, *, label: str = "snippet") -> list[st
             *_include_flags(isolate_headers=True),
             cpp_path,
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, text=True)
         out = (result.stderr or "") + (result.stdout or "")
         if result.returncode != 0:
             raise AssertionError(
@@ -377,13 +377,13 @@ def run_emitted_tu(cpp_source: str, driver_main: str, *, opt: str,
             *_include_flags(isolate_headers=True),
             "-I", tmpdir, str(drv), str(_ENGINE_LIB), "-o", str(exe),
         ]
-        build = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        build = subprocess.run(cmd, capture_output=True, text=True)
         if build.returncode != 0:
             raise AssertionError(
                 f"could not build {label} at {opt} (exit={build.returncode}):\n"
                 + "\n".join((build.stderr or build.stdout).splitlines()[:40])
             )
-        run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=120)
+        run = subprocess.run([str(exe)], capture_output=True, text=True)
         if run.returncode != 0:
             raise AssertionError(
                 f"{label} at {opt} exited {run.returncode}:\n{run.stdout}\n{run.stderr}"

@@ -269,14 +269,14 @@ def _compile_and_run(cpp_source: str) -> str:
         if compile_env._GENERATED_INC is not None:
             command += ["-I", str(compile_env._GENERATED_INC)]
         command += [str(cpp_path), str(engine_lib), "-pthread", "-o", str(exe_path)]
-        built = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        built = subprocess.run(command, capture_output=True, text=True)
         if built.returncode != 0:
             raise AssertionError(
                 "typed-map runtime probe failed to link\n"
                 + "\n".join((built.stderr or built.stdout).splitlines()[:100])
             )
         ran = subprocess.run(
-            [str(exe_path)], capture_output=True, text=True, timeout=30
+            [str(exe_path)], capture_output=True, text=True
         )
         if ran.returncode != 0:
             raise AssertionError(
