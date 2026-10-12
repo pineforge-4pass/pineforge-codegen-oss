@@ -20,15 +20,14 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
-## 1.5.0 — Unreleased
+## 1.5.0 — 2026-10-12
 
-The planned number of the next release; it stays **Unreleased** until its tag
-exists, and the package version is unchanged. This entry records the diagnostic
-additions below and the report-contract documentation for the paired engine
-fix, and nothing else: the engine pairing, the rest of the content and the date
-of 1.5.0 are set when the release is prepared. The codegen change is
-diagnostics only; the report documentation adds no Python, JSON, diagnostic or
-emitted-C++ change of its own, and no analyzer or code-generation file differs.
+A minor release of the exact engine/codegen pair, paired with engine `v1.5.0`
+and dated 2026-10-12. This entry records the diagnostic additions below and the
+report-contract documentation for the paired engine fix, and nothing else: the
+codegen change is diagnostics only; the report documentation adds no Python,
+JSON, diagnostic or emitted-C++ change of its own, and no analyzer or
+code-generation file differs.
 
 ### Compatibility and migration
 
