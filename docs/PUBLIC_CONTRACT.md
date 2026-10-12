@@ -1,17 +1,11 @@
 # Public contract for 1.0
 
 The supported Python/JSON contract began in 1.0.0; the sections below identify
-later additions. This revision includes the 1.4.0 pair (2026-10-08).
-Pre-tag validation used codegen `bfc4ddce` and engine `b3192bfc`, whose
-version files at that point read `1.3.0`. One section,
-[A report belongs to the call that returned it](#a-report-belongs-to-the-call-that-returned-it),
-describes a paired engine fix that is not yet released.
+later additions. This revision includes the 1.5.0 pair (2026-10-12).
 
 Text marked **since 1.5.0** describes diagnostic additions that 1.4.0 and
 earlier releases do not have: the `note` severity, the `user_message` template
-and the eleven codes that became notes. 1.5.0 is the planned number of the
-release that carries them; until that tag exists, this text describes the
-source tree, not a published package.
+and the eleven codes that became notes.
 
 ## Optional compiled execution capabilities
 
@@ -176,9 +170,8 @@ three codes: exit 4 alone does not select a billing or refund decision.
 
 ## A report belongs to the call that returned it
 
-Availability: **not yet released.** This is the contract of a report fix in the
-paired engine that is in preparation. Engine `v1.4.0` and earlier do not carry
-it; this section applies to the first engine release that does. The report fix
+Availability: **since 1.5.0**, with engine `v1.5.0`. This is the contract of a
+report fix in the paired engine. The report fix
 itself changes neither the generated C++ nor the transpiler's Python and JSON
 contract: the wrappers still run the strategy and then ask the engine for its
 report.
