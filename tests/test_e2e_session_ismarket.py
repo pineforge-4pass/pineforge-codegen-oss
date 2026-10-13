@@ -5,8 +5,8 @@ one daily chart (``fixtures/session_ismarket``): CME_MINI:ES1! across both
 2025 US DST switches and the Thanksgiving week, OANDA:EURUSD, OANDA:XAUUSD and
 BINANCE:ETHUSDT.P (the engine lane H-MEASURE's session.ismarket tapes
 ``hm-g236-*`` and this lane's every-flag tapes ``cgim-flags-*`` of the same
-windows: all 1,138 bars in market, none in an extended session), NASDAQ:AAPL
-with and without extended hours, and OANDA:XAUUSD 1D, whose bars TradingView
+windows: all 1,138 bars in market, none in an extended session), a US-listed
+stock with and without extended hours, and OANDA:XAUUSD 1D, whose bars TradingView
 stamps at the 17:00 ET break and flags in market: a D/W/M bar holds whole
 session days. Each probe reverses its position
 at the close of every bar (``process_orders_on_close``), so each Entry row is
