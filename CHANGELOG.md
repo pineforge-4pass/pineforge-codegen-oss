@@ -20,6 +20,40 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## 1.6.0 — Unreleased
+
+The planned number of the next release; it stays **Unreleased** until its tag
+exists, and the package version is unchanged. Codegen 1.6.0 is planned as the
+exact engine/codegen pair with engine `v1.6.0`; the prerelease `1.6.0-rc.1`
+pairs with engine `v1.6.0-rc.1`. This entry records what changed in this
+repository since 1.5.0, and nothing else: the engine pairing, the date and the
+final text are set when the release is prepared.
+
+### Compatibility and migration
+
+- The analyzer and the code generator do not change behavior: the only edits
+  under `pineforge_codegen/` since 1.5.0 are comments and docstrings in five
+  files (#202), so the C++ the transpiler emits for a script and the Python
+  and JSON contract are unchanged. No diagnostic code, severity or catalog
+  schema changes.
+- The [release note policy](#release-note-policy) still applies: "A pair
+  change requires regenerated C++ and relinked strategy libraries, even
+  when the C ABI number is unchanged." Regenerate and relink against the
+  new engine's headers and static library.
+- Engine behavior changes, including failure codes and the report contract,
+  are described in the paired engine's own release notes; this entry does
+  not summarize them.
+
+### Changes since 1.5.0
+
+- Remove the 11 gate-corpus pines that copy probes leaving the engine corpus
+  ([#200](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/200)).
+- Remove the subprocess time limits of CI tests and checks
+  ([#201](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/201)).
+- Move the recorded US-listed, futures, forex and metal tapes of the tests to
+  the private fixtures, and reword the comments and docstrings that cited them
+  ([#202](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/202)).
+
 ## 1.5.0 — 2026-10-12
 
 A minor release of the exact engine/codegen pair, paired with engine `v1.5.0`
