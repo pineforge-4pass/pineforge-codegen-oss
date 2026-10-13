@@ -52,6 +52,21 @@ PRIVATE_STRATEGIES = (
     "session_ismarket/cgs2-histfn-aapl-15-ext/strategy.pine",
     "host_member_names/cgs2-hostnames-aapl-15-reg/strategy.pine",
     "lazy_held_source/w8a-lazy-mom-held/strategy.pine",
+    "session_ismarket/hm-g236-es1-60-dst-mar/strategy.pine",
+    "session_ismarket/hm-g236-es1-60-dst-nov/strategy.pine",
+    "session_ismarket/hm-g236-es1-60-thanksgiving/strategy.pine",
+    "session_ismarket/cgim-flags-es1-60-dst-mar/strategy.pine",
+    "session_ismarket/cgim-flags-es1-60-dst-nov/strategy.pine",
+    "session_ismarket/cgim-flags-es1-60-thanksgiving/strategy.pine",
+    "session_ismarket/hm-g236-eurusd-60-dst-mar/strategy.pine",
+    "session_ismarket/cgim-flags-eurusd-60-dst-mar/strategy.pine",
+    "c7_tv_evidence/tv-eurusd/strategy.pine",
+    "session_ismarket/cgim-flags-xauusd-1d/strategy.pine",
+    "session_ismarket/hm-g236-xauusd-60-dst-mar/strategy.pine",
+    "session_ismarket/cgim-flags-xauusd-60-dst-mar/strategy.pine",
+    "session_ismarket/cgs2-flags-zc1-15/strategy.pine",
+    "session_ismarket/ksw-flags-zc1-60/strategy.pine",
+    "session_ismarket/ksw-flags-zc1-240/strategy.pine",
 )
 
 
@@ -178,7 +193,8 @@ def test_private_fixture_code_reads_no_unreserved_host_member(rel: str) -> None:
     path = private_fixture(rel)
     gen, host = _private_battery_host()
     from pineforge_codegen.codegen.host_members import HOST_MEMBER_NAMES
-    named, _ = _battery_members([path], gen, host)
+    named, transpiled = _battery_members([path], gen, host)
+    assert transpiled == 1, f"private fixture did not transpile: {rel}"
     unreserved = {name: where for name, where in named.items() if name not in HOST_MEMBER_NAMES}
     assert not unreserved, f"host members read but not reserved: {unreserved}"
 
@@ -364,9 +380,9 @@ def _tape_probe(renames: dict[str, str] | None = None) -> str:
 
 def test_tradingview_keeps_builtins_beside_host_named_variables() -> None:
     """Needs no engine: the tape is its export byte for byte. TradingView
-    compiles the probe and, on its 260 NASDAQ:AAPL 15 bars, reads every
+    compiles the private probe and reads every
     built-in beside the variable named like the host member PineForge read it
-    from: session.isfirstbar / islastbar flag the 10 session opens / closes,
+    from: session.isfirstbar / islastbar flag the session opens / closes,
     barstate.isfirst the first bar, and each variable holds its own value."""
     metrics = json.loads(tape_file("metrics.json").read_text())
     assert hashlib.sha256(tape_file("tv_trades.csv").read_bytes()).hexdigest() \

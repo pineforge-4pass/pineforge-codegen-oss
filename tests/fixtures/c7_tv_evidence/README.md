@@ -113,14 +113,21 @@ The period is `O=1821.59, H=1842.57, L=1816.64, C=1837.47`, followed by an ancho
 ## VWAP first-value evidence
 
 `vwap_first_value_probe.pine` is the public TA1 probe for the first value of
-the omitted, explicit daily, and custom-anchor forms. The two TradingView
-exports are preserved under `tv-eurusd/` and `tv-eth/`:
+the omitted, explicit daily, and custom-anchor forms. The public TradingView
+export is preserved under `tv-eth/`:
 
 | chart | `ta.vwap(close)` | `ta.vwap(close, timeframe.change("1D"))` | `ta.vwap(close, bar_index == 5)` |
 |---|---|---|---|
-| OANDA:EURUSD, 15m, 2025-04-01 | bar 0 (`V_default_vwap`, 08:00) | first day change (`E_explicit_vwap`, 2025-04-02 05:00) | bar 5 (`A_anchor5_vwap`, 09:15) |
 | BINANCE:ETHUSDT.P, 15m, 2025-04-01 00:00 UTC | bar 0 (`V_default_vwap`, 00:00) | first day change (`E_explicit_vwap`, 2025-04-02 00:00) | bar 5 (`A_anchor5_vwap`, 01:15) |
 
 The codegen E2E reproduces the same bar positions on the engine feed. The
 explicit daily forms therefore use the anchored shim; only omitted-anchor VWAP
 and its band form retain `ta::VWAP` / `ta::VWAPBands`.
+
+### Private VWAP first-value tape
+
+TradingView trade list for forex, kept in a private repository and overlaid by
+the lab onto the paired engine tree at `tests/codegen-fixtures/c7_tv_evidence/`.
+The source is read by the private fixture battery in
+`tests/test_host_member_names.py`. `tests/test_e2e_vwap_anchor.py` checks the
+first-value rule on the public engine feed.

@@ -1,13 +1,13 @@
 """The session.* flags are TradingView's, as its tapes prove.
 
-TradingView's own session flags on every bar of eight 60-minute charts and
-one daily chart (``fixtures/session_ismarket``): CME_MINI:ES1! across both
-2025 US DST switches and the Thanksgiving week, OANDA:EURUSD, OANDA:XAUUSD and
-BINANCE:ETHUSDT.P (the engine lane H-MEASURE's session.ismarket tapes
-``hm-g236-*`` and this lane's every-flag tapes ``cgim-flags-*`` of the same
-windows: all 1,138 bars in market, none in an extended session), a US-listed
-stock with and without extended hours, and OANDA:XAUUSD 1D, whose bars TradingView
-stamps at the 17:00 ET break and flags in market: a D/W/M bar holds whole
+TradingView's own session flags on every bar of intraday and daily charts.
+The BINANCE:ETHUSDT.P tapes stay in ``fixtures/session_ismarket``; tapes for
+US-listed stocks, US futures, forex and spot metals are kept in a private
+repository and overlaid onto the paired engine's
+``tests/codegen-fixtures/session_ismarket/``. The engine lane H-MEASURE's
+session.ismarket tapes ``hm-g236-*`` and this lane's every-flag tapes
+``cgim-flags-*`` cover the same windows. OANDA:XAUUSD's daily bars are
+stamped at the 17:00 ET break and flagged in market: a D/W/M bar holds whole
 session days. Each probe reverses its position
 at the close of every bar (``process_orders_on_close``), so each Entry row is
 one chart bar, dated at its open, and its Signal carries the flags TradingView
@@ -89,7 +89,37 @@ CHARTS = ("es1-60-dst-mar", "es1-60-dst-nov", "es1-60-thanksgiving",
           "eurusd-60-dst-mar", "xauusd-60-dst-mar", "eth-60-24x7")
 TAPES = tuple(f"{kind}-{chart}" for kind in ("hm-g236", "cgim-flags") for chart in CHARTS) + (
     "cgim-flags-aapl-60-ext", "cgim-flags-aapl-60-reg", "cgim-flags-xauusd-1d")
-PRIVATE_TAPES = tuple(slug for slug in TAPES if "-aapl-" in slug)
+PRIVATE_TAPES = (
+    "cgim-flags-aapl-60-ext",
+    "cgim-flags-aapl-60-reg",
+    "hm-g236-es1-60-dst-mar",
+    "hm-g236-es1-60-dst-nov",
+    "hm-g236-es1-60-thanksgiving",
+    "cgim-flags-es1-60-dst-mar",
+    "cgim-flags-es1-60-dst-nov",
+    "cgim-flags-es1-60-thanksgiving",
+    "hm-g236-eurusd-60-dst-mar",
+    "cgim-flags-eurusd-60-dst-mar",
+    "hm-g236-xauusd-60-dst-mar",
+    "cgim-flags-xauusd-60-dst-mar",
+    "cgim-flags-xauusd-1d",
+    "cgs2-flags-zc1-15",
+    "ksw-flags-zc1-60",
+    "ksw-flags-zc1-240",
+)
+PUBLIC_TAPES = tuple(slug for slug in TAPES if slug not in PRIVATE_TAPES)
+PRIVATE_MARKET_TAPES = (
+    "hm-g236-es1-60-dst-mar",
+    "hm-g236-es1-60-dst-nov",
+    "hm-g236-es1-60-thanksgiving",
+    "cgim-flags-es1-60-dst-mar",
+    "cgim-flags-es1-60-dst-nov",
+    "cgim-flags-es1-60-thanksgiving",
+    "hm-g236-eurusd-60-dst-mar",
+    "cgim-flags-eurusd-60-dst-mar",
+    "hm-g236-xauusd-60-dst-mar",
+    "cgim-flags-xauusd-60-dst-mar",
+)
 FLAGS = {"M": "ismarket", "P": "ispremarket", "Q": "ispostmarket",
          "F": "isfirstbar", "L": "islastbar",
          "f": "isfirstbar_regular", "l": "islastbar_regular"}
@@ -135,7 +165,7 @@ CASES = tuple(case for cases in (
     # The same sessions with TradingView's weekday mask, which admits each
     # window on its session day: the Sunday-evening open is Monday's. The
     # time-of-day predicate tested the instant's own weekday and missed every
-    # Sunday-evening open (14/14/14/14/12 bars, all on a local Sunday) until
+    # Sunday-evening open until
     # engine lane W11-ENG-TIME-COLOR (its tapes w11-sessmask{,2,3}-btc15).
     _cases("es1-60-dst-mar", "1700-1600:23456", "America/Chicago", {}),
     _cases("es1-60-dst-nov", "1700-1600:23456", "America/Chicago", {}),
@@ -343,29 +373,44 @@ def _recorded_tape(slug: str) -> list[tuple[int, dict[str, bool]]]:
     return tape
 
 
+def _recorded_market_tape(slug: str) -> list[tuple[int, dict[str, bool]]]:
+    tape = _recorded_tape(slug)
+    if slug.startswith("hm-g236-"):
+        twin = read_tape(slug.replace("hm-g236-", "cgim-flags-", 1))
+        assert [ts for ts, _ in tape] == [ts for ts, _ in twin], slug
+        assert not twin[-1][1]["L"], slug
+    assert all(flags["M"] and not flags.get("P") and not flags.get("Q")
+               for _, flags in tape), slug
+    return tape
+
+
 def test_tapes_are_the_recorded_exports() -> None:
-    """Every fixture is its export byte for byte. TradingView flagged every one
-    of each six-chart set's 1,138 bars in market and none pre- or post-market,
-    and the daily chart's bars in market. A session.ismarket tape holds its
-    every-flag twin's bars, whose last bar's session day goes on
-    (``next_chart_bar``)."""
+    """Each public tape is its export byte for byte and flags every bar in
+    market, with no pre- or post-market bars. The session.ismarket tape holds
+    its every-flag twin's bars, whose last session day goes on."""
+    for slug in PUBLIC_TAPES:
+        _recorded_market_tape(slug)
+
+
+@pytest.mark.parametrize("slug", PRIVATE_MARKET_TAPES)
+def test_private_market_tapes_are_the_recorded_exports(slug: str) -> None:
+    """Check each private tape independently, including its every-flag twin."""
+    _recorded_market_tape(slug)
+
+
+def test_private_six_chart_sets_have_the_recorded_bar_totals() -> None:
+    """The original set-wide total requires every tape in both sets."""
     bars = {"hm-g236": 0, "cgim-flags": 0}
-    for slug in TAPES:
-        if slug in PRIVATE_TAPES:
-            continue
-        tape = _recorded_tape(slug)
-        if slug.startswith("hm-g236-"):
-            twin = read_tape(slug.replace("hm-g236-", "cgim-flags-", 1))
-            assert [ts for ts, _ in tape] == [ts for ts, _ in twin], slug
-            assert not twin[-1][1]["L"], slug
-        if slug.endswith("-1d"):
-            continue
-        assert all(flags["M"] and not flags.get("P") and not flags.get("Q")
-                   for _, flags in tape), slug
+    for slug in tuple(f"{kind}-{chart}" for kind in ("hm-g236", "cgim-flags") for chart in CHARTS):
+        tape = _recorded_market_tape(slug)
         bars["hm-g236" if slug.startswith("hm-g236-") else "cgim-flags"] += len(tape)
     assert bars == {"hm-g236": 1138, "cgim-flags": 1138}
+
+
+def test_private_daily_tape_flags_whole_session_days() -> None:
+    """The private daily export's bars hold whole session days."""
     zone = ZoneInfo("America/New_York")
-    daily = read_tape("cgim-flags-xauusd-1d")
+    daily = _recorded_tape("cgim-flags-xauusd-1d")
     assert {dt.datetime.fromtimestamp(ts / 1000, zone).strftime("%H:%M") for ts, _ in daily} == {"17:00"}
     assert all(all(flags[k] for k in "MFLfl") and not flags["P"] and not flags["Q"]
                for _, flags in daily)
@@ -374,7 +419,7 @@ def test_tapes_are_the_recorded_exports() -> None:
 def test_private_tapes_are_the_recorded_exports() -> None:
     """The private exports are byte for byte, and the extended-hours chart's
     flags follow each bar's own open time."""
-    for slug in PRIVATE_TAPES:
+    for slug in ("cgim-flags-aapl-60-ext", "cgim-flags-aapl-60-reg"):
         _recorded_tape(slug)
     zone = ZoneInfo("America/New_York")
     by_hour: dict[str, set[str]] = {}
@@ -459,6 +504,7 @@ SUNDAY_OPEN = 1740956400000  # 2025-03-02 17:00 America/Chicago: Monday's sessio
 def one_bar(tmp_path_factory) -> dict[str, tuple[bytes, list[dict], str]]:
     """The probe on a single bar given no timeframe, per build: the engine
     detects none and presents no session-day facts for such a run."""
+    tape_file("hm-g236-es1-60-dst-mar", "tv_trades.csv")
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("session_ismarket_one_bar")
     builds = {"current": REPO_ROOT}

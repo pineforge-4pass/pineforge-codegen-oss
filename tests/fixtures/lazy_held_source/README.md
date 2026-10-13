@@ -7,7 +7,7 @@ on the bars it skips. `source[length]` is the source at the call's latest
 execution at or before `length` bars ago, also when the previous execution is
 closer than `length` bars.
 
-TradingView trade list (Strategy Tester > List of trades) for a US-listed stock,
+TradingView trade list for a US-listed stock,
 kept in a private repository and overlaid by the lab onto the paired engine tree
 at `tests/codegen-fixtures/lazy_held_source/`. The tape checks held-source reads
 and is read by `tests/test_e2e_lazy_held_source.py`.

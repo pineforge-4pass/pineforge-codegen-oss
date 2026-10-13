@@ -26,6 +26,8 @@ from pineforge_codegen.diagnostic_codes import (
     UNCATALOGUED, classify, escape_literal, parse_template, render, render_diagnostic,
 )
 from pineforge_codegen.errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from tests._private_fixtures import private_fixture
+from tests.test_host_member_names import PRIVATE_STRATEGIES
 
 ROOT = Path(__file__).resolve().parent.parent
 PIN = ROOT / "tests" / "fixtures" / "diagnostic_codes_pin.json"
@@ -269,7 +271,8 @@ def _corpus_dir() -> Path | None:
 
 
 def _scripts() -> list[Path]:
-    scripts = sorted(FIXTURES.rglob("*.pine"))
+    scripts = [path for path in sorted(FIXTURES.rglob("*.pine"))
+               if path.relative_to(FIXTURES).as_posix() not in PRIVATE_STRATEGIES]
     corpus = _corpus_dir()
     if corpus is not None:
         scripts += sorted(corpus.rglob("*.pine"))
@@ -289,8 +292,7 @@ def _assert_coded(diagnostic: Diagnostic, where: str) -> None:
             or (spec["kind"] == "number" and isinstance(value, str)), (where, name)
 
 
-@pytest.mark.parametrize("path", _scripts(), ids=lambda p: str(p.relative_to(p.parents[2])))
-def test_emitted_diagnostics_render_their_text(path: Path):
+def _assert_emitted_diagnostics_render_their_text(path: Path):
     source = path.read_text(encoding="utf-8")
     try:
         diagnostics = transpile_full(source)["diagnostics"]
@@ -298,6 +300,16 @@ def test_emitted_diagnostics_render_their_text(path: Path):
         diagnostics = err.diagnostics
     for diagnostic in diagnostics:
         _assert_coded(diagnostic, str(path))
+
+
+@pytest.mark.parametrize("path", _scripts(), ids=lambda p: str(p.relative_to(p.parents[2])))
+def test_emitted_diagnostics_render_their_text(path: Path):
+    _assert_emitted_diagnostics_render_their_text(path)
+
+
+@pytest.mark.parametrize("rel", PRIVATE_STRATEGIES)
+def test_private_emitted_diagnostics_render_their_text(rel: str):
+    _assert_emitted_diagnostics_render_their_text(private_fixture(rel))
 
 
 def test_glue_envelope_carries_codes():
