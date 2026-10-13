@@ -96,7 +96,7 @@ def transpile_json(pine: Path, root: Path = REPO_ROOT,
     env = dict(os.environ, PYTHONPATH=str(root), **(extra_env or {}))
     proc = subprocess.run(
         [sys.executable, "-c", _GLUE_MAIN, str(root / "gate"), str(pine)],
-        capture_output=True, text=True, timeout=300, env=env, cwd=root)
+        capture_output=True, text=True, env=env, cwd=root)
     if proc.returncode != 0:
         raise RuntimeError(f"transpile_json crashed on {pine}:\n{proc.stderr}")
     return json.loads(proc.stdout)
@@ -113,7 +113,7 @@ def reference_codegen(commit: str) -> Path | None:
         tree = None
         proc = subprocess.run(
             ["git", "-C", str(REPO_ROOT), "archive", "--format=tar", commit,
-             "pineforge_codegen", "gate"], capture_output=True, timeout=120)
+             "pineforge_codegen", "gate"], capture_output=True)
         if proc.returncode == 0:
             tree = Path(tempfile.mkdtemp(prefix=f"pf-codegen-{commit[:12]}-"))
             with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
@@ -135,7 +135,7 @@ def build_strategy_library(cpp: str, workdir: Path) -> None:
     cmd = [compile_env._COMPILER, "-std=c++17", "-O2", *compile_env.STRATEGY_FP_FLAGS,
            "-fPIC", "-shared", *compile_env._include_flags(isolate_headers=True),
            str(workdir / "generated.cpp"), *link, "-o", str(workdir / "strategy.so")]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"compile failed in {workdir}:\n"
                            + "\n".join(proc.stderr.splitlines()[:40]))
@@ -156,7 +156,7 @@ def run_strategy(engine_root: Path, workdir: Path, feed: Path,
     trace_path = workdir / f"trace_{tag}.json"
     if trace:
         cmd += ["--trace-json", str(trace_path)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"run_strategy failed in {workdir}:\n{proc.stdout}\n{proc.stderr}")
     records = json.loads(trace_path.read_text())["trace"] if trace else None

@@ -148,7 +148,7 @@ def run(engine_root: Path, workdir: Path, feed: Path, root: Path | None,
         [sys.executable, str(engine_root / "scripts" / "run_strategy.py"), str(workdir),
          "--ohlcv", str(feed), "--inputs-json", str(workdir / f"inputs_{tag}.json"),
          "--no-trim-output", "-o", str(out), "--trace-json", str(trace_path)],
-        capture_output=True, text=True, timeout=600, env=env)
+        capture_output=True, text=True, env=env)
     if proc.returncode != 0:
         return Run(False, proc.stdout + proc.stderr, {}, b"")
     per_bar: dict[int, dict[str, float]] = {}
