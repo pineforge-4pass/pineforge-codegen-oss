@@ -407,8 +407,8 @@ class TaSiteHelper:
     # TradingView's per-family clocks below a top-level lazy edge
     # ------------------------------------------------------------------
     #
-    # Pinned 2026-09-03 with ``lab tv`` on NYSE:F 1D (range 2025-04-01 ..
-    # 2026-05-01; cadence-7 ternary probes ``v = bar_index % 7 == 3 ? <call> :
+    # Pinned on a daily US-stock probe (tapes kept outside this repository;
+    # cadence-7 ternary probes ``v = bar_index % 7 == 3 ? <call> :
     # na`` exposing the value through the entry size, plus lazy-``and``
     # probes), each scored per call against three models:
     #
@@ -673,9 +673,10 @@ class TaSiteHelper:
         Re-pinned 2026-09-03: the old opt-out for a chart ``ta.sma`` under an
         ``and`` RHS (pf-probe-oliver-dual-vol-sma, "eager precalc is
         TV-incorrect") and the matching recursive ``ta.ema`` rule encoded a
-        per-call clock that ``lab tv`` refuted for top-level shapes (NYSE:F 1D,
-        ``... and close > ta.sma(close,5)[1]``: every-bar 25/25 vs per-call 28;
-        ``ta.ema``: 23/23 vs 27). The analyzer never marks a site inside an
+        per-call clock that TradingView refuted for top-level shapes (a daily
+        US-stock probe, ``... and close > ta.sma(close,5)[1]``: the every-bar
+        clock matched every trade and the per-call clock did not; ``ta.ema``
+        likewise). The analyzer never marks a site inside an
         ``if``/loop/function scope static, so after hoisting the opt-outs
         only reach a static lazy-edge ``ta.sma``/``ta.ema`` that is not a
         top-level statement operand -- in practice a UDT field default
@@ -717,8 +718,8 @@ class TaSiteHelper:
     # Every-bar hoisting of stateful ``ta.*`` sites below top-level lazy edges
     # ------------------------------------------------------------------
     #
-    # TradingView rule, pinned 2026-09-03 with ``lab tv`` on NYSE:F 1D (tapes
-    # out-pin-ring-lazyand / lazyand-sma / lazyand-ema / ring-ternary): a
+    # TradingView rule, pinned on a daily US-stock probe (tapes kept outside
+    # this repository; out-pin-ring-lazyand / lazyand-sma / lazyand-ema / ring-ternary): a
     # stateful ``ta.*`` call inside ANY expression operand of a top-level
     # statement -- the RHS of a Pine-v6 lazy ``and``/``or``, either branch of a
     # ternary, nested comparisons -- is evaluated on EVERY bar. Short-circuiting
