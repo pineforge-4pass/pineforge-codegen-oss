@@ -507,7 +507,7 @@ def test_main_crashed_on_the_keyword_call(tmp_path: Path, case: str) -> None:
 # ---------------------------------------------------------------------------
 # A flag's history beside a global under a payload's builtin
 # (CG-SESSION-2 x CG-SECURITY-2 x CG-OPEN-ITEMS 5b3791d), on the session
-# tapes' bars
+# tapes' bars in the paired engine's private tests/codegen-fixtures/session_ismarket/
 # ---------------------------------------------------------------------------
 
 SESSION_GLOBAL = '''//@version=6
@@ -524,9 +524,10 @@ if a > a_ref
 
 @pytest.fixture(scope="module")
 def session_global_run(tmp_path_factory):
+    stamps = _replay_stamps(EXTENDED)
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("cgint4_session_global")
-    return _replay(engine, base / "session_global", SESSION_GLOBAL, _replay_stamps(EXTENDED))
+    return _replay(engine, base / "session_global", SESSION_GLOBAL, stamps)
 
 
 def test_a_flags_history_beside_a_requested_global(session_global_run):

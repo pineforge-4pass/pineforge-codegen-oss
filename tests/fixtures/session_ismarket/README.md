@@ -1,13 +1,9 @@
 # session.* TradingView tapes
 
-TradingView's own session flags on every bar of eight 60-minute charts and
-one daily chart. Each
-directory is one TradingView export (channel `ws-report-v1`, `rangeProof`
-covered), byte for byte: `strategy.pine`, `tv_trades.csv` (times at UTC+8,
-the exporters' rendering), `metrics.json`, and for a `lab tv` export
-`meta.json`. `metrics.json` `tvTradesCsvHash` is the sha256 of
-`tv_trades.csv`, and its `sourceArtifactHash` that of `strategy.pine`. The
-probes are public; no closed or scraped strategy is involved.
+The public tapes cover futures, forex, crypto and non-US-listed stocks.
+Each directory holds `strategy.pine`, `tv_trades.csv`, `metrics.json` and,
+where present, `meta.json`. `metrics.json` `tvTradesCsvHash` is the sha256
+of `tv_trades.csv`, and its `sourceArtifactHash` that of `strategy.pine`.
 
 Each probe reverses its position at the close of every chart bar
 (`process_orders_on_close=true`), so every entry is one chart bar, dated at
@@ -18,10 +14,7 @@ the symbol's session and timezone only.
 
 ## `hm-g236-*`: session.ismarket (engine lane H-MEASURE, row G2-36)
 
-Copied unchanged from the engine repository, branch `r5/hmeasure` at
-`2b494497`, `tests/fixtures/session_ismarket/` (H-MEASURE's
-`tests/test_session_ismarket_tape.cpp` reads them there). The Signal is `M1`
-when `session.ismarket` is true, `M0` when it is false.
+The Signal is `M1` when `session.ismarket` is true, `M0` when it is false.
 
 | tape | chart | window | bars | flags | tv_trades.csv sha256 | exported (UTC) | campaign note |
 |---|---|---|---|---|---|---|---|
@@ -34,18 +27,11 @@ when `session.ismarket` is true, `M0` when it is false.
 
 ## `cgim-flags-*`: every session flag (codegen lane CG-ISMARKET)
 
-The same six charts and windows, exported for this lane on 2026-09-25 (UTC)
-with a probe that carries every flag in its Signal, a letter and a digit each:
-`M` session.ismarket, `P` session.ispremarket, `Q` session.ispostmarket, `F`
-session.isfirstbar, `L` session.islastbar, `f` session.isfirstbar_regular, `l`
-session.islastbar_regular. The six `strategy.pine` files are one source. The
-command, run once per row (`--no-note`: no campaign note was recorded):
-
-```sh
-source ~/code/pineforge-workflow/campaign/env.sh
-lab tv --pine session_flags_probe.pine --slug <tape> --symbol <chart> \
-  --interval 60 --from <from> --to <to> --out <dir>/<tape> --no-note --json
-```
+The same six charts and windows, with a probe that carries every flag in its
+Signal, a letter and a digit each: `M` session.ismarket, `P`
+session.ispremarket, `Q` session.ispostmarket, `F` session.isfirstbar, `L`
+session.islastbar, `f` session.isfirstbar_regular, `l`
+session.islastbar_regular. The six `strategy.pine` files are one source.
 
 | tape | chart | window | bars | flags (bars) | tv_trades.csv sha256 | exported (UTC) |
 |---|---|---|---|---|---|---|
@@ -61,46 +47,16 @@ session day opens with an `F1` bar and closes with an `L1` bar, the
 `_regular` flags equal to the plain ones. Every tape's last bar is `L0`: its
 session day goes on past the window.
 
-## `cgim-flags-aapl-60-*`: NASDAQ:AAPL with and without extended hours (codegen lane CG-ISMARKET)
+## Private every-flag tapes
 
-The every-flag probe on NASDAQ:AAPL 60, 2025-03-03 .. 03-15 (US DST 03-09),
-exported on 2026-09-25 (UTC) through the WebSocket exporter
-`pinescript-scrapper/scripts/tv-ws-backtest.mjs` (sha256
-`f2dc0bb0e86b4a8685edaec7d11da1f7d89dd4c18c0aac0c9bb91c75ea79012b`, last
-changed in `35fe8338b`). The exporter asks TradingView for the regular
-session. The extended-hours tape ran a scratch copy that differs in one line,
-the symbol descriptor's `session: process.env.CGIM_TV_SESSION || "regular"`
-(sha256 `15d8afae63844c35481e94ba14000720a9e8f0f500d28c51bc2f8cb8189f4f06`),
-with `CGIM_TV_SESSION=extended`; the regular tape ran the same copy without
-it. Every other byte on the wire is the exporter's. These exports write
-`metrics.json` but no `meta.json`; its `sourceArtifactHash` is the sha256 of
-`strategy.pine`.
-
-```sh
-node tv-ws-backtest-session.mjs --pine-dir <group> --write-into-dir \
-  --symbol NASDAQ:AAPL --interval 60 --from 2025-03-03 --to 2025-03-15 --concurrency 1
-```
-
-| tape | session | bars | flags by bar open (America/New_York), every day | tv_trades.csv sha256 | exported (UTC) |
-|---|---|---|---|---|---|
-| `cgim-flags-aapl-60-ext` | extended | 160 | 04:00 `M0P1Q0F1L0f0l0`, 05:00-09:00 `M0P1Q0F0L0f0l0`, 10:00 `M1P0Q0F0L0f1l0`, 11:00-14:00 `M1P0Q0F0L0f0l0`, 15:00 `M1P0Q0F0L0f0l1`, 16:00-18:00 `M0P0Q1F0L0f0l0`, 19:00 `M0P0Q1F0L1f0l0` | `c61119c7077dcf01cf89b13c77931a52bff4c1078e63c0e58c3e687f93db0802` | 2026-09-25 23:04:04 |
-| `cgim-flags-aapl-60-reg` | regular | 70 | 09:30 `M1P0Q0F1L0f1l0`, 10:30-14:30 `M1P0Q0F0L0f0l0`, 15:30 `M1P0Q0F0L1f0l1` | `163434a171c27026622b65d0777118120f7660a2a97b2e320091aaf1c9bc6a57` | 2026-09-25 23:04:06 |
-
-The extended chart's bars open on the hour, and TradingView flags each by its
-open time: the 09:00 bar, which holds the 09:30 open, is pre-market, and the
-16:00 bar is post-market. There isfirstbar / islastbar are the extended day's
-first and last bars and the `_regular` twins the regular day's.
+TradingView trade list (Strategy Tester > List of trades) for a US-listed stock,
+kept in a private repository and overlaid by the lab onto the paired engine tree
+at `tests/codegen-fixtures/session_ismarket/`. These session-flag tapes are read
+by `tests/test_e2e_session_ismarket.py`.
 
 ## `cgim-flags-xauusd-1d`: a daily chart (codegen lane CG-ISMARKET)
 
-The every-flag probe on OANDA:XAUUSD 1D, 2025-01-01 .. 04-01, exported with
-`lab tv` on 2026-09-26 00:09:26 (UTC), `--no-note`:
-
-```sh
-lab tv --pine session_flags_probe.pine --slug cgim-flags-xauusd-1d \
-  --symbol OANDA:XAUUSD --interval 1D --from 2025-01-01 --to 2025-04-01 \
-  --out <dir>/cgim-flags-xauusd-1d --no-note --json
-```
+The every-flag probe on OANDA:XAUUSD 1D, 2025-01-01 .. 04-01.
 
 | tape | chart | window | bars | flags | tv_trades.csv sha256 |
 |---|---|---|---|---|---|
@@ -110,86 +66,26 @@ TradingView stamps each daily bar at 17:00 America/New_York, the break of the
 `1800-1700` session, and flags it in market and as its session day's first and
 last bar: a daily bar holds whole session days.
 
-## `cgs2-hist-aapl-15-*`: the flags read with a history offset (codegen lane CG-SESSION-2)
+## Private flag-history tapes
 
-One probe on NASDAQ:AAPL 15, 2025-03-03 .. 03-15 (US DST 03-09), without and
-with extended hours, exported on 2026-09-26 (UTC). Its Signal is three
-seven-bit groups in the flag order `M P Q F L f l` above -- `C` the flags on
-the bar, `H` the flags `[1]`, `T` the flags `[2]` -- then one bit each: `B`
-session.ispremarket[1] assigned in a block run on every third bar, `U`
-session.ispostmarket[1] read by a function called on odd bars, `Z`
-session.islastbar[1] on the lazy right side of an `and` reached on even bars,
-`K` session.isfirstbar[k] with k = 1 or 2 by bar, `D` session.ismarket[0], `W`
-session.ismarket[64]. The two `strategy.pine` files are one source.
+TradingView trade list (Strategy Tester > List of trades) for a US-listed stock,
+kept in a private repository and overlaid by the lab onto the paired engine tree
+at `tests/codegen-fixtures/session_ismarket/`. These flag-history tapes are read
+by `tests/test_e2e_session_history.py`; the extended-hours tape also supplies the
+replay bars in `tests/test_e2e_cgint4_compositions.py`.
 
-The regular tape is a `lab tv` export (`--no-note`: no campaign note):
+### Private function-history tape
 
-```sh
-lab tv --pine session_history_probe.pine --slug cgs2-hist-aapl-15-reg \
-  --symbol NASDAQ:AAPL --interval 15 --from 2025-03-03 --to 2025-03-15 \
-  --out <dir>/cgs2-hist-aapl-15-reg --no-note --json
-```
-
-`lab tv` asks TradingView for the regular session only, so the extended tape
-ran lane CG-ISMARKET's one-line copy of the WebSocket exporter (sha256
-`15d8afae63844c35481e94ba14000720a9e8f0f500d28c51bc2f8cb8189f4f06`, see
-`cgim-flags-aapl-60-*` above) with `CGIM_TV_SESSION=extended`; it writes no
-`meta.json`.
-
-```sh
-CGIM_TV_SESSION=extended node tv-ws-backtest-session.mjs --pine-dir <group> \
-  --write-into-dir --symbol NASDAQ:AAPL --interval 15 --from 2025-03-03 \
-  --to 2025-03-15 --concurrency 1
-```
-
-| tape | session | bars | tv_trades.csv sha256 | exported (UTC) |
-|---|---|---|---|---|
-| `cgs2-hist-aapl-15-reg` | regular | 260 | `d4f5ed467ea7ac82fc90e4c0e6cc125c70c47b11762e342d11f946e89cffc737` | 2026-09-26 09:25:49 |
-| `cgs2-hist-aapl-15-ext` | extended | 639 | `a6dcfe7eacbc5704c91eac765ab93e7115ceb49d16e5440e8a42e70a2d9952da` | 2026-09-26 09:26:24 |
-
-TradingView reads a flag's history by bars at the top level of a script: on
-all 899 bars `H` and `T` are the `C` of one and two bars back, `B`, `Z`, `K`,
-`D` and `W` the flag of the bar their offset names, and every read before the
-first bar is false. Inside a function it reads the function's calls: `U` is
-session.ispostmarket two bars back, on the function's previous call, which
-differs from the previous bar's flag on 7 extended-hours bars. The extended
-tape lacks one bar (2025-03-06 18:30 ET), which TradingView's data does not
-hold.
-
-### `cgs2-histfn-aapl-15-ext`: the flags read in functions
-
-A probe of functions on the same extended-hours chart and window, exported
-with the same exporter copy on 2026-09-26 10:48:47 (UTC): 639 bars,
-`tv_trades.csv` sha256
-`76c87e46868b768f80fcd46b55f794c7a90a2e9a993045aca264b01f0b724270`,
-`strategy.pine` sha256
-`4447e292cf1f5bfc850789290f5ca3b4b815feedede0c2ec20819dfd74b1b6cf`. Its
-Signal is the seven flags (`C`, as above) and one bit per read: `A`
-`post1()` = session.ispostmarket[1] called on every bar, `B` the same
-function at a second call site reached on odd bars, `Z` a function whose [1]
-read sits on the lazy side of an `and` reached on even bars and `K` one whose
-[1] read sits in a block run on every third bar, both called on every bar,
-`N` and `O` `newSession() => session.ismarket and not session.ismarket[1]` at
-two call sites.
-
-TradingView keeps each call site's history apart and reads it by the calls of
-the function, whatever operand or block holds the read: `B` is the flag on
-that call site's previous call, two bars back (7 bars differ from the
-previous bar's flag); `Z` and `K` are the previous call's flag, one bar back,
-not the flag the last time the read ran (12 and 13 bars differ); `N` and `O`
-both flag the 10 session opens.
+TradingView trade list (Strategy Tester > List of trades) for a US-listed stock,
+kept in a private repository and overlaid by the lab onto the paired engine tree
+at `tests/codegen-fixtures/session_ismarket/`. This function-history tape is read
+by `tests/test_e2e_session_history.py`.
 
 ## `cgs2-flags-*-15`: sessions with two windows (codegen lane CG-SESSION-2)
 
 The every-flag probe of `cgim-flags-*` above (the same `strategy.pine`, sha256
 `78898de72eeff09ef33a75e40f94da2b8ec9fbc301264183ba048e2e5f130225`) on three
-15-minute charts whose regular session has two windows, 2025-03-03 .. 03-15,
-exported with `lab tv` on 2026-09-26 (UTC), `--no-note`:
-
-```sh
-lab tv --pine session_flags_probe.pine --slug <tape> --symbol <chart> \
-  --interval 15 --from 2025-03-03 --to 2025-03-15 --out <dir>/<tape> --no-note --json
-```
+15-minute charts whose regular session has two windows, 2025-03-03 .. 03-15.
 
 | tape | chart | windows (exchange time) | bars | flags | tv_trades.csv sha256 | exported (UTC) |
 |---|---|---|---|---|---|---|
@@ -206,20 +102,10 @@ of the afternoon window, and TradingView keeps it in the session.
 
 ## `ksw-flags-*`: the same three charts at 60 and 240 minutes (engine lane K-SESSION-WINDOWS)
 
-Copied unchanged from the engine repository, branch `r5/k-session` at
-`73888644`, `tests/fixtures/session_windows/` (added there in `53b31066`; the
-branch was rebased onto XSYM-D as `7b35bf8c`, which holds the same bytes,
-added in `15b5e1c5`): the
-every-flag probe (the `cgim-flags-*` source with its title and header comment
-changed, `strategy.pine` sha256
+The every-flag probe (the `cgim-flags-*` source with its title and header
+comment changed, `strategy.pine` sha256
 `1a78deccefb408d955112da398240e8fc5b146d126c40e514ee24078e4af83d4`) on
-TSE:7203, HKEX:700 and CBOT:ZC1!, 2025-03-03 .. 03-15, exported by that lane
-with `lab tv` on 2026-09-27 (UTC), `--no-note`:
-
-```sh
-lab tv --pine <probe> --slug <tape> --symbol <chart> --interval <tf> \
-  --from 2025-03-03 --to 2025-03-15 --out <dir> --no-note --json
-```
+TSE:7203, HKEX:700 and CBOT:ZC1!, 2025-03-03 .. 03-15.
 
 | tape | chart | bars | tv_trades.csv sha256 | exported (UTC) |
 |---|---|---|---|---|

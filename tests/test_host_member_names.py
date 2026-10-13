@@ -15,7 +15,8 @@ emitted C++ includes; ``_safe_name`` renames a script identifier in it the way
 it renames one spelled like a C++ keyword. This module regenerates the set,
 checks it against every host member a transpiled battery actually names, and
 replays TradingView's tape of a probe using such names
-(``fixtures/host_member_names``).
+(kept in a private repository and overlaid onto the paired engine's
+``tests/codegen-fixtures/host_member_names/``).
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ import json
 import os
 import re
 import sys
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -36,11 +38,21 @@ from tests._e2e import (
     REPO_ROOT, Build, assert_same_runs, chart_feed_head, execute_all, ok,
     reference_codegen, skip_unless_e2e_env, transpile_json,
 )
+from tests._private_fixtures import private_fixture
 from tests.test_e2e_session_history import LEGACY, QUARTER, _replay, _utc_ms
 from tests.test_e2e_session_ismarket import next_chart_bar
 
 
 GENERATOR = REPO_ROOT / "scripts" / "gen_host_members.py"
+PRIVATE_STRATEGIES = (
+    "session_ismarket/cgim-flags-aapl-60-ext/strategy.pine",
+    "session_ismarket/cgim-flags-aapl-60-reg/strategy.pine",
+    "session_ismarket/cgs2-hist-aapl-15-ext/strategy.pine",
+    "session_ismarket/cgs2-hist-aapl-15-reg/strategy.pine",
+    "session_ismarket/cgs2-histfn-aapl-15-ext/strategy.pine",
+    "host_member_names/cgs2-hostnames-aapl-15-reg/strategy.pine",
+    "lazy_held_source/w8a-lazy-mom-held/strategy.pine",
+)
 
 
 def _generator():
@@ -112,7 +124,9 @@ def test_identifier_scan_skips_comments_and_literals_only() -> None:
 
 
 def _battery() -> list[Path]:
-    sources = sorted((REPO_ROOT / "tests" / "fixtures").rglob("*.pine"))
+    fixtures = REPO_ROOT / "tests" / "fixtures"
+    sources = [path for path in sorted(fixtures.rglob("*.pine"))
+               if path.relative_to(fixtures).as_posix() not in PRIVATE_STRATEGIES]
     sources += sorted((REPO_ROOT / "tests" / "gate-corpus" / "ok").glob("*.pine"))
     corpus = os.environ.get("PINEFORGE_ENGINE_CORPUS")
     if corpus and Path(corpus).is_dir():
@@ -120,19 +134,12 @@ def _battery() -> list[Path]:
     return sources
 
 
-def test_generated_code_reads_no_unreserved_host_member() -> None:
-    """Every host member a transpiled battery names unqualified (the test
-    fixtures, the gate corpus and the engine's public corpus) is in the
-    reserved set: a new lowering that reads a host member the derivation
-    cannot see fails here."""
-    gen, cxx, includes = _clang_env()
+def _battery_members(sources: list[Path], gen, host: set[str]) -> tuple[dict[str, str], int]:
     from pineforge_codegen import transpile
     from pineforge_codegen.errors import CompileError
-    from pineforge_codegen.codegen.host_members import HOST_MEMBER_NAMES
-    host = gen.derive(REPO_ROOT, cxx, includes).host
     named: dict[str, str] = {}
     transpiled = 0
-    for path in _battery():
+    for path in sources:
         try:
             cpp = transpile(path.read_text(encoding="utf-8"), filename=str(path))
         except CompileError:
@@ -140,10 +147,40 @@ def test_generated_code_reads_no_unreserved_host_member() -> None:
         transpiled += 1
         for name in gen.unqualified_identifiers(cpp) & host:
             named.setdefault(name, str(path))
+    return named, transpiled
+
+
+def test_generated_code_reads_no_unreserved_host_member() -> None:
+    """Every host member a transpiled battery names unqualified (the public
+    test fixtures, the gate corpus and the engine's public corpus) is in the
+    reserved set: a new lowering that reads a host member the derivation
+    cannot see fails here."""
+    gen, cxx, includes = _clang_env()
+    from pineforge_codegen.codegen.host_members import HOST_MEMBER_NAMES
+    host = gen.derive(REPO_ROOT, cxx, includes).host
+    named, transpiled = _battery_members(_battery(), gen, host)
     assert transpiled > 100
     unreserved = {name: where for name, where in named.items() if name not in HOST_MEMBER_NAMES}
     assert not unreserved, f"host members read but not reserved: {unreserved}"
     print(f"{transpiled} TUs name {len(named)} host members, all reserved")
+
+
+@cache
+def _private_battery_host():
+    """Derive the host once, when a private battery case first needs it."""
+    gen, cxx, includes = _clang_env()
+    return gen, gen.derive(REPO_ROOT, cxx, includes).host
+
+
+@pytest.mark.parametrize("rel", PRIVATE_STRATEGIES)
+def test_private_fixture_code_reads_no_unreserved_host_member(rel: str) -> None:
+    """Keep the moved probes' battery coverage independent of public files."""
+    path = private_fixture(rel)
+    gen, host = _private_battery_host()
+    from pineforge_codegen.codegen.host_members import HOST_MEMBER_NAMES
+    named, _ = _battery_members([path], gen, host)
+    unreserved = {name: where for name, where in named.items() if name not in HOST_MEMBER_NAMES}
+    assert not unreserved, f"host members read but not reserved: {unreserved}"
 
 
 def test_script_names_of_host_members_are_renamed(tmp_path: Path) -> None:
@@ -287,7 +324,10 @@ def test_host_named_script_runs_like_its_reference(label: str, runs) -> None:
     print(f"host member names, {label} probe: {summary} == neutral names")
 
 
-TAPE = Path(__file__).parent / "fixtures" / "host_member_names" / "cgs2-hostnames-aapl-15-reg"
+def tape_file(name: str) -> Path:
+    return private_fixture(f"host_member_names/cgs2-hostnames-aapl-15-reg/{name}")
+
+
 # The probe's Signal, pair by pair: the built-in a script variable named like
 # a host member used to hide, then that variable (strategy.pine's header).
 SIGNAL = re.compile(r"F([01])([01])L([01])([01])B([01])(\d+)M(\d+)C(\d+)Z([01])(.+)")
@@ -305,7 +345,7 @@ LOUD_IN_TAPE = {"current_bar_": "cb_v", "syminfo_": "si_v"}
 def read_host_tape() -> list[tuple[int, dict[str, float]]]:
     """(the chart bar's open in UTC ms, TradingView's values by trace name)
     per Entry row, in time order. The export renders times at UTC+8."""
-    with (TAPE / "tv_trades.csv").open(encoding="utf-8-sig") as fh:
+    with tape_file("tv_trades.csv").open(encoding="utf-8-sig") as fh:
         rows = [row for row in csv.DictReader(fh) if row["Type"].startswith("Entry")]
     return sorted(((_utc_ms(row["Date and time"], 8),
                     dict(zip(TAPE_TRACE, map(float, SIGNAL.fullmatch(row["Signal"]).groups()))))
@@ -315,7 +355,7 @@ def read_host_tape() -> list[tuple[int, dict[str, float]]]:
 def _tape_probe(renames: dict[str, str] | None = None) -> str:
     """The exported probe with a trace of every pair, a variable renamed per
     ``renames``."""
-    source = (TAPE / "strategy.pine").read_text(encoding="utf-8") + "".join(
+    source = tape_file("strategy.pine").read_text(encoding="utf-8") + "".join(
         f"\n// @pf-trace {name}={expr}" for name, expr in TAPE_TRACE.items()) + "\n"
     for old, new in (renames or {}).items():
         source = re.sub(rf"\b{re.escape(old)}(?!\w)", new, source)
@@ -328,10 +368,10 @@ def test_tradingview_keeps_builtins_beside_host_named_variables() -> None:
     built-in beside the variable named like the host member PineForge read it
     from: session.isfirstbar / islastbar flag the 10 session opens / closes,
     barstate.isfirst the first bar, and each variable holds its own value."""
-    metrics = json.loads((TAPE / "metrics.json").read_text())
-    assert hashlib.sha256((TAPE / "tv_trades.csv").read_bytes()).hexdigest() \
+    metrics = json.loads(tape_file("metrics.json").read_text())
+    assert hashlib.sha256(tape_file("tv_trades.csv").read_bytes()).hexdigest() \
         == metrics["tvTradesCsvHash"]
-    assert hashlib.sha256((TAPE / "strategy.pine").read_bytes()).hexdigest() \
+    assert hashlib.sha256(tape_file("strategy.pine").read_bytes()).hexdigest() \
         == metrics["sourceArtifactHash"]
     assert metrics["wsProvenance"]["rangeProof"] == "covered"
     tape = [values for _, values in read_host_tape()]
@@ -355,14 +395,15 @@ def tape_replays(tmp_path_factory) -> dict:
     """The probe replayed on the tape's bars and the chart's next one
     (``next_chart_bar``), and with the pre-lane codegen as exported and
     without its two loud names; an exception when a build failed."""
+    tape = [(ts, {"L": values["lb"] == 1.0}) for ts, values in read_host_tape()]
+    source = _tape_probe()
     engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("host_member_names_tape")
-    tape = [(ts, {"L": values["lb"] == 1.0}) for ts, values in read_host_tape()]
     stamps = [ts for ts, _ in tape] + [next_chart_bar(tape, QUARTER, "America/New_York")]
-    jobs = {"now": (_tape_probe(), REPO_ROOT)}
+    jobs = {"now": (source, REPO_ROOT)}
     legacy = reference_codegen(LEGACY)
     if legacy is not None:
-        jobs["legacy"] = (_tape_probe(), legacy)
+        jobs["legacy"] = (source, legacy)
         jobs["legacy-silent"] = (_tape_probe(LOUD_IN_TAPE), legacy)
     results: dict = {}
     for key, (source, codegen) in jobs.items():

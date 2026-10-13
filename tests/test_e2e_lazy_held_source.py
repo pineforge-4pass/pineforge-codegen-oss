@@ -3,15 +3,16 @@
 Below a lazy edge the call's ``source`` history is written only on bars where
 the call executes and held on the bars it skips, so ``source[length]`` is the
 source at the call's latest execution at or before ``length`` bars ago, also
-when the previous execution is closer than ``length`` bars. TradingView's tape
-``fixtures/lazy_held_source/w8a-lazy-mom-held`` (NASDAQ:AAPL 15, see its
-README) runs ``ta.mom(close, 3)`` on three bars of every four: on each
+when the previous execution is closer than ``length`` bars. A US-stock tape
+kept in a private repository and overlaid onto the paired
+engine's ``tests/codegen-fixtures/lazy_held_source/`` runs ``ta.mom(close, 3)``
+on three bars of every four: on each
 ``bar_index % 4 == 2`` bar ``M`` is ``close - close[4]`` and the top-level
-control ``C`` is ``close - close[3]``, on all 91 cycles. The codegen used to
+control ``C`` is ``close - close[3]``, on every such cycle. The codegen used to
 read the chart's ``close[length]`` there (``_pf_lazy_src_chart_N``), which
 makes ``M`` equal ``C``.
 
-The AAPL feed does not ship here: the tape's own structure is checked, and the
+The US-stock feed does not ship here: the tape's own structure is checked, and the
 rule is pinned end to end (``tests/_e2e.py``: ``transpile_json``, the built
 runtime, ``run_strategy.py`` over the corpus 15m feed, ``@pf-trace`` values)
 bar by bar against the spelled-out reads. The pre-lane build (``LEGACY``)
@@ -31,9 +32,13 @@ from tests._e2e import (
     Build, derive_chart_feed, execute_all, ok, per_bar_mismatches,
     reference_codegen, same, skip_unless_e2e_env,
 )
+from tests._private_fixtures import private_fixture
 
 
-TAPE = Path(__file__).parent / "fixtures" / "lazy_held_source" / "w8a-lazy-mom-held"
+def tape_file(name: str) -> Path:
+    return private_fixture(f"lazy_held_source/w8a-lazy-mom-held/{name}")
+
+
 # Main at the CGINT3 integration base, as the lane's base (cg/tvdefaults
 # d7e095f): the eager chart read between close executions.
 LEGACY = "fdcdcbb908b9ea6bdbb135802a7e2aed6a7ec3de"
@@ -61,8 +66,8 @@ REFERENCE = (HEADER
 
 
 def test_tradingview_tape_separates_the_held_and_eager_reads():
-    metrics = json.loads((TAPE / "metrics.json").read_text())
-    with (TAPE / "tv_trades.csv").open(encoding="utf-8-sig") as fh:
+    metrics = json.loads(tape_file("metrics.json").read_text())
+    with tape_file("tv_trades.csv").open(encoding="utf-8-sig") as fh:
         entries = [row for row in csv.DictReader(fh) if row["Type"].startswith("Entry")]
     cycles: dict[str, dict[str, float]] = defaultdict(dict)
     for row in entries:

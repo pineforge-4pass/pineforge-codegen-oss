@@ -68,6 +68,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -78,6 +79,7 @@ from tests._e2e import (
     REPO_ROOT, build_strategy_library, reference_codegen, run_strategy,
     skip_unless_e2e_env, transpile_json,
 )
+from tests._private_fixtures import private_fixture
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "session_ismarket"
@@ -87,12 +89,19 @@ CHARTS = ("es1-60-dst-mar", "es1-60-dst-nov", "es1-60-thanksgiving",
           "eurusd-60-dst-mar", "xauusd-60-dst-mar", "eth-60-24x7")
 TAPES = tuple(f"{kind}-{chart}" for kind in ("hm-g236", "cgim-flags") for chart in CHARTS) + (
     "cgim-flags-aapl-60-ext", "cgim-flags-aapl-60-reg", "cgim-flags-xauusd-1d")
+PRIVATE_TAPES = tuple(slug for slug in TAPES if "-aapl-" in slug)
 FLAGS = {"M": "ismarket", "P": "ispremarket", "Q": "ispostmarket",
          "F": "isfirstbar", "L": "islastbar",
          "f": "isfirstbar_regular", "l": "islastbar_regular"}
 TRACE = "".join(f"\n// @pf-trace {name}=session.{name}" for name in FLAGS.values()) + "\n"
 HOUR = 3_600_000
 INTERVAL_MS = {"60": HOUR, "1D": 24 * HOUR}
+
+
+def tape_file(slug: str, name: str) -> Path:
+    if slug in PRIVATE_TAPES:
+        return private_fixture(f"session_ismarket/{slug}/{name}")
+    return FIXTURES / slug / name
 
 
 @dataclass(frozen=True)
@@ -174,7 +183,7 @@ def read_tape(slug: str) -> list[tuple[int, dict[str, bool]]]:
     """(the chart bar's open in UTC ms, TradingView's flags by letter) per
     Entry row, in time order. ``lab tv`` renders times at UTC+8; a Signal is a
     letter and a digit per flag (``M1``, ``M1P0Q0F1L0f1l0``)."""
-    with (FIXTURES / slug / "tv_trades.csv").open(encoding="utf-8-sig") as fh:
+    with tape_file(slug, "tv_trades.csv").open(encoding="utf-8-sig") as fh:
         rows = [row for row in csv.DictReader(fh) if row["Type"].startswith("Entry")]
     tape = []
     for row in rows:
@@ -234,7 +243,7 @@ def _write_feed(stamps: list[int], path: Path) -> Path:
 
 
 def _interval(slug: str) -> str:
-    return json.loads((FIXTURES / slug / "metrics.json").read_text())["interval"]
+    return json.loads(tape_file(slug, "metrics.json").read_text())["interval"]
 
 
 def _replay_stamps(slug: str) -> list[int]:
@@ -279,29 +288,32 @@ def _replay(engine: Path, work: Path, source: str, codegen: Path,
 
 
 @pytest.fixture(scope="session")
-def replays(tmp_path_factory) -> dict[tuple[str, str], Replay]:
-    """``(build, slug)`` -> the tape's probe replayed under every session
+def replays(tmp_path_factory):
+    """Load and cache one tape's ``(build, slug)`` replays under every session
     spelling of its chart; build is ``current``, ``legacy`` (when LEGACY is in
     this checkout's history), or ``security-current`` / ``security-legacy``."""
-    engine = skip_unless_e2e_env()
     base = tmp_path_factory.mktemp("session_ismarket")
-    legacy = reference_codegen(LEGACY)
-    builds = {"current": REPO_ROOT} | ({"legacy": legacy} if legacy is not None else {})
-    jobs: dict[tuple[str, str], tuple[str, Path, list[Case]]] = {}
-    for slug in TAPES:
-        probe = (FIXTURES / slug / "strategy.pine").read_text(encoding="utf-8") + TRACE
-        cases = [case for case in CASES if case.slug == slug]
-        for label, codegen in builds.items():
-            jobs[(label, slug)] = (probe, codegen, cases)
-    probe = (FIXTURES / SECURITY_CASE.slug / "strategy.pine").read_text(encoding="utf-8")
-    for label, codegen in builds.items():
-        jobs[(f"security-{label}", SECURITY_CASE.slug)] = (
-            probe + SECURITY_TRACE + TRACE, codegen, [SECURITY_CASE])
-    workers = max(2, min(8, (os.cpu_count() or 4) // 2))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {key: pool.submit(_replay, engine, base / key[0] / key[1], *job)
-                   for key, job in jobs.items()}
-        return {key: future.result() for key, future in futures.items()}
+
+    @cache
+    def load(slug: str, security: bool = False) -> dict[tuple[str, str], Replay]:
+        # Resolve only this tape, on the test's thread, before starting builds.
+        probe = tape_file(slug, "strategy.pine").read_text(encoding="utf-8")
+        _replay_stamps(slug)
+        engine = skip_unless_e2e_env()
+        legacy = reference_codegen(LEGACY)
+        builds = {"current": REPO_ROOT} | ({"legacy": legacy} if legacy is not None else {})
+        cases = [SECURITY_CASE] if security else [case for case in CASES if case.slug == slug]
+        probe += SECURITY_TRACE + TRACE if security else TRACE
+        prefix = "security-" if security else ""
+        jobs = {(f"{prefix}{label}", slug): (probe, codegen, cases)
+                for label, codegen in builds.items()}
+        workers = max(2, min(8, (os.cpu_count() or 4) // 2))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {key: pool.submit(_replay, engine, base / key[0] / key[1], *job)
+                       for key, job in jobs.items()}
+            return {key: future.result() for key, future in futures.items()}
+
+    return load
 
 
 def _misses(case: Case, replay: Replay, prefix: str = "") -> dict[str, list[int]]:
@@ -319,32 +331,51 @@ def _misses(case: Case, replay: Replay, prefix: str = "") -> dict[str, list[int]
     return misses
 
 
+def _recorded_tape(slug: str) -> list[tuple[int, dict[str, bool]]]:
+    metrics = json.loads(tape_file(slug, "metrics.json").read_text())
+    tape_bytes = tape_file(slug, "tv_trades.csv").read_bytes()
+    pine_bytes = tape_file(slug, "strategy.pine").read_bytes()
+    assert hashlib.sha256(tape_bytes).hexdigest() == metrics["tvTradesCsvHash"], slug
+    assert hashlib.sha256(pine_bytes).hexdigest() == metrics["sourceArtifactHash"], slug
+    assert metrics["wsProvenance"]["rangeProof"] == "covered", slug
+    tape = read_tape(slug)
+    assert len(tape) == metrics["trades"], slug
+    return tape
+
+
 def test_tapes_are_the_recorded_exports() -> None:
     """Every fixture is its export byte for byte. TradingView flagged every one
     of each six-chart set's 1,138 bars in market and none pre- or post-market,
-    and the extended-hours AAPL bars by their own open time. A session.ismarket
-    tape holds its every-flag twin's bars, whose last bar's session day goes on
+    and the daily chart's bars in market. A session.ismarket tape holds its
+    every-flag twin's bars, whose last bar's session day goes on
     (``next_chart_bar``)."""
     bars = {"hm-g236": 0, "cgim-flags": 0}
     for slug in TAPES:
-        metrics = json.loads((FIXTURES / slug / "metrics.json").read_text())
-        tape_bytes = (FIXTURES / slug / "tv_trades.csv").read_bytes()
-        pine_bytes = (FIXTURES / slug / "strategy.pine").read_bytes()
-        assert hashlib.sha256(tape_bytes).hexdigest() == metrics["tvTradesCsvHash"], slug
-        assert hashlib.sha256(pine_bytes).hexdigest() == metrics["sourceArtifactHash"], slug
-        assert metrics["wsProvenance"]["rangeProof"] == "covered", slug
-        tape = read_tape(slug)
-        assert len(tape) == metrics["trades"], slug
+        if slug in PRIVATE_TAPES:
+            continue
+        tape = _recorded_tape(slug)
         if slug.startswith("hm-g236-"):
             twin = read_tape(slug.replace("hm-g236-", "cgim-flags-", 1))
             assert [ts for ts, _ in tape] == [ts for ts, _ in twin], slug
             assert not twin[-1][1]["L"], slug
-        if "-aapl-" in slug or slug.endswith("-1d"):
+        if slug.endswith("-1d"):
             continue
         assert all(flags["M"] and not flags.get("P") and not flags.get("Q")
                    for _, flags in tape), slug
         bars["hm-g236" if slug.startswith("hm-g236-") else "cgim-flags"] += len(tape)
     assert bars == {"hm-g236": 1138, "cgim-flags": 1138}
+    zone = ZoneInfo("America/New_York")
+    daily = read_tape("cgim-flags-xauusd-1d")
+    assert {dt.datetime.fromtimestamp(ts / 1000, zone).strftime("%H:%M") for ts, _ in daily} == {"17:00"}
+    assert all(all(flags[k] for k in "MFLfl") and not flags["P"] and not flags["Q"]
+               for _, flags in daily)
+
+
+def test_private_tapes_are_the_recorded_exports() -> None:
+    """The private exports are byte for byte, and the extended-hours chart's
+    flags follow each bar's own open time."""
+    for slug in PRIVATE_TAPES:
+        _recorded_tape(slug)
     zone = ZoneInfo("America/New_York")
     by_hour: dict[str, set[str]] = {}
     for ts, flags in read_tape(EXTENDED):
@@ -354,14 +385,11 @@ def test_tapes_are_the_recorded_exports() -> None:
     assert by_hour["10:00"] == {"M1P0Q0F0L0f1l0"}
     assert by_hour["15:00"] == {"M1P0Q0F0L0f0l1"}
     assert by_hour["16:00"] == {"M0P0Q1F0L0f0l0"}
-    daily = read_tape("cgim-flags-xauusd-1d")
-    assert {dt.datetime.fromtimestamp(ts / 1000, zone).strftime("%H:%M") for ts, _ in daily} == {"17:00"}
-    assert all(all(flags[k] for k in "MFLfl") and not flags["P"] and not flags["Q"]
-               for _, flags in daily)
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.key)
 def test_session_flags_are_tradingviews(case: Case, replays) -> None:
+    replays = replays(case.slug)
     replay = replays[("current", case.slug)]
     misses = _misses(case, replay)
     wrong = {FLAGS[letter]: len(bars) for letter, bars in misses.items()
@@ -385,6 +413,7 @@ def test_legacy_predicates_missed_the_pinned_bars(case: Case, replays) -> None:
     payload still reads, and misses exactly the pinned bars: on these tapes
     only the extended-hours chart's _regular pair, which it read from the
     chart's day (see EXTENDED)."""
+    replays = replays(case.slug)
     if ("legacy", case.slug) not in replays:
         pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
     replay = replays[("legacy", case.slug)]
@@ -401,6 +430,7 @@ def test_security_payload_keeps_its_own_bars_predicates(replays) -> None:
     exactly as the pre-lane build did, and each read warns that it can differ
     from TradingView; the chart reads beside it are TradingView's flags."""
     case = SECURITY_CASE
+    replays = replays(case.slug, security=True)
     current = replays[("security-current", case.slug)]
     for name in ("ismarket", "ispremarket", "ispostmarket"):
         assert (f"pine_session_{name}(syminfo_.session, syminfo_.timezone, bar.timestamp)"
