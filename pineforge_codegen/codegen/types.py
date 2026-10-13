@@ -563,8 +563,8 @@ class TypeInferer:
         milliseconds) is 7 776 000 000 on TradingView. Emitted as C++ ``int``
         literal arithmetic the same product overflows (wraps to -813 934 592),
         so a ``(time - t0) > threeMonths`` expiry fires on every bar (round 8
-        family U: latibonit15 execution-signals-confluence, six lanes; lab tv
-        u-lati-levels-nq15 vs the engine, 2026-09-05). ``400 * MS`` over
+        family U: latibonit15 execution-signals-confluence, six lanes; a recorded
+        probe tape vs the engine). ``400 * MS`` over
         ``const int MS = 7200000`` is 2 880 000 000 too (lab tv
         pf-cgs-int64-const, 2026-09-28): the constant is emitted as its
         literal, so the product was the same C++ ``int`` overflow. Folding
