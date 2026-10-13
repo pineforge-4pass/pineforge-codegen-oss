@@ -32,7 +32,9 @@ import pytest
 
 from pineforge_codegen import transpile
 from tests._e2e import Build, closed_trades, execute_all, ok, skip_unless_e2e_env
+from tests._private_fixtures import private_fixture
 from tests._security_tapes import TAPE_TZ, mismatches, source, tape_exits, tape_feed
+from tests.test_host_member_names import PRIVATE_STRATEGIES
 
 FIXTURES = Path(__file__).parent / "fixtures" / "security_epoch_tv"
 REPO = Path(__file__).resolve().parent.parent
@@ -205,7 +207,9 @@ def test_no_security_epoch_is_narrowed_to_int():
 
 def test_no_public_source_narrows_a_security_epoch_to_int():
     sources = sorted((REPO / "tests" / "gate-corpus").rglob("*.pine"))
-    sources += sorted((REPO / "tests" / "fixtures").rglob("*.pine"))
+    fixtures = REPO / "tests" / "fixtures"
+    sources += [path for path in sorted(fixtures.rglob("*.pine"))
+                if path.relative_to(fixtures).as_posix() not in PRIVATE_STRATEGIES]
     engine = None
     try:
         engine = skip_unless_e2e_env()
@@ -213,16 +217,27 @@ def test_no_public_source_narrows_a_security_epoch_to_int():
         pass
     if engine is not None:
         sources += sorted((engine / "corpus").rglob("strategy.pine"))
+    _assert_no_source_narrows_a_security_epoch(sources)
+
+
+def _assert_no_source_narrows_a_security_epoch(sources, *, allow_refused: bool = True):
     flagged = {}
     for path in sources:
         try:
             cpp = transpile(path.read_text(encoding="utf-8"))
         except Exception:  # a refused source narrows nothing
+            if not allow_refused:
+                raise
             continue
         hits = _epoch_narrowings(cpp)
         if hits:
             flagged[str(path.relative_to(path.anchor))] = hits
     assert not flagged, flagged
+
+
+@pytest.mark.parametrize("rel", PRIVATE_STRATEGIES)
+def test_no_private_source_narrows_a_security_epoch_to_int(rel: str):
+    _assert_no_source_narrows_a_security_epoch([private_fixture(rel)], allow_refused=False)
 
 
 def test_a_float_or_bool_an_epoch_reaches_keeps_its_type():

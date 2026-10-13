@@ -107,5 +107,5 @@ value and a quantity floored to it: TradingView's BINANCE:ETHUSDT.P reads
 fact on every lane's symbol and timeframe (qty `1000 * syminfo.mincontract`,
 the value in the entry comment) gave 0.0001 on BINANCE:ETHUSDT.P (15, 1D),
 0.00001 on BINANCE:BTCUSDT (15, 1D), 0.01 on OANDA:EURUSD and OANDA:XAUUSD
-(15, 1D), and 1 on NASDAQ:AAPL, NYSE:F, NSE:NIFTY, CME_MINI:ES1! and
+(15, 1D), and 1 on NSE:NIFTY, CME_MINI:ES1! and
 CME_MINI:NQ1! (15, 1D); those tapes stay with the lane's evidence.

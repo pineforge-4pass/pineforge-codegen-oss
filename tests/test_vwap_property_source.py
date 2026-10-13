@@ -1,15 +1,14 @@
 """The bare ``ta.vwap`` property is the VWAP of hlc3, bound to its own site.
 
 Pine v6 reference: ``ta.vwap`` "uses hlc3 as its source series". TradingView's
-read equals hlc3 on a daily bar (lab tv notrade-session-vwap-f1d, NYSE:F 1D
-2025-07-01..08-31, 42/42 bars, 2026-09-05) where the generated code used to
-feed the bar's close (therealbouga-apex-mtf-index-model F@1D: ``close < vwap``
-never true, 0 engine trades vs 9). And the property read is one TA site per
+read equals hlc3 on a daily bar in a US-stock probe where the generated code
+used to feed the bar's close: ``close < vwap`` never held and the trades
+did not match. And the property read is one TA site per
 read, keyed on its own AST node: a bare ``ta.vwap`` inside
 ``request.security()`` is that evaluator's own ``_sec<id>__ta_vwap_<n>``
 member (advanced by ``security_series_slot_is_new``), not the first live
 CHART member advanced by the chart bar and every requested sub-bar
-(nightowlxtrader-azt F@1D ``vwap5 = request.security(tickerid,
+(a US-stock probe: ``vwap5 = request.security(tickerid,
 timeframe.period, ta.vwap)``).
 """
 

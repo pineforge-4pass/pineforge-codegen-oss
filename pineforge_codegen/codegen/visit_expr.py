@@ -865,8 +865,8 @@ class ExprVisitor:
                                 # Same implicit tail as TA_IMPLICIT_APPEND["vwap"]:
                                 # the symbol clock keys the Daily anchor reset.
                                 # The bare property is the VWAP of hlc3 (Pine
-                                # v6 reference; lab tv notrade-session-vwap-f1d,
-                                # 2026-09-05: TradingView's read equals hlc3 on
+                                # v6 reference; a recorded daily US-stock probe:
+                                # TradingView's read equals hlc3 on
                                 # a daily bar), never of the close.
                                 _hlc3 = "((current_bar_.high + current_bar_.low + current_bar_.close) / 3.0)"
                                 return (

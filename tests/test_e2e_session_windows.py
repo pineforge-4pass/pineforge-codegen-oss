@@ -1,12 +1,12 @@
 """Session flags on a session with more than one window.
 
-TradingView's every-flag tapes (lane CG-ISMARKET's probe) on three charts
-whose session has two windows, 2025-03-03 .. 03-15
-(``fixtures/session_ismarket``): TSE:7203 (09:00-11:30 and 12:30-15:30
-Asia/Tokyo), HKEX:700 (09:30-12:00 and 13:00-16:00 Asia/Hong_Kong) and
-CBOT:ZC1! (19:00-07:45 and 08:30-13:20 America/Chicago), at 15 minutes
-(``cgs2-flags-*``) and at 60 and 240 (``ksw-flags-*``, engine lane
-K-SESSION-WINDOWS). TradingView flags all 1,570 of their bars in market and
+TradingView's every-flag tapes (lane CG-ISMARKET's probe) on charts
+whose session has two windows: the public TSE:7203 and HKEX:700 tapes
+(``fixtures/session_ismarket``) and US futures tapes kept in a private
+repository and overlaid onto the paired engine's
+``tests/codegen-fixtures/session_ismarket/``. They cover 15 minutes
+(``cgs2-flags-*``) and 60 and 240 (``ksw-flags-*``, engine lane
+K-SESSION-WINDOWS). TradingView flags all their bars in market and
 none pre- or post-market: these symbols have no extended session, and a bar
 that opens in a break (TSE:7203's 60-minute 12:00 bar, CBOT:ZC1!'s 08:00 one)
 holds the reopen and is in market.
@@ -37,8 +37,8 @@ to 20:00, over every window in either order; a bar between two windows is
 neither, and a session with an overnight window has neither. Codegen gates
 them with the chart's in-market answer. No TradingView chart above holds an
 off-market bar, so the synthetic day below pins the rule as the tapes show it
-where a chart holds such a bar: NASDAQ:AAPL's extended hours
-(``cgim-flags-aapl-60-ext``) for one window.
+where a chart holds such a bar: a US-listed stock's extended hours
+for one window.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from tests._e2e import build_strategy_library, run_strategy, skip_unless_e2e_env, transpile_json
-from tests.test_e2e_session_ismarket import FIXTURES, FLAGS, TRACE, next_chart_bar, read_tape
+from tests.test_e2e_session_ismarket import FLAGS, TRACE, next_chart_bar, read_tape, tape_file
 
 
 TAPES = {"cgs2-flags-tse7203-15": ("Asia/Tokyo", 230),
@@ -65,6 +65,12 @@ TAPES = {"cgs2-flags-tse7203-15": ("Asia/Tokyo", 230),
          "ksw-flags-hkex700-240": ("Asia/Hong_Kong", 20),
          "ksw-flags-zc1-60": ("America/Chicago", 190),
          "ksw-flags-zc1-240": ("America/Chicago", 50)}
+PRIVATE_TAPES = (
+    "cgs2-flags-zc1-15",
+    "ksw-flags-zc1-60",
+    "ksw-flags-zc1-240",
+)
+PUBLIC_TAPES = tuple(slug for slug in TAPES if slug not in PRIVATE_TAPES)
 MINUTE = 60_000
 QUARTER = 15 * MINUTE
 TSE = ("0900-1130,1230-1530", "0900-1130,1230-1545")
@@ -109,7 +115,7 @@ CASES = (
 
 
 def _interval(slug: str) -> str:
-    return json.loads((FIXTURES / slug / "metrics.json").read_text())["interval"]
+    return json.loads(tape_file(slug, "metrics.json").read_text())["interval"]
 
 
 def _write_feed(stamps: list[int], path: Path) -> Path:
@@ -127,7 +133,7 @@ def _run(engine: Path, work: Path, stamps: list[int], session: str, timezone: st
     feed = _write_feed(stamps, work / "chart.csv")
     pine = work / "strategy.pine"
     if not pine.exists():
-        pine.write_text((FIXTURES / "cgs2-flags-hkex700-15" / "strategy.pine")
+        pine.write_text(tape_file("cgs2-flags-hkex700-15", "strategy.pine")
                         .read_text(encoding="utf-8") + TRACE, encoding="utf-8")
         transpiled = transpile_json(pine)
         assert transpiled["ok"], transpiled["diagnostics"]
@@ -145,28 +151,62 @@ def engine() -> Path:
     return skip_unless_e2e_env()
 
 
+FIRST_LAST = {
+    "cgs2-flags-tse7203-15": ({"09:00"}, {"15:30"}),
+    "cgs2-flags-hkex700-15": ({"09:30"}, {"15:45"}),
+    "cgs2-flags-zc1-15": ({"19:00"}, {"13:15"}),
+    "ksw-flags-tse7203-60": ({"09:00"}, {"15:00"}),
+    "ksw-flags-tse7203-240": ({"09:00"}, {"13:00"}),
+    "ksw-flags-hkex700-60": ({"09:30", "10:00"}, {"15:00"}),
+    "ksw-flags-hkex700-240": ({"09:30", "13:00"}, {"09:30", "13:00"}),
+    "ksw-flags-zc1-60": ({"19:00"}, {"13:00"}),
+    "ksw-flags-zc1-240": ({"19:00"}, {"11:00"}),
+}
+
+
+def _recorded_window_tape(slug: str) -> tuple[set[str], set[str]]:
+    timezone, bars = TAPES[slug]
+    metrics = json.loads(tape_file(slug, "metrics.json").read_text())
+    assert hashlib.sha256(tape_file(slug, "tv_trades.csv").read_bytes()).hexdigest() \
+        == metrics["tvTradesCsvHash"], slug
+    assert hashlib.sha256(tape_file(slug, "strategy.pine").read_bytes()).hexdigest() \
+        == metrics["sourceArtifactHash"], slug
+    assert metrics["wsProvenance"]["rangeProof"] == "covered", slug
+    tape = read_tape(slug)
+    assert len(tape) == bars == metrics["trades"], slug
+    assert all(flags["M"] and not flags["P"] and not flags["Q"] for _, flags in tape), slug
+    assert all(flags["F"] == flags["f"] and flags["L"] == flags["l"] for _, flags in tape), slug
+    zone = ZoneInfo(timezone)
+    opens = {letter: {dt.datetime.fromtimestamp(ts / 1000, zone).strftime("%H:%M")
+                      for ts, flags in tape if flags[letter]} for letter in "FL"}
+    return opens["F"], opens["L"]
+
+
+def _assert_break_reopen(slug: str, timezone: str, hhmm: str) -> None:
+    zone = ZoneInfo(timezone)
+    inside = [flags for ts, flags in read_tape(slug)
+              if dt.datetime.fromtimestamp(ts / 1000, zone).strftime("%H:%M") == hhmm]
+    assert len(inside) == 10 and all(flags["M"] for flags in inside), slug
+
+
 def test_tapes_are_the_recorded_exports() -> None:
-    """Every fixture is its export byte for byte; TradingView flags every bar
-    of the three charts in market and none pre- or post-market. Each session
-    day's first bar opens at the first window's open and its last in the last
-    window, but for HKEX:700 above 15 minutes, whose 10:00 60-minute bar is a
-    first bar too and whose 240-minute bars are each first and last."""
-    first_last = {}
-    for slug, (timezone, bars) in TAPES.items():
-        metrics = json.loads((FIXTURES / slug / "metrics.json").read_text())
-        assert hashlib.sha256((FIXTURES / slug / "tv_trades.csv").read_bytes()).hexdigest() \
-            == metrics["tvTradesCsvHash"], slug
-        assert hashlib.sha256((FIXTURES / slug / "strategy.pine").read_bytes()).hexdigest() \
-            == metrics["sourceArtifactHash"], slug
-        assert metrics["wsProvenance"]["rangeProof"] == "covered", slug
-        tape = read_tape(slug)
-        assert len(tape) == bars == metrics["trades"], slug
-        assert all(flags["M"] and not flags["P"] and not flags["Q"] for _, flags in tape), slug
-        assert all(flags["F"] == flags["f"] and flags["L"] == flags["l"] for _, flags in tape), slug
-        zone = ZoneInfo(timezone)
-        opens = {letter: {dt.datetime.fromtimestamp(ts / 1000, zone).strftime("%H:%M")
-                          for ts, flags in tape if flags[letter]} for letter in "FL"}
-        first_last[slug] = (opens["F"], opens["L"])
+    """Each public export keeps its recorded flags and first/last bar opens."""
+    for slug in PUBLIC_TAPES:
+        assert _recorded_window_tape(slug) == FIRST_LAST[slug], slug
+    _assert_break_reopen("ksw-flags-tse7203-60", "Asia/Tokyo", "12:00")
+
+
+@pytest.mark.parametrize("slug", PRIVATE_TAPES)
+def test_private_tapes_are_the_recorded_exports(slug: str) -> None:
+    """Each private export is checked independently of the public tapes."""
+    assert _recorded_window_tape(slug) == FIRST_LAST[slug], slug
+    if slug == "ksw-flags-zc1-60":
+        _assert_break_reopen(slug, "America/Chicago", "08:00")
+
+
+def test_private_all_tapes_have_the_recorded_first_last_opens() -> None:
+    """The original complete first/last map requires every recorded export."""
+    first_last = {slug: _recorded_window_tape(slug) for slug in TAPES}
     assert first_last == {"cgs2-flags-tse7203-15": ({"09:00"}, {"15:30"}),
                           "cgs2-flags-hkex700-15": ({"09:30"}, {"15:45"}),
                           "cgs2-flags-zc1-15": ({"19:00"}, {"13:15"}),
@@ -186,12 +226,13 @@ def test_tapes_are_the_recorded_exports() -> None:
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.key)
-def test_multi_window_charts_are_tradingviews(case: Case, engine: Path, tmp_path: Path) -> None:
+def test_multi_window_charts_are_tradingviews(case: Case, tmp_path: Path) -> None:
     timezone, _ = TAPES[case.slug]
     tape = read_tape(case.slug)
     tf = _interval(case.slug)
     source = read_tape(case.feed) if case.feed else tape
     feed_tf = _interval(case.feed) if case.feed else tf
+    engine = skip_unless_e2e_env()
     stamps = [ts for ts, _ in source]
     stamps.append(next_chart_bar(source, int(feed_tf) * MINUTE, timezone))
     traces = _run(engine, tmp_path / "run", stamps, case.session, timezone, feed_tf, tf)

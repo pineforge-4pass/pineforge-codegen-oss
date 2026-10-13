@@ -30,8 +30,11 @@ from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
 from tests._e2e import Build, closed_trades, derive_chart_feed, execute_all, ok, skip_unless_e2e_env
 from tests._pine_libraries import Layout
+from tests._private_fixtures import private_fixture
 
 FIXTURES = Path(__file__).parent / "fixtures" / "tail_f_tv"
+# Trade lists of an index kept in a private repository (overlaid onto the paired engine tree); their test skips without them.
+PRIVATE_TAPES = ("barmerge_values",)
 SCRIPTS = Path(__file__).parent / "fixtures" / "library_scripts"
 TAPE_TZ = ZoneInfo("Asia/Taipei")  # the exporting account's chart timezone
 WINDOW_START_MS = int(dt.datetime(2025, 4, 1, tzinfo=dt.timezone.utc).timestamp() * 1000)
@@ -55,9 +58,15 @@ LIBRARIES = {
 }
 
 
+def _tape_file(name: str) -> Path:
+    if name in PRIVATE_TAPES:
+        return private_fixture(f"tail_f_tv/{name}_tv_trades.csv")
+    return FIXTURES / f"{name}_tv_trades.csv"
+
+
 def _tape(name: str) -> list[dict]:
     trades: dict[str, dict] = {}
-    with (FIXTURES / f"{name}_tv_trades.csv").open(encoding="utf-8-sig") as fh:
+    with _tape_file(name).open(encoding="utf-8-sig") as fh:
         for row in csv.DictReader(fh):
             side = "entry" if row["Type"].startswith("Entry") else "exit"
             when = dt.datetime.strptime(row["Date and time"], "%Y-%m-%d %H:%M")

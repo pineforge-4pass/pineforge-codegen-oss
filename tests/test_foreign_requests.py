@@ -16,8 +16,8 @@ with it named (item 4): never the chart's bars.
 
 TradingView's behaviour is pinned by synthetic tapes kept outside this
 repository (they carry TradingView's bars of other symbols): a TVC:DXY EMA
-cross on NYSE:F 15, BINANCE:BTCUSDT 1D and BINANCE:ETHUSDT.P 15, a TVC:VIX
-240 ``ta.ema(close, 14)[1]`` lookahead_on strategy on NASDAQ:AAPL 1D and
+cross on US-listed stocks, BINANCE:BTCUSDT 1D and BINANCE:ETHUSDT.P 15, a TVC:VIX
+240 ``ta.ema(close, 14)[1]`` lookahead_on strategy on US-listed stocks and
 OANDA:XAUUSD 15, a gaps_on variant and the XSYM-DESIGN alignment witnesses
 match trade for trade and bar for bar on the XSYM-B captures. These tests
 replay the same rules on generated bars, against an independent reckoning of

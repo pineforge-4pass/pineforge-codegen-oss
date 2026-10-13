@@ -407,34 +407,36 @@ class TaSiteHelper:
     # TradingView's per-family clocks below a top-level lazy edge
     # ------------------------------------------------------------------
     #
-    # Pinned 2026-09-03 with ``lab tv`` on NYSE:F 1D (range 2025-04-01 ..
-    # 2026-05-01; cadence-7 ternary probes ``v = bar_index % 7 == 3 ? <call> :
+    # Pinned on a daily US-stock probe (tapes kept outside this repository;
+    # cadence-7 ternary probes ``v = bar_index % 7 == 3 ? <call> :
     # na`` exposing the value through the entry size, plus lazy-``and``
     # probes), each scored per call against three models:
     #
-    #   every-bar natives   highest 9/9, sma 25/25, ema 23/23 -- the runtime
+    #   every-bar natives   highest, sma, ema (every trade matched) -- the runtime
     #                       advances the built-in on every chart bar; only the
     #                       value is gated (``_lazy_edge_ta_hoist_plan``).
-    #   hold-last source    roc 38/38 (+39/39 entries), change 39/39, mom
-    #                       39/39 -- TradingView computes these from the CALL'S
+    #   hold-last source    roc, change, mom (every trade matched) --
+    #                       TradingView computes these from the CALL'S
     #                       OWN ``source[length]`` history: the source is
     #                       written only on bars where the call executes, the
     #                       last executed value is held on skipped bars, and
     #                       the history is na before the first execution
     #                       (call 1 of every value probe has no TV entry).
-    #                       every-bar 0/38..0/39, ring-of-executions 0..1/39.
-    #   per-execution       cum, barssince, valuewhen, cross, crossover 39/39,
-    #                       rising 39/39 (strictly monotonic over its executed
-    #                       samples) and math.sum 39/39 (na until three
-    #                       executed samples) -- the native only ever sees the
-    #                       samples of bars where the call executes, which is
-    #                       exactly the reached-only inline ``compute`` lowering
-    #                       (every-bar 0..31/39).
+    #                       the every-bar clock matched almost no trade and the
+    #                       ring-of-executions clock at most one.
+    #   per-execution       cum, barssince, valuewhen, cross, crossover,
+    #                       rising (strictly monotonic over its executed
+    #                       samples) and math.sum (na until three
+    #                       executed samples), every trade matched -- the native
+    #                       only ever sees the samples of bars where the call
+    #                       executes, which is exactly the reached-only inline
+    #                       ``compute`` lowering (the every-bar clock matched
+    #                       fewer than all of them).
     #
     # The hoist is an ALLOW-LIST and requires a direct ``[k]`` read. A broad
     # every-bar hoist of every stateful family measured on Cloud Run against
-    # the full population (2026-09-04, like-for-like vs the same lab bundle)
-    # fixed the pinned shapes but cost 170 tiers / 30 hard-lane regressions,
+    # the full population (like-for-like vs the same lab bundle)
+    # fixed the pinned shapes but cost many tiers and hard-lane regressions,
     # and hoisting allow-listed families WITHOUT a history read still broke
     # four ETH hard-lane probes that main matched at 100%: ``adxVal > 30 and
     # adxVal > ta.sma(adxVal, 7)`` (louislapis9), ``volume < ta.sma(volume,
@@ -444,12 +446,12 @@ class TaSiteHelper:
     # ``ta.highest(high, n) / entry > 1.05`` under ``and`` (miemomo3). Every
     # every-bar tape (highest/sma/ema ``[1]`` under ``and``, the ternary
     # ``ta.highest(high, 5)[1]``, robmagnaye) reads ``[k]`` on the call, and
-    # the bare twins of those tapes (2026-09-04, same cadence-7 probes) are
-    # per-execution: ``close > ta.sma(close, 5)`` ring 39/39 (every-bar 23),
-    # ``close > ta.ema(close, 5)`` ring 39/39 (26), ``? ta.sma(close, 5) : na``
-    # ring 39/39 (2, na until five executed samples), ``? ta.highest(high, 5)
-    # : na`` ring 38/39 (11; TV is na with one executed sample, then the
-    # partial maximum). So: TradingView keeps a lazily executed call on the
+    # the bare twins of those tapes (same cadence-7 probes) are
+    # per-execution: ``close > ta.sma(close, 5)`` ring matched every trade
+    # (every-bar did not), likewise ``close > ta.ema(close, 5)``,
+    # ``? ta.sma(close, 5) : na`` (na until five executed samples) and
+    # ``? ta.highest(high, 5) : na`` (ring matched all but one trade; TV is na
+    # with one executed sample, then the partial maximum). So: TradingView keeps a lazily executed call on the
     # reached-only clock unless the call's own history is referenced (``[k]``),
     # in which case it materialises a continuous series and the call is
     # evaluated on every bar. Only ``LAZY_EVERY_BAR_TA`` families
@@ -670,12 +672,13 @@ class TaSiteHelper:
         per-execution inline compute (cum/barssince/valuewhen/cross*/rising/...)
         must never precalc.
 
-        Re-pinned 2026-09-03: the old opt-out for a chart ``ta.sma`` under an
+        Re-pinned: the old opt-out for a chart ``ta.sma`` under an
         ``and`` RHS (pf-probe-oliver-dual-vol-sma, "eager precalc is
         TV-incorrect") and the matching recursive ``ta.ema`` rule encoded a
-        per-call clock that ``lab tv`` refuted for top-level shapes (NYSE:F 1D,
-        ``... and close > ta.sma(close,5)[1]``: every-bar 25/25 vs per-call 28;
-        ``ta.ema``: 23/23 vs 27). The analyzer never marks a site inside an
+        per-call clock that TradingView refuted for top-level shapes (a daily
+        US-stock probe, ``... and close > ta.sma(close,5)[1]``: the every-bar
+        clock matched every trade and the per-call clock did not; ``ta.ema``
+        likewise). The analyzer never marks a site inside an
         ``if``/loop/function scope static, so after hoisting the opt-outs
         only reach a static lazy-edge ``ta.sma``/``ta.ema`` that is not a
         top-level statement operand -- in practice a UDT field default
@@ -717,21 +720,21 @@ class TaSiteHelper:
     # Every-bar hoisting of stateful ``ta.*`` sites below top-level lazy edges
     # ------------------------------------------------------------------
     #
-    # TradingView rule, pinned 2026-09-03 with ``lab tv`` on NYSE:F 1D (tapes
-    # out-pin-ring-lazyand / lazyand-sma / lazyand-ema / ring-ternary): a
+    # TradingView rule, pinned on a daily US-stock probe (tapes kept outside
+    # this repository; out-pin-ring-lazyand / lazyand-sma / lazyand-ema / ring-ternary): a
     # stateful ``ta.*`` call inside ANY expression operand of a top-level
     # statement -- the RHS of a Pine-v6 lazy ``and``/``or``, either branch of a
     # ternary, nested comparisons -- is evaluated on EVERY bar. Short-circuiting
     # and branch selection gate only the *value*, never the built-in's state,
     # and ``[1]`` on such a call is the previous BAR's value:
     #
-    #   c = bar_index % 7 == 3 and close > ta.highest(high,5)[1]   9/9 entries
-    #   c = bar_index % 7 == 3 and close > ta.sma(close,5)[1]      25/25
-    #   c = bar_index % 7 == 3 and close > ta.ema(close,5)[1]      23/23
-    #   v = bar_index % 7 == 3 ? ta.highest(high,5)[1] : na        38/39
+    #   c = bar_index % 7 == 3 and close > ta.highest(high,5)[1]
+    #   c = bar_index % 7 == 3 and close > ta.sma(close,5)[1]
+    #   c = bar_index % 7 == 3 and close > ta.ema(close,5)[1]
+    #   v = bar_index % 7 == 3 ? ta.highest(high,5)[1] : na
     #
-    # (the per-call / "previous evaluation" model predicts 8/9, 28, 27 and
-    # 2/39). Production instance: robmagnaye14 ``bullMSS = setupAlive and
+    # (the per-call / "previous evaluation" model mispredicts these).
+    # Production instance: robmagnaye14 ``bullMSS = setupAlive and
     # dir == 1 and close > ta.highest(high, 10)[1]``.
     #
     # A stateful call INSIDE an ``if``/local-block/function body that does not

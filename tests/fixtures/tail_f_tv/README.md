@@ -25,7 +25,7 @@ tape's exit `Signal`s are TradingView's values.
 | `array_ref_args` | `b0208225f3b6a9a8a30f70cc6ebaccf0d9610e9e6c2e070ea5c215d6fa8a7be9` | `ed3ef44f5b0bee31e9f4905961dc24b6d71bb95378856d87b5c677080065d426` | 41 |
 | `array_ref_fresh` | `f7688de99fb628a22b863f445f963af0f5dc21cae11b2099dbf570bdf15d0236` | `dbdda31f12614235dbfa04eca2261b02e121afafcfbd4185b66ab5af168fe058` | 41 |
 | `overload_qualifiers` | `f7096b6e8d6f29832feeef2a40ab095593658630f69940dd06dcd640b924b947` | `f57d06a1200d73d4e3537ff169288b45191b7a1bba2752313a97056bc5ee0e0d` | 41 |
-| `barmerge_values` | `a83175b93dd01016b91ac1d62bfce72688498f2c4c5ab7f885b916baadb2c2be` | `66ba8fd3a105f694184644906e967e2bdc4908afe1d0386086e93a777d95d86e` | 41 |
+| `barmerge_values` | `a83175b93dd01016b91ac1d62bfce72688498f2c4c5ab7f885b916baadb2c2be` | kept in a private repository, overlaid onto the paired engine tree | 41 |
 | `block_local_types` | `af13f0c0ab095d5b2881df1a68052c9302bf00f0225073c16ee37cd99eff3237` | `2da7edfa18e8b0538c8b519f0d7486f9b097cd7e25ea7b10cd01493d5492d8ca` | 41 |
 | `int_product` | `a60b3c382967056b8a4297f6ebfc5bc1b78711fa725830f23c2161284df17d36` | `774698ad0028cbd6e9ec996f9656ee56e2260ace7e2d7d4328c54bb74811cdc0` | 41 |
 

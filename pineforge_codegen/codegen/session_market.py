@@ -2,7 +2,7 @@
 timeframe.
 
 TradingView flags a bar by its own open time: on an extended-hours
-NASDAQ:AAPL 60 chart the 09:00 bar, which holds the 09:30 open, is
+US-listed stock's 60-minute chart the 09:00 bar, which holds the 09:30 open, is
 pre-market and the 16:00 bar post-market. It reads a session's day mask per
 session day, so an overnight session's Sunday-evening open belongs to
 Monday's, and a ``0000-2400`` day is in market throughout; a D/W/M bar holds
