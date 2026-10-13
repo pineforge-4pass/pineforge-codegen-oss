@@ -1,16 +1,16 @@
 """Hold-last source clock for ``ta.change`` / ``ta.mom`` / ``ta.roc`` below a lazy edge.
 
-Pinned 2026-09-03 with ``lab tv`` on NYSE:F 1D (range 2025-04-01..2026-05-01,
-cadence-7 probes, value exposed through the entry size). TradingView computes
+Pinned with a daily US-stock probe (tapes kept outside this repository,
+with conditional calls). TradingView computes
 these three from the CALL'S OWN ``source[length]`` history: the source is
 written only on bars where the call executes, the last executed value is held
 on the bars it skips, and the history is na before the first execution:
 
-* ``v = bar_index % 7 == 3 ? ta.roc(close, 3) : na``   -> 38/38 by value
-  (``... and ta.roc(close, 3) > 0`` -> 39/39 entries); every-bar 0/38,
-  ring-of-executions 0/38.
-* ``ta.change(close, 3)`` / ``ta.mom(close, 3)`` -> 39/39 each (every-bar 0,
-  ring 1); call 1 (bar 3, the first execution) has no TV entry: na.
+* ``v = bar_index % 7 == 3 ? ta.roc(close, 3) : na`` -> matched by value
+  (``... and ta.roc(close, 3) > 0`` -> matched every entry); every-bar and
+  ring-of-executions models did not match.
+* ``ta.change(close, 3)`` / ``ta.mom(close, 3)`` -> matched by value;
+  every-bar and ring models did not match. The first execution has no TV entry: na.
 
 This generalises the former ``_PFLazySaturatedROC3Clock`` (#64), which pinned
 the same clock for the literal ``ta.roc(close, 3)`` under a plain ``and`` RHS

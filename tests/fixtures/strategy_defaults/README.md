@@ -12,7 +12,7 @@ default moved: `currency`, `commission_type`, `commission_value`, `slippage`,
 `process_orders_on_close`, `close_entries_rule` and `use_bar_magnifier`
 export the same tape omitted as given explicitly at their documented default.
 The whole matrix (every parameter, Pine v5 and v6, BINANCE:BTCUSDT 15,
-NYSE:F 15, BINANCE:ETHUSDT.P 15 and CME_MINI:ES1! 15, each parameter omitted,
+BINANCE:ETHUSDT.P 15 and CME_MINI:ES1! 15, each parameter omitted,
 at its old default and at a value that moves the tape) is the engine lane
 TV-DEFAULTS report; these seven tapes are the rows this repository replays.
 

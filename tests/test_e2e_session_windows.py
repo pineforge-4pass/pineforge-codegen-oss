@@ -37,8 +37,8 @@ to 20:00, over every window in either order; a bar between two windows is
 neither, and a session with an overnight window has neither. Codegen gates
 them with the chart's in-market answer. No TradingView chart above holds an
 off-market bar, so the synthetic day below pins the rule as the tapes show it
-where a chart holds such a bar: NASDAQ:AAPL's extended hours
-(``cgim-flags-aapl-60-ext``) for one window.
+where a chart holds such a bar: a US-listed stock's extended hours
+for one window.
 """
 
 from __future__ import annotations

@@ -3,8 +3,8 @@
 Links the generated strategy against a built ``libpineforge`` (set
 ``PINEFORGE_ENGINE_LIB``; otherwise the sibling engine's ``build*/lib`` is
 used) and drives it with synthetic bars -- no feed, no probe. The expected
-numbers are the TradingView models pinned 2026-09-03 with ``lab tv`` on
-NYSE:F 1D (see tests/test_lazy_source_clock.py and
+numbers are the TradingView models pinned on a US-listed stock
+(tapes kept outside this repository; see tests/test_lazy_source_clock.py and
 tests/test_lazy_edge_ta_every_bar.py): change/mom/roc read the call's own
 held ``source[length]`` (na before the first execution); cum/barssince only
 see the samples of bars where the call executes.
@@ -189,7 +189,7 @@ def test_executions_closer_than_length_read_the_held_source():
     """The previous execution (bar 4) is 2 bars back for length 3: the previous
     source is still the held history, the close of the latest execution at or
     before bar 3 (bar 1 = 102), not the chart close[3] (bar 3 = 106), as
-    TradingView's w8a-lazy-mom-held tape shows
+    a US-stock tape kept in a private repository shows
     (tests/test_e2e_lazy_held_source.py)."""
     pine = """//@version=6
 strategy("lazy source clock close executions")

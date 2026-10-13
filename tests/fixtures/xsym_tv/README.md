@@ -42,28 +42,23 @@ What each tape shows:
   ta.sma(close, 3))` reached through `h(tf) => g(tf)` and `k(tf) => h(tf)`
   as `h(tfA)`, `h(tfB)`, `k("60")`, `k(tfB)` (inputs 60 and 240): each call
   reads its own timeframe's SMA. Exit Signals: `a`, `b`, `c`, `d`. The same
-  probe exported on NASDAQ:AAPL 15 over 2025-04-01..2025-05-01 (tape sha256
-  `d5ba8f84b8a1520f1f35e09a760eaa9ec260ee33034b2c9ec3ea62ecfb803dfd`, 267
-  trades, the last one still open) is replayed outside this repository, on
-  the AAPL lane feed the tests cannot reach.
+  probe on a US-listed stock, 15-minute chart (tape not shipped) is replayed
+  outside this repository, on a feed the tests cannot reach.
 - `xa_nested_tf`: the symbol and the timeframe through two helper levels,
   `g(sym, tf) => request.security(sym, tf, ta.sma(close, 3))`, `h(sym, tf) =>
   g(sym, tf)`, `k(tf) => h(syminfo.tickerid, tf)`, called as
   `h(syminfo.tickerid, tfA)`, `h(syminfo.tickerid, tfB)`, `k("60")`,
   `k(tfB)` and `h(ticker.heikinashi(syminfo.tickerid), tfA)`: the last reads
-  the Heikin-Ashi 60-minute SMA. Exit Signals: `a` ... `e`. The NASDAQ:AAPL
-  15 export over 2025-04-01..2025-05-01 (tape sha256
-  `0a40b6b98084d0ff1e6ab776f1a1ab007cf2700770701ec3fa275e0f56ee874b`, 267
-  trades, the last one open) is replayed outside this repository.
+  the Heikin-Ashi 60-minute SMA. Exit Signals: `a` ... `e`. The same probe
+  on a US-listed stock, 15-minute chart (tape not shipped) is replayed
+  outside this repository.
 - `xa_watchlist`, `xa_watchlist_plain`: a watchlist of three other symbols
   (`BINANCE:BTCUSDT`, `OANDA:EURUSD`, `TVC:DXY`) through a helper returning a
   bool pair, and a `request.financial`, whose values reach only an `alert()`
   and table cells, beside an SMA-cross strategy; the plain probe is the same
   strategy with the watchlist deleted. The two tapes are one file on
-  BINANCE:ETHUSDT.P 15 (22 trades) and one file on NASDAQ:AAPL 15 over
-  2025-04-01..2025-05-01 (tape sha256
-  `b1cd05f0bc7ee1dec26ca03a1a65fd5dc31ed0d12bb211ca221ca2e206418075`, 20
-  trades; kept outside this repository). These probes send no comments: the
+  BINANCE:ETHUSDT.P 15 (22 trades), with the same probe on a US-listed stock,
+  15-minute chart (tape not shipped). These probes send no comments: the
   replay compares trade times and prices.
 - `xa_default_arm`: a `switch` on an input, default `"Session"`, whose other
   arms read `request.earnings` and `request.dividends` values or call a

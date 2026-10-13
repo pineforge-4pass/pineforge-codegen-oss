@@ -795,13 +795,14 @@ def test_ta_precalc_skips_user_series_alias_source():
 
 
 
-_EVERY_BAR_RULE_NOTE = """Pinned 2026-09-03/04 with ``lab tv`` (NYSE:F 1D) and Cloud Run: a chart
+_EVERY_BAR_RULE_NOTE = """Pinned with a daily US-stock probe (tapes kept outside this repository): a chart
 ``ta.*`` call below a Pine-v6 lazy edge of a TOP-LEVEL statement stays on the
 reached-only clock UNLESS the call's own history is read. With ``[1]`` on the
 call the every-bar model is exact -- ``c = bar_index % 7 == 3 and close >
-ta.sma(close, 5)[1]`` 25/25 TV trades (per-call clock 28), ``ta.ema`` 23/23
-(27), ``ta.highest(high, 5)[1]`` 9/9 (8), the ternary ``v = bar_index % 7 == 3
-? ta.highest(high, 5)[1] : na`` 38/39 (2) -- and codegen hoists such
+ta.sma(close, 5)[1]`` matched every TradingView trade; the per-call clock did
+not. The same holds for ``ta.ema`` and ``ta.highest(high, 5)[1]``; for the
+ternary ``v = bar_index % 7 == 3 ? ta.highest(high, 5)[1] : na`` the every-bar
+model matched more trades than the per-call clock -- and codegen hoists such
 highest/lowest/sma/ema sites into a ``const auto _pf_every_bar_ta_N`` local
 before the statement (``_lazy_edge_ta_hoist_plan``), where precalc (the same
 every-bar evaluation) is valid again. WITHOUT a history read the reached-only
@@ -855,8 +856,8 @@ def test_nested_ta_below_and_rhs_keeps_inline_sma_and_clocks_outer_change():
     """``ta.change(ta.sma(...))`` under an ``and`` RHS (ycelestine77): the SMA
     has no history read, so it stays on the reached-only inline compute (no
     precalc); ``ta.change`` follows TradingView's hold-last source clock over
-    that value (lab tv 2026-09-03: change 39/39; length 1 == previous
-    execution)."""
+    that value (a daily US-stock probe, tapes kept outside this repository:
+    matched every TradingView trade; length 1 == previous execution)."""
     cpp = _cpp(
         "base = ta.mom(close, 20) > 0 and ta.change(ta.sma(close, 50)) > 0\n"
         "plot(base ? 1 : 0)"

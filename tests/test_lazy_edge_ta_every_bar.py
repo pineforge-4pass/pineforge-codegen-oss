@@ -1,16 +1,16 @@
 """Top-level lazy-edge ``ta.*`` sites advance every bar (TradingView rule).
 
-Pinned 2026-09-03 with ``lab tv`` on NYSE:F 1D (campaign scratch tapes
-``out-pin-ring-lazyand`` / ``out-pin-lazyand-sma`` / ``out-pin-lazyand-ema`` /
-``out-pin-ring-ternary``; feed ``lab bars NYSE:F 1D --around 2025-10-15``):
+Pinned on a US-listed stock (tapes kept outside this repository):
 
 * ``c = bar_index % 7 == 3 and close > ta.highest(high, 5)[1]`` -- the
-  every-bar model reproduces TV's 9/9 entries; the per-call model is wrong on
-  8 of them.
-* ``... and close > ta.sma(close, 5)[1]`` -- every-bar 25/25 (per-call 28).
-* ``... and close > ta.ema(close, 5)[1]`` -- every-bar 23/23 (per-call 27).
-* ``v = bar_index % 7 == 3 ? ta.highest(high, 5)[1] : na`` -- every-bar 38/39
-  (ring / previous-execution model 2/39).
+  every-bar model reproduces every TradingView entry; the per-call model
+  does not.
+* ``... and close > ta.sma(close, 5)[1]`` -- every-bar matched every trade;
+  per-call did not.
+* ``... and close > ta.ema(close, 5)[1]`` -- every-bar matched every trade;
+  per-call did not.
+* ``v = bar_index % 7 == 3 ? ta.highest(high, 5)[1] : na`` -- every-bar
+  matched more trades than the ring / previous-execution model.
 
 Rule: a stateful ``ta.*`` call inside ANY expression operand of a top-level
 statement -- the RHS of a Pine-v6 lazy ``and``/``or``, either ternary arm,
@@ -221,13 +221,12 @@ def test_hoist_is_independent_of_run_mode():
 
 
 # ---------------------------------------------------------------------------
-# The bare twins (2026-09-04, same cadence-7 probes on NYSE:F 1D): without a
+# The bare twins on a US-listed stock: without a
 # history read TradingView runs the call per execution.
-#   c = bar_index % 7 == 3 and close > ta.sma(close, 5)   ring 39/39, every-bar 23/39
-#   c = bar_index % 7 == 3 and close > ta.ema(close, 5)   ring 39/39, every-bar 26/39
-#   v = bar_index % 7 == 3 ? ta.sma(close, 5) : na        ring 39/39, every-bar 2/39
-#   v = bar_index % 7 == 3 ? ta.highest(high, 5) : na     ring 38/39, every-bar 11/39
-# (their ``[1]`` twins: every-bar 39/39 each)
+#   Bare lazy-and SMA and EMA: ring matched every trade; every-bar did not.
+#   Bare ternary SMA: ring matched every trade; every-bar did not.
+#   Bare ternary highest: ring matched more trades than every-bar.
+#   Their history-read twins matched every trade on the every-bar clock.
 # ---------------------------------------------------------------------------
 
 PIN_LAZYAND_SMA_BARE = (
@@ -450,13 +449,12 @@ def test_var_initializer_is_not_hoisted():
     assert "_pf_every_bar_ta_" not in cpp
 
 
-# Per-family clocks below a lazy edge, pinned 2026-09-03 with cadence-7 ternary
-# probes on NYSE:F 1D (``v = bar_index % 7 == 3 ? <call> : na``, value exposed
-# through the entry size) plus lazy-``and`` probes:
-#   hold-last source   roc 38/38 (+39/39 entries), change 39/39, mom 39/39
-#                      (every-bar 0/38..0/39; ring-of-executions 0..1/39)
-#   per-execution      cum, barssince, valuewhen, cross, crossover, rising 39/39,
-#                      math.sum 39/39 (every-bar 0..31/39)
+# Per-family clocks below a lazy edge, pinned on a US-listed stock with
+# ternary and lazy-``and`` probes (tapes kept outside this repository):
+#   hold-last source   roc, change and mom matched by value and entry;
+#                      every-bar and ring-of-executions models did not.
+#   per-execution      cum, barssince, valuewhen, cross, crossover, rising
+#                      and math.sum matched; the every-bar model did not.
 
 
 def test_source_clock_families_are_not_hoisted_and_use_held_source_history():
