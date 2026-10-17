@@ -43,11 +43,21 @@ A patch release of the exact engine/codegen pair.
   `second`, `dayofmonth`, `dayofweek`, `month`, `year`, `weekofyear`) to the
   active bar's timestamp (`current_bar_.timestamp` on the chart, `bar.timestamp`
   inside `request.security`) when called with a `timezone=` keyword argument
-  only.
-- Infer a single consistent element type across `var` array declarations and
-  their `array.from(...)` initializers, preserving `int` for integer constants
-  (including unary-signed constants and function-local constants) and promoting
-  to `double` when any element is `float`.
+  only
+  ([#205](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/205)).
+- Infer a single consistent element type across every `array.from(...)` call
+  (`var` array declarations, plain declarations and inline arguments alike) in
+  `pineforge_codegen/codegen/types.py` and `pineforge_codegen/analyzer/types.py`,
+  preserving `int` for integer constants (including unary-signed constants and
+  function-local constants) and promoting to `double` when any element is
+  `float`. For previously compiling scripts, the observable emitted-C++ change
+  is that an `array.from` whose arguments are all integer, including
+  unary-signed ones like `array.from(-1, 1)`, now emits `std::vector<int>`
+  instead of `std::vector<double>`; with `na` mixed in (`array.from(-1, na)`) it
+  emits `int` with the `int` `na` sentinel, as `array.from(1, na)` already did.
+  Values are unchanged for arithmetic, since `/`, `%`, `math.max` and the array
+  reductions already work in `double`
+  ([#205](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/205)).
 
 ## 1.6.0 — 2026-10-17
 

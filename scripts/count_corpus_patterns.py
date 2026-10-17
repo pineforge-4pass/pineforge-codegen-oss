@@ -2,9 +2,11 @@
 """Read-only corpus counter for timezone-only calendar built-ins and ``var`` + ``array.from`` with numeric constants.
 
 Scans Pine files in the repository's gate corpus (``tests/gate-corpus/``) and
-fixtures (``tests/fixtures/``), plus the sibling engine corpus if present via
-``PINEFORGE_CORPUS_DIR`` / ``../pineforge-engine/corpus``, without modifying any
-files or invoking native builds.
+fixtures (``tests/fixtures/``), plus the sibling engine corpus via
+``PINEFORGE_ENGINE_CORPUS`` (or ``PINEFORGE_CORPUS_DIR`` as a fallback, then
+``../pineforge-engine/corpus``), without modifying any files or invoking native
+builds. Exits nonzero with a diagnostic on stderr when any corpus directory is
+not found.
 
 Counts:
   (A) Calendar built-in calls (``hour``, ``minute``, ``second``, ``dayofmonth``,
@@ -143,17 +145,8 @@ def scan_pine_file(path: Path) -> tuple[int, int, bool]:
 
 def collect_corpus_Summary(root: Path) -> dict:
     if not root.is_dir():
-        return {
-            "exists": False,
-            "total_files": 0,
-            "parsed_files": 0,
-            "files_with_a": 0,
-            "occurrences_a": 0,
-            "files_a": [],
-            "files_with_b": 0,
-            "occurrences_b": 0,
-            "files_b": [],
-        }
+        print(f"error: corpus directory not found: {root}", file=sys.stderr)
+        sys.exit(1)
     pine_files = sorted(p for p in root.rglob("*.pine") if "data" not in p.parts)
     parsed = 0
     files_a: list[str] = []
@@ -187,12 +180,33 @@ def collect_corpus_Summary(root: Path) -> dict:
 def main() -> None:
     gate_corpus_dir = REPO_ROOT / "tests" / "gate-corpus"
     fixtures_dir = REPO_ROOT / "tests" / "fixtures"
-    env_corpus = os.environ.get("PINEFORGE_CORPUS_DIR")
+    env_corpus = (
+        os.environ.get("PINEFORGE_ENGINE_CORPUS")
+        or os.environ.get("PINEFORGE_CORPUS_DIR")
+    )
     engine_corpus_dir = (
-        Path(env_corpus)
+        Path(env_corpus).expanduser()
         if env_corpus
         else (REPO_ROOT.parent / "pineforge-engine" / "corpus")
     )
+
+    missing = [
+        (name, path)
+        for name, path in (
+            ("gate_corpus", gate_corpus_dir),
+            ("tests_fixtures", fixtures_dir),
+            ("engine_corpus", engine_corpus_dir),
+        )
+        if not path.is_dir()
+    ]
+    if missing:
+        for name, path in missing:
+            print(
+                f"error: corpus directory not found for {name}: {path} "
+                "(set PINEFORGE_ENGINE_CORPUS or PINEFORGE_CORPUS_DIR)",
+                file=sys.stderr,
+            )
+        sys.exit(1)
 
     report = {
         "gate_corpus": collect_corpus_Summary(gate_corpus_dir),
