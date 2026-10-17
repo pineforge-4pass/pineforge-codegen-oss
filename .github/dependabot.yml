@@ -15,12 +15,21 @@ updates:
   # The conformance-gate / npm-package tooling (pyodide pinned to PYODIDE_TARGET,
   # tar caret range) — get reviewable bump PRs. NOTE: a pyodide bump must move
   # PYODIDE_TARGET in lockstep (the gate validates against it), so review these.
+  # One grouped PR a week.
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
-  # Python dev deps (pytest).
+    groups:
+      npm:
+        patterns:
+          - "*"
+  # Python dev deps (pytest). One grouped PR a week.
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      pip:
+        patterns:
+          - "*"
