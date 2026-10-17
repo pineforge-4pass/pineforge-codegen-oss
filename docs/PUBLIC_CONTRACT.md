@@ -1,7 +1,7 @@
 # Public contract for 1.0
 
 The supported Python/JSON contract began in 1.0.0; the sections below identify
-later additions. This revision includes the 1.5.0 pair (2026-10-12).
+later additions. This revision includes the 1.6.0 pair (2026-10-17).
 
 Text marked **since 1.5.0** describes diagnostic additions that 1.4.0 and
 earlier releases do not have: the `note` severity, the `user_message` template

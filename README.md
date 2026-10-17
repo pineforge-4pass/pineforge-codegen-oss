@@ -42,7 +42,7 @@ for the changes in each release from 1.0.0 on and the release-note policy.
 ## Releases and this README
 
 <!-- Release lane: before a release is tagged, add it to the Engine pairing
-table and update every line that names `1.5.0` or `v1.5.0` as the current
+table and update every line that names `1.6.0` or `v1.6.0` as the current
 release or pair (this section's version and date, the baseline paragraph at
 the top, the engine `src/source/` link, the `@pf-trace` note, the clone
 command and its example output, "This section describes …", the timing note)
@@ -52,7 +52,7 @@ hosted-server line name no version. -->
 
 This README ships with each release as its package description on PyPI
 (`pineforge-codegen`); releases from 0.7.0 on are also on npm as
-`@pineforge/codegen-pyodide`. It describes 1.5.0 (2026-10-12)
+`@pineforge/codegen-pyodide`. It describes 1.6.0 (2026-10-17)
 and what changed since 0.10.4. The 1.4.0 release's behavior was validated
 before tagging on codegen `bfc4ddce` with engine `b3192bfc`, excluding engine
 request #356; those validation builds reported `1.3.0`. Historical measurements
@@ -125,8 +125,8 @@ It does **not** own execution semantics. Order lifecycle, bracket legs,
 fill-price and slippage rules, `process_orders_on_close` / `calc_on_order_fills`,
 margin revival and trail/stop behaviour — everything TradingView parity depends
 on at run time — live in the engine's source-adapter runtime
-([`src/source/`](https://github.com/pineforge-4pass/pineforge-engine/tree/v1.5.0/src/source)
-in engine `v1.5.0`), which maps them onto the engine's Pine-agnostic kernel.
+([`src/source/`](https://github.com/pineforge-4pass/pineforge-engine/tree/v1.6.0/src/source)
+in engine `v1.6.0`), which maps them onto the engine's Pine-agnostic kernel.
 See
 the engine's [architecture notes](https://github.com/pineforge-4pass/pineforge-engine#architecture-kernel-vs-parity).
 
@@ -540,6 +540,7 @@ Generated C++ compiles only against the engine it was generated for:
 | 1.3.0 (PyPI, 2026-10-06) | `v1.3.0` | The pair the `pineforge-release` image `1.3.0` ships. Its C++ adds the confirmed-bar receipt, which engine `v1.3.0`'s live runner reads, and the order-shapes receipt; engine `v1.3.0`'s `<pineforge/pineforge.h>` is `v1.2.0`'s. Regenerate and relink. |
 | 1.4.0 (PyPI, 2026-10-08) | `v1.4.0` | Adds paired coded failures, corrected input manifests and collection lowering. C ABI 4 does not authorize a mixed pair. Regenerate and relink. |
 | 1.5.0 (PyPI, 2026-10-12) | `v1.5.0` | Adds the nonfatal `note` diagnostic severity and diagnostic `user_message` templates. Regenerate and relink. |
+| 1.6.0 (PyPI, 2026-10-17) | `v1.6.0` | Emitted C++ and the Python, JSON and diagnostic contract are unchanged since 1.5.0; test and comment cleanup only (#200, #201, #202). Regenerate and relink. |
 | Later `X.Y.Z` releases | `vX.Y.Z` of the same version | See below. |
 
 On the 0.x line the engine and codegen versions are independent, and the
@@ -565,8 +566,8 @@ Pine as `strategy.pine`, write `strategy.generated.cpp` with the
 [file example](#transpile-a-file-to-a-cpp) above, then from the same directory:
 
 ```bash
-# 1.5.0 pairs with engine v1.5.0. For 0.10.4 use v0.13.1.
-git clone --branch v1.5.0 https://github.com/pineforge-4pass/pineforge-engine.git
+# 1.6.0 pairs with engine v1.6.0. For 0.10.4 use v0.13.1.
+git clone --branch v1.6.0 https://github.com/pineforge-4pass/pineforge-engine.git
 cd pineforge-engine
 cp ../strategy.generated.cpp tutorial/macd/generated.cpp   # the tutorial's strategy slot
 bash tutorial/run.sh    # needs cmake, a C++17 compiler and python3
@@ -692,7 +693,7 @@ quote. The commercial-license store (coming soon) will take orders online.
 
 ## Explicit Pine execution attachment
 
-This section describes the 1.5.0 and engine `v1.5.0` pair. The Pine execution adapter is
+This section describes the 1.6.0 and engine `v1.6.0` pair. The Pine execution adapter is
 the engine's full Pine execution runtime (`PineExecutionAdapter` and
 `PineStrategyHost` in the engine's `src/source/`): order lifecycle, bracket
 legs, fill-price and slippage rules, POOC / `calc_on_order_fills`, margin
@@ -715,9 +716,9 @@ Regenerate old generated C++ before using a new engine for Pine execution. C++
 generated before the source-layer cut
 ([#129](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/129)),
 0.10.4's included, derives from `BacktestEngine` and does not compile against
-engine `v1.5.0`; old cap-only C++ does not attach the priority rule, and
+engine `v1.6.0`; old cap-only C++ does not attach the priority rule, and
 metadata cannot silently restore it. Rebuild all modules against the
-new matching C++ layout (`engine_script_run_v19` in engine `v1.5.0`). Retaining
+new matching C++ layout (`engine_script_run_v19` in engine `v1.6.0`). Retaining
 that epoch does not promise equal fingerprints, state hashes or trades across
 releases. The extraction preserves Pine policy
 under explicit attachment; it does not implement the generic native
