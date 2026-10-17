@@ -22,7 +22,13 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## 1.6.1 — Unreleased
 
-A patch release of the exact engine/codegen pair.
+The planned number of the next patch release of the exact engine/codegen pair;
+it stays **Unreleased** until its tag exists, and the package version is
+unchanged. Codegen 1.6.1 is planned as the exact engine/codegen pair with
+engine `v1.6.1`; the prerelease `1.6.1-rc.1` pairs with engine
+`v1.6.1-rc.1`. This entry records what changed in this repository since 1.6.0,
+and nothing else: the engine pairing, the date and the final text are set when
+the release is prepared.
 
 ### Compatibility and migration
 
@@ -58,6 +64,9 @@ A patch release of the exact engine/codegen pair.
   Values are unchanged for arithmetic, since `/`, `%`, `math.max` and the array
   reductions already work in `double`
   ([#205](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/205)).
+- Group weekly Dependabot pull requests into one pull request per ecosystem
+  (`npm` and `pip`) in `.github/dependabot.yml`
+  ([#206](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/206)).
 
 ## 1.6.0 — 2026-10-17
 
