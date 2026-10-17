@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from pineforge_codegen import transpile
 from pineforge_codegen.cpp_allowlist import (
     Finding,
     check_generated_cpp,
@@ -22,12 +23,41 @@ from pineforge_codegen.cpp_allowlist import (
 ROOT = Path(__file__).resolve().parents[1]
 COMMITTED_GENERATED_CPP = sorted((ROOT / "tests").rglob("*.cpp"))
 
+# The committed golden is normalised by ``tests/_legacy_cpp.legacy_cpp`` and
+# predates the unconditional settings and run-stop blocks, so it cannot show
+# those paths.  These fixtures are transpiled here, against the current
+# emitter, for the positive corpus: settings/inputs (which emit ``<::``),
+# timezone use (the sealed timestamp calendar run), drawing and request.
+CURRENT_CODEGEN_FIXTURES = (
+    "tests/fixtures/matrix_eigen_pca.pine",
+    "tests/fixtures/input_metadata_numeric.pine",
+    "tests/fixtures/drawing_lifetime/w9dg-label-collect/strategy.pine",
+    "tests/fixtures/request_discovery/case_strategy.pine",
+)
+
 
 def test_committed_generated_cpp_passes_the_allowlist():
     assert COMMITTED_GENERATED_CPP, "no committed generated .cpp found"
     for path in COMMITTED_GENERATED_CPP:
         findings = check_generated_cpp(path.read_text(encoding="utf-8"))
         assert findings == [], f"{path}: {findings}"
+
+
+@pytest.mark.parametrize("relative", CURRENT_CODEGEN_FIXTURES)
+def test_current_codegen_output_passes_the_allowlist(relative: str):
+    source = (ROOT / relative).read_text(encoding="utf-8")
+    findings = check_generated_cpp(transpile(source))
+    assert findings == [], f"{relative}: {findings}"
+
+
+def test_current_matrix_output_exercises_settings_and_run_stop_macros():
+    source = (ROOT / "tests/fixtures/matrix_eigen_pca.pine").read_text(
+        encoding="utf-8"
+    )
+    cpp = transpile(source)
+    assert "std::vector<::" in cpp
+    assert "#define _PF_ARRAY_STOP" in cpp
+    assert check_generated_cpp(cpp) == []
 
 
 NEGATIVES = {
