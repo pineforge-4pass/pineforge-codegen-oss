@@ -25,7 +25,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
 The planned number of the next patch release of the exact engine/codegen pair;
 it stays **Unreleased** until its tag exists, and the package version is
 unchanged. Codegen 1.6.1 is planned as the exact engine/codegen pair with
-engine `v1.6.1`; the prerelease `1.6.1-rc.1` (2026-10-17) pairs with engine
+engine `v1.6.1`; the prerelease `1.6.1-rc.1` pairs with engine
 `v1.6.1-rc.1`. This entry records what changed in this repository since 1.6.0,
 and nothing else: the engine pairing, the date and the final text are set when
 the release is prepared.
