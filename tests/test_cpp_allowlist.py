@@ -67,6 +67,13 @@ def test_each_rule_has_a_load_bearing_negative(rule: str, source: str):
     assert all(isinstance(finding, Finding) for finding in findings)
 
 
+def test_shift_scope_sequence_is_not_a_digraph():
+    # C++ max munch: ``<::`` is ``<`` then ``::`` unless followed by
+    # ``:`` or ``>``.  Settings metadata emits this shape.
+    cpp = "std::vector<::pineforge::checked_settings::Setting> settings;"
+    assert check_generated_cpp(cpp) == []
+
+
 def test_pragma_spelling_with_underscore_is_refused():
     findings = check_generated_cpp('_Pragma("once")')
     assert {finding.rule for finding in findings} == {"pragma"}, findings

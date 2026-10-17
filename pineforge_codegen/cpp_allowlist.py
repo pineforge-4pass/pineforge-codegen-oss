@@ -584,6 +584,14 @@ class _Tokenizer:
         self.bol = False
 
     def _digraph_length(self) -> int:
+        # [lex.pptoken] max-munch exception: ``<::`` is an ordinary ``<``
+        # followed by ``::`` unless the character after ``<::`` is another
+        # ``:`` or a ``>``.  Codegen emits that sequence for qualified type
+        # members (``std::vector<::pineforge::checked_settings::Setting>``).
+        if self.text.startswith("<::", self.i):
+            after = self.text[self.i + 3] if self.i + 3 < self.n else ""
+            if after not in (":", ">"):
+                return 0
         for digraph in _DIGRAPHS:
             if self.text.startswith(digraph, self.i):
                 return len(digraph)
