@@ -20,6 +20,35 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## 1.6.1 — Unreleased
+
+A patch release of the exact engine/codegen pair.
+
+### Compatibility and migration
+
+- No Python, JSON, diagnostic or C ABI contract changes.
+- Strategies that previously failed native C++ compilation when calling a
+  calendar built-in (`hour`, `minute`, `second`, `dayofmonth`, `dayofweek`,
+  `month`, `year`, `weekofyear`) with `timezone=` and no positional `time`
+  argument, or when initializing a `var` array with `array.from(...)` over
+  unary-signed or mixed numeric constants, now emit matching C++ types and
+  compile cleanly.
+- A pair change requires regenerated C++ and relinked strategy libraries against
+  the paired engine release's headers and `libpineforge.a` (README
+  [Engine pairing](README.md#engine-pairing)).
+
+### Changes since 1.6.0
+
+- Bind the omitted `time` argument of calendar built-ins (`hour`, `minute`,
+  `second`, `dayofmonth`, `dayofweek`, `month`, `year`, `weekofyear`) to the
+  active bar's timestamp (`current_bar_.timestamp` on the chart, `bar.timestamp`
+  inside `request.security`) when called with a `timezone=` keyword argument
+  only.
+- Infer a single consistent element type across `var` array declarations and
+  their `array.from(...)` initializers, preserving `int` for integer constants
+  (including unary-signed constants and function-local constants) and promoting
+  to `double` when any element is `float`.
+
 ## 1.6.0 — 2026-10-17
 
 A minor release of the exact engine/codegen pair, paired with engine `v1.6.0`

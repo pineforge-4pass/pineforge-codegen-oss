@@ -48,7 +48,8 @@ def test_calendar_builtin_timezone_only_binds_chart_bar_time(func_name: str):
     cpp = transpile(src)
     assert "int64_t _pf_calendar_ts = (current_bar_.timestamp);" in cpp
     if func_name == "weekofyear":
-        assert 'pine_weekofyear(_pf_calendar_ts, std::string("UTC"))' in cpp
+        assert 'auto _pf_calendar_tz = (std::string("UTC"));' in cpp
+        assert "pine_weekofyear(_pf_calendar_ts, _pf_calendar_tz)" in cpp
     else:
         assert (
             f"pine_{func_name}(is_na(_pf_calendar_ts) ? int64_t(0) : "
@@ -71,7 +72,8 @@ def test_calendar_builtin_timezone_only_in_security_binds_security_bar_time(
     cpp = transpile(src)
     assert "int64_t _pf_calendar_ts = (bar.timestamp);" in cpp
     if func_name == "weekofyear":
-        assert 'pine_weekofyear(_pf_calendar_ts, std::string("UTC"))' in cpp
+        assert 'auto _pf_calendar_tz = (std::string("UTC"));' in cpp
+        assert "pine_weekofyear(_pf_calendar_ts, _pf_calendar_tz)" in cpp
     else:
         assert (
             f"pine_{func_name}(is_na(_pf_calendar_ts) ? int64_t(0) : "

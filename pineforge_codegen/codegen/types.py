@@ -1373,6 +1373,13 @@ class TypeInferer:
         slot populated; recover that exact scalar here rather than silently
         defaulting ``array.from(string_udf())`` to ``std::vector<double>``.
         """
+        if isinstance(node, UnaryOp):
+            if node.op == "not":
+                return TypeSpec.primitive("bool")
+            operand = self._array_from_element_spec(node.operand)
+            if operand is not None and operand.kind == "primitive" and operand.name in ("int", "int64", "float"):
+                return operand
+            return None
         if isinstance(node, BinOp):
             left = self._array_from_element_spec(node.left)
             right = self._array_from_element_spec(node.right)
@@ -1527,12 +1534,30 @@ class TypeInferer:
                 node.name
             )
             if found_udt_binding:
-                return (
-                    TypeSpec.udt(exact_udt)
-                    if exact_udt is not None
-                    else None
-                )
+                if exact_udt is not None:
+                    return TypeSpec.udt(exact_udt)
+                local_cpp = getattr(self, "_current_func_local_types", {}).get(node.name)
+                local_prim = {
+                    "int": "int",
+                    "int64_t": "int64",
+                    "double": "float",
+                    "bool": "bool",
+                    "std::string": "string",
+                }.get(local_cpp)
+                if local_prim is not None:
+                    return TypeSpec.primitive(local_prim)
+                return None
             if self._collection_name_is_lexically_shadowed(node.name):
+                local_cpp = getattr(self, "_current_func_local_types", {}).get(node.name)
+                local_prim = {
+                    "int": "int",
+                    "int64_t": "int64",
+                    "double": "float",
+                    "bool": "bool",
+                    "std::string": "string",
+                }.get(local_cpp)
+                if local_prim is not None:
+                    return TypeSpec.primitive(local_prim)
                 return None
             sym = self.ctx.symbols.resolve(node.name)
             if sym is not None:
@@ -1762,8 +1787,28 @@ class TypeInferer:
                 if targs:
                     return TypeSpec.array(self._type_spec_from_hint_name(targs[0]) or TypeSpec.udt(targs[0]))
                 if func_name == "from" and node.args:
+                    elem_specs = [
+                        self._array_from_element_spec(arg)
+                        for arg in node.args
+                    ]
+                    if any(
+                        s is not None and s.kind == "primitive" and s.name == "float"
+                        for s in elem_specs
+                    ) and all(
+                        (s is None or (s.kind == "primitive" and s.name in ("int", "int64", "float")))
+                        for s in elem_specs
+                    ):
+                        return TypeSpec.array(TypeSpec.primitive("float"))
+                    if any(
+                        s is not None and s.kind == "primitive" and s.name == "int64"
+                        for s in elem_specs
+                    ) and all(
+                        s is not None and s.kind == "primitive" and s.name in ("int", "int64")
+                        for s in elem_specs
+                    ):
+                        return TypeSpec.array(TypeSpec.primitive("int64"))
                     return TypeSpec.array(
-                        self._array_from_element_spec(node.args[0])
+                        elem_specs[0]
                         or TypeSpec.primitive("float")
                     )
                 return TypeSpec.array(TypeSpec.primitive("float"))

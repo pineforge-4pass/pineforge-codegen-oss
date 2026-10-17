@@ -173,6 +173,13 @@ class TypeHelper:
             return TypeSpec.primitive("bool")
         if isinstance(value, StringLiteral):
             return TypeSpec.primitive("string")
+        if isinstance(value, UnaryOp):
+            if value.op == "not":
+                return TypeSpec.primitive("bool")
+            operand = self._array_from_element_spec(value.operand)
+            if operand is not None and operand.kind == "primitive" and operand.name in ("int", "int64", "float"):
+                return operand
+            return None
         if isinstance(value, BinOp):
             left = self._array_from_element_spec(value.left)
             right = self._array_from_element_spec(value.right)
@@ -507,7 +514,20 @@ class TypeHelper:
                     elem = self._type_spec_from_hint(targs[0]) or TypeSpec.udt(targs[0])
                     return TypeSpec.array(elem)
                 if func == "from" and value.args:
-                    first_spec = self._array_from_element_spec(value.args[0])
+                    elem_specs = [
+                        self._array_from_element_spec(arg)
+                        or self._pine_type_to_spec(self._visit(arg))
+                        for arg in value.args
+                    ]
+                    if any(
+                        s is not None and s.kind == "primitive" and s.name == "float"
+                        for s in elem_specs
+                    ) and all(
+                        s is not None and s.kind == "primitive" and s.name in ("int", "int64", "float")
+                        for s in elem_specs
+                    ):
+                        return TypeSpec.array(TypeSpec.primitive("float"))
+                    first_spec = elem_specs[0]
                     if first_spec is not None:
                         return TypeSpec.array(first_spec)
                     first = self._visit(value.args[0])

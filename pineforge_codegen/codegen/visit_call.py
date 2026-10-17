@@ -2202,6 +2202,10 @@ class CallVisitor:
                     # ``color[] cs = array.from(c1, c2)`` declares
                     # ``std::vector<int64_t>`` and must construct one.
                     declared = self._collection_spec_for_name(target)
+                    if declared is None and getattr(self, "_active_func_name", None) is not None:
+                        declared = self._callable_var_collection_spec(
+                            target, self._active_func_name
+                        )
                     if (declared is not None and declared.kind == "array"
                             and declared.element is not None
                             and declared.element.kind == "primitive"
@@ -2408,13 +2412,16 @@ class CallVisitor:
             and func_name in TIME_FIELD_EXPRS
             and (node.args or node.kwargs)
         ):
-            params = sigs.get_param_names(None, func_name)
-            arg_nodes = _merge_kwargs(node.args, node.kwargs, params, lambda a: a)
-            args = [self._visit_expr(a) for a in arg_nodes]
-            ts_node = arg_nodes[0] if arg_nodes else None
-            ts_arg = args[0] if args else "current_bar_.timestamp"
+            bound = self._resolve_func_args(node, func_name)
+            ts_node = bound.get("time")
+            ts_arg = (
+                self._visit_expr(ts_node)
+                if ts_node is not None
+                else "current_bar_.timestamp"
+            )
             ts_arg = self._coerce_int_slot(ts_arg, ts_node, "int64_t")
-            tz_arg = args[1] if len(args) > 1 else None
+            tz_node = bound.get("timezone")
+            tz_arg = self._visit_expr(tz_node) if tz_node is not None else None
             field_expr = TIME_FIELD_EXPRS[func_name]
             if tz_arg is None:
                 # 1-arg form — fall back to ``syminfo.timezone`` per TV
