@@ -50,6 +50,19 @@ def test_current_codegen_output_passes_the_allowlist(relative: str):
     assert findings == [], f"{relative}: {findings}"
 
 
+def test_libc_named_pine_variables_are_renamed():
+    # ``free`` and ``system`` are legal Pine identifiers; the emitter must
+    # escape them so their generated members never read as libc calls.
+    source = (
+        '//@version=6\nstrategy("t")\n'
+        "free = 1.0\nsystem = 2.0\nplot(close + free + system)\n"
+    )
+    cpp = transpile(source)
+    assert "pf_safe_free" in cpp
+    assert "pf_safe_system" in cpp
+    assert check_generated_cpp(cpp) == []
+
+
 def test_current_matrix_output_exercises_settings_and_run_stop_macros():
     source = (ROOT / "tests/fixtures/matrix_eigen_pca.pine").read_text(
         encoding="utf-8"
