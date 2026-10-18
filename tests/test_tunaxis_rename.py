@@ -212,6 +212,20 @@ RACE_PROBE = textwrap.dedent(
         time.sleep(0.001)
         if not getattr(spec, "_initializing", False):
             return
+        # The alias is in sys.modules a few bytecodes (class definitions) before
+        # it can install its finder: that header window is microseconds and no
+        # import order can remove it. The heavy transpiler import is the window
+        # that the install order controls and it lasts far longer. So give the
+        # finder a few milliseconds to appear: if the module is STILL
+        # initializing and still has no finder after that, the finder is
+        # installed after the heavy import (the old order) and the import
+        # below is made in the bad window on purpose.
+        patience = time.monotonic() + 0.02
+        while (len(sys.meta_path) <= baseline and time.monotonic() < patience
+               and getattr(spec, "_initializing", False)):
+            time.sleep(0.0005)
+        if not getattr(spec, "_initializing", False):
+            return
         state["initializing"] = True
         state["finders_installed"] = len(sys.meta_path) > baseline
         try:
