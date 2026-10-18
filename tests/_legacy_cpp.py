@@ -38,22 +38,33 @@ def _without_run_failure_scaffold(cpp: str) -> str:
     return ''.join(output)
 
 
+def without_trade_history_policy(cpp: str) -> str:
+    """Remove only CR-150's additive policy block and reader export.
+
+    Whole-C++ identity fixtures pinned before L5 compare semantic lowering
+    against that accepted scaffold. The L5 raw-output tests cover these two
+    emitted ABI pieces directly, so those fixtures should ignore only this
+    additive surface while retaining every other generated line.
+    """
+    cpp = re.sub(
+        r'^#if defined\(PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1\)\n'
+        r'        set_trade_history_streamable\(true\);\n'
+        r'^#endif\n',
+        '', cpp, flags=re.MULTILINE)
+    return re.sub(
+        r'^    int strategy_reads_trade_history\(void\) \{\n'
+        r'        return [01];\n'
+        r'    \}\n',
+        '', cpp, flags=re.MULTILINE)
+
+
 def legacy_cpp(cpp: str) -> str:
     # Coded-stop ABIs are additive; retain their actual call-site changes.
     cpp = _without_run_failure_scaffold(cpp)
     # CR-150's trade-history policy and per-strategy reader export are also
     # additive. Historical lowering oracles intentionally ignore both so the
     # feature's ABI shape is covered by its own raw-output tests.
-    cpp = re.sub(
-        r'^#if defined\(PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1\)\n'
-        r'        set_trade_history_streamable\(true\);\n'
-        r'^#endif\n',
-        '', cpp, flags=re.MULTILINE)
-    cpp = re.sub(
-        r'^    int strategy_reads_trade_history\(void\) \{\n'
-        r'        return [01];\n'
-        r'    \}\n',
-        '', cpp, flags=re.MULTILINE)
+    cpp = without_trade_history_policy(cpp)
     cpp = cpp.replace(
         '#if __has_include(<pineforge/checked_settings.hpp>)\n'
         '#include <pineforge/checked_settings.hpp>\n#endif\n', '')
