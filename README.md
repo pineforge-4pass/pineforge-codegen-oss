@@ -658,7 +658,7 @@ use `python -m pytest --collect-only -q` for the current collection count.
 
 ## License
 
-Source-available under the [PineForge Source License 1.2](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE);
+Source-available under the [Tunaxis Source License 1.2](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE);
 the `LICENSE` file is the controlling text. The licensor is pineforge, LLC.
 
 - **Free for noncommercial use:** any noncommercial purpose, and use by a

@@ -31,6 +31,7 @@ supported as exact pairs; on the 0.x line they are independent. See the
   CLI names remain available.
 - The C++ namespace, headers, macros, environment variables and C ABI remain
   unchanged for now.
+- The license is now the **Tunaxis Source License 1.2**, with the same terms.
 
 ## 1.6.1 — 2026-10-18
 
