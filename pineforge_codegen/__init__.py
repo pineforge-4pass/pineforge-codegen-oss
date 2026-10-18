@@ -18,17 +18,17 @@ class _AliasLoader(importlib.abc.Loader):
         self._spec = canonical_spec
 
     def create_module(self, spec):
-        # Let the import machinery create the throwaway placeholder module it
-        # passes to exec_module. Returning the canonical module here would make
-        # the machinery write the alias's __name__ / __spec__ / __package__
-        # onto the live canonical module, if only for the length of the call.
-        return None
+        return importlib.import_module(self._spec.name)
 
     def exec_module(self, module):
-        # Publish the canonical module under the alias name. The machinery
-        # re-reads sys.modules after exec_module, so every importer gets the
-        # canonical object, with its own __name__ / __spec__ / reload intact.
-        sys.modules[module.__name__] = importlib.import_module(self._spec.name)
+        # create_module already imported the canonical module, so there is no
+        # code to run. Restore the attributes the import machinery just pointed
+        # at the alias spec: the module object is the canonical one and its
+        # __name__ / __spec__ / reload must stay the canonical ones.
+        module.__name__ = self._spec.name
+        module.__package__ = self._spec.parent
+        module.__loader__ = self._spec.loader
+        module.__spec__ = self._spec
 
     def get_code(self, fullname):
         # runpy / python -m need code under the requested name, whereas a
@@ -53,15 +53,6 @@ class _AliasFinder(importlib.abc.MetaPathFinder):
         )
 
 
-# Install the finder before importing the transpiler. The canonical import is
-# long enough for another thread to ask for a submodule, and that thread must
-# find the alias rather than a directory that holds no such file. Its own
-# import then waits: on 3.13+ the import machinery re-imports an initializing
-# parent, and on older interpreters the alias loader's canonical import waits on
-# the canonical package's module lock. Neither can deadlock, because
-# tunaxis_codegen never imports the alias.
-sys.meta_path.insert(0, _AliasFinder())
-
 warnings.warn(
     "pineforge_codegen / pineforge-codegen was renamed; import tunaxis_codegen "
     "and install tunaxis-codegen instead.",
@@ -70,6 +61,7 @@ warnings.warn(
 )
 
 _canonical = importlib.import_module("tunaxis_codegen")
+sys.meta_path.insert(0, _AliasFinder())
 
 # The canonical package eagerly imports part of its tree. Seed those aliases
 # too, so Python never loads one of their source files under the old name.
