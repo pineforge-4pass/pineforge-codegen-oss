@@ -12,6 +12,11 @@ on:
         description: "npm publish --dry-run (default true). Set false to actually publish."
         type: boolean
         default: true
+      claim_version:
+        description: "placeholder version for the claim job (e.g. 0.0.2 for the OIDC proof)"
+        required: false
+        default: "0.0.1"
+        type: string
       claim_placeholder:
         description: "claims the npm name @tunaxis/codegen-pyodide with a 0.0.1 placeholder"
         required: false
@@ -102,7 +107,6 @@ jobs:
   claim-npm:
     if: ${{ inputs.claim_placeholder }}
     runs-on: ubuntu-24.04
-    environment: npm-first
     permissions: { contents: read, id-token: write }
     steps:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
@@ -119,8 +123,11 @@ jobs:
 
       - name: Write placeholder package
         id: claim
+        env:
+          CLAIM_VERSION: ${{ inputs.claim_version }}
         run: |
           set -euo pipefail
+          [[ "$CLAIM_VERSION" =~ ^0\.0\.[0-9]+$ ]] || { echo "claim_version must be 0.0.N, got '$CLAIM_VERSION'"; exit 1; }
           CLAIM_DIR=$RUNNER_TEMP/claim-npm
           mkdir -p "$CLAIM_DIR"
           cd "$CLAIM_DIR"
@@ -141,11 +148,13 @@ jobs:
           cat > README.md <<'README'
           Tunaxis: first release coming soon. https://tunaxis.com
           README
+          node -e 'const fs=require("node:fs");const p=JSON.parse(fs.readFileSync("package.json","utf8"));p.version=process.env.CLAIM_VERSION;fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n")'
 
       - name: Verify placeholder package
         working-directory: ${{ steps.claim.outputs.path }}
         env:
           PACK_MANIFEST: ${{ runner.temp }}/claim-npm-pack.json
+          CLAIM_VERSION: ${{ inputs.claim_version }}
         run: |
           set -euo pipefail
           npm pack --dry-run --json > "$PACK_MANIFEST"
@@ -161,7 +170,7 @@ jobs:
           const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
           const readme = fs.readFileSync('README.md', 'utf8');
           assert.equal(pkg.name, '@tunaxis/codegen-pyodide');
-          assert.equal(pkg.version, '0.0.1');
+          assert.equal(pkg.version, process.env.CLAIM_VERSION);
           assert.equal(pkg.license, 'UNLICENSED');
           assert.equal(pkg.description, 'Tunaxis: first release coming soon. https://tunaxis.com');
           assert.equal(readme, 'Tunaxis: first release coming soon. https://tunaxis.com\n');
@@ -179,8 +188,6 @@ jobs:
             test $? -eq 1
           fi
 
-      - name: Publish placeholder to npm
+      - name: Publish placeholder to npm (OIDC trusted publishing, no token)
         working-directory: ${{ steps.claim.outputs.path }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_FIRST_PUBLISH }}
         run: npm publish --access public --provenance
