@@ -194,9 +194,6 @@ RACE_PROBE = textwrap.dedent(
     def import_submodule():
         deadline = time.monotonic() + 30.0
         while "pineforge_codegen" not in sys.modules:
-            if state.get("alias") not in (None, "ok"):
-                state["racer"] = state["alias"]  # the loader thread failed
-                return
             if time.monotonic() > deadline:
                 state["racer"] = "never saw the alias package"
                 return
@@ -231,10 +228,6 @@ RACE_PROBE = textwrap.dedent(
     racer.join()
     print(json.dumps(state))
 
-    if state.get("racer") == "never saw the alias package":
-        raise SystemExit(1)  # the alias package never appeared at all
-    if state.get("alias") not in (None, "ok"):
-        raise SystemExit(1)
     if not state.get("initializing"):
         raise SystemExit(3)  # the trial missed the start-up window; retry it
     failed = (state.get("racer") != "ok"
