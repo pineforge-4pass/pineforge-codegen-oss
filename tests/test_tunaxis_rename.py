@@ -372,18 +372,9 @@ def test_root_wheel_has_no_alias_and_the_shim_restores_the_old_import(
     assert probe.returncode != 0
     assert "ModuleNotFoundError" in probe.stderr
 
-    install(wheels["shim_wheel"])
-    probe = _run_with_site(
-        site,
-        ["-S", "-c",
-         "import pineforge_codegen, tunaxis_codegen\n"
-         "assert pineforge_codegen is tunaxis_codegen\n"
-         "assert pineforge_codegen.parser is tunaxis_codegen.parser\n"
-         "assert pineforge_codegen.transpile_full is tunaxis_codegen.transpile_full\n"],
-        tmp_path,
-    )
-    assert probe.returncode == 0, probe.stderr
-
+    # Both console names the new distribution declares run, over the same
+    # arguments, from the installed wheel. (pip's --target replaces bin/ when
+    # the shim is installed, so this runs before that install.)
     payload = "reinterpret_cast<int *>(p);\n"
     results = {}
     for name in ("pf-cpp-allowlist", "tunaxis-cpp-allowlist"):
@@ -397,3 +388,16 @@ def test_root_wheel_has_no_alias_and_the_shim_restores_the_old_import(
     assert results["pf-cpp-allowlist"] == results["tunaxis-cpp-allowlist"]
     assert results["pf-cpp-allowlist"][0] == 1
     assert "reinterpret-cast" in results["pf-cpp-allowlist"][1]
+
+    # The shim adds only the old import beside the same tunaxis_codegen.
+    install(wheels["shim_wheel"])
+    probe = _run_with_site(
+        site,
+        ["-S", "-c",
+         "import pineforge_codegen, tunaxis_codegen\n"
+         "assert pineforge_codegen is tunaxis_codegen\n"
+         "assert pineforge_codegen.parser is tunaxis_codegen.parser\n"
+         "assert pineforge_codegen.transpile_full is tunaxis_codegen.transpile_full\n"],
+        tmp_path,
+    )
+    assert probe.returncode == 0, probe.stderr
