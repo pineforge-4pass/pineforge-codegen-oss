@@ -1,18 +1,19 @@
 {
-  "name": "@pineforge/codegen-pyodide",
+  "name": "@tunaxis/codegen-pyodide",
   "version": "0.7.0",
-  "description": "Gate-validated Pyodide payload for the PineScript v6 -> C++ transpiler: archive (run in Pyodide), unpacked source, introspected tables, and release metadata.",
+  "description": "Gate-validated Pyodide payload for the Tunaxis PineScript v6 -> C++ transpiler: archive (run in Pyodide), unpacked source, introspected tables, and release metadata.",
   "type": "module",
   "main": "index.mjs",
   "exports": {
     ".": "./index.mjs",
     "./tables.json": "./tables.json",
     "./release.json": "./release.json",
-    "./diagnostics_catalog.json": "./pineforge_codegen/diagnostics_catalog.json"
+    "./diagnostics_catalog.json": "./tunaxis_codegen/diagnostics_catalog.json"
   },
   "files": [
     "index.mjs",
-    "pineforge_codegen-*.tar.gz",
+    "tunaxis_codegen-*.tar.gz",
+    "tunaxis_codegen/**/*",
     "pineforge_codegen/**/*",
     "tables.json",
     "release.json",

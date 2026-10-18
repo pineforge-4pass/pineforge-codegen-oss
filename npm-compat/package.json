@@ -1,0 +1,53 @@
+{
+  "name": "@pineforge/codegen-pyodide",
+  "version": "@VERSION@",
+  "description": "Compatibility forwarder for the renamed Tunaxis Pyodide payload.",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./tables.json": {
+      "import": "./tables.mjs",
+      "require": "./tables.cjs",
+      "default": "./tables.mjs"
+    },
+    "./release.json": {
+      "import": "./release.mjs",
+      "require": "./release.cjs",
+      "default": "./release.mjs"
+    },
+    "./diagnostics_catalog.json": {
+      "import": "./diagnostics_catalog.mjs",
+      "require": "./diagnostics_catalog.cjs",
+      "default": "./diagnostics_catalog.mjs"
+    }
+  },
+  "files": [
+    "index.mjs",
+    "tables.mjs",
+    "tables.cjs",
+    "release.mjs",
+    "release.cjs",
+    "diagnostics_catalog.mjs",
+    "diagnostics_catalog.cjs",
+    "README.md",
+    "DEPRECATION.txt",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@tunaxis/codegen-pyodide": "@VERSION@"
+  },
+  "peerDependencies": {
+    "pyodide": "314.0.0"
+  },
+  "keywords": ["pinescript", "transpiler", "pyodide", "codegen", "compatibility"],
+  "homepage": "https://github.com/pineforge-4pass/pineforge-codegen-oss",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pineforge-4pass/pineforge-codegen-oss.git"
+  },
+  "license": "SEE LICENSE IN LICENSE"
+}

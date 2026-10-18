@@ -1,4 +1,4 @@
-// Entry for @pineforge/codegen-pyodide. Resolves the packaged payload paths and
+// Entry for @tunaxis/codegen-pyodide. Resolves the packaged payload paths and
 // metadata so consumers (the app's build + Node oracle/grammar tooling) read
 // everything from this one dependency — no git submodule.
 import { readFileSync } from "node:fs";
@@ -13,12 +13,15 @@ export const release = require("./release.json");
 export const tables = require("./tables.json");
 
 // Absolute path to the gate-validated Pyodide archive (gztar) to unpackArchive.
-export const archivePath = join(HERE, `pineforge_codegen-${release.codegen}.tar.gz`);
+export const archivePath = join(HERE, `tunaxis_codegen-${release.codegen}.tar.gz`);
 
 // Absolute path to the unpacked Python source dir's PARENT — put on PYTHONPATH
-// so `import pineforge_codegen` resolves (oracle tests, grammar gen).
+// so `import tunaxis_codegen` resolves (oracle tests, grammar gen).
 export const sourceRoot = HERE;
-export const codegenSourceDir = join(HERE, "pineforge_codegen");
+export const codegenSourceDir = join(HERE, "tunaxis_codegen");
+
+// The payload also carries the deprecated pineforge_codegen/ import alias for
+// source compatibility; codegenSourceDir points at the canonical Tunaxis tree.
 
 // Absolute path to the shipped ESM module worker — consumers copy it into their
 // served /pyodide/ dir and load it via `new Worker(url, { type: "module" })`.
