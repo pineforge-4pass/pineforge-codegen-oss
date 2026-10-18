@@ -48,7 +48,8 @@ PYPI_VERSION = CHANNEL["pypi"]
 def _clean_env(**extra: str) -> dict:
     """The current environment without import overrides."""
     env = {k: v for k, v in os.environ.items()
-           if k not in {"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"}}
+           if k not in {"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+                        "PYTHONWARNINGS"}}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env.update(extra)
     return env
