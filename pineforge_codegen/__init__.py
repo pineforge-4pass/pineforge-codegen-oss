@@ -21,9 +21,14 @@ class _AliasLoader(importlib.abc.Loader):
         return importlib.import_module(self._spec.name)
 
     def exec_module(self, module):
-        # create_module already imported the canonical module. Import machinery
-        # registers that same object under the alias and on its parent package.
-        pass
+        # create_module already imported the canonical module, so there is no
+        # code to run. Restore the attributes the import machinery just pointed
+        # at the alias spec: the module object is the canonical one and its
+        # __name__ / __spec__ / reload must stay the canonical ones.
+        module.__name__ = self._spec.name
+        module.__package__ = self._spec.parent
+        module.__loader__ = self._spec.loader
+        module.__spec__ = self._spec
 
     def get_code(self, fullname):
         # runpy / python -m need code under the requested name, whereas a
@@ -63,3 +68,18 @@ sys.meta_path.insert(0, _AliasFinder())
 for _name, _module in tuple(sys.modules.items()):
     if _name == "tunaxis_codegen" or _name.startswith("tunaxis_codegen."):
         sys.modules["pineforge_codegen" + _name[len("tunaxis_codegen"):]] = _module
+
+
+def __getattr__(name):
+    """Expose the canonical package's names, without copying anything.
+
+    A plain attribute lookup such as ``pineforge_codegen.transpile_full`` (and
+    ``from pineforge_codegen import transpile_full``) resolves through the one
+    canonical module object. Submodules that the canonical package imported
+    later are reachable here too; the finder aliases a direct import of one.
+    """
+    return getattr(_canonical, name)
+
+
+def __dir__():
+    return sorted(set(globals()) | set(dir(_canonical)))
