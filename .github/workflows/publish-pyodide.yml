@@ -12,6 +12,11 @@ on:
         description: "npm publish --dry-run (default true). Set false to actually publish."
         type: boolean
         default: true
+      claim_placeholder:
+        description: "claims the npm name @tunaxis/codegen-pyodide with a 0.0.1 placeholder"
+        required: false
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
@@ -25,6 +30,7 @@ concurrency:
 
 jobs:
   publish:
+    if: ${{ !inputs.claim_placeholder }}
     runs-on: ubuntu-latest
     env:
       PYTHONHASHSEED: "0"
@@ -92,3 +98,89 @@ jobs:
             echo "DRY RUN (a v* tag push or dispatch with dry_run=false publishes for real)"
             npm publish --dry-run --access=public ${tag[@]+"${tag[@]}"}
           fi
+
+  claim-npm:
+    if: ${{ inputs.claim_placeholder }}
+    runs-on: ubuntu-24.04
+    environment: npm-first
+    permissions: { contents: read, id-token: write }
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+
+      - name: Install npm for provenance
+        run: |
+          set -euo pipefail
+          npm install -g npm@^11.5.1
+          node --version
+          npm --version
+
+      - name: Write placeholder package
+        id: claim
+        run: |
+          set -euo pipefail
+          CLAIM_DIR=$RUNNER_TEMP/claim-npm
+          mkdir -p "$CLAIM_DIR"
+          cd "$CLAIM_DIR"
+          printf 'path=%s\n' "$CLAIM_DIR" >> "$GITHUB_OUTPUT"
+          cat > package.json <<'JSON'
+          {
+            "name": "@tunaxis/codegen-pyodide",
+            "version": "0.0.1",
+            "description": "Tunaxis: first release coming soon. https://tunaxis.com",
+            "license": "UNLICENSED",
+            "repository": {
+              "type": "git",
+              "url": "git+https://github.com/pineforge-4pass/pineforge-codegen-oss.git"
+            },
+            "publishConfig": { "access": "public" }
+          }
+          JSON
+          cat > README.md <<'README'
+          Tunaxis: first release coming soon. https://tunaxis.com
+          README
+
+      - name: Verify placeholder package
+        working-directory: ${{ steps.claim.outputs.path }}
+        env:
+          PACK_MANIFEST: ${{ runner.temp }}/claim-npm-pack.json
+        run: |
+          set -euo pipefail
+          npm pack --dry-run --json > "$PACK_MANIFEST"
+          node <<'JS'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const expected = ['README.md', 'package.json'];
+          assert.deepEqual(fs.readdirSync('.').sort(), expected);
+          assert(expected.every(path => fs.statSync(path).isFile()));
+          const packed = JSON.parse(fs.readFileSync(process.env.PACK_MANIFEST, 'utf8'));
+          assert.equal(packed.length, 1);
+          assert.deepEqual(packed[0].files.map(file => file.path).sort(), expected);
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const readme = fs.readFileSync('README.md', 'utf8');
+          assert.equal(pkg.name, '@tunaxis/codegen-pyodide');
+          assert.equal(pkg.version, '0.0.1');
+          assert.equal(pkg.license, 'UNLICENSED');
+          assert.equal(pkg.description, 'Tunaxis: first release coming soon. https://tunaxis.com');
+          assert.equal(readme, 'Tunaxis: first release coming soon. https://tunaxis.com\n');
+          assert.deepEqual(pkg.repository, {
+            type: 'git',
+            url: 'git+https://github.com/pineforge-4pass/pineforge-codegen-oss.git'
+          });
+          const { repository, ...metadata } = pkg;
+          assert(!/pineforge/i.test(JSON.stringify(metadata)));
+          JS
+          # Node scans every JSON field except repository; grep scans the rest of the folder.
+          if grep -ri --exclude=package.json pineforge .; then
+            exit 1
+          else
+            test $? -eq 1
+          fi
+
+      - name: Publish placeholder to npm
+        working-directory: ${{ steps.claim.outputs.path }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_FIRST_PUBLISH }}
+        run: npm publish --access public --provenance
