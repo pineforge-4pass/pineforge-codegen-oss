@@ -218,7 +218,13 @@ _BACKEND = textwrap.dedent(
 
 @pytest.fixture(scope="module")
 def wheels(tmp_path_factory):
-    """Build both distributions exactly as the release workflow does."""
+    """Build both distributions exactly as the release workflow does.
+
+    Needs the hatchling build backend. CI (test.yml) installs it and runs these
+    tests for real; a host without it (the registry-less lab hosts) skips them
+    with this reason, and the spot-box proof runs them with hatchling installed.
+    """
+    pytest.importorskip("hatchling", reason="the build backend hatchling is not installed on this host")
     dist = tmp_path_factory.mktemp("dist")
     main_dir = dist / "tunaxis"
     shim_dir = dist / "shim"
