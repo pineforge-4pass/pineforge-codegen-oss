@@ -38,4 +38,3 @@ def test_closed_trade_count_does_not_disable_streaming() -> None:
 
     assert constructor.count("set_trade_history_streamable(true);") == 1
     assert "int strategy_reads_trade_history(void) {\n        return 0;\n" in cpp
-
