@@ -21,10 +21,10 @@ from __future__ import annotations
 
 import re
 
-from pineforge_codegen.analyzer import Analyzer
-from pineforge_codegen.codegen import CodeGen
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
+from tunaxis_codegen.analyzer import Analyzer
+from tunaxis_codegen.codegen import CodeGen
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
 
 
 def _generate(src: str) -> str:

@@ -5,8 +5,8 @@ VWAPBands tuple-return path and emits correct C++ field accesses.
 """
 import re
 import pytest
-from pineforge_codegen import transpile
-from pineforge_codegen.support_checker import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.support_checker import CompileError
 
 PRELUDE = '//@version=6\nstrategy("T")\n'
 

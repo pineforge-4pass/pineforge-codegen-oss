@@ -15,13 +15,13 @@ import json
 import os
 import sys
 
-from pineforge_codegen import signatures as sigs
-from pineforge_codegen.analyzer import tables as atab
-from pineforge_codegen.codegen import tables as ctab
-from pineforge_codegen.codegen import visit_expr as cve
-from pineforge_codegen import tv_input_choices as tvi
-from pineforge_codegen import support_checker as sc
-from pineforge_codegen.symbols import PineType
+from tunaxis_codegen import signatures as sigs
+from tunaxis_codegen.analyzer import tables as atab
+from tunaxis_codegen.codegen import tables as ctab
+from tunaxis_codegen.codegen import visit_expr as cve
+from tunaxis_codegen import tv_input_choices as tvi
+from tunaxis_codegen import support_checker as sc
+from tunaxis_codegen.symbols import PineType
 
 
 def _type_str(v: object) -> str:

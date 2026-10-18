@@ -15,9 +15,9 @@ import re
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError, Level
-from pineforge_codegen.library_v5 import V5_RULES
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError, Level
+from tunaxis_codegen.library_v5 import V5_RULES
 from tests._pine_libraries import library_sources
 
 HEAD = '//@version=6\nstrategy("T")\nimport pftest/Five/1 as F\n'

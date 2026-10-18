@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._e2e import (
     Build, derive_chart_feed, execute_all, ok, per_bar_mismatches,
     reference_codegen, same, skip_unless_e2e_env,

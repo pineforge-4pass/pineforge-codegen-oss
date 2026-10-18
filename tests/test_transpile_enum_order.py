@@ -1,8 +1,8 @@
 """Transpile contract: enum declaration order vs input.enum (Analyzer + CodeGen)."""
 
 import pytest
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
 
 
 def test_transpile_rejects_input_enum_before_enum_decl():

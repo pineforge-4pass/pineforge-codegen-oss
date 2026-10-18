@@ -5,7 +5,7 @@ of the historic 5,738-line ``codegen.py``. Pulling them out into a
 dedicated module gives the visitor / emitter mixins a single place to
 import from and lets ``base.py`` stay focused on the ``CodeGen`` class
 itself. ``support_checker.py`` also reads many of these tables through
-the package facade (``from pineforge_codegen.codegen import …``);
+the package facade (``from tunaxis_codegen.codegen import …``);
 that contract is preserved by re-exports in ``codegen/__init__.py``.
 
 Helpers ``_matrix_add_row`` / ``_matrix_add_col`` / ``_merge_kwargs``

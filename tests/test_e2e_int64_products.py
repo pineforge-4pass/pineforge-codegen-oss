@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
+from tunaxis_codegen import transpile, transpile_full
 from tests._compile import compile_cpp
 from tests._e2e import (
     Build, chart_feed_head, execute_all, ok, skip_unless_e2e_env,

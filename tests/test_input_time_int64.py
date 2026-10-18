@@ -8,7 +8,7 @@ MILLISECONDS, which trivially overflows the int32 used by
 
 from __future__ import annotations
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 def test_input_time_routes_to_int64():

@@ -45,7 +45,7 @@ from pathlib import Path
 import pytest
 
 # Repo root = parent of this tests/ directory. Threaded into the child via
-# PYTHONPATH so ``import pineforge_codegen`` resolves regardless of how/where
+# PYTHONPATH so ``import tunaxis_codegen`` resolves regardless of how/where
 # pytest was launched.
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -89,7 +89,7 @@ plot(s1 + s2 + s3 + s4)
 # verbatim. Any exception propagates as a non-zero exit + traceback on stderr.
 _CHILD = (
     "import sys\n"
-    "from pineforge_codegen import transpile\n"
+    "from tunaxis_codegen import transpile\n"
     "sys.stdout.write(transpile(sys.stdin.read()))\n"
 )
 
@@ -211,7 +211,7 @@ def ordered_id(value):
 builtins.id = ordered_id
 sys.path.insert(0, sys.argv[1])
 sys.path.insert(0, sys.argv[1] + "/gate")
-from pineforge_codegen import transpile_full
+from tunaxis_codegen import transpile_full
 from glue import transpile_json
 
 source = sys.stdin.read()
@@ -293,7 +293,7 @@ def test_emitters_do_not_sort_identity_mapping_keys() -> None:
     """Guard direct identity-keyed stores, including stores in another mixin."""
     trees = {
         path: ast.parse(path.read_text())
-        for path in (_REPO_ROOT / "pineforge_codegen/codegen").glob("*.py")
+        for path in (_REPO_ROOT / "tunaxis_codegen/codegen").glob("*.py")
     }
     identity_mappings = {
         ast.unparse(node.value)

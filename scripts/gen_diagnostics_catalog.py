@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Find every diagnostic template the transpiler spells, and keep
-``pineforge_codegen/diagnostics_catalog.json`` in step with them.
+``tunaxis_codegen/diagnostics_catalog.json`` in step with them.
 
 The emitters spell their English text in place (f-strings, string tables,
 helper arguments). This script reads the package's source with ``ast`` and
@@ -34,10 +34,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PKG = ROOT / "pineforge_codegen"
+PKG = ROOT / "tunaxis_codegen"
 sys.path.insert(0, str(ROOT))
 
-from pineforge_codegen.diagnostic_codes import (  # noqa: E402
+from tunaxis_codegen.diagnostic_codes import (  # noqa: E402
     CATALOG_PATH, CATALOG_SCHEMA, UNCATALOGUED, escape_literal, parse_template,
 )
 
@@ -66,7 +66,7 @@ SWITCH_ARM_TWIN_LIMIT = 500
 
 
 def area_of(path: str) -> int:
-    rel = path.replace("\\", "/").split("pineforge_codegen/", 1)[-1]
+    rel = path.replace("\\", "/").split("tunaxis_codegen/", 1)[-1]
     best = None
     for suffix, area in AREAS:
         if rel == suffix or rel.endswith("/" + suffix) or (suffix.endswith("/") and rel.startswith(suffix)):
@@ -834,7 +834,7 @@ def _may_be_none(mod: Module, hint) -> bool:
 
 def _parser_consume_templates() -> list[dict]:
     """``Parser._consume(tt, msg)``: "Expected {tt}, got {type}({value!r}). {msg}"."""
-    mod = MODULES["pineforge_codegen/parser.py"]
+    mod = MODULES["tunaxis_codegen/parser.py"]
     out = []
     for call in ast.walk(mod.tree):
         if not isinstance(call, ast.Call) or callee_name(call) != "_consume":

@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.errors import CompileError, Level
+from tunaxis_codegen import transpile, transpile_full
+from tunaxis_codegen.errors import CompileError, Level
 from tests._pine_libraries import library_sources
 
 SOURCES = library_sources("pftest/Signals/1", "pftest/Base/1")

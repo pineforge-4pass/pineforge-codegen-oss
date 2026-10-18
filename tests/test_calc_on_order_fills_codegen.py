@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 def _strategy(header: str, body: str = "") -> str:

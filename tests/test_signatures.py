@@ -7,14 +7,14 @@ for every registered intrinsic function.
 """
 
 import pytest
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
-from pineforge_codegen.analyzer import Analyzer
-from pineforge_codegen.codegen import CodeGen
-from pineforge_codegen import signatures as sigs
-from pineforge_codegen import tv_input_choices as tv_in
-from pineforge_codegen.errors import CompileError
-from pineforge_codegen.symbols import PineType
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
+from tunaxis_codegen.analyzer import Analyzer
+from tunaxis_codegen.codegen import CodeGen
+from tunaxis_codegen import signatures as sigs
+from tunaxis_codegen import tv_input_choices as tv_in
+from tunaxis_codegen.errors import CompileError
+from tunaxis_codegen.symbols import PineType
 
 
 def _generate(src: str) -> str:
@@ -969,7 +969,7 @@ class TestG2SyminfoVariables:
         assert "syminfo.country" in sigs.SYMINFO_VARIABLES
 
     def test_field_types_correct(self):
-        from pineforge_codegen.symbols import PineType
+        from tunaxis_codegen.symbols import PineType
         S, F, I = PineType.STRING, PineType.FLOAT, PineType.INT
         assert sigs.SYMINFO_VARIABLES["syminfo.prefix"] == S
         assert sigs.SYMINFO_VARIABLES["syminfo.root"] == S
@@ -985,7 +985,7 @@ class TestG2CodegenHelpers:
     """Verify codegen output for G2 new features."""
 
     def _generate(self, body: str) -> str:
-        from pineforge_codegen import transpile
+        from tunaxis_codegen import transpile
         return transpile(f'//@version=6\nstrategy("T")\n{body}\n')
 
     def test_backadjustment_on_emits_int(self):

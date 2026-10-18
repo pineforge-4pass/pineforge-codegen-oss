@@ -1,5 +1,5 @@
-from pineforge_codegen.symbols import PineType, Symbol, Scope, SymbolTable
-from pineforge_codegen.errors import SourceLocation
+from tunaxis_codegen.symbols import PineType, Symbol, Scope, SymbolTable
+from tunaxis_codegen.errors import SourceLocation
 
 def test_scope_define_and_resolve():
     scope = Scope(name="global", parent=None)

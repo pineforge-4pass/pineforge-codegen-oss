@@ -1,4 +1,4 @@
-from pineforge_codegen import transpile_full
+from tunaxis_codegen import transpile_full
 
 PREAMBLE = "//@version=6\nstrategy(\"T\")\n"
 

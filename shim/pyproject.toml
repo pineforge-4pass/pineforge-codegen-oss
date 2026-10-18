@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pineforge-codegen"
+# Build with `python scripts/build_shim.py` from the repository root. It stages
+# VERSION and the root alias package, and renders the exact dependency below.
+# This template cannot build on its own: it has no private VERSION or package.
+dynamic = ["version", "dependencies"]
+description = "Compatibility package forwarding to tunaxis-codegen."
+requires-python = ">=3.11"
+authors = [{ name = "Tunaxis", email = "luis@4pass.com.tw" }]
+license = { file = "LICENSE" }
+readme = "README.md"
+
+[project.scripts]
+pf-cpp-allowlist = "tunaxis_codegen.cpp_allowlist:main"
+
+[tool.hatch.version]
+source = "regex"
+path = "VERSION"
+pattern = "^(?P<version>\\S+)"
+
+[tool.hatch.build.targets.sdist]
+only-include = ["pineforge_codegen", "README.md", "LICENSE", "VERSION", "pyproject.toml"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["pineforge_codegen"]

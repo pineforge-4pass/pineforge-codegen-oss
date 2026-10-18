@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from tests._legacy_cpp import legacy_cpp
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 _CONFIG_SOURCE = '''//@version=6
@@ -222,7 +222,7 @@ def test_no_export_unless_the_magnifier_is_declared_true():
 
 
 def test_a_non_literal_declaration_warns_that_the_host_runs_without_it():
-    from pineforge_codegen import transpile_full
+    from tunaxis_codegen import transpile_full
 
     result = transpile_full(
         "//@version=6\n"

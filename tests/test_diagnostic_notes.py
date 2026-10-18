@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import diagnostics_catalog, transpile_full
-from pineforge_codegen.errors import CompileError, Level
-from pineforge_codegen.errors import Diagnostic, Phase, SourceLocation
-from pineforge_codegen.diagnostic_codes import classify, parse_template, render, render_diagnostic
+from tunaxis_codegen import diagnostics_catalog, transpile_full
+from tunaxis_codegen.errors import CompileError, Level
+from tunaxis_codegen.errors import Diagnostic, Phase, SourceLocation
+from tunaxis_codegen.diagnostic_codes import classify, parse_template, render, render_diagnostic
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diagnostic_notes"
@@ -64,7 +64,7 @@ def test_exact_catalog_delta_and_legacy_pin():
 
 
 def test_catalog_legacy_bytes_only_have_the_declared_delta():
-    path = Path(__file__).resolve().parents[1] / "pineforge_codegen" / "diagnostics_catalog.json"
+    path = Path(__file__).resolve().parents[1] / "tunaxis_codegen" / "diagnostics_catalog.json"
     catalog = diagnostics_catalog()["codes"]
     restored = []
     for line in path.read_text().splitlines(keepends=True):

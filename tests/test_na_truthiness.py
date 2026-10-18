@@ -11,7 +11,7 @@ repository fixtures.
 
 from __future__ import annotations
 
-from pineforge_codegen import transpile, transpile_full
+from tunaxis_codegen import transpile, transpile_full
 
 from tests._compile import run_emitted_tu
 

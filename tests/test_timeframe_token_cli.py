@@ -1,4 +1,4 @@
-"""The batch transport ``python -m pineforge_codegen.timeframe_token_cli``.
+"""The batch transport ``python -m tunaxis_codegen.timeframe_token_cli``.
 
 The in-process cases call ``main()`` with its streams replaced and count the calls
 to the shared ``canonical_wire_timeframe``; the subprocess cases check the exit
@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pineforge_codegen import request_feed_inventory, timeframe_token_cli
+from tunaxis_codegen import request_feed_inventory, timeframe_token_cli
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MALFORMED_TEXT = "malformed timeframe token request\n"
@@ -58,7 +58,7 @@ def _spy(monkeypatch) -> list:
 
 def _subprocess(raw: bytes):
     return subprocess.run(
-        [sys.executable, "-m", "pineforge_codegen.timeframe_token_cli"],
+        [sys.executable, "-m", "tunaxis_codegen.timeframe_token_cli"],
         input=raw, capture_output=True, cwd=REPO_ROOT, check=False)
 
 

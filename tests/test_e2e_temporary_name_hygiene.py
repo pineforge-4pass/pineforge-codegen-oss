@@ -30,9 +30,9 @@ import re
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.codegen.helpers import CPP_TEMPORARY_NAMES, is_emitter_temporary
-from pineforge_codegen.lexer import Lexer
+from tunaxis_codegen import transpile
+from tunaxis_codegen.codegen.helpers import CPP_TEMPORARY_NAMES, is_emitter_temporary
+from tunaxis_codegen.lexer import Lexer
 from tests._e2e import Build, execute_all, ok, skip_unless_e2e_env
 from tests._tv_tapes import FIXTURES, exit_misses, tape, window_feed
 
@@ -80,7 +80,7 @@ def test_a_name_spelled_like_an_array_history_member_is_escaped():
     # An array's history member, _pf_collection_hist_<name> (a later
     # declaration's _pf_collection_hist_<n>_<name>), beside a script
     # variable of that spelling: both became members of one name, an
-    # internal error (pineforge_codegen/collection_history.py).
+    # internal error (tunaxis_codegen/collection_history.py).
     from tests._compile import compile_cpp
     cpp = transpile(HEAD + "x = array.from(close)\n_pf_collection_hist_x = close\n"
                            "r = na(x[1]) ? 0.0 : _pf_collection_hist_x\n"

@@ -1,8 +1,8 @@
 """Recursive-descent parser for PineScript v6 tokens.
 
 Rewritten parser (Tasks 5 & 6) that:
-- Uses the new Lexer (pineforge_codegen.lexer) with TokenType enum and Token dataclass
-- Produces AST nodes from pineforge_codegen.ast_nodes with ASTNode base class
+- Uses the new Lexer (tunaxis_codegen.lexer) with TokenType enum and Token dataclass
+- Produces AST nodes from tunaxis_codegen.ast_nodes with ASTNode base class
 - Sets SourceLocation (loc) on every node
 - Handles all PineScript v6 constructs: expressions, declarations, control flow,
   function definitions, strategy/indicator declarations

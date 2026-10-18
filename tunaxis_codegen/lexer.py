@@ -14,14 +14,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum, auto
 
-from pineforge_codegen.errors import (
+from tunaxis_codegen.errors import (
     CompileError,
     Diagnostic,
     Level,
     Phase,
     SourceLocation,
 )
-from pineforge_codegen.limits import (
+from tunaxis_codegen.limits import (
     MAX_NESTING_DEPTH, TimeBudget, check_source_size, limit_error,
 )
 

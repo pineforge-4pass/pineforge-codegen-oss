@@ -7,8 +7,8 @@ later input's minval)."""
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
 
 HEAD = '//@version=6\nstrategy("t")\n'
 

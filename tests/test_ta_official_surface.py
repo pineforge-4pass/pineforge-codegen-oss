@@ -7,10 +7,10 @@ without parentheses.
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
-from pineforge_codegen import signatures as sigs
-from pineforge_codegen.support_checker import SUPPORTED_TA, TA_PROPERTY_VARIABLES
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
+from tunaxis_codegen import signatures as sigs
+from tunaxis_codegen.support_checker import SUPPORTED_TA, TA_PROPERTY_VARIABLES
 
 
 OFFICIAL_TA_FUNCTIONS = {

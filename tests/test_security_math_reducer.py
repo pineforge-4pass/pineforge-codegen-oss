@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 def test_math_sum_in_security_resolves_to_committed_secval():

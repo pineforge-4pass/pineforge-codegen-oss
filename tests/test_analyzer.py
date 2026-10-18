@@ -1,9 +1,9 @@
 import pytest
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
-from pineforge_codegen.analyzer import Analyzer
-from pineforge_codegen.symbols import PineType
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
+from tunaxis_codegen.analyzer import Analyzer
+from tunaxis_codegen.symbols import PineType
+from tunaxis_codegen.errors import CompileError
 
 def _analyze(src: str):
     tokens = Lexer(src).tokenize()

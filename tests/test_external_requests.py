@@ -22,12 +22,12 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.ast_nodes import ASTNode, FuncCall, MemberAccess
-from pineforge_codegen.errors import CompileError
-from pineforge_codegen.external_requests import TradeSlice
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
+from tunaxis_codegen import transpile, transpile_full
+from tunaxis_codegen.ast_nodes import ASTNode, FuncCall, MemberAccess
+from tunaxis_codegen.errors import CompileError
+from tunaxis_codegen.external_requests import TradeSlice
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
 from tests._compile import compile_cpp
 from tests._e2e import Build, closed_trades, execute_all, ok, skip_unless_e2e_env
 from tests._security_tapes import TAPE_TZ, source, tape_feed

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 HLC3_CHART = "((current_bar_.high + current_bar_.low + current_bar_.close) / 3.0)"

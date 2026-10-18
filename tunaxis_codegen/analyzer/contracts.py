@@ -300,7 +300,7 @@ class AnalyzerContext:
     session_history_unsafe: dict = field(default_factory=dict)
     # Functions that read a flag at an offset this analysis did not clone:
     # no per-call Series. A read of theirs the C++ holds asks
-    # pineforge_codegen._generate to clone them.
+    # tunaxis_codegen._generate to clone them.
     session_uncloned: frozenset = frozenset()
     # (func_name, cs_idx) -> {orig_member_name: cloned_member_name}. Populated by
     # the analyzer ONLY for clones whose default ``{base}_cs{cs_idx}`` name would
@@ -341,7 +341,7 @@ class AnalyzerContext:
     # each emitted body its own chart-clocked buffer of the variable.
     func_global_history_reads: dict = field(default_factory=dict)
     # Array and matrix variables whose history the script reads, by name
-    # (pineforge_codegen/collection_history.py HistoryVariable).
+    # (tunaxis_codegen/collection_history.py HistoryVariable).
     collection_history: dict = field(default_factory=dict)
     func_global_history_nodes: dict = field(default_factory=dict)
     # FuncDef owner -> declaration-bound non-persistent history-local names.
@@ -383,7 +383,7 @@ class AnalyzerContext:
     # of the var resolve to the disambiguated member.
     block_var_renames: dict[int, dict[str, str]] = field(default_factory=dict)
     # ``// @pf-trace name=expr`` pragmas in source order. Populated by
-    # :func:`pineforge_codegen.pragmas.extract_pf_trace_pragmas` from
+    # :func:`tunaxis_codegen.pragmas.extract_pf_trace_pragmas` from
     # the original source text and attached after :class:`Analyzer`
     # finishes (the analyzer never sees pragma expressions because the
     # lexer strips comments). Codegen iterates this list to emit the

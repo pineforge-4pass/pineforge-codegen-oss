@@ -31,11 +31,11 @@ import re
 
 import pytest
 
-from pineforge_codegen import transpile, signatures as sigs
-from pineforge_codegen.errors import CompileError
-from pineforge_codegen.library_modules import parse_library_module
-from pineforge_codegen.library_v5 import V5_RULES
-from pineforge_codegen.support_checker import (
+from tunaxis_codegen import transpile, signatures as sigs
+from tunaxis_codegen.errors import CompileError
+from tunaxis_codegen.library_modules import parse_library_module
+from tunaxis_codegen.library_v5 import V5_RULES
+from tunaxis_codegen.support_checker import (
     SUPPORTED_TA,
     SUPPORTED_MATH,
     SUPPORTED_STR,

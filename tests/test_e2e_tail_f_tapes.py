@@ -26,8 +26,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
 from tests._e2e import Build, closed_trades, derive_chart_feed, execute_all, ok, skip_unless_e2e_env
 from tests._pine_libraries import Layout
 from tests._private_fixtures import private_fixture

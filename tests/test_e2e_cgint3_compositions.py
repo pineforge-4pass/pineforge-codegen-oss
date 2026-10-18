@@ -49,7 +49,7 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._e2e import (
     Build, chart_feed_head, execute_all, ok, reference_codegen, same,
     skip_unless_e2e_env, transpile_json,

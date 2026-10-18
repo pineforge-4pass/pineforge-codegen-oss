@@ -1,6 +1,6 @@
 name: Release
 
-# Manual release: bump VERSION, build the sdist + wheel, publish to PyPI via
+# Manual release: bump VERSION, build both distributions, publish to PyPI via
 # Trusted Publishing (OIDC — no stored token), then commit + tag + create a
 # GitHub Release. VERSION is semver; scripts/release_version.py gives each
 # channel its spelling. A prerelease (override 1.0.0-rc.1) ships PyPI 1.0.0rc1,
@@ -94,7 +94,8 @@ jobs:
       # tag->npm trigger never fires), and no GitHub Release is created.
       - name: Run conformance gate (blocking)
         run: |
-          python -m pip install -e .
+          python -m pip install -e ".[dev]" hatchling
+          python -m pytest -ra tests/test_tunaxis_rename.py
           npm ci
           npm audit --audit-level=high
           npm run gate:selftest
@@ -105,22 +106,36 @@ jobs:
           PYPI_VERSION: ${{ steps.ver.outputs.pypi }}
         run: |
           set -euo pipefail
-          python -m pip install --upgrade build
-          python -m build
-          ls -l dist/
+          python -m pip install --upgrade build hatchling
+          python -m build --outdir dist/tunaxis
+          python scripts/build_shim.py --outdir dist/shim
+          ls -l dist/tunaxis/ dist/shim/
           # hatchling normalizes VERSION to PEP 440 (1.0.0-rc.1 builds 1.0.0rc1):
           # the spelling PyPI serves and the hub probes.
-          test -f "dist/pineforge_codegen-${PYPI_VERSION}.tar.gz" \
-            || { echo "::error::no dist/pineforge_codegen-${PYPI_VERSION}.tar.gz"; exit 1; }
-          ls "dist/pineforge_codegen-${PYPI_VERSION}-"*.whl >/dev/null \
-            || { echo "::error::no wheel for ${PYPI_VERSION}"; exit 1; }
+          test -f "dist/tunaxis/tunaxis_codegen-${PYPI_VERSION}.tar.gz" \
+            || { echo "::error::no tunaxis-codegen sdist for ${PYPI_VERSION}"; exit 1; }
+          ls "dist/tunaxis/tunaxis_codegen-${PYPI_VERSION}-"*.whl >/dev/null \
+            || { echo "::error::no tunaxis-codegen wheel for ${PYPI_VERSION}"; exit 1; }
+          test -f "dist/shim/pineforge_codegen-${PYPI_VERSION}.tar.gz" \
+            || { echo "::error::no pineforge-codegen shim sdist for ${PYPI_VERSION}"; exit 1; }
+          ls "dist/shim/pineforge_codegen-${PYPI_VERSION}-"*.whl >/dev/null \
+            || { echo "::error::no pineforge-codegen shim wheel for ${PYPI_VERSION}"; exit 1; }
 
       # Publish to PyPI BEFORE the tag is pushed. The tag push triggers
       # publish-pyodide.yml (npm), so PyPI must land first — otherwise a PyPI
       # failure would leave npm shipping a version PyPI never got.
-      - name: Publish to PyPI
+      - name: Publish tunaxis-codegen to PyPI
         if: ${{ !inputs.dry_run }}
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          packages-dir: dist/tunaxis/
+
+      # Separate Trusted Publishing project, after its exact dependency lands.
+      - name: Publish pineforge-codegen shim to PyPI
+        if: ${{ !inputs.dry_run }}
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          packages-dir: dist/shim/
 
       # Commit + tag + push AFTER PyPI succeeds. The `git push --tags` triggers
       # publish-pyodide.yml for npm (which re-runs the gate — defense in depth),
@@ -154,13 +169,13 @@ jobs:
           if [ "$PRERELEASE" = true ]; then channel=(--prerelease --latest=false); fi
           # The diagnostics catalog (docs/PUBLIC_CONTRACT.md, "Diagnostic codes").
           catalog="diagnostics_catalog-${GIT_TAG}.json"
-          cp pineforge_codegen/diagnostics_catalog.json "${catalog}"
+          cp tunaxis_codegen/diagnostics_catalog.json "${catalog}"
           gh release create "${GIT_TAG}" \
             --title "${GIT_TAG}" \
             --generate-notes \
-            --notes "Install: \`pip install pineforge-codegen==${PYPI_VERSION}\`" \
+            --notes "Install: \`pip install tunaxis-codegen==${PYPI_VERSION}\`. The \`pineforge-codegen\` package forwards to the same Tunaxis version." \
             ${channel[@]+"${channel[@]}"} \
-            dist/* "${catalog}"
+            dist/tunaxis/* dist/shim/* "${catalog}"
 
       # Notify the pineforge-release hub: it bumps its CODEGEN_VERSION pin,
       # rebuilds the combined image, and fans out to the MCPs. FAIL LOUD (no

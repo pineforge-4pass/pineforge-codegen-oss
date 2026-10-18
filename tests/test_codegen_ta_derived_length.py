@@ -22,8 +22,8 @@ import re
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile, transpile_full
+from tunaxis_codegen.errors import CompileError
 
 
 def _ctor_period(cpp: str, member: str) -> str:

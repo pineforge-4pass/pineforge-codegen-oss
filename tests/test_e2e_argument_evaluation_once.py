@@ -236,5 +236,5 @@ def test_a_stateful_argument_runs_like_its_hoisted_twin(twin_runs, name):
     ("_s_close[i]", False), ("(int)(2)", False),
 ])
 def test_plain_reads_are_recognised(cpp, plain):
-    from pineforge_codegen.codegen.helpers import cpp_is_plain_read
+    from tunaxis_codegen.codegen.helpers import cpp_is_plain_read
     assert cpp_is_plain_read(cpp) is plain

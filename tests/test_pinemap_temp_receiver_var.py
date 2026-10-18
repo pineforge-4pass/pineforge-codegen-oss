@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests.test_pinemap_semantics import _compile_and_run
 
 

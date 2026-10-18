@@ -27,8 +27,8 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests._e2e import reference_codegen, transpile_json
 

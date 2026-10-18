@@ -36,8 +36,8 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile, transpile_full
+from tunaxis_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests._e2e import Build, skip_unless_e2e_env
 from tests._security_tapes import mismatches, replay, source, tape_exits
@@ -175,7 +175,7 @@ def test_every_read_of_a_prologue_variant_orders_it(body, monkeypatch):
     compile_cpp(cpp, label="prologue variants read after a history read")
     # The reads learnt by building the arguments (a cycle in the reach graph)
     # give the same order.
-    from pineforge_codegen.codegen.base import CodeGen
+    from tunaxis_codegen.codegen.base import CodeGen
     monkeypatch.setattr(CodeGen, "_security_ta_sites_reached",
                         lambda self, site, stack: set(range(len(self.ctx.ta_call_sites))))
     assert transpile(PRELUDE + body + TRADE) == cpp

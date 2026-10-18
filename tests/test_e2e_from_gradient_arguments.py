@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._e2e import Build, execute_all, ok, skip_unless_e2e_env
 from tests._tv_tapes import FIXTURES, exit_misses, tape, window_feed
 

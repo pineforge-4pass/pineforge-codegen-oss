@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
+from tunaxis_codegen import transpile, transpile_full
 from tests import _compile as compile_env
 from tests.test_array_checked_access import _compile_and_run
 

@@ -7,11 +7,11 @@ Inside it an unqualified name finds the class's own members first, so a script
 identifier spelled like a host member the emitter reads -- a variable named
 ``session_isfirstbar_``, ``syminfo_`` or ``current_bar_`` -- would hide that
 member from the generated code. This script writes
-``pineforge_codegen/codegen/host_members.py``, the set ``_safe_name`` renames:
+``tunaxis_codegen/codegen/host_members.py``, the set ``_safe_name`` renames:
 
 * the host: every public or protected member of that class and its bases,
   from clang's JSON AST of the ``#include`` lines the emitted C++ starts with;
-* the emitter: every identifier one of ``pineforge_codegen/codegen``'s string
+* the emitter: every identifier one of ``tunaxis_codegen/codegen``'s string
   constants spells outside a ``.`` or ``::`` access, or two such constants
   join (``"closed_trade_" + "profit"``); docstrings, the reserved-name lists
   of ``codegen/helpers.py``, dict keys, a named constant set's elements and
@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-EMITTER = Path("pineforge_codegen") / "codegen"
+EMITTER = Path("tunaxis_codegen") / "codegen"
 OUTPUT = EMITTER / "host_members.py"
 
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -102,7 +102,7 @@ def emitter_target(repo: Path) -> tuple[tuple[str, ...], str]:
     probe = '//@version=6\nstrategy("host")\n'
     proc = subprocess.run(
         [sys.executable, "-c",
-         "import sys; import pineforge_codegen as pc; "
+         "import sys; import tunaxis_codegen as pc; "
          "sys.stdout.write(pc.transpile(sys.stdin.read()))"],
         input=probe, capture_output=True, text=True,
         env=dict(os.environ, PYTHONPATH=str(repo)), cwd=repo)

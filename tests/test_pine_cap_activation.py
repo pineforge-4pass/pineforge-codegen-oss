@@ -6,7 +6,7 @@ real C metadata forwarding are tested by the engine's literal C++ fixtures.
 
 import pytest
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._compile import compile_cpp
 
 

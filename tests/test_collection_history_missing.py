@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.collection_history import NA_ARRAY_MESSAGE, NA_MATRIX_MESSAGE
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.collection_history import NA_ARRAY_MESSAGE, NA_MATRIX_MESSAGE
+from tunaxis_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests._e2e import Build, chart_feed_head, execute_all, ok, skip_unless_e2e_env, trade_count
 

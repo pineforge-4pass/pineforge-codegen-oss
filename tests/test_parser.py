@@ -5,9 +5,9 @@ import re
 
 import pytest
 
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
-from pineforge_codegen.ast_nodes import *
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
+from tunaxis_codegen.ast_nodes import *
 from tests._e2e import engine_root
 
 
@@ -302,7 +302,7 @@ def test_udt_parse():
 
 
 def test_enum_parse():
-    from pineforge_codegen.ast_nodes import EnumDecl
+    from tunaxis_codegen.ast_nodes import EnumDecl
     src = "enum Direction\n    Up\n    Down\n    Sideways\n"
     tokens = Lexer(src).tokenize()
     ast = Parser(tokens, source=src).parse()
@@ -314,7 +314,7 @@ def test_enum_parse():
 
 def test_enum_parse_field_string_values():
     """TV manual: enum members may use = \"title\" for dropdown / str.tostring."""
-    from pineforge_codegen.ast_nodes import EnumDecl, StringLiteral
+    from tunaxis_codegen.ast_nodes import EnumDecl, StringLiteral
     src = '''enum tz
     utc = "UTC"
     exch = ""
@@ -440,7 +440,7 @@ def test_postfix_array_decl_bare():
 
 def test_postfix_array_and_simple_qualifier_transpile():
     """End-to-end: both fixed forms transpile to C++ without error."""
-    from pineforge_codegen import transpile
+    from tunaxis_codegen import transpile
     cpp = transpile(
         "//@version=6\nstrategy(\"t\")\n"
         "ma(float s, int l, simple string m) =>\n    ta.ema(s, l)\n"

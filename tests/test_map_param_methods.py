@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen.errors import CompileError
-from pineforge_codegen import transpile
+from tunaxis_codegen.errors import CompileError
+from tunaxis_codegen import transpile
 from tests import _compile as compile_env
 
 

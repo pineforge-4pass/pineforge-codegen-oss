@@ -1812,7 +1812,7 @@ class TopLevelEmitter:
         # (actual push happens in visit_VarDecl when the decl is visited)
 
         # c1. A top-level var array's or matrix's history slot opens on every
-        # bar (pineforge_codegen/collection_history.py).
+        # bar (tunaxis_codegen/collection_history.py).
         self._emit_collection_history_var_opens(lines, "        ")
 
         # c2. First-bar TA resize: rebuild any TA object whose ctor args come
@@ -1854,8 +1854,8 @@ class TopLevelEmitter:
         """Emit the ``// @pf-trace`` instrumentation block.
 
         Reads ``self.ctx.pf_trace_pragmas`` (populated by
-        :func:`pineforge_codegen.pragmas.extract_pf_trace_pragmas` and
-        attached in :func:`pineforge_codegen.transpile`). For each
+        :func:`tunaxis_codegen.pragmas.extract_pf_trace_pragmas` and
+        attached in :func:`tunaxis_codegen.transpile`). For each
         pragma ``// @pf-trace name=expr`` we emit:
 
             trace(std::string("name"), (double)(<expr_cpp>));
@@ -1876,7 +1876,7 @@ class TopLevelEmitter:
         default empty state).
 
         Pragma names match ``[A-Za-z_][A-Za-z0-9_]*`` (enforced by
-        the regex in :mod:`pineforge_codegen.pragmas`) so they need
+        the regex in :mod:`tunaxis_codegen.pragmas`) so they need
         no escaping inside the C++ string literal.
 
         Empty pragma list -> nothing is emitted (zero overhead).

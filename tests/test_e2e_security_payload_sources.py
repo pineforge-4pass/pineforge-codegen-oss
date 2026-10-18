@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._e2e import Build, skip_unless_e2e_env
 from tests._security_tapes import mismatches, replay, source, tape_exits
 
@@ -85,7 +85,7 @@ def test_payload_reads_no_chart_source_series():
 
 
 def test_a_source_input_beside_a_chart_global_reads_the_requested_bar():
-    from pineforge_codegen import transpile_full
+    from tunaxis_codegen import transpile_full
 
     # ``g`` keeps the chart's value (a global under a builtin); the source
     # input reads the requested bar, as ``close`` would, and inlines no call,

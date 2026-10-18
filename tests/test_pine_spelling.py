@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
-from pineforge_codegen.pine_spelling import (
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
+from tunaxis_codegen.pine_spelling import (
     input_call_spans,
     pine_string_literal,
     spell_input_call,

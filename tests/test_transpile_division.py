@@ -17,7 +17,7 @@ Reference: https://www.tradingview.com/pine-script-docs/concepts/operators/
 
 from __future__ import annotations
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 def _wrap(body: str) -> str:

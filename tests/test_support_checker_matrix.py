@@ -1,6 +1,6 @@
 """Support-checker validation for matrix<T> element types (Task 2.15)."""
 import pytest
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 def test_matrix_unknown_element_rejected():

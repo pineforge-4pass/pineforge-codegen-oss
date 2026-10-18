@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 
-import pineforge_codegen as pc
+import tunaxis_codegen as pc
 
 PRELUDE = '//@version=6\nstrategy("t", overlay=true)\n'
 

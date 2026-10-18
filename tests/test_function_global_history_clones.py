@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 
-from pineforge_codegen import transpile, transpile_full
+from tunaxis_codegen import transpile, transpile_full
 from tests import _compile as compile_env
 from tests.test_runtime_var_initialization import _compile_and_run
 

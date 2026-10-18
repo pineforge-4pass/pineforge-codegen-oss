@@ -8,9 +8,9 @@ back and leaves ``varip`` alone. Codegen now lowers ``varip`` as ``var`` and
 keeps it out of that rollback (tests/test_e2e_varip_coof.py replays the
 tapes), so the checker accepts it without an error or a warning.
 """
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
-from pineforge_codegen.support_checker import SupportChecker
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
+from tunaxis_codegen.support_checker import SupportChecker
 
 
 def _diagnostics(src: str) -> list:

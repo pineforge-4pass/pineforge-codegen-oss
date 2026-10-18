@@ -31,7 +31,7 @@ pre-fix (aa774ff) lowering, which emits naive relationals with no ``is_na``.
 
 from __future__ import annotations
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 from tests._compile import compile_cpp, skip_if_no_compile_env
 

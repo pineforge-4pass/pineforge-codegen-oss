@@ -10,8 +10,8 @@ EMA.
 
 from __future__ import annotations
 
-from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.errors import Level
+from tunaxis_codegen import transpile, transpile_full
+from tunaxis_codegen.errors import Level
 
 from tests._compile import run_emitted_tu
 

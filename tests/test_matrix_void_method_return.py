@@ -12,12 +12,12 @@ import re
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.analyzer import Analyzer
-from pineforge_codegen.ast_nodes import ExprStmt, FuncCall, MemberAccess, MethodDef
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
-from pineforge_codegen.symbols import PineType
+from tunaxis_codegen import transpile
+from tunaxis_codegen.analyzer import Analyzer
+from tunaxis_codegen.ast_nodes import ExprStmt, FuncCall, MemberAccess, MethodDef
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
+from tunaxis_codegen.symbols import PineType
 from tests._compile import compile_cpp
 
 

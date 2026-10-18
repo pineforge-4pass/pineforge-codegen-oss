@@ -31,7 +31,7 @@ def test_new_version_and_channels_come_from_the_script():
 def test_built_dists_carry_the_pypi_spelling():
     body = step(RELEASE, "Build sdist + wheel")
     assert has_env(body, "PYPI_VERSION", "steps.ver.outputs.pypi")
-    assert "dist/pineforge_codegen-${PYPI_VERSION}.tar.gz" in body
+    assert "dist/tunaxis_codegen-${PYPI_VERSION}.tar.gz" in body
 
 
 def test_git_tag_is_the_channel_tag():

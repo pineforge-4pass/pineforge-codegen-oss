@@ -837,7 +837,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._refused_session_reads: dict[
             str, tuple[ASTNode, ASTNode, str, str | None]] = {}
         # The uncloned functions whose reads the emitted C++ holds: another
-        # analysis clones them (pineforge_codegen._generate).
+        # analysis clones them (tunaxis_codegen._generate).
         self.session_functions_needing_clones: frozenset[str] = frozenset()
         # The top-level block declarations whose type the member of their name
         # cannot hold (``block_locals``): transpile() names each apart and
@@ -4758,7 +4758,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # and therefore join the automatic COOF checkpoint inventory.
         self._emit_lazy_source_clock_helper(lines)
         # The history of an array or a matrix variable: its support types
-        # (pineforge_codegen/collection_history.py), emitted only for a script
+        # (tunaxis_codegen/collection_history.py), emitted only for a script
         # that reads one.
         self._emit_collection_history_helper(lines)
         # The chart-bar session type, inserted here once the class is lowered
@@ -5315,7 +5315,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             lines.append("    DrawingArena<LinefillRec> _pf_linefills_{_PF_DRAWING_UNBOUNDED};")
 
         # 8e. The copies an array or a matrix variable's executions left
-        #     (pineforge_codegen/collection_history.py).
+        #     (tunaxis_codegen/collection_history.py).
         for variable in self._collection_history_variables():
             lines.append(
                 f"    _PFCollectionHistory<{self._collection_history_cpp_type(variable)}> "

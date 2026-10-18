@@ -1,4 +1,4 @@
-from pineforge_codegen.symbols import TypeSpec
+from tunaxis_codegen.symbols import TypeSpec
 
 
 def test_typespec_matrix_constructor():

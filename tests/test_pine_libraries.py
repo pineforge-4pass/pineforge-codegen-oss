@@ -24,9 +24,9 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError, Level
-from pineforge_codegen.pine_libraries import library_resolver, source_digests
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError, Level
+from tunaxis_codegen.pine_libraries import library_resolver, source_digests
 from tests._pine_libraries import Layout, library_sources, library_text, sha256
 
 SCRIPT = """//@version=6

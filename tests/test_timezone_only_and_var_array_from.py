@@ -20,7 +20,7 @@ import re
 
 import pytest
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 CALENDAR_BUILTINS = (

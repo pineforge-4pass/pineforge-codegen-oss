@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._compile import compile_cpp
 from tests._e2e import (
     Build, chart_feed_head, execute_all, ok, skip_unless_e2e_env,

@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.support_checker import SupportChecker
+from tunaxis_codegen import transpile
+from tunaxis_codegen.support_checker import SupportChecker
 
 
 PRELUDE = '//@version=6\nstrategy("t")\n'

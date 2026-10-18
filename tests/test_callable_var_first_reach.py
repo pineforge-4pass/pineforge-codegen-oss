@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests.test_runtime_var_initialization import _compile_and_run
 
 

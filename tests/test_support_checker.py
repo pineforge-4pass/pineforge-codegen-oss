@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile_full
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
-from pineforge_codegen.errors import CompileError, Level
-from pineforge_codegen.support_checker import (
+from tunaxis_codegen import transpile_full
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
+from tunaxis_codegen.errors import CompileError, Level
+from tunaxis_codegen.support_checker import (
     SupportChecker,
     HARD_REJECT_FUNC,
     HARD_REJECT_NAMESPACE,
@@ -152,7 +152,7 @@ def test_request_security_lower_tf_accepted():
     not the support_checker — tested in tests/test_request_security_lower_tf.py."""
     src = PRELUDE + 'a = request.security_lower_tf(syminfo.tickerid, "1", close)\n'
     # No CompileError expected; analyzer + codegen handle parameter validation.
-    from pineforge_codegen import transpile
+    from tunaxis_codegen import transpile
     cpp = transpile(src)
     assert "_req_sec_lower_tf" in cpp
 
@@ -988,7 +988,7 @@ def test_ticker_inherit_not_rejected():
 
 def test_ticker_inherit_passthrough_in_request_security():
     """ticker.inherit(syminfo.tickerid) used directly as symbol arg should compile."""
-    from pineforge_codegen import transpile
+    from tunaxis_codegen import transpile
     src = PRELUDE + 'data = request.security(ticker.inherit(syminfo.tickerid), "D", close)\n'
     # Should not raise a CompileError — ticker.inherit is accepted as current-symbol passthrough
     cpp = transpile(src)
@@ -1004,7 +1004,7 @@ def test_ticker_standard_not_rejected():
 
 def test_ticker_standard_passthrough_in_request_security():
     """ticker.standard(syminfo.tickerid) used directly as symbol arg should compile."""
-    from pineforge_codegen import transpile
+    from tunaxis_codegen import transpile
     src = PRELUDE + 'data = request.security(ticker.standard(syminfo.tickerid), "D", close)\n'
     cpp = transpile(src)
     assert cpp  # generated non-empty C++

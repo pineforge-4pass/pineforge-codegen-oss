@@ -2,11 +2,11 @@
 
 import re
 
-from pineforge_codegen import transpile
-from pineforge_codegen.analyzer import Analyzer
-from pineforge_codegen.codegen import CodeGen
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
+from tunaxis_codegen import transpile
+from tunaxis_codegen.analyzer import Analyzer
+from tunaxis_codegen.codegen import CodeGen
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
 
 
 _CLOSE_TOKEN = re.compile(r"strategy_close\([^;\n]*, ([0-9]+ULL)\)")

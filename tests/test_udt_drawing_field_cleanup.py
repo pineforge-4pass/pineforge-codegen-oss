@@ -8,7 +8,7 @@ become real field read/writes against the shared per-type arena.
 
 (``table``/``polyline`` fields are still dropped — they have no C++ type.)
 """
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 def test_udt_label_field_is_real_handle():

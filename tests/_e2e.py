@@ -106,15 +106,25 @@ _REFERENCE_TREES: dict[str, Path | None] = {}
 
 
 def reference_codegen(commit: str) -> Path | None:
-    """This repository's ``pineforge_codegen`` and ``gate`` as of ``commit``
+    """This repository's codegen package and ``gate`` as of ``commit``
     (``git archive``), extracted once per session, to transpile a script the
     way that commit did; None when git or the commit is unavailable."""
     if commit not in _REFERENCE_TREES:
         tree = None
+        # Historical references predate the rename; later ones also need the
+        # compatibility package if their gate imports it. Archive the package
+        # directories actually present at that commit, without rewriting them.
+        inventory = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-tree", "--name-only", commit,
+             "--", "tunaxis_codegen", "pineforge_codegen"],
+            capture_output=True, text=True,
+        )
+        packages = inventory.stdout.splitlines()
         proc = subprocess.run(
             ["git", "-C", str(REPO_ROOT), "archive", "--format=tar", commit,
-             "pineforge_codegen", "gate"], capture_output=True)
-        if proc.returncode == 0:
+             *packages, "gate"], capture_output=True,
+        ) if inventory.returncode == 0 and packages else None
+        if proc is not None and proc.returncode == 0:
             tree = Path(tempfile.mkdtemp(prefix=f"pf-codegen-{commit[:12]}-"))
             with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
                 if hasattr(tarfile, "data_filter"):

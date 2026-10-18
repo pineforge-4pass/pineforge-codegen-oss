@@ -9,7 +9,7 @@ the fruit-fly probes' shape, did not compile. The codegen names each
 declaration whose type cannot share the member of the name
 (``CodeGen.block_locals_needing_names``, by ``decl_key``); ``transpile()``
 gives each of them, and every read of it in its block, a name of its own
-(``k__pfblk1``) and runs again (``pineforge_codegen._generate``). Scripts
+(``k__pfblk1``) and runs again (``tunaxis_codegen._generate``). Scripts
 whose declarations share their members keep their C++ byte for byte.
 """
 

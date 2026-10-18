@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._compile import compile_cpp, run_emitted_tu
 
 
@@ -224,7 +224,7 @@ int main() {
 
 
 def test_settings_name_reservations_keep_default_corpus_emission_identical(monkeypatch):
-    from pineforge_codegen.codegen import helpers
+    from tunaxis_codegen.codegen import helpers
 
     corpus = os.environ.get("PINEFORGE_ENGINE_CORPUS")
     if not corpus:

@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile_full
-from pineforge_codegen.ast_nodes import StringLiteral
-from pineforge_codegen.codegen.checked_settings import _string_setting_arg, _string_setting_value
-from pineforge_codegen.codegen.helpers import NamingHelper
-from pineforge_codegen.errors import CompileError
-from pineforge_codegen.pine_spelling import pine_string_literal
+from tunaxis_codegen import transpile_full
+from tunaxis_codegen.ast_nodes import StringLiteral
+from tunaxis_codegen.codegen.checked_settings import _string_setting_arg, _string_setting_value
+from tunaxis_codegen.codegen.helpers import NamingHelper
+from tunaxis_codegen.errors import CompileError
+from tunaxis_codegen.pine_spelling import pine_string_literal
 from tests._compile import run_emitted_tu
 from tests._private_fixtures import private_fixture
 from tests.test_compile_corpus import _resolve_corpus_root

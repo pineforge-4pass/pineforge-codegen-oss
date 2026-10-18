@@ -31,8 +31,8 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
 from tests._compile import compile_cpp
 
 FIXTURES = Path(__file__).parent / "fixtures" / "array_history_tv"
@@ -625,7 +625,7 @@ EARLIER_LOWERING = {
 @pytest.mark.parametrize("name", sorted(EARLIER_LOWERING))
 def test_a_form_the_earlier_lowering_compiled_keeps_it(name):
     body, warning = EARLIER_LOWERING[name]
-    from pineforge_codegen import transpile_full
+    from tunaxis_codegen import transpile_full
     result = transpile_full(_script(body))
     messages = [d.message for d in result["diagnostics"]]
     assert any(warning in m for m in messages), messages
@@ -772,9 +772,9 @@ def test_many_bindings_are_walked_once_each():
 def test_the_changing_methods_are_the_codegen_s_mutating_ones():
     # The checker's change tables follow the codegen's own list of the
     # built-ins that mutate a collection.
-    from pineforge_codegen.codegen.tables import ARRAY_METHODS, MATRIX_METHODS
-    from pineforge_codegen.codegen.types import COLLECTION_MUTATING_METHODS
-    from pineforge_codegen.collection_history import (
+    from tunaxis_codegen.codegen.tables import ARRAY_METHODS, MATRIX_METHODS
+    from tunaxis_codegen.codegen.types import COLLECTION_MUTATING_METHODS
+    from tunaxis_codegen.collection_history import (
         ARRAY_CHANGING_METHODS, MATRIX_CHANGING_METHODS,
     )
     assert ARRAY_CHANGING_METHODS == COLLECTION_MUTATING_METHODS & set(ARRAY_METHODS)
@@ -784,7 +784,7 @@ def test_the_changing_methods_are_the_codegen_s_mutating_ones():
 def test_the_runtime_stops_spell_the_message_constants():
     # The C++ stops with TradingView's texts, which the module's constants
     # hold (fixtures/array_history_tv README).
-    from pineforge_codegen.collection_history import (
+    from tunaxis_codegen.collection_history import (
         COLLECTION_HISTORY_CLASS_CPP, COLLECTION_HISTORY_CPP,
         COLLECTION_HISTORY_GENERIC_MATRIX_CPP, COLLECTION_HISTORY_MATRIX_CPP,
         HISTORICAL_CHANGE_MESSAGE, NA_ARRAY_MESSAGE, NA_MATRIX_MESSAGE,

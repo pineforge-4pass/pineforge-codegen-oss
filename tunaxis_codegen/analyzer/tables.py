@@ -8,7 +8,7 @@ analyzer mixins a single place to import from while letting
 
 External consumers (``codegen/base.py``, ``support_checker.py``, and
 external tests) import these names through the package facade
-(``from pineforge_codegen.analyzer import …``); that contract is
+(``from tunaxis_codegen.analyzer import …``); that contract is
 preserved by re-exports in ``analyzer/__init__.py``.
 
 Naming overlap note: ``BAR_FIELDS`` here is a ``set[str]`` of Pine

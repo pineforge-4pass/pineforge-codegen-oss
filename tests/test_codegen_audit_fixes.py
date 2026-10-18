@@ -1,8 +1,8 @@
 """Emission tests for the 2026-06 audit fixes (items A4/A5, B8-B17, C18)."""
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
 
 PRELUDE = '//@version=6\nstrategy("T")\n'
 

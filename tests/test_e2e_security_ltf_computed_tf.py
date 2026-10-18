@@ -96,7 +96,7 @@ def _configure(cpp: str) -> str:
 
 
 def test_registration_replays_the_first_bar_in_source_order():
-    from pineforge_codegen import transpile_full
+    from tunaxis_codegen import transpile_full
 
     result = transpile_full(source(NAME, FIXTURES))
     configure = _configure(result["cpp"])
@@ -111,7 +111,7 @@ def test_registration_replays_the_first_bar_in_source_order():
 
 
 def test_a_timeframe_registration_cannot_replay_keeps_its_lowering_and_warns(tmp_path):
-    from pineforge_codegen import transpile_full
+    from tunaxis_codegen import transpile_full
 
     helper = '''//@version=6
 strategy("replay fallback")
@@ -147,7 +147,7 @@ plot(array.size(a))
 
 
 def test_a_global_built_from_a_reassigned_one_is_computed_at_its_declaration():
-    from pineforge_codegen import transpile_full
+    from tunaxis_codegen import transpile_full
 
     # TradingView: snap = 60 * 2 before mins := mins * 4 runs.
     result = transpile_full('''//@version=6
@@ -165,7 +165,7 @@ plot(v)
 
 
 def test_var_inline_input_and_method_requests_replay():
-    from pineforge_codegen import transpile_full
+    from tunaxis_codegen import transpile_full
 
     result = transpile_full('''//@version=6
 strategy("replay shapes")
@@ -185,7 +185,7 @@ plot(v + w + close.htf())
 
 
 def test_a_helper_parameter_named_like_a_reassigned_global_is_not_replayed(tmp_path):
-    from pineforge_codegen import transpile_full
+    from tunaxis_codegen import transpile_full
 
     pine = '''//@version=6
 strategy("parameter shadow")

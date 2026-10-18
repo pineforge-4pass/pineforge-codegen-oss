@@ -2,7 +2,7 @@
 
 The analyzer annotates every such read with how its value is used and lists
 the variables whose history the script reads (``ctx.collection_history``;
-pineforge_codegen/collection_history.py). Such a variable keeps its own
+tunaxis_codegen/collection_history.py). Such a variable keeps its own
 ``std::vector`` or matrix member, so every other operation on it keeps its
 C++; beside it, ``_pf_collection_hist_<name>`` keeps the copies its
 executions left. Each execution of the declaration -- each bar, for a top

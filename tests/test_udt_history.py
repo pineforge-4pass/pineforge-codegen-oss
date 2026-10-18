@@ -20,8 +20,8 @@ import pytest
 
 from pathlib import Path
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
 from tests._compile import compile_cpp
 
 FIXTURES = Path(__file__).parent / "fixtures" / "udt_history_tv"

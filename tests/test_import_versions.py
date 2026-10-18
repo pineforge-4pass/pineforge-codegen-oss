@@ -5,9 +5,9 @@ import json
 import pytest
 
 from gate.glue import transpile_json
-from pineforge_codegen.ast_nodes import ImportStmt
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
+from tunaxis_codegen.ast_nodes import ImportStmt
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
 
 PRELUDE = '//@version=6\nstrategy("version probe")\n'
 VERSIONS = ["²", "1²", "①", "١", "１", "𝟡", pytest.param("9" * 4301, id="over-limit")]
