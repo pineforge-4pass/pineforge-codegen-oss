@@ -378,6 +378,13 @@ def _wheel_entry_points(wheel: Path) -> configparser.ConfigParser:
     return parser
 
 
+def _console_scripts(wheel: Path) -> set[str]:
+    entry_points = _wheel_entry_points(wheel)
+    if not entry_points.has_section("console_scripts"):
+        return set()
+    return set(entry_points["console_scripts"])
+
+
 def test_main_wheel_is_tunaxis_codegen_only(wheels):
     members = _wheel_members(wheels["main_wheel"])
     dist_info = next(
@@ -459,6 +466,16 @@ def test_the_two_wheels_share_no_file(wheels):
     main = set(_wheel_members(wheels["main_wheel"]))
     shim = set(_wheel_members(wheels["shim_wheel"]))
     assert main & shim == set()
+
+    # Both wheels deliberately generate bin/pf-cpp-allowlist: the shim restores
+    # it for users upgrading the old full 1.6.1 package, and both entry points
+    # call the same tunaxis function, so any other console-script overlap would
+    # let an uninstall of one distribution remove a script the other declared.
+    overlap = (
+        _console_scripts(wheels["main_wheel"])
+        & _console_scripts(wheels["shim_wheel"])
+    )
+    assert overlap == {"pf-cpp-allowlist"}, sorted(overlap)
 
 
 def test_root_wheel_has_no_alias_and_the_shim_restores_the_old_import(
