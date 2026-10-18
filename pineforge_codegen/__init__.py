@@ -83,3 +83,11 @@ def __getattr__(name):
 
 def __dir__():
     return sorted(set(globals()) | set(dir(_canonical)))
+
+
+# The import machinery re-reads sys.modules[name] after exec_module and returns
+# that object (importlib._bootstrap._load_unlocked). Pointing the entry at the
+# canonical package makes `pineforge_codegen is tunaxis_codegen` hold and every
+# later import / attribute lookup native; the forwarding module object above is
+# discarded once this package has finished initialising.
+sys.modules["pineforge_codegen"] = _canonical

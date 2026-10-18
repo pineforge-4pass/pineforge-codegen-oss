@@ -103,6 +103,7 @@ ALIAS_PROBE = textwrap.dedent(
         from tunaxis_codegen.analyzer.base import Analyzer as CanonicalAnalyzer
 
     assert pineforge_codegen is tunaxis_codegen
+    assert sys.modules["pineforge_codegen"] is tunaxis_codegen
     assert pineforge_codegen.parser is tunaxis_codegen.parser
     assert sys.modules["pineforge_codegen.parser"] is sys.modules["tunaxis_codegen.parser"]
     assert pineforge_codegen.codegen.visit_expr is tunaxis_codegen.codegen.visit_expr
