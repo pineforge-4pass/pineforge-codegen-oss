@@ -297,7 +297,12 @@ def test_main_wheel_is_tunaxis_codegen_only(wheels):
     metadata = _wheel_metadata(wheels["main_wheel"])
     assert metadata["Name"] == "tunaxis-codegen"
     assert metadata["Version"] == PYPI_VERSION
-    assert not metadata.get_all("Requires-Dist")
+    # No runtime dependency: only the optional dev extra may declare requirements.
+    runtime_requirements = [
+        requirement for requirement in (metadata.get_all("Requires-Dist") or [])
+        if "extra ==" not in requirement
+    ]
+    assert not runtime_requirements, runtime_requirements
 
     entry_points = _wheel_entry_points(wheels["main_wheel"])
     assert entry_points["console_scripts"]["pf-cpp-allowlist"] == (
@@ -349,7 +354,9 @@ def test_shim_sdist_is_self_contained_and_renders_the_pin(wheels):
     assert settings["dynamic"] == ["version"]
     assert settings["dependencies"] == [f"tunaxis-codegen=={PYPI_VERSION}"]
     assert "version" not in settings
-    assert "dependencies" not in settings
+    # The template's `dynamic = ["version", "dependencies"]` was rendered to a static pin above;
+    # "dependencies" must no longer be declared dynamic.
+    assert "dependencies" not in settings["dynamic"]
 
 
 def test_the_two_wheels_share_no_file(wheels):
