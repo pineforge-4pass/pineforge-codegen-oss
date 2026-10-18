@@ -20,15 +20,15 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
-## 1.6.1 — Unreleased
+## 1.6.1 — 2026-10-18
 
-The planned number of the next patch release of the exact engine/codegen pair;
-it stays **Unreleased** until its tag exists, and the package version is
-unchanged. Codegen 1.6.1 is planned as the exact engine/codegen pair with
-engine `v1.6.1`; the prerelease `1.6.1-rc.1` pairs with engine
+A patch release of the exact engine/codegen pair, paired with engine `v1.6.1`
+and dated 2026-10-18; the prerelease `1.6.1-rc.1` pairs with engine
 `v1.6.1-rc.1`. This entry records what changed in this repository since 1.6.0,
-and nothing else: the engine pairing, the date and the final text are set when
-the release is prepared.
+and nothing else: after
+[#209](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/209) added
+the 1.6.1 changelog entry for `v1.6.1-rc.1`, only the final release-note and
+pairing documentation updates landed before `1.6.1`.
 
 ### Compatibility and migration
 
