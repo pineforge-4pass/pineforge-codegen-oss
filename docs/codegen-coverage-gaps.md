@@ -13,8 +13,8 @@
 > "Libraries and requests for outside data"). `AGENTS.md` describes the current
 > support contracts.
 
-Tracks fallthrough paths in `pineforge_codegen/codegen/visit_call.py` and
-`pineforge_codegen/codegen/visit_expr.py` that emit a literal `"false"` /
+Tracks fallthrough paths in `tunaxis_codegen/codegen/visit_call.py` and
+`tunaxis_codegen/codegen/visit_expr.py` that emit a literal `"false"` /
 `"0"` / `"na<double>()"` for an unrecognized construct, and whether the
 analyzer (`support_checker.py`) already rejects the construct before
 codegen ever sees it.
@@ -22,8 +22,9 @@ codegen ever sees it.
 A gap appears here only when **both** are true:
 
 1. The fallthrough is reachable from a valid Pine v6 construct.
-2. The fallthrough produces silently-wrong behavior (not a defensive
-   sentinel that the engine ignores).
+2. The fallthrough produces silently-wrong behavior; a defensive sentinel
+   that the Tunaxis engine (repository `pineforge-engine`) ignores does not
+   qualify.
 
 If only (1) is true but the analyzer rejects the construct, the
 fallthrough is defensive-only and is intentionally left in place as a
@@ -35,9 +36,9 @@ No additional gaps found beyond what Phase B closed (B1–B6).
 
 ### Audit method
 
-Ran `grep -n 'return "false"\|return "0"' pineforge_codegen/codegen/visit_call.py pineforge_codegen/codegen/visit_expr.py`
-and triaged each of the 34 matches against the analyzer's rejection
-tables (`HARD_REJECT_FUNC`, `HARD_REJECT_NAMESPACE`, `NOT_YET_FUNC`,
+The audit searched `codegen/visit_call.py` and `codegen/visit_expr.py` for
+`return "false"` and `return "0"`, and triaged each of the 34 matches against
+the analyzer's rejection tables (`HARD_REJECT_FUNC`, `HARD_REJECT_NAMESPACE`, `NOT_YET_FUNC`,
 `UNSUPPORTED_BARE_FUNCS`, `UNSUPPORTED_NAMESPACES`,
 `UNSUPPORTED_MEMBERS`, `UNSUPPORTED_NAMESPACE_VARS`,
 `SUPPORTED_TIMEFRAME_FUNC`, `SUPPORTED_SYMINFO`, `SUPPORTED_MATH`,
@@ -96,7 +97,7 @@ No new follow-up work identified by this audit.
 2025-04-08 used the operation's result in each order signal. An earlier
 unobserved probe let TradingView eliminate the operation and was discarded.
 
-| Operation | TradingView evidence | PineForge behavior |
+| Operation | TradingView evidence | Tunaxis behavior |
 |---|---|---|
 | Primitive `array<float>` slice, then write through slice and source | 32/32 entries signal `both-alias`; covered tape SHA-256 `fbd83309262bfd1a8a06e8f3cc82228fad1b1358b03b135b200246d5f4cfb7c0` | The same source run against the built engine signals `no-alias`. Both syntax forms emit a located warning in `transpile_full` / `transpile_json`. |
 | `array.fill(a, 9, 2, 1)` on `[1,2,3]` | 32/32 entries signal `123` (no-op); covered tape SHA-256 `83243e37dd66678e1b9127baac2ba42ef74815d31097c0c2095a08efffca575e` | Guarded no-op, without invalid STL iterator arithmetic. |

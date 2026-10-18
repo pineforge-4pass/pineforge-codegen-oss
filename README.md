@@ -1,6 +1,6 @@
-# pineforge-codegen
+# Tunaxis Codegen
 
-> PineScript v6 → C++ transpiler that emits against the [pineforge-engine](https://github.com/pineforge-4pass/pineforge-engine) runtime.
+> PineScript v6 → C++ transpiler that emits against the Tunaxis engine (repository [pineforge-engine](https://github.com/pineforge-4pass/pineforge-engine)).
 
 [![PyPI](https://img.shields.io/pypi/v/pineforge-codegen.svg)](https://pypi.org/project/pineforge-codegen/)
 [![Python](https://img.shields.io/pypi/pyversions/pineforge-codegen.svg)](https://pypi.org/project/pineforge-codegen/)
@@ -8,8 +8,7 @@
 [![Personal use](https://img.shields.io/badge/personal%20trading-free-22c55e.svg)](#license)
 
 A pure-Python library that turns a PineScript v6 strategy into a complete C++
-source file you can compile against the [`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine)
-runtime.
+source file you can compile against the [engine](https://github.com/pineforge-4pass/pineforge-engine).
 
 **Measured <!-- pf:scoreboard.date -->2026-10-07<!-- /pf -->** on main engine <!-- pf:scoreboard.engineCommit|short-code -->`b3192bfc`<!-- /pf --> with codegen-oss <!-- pf:scoreboard.codegenCommit|short-code -->`bfc4ddce`<!-- /pf --> (baseline <!-- pf:scoreboard.id|code -->`pineforge-parity-baseline-20261007-engine-b3192bfc`<!-- /pf -->, snapshot <!-- pf:scoreboard.snapshotSha256|short-code -->`28ba8dbd`<!-- /pf -->): <!-- pf:scoreboard.excellent|int -->7,983<!-- /pf --> of <!-- pf:scoreboard.graded|int -->7,989<!-- /pf --> TradingView probes
 graded excellent and <!-- pf:scoreboard.strong|int -->6<!-- /pf --> strong, with <!-- pf:scoreboard.belowStrong|int -->0<!-- /pf --> below strong; <!-- pf:scoreboard.anomaliesExcluded|int -->17<!-- /pf --> more probes are held out as TradingView-side anomalies.
@@ -39,6 +38,13 @@ for the changes in each release from 1.0.0 on and the release-note policy.
   `transpile_full()` returns nonfatal warnings and, since 1.5.0, notes for supported scripts,
   including those with documented approximations.
 
+## Formerly PineForge
+
+`pineforge-codegen` on PyPI now forwards to `tunaxis-codegen`.
+`import pineforge_codegen` and `pf-cpp-allowlist` keep working; the import
+prints a `DeprecationWarning`. `@pineforge/codegen-pyodide` forwards to
+`@tunaxis/codegen-pyodide`.
+
 ## Releases and this README
 
 <!-- Release lane: before a release is tagged, add it to the Engine pairing
@@ -50,9 +56,10 @@ and every "on `main`" marker; lines saying what changed in a release stay.
 PyPI shows the README as it is at the tag. The Install note and the
 hosted-server line name no version. -->
 
-This README ships with each release as its package description on PyPI
-(`pineforge-codegen`); releases from 0.7.0 on are also on npm as
-`@pineforge/codegen-pyodide`. It describes 1.6.1 (2026-10-18)
+This README ships with each release as its package description on PyPI.
+The package names are `tunaxis-codegen` on PyPI and
+`@tunaxis/codegen-pyodide` on npm; the Pyodide package has shipped on npm
+since 0.7.0. This README describes 1.6.1 (2026-10-18)
 and what changed since 0.10.4. The 1.4.0 release's behavior was validated
 before tagging on codegen `bfc4ddce` with engine `b3192bfc`, excluding engine
 request #356; those validation builds reported `1.3.0`. Historical measurements
@@ -135,7 +142,7 @@ the engine's [architecture notes](https://github.com/pineforge-4pass/pineforge-e
 ## Install
 
 ```bash
-pip install pineforge-codegen
+pip install tunaxis-codegen
 ```
 
 This installs the latest release. Requires Python ≥ 3.11. No runtime
@@ -152,7 +159,7 @@ pip install -e ".[dev]"
 ## Quick start
 
 ```python
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 pine = """
 //@version=6
@@ -191,7 +198,7 @@ transpile(
 ```
 
 Returns the generated C++ source as a string. Raises
-`pineforge_codegen.errors.CompileError` on a rejected construct and, since 1.0.0,
+`tunaxis_codegen.errors.CompileError` on a rejected construct and, since 1.0.0,
 on a syntax error or an input limit (0.10.4 recovers from some syntax errors
 and has no input limits). It does not return nonfatal diagnostics (warnings and,
 since 1.5.0, notes); use `transpile_full()` to inspect them.
@@ -257,8 +264,8 @@ warnings; since 1.1.0 the success envelope also carries `requests`. Since 1.5.0,
 informational level described under [Diagnostic codes](#diagnostic-codes),
 travel in the same `diagnostics` lists with `"severity": "note"`. See the
 [1.0 public contract](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/docs/PUBLIC_CONTRACT.md)
-for the exact fields, severity values, and input key rules. There is no
-installed CLI or exit-code contract.
+for the exact fields, severity values, and input key rules. Transpilation has
+no installed CLI or exit-code contract.
 
 ### Diagnostic codes
 
@@ -278,20 +285,18 @@ lowered to `na`). Every other diagnostic keeps its severity, the other
 visual-only and display-only ones included; the catalog is authoritative.
 
 ```python
-from pineforge_codegen import diagnostics_catalog, transpile_full
+from tunaxis_codegen import diagnostics_catalog, transpile_full
 
 for d in transpile_full(source)["diagnostics"]:
-    print(d.code, d.args, d.message)
-# PF-W1067 {'name': 'bar_index'} bar_index diverges from TradingView semantics in PineForge.
+    print(d.code, d.args)
+# PF-W1067 {'name': 'bar_index'}
 
 entry = diagnostics_catalog()["codes"]["PF-W1067"]
-# {'severity': 'warning', 'area': 'support',
-#  'message': '{name} diverges from TradingView semantics in PineForge.',
-#  'hint': '...', 'explanation': '...', 'args': {'name': {'kind': 'identifier'}},
-#  'user_message': '...'}
+print(entry["severity"], entry["args"])
+# warning {'name': {'kind': 'identifier'}}
 ```
 
-The catalog (`pineforge_codegen/diagnostics_catalog.json`, also attached to
+The catalog (`tunaxis_codegen/diagnostics_catalog.json`, also attached to
 each GitHub release) gives each code its severity, English ICU MessageFormat
 `message` and `hint` templates, a one-line explanation and a short
 `user_message` template; rendering the `message` and `hint` templates with
@@ -311,7 +316,7 @@ symbol string and timeframe, matched byte for byte. `transpile_full()`'s
 request site:
 
 ```python
-from pineforge_codegen import transpile_full
+from tunaxis_codegen import transpile_full
 
 full = transpile_full(open("my_strategy.pine").read())
 for request in full["requests"]:
@@ -325,7 +330,7 @@ for request in full["requests"]:
 The symbol is a `literal` (its `value`), an `input` (its override key `title`
 and its `default`: the run keys the feed on the override, else the default),
 `computed` (its `expr`, the `value` at the inputs' defaults when it can be
-computed, and the `inputs` it reads) or `unresolvable` (a request PineForge
+computed, and the `inputs` it reads) or `unresolvable` (a request Tunaxis
 cannot key before the first bar: the run stops where its value is read). The
 timeframe is a `literal` in the engine's spelling (whole minutes such as
 `"240"`, `<n>D|W|M|S` such as `"1D"`, Pine's bare `"D"` as `"1D"`), the
@@ -340,7 +345,7 @@ expression (`timeframe.period`, a variable's name). Request discovery and feed
 keys use the engine's spelling, in which Pine's bare `"D"` / `"W"` / `"M"` /
 `"S"` are `"1D"` / `"1W"` / `"1M"` / `"1S"` and any other text is kept.
 Discovery folds `literal` and `computed` values
-(`pineforge_codegen.request_discovery.canonical_timeframe`); the engine folds
+(`tunaxis_codegen.request_discovery.canonical_timeframe`); the engine folds
 the requested timeframe when it looks a feed up, so a script's `"D"` and
 `"1D"` read the same feed, keyed `"1D"`. An `input` timeframe's `default` and
 its override are raw: fold them the same way. To match a receipt's request to a
@@ -353,11 +358,20 @@ gives every field.
 
 ```python
 from pathlib import Path
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 pine = Path("strategy.pine")
 cpp = transpile(pine.read_text(), filename=pine.name)   # filename → better errors
 Path("strategy.generated.cpp").write_text(cpp)
+```
+
+### Check generated C++
+
+The installed `tunaxis-cpp-allowlist` command checks generated C++ against the
+codegen allowlist:
+
+```bash
+tunaxis-cpp-allowlist strategy.generated.cpp
 ```
 
 ### Handle unsupported features
@@ -366,14 +380,13 @@ The support checker raises a `CompileError` with the exact source location
 instead of emitting broken C++:
 
 ```python
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
 
 try:
     transpile('//@version=6\nindicator("x")\n')
 except CompileError as e:
     print(e)
-    # <input>:2:1: indicator() declarations are not supported; PineForge runs strategies only.
 
 try:
     transpile('//@version=6\nstrategy("x")\n'
@@ -405,7 +418,7 @@ faithfully:
 
 ```python
 from pathlib import Path
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 src = Path("strategy.pine").read_text()
 cpp = transpile(src, check_support=False)
@@ -420,7 +433,7 @@ engine's `strategy_set_trace_enabled()`; the values come back in the report's
 against TradingView:
 
 ```python
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 pine = """
 //@version=6
@@ -448,7 +461,7 @@ context. These classes are outside the
 [1.0 public contract](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/docs/PUBLIC_CONTRACT.md):
 
 ```python
-from pineforge_codegen import (
+from tunaxis_codegen import (
     Lexer, Parser, Analyzer, CodeGen,
     extract_pf_trace_pragmas, check_support_or_raise,
 )
@@ -472,7 +485,7 @@ quick-start strategy.
 
 These limits are new in 1.0.0; 0.10.4 has none of them. They turn a crash or
 a hang on untrusted source into a `CompileError` with a Pine `file:line:col`
-location. Where TradingView documents a limit, PineForge's is at least as
+location. Where TradingView documents a limit, Tunaxis's is at least as
 large. Exceeding one does not return partial C++, and `check_support=False`
 does not bypass them.
 
@@ -518,7 +531,7 @@ pine source
 
 The passes run again, from pass 1, when the generated C++ needs a renamed
 block-local declaration or a per-call-site clone of a function that reads
-`session.<flag>[k]`; `_generate` in `pineforge_codegen/__init__.py` holds the
+`session.<flag>[k]`; `_generate` in `tunaxis_codegen/__init__.py` holds the
 loop. 0.10.4 runs passes 1, 2, 4, 6 and 7 once, with only the bounded TA
 length rewrite of pass 5.
 
