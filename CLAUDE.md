@@ -54,6 +54,17 @@ A quick pytest run without a resolvable engine remains useful during
 development, but it is **not sufficient** to validate a change. Always
 finish with the engine-enabled run and inspect its skip reasons.
 
+## Rename (Tunaxis)
+
+The real package is `tunaxis_codegen` (distribution `tunaxis-codegen`); the
+root `pineforge_codegen/` is only the import alias, shipped in no main-wheel
+member. The `pineforge-codegen` shim distribution is built by
+`scripts/build_shim.py` from `shim/` plus that same alias, and pins
+`tunaxis-codegen` to this repository's `VERSION` exactly. Do not copy the
+alias into the tunaxis-codegen wheel. The rename tests
+(`tests/test_tunaxis_rename.py`) need `hatchling` installed: without it five
+tests skip, and a skipped wheel test proves nothing.
+
 ## What this is
 
 PineScript v6 → C++ transpiler that emits source linking against the
