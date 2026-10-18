@@ -413,6 +413,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # Set when a chart expression calls ``_pf_session_market_``; its type
         # and member are emitted once the whole TU is lowered.
         self._uses_session_market: bool = False
+        # Set while lowering a closed-trade accessor. The constructor is
+        # emitted before user bodies, so _generate_cpp resolves the deferred
+        # policy marker after every expression (including security evaluators
+        # and @pf-trace expressions) has been emitted.
+        self._reads_trade_history: bool = False
         # session.* reads inside a request.security payload already warned.
         self._warned_security_session_sites: set[int] = set()
         # Top-level lazy-edge TA sites hoisted to every-bar evaluation for the
@@ -5453,6 +5458,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 11b. security evaluators
         self._emit_security_evaluators(lines)
+
+        # ``_emit_constructor`` runs before function bodies and security
+        # evaluators, while the trade-history read flag is set by the call
+        # visitor. Resolve its constructor marker only after all emission is
+        # complete so no generated path can accidentally opt a reader into
+        # streaming.
+        self._settle_trade_history_policy(lines)
 
         # 12. Close class
         lines.append("};")

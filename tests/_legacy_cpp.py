@@ -41,6 +41,19 @@ def _without_run_failure_scaffold(cpp: str) -> str:
 def legacy_cpp(cpp: str) -> str:
     # Coded-stop ABIs are additive; retain their actual call-site changes.
     cpp = _without_run_failure_scaffold(cpp)
+    # CR-150's trade-history policy and per-strategy reader export are also
+    # additive. Historical lowering oracles intentionally ignore both so the
+    # feature's ABI shape is covered by its own raw-output tests.
+    cpp = re.sub(
+        r'^#if defined\(PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1\)\n'
+        r'        set_trade_history_streamable\(true\);\n'
+        r'^#endif\n',
+        '', cpp, flags=re.MULTILINE)
+    cpp = re.sub(
+        r'^    int strategy_reads_trade_history\(void\) \{\n'
+        r'        return [01];\n'
+        r'    \}\n',
+        '', cpp, flags=re.MULTILINE)
     cpp = cpp.replace(
         '#if __has_include(<pineforge/checked_settings.hpp>)\n'
         '#include <pineforge/checked_settings.hpp>\n#endif\n', '')
