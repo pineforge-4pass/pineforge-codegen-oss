@@ -1,3 +1,5 @@
+<img alt="Tunaxis" src="https://tunaxis.com/brand/v1/lockup-light.png" height="40">
+
 # Tunaxis Codegen
 
 > PineScript v6 → C++ transpiler that emits against the Tunaxis engine (repository [pineforge-engine](https://github.com/pineforge-4pass/pineforge-engine)).
