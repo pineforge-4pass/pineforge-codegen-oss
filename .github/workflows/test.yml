@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: test-${{ github.sha }}
-  cancel-in-progress: true
+  group: test-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   preflight-docs:
