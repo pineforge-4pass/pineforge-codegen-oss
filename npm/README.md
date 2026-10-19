@@ -1,3 +1,5 @@
+<img alt="Tunaxis" src="https://tunaxis.com/brand/v1/lockup-light.png" height="40">
+
 # @tunaxis/codegen-pyodide
 
 formerly @pineforge/codegen-pyodide
