@@ -69,14 +69,16 @@ _canonical = importlib.import_module("tunaxis_codegen")
 sys.meta_path.insert(0, _AliasFinder())
 
 # The canonical package eagerly imports part of its tree. Seed those aliases
-# too, so Python never loads one of their source files under the old name. A module
-# that another thread is still initializing is NOT seeded: the finder serves it later,
-# after the canonical import has finished.
+# too, so Python never loads one of their source files under the old name. Check
+# initialization first, then recheck that the snapshot entry is still canonical;
+# the finder imports skipped modules later.
 for _name, _module in tuple(sys.modules.items()):
     if _name == "tunaxis_codegen" or _name.startswith("tunaxis_codegen."):
-        if getattr(getattr(_module, "__spec__", None), "_initializing", False):
-            continue
-        sys.modules["pineforge_codegen" + _name[len("tunaxis_codegen"):]] = _module
+        if (
+            not getattr(getattr(_module, "__spec__", None), "_initializing", False)
+            and sys.modules.get(_name) is _module
+        ):
+            sys.modules["pineforge_codegen" + _name[len("tunaxis_codegen"):]] = _module
 
 
 def __getattr__(name):

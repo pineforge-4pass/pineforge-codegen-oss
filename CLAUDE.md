@@ -65,13 +65,18 @@ alias into the tunaxis-codegen wheel. The rename tests
 (`tests/test_tunaxis_rename.py`) need `hatchling` installed: without it five
 tests skip, and a skipped wheel test proves nothing.
 
-RELEASE HOLD until TX-NPM lands: do not dispatch `release.yml` or push a `v*`
-tag. `scripts/build-npm-package.mjs` writes `tunaxis_codegen-<v>.tar.gz` and
+RELEASE HOLD until TX-NPM lands: do not dispatch `release.yml`, push a `v*`
+tag, or dispatch `publish-pyodide.yml` with `dry_run=false`.
+`python scripts/check_npm_payload.py` guards the release and both npm publish
+triggers: a `v*` tag push (including a hand-pushed tag) and `workflow_dispatch`
+with `dry_run=false`. It refuses the current npm payload:
+`scripts/build-npm-package.mjs` writes `tunaxis_codegen-<v>.tar.gz` and
 `tunaxis_codegen/`, which `npm/package.json` (`files`, `exports`) and
-`npm/index.mjs` (`archivePath`, `codegenSourceDir`) do not ship yet, so
-`publish-pyodide.yml` would publish `@pineforge/codegen-pyodide` without its
-archive (an npm version cannot be reused). The npm side lands in the same
-release window (branch `core/tnx-npm`).
+`npm/index.mjs` (`archivePath`, `codegenSourceDir`) do not ship yet (an npm
+version cannot be reused). In the release window, merge `core/tnx-codegen`
+before or with `core/tnx-npm` (TX-NPM alone has no guard; main still builds
+`pineforge_codegen-<v>.tar.gz`); drop this paragraph when TX-NPM lands; the
+check stays.
 
 Known limitation of the old-name alias (Python 3.11-3.13): the alias finder is
 installed after the canonical import, so a second thread importing an old-name

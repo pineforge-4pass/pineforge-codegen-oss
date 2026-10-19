@@ -76,6 +76,7 @@ jobs:
 
       - name: Install + run the gate (publish only ships gate-validated bytes)
         run: |
+          python scripts/check_npm_payload.py
           python -m pip install -e .
           npm ci
           npm audit --audit-level=high
