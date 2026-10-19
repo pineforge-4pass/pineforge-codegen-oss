@@ -6,30 +6,15 @@
   "main": "index.mjs",
   "exports": {
     ".": "./index.mjs",
-    "./tables.json": {
-      "import": "./tables.mjs",
-      "require": "./tables.cjs",
-      "default": "./tables.mjs"
-    },
-    "./release.json": {
-      "import": "./release.mjs",
-      "require": "./release.cjs",
-      "default": "./release.mjs"
-    },
-    "./diagnostics_catalog.json": {
-      "import": "./diagnostics_catalog.mjs",
-      "require": "./diagnostics_catalog.cjs",
-      "default": "./diagnostics_catalog.mjs"
-    }
+    "./tables.json": "./tables.json",
+    "./release.json": "./release.json",
+    "./diagnostics_catalog.json": "./diagnostics_catalog.json"
   },
   "files": [
     "index.mjs",
-    "tables.mjs",
-    "tables.cjs",
-    "release.mjs",
-    "release.cjs",
-    "diagnostics_catalog.mjs",
-    "diagnostics_catalog.cjs",
+    "tables.json",
+    "release.json",
+    "diagnostics_catalog.json",
     "README.md",
     "DEPRECATION.txt",
     "LICENSE"

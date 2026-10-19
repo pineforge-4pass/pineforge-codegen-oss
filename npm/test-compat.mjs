@@ -21,6 +21,19 @@ if (!existsSync(join(compatSourceDir, "package.json"))) {
   throw new Error(`compat package is missing package.json: ${compatSourceDir}`);
 }
 
+const canonicalManifest = JSON.parse(readFileSync(join(payloadDir, "package.json"), "utf8"));
+const compatManifest = JSON.parse(readFileSync(join(compatSourceDir, "package.json"), "utf8"));
+assert.deepStrictEqual(
+  new Set(Object.keys(compatManifest.exports)),
+  new Set(Object.keys(canonicalManifest.exports)),
+  "compat package subpaths differ",
+);
+assert.strictEqual(
+  compatManifest.dependencies["@tunaxis/codegen-pyodide"],
+  canonicalManifest.version,
+  "render the compatibility package with the built payload's version before testing",
+);
+
 const scratchDir = mkdtempSync(join(tmpdir(), "tunaxis-codegen-pyodide-compat-"));
 const nodeModulesDir = join(scratchDir, "node_modules");
 const tunaxisScopeDir = join(nodeModulesDir, "@tunaxis");
@@ -44,8 +57,12 @@ writeFileSync(
 );
 const { tunaxis, pineforge } = await import(pathToFileURL(probePath).href);
 
+assert.deepStrictEqual(
+  new Set(Object.keys(pineforge)),
+  new Set(Object.keys(tunaxis)),
+  "compat module export names differ",
+);
 for (const name of Object.keys(tunaxis)) {
-  assert.ok(Object.prototype.hasOwnProperty.call(pineforge, name), `compat export is missing: ${name}`);
   assert.strictEqual(pineforge[name], tunaxis[name], `compat export differs: ${name}`);
 }
 
@@ -55,7 +72,7 @@ const packageSubpath = (packageName, subpath) => packageName + "/" + subpath.sli
 for (const subpath of jsonSubpaths) {
   const canonical = requireFromScratch(packageSubpath("@tunaxis/codegen-pyodide", subpath));
   const forwarded = requireFromScratch(packageSubpath("@pineforge/codegen-pyodide", subpath));
-  assert.strictEqual(forwarded, canonical, `compat JSON object differs: ${subpath}`);
+  assert.deepStrictEqual(forwarded, canonical, `compat JSON contents differ: ${subpath}`);
   const canonicalPath = requireFromScratch.resolve(packageSubpath("@tunaxis/codegen-pyodide", subpath));
   assert.deepStrictEqual(
     forwarded,
@@ -66,17 +83,25 @@ for (const subpath of jsonSubpaths) {
 
 const jsonProbePath = join(scratchDir, "json-probe.mjs");
 const importLines = jsonSubpaths
-  .map((subpath, index) => `import * as compatJson${index} from ${JSON.stringify(packageSubpath("@pineforge/codegen-pyodide", subpath))};`)
+  .flatMap((subpath, index) => [
+    `import canonicalJson${index} from ${JSON.stringify(packageSubpath("@tunaxis/codegen-pyodide", subpath))} with { type: "json" };`,
+    `import compatJson${index} from ${JSON.stringify(packageSubpath("@pineforge/codegen-pyodide", subpath))} with { type: "json" };`,
+  ])
   .join("\n");
-const exportNames = jsonSubpaths.map((_, index) => `compatJson${index}`).join(", ");
+const exportNames = jsonSubpaths.flatMap((_, index) => [`canonicalJson${index}`, `compatJson${index}`]).join(", ");
 writeFileSync(jsonProbePath, `${importLines}\nexport { ${exportNames} };\n`);
 const jsonModules = await import(pathToFileURL(jsonProbePath).href);
 for (const [index, subpath] of jsonSubpaths.entries()) {
   const canonical = requireFromScratch(packageSubpath("@tunaxis/codegen-pyodide", subpath));
-  assert.strictEqual(
-    jsonModules[`compatJson${index}`].default,
+  assert.deepStrictEqual(
+    jsonModules[`compatJson${index}`],
+    jsonModules[`canonicalJson${index}`],
+    `compat ESM JSON contents differ: ${subpath}`,
+  );
+  assert.deepStrictEqual(
+    jsonModules[`canonicalJson${index}`],
     canonical,
-    `compat ESM JSON wrapper differs: ${subpath}`,
+    `canonical ESM and CommonJS JSON contents differ: ${subpath}`,
   );
 }
 
