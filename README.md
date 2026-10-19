@@ -4,9 +4,9 @@
 
 > PineScript v6 → C++ transpiler that emits against the Tunaxis engine (repository [pineforge-engine](https://github.com/pineforge-4pass/pineforge-engine)).
 
-[![PyPI](https://img.shields.io/pypi/v/pineforge-codegen.svg)](https://pypi.org/project/pineforge-codegen/)
-[![Python](https://img.shields.io/pypi/pyversions/pineforge-codegen.svg)](https://pypi.org/project/pineforge-codegen/)
-[![License](https://img.shields.io/badge/license-PineForge%20Source%201.2-orange.svg)](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/tunaxis-codegen.svg)](https://pypi.org/project/tunaxis-codegen/)
+[![Python](https://img.shields.io/pypi/pyversions/tunaxis-codegen.svg)](https://pypi.org/project/tunaxis-codegen/)
+[![License](https://img.shields.io/badge/license-Tunaxis%20Source%201.2-orange.svg)](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE)
 [![Personal use](https://img.shields.io/badge/personal%20trading-free-22c55e.svg)](#license)
 
 A pure-Python library that turns a PineScript v6 strategy into a complete C++
@@ -704,7 +704,7 @@ Commercial licenses are annual: Solo for one person, Team for an
 organization's own use, Fund for managers of others' capital and for
 institutional investment capital such as endowments and pension or public
 funds (by assets under management), and OEM / Embedded for products and
-hosted services. Email **enterprise@pineforge.dev** with questions or for a
+hosted services. Email **enterprise@tunaxis.com** with questions or for a
 quote. The commercial-license store (coming soon) will take orders online.
 
 ## Explicit Pine execution attachment

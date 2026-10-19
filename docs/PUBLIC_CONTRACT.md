@@ -614,7 +614,7 @@ two templates tie. The migration does not invent a new emitted identity.
 
 Those eleven are the only codes the catalog declares as notes; a message that
 says "visual only" or "display" does not make its code one. PF-W1508 and
-PF-W1509 describe a call Tunaxis skips as visual only (`plot(...)`,
+PF-W1509 describe a call PineForge skips as visual only (`plot(...)`,
 `table.new(...)`). PF-W1525 to PF-W1532 describe an earnings, dividends,
 splits, financial, footprint or other-symbol request whose value reaches only
 display and alert sinks and is lowered to `na`. PF-W1505 describes the
@@ -655,12 +655,13 @@ follows. The templates of the eleven migrated codes are fixed string for string
 by `tests/fixtures/diagnostic_notes/delta.json`. Every template is checked for
 form: a short, parseable sentence over the entry's own argument names. Each of
 the 97 warning twins of an error (`PF-W1nnn` for `PF-E1nnn`) has a sentence of
-its own, not its error's, that says Tunaxis warns; the 91 that warn only
-inside a `switch` arm also say that Tunaxis keeps the arm's lowering, and
+its own, not its error's, that says PineForge warns; the 91 that warn only
+inside a `switch` arm also say that PineForge keeps the arm's lowering, and
 PF-W1067 to PF-W1072, which warn everywhere, name no arm. No warning or note
-template says that Tunaxis refuses or rejects something, though one may say
+template says that PineForge refuses or rejects something, though one may say
 what TradingView refuses or rejects. Beyond these checks a template's exact
-wording is not pinned. A text no template
+wording is not pinned. The user-visible message strings will be renamed to
+Tunaxis in a later release. A text no template
 renders carries `PF-E0000` / `PF-W0000` with the text in `args.message` (and
 `args.hint`); the test suite refuses it. The `message` text itself is
 unchanged and stays the English rendering; `runtime.error` text a strategy
