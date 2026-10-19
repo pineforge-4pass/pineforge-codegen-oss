@@ -6,7 +6,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/tunaxis-codegen.svg)](https://pypi.org/project/tunaxis-codegen/)
 [![Python](https://img.shields.io/pypi/pyversions/tunaxis-codegen.svg)](https://pypi.org/project/tunaxis-codegen/)
-[![License](https://img.shields.io/badge/license-Tunaxis%20Source%201.2-orange.svg)](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-Tunaxis%20Source%201.3-orange.svg)](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE)
 [![Personal use](https://img.shields.io/badge/personal%20trading-free-22c55e.svg)](#license)
 
 A pure-Python library that turns a PineScript v6 strategy into a complete C++
@@ -660,7 +660,7 @@ use `python -m pytest --collect-only -q` for the current collection count.
 
 ## License
 
-Source-available under the [Tunaxis Source License 1.2](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE);
+Source-available under the [Tunaxis Source License 1.3](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE);
 the `LICENSE` file is the controlling text. The licensor is pineforge, LLC.
 
 - **Free for noncommercial use:** any noncommercial purpose, and use by a
