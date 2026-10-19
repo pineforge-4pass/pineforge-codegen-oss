@@ -36,7 +36,7 @@ jobs:
           path: .docs-gate
           persist-credentials: false
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1 HELD: checkout >= v6.1.0 refuses a fork PR head under pull_request_target
         if: github.event_name == 'pull_request_target'
         with:
           fetch-depth: 0
