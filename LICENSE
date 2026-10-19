@@ -1,5 +1,9 @@
-PineForge Source License 1.2
-============================
+Tunaxis Source License 1.3
+==========================
+
+Version 1.3, 2026-11-17. Compared with 1.2, the licensor's product is renamed
+Tunaxis, and the commercial contact address and the Required Notice URL
+change; the terms are unchanged.
 
 Version 1.2, 2026-10-05. Compared with 1.1, two places change. In the
 Personal Trading section, the last bullet now says that an account a
@@ -11,7 +15,7 @@ account, real or simulated.
 
 Copyright 2025-2026 pineforge, LLC
 
-Required Notice: Copyright 2025-2026 pineforge, LLC (https://github.com/pineforge-4pass/pineforge-codegen-oss)
+Required Notice: Copyright 2025-2026 pineforge, LLC (https://github.com/tunaxis/tunaxis-codegen-oss)
 
 The software is free of charge for the permitted purposes below, including
 Personal Trading. Commercial Use, defined below, needs a separate commercial
@@ -192,7 +196,7 @@ Use:
       Output.
 
 Commercial Use requires a separate commercial license from the licensor. To
-obtain one, contact: enterprise@pineforge.dev
+obtain one, contact: enterprise@tunaxis.com
 
 
 ## Output
