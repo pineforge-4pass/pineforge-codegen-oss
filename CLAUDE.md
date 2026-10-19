@@ -69,7 +69,9 @@ RELEASE HOLD until TX-NPM lands: do not dispatch `release.yml`, push a `v*`
 tag, or dispatch `publish-pyodide.yml` with `dry_run=false`.
 `python scripts/check_npm_payload.py` guards the release and both npm publish
 triggers: a `v*` tag push (including a hand-pushed tag) and `workflow_dispatch`
-with `dry_run=false`. It refuses the current npm payload:
+with `dry_run=false`. Every job that runs `scripts/build-npm-package.mjs`
+(`publish` and, after TX-NPM, `first-publish`) must run the guard. It refuses
+the current npm payload:
 `scripts/build-npm-package.mjs` writes `tunaxis_codegen-<v>.tar.gz` and
 `tunaxis_codegen/`, which `npm/package.json` (`files`, `exports`) and
 `npm/index.mjs` (`archivePath`, `codegenSourceDir`) do not ship yet (an npm

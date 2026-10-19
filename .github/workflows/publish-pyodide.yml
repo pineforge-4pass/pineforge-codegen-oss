@@ -74,9 +74,11 @@ jobs:
       # npm docs + spec §7 require >= 11.5.1).
       - run: npm install -g npm@11.5.1
 
+      - name: Refuse a release whose npm package does not ship tunaxis_codegen-*
+        run: python scripts/check_npm_payload.py
+
       - name: Install + run the gate (publish only ships gate-validated bytes)
         run: |
-          python scripts/check_npm_payload.py
           python -m pip install -e .
           npm ci
           npm audit --audit-level=high

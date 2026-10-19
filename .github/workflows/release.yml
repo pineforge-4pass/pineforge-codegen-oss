@@ -98,11 +98,16 @@ jobs:
       # before anything is built, published, or tagged. A gate-broken codegen
       # fails the release here — nothing reaches PyPI, no tag is pushed (so the
       # tag->npm trigger never fires), and no GitHub Release is created.
-      - name: Run conformance gate (blocking)
+      - name: Install + test release tooling
         run: |
           python -m pip install -e ".[dev]" hatchling
           python -m pytest -ra tests/test_tunaxis_rename.py tests/test_check_npm_payload.py
-          python scripts/check_npm_payload.py
+
+      - name: Refuse a release whose npm package does not ship tunaxis_codegen-*
+        run: python scripts/check_npm_payload.py
+
+      - name: Run conformance gate (blocking)
+        run: |
           npm ci
           npm audit --audit-level=high
           npm run gate:selftest
