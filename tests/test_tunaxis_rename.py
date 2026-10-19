@@ -116,11 +116,15 @@ ALIAS_PROBE = textwrap.dedent(
     # not have retyped it as the alias on the way back.
     assert tunaxis_codegen.parser.__name__ == "tunaxis_codegen.parser"
     assert tunaxis_codegen.parser.__spec__.name == "tunaxis_codegen.parser"
-    # visit_expr is loaded lazily, through the alias finder, on the line above.
-    assert tunaxis_codegen.codegen.visit_expr.__name__ == (
-        "tunaxis_codegen.codegen.visit_expr")
-    assert tunaxis_codegen.codegen.visit_expr.__spec__.name == (
-        "tunaxis_codegen.codegen.visit_expr")
+    # cpp_allowlist is NOT imported by tunaxis_codegen at start-up: it is loaded
+    # lazily, through the alias finder and the alias loader (create_module /
+    # exec_module), and must keep its canonical name and spec.
+    assert "pineforge_codegen.cpp_allowlist" not in sys.modules
+    import pineforge_codegen.cpp_allowlist as lazy_alias
+    assert lazy_alias is tunaxis_codegen.cpp_allowlist
+    assert tunaxis_codegen.cpp_allowlist.__name__ == "tunaxis_codegen.cpp_allowlist"
+    assert tunaxis_codegen.cpp_allowlist.__spec__.name == "tunaxis_codegen.cpp_allowlist"
+    assert sys.modules["pineforge_codegen.cpp_allowlist"] is sys.modules["tunaxis_codegen.cpp_allowlist"]
 
     assert len(caught) == 1, [str(w.message) for w in caught]
     warning = caught[0]

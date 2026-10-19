@@ -65,6 +65,20 @@ alias into the tunaxis-codegen wheel. The rename tests
 (`tests/test_tunaxis_rename.py`) need `hatchling` installed: without it five
 tests skip, and a skipped wheel test proves nothing.
 
+RELEASE HOLD until TX-NPM lands: do not dispatch `release.yml` or push a `v*`
+tag. `scripts/build-npm-package.mjs` writes `tunaxis_codegen-<v>.tar.gz` and
+`tunaxis_codegen/`, which `npm/package.json` (`files`, `exports`) and
+`npm/index.mjs` (`archivePath`, `codegenSourceDir`) do not ship yet, so
+`publish-pyodide.yml` would publish `@pineforge/codegen-pyodide` without its
+archive (an npm version cannot be reused). The npm side lands in the same
+release window (branch `core/tnx-npm`).
+
+Known limitation of the old-name alias (Python 3.11-3.13): the alias finder is
+installed after the canonical import, so a second thread importing an old-name
+submodule during the very first `import pineforge_codegen` can see
+`ModuleNotFoundError`. Import the old name once before starting threads, or use
+`tunaxis_codegen`.
+
 ## What this is
 
 PineScript v6 → C++ transpiler that emits source linking against the
