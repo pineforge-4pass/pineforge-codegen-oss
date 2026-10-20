@@ -109,6 +109,27 @@ the Python `build` frontend, run `python -m build`, assemble the npm payload,
 then run `npm pack --dry-run` from `npm/`. These commands build local artifacts;
 publishing is a separate release operation.
 
+## Release runners
+
+The `release` and `claim-name` jobs in
+[release.yml](.github/workflows/release.yml), and the `publish` and `claim-npm`
+jobs in [publish-pyodide.yml](.github/workflows/publish-pyodide.yml), plus the
+`promote` job in [promote-baseline.yml](.github/workflows/promote-baseline.yml), use
+`["self-hosted","pf-ci","pf-ci-release"]`. This isolated class has its own
+runner group restricted to selected workflows at protected refs, its own
+service account with no roles, and one job per runner, with nothing shared
+with PR classes. It also covers jobs that build artifacts a release publishes,
+even without secrets. Jobs triggered by `pull_request` must never use this
+class. L6 via CORE-TOP 15:40 (addendum 2) explicitly moves only the `promote`
+job despite its existing `pull_request_target` trigger; other PR-triggered jobs
+keep their existing routing. The separate `ci/sec846-codegen` branch adds
+`promote-guard`; when the branches merge, that guard must use the same
+`["self-hosted","pf-ci","pf-ci-release"]` runner as `promote`.
+
+Push this branch only after both laneboss posts "pf-ci-release live" and the
+owner answers REL-HOSTED, as CORE-TOP requires. Until both gates are satisfied,
+nothing is pushed; a job on that label with no runners only waits.
+
 ## Change and review notes
 
 - Add or update tests for behavior changes. Keep the engine corpus compiling;
