@@ -109,6 +109,25 @@ the Python `build` frontend, run `python -m build`, assemble the npm payload,
 then run `npm pack --dry-run` from `npm/`. These commands build local artifacts;
 publishing is a separate release operation.
 
+`promote-baseline.yml` runs from the base repository on `pull_request_target`
+closes and `workflow_dispatch`, and its credential job depends on
+`promote-guard`. The guard has empty job permissions, holds no secrets, and
+checks out no code. Every pull request close first requires a head in this
+repository with `fork == false`, even when unmerged. An author outside
+`OWNER`/`MEMBER`/`COLLABORATOR` and the
+`dependabot[bot]`/`pineforge-app[bot]` allowlist must have
+`admin`/`maintain`/`write` permission returned by GitHub, including a
+`CONTRIBUTOR` whose organization membership is private. A failed author
+lookup, an empty permission, or a non-write permission refuses the close
+before any unmerged exit or merger check.
+A merged pull request also requires an allowlisted merger or a successful
+`admin`/`maintain`/`write` permission lookup for the merger. An empty merger,
+a failed merger lookup, or an empty or non-write merger permission refuses
+promotion.
+An unmerged close of our own allowed pull request passes the guard with
+promotion skipped. Manual dispatch requires repository write access, and
+every other event is refused.
+
 ## Change and review notes
 
 - Add or update tests for behavior changes. Keep the engine corpus compiling;
