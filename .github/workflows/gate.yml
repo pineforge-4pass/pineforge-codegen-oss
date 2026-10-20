@@ -4,26 +4,82 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "27 5 * * *"
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened, edited, ready_for_review]
 
 permissions: {}
 
 concurrency:
   group: gate-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'pull_request_target' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  authz:
+    name: authz
+    # Pool label (needs no toolchain or Docker). Switch to pf-ci-crj once laneboss's
+    # bulletin says the Cloud Run class is live.
+    runs-on: ["self-hosted", "pf-ci", "pf-ci-x64"]
+    permissions: {}
+    # No timeout-minutes: the owner's no-time-limits rule (check-no-time-limits refuses new ones).
+    steps:
+      - name: Only our own pull requests and our own events run CI
+        env:
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          WR_HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          WR_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
+          GH_TOKEN: ${{ github.token }}   # read-only use: one permission lookup for workflow_run
+          # Bot logins whose same-repository pull requests count as ours: dependabot[bot] (CI-DEPBOT A)
+          # and the org's own GitHub App bot logins by name (space-separated), nothing else.
+          ALLOWED_BOTS: "dependabot[bot] pineforge-app[bot]"
+        run: |
+          set -eu
+          fail() { echo "::error title=authz::$1"; echo "authz: REFUSED: $1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          case "$EVENT" in
+            push|workflow_dispatch|schedule|merge_group|release|workflow_call|repository_dispatch)
+              # Only someone with write access to this repository (or our App's token) can cause these
+              # events; none of them runs pull-request code.
+              ;;
+            workflow_run)
+              # The pwn-request path: it runs in THIS repository with secrets even when the triggering run
+              # came from a fork. Refuse ALWAYS unless the triggering run's head is this repository, and
+              # apply the same identity rule to its triggering actor as to a pull-request author.
+              [ "$WR_HEAD_REPO" = "$REPO" ] || fail "workflow_run triggered from another repository (${WR_HEAD_REPO:-unknown})"
+              case " $ALLOWED_BOTS " in
+                *" $WR_ACTOR "*) ;;
+                *)
+                  # No author_association exists on workflow_run: ask GitHub for the actor's permission on
+                  # this repository; anything but admin/maintain/write (or a failed call) refuses.
+                  perm=$(gh api "repos/$REPO/collaborators/$WR_ACTOR/permission" --jq .permission 2>/dev/null || echo none)
+                  case "$perm" in admin|maintain|write) ;; *) fail "workflow_run triggering actor ${WR_ACTOR:-unknown} has permission '$perm', not write" ;; esac ;;
+              esac ;;
+            pull_request)
+              [ "$HEAD_REPO" = "$REPO" ] || fail "pull request from another repository (${HEAD_REPO:-unknown})"
+              [ "$HEAD_IS_FORK" = "false" ] || fail "pull request from a fork"
+              case "$ASSOCIATION" in
+                OWNER|MEMBER|COLLABORATOR) ;;
+                *)
+                  case " $ALLOWED_BOTS " in
+                    *" $PR_AUTHOR "*) ;;
+                    *)
+                      # A member whose org membership is private shows as CONTRIBUTOR: ask GitHub for the
+                      # author's permission on this repository; anything but admin/maintain/write (or a
+                      # failed call) refuses.
+                      perm=$(gh api "repos/$REPO/collaborators/$PR_AUTHOR/permission" --jq .permission 2>/dev/null || echo none)
+                      case "$perm" in admin|maintain|write) ;; *) fail "author ${PR_AUTHOR:-unknown} (${ASSOCIATION:-NONE}) has permission '$perm', not write, and is not an allowlisted bot" ;; esac ;;
+                  esac ;;
+              esac ;;
+            *) fail "event $EVENT does not run CI (pull_request_target and other events are not allowed)" ;;
+          esac
+          echo "authz: allowed ($EVENT${PR_AUTHOR:+ by $PR_AUTHOR})" >> "$GITHUB_STEP_SUMMARY"
+
   preflight-docs:
-    runs-on: >-
-      ${{ github.event_name != 'pull_request_target' &&
-          github.actor != 'dependabot[bot]' && github.triggering_actor != 'dependabot[bot]' &&
-          contains(fromJSON('["push","pull_request","workflow_dispatch","schedule","release"]'), github.event_name) &&
-          (github.event_name != 'pull_request' ||
-           (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.repo.fork == false)) &&
-          fromJSON('["self-hosted","pf-ci","pf-ci-x64"]') || 'ubuntu-24.04' }}
-    env:
-      PF_CI_LABELS: '["self-hosted","pf-ci","pf-ci-x64"]'
+    needs: authz
+    runs-on: ["self-hosted","pf-ci","pf-ci-x64"]
     timeout-minutes: 360
     permissions:
       contents: read
@@ -32,12 +88,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
           path: .docs-gate
           persist-credentials: false
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1 HELD: checkout >= v6.1.0 refuses a fork PR head under pull_request_target
-        if: github.event_name == 'pull_request_target'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
@@ -58,7 +114,7 @@ jobs:
         run: |
           set -euo pipefail
           checker=.docs-gate/.github/pineforge/ci/codegen-docs-check.mjs
-          if [ "$EVENT_NAME" = pull_request_target ] && [ "$BASE_BRANCH" = main ] && [ -f "$checker" ]; then
+          if [ "$EVENT_NAME" = pull_request ] && [ "$BASE_BRANCH" = main ] && [ -f "$checker" ]; then
             node "$checker" "$PWD/.candidate" "$BASE_SHA" "$HEAD_SHA" "$BASE_BRANCH" > "$RUNNER_TEMP/codegen-docs-diff.json"
           else
             echo 'docs_only=false' >> "$GITHUB_OUTPUT"
@@ -72,20 +128,13 @@ jobs:
           path: ${{ runner.temp }}/codegen-docs-diff.json
 
   differential:
-    needs: preflight-docs
-    if: needs.preflight-docs.outputs.docs_only != 'true' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: >-
-      ${{ github.event_name != 'pull_request_target' &&
-          github.actor != 'dependabot[bot]' && github.triggering_actor != 'dependabot[bot]' &&
-          contains(fromJSON('["push","pull_request","workflow_dispatch","schedule","release"]'), github.event_name) &&
-          (github.event_name != 'pull_request' ||
-           (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.repo.fork == false)) &&
-          fromJSON('["self-hosted","pf-ci","pf-ci-x64"]') || 'ubuntu-24.04' }}
+    needs: [authz, preflight-docs]
+    if: needs.preflight-docs.outputs.docs_only != 'true'
+    runs-on: ["self-hosted","pf-ci","pf-ci-x64"]
     timeout-minutes: 360
     permissions:
       contents: read
     env:
-      PF_CI_LABELS: '["self-hosted","pf-ci","pf-ci-x64"]'
       PYTHONHASHSEED: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -117,15 +166,9 @@ jobs:
           if-no-files-found: ignore
 
   pytest:
-    needs: preflight-docs
-    if: needs.preflight-docs.outputs.docs_only != 'true' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: >-
-      ${{ github.event_name != 'pull_request_target' &&
-          github.actor != 'dependabot[bot]' && github.triggering_actor != 'dependabot[bot]' &&
-          contains(fromJSON('["push","pull_request","workflow_dispatch","schedule","release"]'), github.event_name) &&
-          (github.event_name != 'pull_request' ||
-           (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.repo.fork == false)) &&
-          fromJSON('["self-hosted","pf-ci","pf-ci-x64"]') || 'ubuntu-24.04' }}
+    needs: [authz, preflight-docs]
+    if: needs.preflight-docs.outputs.docs_only != 'true'
+    runs-on: ["self-hosted","pf-ci","pf-ci-x64"]
     timeout-minutes: 360
     permissions:
       contents: read
@@ -134,7 +177,6 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     env:
-      PF_CI_LABELS: '["self-hosted","pf-ci","pf-ci-x64"]'
       PYTHONHASHSEED: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -151,56 +193,37 @@ jobs:
         run: python -m pytest -q
 
   gate:
-    if: always()
-    needs: [preflight-docs, differential, pytest]
-    runs-on: >-
-      ${{ github.event_name != 'pull_request_target' &&
-          github.actor != 'dependabot[bot]' && github.triggering_actor != 'dependabot[bot]' &&
-          contains(fromJSON('["push","pull_request","workflow_dispatch","schedule","release"]'), github.event_name) &&
-          (github.event_name != 'pull_request' ||
-           (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.repo.fork == false)) &&
-          fromJSON('["self-hosted","pf-ci","pf-ci-x64"]') || 'ubuntu-24.04' }}
-    env:
-      PF_CI_LABELS: '["self-hosted","pf-ci","pf-ci-x64"]'
+    if: ${{ always() }}
+    needs: [authz, preflight-docs, differential, pytest]
+    runs-on: ["self-hosted","pf-ci","pf-ci-x64"]
     timeout-minutes: 360
-    permissions:
-      statuses: write
+    permissions: {}
     steps:
-      - name: Report exact-head gate status
+      - name: Refuse an unauthorised run before anything else
+        if: ${{ needs.authz.result != 'success' }}
+        run: |
+          echo "::error::authz did not pass; nothing of this run's code is checked out or run"
+          exit 1
+      - name: Check gate results
+        if: needs.authz.result == 'success'
         env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          AUTHZ_RESULT: ${{ needs.authz.result }}
           PREFLIGHT_RESULT: ${{ needs.preflight-docs.result }}
           DOCS_ONLY: ${{ needs.preflight-docs.outputs.docs_only }}
           DIFFERENTIAL_RESULT: ${{ needs.differential.result }}
           PYTEST_RESULT: ${{ needs.pytest.result }}
-          SAME_REPO: ${{ github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           set -euo pipefail
           state=failure
           description='Codegen gate did not pass'
-          if [ "$PREFLIGHT_RESULT" = success ]; then
+          if [ "$AUTHZ_RESULT" = success ] && [ "$PREFLIGHT_RESULT" = success ]; then
             if [ "$DOCS_ONLY" = true ] && [ "$DIFFERENTIAL_RESULT" = skipped ] && [ "$PYTEST_RESULT" = skipped ]; then
               state=success
               description='docs-only preflight+docs; no sweep'
-            elif [ "$DOCS_ONLY" != true ] && [ "$SAME_REPO" = true ] && [ "$DIFFERENTIAL_RESULT" = success ] && [ "$PYTEST_RESULT" = success ]; then
+            elif [ "$DOCS_ONLY" != true ] && [ "$DIFFERENTIAL_RESULT" = success ] && [ "$PYTEST_RESULT" = success ]; then
               state=success
               description='Full codegen differential gate and pytest passed'
             fi
           fi
-          if [ "$state" != success ] && [ "$SAME_REPO" != true ]; then
-            description="Fork PR: a maintainer must push this branch to $GITHUB_REPOSITORY and open a PR from it for the full gate"
-            prior=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/statuses?per_page=100" \
-              --jq '[.[] | select(.context == "gate")][0] | "\(.state) \(.creator.login)"' || true)
-            if [ "$prior" = "success github-actions[bot]" ]; then
-              echo "gate already passed on $HEAD_SHA in this repository; a fork's run leaves it"
-              exit 0
-            fi
-          fi
-          if [ "$EVENT_NAME" = pull_request_target ]; then
-            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-              -f context=gate -f state="$state" -f description="$description" \
-              -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          fi
+          echo "$description"
           [ "$state" = success ]

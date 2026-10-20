@@ -118,11 +118,50 @@ publishing is a separate release operation.
   engine.
 - Keep [CHANGELOG.md](CHANGELOG.md) current for user-visible changes. Its
   release-note policy applies to both stable and prerelease tags.
-- CI clears a pull request from a fork into `main` only when it changes
-  documentation or legal text alone (Markdown, `docs/`, `LICENSE`, `NOTICE`).
-  A fork's code change does not run in CI here: its `gate` check fails until a
-  maintainer pushes the branch to this repository and opens a pull request
-  from it, which runs the full gate.
+- Each CI workflow starts with the org's canonical `authz` job, with no
+  checkout, secrets or token scopes, and fails red unless the run belongs
+  to us. A same-repository PR must have a non-fork head.
+  The author check accepts an owner, member or collaborator, or either
+  allowlisted bot: `dependabot[bot]` and `pineforge-app[bot]`.
+  For any other author, including a `CONTRIBUTOR` with private org
+  membership, GitHub must report `admin`, `maintain` or `write` permission
+  on this repository; a failed lookup refuses the run.
+  Fork heads, authors who fail that check and unlisted events, including
+  `pull_request_target`, fail red.
+  The canon also refuses `workflow_run` unless its head repository is
+  this repository and its triggering actor is an allowlisted bot or has
+  `admin`, `maintain` or `write` permission; a failed permission lookup
+  refuses the run.
+  The repository setting is required because a fork can edit its own
+  workflow and remove `authz`: private repositories must set Settings >
+  Actions > General > Fork pull request workflows > Run workflows from
+  fork pull requests OFF; public repositories must require approval for
+  all external contributors. The runner group must be restricted to the
+  org's private repositories, with Allow public repositories OFF.
+  With that setting, an outside fork run is disabled or held for approval;
+  the dispatcher's identity gate decides who gets a runner and `authz`
+  supplies the readable red verdict. A cancelled or red `authz` cannot
+  satisfy the required check. A maintainer can push a fork's branch to
+  this repository and open a same-repository pull request.
+  Every other job directly needs `authz`; the required `gate` aggregate uses
+  `if: ${{ always() }}` so cancellation cannot skip the required check.
+  GitHub counts a required check skipped by its condition as success, so
+  `!cancelled()` could allow a cancelled run to merge without tests.
+  The aggregate's first step prints a GitHub error annotation and exits
+  with status 1 when `needs.authz.result != 'success'`, before any checkout
+  or repository code.
+  Each later aggregate step requires `needs.authz.result == 'success'`
+  before applying the existing docs-only rule: authz and preflight must
+  succeed, then differential and pytest must both succeed, or both be
+  skipped only for a proven docs-only change.
+  Branch protection must make both `authz` and `gate` REQUIRED status
+  checks, and the workflows must run on every PR without path or branch
+  filters. CI jobs keep their literal pool runner arrays, with authz
+  copied byte for byte from the org canon.
+  The other jobs retain the
+  `["self-hosted","pf-ci","pf-ci-x64"]` runner array, preserving their class
+  until `pf-ci-crj` is live; no hosted fallback or Dependabot exclusion is
+  allowed. Credential/release jobs stay unchanged, pending `pf-ci-release`.
 - The README describes the latest release and becomes the PyPI page of the
   next release: when a version is tagged, update its "Releases and this
   README" section, its engine-pairing table and its release markers.
