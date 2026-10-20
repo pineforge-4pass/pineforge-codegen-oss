@@ -2,12 +2,16 @@ name: Publish codegen-pyodide
 
 # Builds @pineforge/codegen-pyodide from the GATE-VALIDATED archive and publishes
 # it via npm OIDC Trusted Publishing (mirrors pineforge-codegen-mcp/publish.yml).
-# Auto-release: a `v*` tag push (e.g. created by release.yml) publishes for real,
-# gate-blocked. workflow_dispatch defaults to a DRY RUN (set dry_run=false to
-# publish manually). Publishing only happens after the gate passes.
+# Auto-release: release.yml dispatches this workflow on main with the pushed
+# tag and dry_run=false. Every run first verifies a release tag on main.
+# Publish checks out its verified commit; manual dispatch defaults to a DRY RUN.
 on:
   workflow_dispatch:
     inputs:
+      tag:
+        description: "Existing release tag on main (vX.Y.Z or vX.Y.Z-rc.N), required for every run."
+        required: true
+        type: string
       dry_run:
         description: "npm publish --dry-run (default true). Set false to actually publish."
         type: boolean
@@ -22,31 +26,77 @@ on:
         required: false
         type: boolean
         default: false
-  push:
-    tags: ["v*"]
 
 permissions:
   contents: read
   id-token: write   # npm OIDC Trusted Publishing
 
 concurrency:
-  group: publish-pyodide-${{ github.ref }}
+  group: publish-pyodide-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
+  tag-guard:
+    runs-on: ["self-hosted","pf-ci","pf-ci-release"]
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.tag.outputs.sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release tag
+        id: tag
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$DISPATCH_REF" != refs/heads/main ]; then
+            echo "::error::workflow must be dispatched on refs/heads/main"
+            exit 1
+          fi
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "::error::invalid release tag '$TAG'"
+            exit 1
+          fi
+          git fetch --tags origin
+          git fetch origin +refs/heads/main:refs/remotes/origin/main
+          if ! TAG_COMMIT=$(git rev-parse -q --verify "refs/tags/${TAG}^{commit}"); then
+            echo "::error::release tag '$TAG' does not exist or does not point to a commit"
+            exit 1
+          fi
+          if ! [[ "$TAG_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::release tag '$TAG' did not resolve to a 40-hex commit"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "::error::release tag '$TAG' is not reachable from origin/main"
+            exit 1
+          fi
+          printf 'sha=%s\n' "$TAG_COMMIT" >> "$GITHUB_OUTPUT"
+
   publish:
-    if: ${{ !inputs.claim_placeholder }}
+    needs: tag-guard
+    if: ${{ github.ref == 'refs/heads/main' && !inputs.claim_placeholder }}
     runs-on: ["self-hosted","pf-ci","pf-ci-release"]
     env:
       PYTHONHASHSEED: "0"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ needs.tag-guard.outputs.sha }}
+          persist-credentials: false
 
-      # Tag push must match VERSION (mirrors mcp). Skipped for dispatch.
+      # The verified tag must match VERSION at the pinned commit.
       - name: Verify tag matches VERSION
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
-          TAG_NAME: ${{ github.ref_name }}
+          TAG_NAME: ${{ inputs.tag }}
         run: |
           tag="${TAG_NAME#v}"; file="$(tr -d '[:space:]' < VERSION)"
           if [ "$tag" != "$file" ]; then
@@ -85,7 +135,7 @@ jobs:
       - name: Assemble the package
         run: node scripts/build-npm-package.mjs
 
-      - name: Publish (real on tag push or dispatch dry_run=false; dry-run otherwise)
+      - name: Publish (real on dispatch dry_run=false; dry-run otherwise)
         working-directory: npm
         env:
           EVENT: ${{ github.event_name }}
@@ -100,12 +150,13 @@ jobs:
             echo "Publishing for real (--access=public, dist-tag ${DIST_TAG})"
             npm publish --access=public ${tag[@]+"${tag[@]}"}
           else
-            echo "DRY RUN (a v* tag push or dispatch with dry_run=false publishes for real)"
+            echo "DRY RUN (dispatch with dry_run=false publishes for real)"
             npm publish --dry-run --access=public ${tag[@]+"${tag[@]}"}
           fi
 
   claim-npm:
-    if: ${{ inputs.claim_placeholder }}
+    needs: tag-guard
+    if: ${{ github.ref == 'refs/heads/main' && inputs.claim_placeholder }}
     runs-on: ["self-hosted","pf-ci","pf-ci-release"]
     permissions: { contents: read, id-token: write }
     steps:
