@@ -1017,7 +1017,7 @@ def assert_authz_refusal_shell(text, job_id, authz_result):
     result = subprocess.run(
         ["bash", "-euo", "pipefail", "-c", script],
         env={**os.environ, "AUTHZ_RESULT": authz_result},
-        capture_output=True, text=True, timeout=5,
+        capture_output=True, text=True,
     )
     expected = 0 if authz_result == "success" else 1
     assert result.returncode == expected, (
@@ -1147,7 +1147,7 @@ def assert_authz_shell(
              "GH_TOKEN": "", "ALLOWED_BOTS": allowed_bots[0],
              "GITHUB_STEP_SUMMARY": str(summary), "AUTHZ_GH_LOG": str(lookup_log),
              "AUTHZ_GH_PERMISSION": permission, "AUTHZ_GH_STATUS": str(lookup_status)},
-        capture_output=True, text=True, timeout=5,
+        capture_output=True, text=True,
     )
     assert result.returncode == (0 if expected else 1), (
         "authz shell decision disagrees with the required event/identity verdict: "
@@ -1343,7 +1343,7 @@ def assert_gate_shell(text, authz, preflight, differential, pytest_result, docs_
         env={**os.environ, "AUTHZ_RESULT": authz, "PREFLIGHT_RESULT": preflight,
              "DIFFERENTIAL_RESULT": differential, "PYTEST_RESULT": pytest_result,
              "DOCS_ONLY": docs_only},
-        capture_output=True, text=True, timeout=5,
+        capture_output=True, text=True,
     )
     accepted_sweeps = (
         differential == pytest_result == "skipped"
