@@ -19,7 +19,7 @@ The PineForge Source License 1.1 replaced 1.0, and the Tunaxis Source License 1.
 
 ## Copyright and licensor
 
-The licensor is **pineforge, LLC**, a Delaware limited liability company. It holds the copyright in `tunaxis-codegen` (formerly published as `pineforge-codegen`); the founder's rights in the software are assigned to it. Commercial licenses are granted by pineforge, LLC.
+The licensor is **PINEFORGE LLC**, a Delaware limited liability company. It holds the copyright in `tunaxis-codegen` (formerly published as `pineforge-codegen`); the founder's rights in the software are assigned to it. Commercial licenses are granted by PINEFORGE LLC.
 
 ## What this repository is
 
@@ -35,7 +35,7 @@ The transpiler has **no runtime dependencies** (`transpile()` and `transpile_ful
 
 ## Contributions
 
-Contributions are accepted under a Developer Certificate of Origin (`Signed-off-by`). Because this project is **dual-licensed** (source-available + a sold commercial license), material contributions require a Contributor License Agreement granting pineforge, LLC the right to include the contribution in its commercial licenses; otherwise it cannot be accepted. See [CONTRIBUTING.md](CONTRIBUTING.md) (or contact luis@4pass.com.tw) before opening a material PR.
+Contributions are accepted under a Developer Certificate of Origin (`Signed-off-by`). Because this project is **dual-licensed** (source-available + a sold commercial license), material contributions require a Contributor License Agreement granting PINEFORGE LLC the right to include the contribution in its commercial licenses; otherwise it cannot be accepted. See [CONTRIBUTING.md](CONTRIBUTING.md) (or contact luis@4pass.com.tw) before opening a material PR.
 
 ## No warranty
 
