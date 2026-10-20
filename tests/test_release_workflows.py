@@ -730,7 +730,12 @@ def guard_repository(tmp_path):
     for name in ("origin/main", "main", "heads/main", "remotes/origin/main"):
         git("tag", name, "refs/heads/side")
     checkout = tmp_path / "checkout"
-    git("clone", "--no-local", "--no-tags", "--branch", "main", str(origin), str(checkout))
+    # --single-branch: with the decoy tags above (one is named main), a plain
+    # --no-tags clone of --branch main still brings the tags along.
+    git(
+        "clone", "--no-local", "--no-tags", "--single-branch", "--branch", "main",
+        str(origin), str(checkout),
+    )
     assert git("tag", "--list", cwd=checkout) == "", "guard must fetch its tags"
     assert git("rev-list", "--count", "refs/remotes/origin/main", cwd=checkout) == "2"
     assert git("rev-parse", "refs/remotes/origin/main", cwd=checkout) == head
