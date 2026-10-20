@@ -4,8 +4,9 @@ name: Release
 # Trusted Publishing (OIDC — no stored token), then commit + tag + create a
 # GitHub Release. VERSION is semver; scripts/release_version.py gives each
 # channel its spelling. A prerelease (override 1.0.0-rc.1) ships PyPI 1.0.0rc1,
-# tag v1.0.0-rc.1 as a GitHub prerelease, npm 1.0.0-rc.1 on dist-tag next
-# (publish-pyodide.yml) and tells the hub prerelease=true: never `latest`.
+# tag v1.0.0-rc.1 as a GitHub prerelease and tells the hub prerelease=true.
+# A separate manual publish-pyodide.yml dispatch ships npm 1.0.0-rc.1 on
+# dist-tag next: never `latest` (see CONTRIBUTING.md).
 
 on:
   workflow_dispatch:
@@ -49,10 +50,10 @@ jobs:
       OVERRIDE:      ${{ inputs.override }}
       PYTHONHASHSEED: "0"   # deterministic gate runtime (match gate.yml)
     steps:
-      # Org GitHub App token (no PAT — never expires). Authorizes the
+      # Org GitHub App token (no PAT — never expires). Authorizes BOTH the
       # release commit/tag push to protected main (the App is a bypass actor on
-      # the org ruleset), the npm workflow dispatch on main AND the downstream
-      # hub dispatch. Scoped to this repo + the hub. Minted before checkout.
+      # the org ruleset) AND the downstream hub dispatch. Scoped to this repo +
+      # the hub. Minted first so checkout can push with it.
       - name: Mint org App token
         id: app
         uses: actions/create-github-app-token@v1
@@ -61,8 +62,6 @@ jobs:
           private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: pineforge-codegen-oss,pineforge-release
-          permission-contents: write
-          permission-actions: write
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
@@ -98,8 +97,8 @@ jobs:
 
       # Conformance gate (BLOCKING): the differential parity gate must pass
       # before anything is built, published, or tagged. A gate-broken codegen
-      # fails the release here — nothing reaches PyPI, no tag is pushed, no
-      # npm workflow is dispatched, and no GitHub Release is created.
+      # fails the release here — nothing reaches PyPI, no tag is pushed,
+      # and no GitHub Release is created.
       - name: Run conformance gate (blocking)
         run: |
           python -m pip install -e .
@@ -123,16 +122,16 @@ jobs:
           ls "dist/pineforge_codegen-${PYPI_VERSION}-"*.whl >/dev/null \
             || { echo "::error::no wheel for ${PYPI_VERSION}"; exit 1; }
 
-      # Publish to PyPI BEFORE the tag push and the npm dispatch on main.
+      # Publish to PyPI BEFORE the tag push and the separate manual npm dispatch.
       # PyPI must land first so a failure cannot leave npm shipping a version
       # PyPI never got.
       - name: Publish to PyPI
         if: ${{ !inputs.dry_run }}
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
 
-      # Commit + tag + push AFTER PyPI succeeds, then dispatch npm on main.
-      # The npm workflow verifies the tag is on main, pins its commit and
-      # re-runs the gate. The tag exists only after this gate and PyPI succeed.
+      # Commit + tag + push AFTER the gate and PyPI succeed.
+      # npm publication is a separate manual dispatch of publish-pyodide.yml
+      # on main with this tag after the release job is green (see CONTRIBUTING.md).
       - name: Commit + tag + push release tree
         if: ${{ !inputs.dry_run }}
         env:
@@ -145,15 +144,6 @@ jobs:
           git commit -m "release: v${NEW_VERSION}"
           git tag "${GIT_TAG}"
           git push origin HEAD --tags
-
-      - name: Dispatch publish-pyodide on main
-        if: ${{ !inputs.dry_run }}
-        env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          GIT_TAG: ${{ steps.ver.outputs.git_tag }}
-        run: |
-          set -euo pipefail
-          gh workflow run publish-pyodide.yml --ref main -f tag="${GIT_TAG}" -f dry_run=false
 
       - name: Create GitHub Release
         if: ${{ !inputs.dry_run }}

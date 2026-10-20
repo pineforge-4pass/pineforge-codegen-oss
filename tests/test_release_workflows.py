@@ -1,5 +1,5 @@
 # tests/test_release_workflows.py
-"""Pin isolated release runners, main-ref triggers and the tagged npm dispatch.
+"""Pin isolated release runners, main-ref triggers and manual tagged npm publication.
 
 Take channel spellings from scripts/release_version.py so a prerelease never
 reaches a `latest` channel. Execute the shipped tag guard against temporary
@@ -162,8 +162,8 @@ def step(text, name):
     marker = f"- name: {name}"
     assert marker in text, f"workflow step {name} must be present"
     start = text.index(marker)
-    nxt = text.find("\n      - ", start + 1)
-    return text[start:] if nxt < 0 else text[start:nxt]
+    nxt = re.search(r"\n(?:      - |  [\w-]+:)", text[start + 1:])
+    return text[start:] if nxt is None else text[start:start + 1 + nxt.start()]
 
 
 def has_env(body, name, expr):
@@ -350,10 +350,10 @@ def test_generic_release_trigger_pin_accepts_approved_events(event):
     assert_main_ref_triggers(mutate_once(NPM, "\non:\n", "\non:\n" + event))
 
 
-TAG_FORMAT_CHECK = r'if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then'
+TAG_FORMAT_CHECK = r'if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then'
 TAG_PATTERN_BLOCK = (
     f"          {TAG_FORMAT_CHECK}\n"
-    '            echo "::error::invalid release tag \'$TAG\'"\n'
+    '            echo "::error::invalid release tag \'$TAG\': expected vX.Y.Z or vX.Y.Z-{alpha,beta,rc}.N"\n'
     "            exit 1\n"
     "          fi\n"
 )
@@ -364,13 +364,10 @@ TAG_EXISTENCE_BLOCK = (
     "          fi\n"
 )
 TAG_REACHABILITY_BLOCK = (
-    '          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then\n'
-    '            echo "::error::release tag \'$TAG\' is not reachable from origin/main"\n'
+    '          if ! git merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main; then\n'
+    '            echo "::error::release tag \'$TAG\' is not reachable from refs/remotes/origin/main"\n'
     "            exit 1\n"
     "          fi\n"
-)
-NPM_DISPATCH_COMMAND = (
-    'gh workflow run publish-pyodide.yml --ref main -f tag="${GIT_TAG}" -f dry_run=false'
 )
 
 
@@ -453,7 +450,7 @@ def assert_tag_guard(text):
     assert 'printf \'sha=%s\\n\' "$TAG_COMMIT" >> "$GITHUB_OUTPUT"' in script
     assert "git fetch --tags origin\n" in script, "guard must fetch repository tags"
     assert "git fetch origin +refs/heads/main:refs/remotes/origin/main\n" in script, (
-        "guard must refresh origin/main"
+        "guard must refresh refs/remotes/origin/main"
     )
     assert script.index('if [ "$DISPATCH_REF"') < script.index(TAG_FORMAT_CHECK) < script.index(
         "git fetch"
@@ -718,6 +715,9 @@ def guard_repository(tmp_path):
     git("tag", "v1.0.0", base)
     git("tag", "not-a-release", base)
     git("tag", "v1.1.0-rc.2", head)
+    git("tag", "v1.2.0-alpha.1", head)
+    git("tag", "v1.2.0-beta.1", head)
+    git("tag", "v1.2.0-gamma.1", head)
     git("tag", "-a", "v1.1.0", "-m", "annotated main tag", head)
     annotated_object = git("rev-parse", "refs/tags/v1.1.0")
     git("tag", "v2.0.0", git("rev-parse", "HEAD^{tree}"))
@@ -725,15 +725,27 @@ def guard_repository(tmp_path):
     git("commit", "--allow-empty", "-m", "unmerged side commit")
     git("tag", "v9.9.9")
     git("switch", "main")
+    # Short refs can resolve these tags before branches or remote refs. Put
+    # every decoy on the unmerged side commit to expose ancestry bypasses.
+    for name in ("origin/main", "main", "heads/main", "remotes/origin/main"):
+        git("tag", name, "refs/heads/side")
     checkout = tmp_path / "checkout"
     git("clone", "--no-local", "--no-tags", "--branch", "main", str(origin), str(checkout))
     assert git("tag", "--list", cwd=checkout) == "", "guard must fetch its tags"
-    assert git("rev-list", "--count", "main", cwd=checkout) == "2"
+    assert git("rev-list", "--count", "refs/remotes/origin/main", cwd=checkout) == "2"
+    assert git("rev-parse", "refs/remotes/origin/main", cwd=checkout) == head
     assert annotated_object != head, "fixture must distinguish tag object and commit"
     return GuardRepository(checkout, env, base, head, annotated_object)
 
 
-def run_tag_guard(text, repository, tmp_path, tag, dispatch_ref):
+def run_tag_guard(text, repository, tmp_path, tag, dispatch_ref, local_branches=()):
+    for name, commit in local_branches:
+        branch = run_guard_command(
+            ["git", "branch", name, getattr(repository, commit)],
+            repository.checkout,
+            repository.env,
+        )
+        assert branch.returncode == 0, f"local branch fixture failed: {branch.stdout}\n{branch.stderr}"
     output = tmp_path / "github-output"
     output.write_text("", encoding="utf-8")
     env = dict(repository.env, TAG=tag, DISPATCH_REF=dispatch_ref, GITHUB_OUTPUT=str(output))
@@ -761,49 +773,76 @@ def assert_guard_result(result, output, expected_status, expected_sha, error):
 
 # Literal expectations; every row executes the script extracted from the workflow.
 @pytest.mark.parametrize(
-    "tag,dispatch_ref,status,commit,error",
+    "tag,dispatch_ref,status,commit,error,local_branches",
     [
-        pytest.param("v1.0.0", "refs/heads/main", 0, "base", None, id="main-ancestor"),
-        pytest.param("v1.1.0-rc.2", "refs/heads/main", 0, "head", None, id="main-rc"),
+        pytest.param("v1.0.0", "refs/heads/main", 0, "base", None, (), id="main-ancestor"),
+        pytest.param("v1.1.0-rc.2", "refs/heads/main", 0, "head", None, (), id="main-rc"),
+        pytest.param("v1.2.0-alpha.1", "refs/heads/main", 0, "head", None, (), id="main-alpha"),
+        pytest.param("v1.2.0-beta.1", "refs/heads/main", 0, "head", None, (), id="main-beta"),
+        pytest.param(
+            "v1.2.0-gamma.1", "refs/heads/main", 1, None,
+            "invalid release tag", (), id="unsupported-prerelease",
+        ),
         pytest.param(
             "not-a-release", "refs/heads/main", 1, None,
-            "invalid release tag", id="invalid-name-existing-tag",
+            "invalid release tag", (), id="invalid-name-existing-tag",
         ),
         pytest.param(
             "v8.8.8", "refs/heads/main", 1, None,
             "release tag 'v8.8.8' does not exist or does not point to a commit",
-            id="missing-tag",
+            (), id="missing-tag",
+        ),
+        pytest.param(
+            "v1.2.9", "refs/heads/main", 1, None,
+            "release tag 'v1.2.9' does not exist or does not point to a commit",
+            (("v1.2.9", "head"),), id="local-branch-is-not-a-tag",
+        ),
+        pytest.param(
+            "v1.0.0", "refs/heads/main", 0, "base", None,
+            (("v1.0.0", "head"),), id="tag-sha-wins-over-local-branch",
         ),
         pytest.param(
             "v9.9.9", "refs/heads/main", 1, None,
-            "release tag 'v9.9.9' is not reachable from origin/main",
-            id="unmerged-side-branch",
+            "release tag 'v9.9.9' is not reachable from refs/remotes/origin/main",
+            (), id="unmerged-side-branch",
         ),
-        pytest.param("v1.1.0", "refs/heads/main", 0, "head", None, id="annotated-main"),
+        pytest.param("v1.1.0", "refs/heads/main", 0, "head", None, (), id="annotated-main"),
         pytest.param(
             "v2.0.0", "refs/heads/main", 1, None,
             "release tag 'v2.0.0' does not exist or does not point to a commit",
-            id="tag-points-to-tree",
+            (), id="tag-points-to-tree",
         ),
-        pytest.param("", "refs/heads/main", 1, None, "invalid release tag", id="empty"),
+        pytest.param("", "refs/heads/main", 1, None, "invalid release tag", (), id="empty"),
+        pytest.param(
+            "v1.0.0\n", "refs/heads/main", 1, None,
+            "invalid release tag", (), id="trailing-newline",
+        ),
+        pytest.param(
+            "v1.0.0\nv9.9.9", "refs/heads/main", 1, None,
+            "invalid release tag", (), id="embedded-newline",
+        ),
+        pytest.param(
+            "v1.*", "refs/heads/main", 1, None,
+            "invalid release tag", (), id="glob-input",
+        ),
         pytest.param(
             "v1.0.0; echo injected", "refs/heads/main", 1, None,
-            "invalid release tag", id="shell-input",
+            "invalid release tag", (), id="shell-input",
         ),
         pytest.param(
             "v1.0.0", "refs/heads/side", 1, None,
-            "workflow must be dispatched on refs/heads/main", id="branch-dispatch",
+            "workflow must be dispatched on refs/heads/main", (), id="branch-dispatch",
         ),
         pytest.param(
             "v1.0.0", "refs/tags/v1.0.0", 1, None,
-            "workflow must be dispatched on refs/heads/main", id="tag-dispatch",
+            "workflow must be dispatched on refs/heads/main", (), id="tag-dispatch",
         ),
     ],
 )
 def test_tag_guard_executes_against_real_git(
-    guard_repository, tmp_path, tag, dispatch_ref, status, commit, error
+    guard_repository, tmp_path, tag, dispatch_ref, status, commit, error, local_branches
 ):
-    result, output = run_tag_guard(NPM, guard_repository, tmp_path, tag, dispatch_ref)
+    result, output = run_tag_guard(NPM, guard_repository, tmp_path, tag, dispatch_ref, local_branches)
     expected_sha = getattr(guard_repository, commit) if commit is not None else None
     assert_guard_result(result, output, status, expected_sha, error)
     if tag == "v1.1.0":
@@ -817,7 +856,7 @@ def test_tag_guard_executes_against_real_git(
         (TAG_EXISTENCE_BLOCK, "v1.0.0", 0, "base", None),
         (
             TAG_REACHABILITY_BLOCK, "v9.9.9", 1, None,
-            "release tag 'v9.9.9' is not reachable from origin/main",
+            "release tag 'v9.9.9' is not reachable from refs/remotes/origin/main",
         ),
     ],
 )
@@ -838,75 +877,160 @@ def test_real_git_oracle_rejects_removed_guard_checks(
         assert_guard_result(result, output, status, expected_sha, error)
 
 
-def assert_release_dispatches_npm(text):
-    assert set(workflow_triggers(text)) == {"workflow_dispatch"}, "release must be dispatch-only"
-    jobs = re.findall(r"^  release:\n(.*?)(?=^  [\w-]+:|\Z)", text, re.M | re.S)
-    assert len(jobs) == 1, "release job must be present exactly once"
-    release = jobs[0]
-    tag = step(release, "Commit + tag + push release tree")
-    dispatch = step(release, "Dispatch publish-pyodide on main")
-    for body in (tag, dispatch):
-        assert "        if: ${{ !inputs.dry_run }}\n" in body, "tag and npm dispatch must skip dry runs"
-        assert has_env(body, "GIT_TAG", "steps.ver.outputs.git_tag")
-    assert "git push origin HEAD --tags" in tag, "push the tag before dispatching npm"
-    assert release.index(tag) < release.index(dispatch), "npm dispatch must follow the tag push"
-    assert NPM_DISPATCH_COMMAND in dispatch, "npm dispatch must target main with the release tag"
-    assert has_env(dispatch, "GH_TOKEN", "steps.app.outputs.token"), "dispatch must use the App token"
-    assert "continue-on-error" not in dispatch, "a dropped npm dispatch must fail the release"
+@pytest.mark.parametrize("original,replacement,tag,status,commit,error,local_branches", [
+    (
+        TAG_REACHABILITY_BLOCK,
+        TAG_REACHABILITY_BLOCK.replace(' refs/remotes/origin/main;', ' origin/main;'),
+        "v9.9.9", 1, None,
+        "release tag 'v9.9.9' is not reachable from refs/remotes/origin/main", (),
+    ),
+    (
+        TAG_EXISTENCE_BLOCK,
+        TAG_EXISTENCE_BLOCK.replace('"refs/tags/${TAG}^{commit}"', '"${TAG}^{commit}"'),
+        "v1.2.9", 1, None,
+        "release tag 'v1.2.9' does not exist or does not point to a commit",
+        (("v1.2.9", "head"),),
+    ),
+])
+def test_real_git_oracle_rejects_ambiguous_ref_mutants(
+    guard_repository, tmp_path, original, replacement, tag, status, commit, error, local_branches
+):
+    expected_sha = getattr(guard_repository, commit) if commit is not None else None
+    baseline = run_tag_guard(
+        NPM, guard_repository, tmp_path, tag, "refs/heads/main", local_branches
+    )
+    assert_guard_result(*baseline, status, expected_sha, error)
+    mutant = mutate_once(NPM, original, replacement)
+    with pytest.raises(AssertionError):
+        assert_tagged_npm_dispatch(mutant)
+    result, output = run_tag_guard(mutant, guard_repository, tmp_path, tag, "refs/heads/main")
+    with pytest.raises(AssertionError, match="guard status"):
+        assert_guard_result(result, output, status, expected_sha, error)
+
+
+def assert_no_npm_workflow_dispatch(text):
+    text = re.sub(r"\\\r?\n[ \t]*", " ", text)
+    # No workflow of this repository dispatches any workflow, so the pin does
+    # not depend on how the target is named (file, display name, numeric id,
+    # expression or a separately supplied variable).
+    for pattern in (
+        r"\bworkflow\s+run\b",
+        r"\bcreateWorkflowDispatch\b",
+        r"\bactions/workflows/[^\s/]+/dispatches\b",
+    ):
+        assert re.search(pattern, text) is None, "no workflow may dispatch any workflow"
+
+
+def test_no_workflow_dispatches_publish_pyodide():
+    paths = sorted((*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")))
+    assert paths, "must discover workflow files for the manual-dispatch pin"
+    for path in paths:
+        assert_no_npm_workflow_dispatch(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("command", [
+    'gh workflow run publish-pyodide.yml --ref main -f tag="${GIT_TAG}" -f dry_run=false',
+    'workflow run "publish-pyodide.yml" --ref main',
+    'gh workflow run \\\n'
+    '            publish-pyodide.yml --ref main',
+    "await github.rest.actions.createWorkflowDispatch({\n"
+    "            workflow_id: 'publish-pyodide.yml', ref: 'main'\n"
+    "          });",
+    "gh api --method POST repos/pineforge-4pass/pineforge-codegen-oss/"
+    "actions/workflows/publish-pyodide.yml/dispatches -f ref=main",
+    'gh workflow run "Publish codegen-pyodide" --ref main -f tag=v1.0.0',
+    "gh api -X POST repos/pineforge-4pass/pineforge-codegen-oss/"
+    "actions/workflows/123456789/dispatches -f ref=main",
+    "await github.request(\n"
+    "            'POST /repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches',\n"
+    "            {owner, repo, workflow_id: 123456789, ref: 'main'}\n"
+    "          );",
+])
+def test_manual_dispatch_pin_rejects_a_workflow_dispatch_step(command):
+    assert_no_npm_workflow_dispatch(RELEASE)
+    marker = "      - name: Create GitHub Release\n"
+    mutant = mutate_once(
+        RELEASE, marker,
+        "      - name: Dispatch publish-pyodide on main\n"
+        "        run: |\n"
+        f"          {command}\n\n" + marker,
+    )
+    with pytest.raises(AssertionError, match="no workflow may dispatch"):
+        assert_no_npm_workflow_dispatch(mutant)
+
+
+def assert_release_app_token_scope(text):
+    release = workflow_jobs(text).get("release", "")
     app = step(release, "Mint org App token")
     assert "actions/create-github-app-token@" in app
-    assert "          permission-actions: write\n" in app, "App token must request Actions write"
-    assert "          permission-contents: write\n" in app, "App token must retain Contents write"
+    assert "permission-actions:" not in app, "release App token must not request Actions permission"
+    # gh/main's App-token step has no explicit permission inputs.
+    assert re.findall(r"^\s+permission-[\w-]+:", app, re.M) == [], (
+        "release App token must keep main's permission inputs"
+    )
+    # The whole `with:` block is main's, so dropping `repositories:` (which
+    # would widen the token to every repository of the installation) fails.
+    assert app.rstrip("\n").endswith(
+        "        with:\n"
+        "          app-id: ${{ secrets.PINEFORGE_APP_ID }}\n"
+        "          private-key: ${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}\n"
+        "          owner: ${{ github.repository_owner }}\n"
+        "          repositories: pineforge-codegen-oss,pineforge-release"
+    ), "release App token inputs must stay exactly main's"
 
 
-def test_release_dispatches_npm_on_main_after_pushing_the_tag():
-    assert_release_dispatches_npm(RELEASE)
+def test_release_preserves_main_app_token_scope():
+    assert_release_app_token_scope(RELEASE)
 
 
-@pytest.mark.parametrize("original,replacement", [
-    ("  release:\n", "  removed-release:\n"),
-    (NPM_DISPATCH_COMMAND, NPM_DISPATCH_COMMAND.replace("--ref main", '--ref "$GIT_TAG"')),
-    (NPM_DISPATCH_COMMAND, NPM_DISPATCH_COMMAND.replace(' -f tag="${GIT_TAG}"', "")),
-    (NPM_DISPATCH_COMMAND, NPM_DISPATCH_COMMAND.replace("-f dry_run=false", "-f dry_run=true")),
-    ("git push origin HEAD --tags", "git push origin HEAD"),
-    ("          permission-actions: write\n", ""),
-    ("          permission-contents: write\n", ""),
-    ("- name: Dispatch publish-pyodide on main", "- name: Removed npm dispatch"),
-])
-def test_release_dispatch_pin_rejects_real_workflow_mutations(original, replacement):
-    assert_release_dispatches_npm(RELEASE)
-    mutant = mutate_once(RELEASE, original, replacement)
+@pytest.mark.parametrize("permission", ["actions", "contents", "issues"])
+def test_app_token_pin_rejects_new_permission_inputs(permission):
+    assert_release_app_token_scope(RELEASE)
+    release = workflow_jobs(RELEASE).get("release", "")
+    app = step(release, "Mint org App token")
+    replacement = mutate_once(
+        app, "        with:\n",
+        f"        with:\n          permission-{permission}: write\n",
+    )
+    mutant = mutate_once(RELEASE, app, replacement)
     with pytest.raises(AssertionError):
-        assert_release_dispatches_npm(mutant)
+        assert_release_app_token_scope(mutant)
 
 
-@pytest.mark.parametrize("step_name", ["Commit + tag + push release tree", "Dispatch publish-pyodide on main"])
-def test_release_dispatch_pin_rejects_dry_run_and_token_mutations(step_name):
-    assert_release_dispatches_npm(RELEASE)
-    original = step(RELEASE, step_name)
-    replacements = [original.replace("        if: ${{ !inputs.dry_run }}\n", "")]
-    if step_name.startswith("Dispatch"):
-        replacements.extend([
-            original.replace("${{ steps.app.outputs.token }}", "${{ github.token }}"),
-            original.replace("        run: |\n", "        continue-on-error: true\n        run: |\n"),
-        ])
-    for replacement in replacements:
-        mutant = mutate_once(RELEASE, original, replacement)
-        with pytest.raises(AssertionError):
-            assert_release_dispatches_npm(mutant)
+@pytest.mark.parametrize("line", [
+    "          repositories: pineforge-codegen-oss,pineforge-release\n",
+    "          owner: ${{ github.repository_owner }}\n",
+])
+def test_app_token_pin_rejects_a_dropped_input(line):
+    release = workflow_jobs(RELEASE).get("release", "")
+    app = step(release, "Mint org App token")
+    dropped = line.rstrip("\n")
+    assert dropped in app, "the mutation anchor must be a real App-token input"
+    mutant = mutate_once(RELEASE, app, app.replace(dropped, "").rstrip(" \n") + "\n")
+    with pytest.raises(AssertionError):
+        assert_release_app_token_scope(mutant)
 
 
-def test_release_dispatch_pin_rejects_dispatch_before_tag_push():
-    assert_release_dispatches_npm(RELEASE)
-    tag = step(RELEASE, "Commit + tag + push release tree")
-    dispatch = step(RELEASE, "Dispatch publish-pyodide on main")
-    mutant = mutate_once(RELEASE, tag, dispatch)
-    # Replace the later occurrence only; both real step bodies remain intact.
-    start = mutant.rfind(dispatch)
-    assert start > mutant.index(dispatch), "order mutation must find the later dispatch"
-    mutant = mutant[:start] + tag + mutant[start + len(dispatch):]
-    with pytest.raises(AssertionError, match="follow the tag push"):
-        assert_release_dispatches_npm(mutant)
+def test_release_keeps_pypi_tag_release_and_hub_order():
+    assert set(workflow_triggers(RELEASE)) == {"workflow_dispatch"}, "release must be dispatch-only"
+    release = workflow_jobs(RELEASE).get("release", "")
+    bodies = [step(release, name) for name in (
+        "Publish to PyPI", "Commit + tag + push release tree",
+        "Create GitHub Release", "Dispatch codegen-release",
+    )]
+    for body in bodies:
+        assert "        if: ${{ !inputs.dry_run }}\n" in body, "release side effects must skip dry runs"
+    assert "git push origin HEAD --tags" in bodies[1], "release must push its tag"
+    positions = [release.index(body) for body in bodies]
+    assert positions == sorted(positions), "keep PyPI, tag push, GitHub Release and hub order"
+
+
+def test_step_slices_stop_before_the_next_job_and_require_a_step():
+    body = step(RELEASE, "Dispatch codegen-release")
+    assert "gh api repos/pineforge-4pass/pineforge-release/dispatches" in body
+    assert "  claim-name:" not in body
+    with pytest.raises(AssertionError, match="must be present"):
+        step(workflow_jobs(RELEASE).get("release", ""), "Missing release step")
 
 
 def test_guard_must_remain_the_first_job():

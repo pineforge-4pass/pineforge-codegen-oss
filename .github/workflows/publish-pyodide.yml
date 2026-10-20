@@ -2,14 +2,15 @@ name: Publish codegen-pyodide
 
 # Builds @pineforge/codegen-pyodide from the GATE-VALIDATED archive and publishes
 # it via npm OIDC Trusted Publishing (mirrors pineforge-codegen-mcp/publish.yml).
-# Auto-release: release.yml dispatches this workflow on main with the pushed
-# tag and dry_run=false. Every run first verifies a release tag on main.
+# An operator with write access dispatches on main with an existing release tag
+# after release.yml is green (see CONTRIBUTING.md). A tag push publishes nothing.
+# Every run first verifies a release tag on main.
 # Publish checks out its verified commit; manual dispatch defaults to a DRY RUN.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag on main (vX.Y.Z or vX.Y.Z-rc.N), required for every run."
+        description: "Existing release tag on main (vX.Y.Z or vX.Y.Z-{alpha,beta,rc}.N), required for every run."
         required: true
         type: string
       dry_run:
@@ -61,8 +62,8 @@ jobs:
             echo "::error::workflow must be dispatched on refs/heads/main"
             exit 1
           fi
-          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
-            echo "::error::invalid release tag '$TAG'"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then
+            echo "::error::invalid release tag '$TAG': expected vX.Y.Z or vX.Y.Z-{alpha,beta,rc}.N"
             exit 1
           fi
           git fetch --tags origin
@@ -75,8 +76,8 @@ jobs:
             echo "::error::release tag '$TAG' did not resolve to a 40-hex commit"
             exit 1
           fi
-          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
-            echo "::error::release tag '$TAG' is not reachable from origin/main"
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main; then
+            echo "::error::release tag '$TAG' is not reachable from refs/remotes/origin/main"
             exit 1
           fi
           printf 'sha=%s\n' "$TAG_COMMIT" >> "$GITHUB_OUTPUT"

@@ -23,8 +23,18 @@ Stable releases are on the `latest` dist-tag. A prerelease (for example
   version 1.1 in release 1.2.0, version 1.2 from release 1.3.0 on.
 
 ## Publishing (maintainers)
-A `v*` tag push, which the release workflow makes, publishes through npm OIDC Trusted
-Publishing after the dependency audit and the full parity gate pass; published versions
+After the release tag exists on main and the release job is green, the operator
+doing the cut, using a GitHub account with write access, dispatches publication:
+
+```sh
+gh workflow run publish-pyodide.yml --repo pineforge-4pass/pineforge-codegen-oss --ref main -f tag=<tag> -f dry_run=false
+```
+
+Use the existing release tag in place of `<tag>`; every run, including a
+placeholder claim, requires it. Set `dry_run=true` to validate first. A tag push
+alone publishes nothing. A green `release.yml` run does not mean npm published;
+watch the `publish-pyodide.yml` run. Publication uses npm OIDC Trusted Publishing
+after the dependency audit and the full parity gate pass; published versions
 carry npm provenance. A manual `workflow_dispatch` defaults to a dry run; `dry_run=false`
 publishes for real. The one-time bootstrap is done: 0.7.0 was the manual first publish,
 and every version since 0.7.1 carries provenance from this workflow.

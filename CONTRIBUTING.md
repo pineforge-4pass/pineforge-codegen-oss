@@ -120,16 +120,22 @@ runner group restricted to selected workflows running at `refs/heads/main`,
 its own service account with no roles, and one job per runner, with nothing
 shared with PR classes. It also covers jobs that build artifacts a release
 publishes, even without secrets. Jobs triggered by `pull_request` must never
-use this class. L6 via CORE-TOP 15:40 (addendum 2) explicitly moves only the `promote`
-job despite its existing `pull_request_target` trigger; other PR-triggered jobs
-keep their existing routing. The separate `ci/sec846-codegen` branch adds
-`promote-guard`; when the branches merge, that guard must use the same
-`["self-hosted","pf-ci","pf-ci-release"]` runner as `promote`.
+use this class.
 
 Run both release workflows with `workflow_dispatch` on `main`.
 `release.yml` publishes to PyPI, commits and pushes the release tag, then
-dispatches `publish-pyodide.yml` with `--ref main`, that `tag`, and
-`dry_run=false`. Every npm run requires an existing release tag, including dry
+creates the GitHub Release and notifies the release hub. After the tag exists
+on main and the release job is green, the operator doing the cut, using a
+GitHub account with write access, publishes npm with this separate dispatch:
+
+```sh
+gh workflow run publish-pyodide.yml --repo pineforge-4pass/pineforge-codegen-oss --ref main -f tag=<tag> -f dry_run=false
+```
+
+Use the existing release tag in place of `<tag>`. Set `dry_run=true` to
+validate first. A tag push alone publishes nothing. A green `release.yml`
+run does not mean npm published; watch the `publish-pyodide.yml` run.
+Every npm run requires an existing release tag, including dry
 runs and placeholder claims. Its first job, `tag-guard`, has only Contents
 read permission: it checks the dispatch ref is main, validates the release
 pattern before using the input in git, fetches tags and full main history,
@@ -139,10 +145,7 @@ outside main fails the run before either npm job can start. Publish checks
 out the verified commit SHA with credentials persistence disabled, verifies
 its `VERSION`, and runs the gate before publishing. The workflow run stays
 at `refs/heads/main` while its checkout uses the pinned commit; moving the tag
-after verification does not change what gets built. A tag push no longer
-starts this workflow. The existing org App must grant Contents write for the
-commit, tag and hub dispatch and Actions write
-for the npm workflow dispatch; the token request explicitly includes both.
+after verification does not change what gets built.
 
 For a manual npm dry run, dispatch `publish-pyodide.yml` on `main` with
 `dry_run=true` and an existing release `tag` on main. For a real npm retry
@@ -153,10 +156,6 @@ guard fails a dispatch at another ref; both npm jobs also retain their
 main-ref job conditions and require the guard to succeed.
 Baseline promotion keeps its `pull_request_target: [closed]` and manual-main
 dispatch paths.
-
-Push this branch only after both laneboss posts "pf-ci-release live" and the
-owner answers REL-HOSTED, as CORE-TOP requires. Until both gates are satisfied,
-nothing is pushed; a job on that label with no runners only waits.
 
 ## Change and review notes
 
