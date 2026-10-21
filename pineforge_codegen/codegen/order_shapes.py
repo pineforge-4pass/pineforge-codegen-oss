@@ -347,10 +347,14 @@ def order_shapes_document(emitter) -> str:
                  if isinstance(node, FuncCall) and (_expression(node.callee) or "").startswith("strategy.")
                  and _expression(node.callee) not in READ_ONLY_STRATEGY_CALLS
                  and id(node) not in recorded_nodes}
+    from .scratch_facts import classify_program
     return json.dumps({
         "version": 1, "process_orders_on_close": pooc, "calls": calls,
         "entry_ids": {"long": len(long_ids), "short": len(short_ids),
                       "shared": len(long_ids & short_ids), "multi_site": sum(count > 1 for count in counts.values())},
         "host_reads": sorted(emitter._order_shape_host_reads), "settings": settings,
         "unmodeled": sorted(unmodeled),
+        # Additive lane V field: the pre-begin vocabulary certificate. It is
+        # metadata only; no export, version or trading computation changes.
+        "scratch_facts": classify_program(emitter.ctx.ast),
     }, sort_keys=True, separators=(",", ":"), allow_nan=False)

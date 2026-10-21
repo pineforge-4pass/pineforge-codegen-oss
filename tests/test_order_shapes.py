@@ -22,7 +22,8 @@ def receipt(body, declaration=SOURCE, *, check_support=True):
     document = json.loads(documents[2])
     result = json.loads(document)
     assert json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False) == document
-    assert set(result) == {"version", "process_orders_on_close", "calls", "entry_ids", "host_reads", "settings", "unmodeled"}
+    assert set(result) == {"version", "process_orders_on_close", "calls", "entry_ids", "host_reads", "settings",
+                           "unmodeled", "scratch_facts"}
     assert result["version"] == 1
     return result
 

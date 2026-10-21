@@ -93,6 +93,18 @@ lists generated execution-member references, excluding strings and comments;
 `unmodeled` names other non-read-only `strategy.*` calls, including risk rules.
 The receipt is a static description, not an admission decision or proof that an
 arbitrary order shape is supported in a live run; engine `v1.3.0` does not read it.
+
+From codegen `1.6.2` on the order-shapes document also carries one additive
+field, `scratch_facts`: `{"version": 1, "classification": "in_subset" or
+"out_of_subset", "certificate": "<lowercase hex>", "reasons": [...]}`. The
+certificate is the compiled strategy's finite vocabulary (source IDs,
+`from_entry` strings, exit IDs, cohort arguments and eligible fill IDs) in the
+engine's internal wire v1; `reasons` names every dynamic form that made it
+incomplete. The field is metadata only, adds no export, and does not change
+`strategy_order_shapes_api_version()`, which stays 1: the protocol and the
+other keys are unchanged, so a reader that does not know the field ignores it.
+An IN-SUBSET label only states that the vocabulary is finite; a run still has
+to be routed, and this receipt never refuses one.
 Existing capability and confirmed-bar receipts, including their order
 classifications, remain unchanged.
 
