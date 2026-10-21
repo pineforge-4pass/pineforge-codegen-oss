@@ -1,3 +1,0 @@
-Fix round 1 editing handoff; see REPORT.md.
-Golden certificates: 82 / 98 / 93 bytes. Baselines retain full comparisons.
-Sink unchanged. Supervisor review, commit, and engine-enabled re-proof pending.
