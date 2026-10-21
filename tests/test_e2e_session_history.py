@@ -62,6 +62,7 @@ from tests._e2e import (
     skip_unless_e2e_env, transpile_json,
 )
 from tests._private_fixtures import private_fixture
+from tests._scratch_facts_baseline import reference_with_literal_entry_scratch_facts
 from tests.test_e2e_session_ismarket import next_chart_bar
 
 
@@ -866,7 +867,8 @@ def test_scripts_without_a_read_keep_their_cpp(place: str, tmp_path: Path) -> No
                     + 'if x\n    strategy.entry("L", strategy.long)\n', encoding="utf-8")
     now, before = transpile_json(pine), transpile_json(pine, reference)
     assert now["ok"] and before["ok"], (now["diagnostics"], before["diagnostics"])
-    assert now["cpp"] == before["cpp"]
+    expected = reference_with_literal_entry_scratch_facts(before["cpp"])
+    assert now["cpp"] == expected
     compile_cpp(now["cpp"], label=place)
 
 

@@ -31,6 +31,7 @@ from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests._e2e import reference_codegen, transpile_json
+from tests._scratch_facts_baseline import reference_with_literal_entry_scratch_facts
 
 
 # Accepted scaffold for whole-C++ noninterference only; historical semantic
@@ -387,5 +388,6 @@ def test_constant_and_input_lengths_keep_their_cpp(tmp_path: Path) -> None:
     ours = transpile_json(pine)
     before = transpile_json(pine, parent)
     assert ours["ok"] and before["ok"]
-    assert ours["cpp"] == before["cpp"]
+    expected = reference_with_literal_entry_scratch_facts(before["cpp"])
+    assert ours["cpp"] == expected
     assert "pine_ta_length.hpp" not in ours["cpp"]
