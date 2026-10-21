@@ -149,9 +149,13 @@ guard to succeed.
 The guard and job conditions live in the workflow file on `main`, but GitHub
 executes the file from the dispatched ref, so they alone cannot stop a user
 with write access who pushes and dispatches a modified workflow on another
-branch; a server-side bound requires an admin to configure a GitHub environment
-with a `main`-only deployment-branch policy and bind the npm trusted publisher
-to require it, outside this change.
+branch. The server-side bound is the GitHub environment `npm-publish`: both npm
+jobs (`publish` and `claim-npm`) run in it, and it carries a `main`-only
+deployment-branch policy, so a run from any other ref is refused by GitHub. The
+npm trusted publisher for the package is set by the repository owner to require
+that environment (owner decision NPM-TP; that setting lives on npmjs.com and
+cannot be read from this repository), so a publish from a workflow that does not
+declare the environment fails at npm.
 
 ## Change and review notes
 
