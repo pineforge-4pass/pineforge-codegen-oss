@@ -56,7 +56,7 @@ The bound query's row for such a member now carries
 `current_storage = _PF_O1_CURRENT_STORAGE`, which expands to `"external"` when
 the TU is built against the store and `"resident"` otherwise. The query's
 other rows keep the literal `resident`; the public row value is still the
-plain word, and the emitter quotes a literal / emits an identifier.
+plain word, and the emitter emits a quoted literal, and an emitted `_PF_` macro name as an expression.
 
 ### Engine defect found in the store commit
 
@@ -125,7 +125,7 @@ persistent member.
   the class.
 - `codegen/state_bounds.py`: classify `_PFO1Buffer<T>` as `precalc`, external,
   element `sizeof(T)` for an inline primitive, `current_storage =
-  _PF_O1_CURRENT_STORAGE`; the emitter quotes a literal and emits an identifier
+  _PF_O1_CURRENT_STORAGE`; the emitter emits a quoted literal and only an emitted `_PF_` macro name as an expression
   as an expression. Every other row and value is unchanged.
 - `codegen/helpers.py`: reserve the new emitted identifiers against authored
   names.
