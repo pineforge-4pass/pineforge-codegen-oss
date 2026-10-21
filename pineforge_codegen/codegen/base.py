@@ -4755,6 +4755,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # (pineforge_codegen/collection_history.py), emitted only for a script
         # that reads one.
         self._emit_collection_history_helper(lines)
+        # The typed view over the engine's O(1) state store, emitted only for a
+        # script whose precalculated TA cache outgrows a compile-time bound
+        # (pineforge_codegen/codegen/o1_store.py).
+        from .o1_store import emit_o1_store_helper, has_precalc_storage
+        emit_o1_store_helper(self, lines)
+        _uses_store_state = has_precalc_storage(self)
         # The chart-bar session type, inserted here once the class is lowered
         # and known to call it (codegen/session_market.py).
         _session_market_at = len(lines)
@@ -4762,6 +4768,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 2. Open class
         lines.append("class GeneratedStrategy : public pineforge::source::PineStrategyHost {")
         lines.append("public:")
+        # The store owner is not script state: it holds no Pine value, so it
+        # stays outside the checkpointed declaration block below.
+        if _uses_store_state:
+            lines.append("    _PFO1StoreOwner _pf_o1_store_;")
         _script_state_decl_start = len(lines)
 
         # One strategy-local undo coordinator gives every UDT arena a single
@@ -4931,8 +4941,15 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 continue
             lines.append(f"    {self._ta_member_cpp_type(site)} {site.member_name};")
             if self._ta_site_uses_precalc(site):
+                # Bar count is a run value, not a compile-time bound, so the
+                # cache spills through the engine's O(1) store instead of
+                # growing resident. The initializer is repeated by the
+                # lifecycle reset, which re-reads this declaration's suffix.
                 vtype = self._ta_return_type(site)
-                lines.append(f"    std::vector<{vtype}> _precalc_{site.member_name};")
+                lines.append(
+                    f"    _PFO1Buffer<{vtype}> _precalc_{site.member_name}"
+                    "{&_pf_o1_store_};"
+                )
         lines.append("    bool _use_precalc = false;")
 
         for info in self._lazy_source_clock_by_node.values():
@@ -5458,6 +5475,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         from .state_bounds import emit_script_state_bounds
         emit_script_state_bounds(self, lines)
+
+        from .o1_store import emit_o1_store_stats
+        emit_o1_store_stats(self, lines)
 
         # 13. extern "C" interface
         self._emit_extern_c(lines)

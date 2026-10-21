@@ -39,13 +39,42 @@ def _without_run_failure_scaffold(cpp: str) -> str:
 
 
 def without_state_bounds(cpp: str) -> str:
-    """Exclude only the additive state query from scaffold-identity checks."""
-    # The state-bound query does not change the strategy body. Its actual
-    # rows/types are checked and compiled in test_script_state_bounds.
+    """Exclude additive, separately-pinned state-lowering scaffolding.
+
+    Three additions are normalized out of *cross-build* scaffold comparisons
+    (a comparison against another commit's codegen, which cannot carry a
+    feature it predates):
+
+    * the read-only bound query (``test_script_state_bounds`` pins its rows);
+    * the O(1) store view and its stats export (``test_script_state_store``
+      pins the emission, the spill counters and value-for-value parity with the
+      resident fallback);
+    * the precalculated TA cache's storage spelling, which is the same
+      declaration with a store-backed element container.
+
+    Nothing about the strategy body is removed or rewritten here.
+    """
     cpp = cpp.replace('#include <cstddef>\n', '')
     cpp = re.sub(
         r'^struct _PFScriptStateBoundV1 \{\n.*?^    return bounds;\n}\n\n',
         '', cpp, flags=re.MULTILINE | re.DOTALL,
+    )
+    cpp = re.sub(r'^// >>> pf-o1-store\n.*?^// <<< pf-o1-store\n\n',
+                 '', cpp, flags=re.MULTILINE | re.DOTALL)
+    cpp = cpp.replace('    _PFO1StoreOwner _pf_o1_store_;\n', '')
+    cpp = re.sub(
+        r'^extern "C" int strategy_script_state_store_stats_v1\(.*?^}\n\n',
+        '', cpp, flags=re.MULTILINE | re.DOTALL,
+    )
+    cpp = re.sub(
+        r'_PFO1Buffer<([^>\n]+)> (_precalc_[A-Za-z0-9_]+)\{&_pf_o1_store_\};',
+        r'std::vector<\1> \2;', cpp,
+    )
+    # The lifecycle reset repeats the declaration's initializer; with no store
+    # owner to bind it is the same default construction as before.
+    cpp = re.sub(
+        r'decltype\(this->(_precalc_[A-Za-z0-9_]+)\)\{&_pf_o1_store_\}',
+        r'decltype(this->\1){}', cpp,
     )
     return cpp
 

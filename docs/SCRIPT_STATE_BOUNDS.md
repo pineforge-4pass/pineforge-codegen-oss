@@ -32,11 +32,12 @@ When a known flag is false, its numeric field is zero and means unknown. A
 known cardinality of zero means a proven empty container.
 
 `storage_requirement` is `preallocate` only when both proofs exist; otherwise
-it is `external`. `current_storage` is presently `resident` for every row.
-**This is allocation evidence, not a typed store binding.** No existing array,
-matrix, string, map or snapshot call is redirected to external storage by this
-query. No engine consumes this new query yet. It cannot establish flat resident
-memory or pre-bar allocation on its own.
+it is `external`. `current_storage` says where the member actually lives today:
+the literal `resident` for every category still held in STL/engine storage, and
+the emitted `_PF_O1_CURRENT_STORAGE` expression for a member whose backing
+depends on the engine the translation unit is built against. This is
+allocation evidence plus the storage actually emitted; it is not a claim that
+the whole script is flat-memory resident.
 
 The proof pass considers a uniquely named top-level array/matrix initialized
 from constant cardinality/dimensions, provided every use is a known operation
@@ -54,16 +55,44 @@ collections frozen in those slots. Opaque runtime TA objects retain unknown
 payload bounds even if their constructor has a length parameter; a length is
 not assumed to bound every allocation inside that runtime type.
 
-The A5 engine contract inspected for this work is
-`include/pineforge/detail/o1_store.hpp`: `Store::open`, `create`, `release`,
-`alive`, `size`, `resize`, `read`, `write`, `begin`, and `stats`, with `Tx` commit
-and rollback and caller-provided `Backing`. It does not define typed array,
-string, matrix, map or UDT adapters, payload serialization, a compiler-bound
-registration API, or ownership of the backing during a script run. Those
-interfaces are necessary to migrate the current typed/reference-bearing C++
-without guessing declarations, copying nontrivial object bytes, or changing
-alias/rollback semantics. The engine and codegen must agree on them before this
-metadata can drive a storage migration.
+## The precalculated TA cache is routed
+
+`codegen/o1_store.py` emits `_PFO1Buffer<T>`: a typed view of one store object
+(`create` at `resize`, element read/write through `read`/`write`, `size`), and
+`_PFO1StoreOwner`, which opens `Store` over `make_memfd_backing()` with a fixed
+`Shape` (64 pages of 4096 bytes; `_PF_O1_PAGE_BYTES` / `_PF_O1_RESIDENT_PAGES`).
+The cache is the one audited category the compiler owns completely: one logical
+element per run bar, trivially copyable elements (`static_assert`), and exactly
+`resize`, write and read. Its slot count is a run value, so it cannot be
+preallocated; the store never refuses for capacity and spills beyond the
+resident window.
+
+The binding is feature-detected at compile time. `__has_include` selects the
+store when the paired engine carries the header; otherwise — and in any TU
+built with `-DPF_O1_STORE_DISABLED` — the same interface is
+`std::vector<T>`, the lowering every earlier build emitted. That fallback is
+the reference: the same generated source built both ways must report identical
+trades, net profit and per-bar broker-state hashes
+(`tests/test_script_state_store.py`). `strategy_script_state_store_stats_v1`
+reports the engine's four counters (live, resident, spilled pages, backing
+bytes) and returns 0 before the store is opened.
+
+The emitted region is delimited (`// >>> pf-o1-store` … `// <<< pf-o1-store`);
+`tests/_legacy_cpp.without_state_bounds` removes it, its export, its owner
+member and its container spelling from *cross-build* scaffold comparisons
+only. The store emission and its runtime parity have their own tests.
+
+## Remaining categories
+
+`include/pineforge/detail/o1_store.hpp` defines `Store::open`, `create`,
+`release`, `alive`, `size`, `resize`, `read`, `write`, `begin`, and `stats`,
+with `Tx` commit and rollback and caller-provided `Backing`. It does not define
+typed array, string, matrix, map or UDT adapters, payload serialization, a
+compiler-bound registration API, or ownership of the backing during a script
+run. Those interfaces are necessary to migrate the remaining
+typed/reference-bearing C++ without guessing declarations, copying nontrivial
+object bytes, or changing alias/rollback semantics. Until they land, the
+remaining categories keep resident storage and report `resident`.
 
 No capacities, evictions or approximations are introduced. UDT handle IDs now
 use the arena's native index width, removing its previous explicit 31-bit

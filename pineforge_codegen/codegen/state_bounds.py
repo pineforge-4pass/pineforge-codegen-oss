@@ -2,8 +2,12 @@
 
 These describe logical payloads, never STL object sizes or reserved capacity.
 An unknown proof requires the external store; it is not a compile/run refusal.
-This module does not migrate a container to the engine's byte store. The emitted
-metadata keeps that distinction explicit until typed runtime adapters exist.
+The precalculated TA cache is the one category this module reports as actually
+spilled: ``o1_store.py`` routes it through the engine's byte store, and its row's
+``current_storage`` is the emitted ``_PF_O1_CURRENT_STORAGE`` expression so a TU
+built without the store reports the resident fallback instead. Every other
+category keeps resident storage until typed engine adapters exist, and its row
+says so.
 """
 
 from __future__ import annotations
@@ -163,7 +167,8 @@ class _Proofs:
         return count if count is not None and 0 <= count < 2**63 else None
 
 
-def _row(member, kind, count, element, reason, cpp_type):
+def _row(member, kind, count, element, reason, cpp_type,
+         current_storage='"resident"'):
     return {
         "member": member,
         "kind": kind,
@@ -172,7 +177,10 @@ def _row(member, kind, count, element, reason, cpp_type):
         "element_bytes_cpp": element,
         "storage_requirement": "preallocate" if count is not None and element is not None else "external",
         # A storage requirement is not a claim that an adapter was installed.
-        "current_storage": "resident",
+        # ``current_storage`` is the C++ expression the emitted row carries: a
+        # literal for a resident member, or ``_PF_O1_CURRENT_STORAGE`` for a
+        # member whose backing depends on the engine the TU is built against.
+        "current_storage": current_storage,
         "reason": reason,
     }
 
@@ -203,6 +211,8 @@ def build_script_state_bounds(emitter, declarations, checkpoint_members):
         cpp_type = decl_match.group(1)
         kind, count, element = "opaque", None, None
         reason = "No complete payload bound is proven."
+        # The C++ expression the emitted row carries for current storage.
+        current_storage = '"resident"'
         if cpp_type in _INLINE_CPP:
             kind, count, element = "scalar", 1, f"sizeof({cpp_type})"
             reason = "One inline primitive."
@@ -237,6 +247,17 @@ def build_script_state_bounds(emitter, declarations, checkpoint_members):
             count = int(capacity.group(1)) if capacity else None
             element = f"sizeof({inner})" if inner in _INLINE_CPP else None
             reason = "Only an explicit emitted horizon is a compiler-known slot bound."
+        elif cpp_type.startswith("_PFO1Buffer<"):
+            # The precalculated TA cache: one logical element per run bar, so
+            # the slot count is a run value with no compile-time bound. It is
+            # routed to the engine's store; the emitted row says which storage
+            # the TU is actually built against.
+            kind = "precalc"
+            inner = cpp_type[len("_PFO1Buffer<"):-1]
+            element = f"sizeof({inner})" if inner in _INLINE_CPP else None
+            reason = ("One element per run bar; the run decides the slot "
+                      "count, so the cache spills through the state store.")
+            current_storage = "_PF_O1_CURRENT_STORAGE"
         elif cpp_type.startswith("std::vector<"):
             kind = "precalc" if member.startswith("_precalc_") else "array"
             inner = cpp_type[len("std::vector<"):-1]
@@ -265,7 +286,8 @@ def build_script_state_bounds(emitter, declarations, checkpoint_members):
         elif "Map<" in cpp_type or "unordered_map<" in cpp_type:
             kind = "map"
             reason = "Neither map cardinality nor reachable payload is proven."
-        rows.append(_row(member, kind, count, element, reason, cpp_type))
+        rows.append(_row(member, kind, count, element, reason, cpp_type,
+                         current_storage=current_storage))
     by_member = {row["member"]: row for row in rows}
     fixed_checkpoint = all(
         by_member[name]["kind"] == "scalar" for name in checkpoint_members
@@ -282,8 +304,10 @@ def build_script_state_bounds(emitter, declarations, checkpoint_members):
 def emit_script_state_bounds(emitter, lines):
     """A read-only, allocation-free query available before strategy_create/bar 0.
 
-    This is compiler evidence only. No typed Store binding or migration is
-    implied by the external requirement, and no engine declaration is guessed.
+    This is compiler evidence. A ``preallocate`` requirement is met by the
+    member's own constructor; an ``external`` row is either routed already (the
+    precalculated TA cache) or still resident, and ``current_storage`` says
+    which. No engine declaration beyond the store contract is guessed.
     """
     lines.extend([
         "struct _PFScriptStateBoundV1 {",
@@ -306,7 +330,8 @@ def emit_script_state_bounds(emitter, lines):
         lines.append(
             f'        {{"{name}", "{row["kind"]}", {str(count is not None).lower()}, '
             f'{count if count is not None else 0}ULL, {str(size is not None).lower()}, '
-            f'{size if size is not None else 0}, "{row["storage_requirement"]}", "resident"}},'
+            f'{size if size is not None else 0}, "{row["storage_requirement"]}", '
+            f'{row["current_storage"]}}},'
         )
     lines.extend([
         "    };",

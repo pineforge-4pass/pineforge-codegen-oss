@@ -789,7 +789,7 @@ def test_ta_precalc_skips_user_series_alias_source():
         "dev = ta.stdev(ha_close, bbLen) * 2.0\n"
         "plot(dev)"
     )
-    assert "std::vector<double> _precalc__ta_stdev" not in cpp
+    assert "_precalc__ta_stdev" not in cpp
     assert "_use_precalc ? _precalc__ta_stdev" not in cpp
     assert "_ta_stdev_1.compute(ha_close)" in cpp
 
@@ -862,7 +862,7 @@ def test_nested_ta_below_and_rhs_keeps_inline_sma_and_clocks_outer_change():
         "plot(base ? 1 : 0)"
     )
     assert "_pf_every_bar_ta_" not in cpp
-    assert "std::vector<double> _precalc__ta_sma" not in cpp
+    assert "_precalc__ta_sma" not in cpp
     base_line = _stmt_line(cpp, "base = (")
     assert "_ta_sma_" in base_line and ".compute(current_bar_.close)" in base_line
     assert "_pf_lazy_src_clock_1.change(" in base_line
@@ -888,9 +888,9 @@ def test_ta_precalc_lazy_scope_routes_recursive_ema_only():
         "plot((a or b or c or d or e or g) ? f + h + i : close)"
     )
     for name in ("lowest", "highest"):
-        assert f"std::vector<double> _precalc__ta_{name}_" in cpp
+        assert f"_PFO1Buffer<double> _precalc__ta_{name}_" in cpp
         assert f"_use_precalc ? _precalc__ta_{name}_" in cpp
-    assert "std::vector<double> _precalc__ta_roc_" not in cpp
+    assert "_precalc__ta_roc_" not in cpp
     assert "struct _PFLazySourceClock {" in cpp
     assert (
         "_pf_lazy_src_clock_1.roc(current_bar_.close, "
@@ -898,8 +898,8 @@ def test_ta_precalc_lazy_scope_routes_recursive_ema_only():
     ) in _stmt_line(cpp, "b = (")
     # No site reads its own history, so nothing is hoisted.
     assert "_pf_every_bar_ta_" not in cpp
-    assert len(re.findall(r"std::vector<double> _precalc__ta_ema_", cpp)) == 1
-    assert len(re.findall(r"std::vector<double> _precalc__ta_sma_", cpp)) == 2
+    assert len(re.findall(r"_PFO1Buffer<double> _precalc__ta_ema_", cpp)) == 1
+    assert len(re.findall(r"_PFO1Buffer<double> _precalc__ta_sma_", cpp)) == 2
     assert len(re.findall(r"_use_precalc \? _precalc__ta_sma_", cpp)) >= 2
 
 
@@ -920,9 +920,9 @@ def test_precalculated_extrema_direct_history_uses_chart_bar_clock():
         "plot((lo or hi or flat) ? 1 : 0)"
     )
 
-    assert "std::vector<double> _precalc__ta_lowest_1" in cpp
-    assert "std::vector<double> _precalc__ta_highest_2" in cpp
-    assert "std::vector<double> _precalc__ta_highest_3" in cpp
+    assert "_PFO1Buffer<double> _precalc__ta_lowest_1" in cpp
+    assert "_PFO1Buffer<double> _precalc__ta_highest_2" in cpp
+    assert "_PFO1Buffer<double> _precalc__ta_highest_3" in cpp
     lines = cpp.splitlines()
     for idx, member in ((1, "_hist_call_1"), (2, "_hist_call_2")):
         hoist = _hoist_line(cpp, f"_pf_every_bar_ta_{idx}")
@@ -960,7 +960,7 @@ def test_nonprecalculated_extrema_direct_history_uses_every_bar_clock():
         "plot(signal ? 1 : 0)"
     )
 
-    assert "std::vector<double> _precalc__ta_highest" not in cpp
+    assert "_precalc__ta_highest" not in cpp
     assert "_pf_hist_bar" not in cpp
     hoist = _hoist_line(cpp, "_pf_every_bar_ta_1")
     assert "_ta_highest_1.compute(src)" in hoist
@@ -988,11 +988,11 @@ def test_recursive_ema_lazy_edges_preserve_eager_operand_positions():
         ": orRight ? close : open)"
     )
     for idx in (1, 3):
-        assert f"std::vector<double> _precalc__ta_ema_{idx}" in cpp
+        assert f"_PFO1Buffer<double> _precalc__ta_ema_{idx}" in cpp
         assert f"_use_precalc ? _precalc__ta_ema_{idx}" in cpp
     for idx in (2, 4, 5):
         assert f"ta::EMA _ta_ema_{idx};" in cpp
-        assert f"std::vector<double> _precalc__ta_ema_{idx}" not in cpp
+        assert f"_precalc__ta_ema_{idx}" not in cpp
         assert f"_use_precalc ? _precalc__ta_ema_{idx}" not in cpp
         assert f"_ta_ema_{idx}.compute(current_bar_.close)" in cpp
 
@@ -1006,7 +1006,7 @@ def test_lazy_chart_ema_does_not_reclassify_security_evaluator_ema():
         "close > open or ta.ema(close, 4) > close)\n"
         "plot(chart ? sec : close)"
     )
-    assert "std::vector<double> _precalc__ta_ema_1" not in cpp
+    assert "_precalc__ta_ema_1" not in cpp
     assert "_ta_ema_1.compute(current_bar_.close)" in cpp
     security_body = cpp.split("void _eval_security_0", 1)[1].split("\n    }", 1)[0]
     assert "ta::EMA _sec0__ta_ema_2;" in cpp
@@ -1024,7 +1024,7 @@ def test_lazy_udf_ema_uses_callsite_state_without_precalc():
         "eager = f()\n"
         "plot(lazy ? eager : close)"
     )
-    assert "std::vector<double> _precalc__ta_ema" not in cpp
+    assert "_precalc__ta_ema" not in cpp
     assert "ta::EMA _ta_ema_1;" in cpp
     assert "ta::EMA _ta_ema_1_cs1;" in cpp
     lazy_body = cpp.split("double f_cs0()", 1)[1].split("\n    }", 1)[0]
@@ -1046,8 +1046,8 @@ def test_ta_precalc_keeps_security_context_and_rhs_sma():
         "secChart = request.security(syminfo.tickerid, \"60\", chart)\n"
         "plot(chart ? sec + secChart : close)"
     )
-    assert "std::vector<double> _precalc__ta_sma_1" not in cpp
-    assert "std::vector<double> _precalc__ta_sma_2" in cpp
+    assert "_precalc__ta_sma_1" not in cpp
+    assert "_PFO1Buffer<double> _precalc__ta_sma_2" in cpp
 
 
 def test_ta_precalc_skips_and_rhs_sma_in_tuple_assignment():
@@ -1060,7 +1060,7 @@ def test_ta_precalc_skips_and_rhs_sma_in_tuple_assignment():
         "    [false, close]\n"
         "plot(a ? b : close)"
     )
-    assert "std::vector<double> _precalc__ta_sma" not in cpp
+    assert "_precalc__ta_sma" not in cpp
     assert "_use_precalc ? _precalc__ta_sma" not in cpp
     assert "ta::SMA _ta_sma_1;" in cpp
 
@@ -1073,7 +1073,7 @@ def test_ta_precalc_skips_and_rhs_sma_in_assignment_subscript_target():
         "xs[pred and ta.sma(close, 3) > close ? 0 : 1] := close\n"
         "plot(array.get(xs, 0))"
     )
-    assert "std::vector<double> _precalc__ta_sma" not in cpp
+    assert "_precalc__ta_sma" not in cpp
     assert "_use_precalc ? _precalc__ta_sma" not in cpp
     assert "_ta_sma_1.compute(current_bar_.close)" in cpp
 
@@ -1086,7 +1086,7 @@ def test_ta_precalc_walks_nested_func_call_keyword_values_under_and_rhs():
         "label.new(bar_index, ta.sma(close, 3))) > 0\n"
         "plot(x ? 1 : 0)"
     )
-    assert "std::vector<double> _precalc__ta_sma" not in cpp
+    assert "_precalc__ta_sma" not in cpp
     assert "_use_precalc ? _precalc__ta_sma" not in cpp
     assert "ta::SMA _ta_sma_1;" in cpp
 
@@ -1099,7 +1099,7 @@ def test_ta_precalc_walks_chained_call_receiver_under_and_rhs():
         "y = ta.sma(close, 3)).get_y() > close\n"
         "plot(x ? 1 : 0)"
     )
-    assert "std::vector<double> _precalc__ta_sma" not in cpp
+    assert "_precalc__ta_sma" not in cpp
     assert "_use_precalc ? _precalc__ta_sma" not in cpp
     assert "_ta_sma_1.compute(current_bar_.close)" in cpp
 
@@ -1114,9 +1114,9 @@ def test_ta_precalc_security_positional_skips_only_expression_payload():
         "pred and ta.sma(close, 5) > close)\n"
         "plot(sec ? 1 : 0)"
     )
-    assert "std::vector<double> _precalc__ta_sma_1" not in cpp
-    assert "std::vector<double> _precalc__ta_sma_2" not in cpp
-    assert "std::vector<double> _precalc__ta_sma_3" in cpp
+    assert "_precalc__ta_sma_1" not in cpp
+    assert "_precalc__ta_sma_2" not in cpp
+    assert "_PFO1Buffer<double> _precalc__ta_sma_3" in cpp
 
 
 def test_ta_precalc_security_lower_tf_keywords_skip_only_expression_payload():
@@ -1130,9 +1130,9 @@ def test_ta_precalc_security_lower_tf_keywords_skip_only_expression_payload():
         "expression = pred and ta.sma(close, 5) > close)\n"
         "plot(array.size(sec))"
     )
-    assert "std::vector<double> _precalc__ta_sma_1" not in cpp
-    assert "std::vector<double> _precalc__ta_sma_2" not in cpp
-    assert "std::vector<double> _precalc__ta_sma_3" in cpp
+    assert "_precalc__ta_sma_1" not in cpp
+    assert "_precalc__ta_sma_2" not in cpp
+    assert "_PFO1Buffer<double> _precalc__ta_sma_3" in cpp
 
 
 def test_ta_precalc_walks_type_field_defaults():
@@ -1143,7 +1143,7 @@ def test_ta_precalc_walks_type_field_defaults():
         "s = State.new()\n"
         "plot(s.ready ? 1 : 0)"
     )
-    assert "std::vector<double> _precalc__ta_sma" not in cpp
+    assert "_precalc__ta_sma" not in cpp
     assert "_use_precalc ? _precalc__ta_sma" not in cpp
     assert "ta::SMA _ta_sma_1;" in cpp
 

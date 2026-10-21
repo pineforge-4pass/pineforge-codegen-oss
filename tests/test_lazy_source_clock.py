@@ -54,7 +54,7 @@ def test_one_clock_and_held_history_per_callsite():
     )
     assert hists == ["_pf_lazy_src_hist_1", "_pf_lazy_src_hist_2"]
     assert "_pf_lazy_src_chart_" not in cpp
-    assert "std::vector<double> _precalc__ta_roc" not in cpp
+    assert "_precalc__ta_roc" not in cpp
     assert "_pf_lazy_src_clock_1.roc(current_bar_.close, _pf_lazy_src_clock_1.previous_source(_pf_lazy_src_hist_1[2], 3))" in _stmt(cpp, "longish = (")
     assert "_pf_lazy_src_clock_2.roc(current_bar_.close, _pf_lazy_src_clock_2.previous_source(_pf_lazy_src_hist_2[2], 3))" in _stmt(cpp, "shortish = (")
 
@@ -144,7 +144,7 @@ def test_change_mom_and_roc_route_in_every_top_level_lazy_position():
     assert "_pf_lazy_src_chart_" not in cpp
     assert "_pf_lazy_src_clock_5.roc(current_bar_.close, _pf_lazy_src_clock_5.previous_source(_pf_lazy_src_hist_5[2], 3))" in _stmt(cpp, "e = (")
     for family in ("change", "mom", "roc"):
-        assert f"std::vector<double> _precalc__ta_{family}" not in cpp
+        assert f"_precalc__ta_{family}" not in cpp
     assert "_pf_every_bar_ta_" not in cpp
 
 
@@ -189,7 +189,7 @@ def test_shadowed_close_and_other_sources_route_too():
     assert "Series<double> _pf_lazy_src_hist_2{3};" in cpp
     third_line = _stmt(cpp, "third = (")
     assert "_pf_lazy_src_clock_3.change(rsiv, _pf_lazy_src_clock_3.previous_source(_pf_lazy_src_hist_3[2], 3))" in third_line
-    assert "std::vector<double> _precalc__ta_roc" not in cpp
+    assert "_precalc__ta_roc" not in cpp
 
 
 def test_non_top_level_and_eager_shapes_keep_the_existing_route():

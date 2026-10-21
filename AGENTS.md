@@ -343,9 +343,21 @@ or bar is needed. Its cardinality and logical inline-byte proofs are separate:
 `sizeof(std::string)`, a UDT handle and a history horizon never bound reachable
 payloads. Constant array/matrix constructors qualify only without a growing,
 rebinding or escaping use; an input default is not a proof. Unknown means
-external storage is required, not a refusal. `current_storage` still says
-`resident`: this query does not install typed `detail::o1::Store` adapters or
-preallocate the existing collections. Do not advertise it as flat memory.
+external storage is required, not a refusal. The precalculated TA cache is the
+one audited category routed already: `codegen/o1_store.py` emits
+`_PFO1Buffer<T>`, a typed view over `pineforge/detail/o1_store.hpp` (fixed
+resident working set, spilling backing, stable ids, no capacity refusal), and
+the member's row says `current_storage = _PF_O1_CURRENT_STORAGE` — `external`
+when the TU is built against the store, `resident` otherwise.
+`strategy_script_state_store_stats_v1` reports the store's live, resident,
+spilled and backing bytes; the same emitted TU built with
+`-DPF_O1_STORE_DISABLED` keeps the `std::vector` fallback and must produce
+byte-identical trades (`tests/test_script_state_store.py`). Every other
+category still reports `resident`: no typed Store adapter exists yet for
+arrays, matrices, strings, maps, UDT records and their undo log, collection
+history slots, the rollback checkpoint, TA objects, preallocation caches,
+drawing arenas or lower-timeframe buffers. Do not advertise the whole script as
+flat memory.
 UDT IDs use the arena's `std::size_t` index and its maximum as na; the old
 31-bit capacity stop is gone. Identity, alias and rollback tests still apply.
 
