@@ -86,6 +86,8 @@ jobs:
     needs: tag-guard
     if: ${{ github.ref == 'refs/heads/main' && !inputs.claim_placeholder }}
     runs-on: ubuntu-latest
+    # GitHub environment with a main-only deployment-branch policy: the server-side bound on npm publishing.
+    environment: npm-publish
     env:
       PYTHONHASHSEED: "0"
     steps:
@@ -159,6 +161,8 @@ jobs:
     needs: tag-guard
     if: ${{ github.ref == 'refs/heads/main' && inputs.claim_placeholder }}
     runs-on: ubuntu-24.04
+    # Same environment as `publish`: the placeholder claim is gated by the main-only policy too.
+    environment: npm-publish
     permissions: { contents: read, id-token: write }
     steps:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4

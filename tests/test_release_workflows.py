@@ -345,6 +345,12 @@ def assert_tagged_npm_dispatch(text):
         assert (
             f"    if: ${{{{ github.ref == 'refs/heads/main' && {claim} }}}}\n"
         ) in workflow_jobs(text).get(job_id, ""), f"{job_id} must refuse dispatches outside main"
+        # The server-side bound: both npm jobs run in the `npm-publish` environment (main-only policy).
+        env_lines = re.findall(r"^    environment:[^\n]*$", workflow_jobs(text).get(job_id, ""), re.M)
+        assert env_lines == ["    environment: npm-publish"], (
+            f"{job_id} must declare exactly `environment: npm-publish`"
+        )
+    assert text.count("environment:") == 2, "only the two npm jobs may declare an environment"
     scripts = re.findall(
         r"^(?:        run:|      - run:)[^\n]*(?:\n(?: {10}[^\n]*|))*", text, re.M
     )
@@ -432,6 +438,21 @@ def test_npm_dispatch_pin_rejects_real_workflow_mutations(original, replacement)
     ("    if: ${{ github.ref", "    if: ${{ always() && github.ref"),
 ])
 def test_npm_jobs_cannot_bypass_a_failed_or_skipped_guard(job_id, original, replacement):
+    assert_tagged_npm_dispatch(NPM)
+    body = workflow_jobs(NPM).get(job_id, "")
+    mutant = mutate_once(NPM, body, mutate_once(body, original, replacement))
+    with pytest.raises(AssertionError):
+        assert_tagged_npm_dispatch(mutant)
+
+
+@pytest.mark.parametrize("job_id", ["publish", "claim-npm"])
+@pytest.mark.parametrize("original,replacement", [
+    ("    environment: npm-publish\n", ""),
+    ("    environment: npm-publish\n", "    environment: production\n"),
+    ("    environment: npm-publish\n", "    environment: npm-publish\n    environment: npm-publish-2\n"),
+    ("    environment: npm-publish\n", "    environment: ${{ inputs.tag }}\n"),
+])
+def test_npm_jobs_must_run_in_the_main_only_environment(job_id, original, replacement):
     assert_tagged_npm_dispatch(NPM)
     body = workflow_jobs(NPM).get(job_id, "")
     mutant = mutate_once(NPM, body, mutate_once(body, original, replacement))
