@@ -25,6 +25,7 @@ from ..ast_nodes import (
     BinOp,
     BoolLiteral,
     ColorLiteral,
+    ExprStmt,
     ForInStmt,
     ForStmt,
     FuncCall,
@@ -301,13 +302,16 @@ class _Analysis:
         return _incomplete(_Reason.UNRECOGNIZED_EXPRESSION)
 
     def _body_value(self, body, scope, env, visiting) -> _Result:
-        """The value of a block used as an expression: its last expression."""
+        """The last value of a block containing only modelled expression statements."""
 
-        for statement in reversed(list(body or ())):
-            expression = getattr(statement, "expr", None)
-            if expression is not None:
-                return self.classify(expression, scope, env, visiting)
-        return _incomplete(_Reason.UNRECOGNIZED_EXPRESSION)
+        statements = list(body or ())
+        # Check the whole block before selecting a value. A SwitchStmt's
+        # ``expr`` is its selector, and skipping any unmodelled statement can
+        # hide a different value or a change to the expression's environment.
+        if not statements or any(not isinstance(statement, ExprStmt)
+                                 for statement in statements):
+            return _incomplete(_Reason.UNRECOGNIZED_EXPRESSION)
+        return self.classify(statements[-1].expr, scope, env, visiting)
 
     def _identifier(self, name: str, scope, env, visiting) -> _Result:
         if env is not None and name in env:
@@ -372,18 +376,12 @@ class _Analysis:
     def _function_return(self, function: FuncDef, call: FuncCall, scope, env, visiting) -> _Result:
         if function.name in visiting:
             return _incomplete(_Reason.RECURSIVE_CALL)
-        # ``f(x) => expr`` is is_single_expr; a one-line body the parser kept
-        # as a single ExprStmt returns the same value and is accepted too. Any
-        # longer body is OUT: its result is not recoverable from the AST.
-        if not function.is_single_expr and not (
-                len(function.body) == 1
-                and getattr(function.body[0], "expr", None) is not None):
+        # Only a single ExprStmt has the return value this classifier models.
+        # The syntax flag cannot make a statement's ``expr`` a return value
+        # (in particular, a SwitchStmt holds its selector there).
+        if len(function.body) != 1 or not isinstance(function.body[0], ExprStmt):
             return _incomplete(_Reason.USER_FUNCTION_NONCONSTANT)
-        return_expression = None
-        for statement in function.body:
-            expression = getattr(statement, "expr", None)
-            if expression is not None:
-                return_expression = expression
+        return_expression = function.body[0].expr
         if return_expression is None:
             return _incomplete(_Reason.USER_FUNCTION_NONCONSTANT)
         parameters = _parse_parameters(function.params)
