@@ -90,7 +90,10 @@ int main() {
     ReportC report{};
     run_backtest_full(handle, bars.data(), n, "", "", 0, 4,
                       static_cast<int>(MagnifierDistribution::ENDPOINTS), &report);
-    if (const char* error = strategy_get_last_error(handle)) {
+    // An empty recorded error is the clean state (the C accessor returns a
+    // non-null empty string for "no error").
+    const char* error = strategy_get_last_error(handle);
+    if (error && *error) {
         std::printf("RUN_ERROR %s\n", error);
         return 11;
     }
