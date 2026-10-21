@@ -16,6 +16,7 @@ import pytest
 from pineforge_codegen import transpile
 from pineforge_codegen.ast_nodes import (
     ASTNode,
+    Assignment,
     BinOp,
     ExprStmt,
     ForStmt,
@@ -27,6 +28,8 @@ from pineforge_codegen.ast_nodes import (
     Program,
     StringLiteral,
     Subscript,
+    SwitchStmt,
+    Ternary,
     VarDecl,
 )
 from pineforge_codegen.codegen.scratch_facts import (
@@ -174,6 +177,98 @@ def test_truth_table(name, body, expected, reasons):
     assert re.fullmatch(r"(?:[0-9a-f]{2})*", facts["certificate"]), name
 
 
+VALUE_POSITION_CASES = [
+    ("tail_switch",
+     'pick(mode) =>\n'
+     '    switch mode\n'
+     '        "route" => "OPEN"\n'
+     '        "other" => str.tostring(bar_index)\n'
+     'strategy.entry(pick(input.string("route")), strategy.long)'),
+    ("nested_switch_arm",
+     'pick(mode) => switch mode\n'
+     '    "route" =>\n'
+     '        switch mode\n'
+     '            "route" => "OPEN"\n'
+     '            => str.tostring(bar_index)\n'
+     '    => "CLOSED"\n'
+     'strategy.entry(pick(input.string("route")), strategy.long)'),
+    ("nested_switch_ternary_branch",
+     'pick(mode) =>\n'
+     '    switch mode\n'
+     '        "route" => "OPEN"\n'
+     '        => str.tostring(bar_index)\n'
+     'strategy.entry(close > open ? pick(input.string("route")) : "CLOSED", strategy.long)'),
+    ("switch_default_arm",
+     'pick(mode) =>\n'
+     '    switch mode\n'
+     '        "route" => "OPEN"\n'
+     '        => str.tostring(bar_index)\n'
+     'strategy.entry(pick(input.string("route")), strategy.long)'),
+    ("local_before_returned_expression",
+     'id = switch close > open\n'
+     '    true =>\n'
+     '        local = str.tostring(bar_index)\n'
+     '        "OPEN"\n'
+     '    => "CLOSED"\n'
+     'strategy.entry(id, strategy.long)'),
+    ("assignment_before_returned_expression",
+     'state = ""\n'
+     'id = switch close > open\n'
+     '    true =>\n'
+     '        state := str.tostring(bar_index)\n'
+     '        "OPEN"\n'
+     '    => "CLOSED"\n'
+     'strategy.entry(id, strategy.long)'),
+    ("assignment_after_deciding_expression",
+     'state = ""\n'
+     'id = switch close > open\n'
+     '    true =>\n'
+     '        "OPEN"\n'
+     '        state := str.tostring(bar_index)\n'
+     '    => "CLOSED"\n'
+     'strategy.entry(id, strategy.long)'),
+    ("local_after_deciding_expression",
+     'id = switch close > open\n'
+     '    true =>\n'
+     '        "OPEN"\n'
+     '        local = str.tostring(bar_index)\n'
+     '    => "CLOSED"\n'
+     'strategy.entry(id, strategy.long)'),
+    ("nested_switch_before_returned_expression",
+     'id = switch close > open\n'
+     '    true =>\n'
+     '        switch "route"\n'
+     '            "route" => "OPEN"\n'
+     '            => "CLOSED"\n'
+     '        "AFTER"\n'
+     '    => "CLOSED"\n'
+     'strategy.entry(id, strategy.long)'),
+    ("nested_switch_after_deciding_expression",
+     'id = switch close > open\n'
+     '    true =>\n'
+     '        "BEFORE"\n'
+     '        switch "route"\n'
+     '            "route" => "OPEN"\n'
+     '    => "CLOSED"\n'
+     'strategy.entry(id, strategy.long)'),
+]
+
+
+@pytest.mark.parametrize(("name", "body"), VALUE_POSITION_CASES,
+                         ids=[row[0] for row in VALUE_POSITION_CASES])
+def test_unmodelled_value_position_is_out(name, body):
+    # Prove the classifier still follows a flat function's argument before
+    # checking the unmodelled value position in this row's emitted receipt.
+    control = scratch_facts('pick(mode) => mode\n'
+                            'strategy.entry(pick(input.string("route")), strategy.long)')
+    assert control["classification"] == "in_subset", (name, control)
+    assert control["reasons"] == [], (name, control)
+    facts = scratch_facts(body)
+    assert facts["classification"] == "out_of_subset", (name, facts)
+    assert {"user_function_nonconstant", "unrecognized_expression"} & set(facts["reasons"]), (
+        name, facts)
+
+
 def test_certificate_carries_the_pine_values():
     facts = scratch_facts('strategy.entry("L", strategy.long)\nstrategy.close("L")')
     # Decode the wire independently: version, then S,F,E,H,J as
@@ -215,6 +310,13 @@ class UnknownExpr(ASTNode):
     label: str = "L"
 
 
+@dataclass
+class UnknownStmt(ASTNode):
+    """An unmodelled statement must not become a value via an expr attribute."""
+
+    expr: ASTNode | None = None
+
+
 def long_direction():
     return MemberAccess(object=Identifier(name="strategy"), member="long")
 
@@ -230,6 +332,21 @@ def entry_statement(id_node):
 
 def facts_of(*statements):
     return classify_program(Program(body=list(statements)))
+
+
+def switch_value(*body, default_body=None):
+    return SwitchStmt(expr=StringLiteral(value="route"),
+                      cases=[(StringLiteral(value="route"), list(body))],
+                      default_body=([ExprStmt(expr=StringLiteral(value="CLOSED"))]
+                                    if default_body is None else default_body))
+
+
+def nested_switch_value():
+    # The selector is finite, but the nested switch's default value is not.
+    dynamic = FuncCall(callee=MemberAccess(object=Identifier(name="str"), member="tostring"),
+                       args=[Identifier(name="bar_index")])
+    return switch_value(switch_value(ExprStmt(expr=StringLiteral(value="OPEN")),
+                                     default_body=[ExprStmt(expr=dynamic)]))
 
 
 def test_identifier_mutant_is_out():
@@ -264,14 +381,89 @@ MUTANTS = [
     ("unrecognized_call", ("unrecognized_call",),
      lambda: FuncCall(callee=Identifier(name="mystery"), args=[])),
     ("unknown_node", ("unrecognized_expression",), lambda: UnknownExpr()),
+    ("nested_switch_arm", ("unrecognized_expression",), nested_switch_value),
+    ("nested_switch_ternary_branch", ("unrecognized_expression",),
+     lambda: Ternary(condition=Identifier(name="close"),
+                     true_val=nested_switch_value(), false_val=StringLiteral(value="CLOSED"))),
+    ("switch_default_statement", ("unrecognized_expression",),
+     lambda: switch_value(ExprStmt(expr=StringLiteral(value="OPEN")),
+                          default_body=[nested_switch_value()])),
+    ("local_before_value", ("unrecognized_expression",),
+     lambda: switch_value(VarDecl(name="local", value=UnknownExpr()),
+                          ExprStmt(expr=StringLiteral(value="OPEN")))),
+    ("assignment_before_value", ("unrecognized_expression",),
+     lambda: switch_value(Assignment(target=Identifier(name="local"), value=UnknownExpr()),
+                          ExprStmt(expr=StringLiteral(value="OPEN")))),
+    ("assignment_after_value", ("unrecognized_expression",),
+     lambda: switch_value(ExprStmt(expr=StringLiteral(value="OPEN")),
+                          Assignment(target=Identifier(name="local"), value=UnknownExpr()))),
+    ("local_after_value", ("unrecognized_expression",),
+     lambda: switch_value(ExprStmt(expr=StringLiteral(value="OPEN")),
+                          VarDecl(name="local", value=UnknownExpr()))),
+    ("nested_switch_before_value", ("unrecognized_expression",),
+     lambda: switch_value(switch_value(ExprStmt(expr=StringLiteral(value="OPEN"))),
+                          ExprStmt(expr=StringLiteral(value="AFTER")))),
+    ("nested_switch_without_default_after_value", ("unrecognized_expression",),
+     lambda: switch_value(ExprStmt(expr=StringLiteral(value="BEFORE")),
+                          switch_value(ExprStmt(expr=StringLiteral(value="OPEN")),
+                                       default_body=[]))),
+    ("unknown_statement_before_value", ("unrecognized_expression",),
+     lambda: switch_value(UnknownStmt(), ExprStmt(expr=StringLiteral(value="OPEN")))),
+    ("unknown_statement_after_value", ("unrecognized_expression",),
+     lambda: switch_value(ExprStmt(expr=StringLiteral(value="OPEN")), UnknownStmt())),
+    ("unknown_statement_with_expr", ("unrecognized_expression",),
+     lambda: switch_value(UnknownStmt(expr=StringLiteral(value="SELECTOR")))),
 ]
 
 
 @pytest.mark.parametrize(("name", "reasons", "node"), MUTANTS, ids=[row[0] for row in MUTANTS])
 def test_mutant_node_kind_is_out(name, reasons, node):
+    control = facts_of(entry_statement(StringLiteral(value="OPEN")))
+    assert control["classification"] == "in_subset", (name, control)
+    assert control["reasons"] == [], (name, control)
+    function = FuncDef(name="pick", params=["mode"], is_single_expr=True,
+                       body=[ExprStmt(expr=Identifier(name="mode"))])
+    flat_control = facts_of(function, entry_statement(
+        FuncCall(callee=Identifier(name="pick"), args=[StringLiteral(value="OPEN")])))
+    assert flat_control["classification"] == "in_subset", (name, flat_control)
+    assert flat_control["reasons"] == [], (name, flat_control)
     facts = facts_of(entry_statement(node()))
     assert facts["classification"] == "out_of_subset", (name, facts)
     assert set(reasons) <= set(facts["reasons"]), (name, facts["reasons"])
+
+
+FUNCTION_BODY_MUTANTS = [
+    ("tail_switch_with_default",
+     lambda: [switch_value(ExprStmt(expr=StringLiteral(value="OPEN")))]),
+    ("tail_switch_without_default",
+     lambda: [switch_value(ExprStmt(expr=StringLiteral(value="OPEN")), default_body=[])]),
+    ("unknown_statement_with_expr",
+     lambda: [UnknownStmt(expr=StringLiteral(value="SELECTOR"))]),
+    ("local_before_value",
+     lambda: [VarDecl(name="local", value=UnknownExpr()),
+              ExprStmt(expr=StringLiteral(value="OPEN"))]),
+    ("assignment_after_value",
+     lambda: [ExprStmt(expr=StringLiteral(value="OPEN")),
+              Assignment(target=Identifier(name="local"), value=UnknownExpr())]),
+]
+
+
+@pytest.mark.parametrize("is_single_expr", [False, True], ids=["block", "single_expr"])
+@pytest.mark.parametrize(("name", "body"), FUNCTION_BODY_MUTANTS,
+                         ids=[row[0] for row in FUNCTION_BODY_MUTANTS])
+def test_mutant_function_value_position_is_out(name, body, is_single_expr):
+    def receipt(statements):
+        function = FuncDef(name="pick", params=["mode"], is_single_expr=is_single_expr,
+                           body=statements)
+        call = FuncCall(callee=Identifier(name="pick"), args=[StringLiteral(value="OPEN")])
+        return facts_of(function, entry_statement(call))
+
+    control = receipt([ExprStmt(expr=Identifier(name="mode"))])
+    assert control["classification"] == "in_subset", (name, control)
+    assert control["reasons"] == [], (name, control)
+    facts = receipt(body())
+    assert facts["classification"] == "out_of_subset", (name, facts)
+    assert "user_function_nonconstant" in facts["reasons"], (name, facts)
 
 
 def test_mutant_loop_variable_is_out():
