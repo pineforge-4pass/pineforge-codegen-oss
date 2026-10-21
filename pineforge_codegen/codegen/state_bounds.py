@@ -16,6 +16,7 @@ from ..ast_nodes import (
     MemberAccess, MethodDef, NumberLiteral, StringLiteral, UnaryOp, VarDecl,
 )
 from ..limits import iter_ast_nodes
+from .tables import _matrix_functional_receiver
 
 
 _INLINE_CPP = frozenset({"bool", "int", "int32_t", "int64_t", "uint64_t", "double"})
@@ -64,6 +65,15 @@ class _Proofs:
             if (isinstance(node, VarDecl) and self.counts[node.name] == 1
                 and node.name not in shadowed)
         }
+        # Source-order caching keeps a flat chain of aliases flat in Python
+        # too. AST nesting is bounded, but the number of top-level aliases is
+        # not; following the entire chain recursively could introduce a new
+        # RecursionError in an otherwise accepted script.
+        self.constants = {}
+        for decl in self.top.values():
+            if (decl.loc is not None and decl.name not in self.reassigned
+                    and not decl.is_var and not decl.is_varip):
+                self.constants[decl.name] = self.integer(decl.value, decl.loc.line)
         self.user_methods = {
             node.name for node in self.nodes if isinstance(node, MethodDef)
         }
@@ -83,7 +93,9 @@ class _Proofs:
                     if receiver.name == kind:
                         # Only the first (id) argument is the receiver. An
                         # occurrence in another slot may escape or alias it.
-                        arg = node.args[0] if node.args else node.kwargs.get("id")
+                        arg = (_matrix_functional_receiver(method, node)
+                               if kind == "matrix" else
+                               node.args[0] if node.args else node.kwargs.get("id"))
                         if isinstance(arg, Identifier):
                             self.safe_uses[kind].add(id(arg))
                     elif receiver.name not in {"array", "matrix"}:
@@ -93,7 +105,7 @@ class _Proofs:
             if isinstance(node, Identifier):
                 self.uses.setdefault(node.name, set()).add(id(node))
 
-    def integer(self, node, before, seen=frozenset()):
+    def integer(self, node, before):
         """Exact integer arithmetic in a conservative, non-overflowing subset.
 
         Input defaults, mutable vars, function results, division and floating
@@ -102,19 +114,19 @@ class _Proofs:
         result = None
         if isinstance(node, NumberLiteral) and type(node.value) is int:
             result = node.value
-        elif isinstance(node, Identifier) and node.name not in seen:
+        elif isinstance(node, Identifier):
             decl = self.top.get(node.name)
             if (decl is not None and decl.name not in self.reassigned
                     and not decl.is_var and not decl.is_varip
                     and decl.loc is not None and decl.loc.line < before):
-                result = self.integer(decl.value, decl.loc.line, seen | {node.name})
+                result = self.constants.get(node.name)
         elif isinstance(node, UnaryOp) and node.op in {"+", "-"}:
-            value = self.integer(node.operand, before, seen)
+            value = self.integer(node.operand, before)
             if value is not None:
                 result = value if node.op == "+" else -value
         elif isinstance(node, BinOp) and node.op in {"+", "-", "*"}:
-            left = self.integer(node.left, before, seen)
-            right = self.integer(node.right, before, seen)
+            left = self.integer(node.left, before)
+            right = self.integer(node.right, before)
             if left is not None and right is not None:
                 if node.op == "+":
                     result = left + right

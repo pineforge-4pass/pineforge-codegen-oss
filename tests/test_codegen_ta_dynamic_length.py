@@ -387,5 +387,6 @@ def test_constant_and_input_lengths_keep_their_cpp(tmp_path: Path) -> None:
     ours = transpile_json(pine)
     before = transpile_json(pine, parent)
     assert ours["ok"] and before["ok"]
-    assert ours["cpp"] == before["cpp"]
+    from tests._legacy_cpp import without_state_bounds
+    assert without_state_bounds(ours["cpp"]) == without_state_bounds(before["cpp"])
     assert "pine_ta_length.hpp" not in ours["cpp"]

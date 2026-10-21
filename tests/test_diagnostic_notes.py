@@ -13,6 +13,7 @@ from pineforge_codegen import diagnostics_catalog, transpile_full
 from pineforge_codegen.errors import CompileError, Level
 from pineforge_codegen.errors import Diagnostic, Phase, SourceLocation
 from pineforge_codegen.diagnostic_codes import classify, parse_template, render, render_diagnostic
+from tests._legacy_cpp import without_state_bounds
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diagnostic_notes"
@@ -214,6 +215,8 @@ def test_real_interfaces_keep_notes_and_short_sentences(case):
                                     if diagnostic.hint else diagnostic.message)
     baseline = PRODUCT_BEFORE["interfaces"][case["name"]]
     normalized = copy.deepcopy(envelope)
+    if "cpp" in normalized:
+        normalized["cpp"] = without_state_bounds(normalized["cpp"])
     python_rows = []
     for d, row in zip(diagnostics, normalized["diagnostics"]):
         row.pop("user_message")

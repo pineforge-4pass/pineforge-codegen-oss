@@ -38,9 +38,8 @@ def _without_run_failure_scaffold(cpp: str) -> str:
     return ''.join(output)
 
 
-def legacy_cpp(cpp: str) -> str:
-    # Coded-stop ABIs are additive; retain their actual call-site changes.
-    cpp = _without_run_failure_scaffold(cpp)
+def without_state_bounds(cpp: str) -> str:
+    """Exclude only the additive state query from scaffold-identity checks."""
     # The state-bound query does not change the strategy body. Its actual
     # rows/types are checked and compiled in test_script_state_bounds.
     cpp = cpp.replace('#include <cstddef>\n', '')
@@ -48,6 +47,13 @@ def legacy_cpp(cpp: str) -> str:
         r'^struct _PFScriptStateBoundV1 \{\n.*?^    return bounds;\n}\n\n',
         '', cpp, flags=re.MULTILINE | re.DOTALL,
     )
+    return cpp
+
+
+def legacy_cpp(cpp: str) -> str:
+    # Coded-stop ABIs are additive; retain their actual call-site changes.
+    cpp = _without_run_failure_scaffold(cpp)
+    cpp = without_state_bounds(cpp)
     cpp = cpp.replace(
         '#if __has_include(<pineforge/checked_settings.hpp>)\n'
         '#include <pineforge/checked_settings.hpp>\n#endif\n', '')

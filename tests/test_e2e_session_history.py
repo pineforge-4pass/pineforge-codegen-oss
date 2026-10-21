@@ -863,7 +863,8 @@ def test_scripts_without_a_read_keep_their_cpp(place: str, tmp_path: Path) -> No
                     + 'if x\n    strategy.entry("L", strategy.long)\n', encoding="utf-8")
     now, before = transpile_json(pine), transpile_json(pine, reference)
     assert now["ok"] and before["ok"], (now["diagnostics"], before["diagnostics"])
-    assert now["cpp"] == before["cpp"]
+    from tests._legacy_cpp import without_state_bounds
+    assert without_state_bounds(now["cpp"]) == without_state_bounds(before["cpp"])
     compile_cpp(now["cpp"], label=place)
 
 

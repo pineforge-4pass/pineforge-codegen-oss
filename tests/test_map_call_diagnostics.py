@@ -214,8 +214,9 @@ for i = 0 to 0
         ),
         (
             _NESTED_LEXICAL_MAP_ROOT_SOURCE,
-            # The Holder arena now calls coded UDT stop helpers.
-            "ef7d12496ae3c8e07e8bbf7c20efb5a3aaee2f69f786c67747d804aec57e4e45",
+            # Native-width UDT IDs without the narrow capacity stop; harvested
+            # by lab rj-20261021t002132-e4130e (runtime value asserted below).
+            "9bc35862f65ed94cb7992b4879ef8e71ee47b2eca9caf96abc6fff0dd86a66df",
             7.0,
         ),
         (

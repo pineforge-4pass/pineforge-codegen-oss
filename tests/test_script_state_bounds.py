@@ -27,10 +27,14 @@ def _member(bounds, name):
 
 @pytest.mark.parametrize("method", ["values.push(close)", "array.push(values, close)"])
 def test_append_per_bar_requires_external_storage(method):
-    bounds, cpp = _generated(f"var values = array.new<float>()\n{method}")
+    source = ('//@version=6\nstrategy("State bounds")\n'
+              f"var values = array.new<float>()\n{method}\n")
+    gen, _ctx, cpp, _diagnostics, _sites = _generate(source, True, "bounds.pine")
     # Pin the actual old representation and mutation, not a source comment.
     assert "std::vector<double> values;" in cpp
     assert "push_back(" in cpp
+    assert "strategy_script_state_bounds_v1" in cpp
+    bounds = gen.script_state_bounds
     row = _member(bounds, "values")
     assert row["cardinality_bound"] is None
     assert row["storage_requirement"] == "external"
