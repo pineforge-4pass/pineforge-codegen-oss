@@ -18,7 +18,7 @@ A script's imports resolve only through its own manifest, never through the
 case-wide directory alone: otherwise a probe that pins no library would
 transpile on a shard neighbour's pin, and measure differently by case
 composition. ``transpile()`` is handed the source text, not a slug (the frozen
-verifier, pineforge-lab 3bac0b7b ``scripts/verify-engine-local.py:1698``, calls
+campaign verifier (commit 3bac0b7b, ``scripts/verify-engine-local.py:1698``) calls
 ``transpile((d / "strategy.pine").read_text())``), so the manifest is found by
 content: the one ``requests.json`` whose ``probe.strategySha256`` is the sha256
 of the script. That sha is of the strategy file's bytes, and ``read_text()``
