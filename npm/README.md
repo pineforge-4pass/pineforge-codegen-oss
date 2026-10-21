@@ -34,7 +34,14 @@ gh workflow run publish-pyodide.yml --repo pineforge-4pass/pineforge-codegen-oss
 Use the existing release tag in place of `<tag>`; every run, including a
 placeholder claim, requires it. Set `dry_run=true` to validate first. A tag push
 alone publishes nothing. A green `release.yml` run does not mean npm published;
-watch the `publish-pyodide.yml` run. Publication uses npm OIDC Trusted Publishing
+watch the `publish-pyodide.yml` run.
+The guard and job conditions live in the workflow file on `main`, but GitHub
+executes the file from the dispatched ref, so they alone cannot stop a user
+with write access who pushes and dispatches a modified workflow on another
+branch; a server-side bound requires an admin to configure a GitHub environment
+with a `main`-only deployment-branch policy and bind the npm trusted publisher
+to require it, outside this change.
+Publication uses npm OIDC Trusted Publishing
 after the dependency audit and the full parity gate pass; published versions
 carry npm provenance. A manual `workflow_dispatch` defaults to a dry run; `dry_run=false`
 publishes for real. The one-time bootstrap is done: 0.7.0 was the manual first publish,

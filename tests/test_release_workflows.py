@@ -84,7 +84,7 @@ def test_github_release_flag_fails_closed():
 def test_no_workflow_uses_retired_runner_labels():
     # PF_CI_LABELS env entries in gate.yml/test.yml are out of scope:
     # they are not runs-on values.
-    paths = sorted(WORKFLOWS.glob("*.yml"))
+    paths = sorted((*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")))
     assert paths, "must discover workflow files for the hosted-runner guard"
     checked = 0
     for path in paths:
@@ -120,6 +120,23 @@ def test_no_workflow_uses_retired_runner_labels():
             )
             checked += 1
     assert checked, "must inspect actual runs-on values"
+
+
+@pytest.mark.parametrize("suffix", [".yml", ".yaml"])
+def test_retired_runner_guard_rejects_workflow_mutations(tmp_path, monkeypatch, suffix):
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    path = tmp_path / f"release{suffix}"
+    path.write_text(RELEASE, encoding="utf-8")
+    test_no_workflow_uses_retired_runner_labels()
+    mutant = mutate_once(
+        RELEASE, "    runs-on: ubuntu-latest\n", "    runs-on: self-hosted\n",
+    )
+    path.write_text(mutant, encoding="utf-8")
+    with pytest.raises(
+        AssertionError,
+        match=rf"{re.escape(path.name)}:\d+: runs-on names a retired runner label",
+    ):
+        test_no_workflow_uses_retired_runner_labels()
 
 
 def workflow_triggers(text):

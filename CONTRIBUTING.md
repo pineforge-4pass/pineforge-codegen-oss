@@ -146,6 +146,12 @@ after a successful tag push, dispatch on `main` with the existing release
 and the same required tag guard. The guard fails a dispatch at another ref;
 both npm jobs also retain their main-ref job conditions and require the
 guard to succeed.
+The guard and job conditions live in the workflow file on `main`, but GitHub
+executes the file from the dispatched ref, so they alone cannot stop a user
+with write access who pushes and dispatches a modified workflow on another
+branch; a server-side bound requires an admin to configure a GitHub environment
+with a `main`-only deployment-branch policy and bind the npm trusted publisher
+to require it, outside this change.
 
 ## Change and review notes
 
