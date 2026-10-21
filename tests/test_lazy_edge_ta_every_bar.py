@@ -508,7 +508,7 @@ def test_per_execution_families_keep_inline_compute_and_never_precalc():
         assert "_use_precalc" not in line
         assert f"_precalc_{member}" not in cpp
     # The unconditional sma5 is untouched (eager, precalc-eligible).
-    assert "std::vector<double> _precalc__ta_sma_1" in cpp
+    assert "_PFO1Buffer<double> _precalc__ta_sma_1" in cpp
     assert on_bar.count("_ta_sma_1.compute(") == 1
 
 
@@ -539,7 +539,7 @@ def test_unpinned_families_keep_their_existing_lowering():
     for var, member in (("a", "_ta_rsi_1"), ("b", "_ta_atr_2"), ("c", "_ta_stdev_3"), ("d", "_ta_wma_4")):
         assert f"{member}.compute(" in _stmt(cpp, f"{var} = ("), var
     # Static sites keep main's precalc eligibility (static mode only).
-    assert "std::vector<double> _precalc__ta_rsi_1" in cpp
+    assert "_PFO1Buffer<double> _precalc__ta_rsi_1" in cpp
 
 
 def test_eager_top_level_sites_are_unchanged():

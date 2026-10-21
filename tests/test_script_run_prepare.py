@@ -81,10 +81,15 @@ def test_constructor_values_caps_and_cache_invalidation_are_preserved():
     assert "_inputs_initialized_ = false;" in preparation
     assert "_ta_initialized_ = false;" in preparation
     assert "_use_precalc = false;" in preparation
-    caches = re.findall(r"^\s+std::vector<double> (_precalc_\w+);$", cpp, re.MULTILINE)
+    caches = re.findall(
+        r"^\s+_PFO1Buffer<double> (_precalc_\w+)\{&_pf_o1_store_\};$",
+        cpp, re.MULTILINE)
     assert caches
     for cache in caches:
-        assert f"this->{cache} = decltype(this->{cache}){{}};" in preparation
+        # The cache's storage view is rebuilt each run and rebound to the
+        # strategy's store owner; the old resident vector defaulted.
+        assert (f"this->{cache} = decltype(this->{cache})"
+                "{&_pf_o1_store_};") in preparation
     assert re.search(r"_s_close = decltype\(this->_s_close\)[({]211[)}];", preparation)
     assert preparation.index("_use_precalc = false;") < preparation.index("precalculate(bars, n)")
     assert "inputs_.clear" not in preparation

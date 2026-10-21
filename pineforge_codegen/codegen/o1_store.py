@@ -25,7 +25,7 @@ from __future__ import annotations
 
 # Every generated identifier below is reserved against authored names
 # (``helpers.CPP_EMITTER_NAMES``).
-STORE_GUARD_CPP = r"""\
+STORE_GUARD_CPP = r"""
 // >>> pf-o1-store
 // A5: script state that the compiler cannot bound lives in the engine's O(1)
 // store (fixed resident working set over a spilling backing) instead of a
@@ -42,7 +42,7 @@ STORE_GUARD_CPP = r"""\
 #endif
 """
 
-STORE_CORE_CPP = r"""\
+STORE_CORE_CPP = r"""
 #include <stdexcept>
 
 #if PF_O1_STORE_AVAILABLE

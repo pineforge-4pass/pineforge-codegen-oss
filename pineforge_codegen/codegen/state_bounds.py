@@ -168,7 +168,7 @@ class _Proofs:
 
 
 def _row(member, kind, count, element, reason, cpp_type,
-         current_storage='"resident"'):
+         current_storage="resident"):
     return {
         "member": member,
         "kind": kind,
@@ -177,9 +177,10 @@ def _row(member, kind, count, element, reason, cpp_type,
         "element_bytes_cpp": element,
         "storage_requirement": "preallocate" if count is not None and element is not None else "external",
         # A storage requirement is not a claim that an adapter was installed.
-        # ``current_storage`` is the C++ expression the emitted row carries: a
-        # literal for a resident member, or ``_PF_O1_CURRENT_STORAGE`` for a
-        # member whose backing depends on the engine the TU is built against.
+        # ``current_storage`` is a plain word when it is a literal
+        # (``resident``) and the emitted macro's name when the backing depends
+        # on the engine the TU is built against; the emitter quotes the former
+        # and emits the latter as an expression.
         "current_storage": current_storage,
         "reason": reason,
     }
@@ -211,8 +212,9 @@ def build_script_state_bounds(emitter, declarations, checkpoint_members):
         cpp_type = decl_match.group(1)
         kind, count, element = "opaque", None, None
         reason = "No complete payload bound is proven."
-        # The C++ expression the emitted row carries for current storage.
-        current_storage = '"resident"'
+        # Where the member lives today; an identifier here is emitted as an
+        # expression, anything else as a string literal.
+        current_storage = "resident"
         if cpp_type in _INLINE_CPP:
             kind, count, element = "scalar", 1, f"sizeof({cpp_type})"
             reason = "One inline primitive."
@@ -327,11 +329,16 @@ def emit_script_state_bounds(emitter, lines):
         name = emitter._cpp_string_escape(row["member"])
         count = row["cardinality_bound"]
         size = row["element_bytes_cpp"]
+        storage = row["current_storage"]
+        storage_cpp = (
+            storage if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", storage)
+            else '"' + emitter._cpp_string_escape(storage) + '"'
+        )
         lines.append(
             f'        {{"{name}", "{row["kind"]}", {str(count is not None).lower()}, '
             f'{count if count is not None else 0}ULL, {str(size is not None).lower()}, '
             f'{size if size is not None else 0}, "{row["storage_requirement"]}", '
-            f'{row["current_storage"]}}},'
+            f'{storage_cpp}}},'
         )
     lines.extend([
         "    };",
