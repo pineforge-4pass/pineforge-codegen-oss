@@ -196,6 +196,16 @@ nothing in the strategy body is.
 The fail-before log is `lab remote logs rj-20261021t012730-0c631f --step pytest`
 (local copy sha256 `04b7a71898bdc936b200ac1837935fd96b6cca007f1162ccad36c7495e353e00`).
 
+A stale job submitted for `ed370651` before the fixes
+(`rj-20261021t020454-e6821a`, engine companion being created) was cancelled
+before it ran; it is not evidence.
+
+Artifacts kept for reproduction: the fail-before worktree
+`../wt-failbefore` (detached at `0f4cc9d7` with the test diff) and the
+companion engine checkout `../engine-storefix` (engine repo worktree at
+`c47e51d8a`, corpus `e99bbd9d` checked out with its 1m feed, the three-line
+store fix as a tracked diff). Neither is removed.
+
 ## Capacity and retention audit
 
 - No capacity refusal is generated: `_PFO1Buffer::resize` creates or resizes an
