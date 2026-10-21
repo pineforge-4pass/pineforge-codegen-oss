@@ -1,7 +1,7 @@
 """Compare frozen lowering bytes without additive settings/capabilities/stop ABIs."""
 import re
 
-from pineforge_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP
+from tunaxis_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP
 
 
 def _without_run_failure_scaffold(cpp: str) -> str:

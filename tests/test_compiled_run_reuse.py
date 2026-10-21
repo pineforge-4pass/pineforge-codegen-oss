@@ -1,7 +1,7 @@
 """Permanent retained-C-handle pins on bounded literal data, not a TV grader."""
 from pathlib import Path
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests.test_runtime_var_initialization import _compile_and_run
 
 

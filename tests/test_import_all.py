@@ -1,4 +1,4 @@
-"""Floor guard: every pineforge_codegen submodule must import on the running
+"""Floor guard: every tunaxis_codegen submodule must import on the running
 Python. On the 3.11 CI matrix leg this catches any 3.12+ syntax in a module
 that no other test imports directly (a gap a plain pytest run would miss).
 """
@@ -8,7 +8,7 @@ from __future__ import annotations
 import importlib
 import pkgutil
 
-import pineforge_codegen
+import tunaxis_codegen
 
 
 def test_all_submodules_import() -> None:
@@ -22,7 +22,7 @@ def test_all_submodules_import() -> None:
 
     seen = 0
     for mod in pkgutil.walk_packages(
-        pineforge_codegen.__path__, "pineforge_codegen.", onerror=_on_error
+        tunaxis_codegen.__path__, "tunaxis_codegen.", onerror=_on_error
     ):
         seen += 1
         try:

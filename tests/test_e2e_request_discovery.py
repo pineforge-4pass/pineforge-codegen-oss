@@ -1,5 +1,5 @@
 """End to end: the feeds ``transpile_json``'s ``requests`` names are exactly
-the ones a run needs (``pineforge_codegen.request_discovery``).
+the ones a run needs (``tunaxis_codegen.request_discovery``).
 
 The script requests an ``input.symbol`` at the chart's timeframe and at
 ``"60"``, and a literal ``.P`` symbol at ``"D"``. Resolved as a host resolves

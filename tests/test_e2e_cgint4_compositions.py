@@ -21,7 +21,7 @@ missed:
   slot's na is ``na<int64_t>()``: the lane spelled ``na<int>()`` for a
   global, switch or reassigned target (Pine's ``int``), which widens to a
   value, so ``na(t)`` read false. Main kept the previous bar's value.
-* ``pineforge_codegen._generate``: CG-OPEN-ITEMS f3e1816 rewrites ``nz`` /
+* ``tunaxis_codegen._generate``: CG-OPEN-ITEMS f3e1816 rewrites ``nz`` /
   ``fixnan`` keyword arguments to their positions (``bind_builtin_keywords``)
   after XSYM-A's passes in main's ``_generate`` loop: ``lower_no_data_requests``
   and ``specialize_security_contexts``, which copies a helper per context and
@@ -87,7 +87,7 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
+from tunaxis_codegen import transpile, transpile_full
 from tests import _compile as compile_env
 from tests._e2e import (
     Build, chart_feed_head, execute_all, ok, reference_codegen, same,

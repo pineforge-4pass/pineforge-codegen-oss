@@ -8,16 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.ast_nodes import Identifier, MemberAccess, StringLiteral
-from pineforge_codegen.codegen.checked_settings import _string_setting_arg
-from pineforge_codegen.codegen.tables import (
+from tunaxis_codegen import transpile
+from tunaxis_codegen.ast_nodes import Identifier, MemberAccess, StringLiteral
+from tunaxis_codegen.codegen.checked_settings import _string_setting_arg
+from tunaxis_codegen.codegen.tables import (
     DRAWING_STYLE_NS,
     NAME_ECHO_STRING_MEMBERS,
     SKIP_NAMESPACES,
 )
-from pineforge_codegen.codegen.visit_expr import _BUILTIN_NAMESPACE_NAMES
-from pineforge_codegen.support_checker import (
+from tunaxis_codegen.codegen.visit_expr import _BUILTIN_NAMESPACE_NAMES
+from tunaxis_codegen.support_checker import (
     UNSUPPORTED_CONST_NAMESPACES,
     UNSUPPORTED_NAMESPACE_VARS,
 )

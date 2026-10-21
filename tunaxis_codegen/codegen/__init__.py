@@ -5,8 +5,8 @@ Historically the codegen lived in a single ``codegen.py`` module that hit
 incrementally splitting it into focused submodules without changing the
 public API:
 
-    from pineforge_codegen.codegen import CodeGen          # primary
-    from pineforge_codegen.codegen import BAR_FIELDS, ...  # constants
+    from tunaxis_codegen.codegen import CodeGen          # primary
+    from tunaxis_codegen.codegen import BAR_FIELDS, ...  # constants
 
 Re-exports preserved for ``support_checker.py`` and any external consumers
 that imported module-level rule tables. Add new helper modules under

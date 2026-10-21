@@ -4,7 +4,7 @@ correct structured type, not silently collapse to a scalar.
 Investigation outcome (see the module-level note below) is the matrix-inference
 precedent from ``tests/test_analyzer_matrix_inference.py``:
 
-The analyzer's :class:`~pineforge_codegen.symbols.PineType` enum is deliberately
+The analyzer's :class:`~tunaxis_codegen.symbols.PineType` enum is deliberately
 small (``INT / FLOAT / BOOL / STRING / COLOR / VOID / NA / UNKNOWN``) and has no
 ``ARRAY`` or ``TUPLE`` member. Structured shape (``array<float>`` etc.) is
 carried on ``Symbol.type_spec`` (a :class:`TypeSpec`), produced by the separate
@@ -27,10 +27,10 @@ These tests lock that behavior in so a future change to the inference paths
 cannot regress array shape back to a bare scalar without tripping a test.
 """
 
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
-from pineforge_codegen.analyzer import Analyzer
-from pineforge_codegen.symbols import PineType
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
+from tunaxis_codegen.analyzer import Analyzer
+from tunaxis_codegen.symbols import PineType
 
 
 def _analyze(src: str):

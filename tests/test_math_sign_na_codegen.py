@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 
-from pineforge_codegen import transpile
-from pineforge_codegen.codegen import CodeGen
+from tunaxis_codegen import transpile
+from tunaxis_codegen.codegen import CodeGen
 from tests._compile import compile_cpp
 
 

@@ -1,7 +1,7 @@
 """Stable diagnostic codes: the catalog, its pin, and every emitted diagnostic.
 
 Every diagnostic carries a ``code`` and named ``args``; the catalog
-(``pineforge_codegen/diagnostics_catalog.json``) gives each code its severity,
+(``tunaxis_codegen/diagnostics_catalog.json``) gives each code its severity,
 English ICU MessageFormat templates and a one-line explanation, and the
 rendered templates are the diagnostic's ``message`` and ``hint`` byte for
 byte. ``tests/fixtures/diagnostic_codes_pin.json`` pins what each code means:
@@ -21,11 +21,11 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import diagnostics_catalog, transpile, transpile_full
-from pineforge_codegen.diagnostic_codes import (
+from tunaxis_codegen import diagnostics_catalog, transpile, transpile_full
+from tunaxis_codegen.diagnostic_codes import (
     UNCATALOGUED, classify, escape_literal, parse_template, render, render_diagnostic,
 )
-from pineforge_codegen.errors import CompileError, Diagnostic, Level, Phase, SourceLocation
+from tunaxis_codegen.errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from tests._private_fixtures import private_fixture
 from tests.test_host_member_names import PRIVATE_STRATEGIES
 

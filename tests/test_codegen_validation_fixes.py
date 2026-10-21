@@ -23,7 +23,7 @@ Covers ten fix families:
 
 import re
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._compile import compile_cpp
 
 
@@ -288,8 +288,8 @@ def test_security_param_tf_nested_ta_six_distinct_literals_cloned_per_callsite()
 # 4. T[] array-typed function parameters
 # ---------------------------------------------------------------------------
 def test_float_array_param_not_dropped():
-    from pineforge_codegen.lexer import Lexer
-    from pineforge_codegen.parser import Parser
+    from tunaxis_codegen.lexer import Lexer
+    from tunaxis_codegen.parser import Parser
     src = ('strategy("t")\n'
            "f(float[] arr) =>\n"
            "    x = array.size(arr)\n"
@@ -301,8 +301,8 @@ def test_float_array_param_not_dropped():
 
 
 def test_drawing_array_param_not_dropped():
-    from pineforge_codegen.lexer import Lexer
-    from pineforge_codegen.parser import Parser
+    from tunaxis_codegen.lexer import Lexer
+    from tunaxis_codegen.parser import Parser
     src = ('strategy("t")\n'
            "f(line[] ln, label[] lb, box[] bx) =>\n"
            "    n = array.size(ln)\n"
@@ -316,8 +316,8 @@ def test_drawing_array_param_not_dropped():
 def test_array_param_function_preserves_following_global_var():
     # The original bug: a T[]-param function was dropped AND swallowed the
     # following global var declaration (the "longActive" regression).
-    from pineforge_codegen.lexer import Lexer
-    from pineforge_codegen.parser import Parser
+    from tunaxis_codegen.lexer import Lexer
+    from tunaxis_codegen.parser import Parser
     src = ('strategy("t")\n'
            "f(float[] a) =>\n"
            "    array.size(a)\n"

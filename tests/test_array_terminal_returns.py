@@ -6,11 +6,11 @@ from itertools import product
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.analyzer import Analyzer
-from pineforge_codegen.errors import CompileError
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
+from tunaxis_codegen import transpile
+from tunaxis_codegen.analyzer import Analyzer
+from tunaxis_codegen.errors import CompileError
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
 from tests._compile import compile_cpp
 
 

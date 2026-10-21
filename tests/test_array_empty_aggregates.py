@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 def _generate(body: str) -> str:

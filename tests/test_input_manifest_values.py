@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile_full
-from pineforge_codegen.codegen.checked_settings import _numeric_setting_value
+from tunaxis_codegen import transpile_full
+from tunaxis_codegen.codegen.checked_settings import _numeric_setting_value
 
 
 ROOT = Path(__file__).resolve().parents[1]

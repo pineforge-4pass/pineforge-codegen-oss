@@ -1,9 +1,9 @@
 """Phase B: chart.left/right_visible_bar_time must be rejected (no batch-mode meaning)."""
 import pytest
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
-from pineforge_codegen.support_checker import SupportChecker
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
+from tunaxis_codegen.support_checker import SupportChecker
+from tunaxis_codegen.errors import CompileError
 
 
 @pytest.mark.parametrize("member", ["left_visible_bar_time", "right_visible_bar_time"])

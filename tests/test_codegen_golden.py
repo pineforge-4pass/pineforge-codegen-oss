@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import pytest
 from tests._legacy_cpp import legacy_cpp
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 # Resolve the engine corpus from the sibling checkout (../pineforge-engine)
 # or PINEFORGE_ENGINE_CORPUS.  The golden itself uses a checked-in fixture so

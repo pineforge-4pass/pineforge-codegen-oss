@@ -9,8 +9,8 @@ import sys
 if "/codegen" not in sys.path:
     sys.path.insert(0, "/codegen")
 
-from pineforge_codegen import transpile_full
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile_full
+from tunaxis_codegen.errors import CompileError
 
 
 def _diagnostic_entries(diagnostics) -> list:

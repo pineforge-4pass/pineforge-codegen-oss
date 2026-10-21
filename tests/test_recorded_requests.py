@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
+from tunaxis_codegen import transpile, transpile_full
 from tests._compile import compile_cpp
 from tests._e2e import chart_feed_head, skip_unless_e2e_env
 from tests._requests import build, run, same, write_root

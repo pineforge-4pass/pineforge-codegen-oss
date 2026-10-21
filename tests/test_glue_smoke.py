@@ -1,7 +1,7 @@
 """Glue contract smoke test for gate/glue.py.
 
 Loads gate/glue.py directly (it carries a `sys.path.insert(0, "/codegen")`
-preamble; `pineforge_codegen` still resolves because the repo root is on
+preamble; `tunaxis_codegen` still resolves because the repo root is on
 sys.path when pytest runs from there) and asserts the transpile_json envelope:
 
 - valid source -> ok:true with inputs[] and strategyParams (the new manifest)

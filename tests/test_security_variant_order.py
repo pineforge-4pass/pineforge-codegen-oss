@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import pytest
 
-import pineforge_codegen.codegen.security as security_module
-from pineforge_codegen import transpile
-from pineforge_codegen.ast_nodes import Identifier
-from pineforge_codegen.errors import SourceLocation
+import tunaxis_codegen.codegen.security as security_module
+from tunaxis_codegen import transpile
+from tunaxis_codegen.ast_nodes import Identifier
+from tunaxis_codegen.errors import SourceLocation
 
 SOURCES = {
     "arguments": ('//@version=6\nstrategy("variants")\n'

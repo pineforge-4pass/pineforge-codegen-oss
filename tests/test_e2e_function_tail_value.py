@@ -40,8 +40,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
 from tests._e2e import (
     Build, assert_same_runs, chart_feed_head, closed_trades, derive_chart_feed,
     execute_all, ok, skip_unless_e2e_env,

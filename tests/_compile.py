@@ -119,7 +119,7 @@ def _synthesize_version_header(engine_inc: Path, template: Path) -> Path | None:
         text = text.replace(f"@{key}@", val)
     if "@" in text:  # an unsubstituted placeholder would be invalid C++
         return None
-    out = Path(tempfile.gettempdir()) / "pineforge_codegen_genhdr" / "include"
+    out = Path(tempfile.gettempdir()) / "tunaxis_codegen_genhdr" / "include"
     (out / "pineforge").mkdir(parents=True, exist_ok=True)
     (out / "pineforge" / "version.h").write_text(text)
     return out

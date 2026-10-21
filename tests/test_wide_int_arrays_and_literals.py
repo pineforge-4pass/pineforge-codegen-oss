@@ -8,7 +8,7 @@ creation times in ``array.new_int()`` and expires a level when
 -813 934 592 in C++ ``int`` arithmetic, so every nearby level "expired" one
 day after creation where TradingView blocks the duplicate for three months.
 """
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 def _gen(body: str) -> str:

@@ -1,5 +1,5 @@
 # tests/test_errors.py
-from pineforge_codegen.errors import (
+from tunaxis_codegen.errors import (
     SourceLocation, Diagnostic, CompileError, Level, Phase
 )
 

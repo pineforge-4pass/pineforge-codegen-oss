@@ -1,8 +1,8 @@
 // Assemble the publishable @pineforge/codegen-pyodide payload into npm/.
 // Inputs (all produced by `npm run gate:full`, which MUST run first):
-//   gate/.scratch/pineforge_codegen.tar.gz  — the gate-VALIDATED archive
+//   gate/.scratch/tunaxis_codegen-<version>.tar.gz — the gate-VALIDATED archive
 //   release.json                            — derived versions + archive sha256
-// Plus: the unpacked pineforge_codegen/ source (for Node PYTHONPATH consumers),
+// Plus: unpacked tunaxis_codegen/ + pineforge_codegen/ (PYTHONPATH consumers),
 // and tables.json (scripts/dump-tables.py). Version synced from VERSION.
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -13,9 +13,9 @@ import * as tar from "tar";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const NPM = join(ROOT, "npm");
-const SCRATCH_ARCHIVE = join(ROOT, "gate", ".scratch", "pineforge_codegen.tar.gz");
 const RELEASE = join(ROOT, "release.json");
 const VERSION = readFileSync(join(ROOT, "VERSION"), "utf8").trim();
+const SCRATCH_ARCHIVE = join(ROOT, "gate", ".scratch", `tunaxis_codegen-${VERSION}.tar.gz`);
 
 function fail(msg) {
   console.error(`build-npm-package: ${msg}`);
@@ -31,10 +31,10 @@ const release = JSON.parse(readFileSync(RELEASE, "utf8"));
 if (release.codegen !== VERSION) fail(`release.json codegen ${release.codegen} != VERSION ${VERSION}`);
 
 // 1. Clean payload (keep tracked manifest + index).
-for (const p of ["pineforge_codegen", "tables.json", "release.json", "glue.py", "transpile.worker.mjs", "LICENSE"]) {
+for (const p of ["tunaxis_codegen", "pineforge_codegen", "tables.json", "release.json", "glue.py", "transpile.worker.mjs", "LICENSE"]) {
   rmSync(join(NPM, p), { recursive: true, force: true });
 }
-const versionedArchive = `pineforge_codegen-${VERSION}.tar.gz`;
+const versionedArchive = `tunaxis_codegen-${VERSION}.tar.gz`;
 rmSync(join(NPM, versionedArchive), { force: true });
 
 // 2. Validated archive (versioned filename) + release.json, and the LICENSE that
@@ -72,5 +72,5 @@ if (pkg.version !== VERSION) {
 }
 
 console.log(
-  `build-npm-package: npm/ ready — ${versionedArchive}, pineforge_codegen/, tables.json, release.json @ v${VERSION}`,
+  `build-npm-package: npm/ ready — ${versionedArchive}, tunaxis_codegen/, pineforge_codegen/, tables.json, release.json @ v${VERSION}`,
 );

@@ -29,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from pineforge_codegen.ast_nodes import (
+from tunaxis_codegen.ast_nodes import (
     ASTNode,
     BinOp,
     FuncCall,
@@ -39,8 +39,8 @@ from pineforge_codegen.ast_nodes import (
     UnaryOp,
     VarDecl,
 )
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
 
 
 CALENDAR_BUILTINS = frozenset({

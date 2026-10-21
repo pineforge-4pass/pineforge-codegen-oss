@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._compile import compile_cpp
 from tests._e2e import Build, skip_unless_e2e_env
 from tests._security_tapes import mismatches, replay, source, tape_exits

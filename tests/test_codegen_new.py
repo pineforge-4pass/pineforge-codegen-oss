@@ -5,11 +5,11 @@ import re as _re
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
-from pineforge_codegen.analyzer import Analyzer
-from pineforge_codegen.codegen import CodeGen
+from tunaxis_codegen import transpile
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
+from tunaxis_codegen.analyzer import Analyzer
+from tunaxis_codegen.codegen import CodeGen
 
 
 def _ensure_v6_preamble(src: str) -> str:
@@ -1105,10 +1105,10 @@ if sig == Signal.Buy
 
 dd = strategy.max_drawdown
 '''
-    from pineforge_codegen.lexer import Lexer
-    from pineforge_codegen.parser import Parser
-    from pineforge_codegen.analyzer import Analyzer
-    from pineforge_codegen.codegen import CodeGen
+    from tunaxis_codegen.lexer import Lexer
+    from tunaxis_codegen.parser import Parser
+    from tunaxis_codegen.analyzer import Analyzer
+    from tunaxis_codegen.codegen import CodeGen
     tokens = Lexer(src).tokenize()
     ast = Parser(tokens, source=src).parse()
     ctx = Analyzer(ast).analyze()

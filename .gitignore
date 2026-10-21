@@ -50,8 +50,8 @@ poetry.lock
 pip-wheel-metadata/
 
 # Cython artifacts (kept out — built inside Docker for the hosted image)
-pineforge_codegen/**/*.c
-pineforge_codegen/**/*.cpp
+tunaxis_codegen/**/*.c
+tunaxis_codegen/**/*.cpp
 
 # ─── Node / TypeScript ─────────────────────────────────────────────────────
 node_modules/
@@ -124,6 +124,8 @@ temp/
 /release.json
 
 # @pineforge/codegen-pyodide built payload (assembled at publish time)
+/npm/tunaxis_codegen-*.tar.gz
+/npm/tunaxis_codegen/
 /npm/pineforge_codegen-*.tar.gz
 /npm/pineforge_codegen/
 /npm/tables.json

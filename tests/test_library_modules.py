@@ -16,16 +16,16 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.ast_nodes import (
+from tunaxis_codegen import transpile
+from tunaxis_codegen.ast_nodes import (
     EnumDecl, FuncDef, MethodDef, StrategyDecl, TypeDecl, VarDecl,
 )
-from pineforge_codegen.errors import CompileError
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.library_modules import (
+from tunaxis_codegen.errors import CompileError
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.library_modules import (
     normalize_library_text, parse_library_module,
 )
-from pineforge_codegen.parser import Parser
+from tunaxis_codegen.parser import Parser
 
 LIBS = Path(__file__).parent / "fixtures" / "pine_libraries"
 

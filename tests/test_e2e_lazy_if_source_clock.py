@@ -20,7 +20,7 @@ the last value of each call on every bar.
 
 from __future__ import annotations
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._e2e import skip_unless_e2e_env
 from tests._tail_e_tapes import (
     BAR_MS, DAY_MS, START_MS, build, engine_rows, feed, mismatches, source, tape_rows,

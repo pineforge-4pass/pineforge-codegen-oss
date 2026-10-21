@@ -11,8 +11,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from pineforge_codegen.codegen.tv_number_format import TV_NUMBER_FORMAT_CPP
-from pineforge_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP
+from tunaxis_codegen.codegen.tv_number_format import TV_NUMBER_FORMAT_CPP
+from tunaxis_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP
 from tests import _compile as compile_env
 
 

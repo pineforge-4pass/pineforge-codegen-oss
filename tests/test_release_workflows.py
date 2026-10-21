@@ -31,7 +31,24 @@ def test_new_version_and_channels_come_from_the_script():
 def test_built_dists_carry_the_pypi_spelling():
     body = step(RELEASE, "Build sdist + wheel")
     assert has_env(body, "PYPI_VERSION", "steps.ver.outputs.pypi")
-    assert "dist/pineforge_codegen-${PYPI_VERSION}.tar.gz" in body
+    assert "python -m build --outdir dist/tunaxis" in body
+    assert "python scripts/build_shim.py --outdir dist/shim" in body
+    assert "dist/tunaxis/tunaxis_codegen-${PYPI_VERSION}.tar.gz" in body
+    assert "dist/shim/pineforge_codegen-${PYPI_VERSION}.tar.gz" in body
+    assert "dist/tunaxis/tunaxis_codegen-${PYPI_VERSION}-" in body
+    assert "dist/shim/pineforge_codegen-${PYPI_VERSION}-" in body
+
+
+def test_publish_steps_name_both_distributions_in_order():
+    tunaxis = RELEASE.index("- name: Publish tunaxis-codegen to PyPI")
+    shim = RELEASE.index("- name: Publish pineforge-codegen shim to PyPI")
+    assert tunaxis < shim
+    for name, directory in (
+            ("Publish tunaxis-codegen to PyPI", "dist/tunaxis/"),
+            ("Publish pineforge-codegen shim to PyPI", "dist/shim/")):
+        body = step(RELEASE, name)
+        assert "if: ${{ !inputs.dry_run }}" in body
+        assert f"packages-dir: {directory}" in body
 
 
 def test_git_tag_is_the_channel_tag():
@@ -44,7 +61,8 @@ def test_prerelease_github_release_is_never_latest():
     body = step(RELEASE, "Create GitHub Release")
     assert has_env(body, "PRERELEASE", "steps.ver.outputs.prerelease")
     assert "--prerelease --latest=false" in body
-    assert "pip install pineforge-codegen==${PYPI_VERSION}" in body
+    assert "pip install tunaxis-codegen==${PYPI_VERSION}" in body
+    assert "pineforge-codegen" in body and "forwards" in body
 
 
 def test_hub_dispatch_carries_the_prerelease_flag():

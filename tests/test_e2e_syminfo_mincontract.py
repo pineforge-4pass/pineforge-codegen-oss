@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from pineforge_codegen import transpile_full
+from tunaxis_codegen import transpile_full
 from tests._e2e import (
     Build, chart_feed_head, closed_trades, derive_chart_feed, execute_all, ok,
     skip_unless_e2e_env, summary, trade_count,

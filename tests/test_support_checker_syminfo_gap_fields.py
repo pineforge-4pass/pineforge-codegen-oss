@@ -12,10 +12,10 @@ na with no signal. The gate now fires for EVERY read — conditional AND plain.
 """
 import pytest
 
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
-from pineforge_codegen.support_checker import SupportChecker
-from pineforge_codegen.errors import Level
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
+from tunaxis_codegen.support_checker import SupportChecker
+from tunaxis_codegen.errors import Level
 
 
 def _diags(src: str):

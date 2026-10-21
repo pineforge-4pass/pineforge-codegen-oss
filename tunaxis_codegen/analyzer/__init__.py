@@ -8,9 +8,9 @@ peel focused mixins out into sibling files (e.g. ``visit_func``,
 ``visit_udt``, ``visit_control``, ``visit_expr``, ``visit_call``, ``types``,
 ``helpers``) without changing the public API:
 
-    from pineforge_codegen.analyzer import Analyzer            # primary
-    from pineforge_codegen.analyzer import AnalyzerContext     # context
-    from pineforge_codegen.analyzer import TA_CLASS_MAP, ...   # tables
+    from tunaxis_codegen.analyzer import Analyzer            # primary
+    from tunaxis_codegen.analyzer import AnalyzerContext     # context
+    from tunaxis_codegen.analyzer import TA_CLASS_MAP, ...   # tables
 
 Re-exports preserved for ``support_checker.py``, ``codegen/base.py`` and
 external tests that imported the dataclasses or module-level dispatch

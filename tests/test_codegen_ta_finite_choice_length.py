@@ -17,8 +17,8 @@ import re
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile, transpile_full
+from tunaxis_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests.test_float_relational_runtime import _compile_and_run
 

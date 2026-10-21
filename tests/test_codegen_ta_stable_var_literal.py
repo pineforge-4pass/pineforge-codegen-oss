@@ -14,11 +14,11 @@ import re
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.ast_nodes import MethodDef
-from pineforge_codegen.errors import CompileError, Level, Phase
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
+from tunaxis_codegen import transpile
+from tunaxis_codegen.ast_nodes import MethodDef
+from tunaxis_codegen.errors import CompileError, Level, Phase
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
 from tests._compile import compile_cpp
 
 

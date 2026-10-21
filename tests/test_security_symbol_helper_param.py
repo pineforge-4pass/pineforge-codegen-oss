@@ -21,11 +21,11 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.errors import Level
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
-from pineforge_codegen.support_checker import SupportChecker
+from tunaxis_codegen import transpile, transpile_full
+from tunaxis_codegen.errors import Level
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
+from tunaxis_codegen.support_checker import SupportChecker
 from tests._e2e import Build, skip_unless_e2e_env
 from tests._security_tapes import mismatches, replay, source, tape_exits
 

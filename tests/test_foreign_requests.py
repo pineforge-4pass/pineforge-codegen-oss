@@ -32,8 +32,8 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile, transpile_full
+from tunaxis_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests._e2e import chart_feed_head, skip_unless_e2e_env
 from tests._requests import FACTS, build, hourly, run, same, write_root

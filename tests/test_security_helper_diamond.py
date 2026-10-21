@@ -23,8 +23,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from pineforge_codegen import transpile
-from pineforge_codegen.codegen.helpers import is_emitter_temporary
+from tunaxis_codegen import transpile
+from tunaxis_codegen.codegen.helpers import is_emitter_temporary
 from tests._e2e import Build, skip_unless_e2e_env
 from tests._security_tapes import replay
 
@@ -64,7 +64,7 @@ def test_a_22_level_diamond_transpiles_in_seconds():
         f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
         f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
         "from test_security_helper_diamond import _script\n"
-        "from pineforge_codegen import transpile\n"
+        "from tunaxis_codegen import transpile\n"
         "for payload in ('f22(close)', 'nz(close.m())'):\n"
         "    print(len(transpile(_script(payload))))\n"
     )

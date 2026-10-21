@@ -15,12 +15,12 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.codegen.security import SecurityEmitter
-from pineforge_codegen.errors import CompileError
-from pineforge_codegen.pine_spelling import pine_string_literal
+from tunaxis_codegen import transpile
+from tunaxis_codegen.codegen.security import SecurityEmitter
+from tunaxis_codegen.errors import CompileError
+from tunaxis_codegen.pine_spelling import pine_string_literal
 
-from pineforge_codegen.codegen.helpers import NamingHelper
+from tunaxis_codegen.codegen.helpers import NamingHelper
 from tests._cpp_tokens import assert_inert, assert_only_in_strings, string_values
 
 PRELUDE = '//@version=6\nstrategy("t")\n'

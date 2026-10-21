@@ -1,6 +1,6 @@
 """Codegen contract: the full ``input.<type>`` -> C++ runtime getter mapping.
 
-``pineforge_codegen/codegen/input.py::_input_type_to_getter`` maps every
+``tunaxis_codegen/codegen/input.py::_input_type_to_getter`` maps every
 Pine v6 ``input.<type>`` short name to one of four C++ runtime getters
 (plus bare ``input(...)``, which hits the fallback). The pre-existing
 suite only spot-checks two rows of this table:
@@ -29,7 +29,7 @@ exercised that the corpus does not already exercise.
 
 from __future__ import annotations
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 def _emit(decl: str) -> str:

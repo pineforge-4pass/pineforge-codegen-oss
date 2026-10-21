@@ -8,14 +8,14 @@ Two outcomes are tracked by this file:
   becomes a regression guard.
 - Outcome (b): analyzer returns wrong PineType (defaults to FLOAT or VOID),
   which would mean the missing ``"matrix"`` arm in
-  ``pineforge_codegen/analyzer/call_handlers.py`` is a real bug that needs
+  ``tunaxis_codegen/analyzer/call_handlers.py`` is a real bug that needs
   fixing.
 """
 
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
-from pineforge_codegen.analyzer import Analyzer
-from pineforge_codegen.symbols import PineType
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
+from tunaxis_codegen.analyzer import Analyzer
+from tunaxis_codegen.symbols import PineType
 
 
 def _analyze(src: str):

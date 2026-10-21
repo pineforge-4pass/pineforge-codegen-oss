@@ -3,20 +3,20 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pineforge-codegen"
+name = "tunaxis-codegen"
 # Version sourced from /VERSION (single source of truth). Bumped by
 # .github/workflows/release.yml. From 1.0.0 on, release tags pair exactly with
 # the engine's; see "Engine pairing" in README.md and CONTRIBUTING.md.
 dynamic = ["version"]
-description = "PineScript v6 to C++ transpiler that targets the pineforge-engine runtime."
+description = "PineScript v6 transpiler for Tunaxis that emits C++ for the engine runtime."
 requires-python = ">=3.11"
 authors = [
-    { name = "PineForge", email = "luis@4pass.com.tw" },
+    { name = "Tunaxis", email = "luis@4pass.com.tw" },
 ]
 # PineForge Source License 1.2 (source-available); see LICENSE.
 license = { file = "LICENSE" }
 readme = "README.md"
-keywords = ["pinescript", "transpiler", "trading", "backtesting", "tradingview"]
+keywords = ["tunaxis", "pinescript", "transpiler", "trading", "backtesting", "tradingview"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Financial and Insurance Industry",
@@ -39,7 +39,8 @@ dev = [
 ]
 
 [project.scripts]
-pf-cpp-allowlist = "pineforge_codegen.cpp_allowlist:main"
+pf-cpp-allowlist = "tunaxis_codegen.cpp_allowlist:main"
+tunaxis-cpp-allowlist = "tunaxis_codegen.cpp_allowlist:main"
 
 [project.urls]
 Homepage = "https://github.com/pineforge-4pass/pineforge-codegen-oss"
@@ -56,7 +57,7 @@ pattern = "^(?P<version>\\S+)"
 # Keep builds from VCS-free release archives free of npm dependencies, gate
 # scratch files and generated payloads. The sdist can still build a wheel.
 only-include = [
-    "pineforge_codegen",
+    "tunaxis_codegen",
     "docs",
     "README.md",
     "CHANGELOG.md",
@@ -68,7 +69,7 @@ only-include = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["pineforge_codegen"]
+packages = ["tunaxis_codegen"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

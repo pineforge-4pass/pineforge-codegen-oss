@@ -7,7 +7,7 @@ compile ("invalid suffix on literal" / unterminated string).
 """
 
 from tests._legacy_cpp import legacy_cpp
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 def _cpp(body: str) -> str:

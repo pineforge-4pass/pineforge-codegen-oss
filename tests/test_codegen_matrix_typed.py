@@ -1,5 +1,5 @@
-from pineforge_codegen.codegen.base import CodeGen
-from pineforge_codegen.symbols import TypeSpec
+from tunaxis_codegen.codegen.base import CodeGen
+from tunaxis_codegen.symbols import TypeSpec
 
 
 def _make_codegen():
@@ -63,7 +63,7 @@ def test_member_access_matrix_row_returns_array_of_element():
     cg = _make_codegen()
     cg._matrix_specs = {"m": TypeSpec.matrix(TypeSpec.primitive("int"))}
     cg._collection_types = {"m": TypeSpec.matrix(TypeSpec.primitive("int"))}
-    from pineforge_codegen.ast_nodes import FuncCall, MemberAccess, Identifier, NumberLiteral
+    from tunaxis_codegen.ast_nodes import FuncCall, MemberAccess, Identifier, NumberLiteral
     node = FuncCall(
         callee=MemberAccess(object=Identifier(name="m"), member="row"),
         args=[NumberLiteral(value=0)],
@@ -81,7 +81,7 @@ def test_member_access_matrix_copy_returns_same_spec():
     elem = TypeSpec.udt("Pivot")
     cg._matrix_specs = {"m": TypeSpec.matrix(elem)}
     cg._collection_types = {"m": TypeSpec.matrix(elem)}
-    from pineforge_codegen.ast_nodes import FuncCall, MemberAccess, Identifier
+    from tunaxis_codegen.ast_nodes import FuncCall, MemberAccess, Identifier
     node = FuncCall(
         callee=MemberAccess(object=Identifier(name="m"), member="copy"),
         args=[],
@@ -97,7 +97,7 @@ def test_member_access_matrix_copy_returns_same_spec():
 # Task 2.8: matrix.new<T> dispatch
 # ---------------------------------------------------------------------------
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests import _compile as compile_env
 
 
@@ -317,9 +317,9 @@ var m = matrix.new<int>(2, 2, 0)
 # ---------------------------------------------------------------------------
 
 def test_analyzer_records_matrix_spec_in_collection_types():
-    from pineforge_codegen.lexer import Lexer
-    from pineforge_codegen.parser import Parser
-    from pineforge_codegen.analyzer import Analyzer
+    from tunaxis_codegen.lexer import Lexer
+    from tunaxis_codegen.parser import Parser
+    from tunaxis_codegen.analyzer import Analyzer
     src = '''//@version=6
 strategy("t")
 var m = matrix.new<int>(2, 2, 0)

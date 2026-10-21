@@ -6,9 +6,9 @@ import sys
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP
-from pineforge_codegen.collection_history import (
+from tunaxis_codegen import transpile
+from tunaxis_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP
+from tunaxis_codegen.collection_history import (
     HISTORICAL_CHANGE_MESSAGE, NA_ARRAY_MESSAGE, NA_MATRIX_MESSAGE,
 )
 from tests import _compile as compile_env

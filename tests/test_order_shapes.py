@@ -6,8 +6,8 @@ import re
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.codegen.order_shapes import HostReadLines, scan_host_reads
+from tunaxis_codegen import transpile
+from tunaxis_codegen.codegen.order_shapes import HostReadLines, scan_host_reads
 from tests._compile import compile_cpp
 
 
@@ -328,7 +328,7 @@ def test_host_recording_does_not_use_the_tu_crosscheck(monkeypatch):
     def forbidden_scan(_cpp):
         pytest.fail("emission must not depend on the cross-check scanner")
 
-    monkeypatch.setattr("pineforge_codegen.codegen.order_shapes.scan_host_reads", forbidden_scan)
+    monkeypatch.setattr("tunaxis_codegen.codegen.order_shapes.scan_host_reads", forbidden_scan)
     result = receipt('value = session.ismarket\nstrategy.entry("L", strategy.long)')
     assert "current_bar_" in result["host_reads"]
 

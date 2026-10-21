@@ -31,8 +31,8 @@ import re
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
 from tests import _compile as compile_env
 from tests._e2e import Build, reference_codegen, skip_unless_e2e_env
 from tests._security_tapes import mismatches, replay, source, tape_exits
@@ -81,7 +81,7 @@ def _eval_bodies(cpp: str) -> str:
 
 
 def _transpiled(src: str) -> dict:
-    from pineforge_codegen import transpile_full
+    from tunaxis_codegen import transpile_full
     return transpile_full(src)
 
 

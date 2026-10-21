@@ -1,5 +1,5 @@
 """``transpile_full(...)["requests"]``: the other symbols' feeds a script
-reads, listed before it runs (``pineforge_codegen.request_discovery``).
+reads, listed before it runs (``tunaxis_codegen.request_discovery``).
 
 A run supplies another symbol's bars as one feed per (symbol string,
 timeframe), looked up byte for byte, so each entry states the symbol and the
@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.request_discovery import canonical_timeframe
+from tunaxis_codegen import transpile, transpile_full
+from tunaxis_codegen.request_discovery import canonical_timeframe
 
 FIXTURES = Path(__file__).parent / "fixtures" / "request_discovery"
 HEAD = '//@version=6\nstrategy("discovery", overlay = true)\n'

@@ -18,7 +18,7 @@ import pytest
 from tests._e2e import (
     Build, derive_chart_feed, execute_all, ok, summary, skip_unless_e2e_env,
 )
-from pineforge_codegen.pine_spelling import pine_string_literal
+from tunaxis_codegen.pine_spelling import pine_string_literal
 
 
 # Expected strings are the Entry long Signals in TradingView's exported tapes.

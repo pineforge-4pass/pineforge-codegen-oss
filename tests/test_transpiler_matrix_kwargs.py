@@ -1,6 +1,6 @@
 """Matrix method calls with Pine keyword args (e.g. add_row(array_id=...))."""
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 def test_matrix_add_row_array_id_kwarg_emits_append():

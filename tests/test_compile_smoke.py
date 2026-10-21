@@ -1,7 +1,7 @@
 """Compile-only smoke tests for transpiled C++ output.
 
 These tests run ``g++ -fsyntax-only`` on the C++ that
-``pineforge_codegen.transpile()`` emits, against the public
+``tunaxis_codegen.transpile()`` emits, against the public
 ``pineforge-engine`` headers. They don't link, don't run a backtest, and
 don't compare trade output to TradingView; the contract here is narrower
 and more useful for the transpiler-only repo:
@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._compile import compile_cpp, have_compile_env, skip_if_no_compile_env
 
 

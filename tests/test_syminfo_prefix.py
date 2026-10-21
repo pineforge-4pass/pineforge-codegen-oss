@@ -5,9 +5,9 @@ import subprocess
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.codegen.helpers import NamingHelper
-from pineforge_codegen.pine_spelling import pine_string_literal
+from tunaxis_codegen import transpile
+from tunaxis_codegen.codegen.helpers import NamingHelper
+from tunaxis_codegen.pine_spelling import pine_string_literal
 from tests._compile import _COMPILER, compile_cpp
 
 PRELUDE = '//@version=6\nstrategy("prefix probe")\n'

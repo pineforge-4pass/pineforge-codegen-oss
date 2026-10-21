@@ -11,7 +11,7 @@ from hashlib import sha256
 import pytest
 
 from tests._legacy_cpp import legacy_cpp
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._compile import compile_cpp
 
 
@@ -824,7 +824,7 @@ def test_an_array_history_as_an_element_of_array_from_is_refused() -> None:
     # ``slot[0]`` is the array itself, which TradingView refuses as an
     # element of array.from (CE10122, pine-facade 2026-10-01); this test's
     # outer alias used to read it as the array's element 0.
-    from pineforge_codegen.errors import CompileError
+    from tunaxis_codegen.errors import CompileError
 
     with pytest.raises(CompileError) as exc:
         transpile(_OUTER_ALIAS_COLLISION_SOURCE.replace("slot.get(0)", "slot[0]"))

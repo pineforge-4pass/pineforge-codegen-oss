@@ -55,7 +55,7 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen.ast_nodes import Identifier, MemberAccess, NumberLiteral, Subscript
+from tunaxis_codegen.ast_nodes import Identifier, MemberAccess, NumberLiteral, Subscript
 from tests._compile import compile_cpp
 from tests._e2e import (
     REPO_ROOT, build_strategy_library, reference_codegen, run_strategy,
@@ -871,9 +871,9 @@ def test_scripts_without_a_read_keep_their_cpp(place: str, tmp_path: Path) -> No
 
 
 def _codegen_for(body: str):
-    from pineforge_codegen import _parse_bounded
-    from pineforge_codegen.analyzer import Analyzer
-    from pineforge_codegen.codegen import CodeGen
+    from tunaxis_codegen import _parse_bounded
+    from tunaxis_codegen.analyzer import Analyzer
+    from tunaxis_codegen.codegen import CodeGen
 
     ast, pragmas, budget = _parse_bounded(
         '//@version=6\nstrategy("session history", overlay=true)\n' + body, "<input>")

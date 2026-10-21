@@ -61,7 +61,7 @@ from tests._e2e import (
     Build, Outcome, derive_chart_feed, digest, execute_all, ok,
     skip_unless_e2e_env, summary, transpile_json,
 )
-from pineforge_codegen.pine_spelling import pine_string_literal
+from tunaxis_codegen.pine_spelling import pine_string_literal
 
 
 HEADER = '//@version=6\nstrategy("e2e-c5-multiline-strings", overlay=true)\n'

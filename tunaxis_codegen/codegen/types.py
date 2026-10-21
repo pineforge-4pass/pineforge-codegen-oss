@@ -1588,7 +1588,7 @@ class TypeInferer:
             annotation = history_annotation(node)
             if annotation is not None:
                 # An array's or a matrix's history is a collection of its
-                # type (pineforge_codegen/collection_history.py), the
+                # type (tunaxis_codegen/collection_history.py), the
                 # analyzer's when no declaration registered one yet.
                 if (receiver_spec is not None
                         and receiver_spec.kind in ("array", "matrix")):

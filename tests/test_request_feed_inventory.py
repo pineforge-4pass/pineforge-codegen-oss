@@ -1,4 +1,4 @@
-"""The request-feed inventory (``pineforge_codegen.request_feed_inventory``,
+"""The request-feed inventory (``tunaxis_codegen.request_feed_inventory``,
 interface v1): every bar request a compiled strategy can make, as a wire token,
 an input reference or ``unknown``, bound to the C++ it was generated from.
 
@@ -16,12 +16,12 @@ import hashlib
 
 import pytest
 
-import pineforge_codegen
-from pineforge_codegen import (
+import tunaxis_codegen
+from tunaxis_codegen import (
     _generate, transpile, transpile_full, transpile_with_request_inventory,
 )
-from pineforge_codegen.errors import Level
-from pineforge_codegen.request_feed_inventory import (
+from tunaxis_codegen.errors import Level
+from tunaxis_codegen.request_feed_inventory import (
     SCHEMA, RequestFeedInventoryError, bind_request_feed_inventory,
     build_request_feed_inventory, canonical_wire_timeframe,
 )
@@ -383,14 +383,14 @@ def test_new_api_returns_the_transpile_full_fields_from_one_generation():
 
 
 def test_new_api_runs_generation_exactly_once(monkeypatch):
-    generate = pineforge_codegen._generate
+    generate = tunaxis_codegen._generate
     calls = []
 
     def counted(*args, **kwargs):
         calls.append(args)
         return generate(*args, **kwargs)
 
-    monkeypatch.setattr(pineforge_codegen, "_generate", counted)
+    monkeypatch.setattr(tunaxis_codegen, "_generate", counted)
     transpile_with_request_inventory(METADATA)
     assert len(calls) == 1
 

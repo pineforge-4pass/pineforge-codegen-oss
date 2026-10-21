@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import re
 
-from pineforge_codegen import transpile
-from pineforge_codegen.pragmas import (
+from tunaxis_codegen import transpile
+from tunaxis_codegen.pragmas import (
     PfTracePragma,
     extract_pf_trace_pragmas,
 )

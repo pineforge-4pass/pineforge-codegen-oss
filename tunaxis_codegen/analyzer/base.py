@@ -139,7 +139,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         self._budget = budget
         # The functions that may be emitted once per call site for their
         # session.<flag>[k] reads; None: every one that reads a flag at an
-        # offset (pineforge_codegen._generate passes none first, then each
+        # offset (tunaxis_codegen._generate passes none first, then each
         # time adds the ones whose reads the C++ holds).
         self._session_clones = session_clones
         self._session_uncloned: frozenset[str] = frozenset()
@@ -436,7 +436,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         # sites (see contracts.TACallSite.owner_func).
         self._enclosing_func_names: list[str] = []
         # Array and matrix history reads (``a[1]``), each decided where the
-        # visit meets it (pineforge_codegen/collection_history.py), and the
+        # visit meets it (tunaxis_codegen/collection_history.py), and the
         # declarations writing each class member, by name (a sibling block's
         # declaration closes another one's history).
         self._collection_history_reads: list[HistoryRead] = []
@@ -2401,7 +2401,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
         immediately; exporting a count without the corresponding members would
         make codegen reference undeclared or shared state.
         """
-        from pineforge_codegen.ast_nodes import FuncCall, FuncDef, Identifier
+        from tunaxis_codegen.ast_nodes import FuncCall, FuncDef, Identifier
 
         func_defs: dict[str, FuncDef] = {}
         for stmt in self._ast.body:
@@ -6689,7 +6689,7 @@ class Analyzer(CallHandlers, DiagnosticsHelper, TypeHelper):
 
     def _check_collection_history(self) -> dict:
         """The declarations whose history the supported reads need, keyed
-        by their members (pineforge_codegen/collection_history.py)."""
+        by their members (tunaxis_codegen/collection_history.py)."""
         if not self._collection_history_reads:
             return {}
         return self._history_checker().history_variables(

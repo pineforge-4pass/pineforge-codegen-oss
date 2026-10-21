@@ -6,7 +6,7 @@ struct (``Line``/``Label``) and the call lowers onto the arena. (Previously
 these were inert no-ops declared as ``double`` / ``auto``.)
 """
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 def _cpp(body: str) -> str:

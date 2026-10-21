@@ -6,11 +6,11 @@ import sys
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.codegen.helpers import CPP_KEYWORDS
-from pineforge_codegen.errors import CompileError
-from pineforge_codegen.lexer import KEYWORDS
-from pineforge_codegen.limits import (
+from tunaxis_codegen import transpile, transpile_full
+from tunaxis_codegen.codegen.helpers import CPP_KEYWORDS
+from tunaxis_codegen.errors import CompileError
+from tunaxis_codegen.lexer import KEYWORDS
+from tunaxis_codegen.limits import (
     MAX_NESTING_DEPTH, MAX_SOURCE_CHARS, MAX_TRANSPILE_SECONDS,
     RECURSION_HEADROOM,
 )
@@ -178,7 +178,7 @@ def test_recursion_headroom_is_raised_and_never_lowered() -> None:
 
 
 def test_elapsed_time_guard_is_a_located_compile_error(monkeypatch) -> None:
-    import pineforge_codegen.limits as limits
+    import tunaxis_codegen.limits as limits
 
     ticks = iter([0, MAX_TRANSPILE_SECONDS + 1])
     monkeypatch.setattr(limits, "monotonic", lambda: next(ticks))
@@ -252,7 +252,7 @@ def test_short_ternary_chains_keep_their_nested_spelling() -> None:
 def test_nested_calls_cost_linear_time(monkeypatch) -> None:
     # Each call's written argument order aliased its arguments, and the AST
     # walkers visited both: f(f(f(...))) cost 2**depth.
-    import pineforge_codegen.limits as limits
+    import tunaxis_codegen.limits as limits
 
     monkeypatch.setattr(limits, "MAX_TRANSPILE_SECONDS", 20)
     transpile(BASE + "x = " + "math.abs(" * 40 + "close" + ")" * 40 + "\n")
@@ -262,7 +262,7 @@ def test_nested_calls_cost_linear_time(monkeypatch) -> None:
 @pytest.mark.parametrize("shape", ["method_chain", "var_declarations"])
 def test_slow_passes_stop_at_the_time_budget(monkeypatch, shape: str) -> None:
     import time
-    import pineforge_codegen.limits as limits
+    import tunaxis_codegen.limits as limits
 
     monkeypatch.setattr(limits, "MAX_TRANSPILE_SECONDS", 2)
     if shape == "method_chain":

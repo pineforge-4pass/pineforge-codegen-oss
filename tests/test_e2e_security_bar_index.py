@@ -19,7 +19,7 @@ chart's own; the replay compares all 265 closes.
 
 from __future__ import annotations
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._e2e import Build, skip_unless_e2e_env
 from tests._security_tapes import mismatches, replay
 from tests._tv_tapes import FIXTURES, exits_by_time

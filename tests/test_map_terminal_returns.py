@@ -11,8 +11,8 @@ from hashlib import sha256
 import pytest
 
 from tests._legacy_cpp import legacy_cpp
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
 from tests._compile import compile_cpp
 
 

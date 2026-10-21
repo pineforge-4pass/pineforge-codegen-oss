@@ -5,9 +5,9 @@ import re
 
 import pytest
 
-from pineforge_codegen import Analyzer, CodeGen, Lexer, Parser, transpile
-from pineforge_codegen.codegen import constant_fold
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import Analyzer, CodeGen, Lexer, Parser, transpile
+from tunaxis_codegen.codegen import constant_fold
+from tunaxis_codegen.errors import CompileError
 from tests._compile import compile_cpp
 
 

@@ -23,11 +23,11 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.ast_nodes import Assignment, ExprStmt, FuncCall, SwitchStmt, VarDecl
-from pineforge_codegen.errors import CompileError, Level
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
+from tunaxis_codegen import transpile, transpile_full
+from tunaxis_codegen.ast_nodes import Assignment, ExprStmt, FuncCall, SwitchStmt, VarDecl
+from tunaxis_codegen.errors import CompileError, Level
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
 from tests._compile import compile_cpp
 from tests._pine_libraries import library_sources
 

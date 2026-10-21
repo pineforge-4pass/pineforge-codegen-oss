@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 
 
 def test_var_int_reassigned_to_time_promotes_to_int64():

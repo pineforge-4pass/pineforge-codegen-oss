@@ -23,6 +23,7 @@ const SCRATCH = join(HERE, ".scratch");
 const GLUE = readFileSync(join(HERE, "glue.py"), "utf8");
 const PYTHON = process.env.GATE_PYTHON ?? "python3";
 const OK_CAP = process.env.GATE_FULL ? Infinity : 60;
+const VERSION = readFileSync(join(ROOT, "VERSION"), "utf8").trim();
 
 function branchItems(branch) {
   const dir = join(CORPUS, branch);
@@ -52,11 +53,11 @@ async function main() {
 
   // 1. Pack the in-repo source into an archive (excluding __pycache__).
   mkdirSync(SCRATCH, { recursive: true });
-  const archive = join(SCRATCH, "pineforge_codegen.tar.gz");
+  const archive = join(SCRATCH, `tunaxis_codegen-${VERSION}.tar.gz`);
   const tar = require("tar");
   await tar.create(
     { gzip: true, file: archive, cwd: ROOT, portable: true, filter: (p) => !p.includes("__pycache__") },
-    ["pineforge_codegen"],
+    ["tunaxis_codegen", "pineforge_codegen"],
   );
   const archiveBytes = readFileSync(archive);
 
@@ -67,6 +68,25 @@ async function main() {
   const u8 = new Uint8Array(archiveBytes.buffer, archiveBytes.byteOffset, archiveBytes.byteLength);
   pyodide.unpackArchive(u8, "gztar", { extractDir: "/codegen" });
   pyodide.runPython(GLUE);
+  // Exercise the shipped forwarding package in wasm as well as in pytest.
+  // Loading the new glue must not import the deprecated name on its own.
+  pyodide.runPython(`
+import importlib
+import warnings
+assert "pineforge_codegen" not in sys.modules
+with warnings.catch_warnings(record=True) as alias_warnings:
+    warnings.simplefilter("always", DeprecationWarning)
+    import pineforge_codegen
+    import tunaxis_codegen
+    assert pineforge_codegen is tunaxis_codegen
+    for suffix in ("parser", "analyzer.base", "codegen.visit_expr", "timeframe_token_cli"):
+        assert importlib.import_module("pineforge_codegen." + suffix) is importlib.import_module("tunaxis_codegen." + suffix)
+    assert pineforge_codegen.Parser is tunaxis_codegen.Parser
+assert len(alias_warnings) == 1
+assert alias_warnings[0].category is DeprecationWarning
+assert "tunaxis_codegen" in str(alias_warnings[0].message)
+assert "tunaxis-codegen" in str(alias_warnings[0].message)
+`);
   const transpileJson = pyodide.globals.get("transpile_json");
 
   // 3. Native oracle (one process, whole corpus). PYTHONHASHSEED pinned for
@@ -103,7 +123,7 @@ async function main() {
 
   // 5. release.json (versions derived from the loaded Pyodide lock).
   const lock = require("pyodide/pyodide-lock.json");
-  const codegen = readFileSync(join(ROOT, "VERSION"), "utf8").trim();
+  const codegen = VERSION;
   const pyodideVer = readFileSync(join(ROOT, "PYODIDE_TARGET"), "utf8").trim();
   const release = {
     codegen,

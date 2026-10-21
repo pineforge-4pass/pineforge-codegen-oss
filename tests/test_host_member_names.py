@@ -99,13 +99,13 @@ def test_committed_host_members_are_the_derived_set() -> None:
     changes, regenerate it with ``scripts/gen_host_members.py``."""
     gen, cxx, includes = _clang_env()
     derived = gen.derive(REPO_ROOT, cxx, includes)
-    from pineforge_codegen.codegen.host_members import HOST_MEMBER_NAMES
+    from tunaxis_codegen.codegen.host_members import HOST_MEMBER_NAMES
     missing = sorted(derived.names - HOST_MEMBER_NAMES)
     stale = sorted(HOST_MEMBER_NAMES - derived.names)
     assert not missing and not stale, (
         f"host members to reserve: {missing}; no longer read: {stale} -- "
         "run scripts/gen_host_members.py")
-    assert (REPO_ROOT / "pineforge_codegen" / "codegen" / "host_members.py").read_text() \
+    assert (REPO_ROOT / "tunaxis_codegen" / "codegen" / "host_members.py").read_text() \
         == gen.render(derived)
     for name in ("session_isfirstbar_", "session_islastbar_", "session_isfirstbar_regular_",
                  "session_islastbar_regular_", "session_ismarket_", "syminfo_", "current_bar_",
@@ -150,8 +150,8 @@ def _battery() -> list[Path]:
 
 
 def _battery_members(sources: list[Path], gen, host: set[str]) -> tuple[dict[str, str], int]:
-    from pineforge_codegen import transpile
-    from pineforge_codegen.errors import CompileError
+    from tunaxis_codegen import transpile
+    from tunaxis_codegen.errors import CompileError
     named: dict[str, str] = {}
     transpiled = 0
     for path in sources:
@@ -171,7 +171,7 @@ def test_generated_code_reads_no_unreserved_host_member() -> None:
     reserved set: a new lowering that reads a host member the derivation
     cannot see fails here."""
     gen, cxx, includes = _clang_env()
-    from pineforge_codegen.codegen.host_members import HOST_MEMBER_NAMES
+    from tunaxis_codegen.codegen.host_members import HOST_MEMBER_NAMES
     host = gen.derive(REPO_ROOT, cxx, includes).host
     named, transpiled = _battery_members(_battery(), gen, host)
     assert transpiled > 100
@@ -192,7 +192,7 @@ def test_private_fixture_code_reads_no_unreserved_host_member(rel: str) -> None:
     """Keep the moved probes' battery coverage independent of public files."""
     path = private_fixture(rel)
     gen, host = _private_battery_host()
-    from pineforge_codegen.codegen.host_members import HOST_MEMBER_NAMES
+    from tunaxis_codegen.codegen.host_members import HOST_MEMBER_NAMES
     named, transpiled = _battery_members([path], gen, host)
     assert transpiled == 1, f"private fixture did not transpile: {rel}"
     unreserved = {name: where for name, where in named.items() if name not in HOST_MEMBER_NAMES}

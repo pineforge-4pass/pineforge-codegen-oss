@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._compile import compile_cpp
 from tests._e2e import skip_unless_e2e_env
 from tests._tail_e_tapes import (

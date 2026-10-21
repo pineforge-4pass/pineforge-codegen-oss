@@ -1,5 +1,5 @@
 # tests/test_lexer.py
-from pineforge_codegen.lexer import Lexer, TokenType
+from tunaxis_codegen.lexer import Lexer, TokenType
 
 def test_simple_assignment():
     tokens = Lexer("x = 14\n").tokenize()

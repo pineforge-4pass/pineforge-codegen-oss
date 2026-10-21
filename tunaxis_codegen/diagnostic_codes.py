@@ -1,6 +1,6 @@
 """Stable codes and named arguments for every transpile diagnostic.
 
-Every :class:`~pineforge_codegen.errors.Diagnostic` carries a ``code``
+Every :class:`~tunaxis_codegen.errors.Diagnostic` carries a ``code``
 (``PF-E1203`` / ``PF-W0412``) and ``args``, the
 named data its English ``message`` and ``hint`` were built from. The codes,
 their severities, English ICU MessageFormat templates and one-line

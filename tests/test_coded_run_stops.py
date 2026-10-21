@@ -5,14 +5,14 @@ import re
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.codegen.helpers import (
+from tunaxis_codegen import transpile
+from tunaxis_codegen.codegen.helpers import (
     CPP_EMITTER_NAMES, CPP_STANDARD_MACROS, is_emitter_temporary,
 )
-from pineforge_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP, request_stop
-from pineforge_codegen.external_requests import request_stop_marker
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
+from tunaxis_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP, request_stop
+from tunaxis_codegen.external_requests import request_stop_marker
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
 from tests._compile import compile_cpp, run_emitted_tu
 from tests._legacy_cpp import _without_run_failure_scaffold
 

@@ -54,8 +54,8 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests._e2e import (
     Build, assert_same_runs, chart_feed_head, execute_all, ok, same,
@@ -288,7 +288,7 @@ def test_each_lanes_members_in_one_tu(runs):
 
 
 def test_a_matched_pine_name_is_not_reserved(runs):
-    from pineforge_codegen.codegen.host_members import HOST_MEMBER_NAMES
+    from tunaxis_codegen.codegen.host_members import HOST_MEMBER_NAMES
     assert "replace" not in HOST_MEMBER_NAMES
     outcomes, _ = runs
     subject = ok(outcomes, "host_name")

@@ -1,9 +1,9 @@
 {
-  "name": "pineforge-codegen-gate",
+  "name": "tunaxis-codegen-gate",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Node-side conformance gate tooling for pineforge-codegen (not published).",
+  "description": "Node-side conformance gate tooling for tunaxis-codegen (not published).",
   "scripts": {
     "gate": "node gate/run-gate.mjs",
     "gate:full": "GATE_FULL=1 node gate/run-gate.mjs",

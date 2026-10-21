@@ -4,9 +4,9 @@ import re
 
 import pytest
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._compile import run_emitted_tu
-from pineforge_codegen.codegen.capabilities import STRATEGY_PARAMETERS
+from tunaxis_codegen.codegen.capabilities import STRATEGY_PARAMETERS
 
 
 def emitted_receipt(source):
@@ -141,7 +141,7 @@ def test_slipped_market_profile_does_not_compose_with_requests():
 
 
 def test_confirmed_receipt_is_additive_and_metadata_only(monkeypatch):
-    from pineforge_codegen.codegen import capabilities
+    from tunaxis_codegen.codegen import capabilities
     source = '//@version=6\nstrategy("metadata", process_orders_on_close=true)\nvarip int count = 0\ncount += 1\nstrategy.entry("L", strategy.long)'
     with_receipts = transpile(source)
     receipt = emitted_confirmed_receipt(source)
@@ -295,7 +295,7 @@ def test_realtime_approximations_are_named(expression):
 
 
 def test_capabilities_collect_facts_in_one_walk(monkeypatch):
-    from pineforge_codegen.codegen import capabilities
+    from tunaxis_codegen.codegen import capabilities
     original = capabilities.iter_ast_nodes
     walks = []
     def counted(root):

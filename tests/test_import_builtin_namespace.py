@@ -18,11 +18,11 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.ast_nodes import ImportStmt
-from pineforge_codegen.errors import CompileError
-from pineforge_codegen.lexer import Lexer
-from pineforge_codegen.parser import Parser
+from tunaxis_codegen import transpile
+from tunaxis_codegen.ast_nodes import ImportStmt
+from tunaxis_codegen.errors import CompileError
+from tunaxis_codegen.lexer import Lexer
+from tunaxis_codegen.parser import Parser
 from tests._e2e import Build, skip_unless_e2e_env
 from tests._security_tapes import mismatches, replay, source, tape_exits
 

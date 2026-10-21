@@ -1,259 +1,104 @@
-"""PineScript v6 to C++ transpiler."""
+"""Compatibility import for the renamed :mod:`tunaxis_codegen` package.
 
-from collections.abc import Mapping
+Only this forwarding package belongs to the pineforge-codegen distribution.
+The implementation and every module object belong to tunaxis-codegen.
+"""
 
-from .lexer import Lexer
-from .parser import Parser
-from .analyzer import Analyzer
-from .codegen import CodeGen
-from .diagnostic_codes import diagnostics_catalog, render_diagnostic
-from .errors import CompileError, Level, Phase
-from .external_requests import lower_no_data_requests
-from .builtin_keywords import bind_builtin_keywords
-from .finite_ta_length import expand_finite_choice_extrema_lengths
-from .library_inline import inline_libraries
-from .limits import TimeBudget, check_ast_depth, check_source_size, ensure_recursion_headroom
-from .pragmas import extract_pf_trace_pragmas
-from .request_discovery import discover_requests, request_sites
-from .request_feed_inventory import build_request_feed_inventory
-from .security_contexts import specialize_security_contexts
-from .block_locals import rename_block_locals
-from .support_checker import check_support as _support_diagnostics
-from .support_checker import check_support_or_raise
+import importlib
+import importlib.abc
+import importlib.util
+import sys
+import warnings
 
 
-def _parse_bounded(pine_source: str, filename: str, budget: TimeBudget | None = None):
-    ensure_recursion_headroom()
-    check_source_size(pine_source, filename)
-    budget = budget or TimeBudget(filename)
-    pragmas = extract_pf_trace_pragmas(
-        pine_source, filename=filename, budget=budget,
-    )
-    budget.check(phase=Phase.LEXER)
-    tokens = Lexer(pine_source, filename=filename, budget=budget).tokenize()
-    budget.check(phase=Phase.LEXER)
-    ast = Parser(tokens, source=pine_source, filename=filename,
-                 budget=budget).parse()
-    check_ast_depth(ast, filename)
-    budget.check(phase=Phase.PARSER)
-    return ast, pragmas, budget
+class _AliasLoader(importlib.abc.Loader):
+    """Return the canonical module without executing its code a second time."""
+
+    def __init__(self, canonical_spec):
+        self._spec = canonical_spec
+
+    def create_module(self, spec):
+        return importlib.import_module(self._spec.name)
+
+    def exec_module(self, module):
+        # create_module already imported the canonical module, so there is no
+        # code to run. Restore the attributes the import machinery just pointed
+        # at the alias spec: the module object is the canonical one and its
+        # __name__ / __spec__ / reload must stay the canonical ones.
+        module.__name__ = self._spec.name
+        module.__package__ = self._spec.parent
+        module.__loader__ = self._spec.loader
+        module.__spec__ = self._spec
+
+    def get_code(self, fullname):
+        # runpy / python -m need code under the requested name, whereas a
+        # SourceFileLoader accepts only its canonical name. Relative imports
+        # in that code still pass through the alias finder.
+        return self._spec.loader.get_code(self._spec.name)
 
 
-def _generate(pine_source: str, check_support: bool, filename: str,
-              libraries: Mapping[str, str] | None = None):
-    """The pipeline, first without the per-call clones of functions that read
-    a ``session.<flag>[k]``, as scripts compiled before such reads were
-    supported; then again with the functions whose reads that C++ holds
-    cloned as well, until the C++ asks for no more (a clone can make a
-    caller's read reach the C++: its callers are cloned per call site, which
-    can retype their parameters). A read in an argument the codegen leaves
-    out never costs a clone (the clones of a function called along a deep
-    call tree grow with every path to it).
-
-    Each pass inlines the libraries the script imports before the support
-    check (``library_inline``). A declaration in a top-level block whose type
-    the member of its name cannot hold gets a name of its own, and the
-    pipeline runs again (``block_locals``).
-
-    Returns ``(codegen, ctx, cpp, support_diagnostics, sites)``: ``sites``
-    are the requests of another symbol's data the support checker lowered
-    (``request_discovery.request_sites``)."""
-    budget = None
-    clones: frozenset[str] = frozenset()
-    renamed: frozenset = frozenset()
-    while True:
-        ast, pragmas, budget = _parse_bounded(pine_source, filename, budget)
-        ast = inline_libraries(ast, pine_source, libraries=libraries,
-                               filename=filename, budget=budget)
-        rename_block_locals(ast, renamed)
-        support_diagnostics = []
-        if check_support:
-            support_diagnostics = _support_diagnostics(ast, filename=filename)
-            if any(d.level == Level.ERROR for d in support_diagnostics):
-                raise CompileError(support_diagnostics)
-        budget.check(phase=Phase.ANALYZER)
-        sites = request_sites(ast)
-        ast = lower_no_data_requests(ast)
-        ast = specialize_security_contexts(ast, filename=filename)
-        ast = bind_builtin_keywords(expand_finite_choice_extrema_lengths(ast))
-        check_ast_depth(ast, filename)
-        budget.check(phase=Phase.ANALYZER)
-        ctx = Analyzer(ast, filename=filename, budget=budget,
-                       session_clones=clones).analyze()
-        budget.check(phase=Phase.ANALYZER)
-        # Attach after analysis: pragma expressions are not part of the
-        # program body, so the analyzer never inspects them; the codegen
-        # consumes them directly from the context to emit the on_bar tail
-        # ``if (trace_enabled_) { trace(...); ... }`` block.
-        ctx.pf_trace_pragmas = pragmas
-        gen = CodeGen(ctx, budget=budget)
-        cpp = gen.generate()
-        budget.check(phase=Phase.CODEGEN)
-        apart = gen.block_locals_needing_names - renamed
-        if apart:
-            renamed |= apart
-            del ast, ctx, gen, cpp, sites
-            continue
-        needed = gen.session_functions_needing_clones
-        if not needed:
-            return gen, ctx, cpp, support_diagnostics, sites
-        # Only uncloned functions ask, so the set grows each time and the
-        # loop ends by the time every function that reads a flag at an
-        # offset is cloned.
-        if needed <= clones:
-            raise AssertionError("a cloned function asked for session clones again")
-        clones |= needed
-        del ast, ctx, gen, cpp, sites
+class _AliasFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if not fullname.startswith("pineforge_codegen."):
+            return None
+        canonical = "tunaxis_codegen" + fullname[len("pineforge_codegen"):]
+        spec = importlib.util.find_spec(canonical)
+        if spec is None:
+            return None
+        return importlib.util.spec_from_loader(
+            fullname,
+            _AliasLoader(spec),
+            origin=spec.origin,
+            is_package=spec.submodule_search_locations is not None,
+        )
 
 
-def transpile(pine_source: str, *, check_support: bool = True, filename: str = "<input>",
-              libraries: Mapping[str, str] | None = None) -> str:
-    """Transpile PineScript v6 source code to C++ code.
+warnings.warn(
+    "pineforge_codegen / pineforge-codegen was renamed; import tunaxis_codegen "
+    "and install tunaxis-codegen instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
-    Semantic rules enforced in :class:`Analyzer` (before codegen), including:
-    user ``enum`` blocks must appear **above** ``input.enum(Enum.member, ...)`` uses.
+# Known limitation (Python 3.11-3.13): the finder below is installed only after the
+# canonical import has finished, so a second thread importing an old-name SUBMODULE
+# (`import pineforge_codegen.x`) during the very first `import pineforge_codegen` can
+# see ModuleNotFoundError. Import the old name once before starting threads, or use
+# `tunaxis_codegen`. Python 3.14 waits for the parent and is not affected.
+_canonical = importlib.import_module("tunaxis_codegen")
+sys.meta_path.insert(0, _AliasFinder())
 
-    Before analysis, :func:`support_checker.check_support_or_raise` rejects
-    scripts that use language constructs PineForge cannot faithfully execute
-    (e.g. ``indicator()`` declarations, ``request.seed``, disallowed
-    ``request.security`` parameters) and warns about approximated ones (e.g.
-    ``bar_index``). Pass ``check_support=False`` to bypass this gate
-    (experimental; intended for tests of legacy fixtures only).
+# The canonical package eagerly imports part of its tree. Seed those aliases
+# too, so Python never loads one of their source files under the old name. Check
+# initialization first, then recheck that the snapshot entry is still canonical;
+# the finder imports skipped modules later.
+for _name, _module in tuple(sys.modules.items()):
+    if _name == "tunaxis_codegen" or _name.startswith("tunaxis_codegen."):
+        if (
+            not getattr(getattr(_module, "__spec__", None), "_initializing", False)
+            and sys.modules.get(_name) is _module
+        ):
+            sys.modules["pineforge_codegen" + _name[len("tunaxis_codegen"):]] = _module
 
-    ``// @pf-trace name=expr`` pragmas are extracted from ``pine_source``
-    via a pre-pass (the lexer strips comments before the parser sees them)
-    and attached to the analyzer context for codegen. See
-    :mod:`pineforge_codegen.pragmas` for the syntax.
 
-    Args:
-        pine_source: PineScript v6 source string.
-        check_support: When True (default) the support checker runs after
-            parsing and raises ``CompileError`` on any unsupported feature
-            before semantic analysis or codegen.
-        filename: Source name threaded into every ``SourceLocation`` so the
-            ``file:line:col`` shown in ``CompileError`` (both ``str()`` and
-            :meth:`~pineforge_codegen.errors.CompileError.format`) points back
-            at the caller's file. Defaults to ``"<input>"``.
-        libraries: The sources of the Pine libraries the script imports,
-            by import path (``{"user/name/version": source_text}``); each
-            import the script uses is inlined from its source (see
-            :mod:`pineforge_codegen.library_inline`). ``None`` (default)
-            reads them from ``$PINEFORGE_PINE_LIBRARIES`` through the
-            script's own requests manifest under ``$PINEFORGE_REQUESTS_ROOT``
-            (see :mod:`pineforge_codegen.pine_libraries`); with neither, an
-            import is refused as before.
+def __getattr__(name):
+    """Expose the canonical package's names, without copying anything.
 
-    Returns:
-        Generated C++ source string.
+    A plain attribute lookup such as ``pineforge_codegen.transpile_full`` (and
+    ``from pineforge_codegen import transpile_full``) resolves through the one
+    canonical module object. Submodules that the canonical package imported
+    later are reachable here too; the finder aliases a direct import of one.
     """
-    _gen, _ctx, cpp, _support, _sites = _generate(pine_source, check_support, filename,
-                                                  libraries)
-    return cpp
+    return getattr(_canonical, name)
 
 
-def transpile_full(pine_source: str, *, check_support: bool = True,
-                   filename: str = "<input>",
-                   libraries: Mapping[str, str] | None = None) -> dict:
-    """Transpile like :func:`transpile`, plus the host-UI input manifest.
-
-    Runs the pipeline (Lexer -> Parser -> support check -> Analyzer ->
-    CodeGen.generate) once, again while the C++ holds a
-    ``session.<flag>[k]`` read of a function not yet cloned for it (see
-    ``_generate``), and returns the generated C++ alongside the data the
-    cloud Studio needs to auto-build a backtest "override params" form:
-
-    - ``cpp``: the generated C++ source (identical to :func:`transpile`).
-    - ``inputs``: a list of ``InputDef`` dicts (one per global-scope
-      ``input(...)`` / ``input.*(...)`` call, inline calls included, in
-      source order). Each has ``title`` / ``type`` / ``default`` /
-      ``supported`` (the checked-settings receipt's flag) and optionally
-      ``min`` / ``max`` / ``step`` / ``options`` (omitted when the
-      corresponding signature argument is absent or is not a literal the
-      receipt holds); an ``input.symbol`` entry also has ``kind: "symbol"``.
-      See :meth:`CodeGen.extract_input_manifest`.
-    - ``strategyParams``: the literal ``strategy(...)`` kwargs the analyzer
-      surfaced (e.g. ``initial_capital``, ``pyramiding``).
-    - ``diagnostics``: the warnings and notes (:class:`~pineforge_codegen.errors.Diagnostic`,
-      ``Level.WARNING`` / ``Level.NOTE``) the support checker and the analyzer raised for a
-      script that transpiled -- e.g. an approximated ``ta.vwap`` anchor. An
-      error still raises ``CompileError``, which carries nonfatal diagnostics too.
-    - ``requests``: every request site that reads another symbol's feed,
-      by line: its symbol and timeframe as registration computes them
-      before the first bar (``literal`` / ``input`` / ``computed`` /
-      ``unresolvable``; ``literal`` / ``chart`` / ``input`` / ``computed``),
-      ``lookahead``, ``gaps`` and ``ignore_invalid_symbol``. A site lowered
-      to ``na`` (its value reaches display sinks only) or in a helper
-      nothing reaches is not listed. See
-      :mod:`pineforge_codegen.request_discovery`.
-
-    Args mirror :func:`transpile`.
-
-    Returns:
-        ``{"cpp": str, "inputs": list[dict], "strategyParams": dict,
-        "diagnostics": list[Diagnostic], "requests": list[dict]}``.
-    """
-    gen, ctx, cpp, support_diagnostics, sites = _generate(
-        pine_source, check_support, filename, libraries)
-    return {
-        "cpp": cpp,
-        "inputs": gen.extract_input_manifest(),
-        "strategyParams": dict(ctx.strategy_params),
-        "diagnostics": [d for d in (*support_diagnostics, *ctx.diagnostics)
-                        if d.level in (Level.WARNING, Level.NOTE)],
-        "requests": discover_requests(gen, ctx, sites),
-    }
+def __dir__():
+    return sorted(set(globals()) | set(dir(_canonical)))
 
 
-def transpile_with_request_inventory(pine_source: str, *, check_support: bool = True,
-                                     filename: str = "<input>",
-                                     libraries: Mapping[str, str] | None = None,
-                                     primary_chart_timeframe: str | None = None) -> dict:
-    """Transpile like :func:`transpile_full`, plus the request-feed inventory
-    bound to the C++ it returns (``pineforge_codegen.request_feed_inventory``).
-
-    Runs the pipeline once (``_generate``) and returns six keys, the five
-    :func:`transpile_full` returns computed from that one generation by the
-    same expressions, and the inventory:
-
-    - ``cpp``: the generated C++ source (identical to :func:`transpile`).
-    - ``inputs``: the input manifest, as :func:`transpile_full` lists it.
-    - ``strategyParams``: the literal ``strategy(...)`` kwargs, as
-      :func:`transpile_full` lists them.
-    - ``diagnostics``: the warnings and notes, as :func:`transpile_full` lists
-      them.
-    - ``requests``: the other-symbol feed projection of
-      :func:`transpile_full` (``request_discovery.discover_requests``). It
-      leaves out the same-ticker requests, so it is not the strategy's
-      complete request list.
-    - ``request_feed_inventory``: the request-feed inventory bound to ``cpp``
-      (``build_request_feed_inventory``). It lists every bar request the
-      compiled strategy can make, same ticker included, from the same
-      registration context as ``requests``. Its ``artifact_sha256`` is null
-      until the trusted compile pipeline binds it after linking with
-      :func:`pineforge_codegen.request_feed_inventory.bind_request_feed_inventory`.
-
-    :func:`transpile` and :func:`transpile_full` are unchanged.
-
-    Args mirror :func:`transpile_full`, plus:
-        primary_chart_timeframe: The chart timeframe the compiled artifact is
-            bound to, as a wire token (a request that reads the chart's own
-            timeframe is then that token; without it, ``unknown``). A value
-            that is no wire token raises ``RequestFeedInventoryError``.
-
-    Returns:
-        ``{"cpp": str, "inputs": list[dict], "strategyParams": dict,
-        "diagnostics": list[Diagnostic], "requests": list[dict],
-        "request_feed_inventory": dict}``.
-    """
-    gen, ctx, cpp, support_diagnostics, sites = _generate(
-        pine_source, check_support, filename, libraries)
-    return {
-        "cpp": cpp,
-        "inputs": gen.extract_input_manifest(),
-        "strategyParams": dict(ctx.strategy_params),
-        "diagnostics": [d for d in (*support_diagnostics, *ctx.diagnostics)
-                        if d.level in (Level.WARNING, Level.NOTE)],
-        "requests": discover_requests(gen, ctx, sites),
-        "request_feed_inventory": build_request_feed_inventory(
-            gen, ctx, sites, cpp, primary_chart_timeframe=primary_chart_timeframe),
-    }
+# The import machinery re-reads sys.modules[name] after exec_module and returns
+# that object (importlib._bootstrap._load_unlocked). Pointing the entry at the
+# canonical package makes `pineforge_codegen is tunaxis_codegen` hold and every
+# later import / attribute lookup native; the forwarding module object above is
+# discarded once this package has finished initialising.
+sys.modules["pineforge_codegen"] = _canonical

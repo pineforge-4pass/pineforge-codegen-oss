@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
-from pineforge_codegen.pine_spelling import pine_string_literal
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
+from tunaxis_codegen.pine_spelling import pine_string_literal
 
 from tests._cpp_tokens import assert_inert, assert_only_in_strings, regions, string_values
 
@@ -314,11 +314,11 @@ SAMPLE_VALUE = f'x" {MARKER} "\\'
 
 @pytest.mark.parametrize("sample", SAMPLES.values(), ids=SAMPLES.keys())
 def test_pf_trace_literal_expression_reaches_its_emitter(sample, monkeypatch):
-    import pineforge_codegen
-    from pineforge_codegen.pragmas import extract_pf_trace_pragmas
+    import tunaxis_codegen
+    from tunaxis_codegen.pragmas import extract_pf_trace_pragmas
     (pragma,) = extract_pf_trace_pragmas('// @pf-trace probe=str.length("benign")\n')
     pragma.expr_node.args[0].value = sample
-    monkeypatch.setattr(pineforge_codegen, "extract_pf_trace_pragmas",
+    monkeypatch.setattr(tunaxis_codegen, "extract_pf_trace_pragmas",
                         lambda *args, **kwargs: [pragma])
     cpp = transpile(PRELUDE + TRADE)
     (trace_line,) = [line for line in cpp.split("\n") if 'trace(std::string("probe"),' in line]
@@ -330,7 +330,7 @@ def test_pf_trace_literal_expression_reaches_its_emitter(sample, monkeypatch):
 
 def test_pf_trace_name_is_escaped(monkeypatch):
     import re
-    from pineforge_codegen import pragmas
+    from tunaxis_codegen import pragmas
     monkeypatch.setattr(pragmas, "_PRAGMA_RE",
                         re.compile(r"^\s*//\s+@pf-trace\s+(\S+?)\s*=\s*(.+?)\s*$"))
     cpp = transpile(PRELUDE + '// @pf-trace a"PFSW"b=close\n' + TRADE)
@@ -339,7 +339,7 @@ def test_pf_trace_name_is_escaped(monkeypatch):
 
 
 def test_footprint_column_is_escaped(monkeypatch):
-    from pineforge_codegen import support_checker
+    from tunaxis_codegen import support_checker
     monkeypatch.setattr(support_checker, "footprint_column", lambda node: SAMPLE_VALUE)
     cpp = transpile(PRELUDE + 'fp = request.security("BINANCE:BTCUSDT", "60", '
                     'request.footprint(100, 70))\nif fp.delta() > 0\n'
@@ -350,12 +350,12 @@ def test_footprint_column_is_escaped(monkeypatch):
 
 def _emitter(**attrs):
     from types import SimpleNamespace
-    from pineforge_codegen.codegen.helpers import NamingHelper
+    from tunaxis_codegen.codegen.helpers import NamingHelper
     return SimpleNamespace(_cpp_string_escape=NamingHelper._cpp_string_escape, **attrs)
 
 
 def test_helper_series_key_is_escaped():
-    from pineforge_codegen.codegen.security import SecurityEmitter
+    from tunaxis_codegen.codegen.security import SecurityEmitter
     for strings in (set(), {SAMPLE_VALUE}):
         ref = SecurityEmitter._security_helper_series_ref(
             _emitter(_security_string_series=strings), SAMPLE_VALUE)
@@ -365,8 +365,8 @@ def test_helper_series_key_is_escaped():
 
 def test_recorded_key_is_escaped():
     from types import SimpleNamespace
-    from pineforge_codegen.codegen.security import SecurityEmitter
-    from pineforge_codegen.external_requests import RECORDED_KEY_ANNOTATION
+    from tunaxis_codegen.codegen.security import SecurityEmitter
+    from tunaxis_codegen.external_requests import RECORDED_KEY_ANNOTATION
     request = SimpleNamespace(args=["sym"], annotations={RECORDED_KEY_ANNOTATION: {
         "fn": SAMPLE_VALUE, "field": SAMPLE_VALUE, "period": SAMPLE_VALUE, "gaps": "off",
         "lookahead": "off"}})
@@ -378,11 +378,11 @@ def test_recorded_key_is_escaped():
 
 @pytest.mark.parametrize("namespace", ["currency", "SampleEnum"])
 def test_member_string_is_escaped_at_the_emitter(namespace, monkeypatch):
-    from pineforge_codegen.analyzer import Analyzer
-    from pineforge_codegen.ast_nodes import Identifier, MemberAccess
-    from pineforge_codegen.codegen import CodeGen
-    from pineforge_codegen.lexer import Lexer
-    from pineforge_codegen.parser import Parser
+    from tunaxis_codegen.analyzer import Analyzer
+    from tunaxis_codegen.ast_nodes import Identifier, MemberAccess
+    from tunaxis_codegen.codegen import CodeGen
+    from tunaxis_codegen.lexer import Lexer
+    from tunaxis_codegen.parser import Parser
     program = Parser(Lexer(PRELUDE).tokenize(), source=PRELUDE).parse()
     emitter = CodeGen(Analyzer(program).analyze())
     monkeypatch.setattr(emitter, "_visit_expr", lambda node: namespace)
@@ -395,7 +395,7 @@ def test_member_string_is_escaped_at_the_emitter(namespace, monkeypatch):
 
 @pytest.mark.parametrize("suffix", ["", "0", "1", "7", "8", "9", "123", "000"])
 def test_nul_uses_a_three_digit_octal_escape(suffix):
-    from pineforge_codegen.codegen.helpers import NamingHelper
+    from tunaxis_codegen.codegen.helpers import NamingHelper
     sample = "x\0" + suffix + MARKER
     escaped = NamingHelper._cpp_string_escape(sample)
     assert escaped == "x\\000" + suffix + MARKER
@@ -404,7 +404,7 @@ def test_nul_uses_a_three_digit_octal_escape(suffix):
 
 
 def test_nul_literal_compiles_without_a_raw_nul():
-    from pineforge_codegen.codegen.helpers import NamingHelper
+    from tunaxis_codegen.codegen.helpers import NamingHelper
     from tests._compile import compile_cpp
     escaped = NamingHelper._cpp_string_escape("x\0" + "7PFSW")
     cpp = (f'constexpr char value[] = "{escaped}";\n'

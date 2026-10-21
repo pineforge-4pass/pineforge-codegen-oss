@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.cpp_allowlist import (
+from tunaxis_codegen import transpile
+from tunaxis_codegen.cpp_allowlist import (
     Finding,
     check_generated_cpp,
 )

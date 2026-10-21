@@ -53,9 +53,9 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
-from pineforge_codegen.parser import Parser
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
+from tunaxis_codegen.parser import Parser
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "popfix_tv" / "version_directive_spellings.json"

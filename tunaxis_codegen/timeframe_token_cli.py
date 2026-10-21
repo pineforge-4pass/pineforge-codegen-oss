@@ -1,6 +1,6 @@
 """Batch timeframe-token transport for the native admission's canonicalizer.
 
-``python -m pineforge_codegen.timeframe_token_cli`` reads one request on stdin
+``python -m tunaxis_codegen.timeframe_token_cli`` reads one request on stdin
 and writes one result on stdout::
 
     request: {"version": 1, "values": [<raw JSON value>, ...]}

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from pineforge_codegen import transpile
+from tunaxis_codegen import transpile
 from tests._compile import compile_cpp
 from tests._e2e import (
     Build, assert_same_runs, chart_feed_head, execute_all, ok, skip_unless_e2e_env,

@@ -371,7 +371,7 @@ class TypeHelper:
                     and isinstance(value.object, Identifier)
                     and self._collection_history_is_supported(value)):
                 # An array's or a matrix's history is a collection of its
-                # type (fixtures/array_history_tv; pineforge_codegen/
+                # type (fixtures/array_history_tv; tunaxis_codegen/
                 # collection_history.py); a legacy read keeps the element
                 # typing it had.
                 return receiver_spec

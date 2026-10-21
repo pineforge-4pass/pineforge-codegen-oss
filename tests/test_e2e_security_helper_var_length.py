@@ -33,8 +33,8 @@ from pathlib import Path
 
 import pytest
 
-from pineforge_codegen import transpile
-from pineforge_codegen.errors import CompileError
+from tunaxis_codegen import transpile
+from tunaxis_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests._e2e import Build, closed_trades, execute_all, ok, skip_unless_e2e_env
 from tests._security_tapes import mismatches, source, tape_exits, tape_feed
