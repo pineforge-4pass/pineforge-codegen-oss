@@ -4,7 +4,7 @@
   "vectors": [
     {
       "name": "doc_worked_vector",
-      "note": "The worked vector of docs/design/scratch-facts.md, 82 bytes: S={ab} F={one empty string} E={x} H={} J={q}, every set complete. 1 + (1+8+8+2) + (1+8+8+0) + (1+8+8+1) + (1+8) + (1+8+8+1) = 82.",
+      "note": "The worked vector of docs/design/scratch-facts.md, 82 bytes: S={ab} F={one empty string} E={x} H={} J={q}, every set complete. 1 + (1+8+8+2) + (1+8+8+0) + (1+8+8+1) + (1+8) + (1+8+8+1) = 82. Hand-counted zero-based byte boundaries (end exclusive): version [0,1), S [1,20), F [20,37), E [37,55), H [55,64), J [64,82). The certificate has 164 hex characters.",
       "classification": "in_subset",
       "layout": [
         "01",
@@ -25,7 +25,7 @@
     },
     {
       "name": "incomplete_exit_out_of_subset",
-      "note": "E is a dynamic exit-ID set (complete=00). S={L} F={empty string} H={empty,L} J={L}. 1 + 18 + 17 + 18 + (1+8+8+8+1) + 18 = 98 bytes. An out_of_subset label is accepted over any certificate.",
+      "note": "E is a dynamic exit-ID set (complete=00). S={L} F={empty string} H={empty,L} J={L}. 1 + 18 + 17 + 18 + (1+8+8+8+1) + 18 = 98 bytes. An out_of_subset label is accepted over any certificate. Hand-counted zero-based byte boundaries (end exclusive): version [0,1), S [1,19), F [19,36), E [36,54), H [54,80), J [80,98). The certificate has 196 hex characters.",
       "classification": "out_of_subset",
       "layout": [
         "01",
@@ -46,7 +46,7 @@
     },
     {
       "name": "sorted_multi_entry_and_nul_byte",
-      "note": "S={B,a} in unsigned-byte order (0x42 before 0x61), E={a NUL b} proves NUL is an ordinary byte, F and H are empty, J={B,a}. 1 + (1+8+16+2) + 9 + (1+8+8+3) + 9 + (1+8+16+2) = 93 bytes.",
+      "note": "S={B,a} in unsigned-byte order (0x42 before 0x61), E={a NUL b} proves NUL is an ordinary byte, F and H are empty, J={B,a}. 1 + (1+8+16+2) + 9 + (1+8+8+3) + 9 + (1+8+16+2) = 93 bytes. Hand-counted zero-based byte boundaries (end exclusive): version [0,1), S [1,28), F [28,37), E [37,57), H [57,66), J [66,93). The certificate has 186 hex characters.",
       "classification": "in_subset",
       "layout": [
         "01",
