@@ -1,6 +1,28 @@
 name: Publish codegen-pyodide
 
-# Builds @pineforge/codegen-pyodide from the GATE-VALIDATED archive and publishes
+# Current registry state for @tunaxis/codegen-pyodide: ["0.0.0-stage", "0.0.1"] only.
+# The 0.0.2 OIDC placeholder was never published (OIDC 403 pending the owner's
+# npm trusted-publisher setting).
+# Name claims use the token-free claim-npm job (claim_placeholder=true).
+# First real release / first-publish bootstrap (perform these steps in order):
+# 1. Configure the @tunaxis/codegen-pyodide trusted publisher for this repository
+#    and publish-pyodide.yml with NO environment (publish declares none). Keep
+#    the separate @pineforge/codegen-pyodide trusted publisher configured too.
+# 2. Only for first_publish=true, create the one-time token and protected
+#    environment declared inside first-publish, with a required reviewer and a
+#    v* tags-only policy. Neither is used by claim-npm.
+# 3. Dispatch on the NEW v<VERSION> tag with first_publish=true, dry_run=false
+#    and publish_old_name=true. Never use a VERSION already published under
+#    @pineforge/codegen-pyodide.
+# 4. Once an OIDC publish of @tunaxis is read back on the registry (CORE-TOP
+#    card), remove first-publish and its publish dependency/guards, revoke its
+#    token and delete its protected environment.
+# 5. After the first forwarder release, the owner runs this ONCE by hand:
+#    npm deprecate @pineforge/codegen-pyodide "<message>"
+#    It covers all old-name versions. Deprecate the 0.0.x @tunaxis placeholders
+#    by hand too; a prerelease on next leaves latest on its placeholder.
+#
+# Builds @tunaxis/codegen-pyodide from the GATE-VALIDATED archive and publishes
 # it via npm OIDC Trusted Publishing (mirrors pineforge-codegen-mcp/publish.yml).
 # Auto-release: a `v*` tag push (e.g. created by release.yml) publishes for real,
 # gate-blocked. workflow_dispatch defaults to a DRY RUN (set dry_run=false to
@@ -22,27 +44,173 @@ on:
         required: false
         type: boolean
         default: false
+      publish_old_name:
+        description: "Also publish the @pineforge compatibility forwarder."
+        type: boolean
+        default: true
+      first_publish:
+        description: "Use the one-time token to publish @tunaxis/codegen-pyodide for the first time."
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
 permissions:
   contents: read
-  id-token: write   # npm OIDC Trusted Publishing
 
 concurrency:
-  group: publish-pyodide-${{ github.ref }}
+  group: publish-pyodide
   cancel-in-progress: false
 
 jobs:
-  publish:
-    if: ${{ !inputs.claim_placeholder }}
+  # remove when an OIDC publish of @tunaxis is read back on the registry (CORE-TOP card)
+  first-publish:
+    name: first-publish
+    if: ${{ !inputs.claim_placeholder && startsWith(github.ref, 'refs/tags/v') && github.event_name == 'workflow_dispatch' && inputs.first_publish == true }}
     runs-on: ubuntu-latest
+    environment: npm-first
+    permissions:
+      contents: read
+      id-token: write   # Required by the existing token bootstrap's --provenance.
     env:
       PYTHONHASHSEED: "0"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
-      # Tag push must match VERSION (mirrors mcp). Skipped for dispatch.
+      - name: Verify tag matches VERSION
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="${TAG_NAME#v}"; file="$(tr -d '[:space:]' < VERSION)"
+          if [ "$tag" != "$file" ]; then
+            echo "::error::tag '$TAG_NAME' != VERSION '$file'"; exit 1
+          fi
+
+      - name: Resolve npm dist-tag from VERSION
+        id: channel
+        run: |
+          set -euo pipefail
+          python3 scripts/release_version.py channels "$(tr -d '[:space:]' < VERSION)" | tee -a "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: "3.14"
+
+      # Supplied by core/tnx-codegen; fails closed until that lane merges.
+      - name: Refuse an npm package that does not ship tunaxis_codegen-*
+        run: python scripts/check_npm_payload.py
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: "22.14.0"
+          registry-url: https://registry.npmjs.org
+
+      - name: Install npm 11.5.1
+        run: npm install -g npm@11.5.1
+
+      - name: Print Node and npm versions
+        run: |
+          node --version
+          npm --version
+
+      - name: Require npm >= 11.5.1
+        run: |
+          set -euo pipefail
+          minimum=11.5.1
+          actual=$(npm --version)
+          lowest=$(printf '%s\n' "$minimum" "$actual" | sort -V | head -n 1)
+          if [ "$lowest" != "$minimum" ]; then
+            printf 'npm %s is below %s\n' "$actual" "$minimum" >&2
+            exit 1
+          fi
+
+      - name: Install + run the gate (publish only ships gate-validated bytes)
+        run: |
+          python -m pip install -e .
+          npm ci
+          npm audit --audit-level=high
+          npm run gate:selftest
+          npm run gate:full
+
+      - name: Assemble the package
+        run: node scripts/build-npm-package.mjs
+
+      # Render and test both packages before either can be published.
+      # @VERSION@ is deliberately kept as a template in npm-compat/package.json.
+      - name: Render @pineforge compatibility package
+        env:
+          VERSION: ${{ steps.channel.outputs.version }}
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [ "$version" != "$VERSION" ]; then
+            echo "::error::VERSION changed after channel resolution"; exit 1
+          fi
+          sed -i "s/@VERSION@/${version}/g" npm-compat/package.json
+          node --input-type=module <<'JS'
+          import assert from "node:assert/strict";
+          import { readFileSync } from "node:fs";
+          const text = readFileSync("npm-compat/package.json", "utf8");
+          assert.ok(!text.includes("@VERSION@"), "unrendered compatibility version");
+          const pkg = JSON.parse(text);
+          assert.equal(pkg.version, process.env.VERSION);
+          assert.equal(pkg.dependencies["@tunaxis/codegen-pyodide"], process.env.VERSION);
+          JS
+          cp LICENSE npm-compat/LICENSE
+          cp npm/tables.json npm-compat/tables.json
+          cp npm/release.json npm-compat/release.json
+          cp npm/tunaxis_codegen/diagnostics_catalog.json npm-compat/diagnostics_catalog.json
+          cmp npm/tables.json npm-compat/tables.json
+          cmp npm/release.json npm-compat/release.json
+          cmp npm/tunaxis_codegen/diagnostics_catalog.json npm-compat/diagnostics_catalog.json
+
+      - name: Verify @pineforge compatibility with the assembled payload
+        run: node npm/test-compat.mjs npm
+
+      - name: Publish @tunaxis/codegen-pyodide (first publish with one-time token)
+        working-directory: npm
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          DIST_TAG: ${{ steps.channel.outputs.npm_dist_tag }}
+          VERSION: ${{ steps.channel.outputs.version }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_FIRST_PUBLISH }}
+        run: |
+          set -euo pipefail
+          tag=()
+          if [ "$DIST_TAG" != latest ]; then tag=(--tag "$DIST_TAG"); fi
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ]; then
+            if npm view "@tunaxis/codegen-pyodide@$VERSION" version; then
+              echo "@tunaxis/codegen-pyodide@$VERSION already exists; skipping publish"
+            else
+              echo "Publishing first @tunaxis package for real (--access=public, dist-tag ${DIST_TAG})"
+              npm publish --access public --provenance ${tag[@]+"${tag[@]}"}
+            fi
+          else
+            echo "DRY RUN (set first_publish=true and dry_run=false for the first real publish)"
+            npm publish --dry-run --access public ${tag[@]+"${tag[@]}"}
+          fi
+
+  publish:
+    # When removing first-publish, also drop needs and both first_publish guards.
+    needs: first-publish
+    if: >-
+      ${{ !cancelled() && !inputs.claim_placeholder && (github.event_name != 'workflow_dispatch' || inputs.first_publish != true || needs['first-publish'].result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # npm OIDC Trusted Publishing for both package names
+    env:
+      PYTHONHASHSEED: "0"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+
+      # Every v* tag ref, including a dispatch, must match VERSION.
       - name: Verify tag matches VERSION
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -65,14 +233,34 @@ jobs:
         with:
           python-version: "3.14"
 
+      # Supplied by core/tnx-codegen; fails closed until that lane merges.
+      - name: Refuse an npm package that does not ship tunaxis_codegen-*
+        run: python scripts/check_npm_payload.py
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
         with:
-          node-version: "22"
+          node-version: "22.14.0"
           registry-url: https://registry.npmjs.org
 
-      # npm OIDC Trusted Publishing needs npm >= 11.5.1 (newer than Node 22's npm;
-      # npm docs + spec §7 require >= 11.5.1).
-      - run: npm install -g npm@11.5.1
+      # npm OIDC Trusted Publishing needs npm >= 11.5.1 and Node >= 22.14.0.
+      - name: Install npm 11.5.1
+        run: npm install -g npm@11.5.1
+
+      - name: Print Node and npm versions
+        run: |
+          node --version
+          npm --version
+
+      - name: Require npm >= 11.5.1
+        run: |
+          set -euo pipefail
+          minimum=11.5.1
+          actual=$(npm --version)
+          lowest=$(printf '%s\n' "$minimum" "$actual" | sort -V | head -n 1)
+          if [ "$lowest" != "$minimum" ]; then
+            printf 'npm %s is below %s\n' "$actual" "$minimum" >&2
+            exit 1
+          fi
 
       - name: Install + run the gate (publish only ships gate-validated bytes)
         run: |
@@ -85,24 +273,95 @@ jobs:
       - name: Assemble the package
         run: node scripts/build-npm-package.mjs
 
-      - name: Publish (real on tag push or dispatch dry_run=false; dry-run otherwise)
+      # Render and test even when publish_old_name=false, before any publish.
+      # @VERSION@ is deliberately kept as a template in npm-compat/package.json.
+      - name: Render @pineforge compatibility package
+        env:
+          VERSION: ${{ steps.channel.outputs.version }}
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [ "$version" != "$VERSION" ]; then
+            echo "::error::VERSION changed after channel resolution"; exit 1
+          fi
+          sed -i "s/@VERSION@/${version}/g" npm-compat/package.json
+          node --input-type=module <<'JS'
+          import assert from "node:assert/strict";
+          import { readFileSync } from "node:fs";
+          const text = readFileSync("npm-compat/package.json", "utf8");
+          assert.ok(!text.includes("@VERSION@"), "unrendered compatibility version");
+          const pkg = JSON.parse(text);
+          assert.equal(pkg.version, process.env.VERSION);
+          assert.equal(pkg.dependencies["@tunaxis/codegen-pyodide"], process.env.VERSION);
+          JS
+          cp LICENSE npm-compat/LICENSE
+          cp npm/tables.json npm-compat/tables.json
+          cp npm/release.json npm-compat/release.json
+          cp npm/tunaxis_codegen/diagnostics_catalog.json npm-compat/diagnostics_catalog.json
+          cmp npm/tables.json npm-compat/tables.json
+          cmp npm/release.json npm-compat/release.json
+          cmp npm/tunaxis_codegen/diagnostics_catalog.json npm-compat/diagnostics_catalog.json
+
+      - name: Verify @pineforge compatibility with the assembled payload
+        run: node npm/test-compat.mjs npm
+
+      - name: Publish @tunaxis/codegen-pyodide via OIDC (real on tag push or dispatch dry_run=false; dry-run otherwise)
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.first_publish != true }}
         working-directory: npm
         env:
           EVENT: ${{ github.event_name }}
           DRY_RUN: ${{ inputs.dry_run }}
           DIST_TAG: ${{ steps.channel.outputs.npm_dist_tag }}
+          VERSION: ${{ steps.channel.outputs.version }}
         run: |
+          set -euo pipefail
           # Only a prerelease names its dist-tag (next): an explicit --tag, even
           # latest, would bypass npm's refusal to move latest to a lower version.
           tag=()
           if [ "$DIST_TAG" != latest ]; then tag=(--tag "$DIST_TAG"); fi
           if [ "$EVENT" = "push" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ]; }; then
-            echo "Publishing for real (--access=public, dist-tag ${DIST_TAG})"
-            npm publish --access=public ${tag[@]+"${tag[@]}"}
+            if npm view "@tunaxis/codegen-pyodide@$VERSION" version; then
+              echo "@tunaxis/codegen-pyodide@$VERSION already exists; skipping publish"
+            else
+              echo "Publishing for real via OIDC (--access=public, dist-tag ${DIST_TAG})"
+              npm publish --access=public --provenance ${tag[@]+"${tag[@]}"}
+            fi
           else
             echo "DRY RUN (a v* tag push or dispatch with dry_run=false publishes for real)"
             npm publish --dry-run --access=public ${tag[@]+"${tag[@]}"}
           fi
+
+      # Keep the @pineforge forwarder on every release; tag pushes need no opt-in.
+      # One-shot vs every-release goes to L6 after the 10-29 switch.
+      - name: Publish @pineforge/codegen-pyodide (compatibility package via OIDC)
+        if: ${{ github.event_name == 'push' || inputs.publish_old_name == true }}
+        working-directory: npm-compat
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          DIST_TAG: ${{ steps.channel.outputs.npm_dist_tag }}
+          VERSION: ${{ steps.channel.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The existing old-name trusted publisher remains in use for this step.
+          # Keep the old-name package on the same latest/next channel as Tunaxis.
+          tag=()
+          if [ "$DIST_TAG" != latest ]; then tag=(--tag "$DIST_TAG"); fi
+          if [ "$EVENT" = "push" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ]; }; then
+            if npm view "@pineforge/codegen-pyodide@$VERSION" version; then
+              echo "@pineforge/codegen-pyodide@$VERSION already exists; skipping publish"
+            else
+              echo "Publishing for real via OIDC (--access=public, dist-tag ${DIST_TAG})"
+              npm publish --access=public --provenance ${tag[@]+"${tag[@]}"}
+            fi
+          else
+            echo "DRY RUN (a v* tag push or dispatch with dry_run=false publishes for real)"
+            npm publish --dry-run --access=public ${tag[@]+"${tag[@]}"}
+          fi
+
+      # npm OIDC authenticates publish only. After the first forwarder release,
+      # the owner runs npm deprecate @pineforge/codegen-pyodide "<message>" once
+      # by hand; omitting @<version> covers every version of the old name.
 
   claim-npm:
     if: ${{ inputs.claim_placeholder }}

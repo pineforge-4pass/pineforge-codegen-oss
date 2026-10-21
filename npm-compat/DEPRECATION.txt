@@ -1,0 +1,1 @@
+@pineforge/codegen-pyodide is deprecated. Install @tunaxis/codegen-pyodide instead.
