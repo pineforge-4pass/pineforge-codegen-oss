@@ -177,10 +177,10 @@ def _row(member, kind, count, element, reason, cpp_type,
         "element_bytes_cpp": element,
         "storage_requirement": "preallocate" if count is not None and element is not None else "external",
         # A storage requirement is not a claim that an adapter was installed.
-        # ``current_storage`` is a plain word when it is a literal
-        # (``resident``) and the emitted macro's name when the backing depends
-        # on the engine the TU is built against; the emitter quotes the former
-        # and emits the latter as an expression.
+        # ``current_storage`` is the plain word ``resident`` when the member is
+        # resident, and the emitted macro's name (``_PF_...``) when the backing
+        # depends on the engine the TU is built against. The emitter quotes the
+        # former and emits the latter as an expression.
         "current_storage": current_storage,
         "reason": reason,
     }
@@ -212,8 +212,8 @@ def build_script_state_bounds(emitter, declarations, checkpoint_members):
         cpp_type = decl_match.group(1)
         kind, count, element = "opaque", None, None
         reason = "No complete payload bound is proven."
-        # Where the member lives today; an identifier here is emitted as an
-        # expression, anything else as a string literal.
+        # Where the member lives today: the plain word ``resident``, or the
+        # emitted ``_PF_`` macro the row carries as an expression.
         current_storage = "resident"
         if cpp_type in _INLINE_CPP:
             kind, count, element = "scalar", 1, f"sizeof({cpp_type})"
@@ -330,8 +330,9 @@ def emit_script_state_bounds(emitter, lines):
         count = row["cardinality_bound"]
         size = row["element_bytes_cpp"]
         storage = row["current_storage"]
+        # A literal is a plain word; only an emitted macro is an expression.
         storage_cpp = (
-            storage if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", storage)
+            storage if storage.startswith("_PF_")
             else '"' + emitter._cpp_string_escape(storage) + '"'
         )
         lines.append(

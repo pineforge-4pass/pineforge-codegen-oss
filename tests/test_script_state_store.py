@@ -256,7 +256,7 @@ def test_bound_row_reports_the_store_storage():
         assert row["storage_requirement"] == "external"
         # The row reports the storage the TU is built against, not a guess.
         assert row["current_storage"] == "_PF_O1_CURRENT_STORAGE"
-    assert '_PF_O1_CURRENT_STORAGE}},' in cpp
+    assert '_PF_O1_CURRENT_STORAGE},' in cpp
 
 
 # ---------------------------------------------------------------------------
