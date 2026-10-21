@@ -109,6 +109,44 @@ the Python `build` frontend, run `python -m build`, assemble the npm payload,
 then run `npm pack --dry-run` from `npm/`. These commands build local artifacts;
 publishing is a separate release operation.
 
+## npm publication (operators)
+
+The release and npm publication workflows run on GitHub-hosted runners.
+Run both workflows with `workflow_dispatch` on `main`.
+`release.yml` publishes to PyPI, commits and pushes the release tag, then
+creates the GitHub Release and notifies the release hub. After the tag exists
+on main and the release job is green, the operator doing the cut, using a
+GitHub account with write access, publishes npm with this separate dispatch:
+
+```sh
+gh workflow run publish-pyodide.yml --repo pineforge-4pass/pineforge-codegen-oss --ref main -f tag=<tag> -f dry_run=false
+```
+
+Use the existing release tag in place of `<tag>`. Set `dry_run=true` to
+validate first. A tag push alone publishes nothing. A green `release.yml`
+run does not mean npm published; watch the `publish-pyodide.yml` run.
+Every npm run requires an existing release tag, including dry runs and
+placeholder claims. Its first job, `tag-guard`, has only Contents read
+permission and checks out main with credentials persistence disabled. It
+checks the dispatch ref is `refs/heads/main`, validates the release pattern
+(`vX.Y.Z` or `vX.Y.Z-{alpha,beta,rc}.N`) before using the input in git,
+fetches tags and full main history, peels the tag to a 40-hex commit and
+checks that commit is an ancestor of `refs/remotes/origin/main`.
+A missing tag, a tag that cannot peel to a commit, an invalid name or a tag
+outside main fails the run before either npm job can start. Publish checks
+out the verified commit SHA with credentials persistence disabled, verifies
+its `VERSION`, and runs the gate before publishing. The workflow run stays
+at `refs/heads/main` while its checkout uses the pinned commit; moving the tag
+after verification does not change what gets built.
+
+For a manual npm dry run, dispatch `publish-pyodide.yml` on `main` with
+`dry_run=true` and an existing release `tag` on main. For a real npm retry
+after a successful tag push, dispatch on `main` with the existing release
+`tag` and `dry_run=false`. A placeholder claim uses `claim_placeholder=true`
+and the same required tag guard. The guard fails a dispatch at another ref;
+both npm jobs also retain their main-ref job conditions and require the
+guard to succeed.
+
 ## Change and review notes
 
 - Add or update tests for behavior changes. Keep the engine corpus compiling;
