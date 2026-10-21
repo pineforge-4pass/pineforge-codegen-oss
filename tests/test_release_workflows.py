@@ -67,3 +67,47 @@ def test_npm_publish_names_a_dist_tag_only_for_a_prerelease():
 def test_github_release_flag_fails_closed():
     body = step(RELEASE, "Create GitHub Release")
     assert 'case "$PRERELEASE" in true|false) ;;' in body
+
+
+def npm_job_blocks(text):
+    """The job blocks of the npm workflow, keyed by job id (the checked 2-space layout)."""
+    assert text.count("\njobs:\n") == 1, "workflow must have one jobs block"
+    parts = re.split(r"^  ([\w-]+):[ \t]*$", text.split("\njobs:\n", 1)[1], flags=re.M)
+    return dict(zip(parts[1::2], parts[2::2]))
+
+
+def assert_npm_jobs_in_main_only_environment(text):
+    """Both npm jobs declare exactly `environment: npm-publish` (main-only deployment-branch
+    policy; npm trusted publishing requires it), and no other environment exists."""
+    jobs = npm_job_blocks(text)
+    assert set(jobs) == {"publish", "claim-npm"}, "npm workflow must have exactly the two npm jobs"
+    for job_id, body in jobs.items():
+        lines = re.findall(r"^    environment:[^\n]*$", body, re.M)
+        assert lines == ["    environment: npm-publish"], f"{job_id} must declare `environment: npm-publish`"
+    assert text.count("environment:") == 2, "only the two npm jobs may declare an environment"
+
+
+def test_npm_jobs_run_in_the_main_only_environment():
+    assert_npm_jobs_in_main_only_environment(NPM)
+
+
+def test_npm_environment_pin_refuses_real_workflow_mutations():
+    assert_npm_jobs_in_main_only_environment(NPM)
+    jobs = npm_job_blocks(NPM)
+    original = "    environment: npm-publish\n"
+    for job_id in ("publish", "claim-npm"):
+        body = jobs[job_id]
+        assert body.count(original) == 1, f"mutation anchor must match {job_id} exactly once"
+        for replacement in (
+            "",
+            "    environment: production\n",
+            original + "    environment: npm-publish-2\n",
+            "    environment: ${{ inputs.claim_version }}\n",
+        ):
+            mutant = NPM.replace(body, body.replace(original, replacement, 1), 1)
+            assert mutant != NPM, "mutation must change the shipped workflow"
+            try:
+                assert_npm_jobs_in_main_only_environment(mutant)
+            except AssertionError:
+                continue
+            raise AssertionError(f"{job_id}: mutant {replacement!r} was accepted")

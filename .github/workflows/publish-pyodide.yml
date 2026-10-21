@@ -37,6 +37,8 @@ jobs:
   publish:
     if: ${{ !inputs.claim_placeholder }}
     runs-on: ubuntu-latest
+    # GitHub environment with a main-only deployment-branch policy; npm trusted publishing requires it.
+    environment: npm-publish
     env:
       PYTHONHASHSEED: "0"
     steps:
@@ -107,6 +109,8 @@ jobs:
   claim-npm:
     if: ${{ inputs.claim_placeholder }}
     runs-on: ubuntu-24.04
+    # Same environment as `publish`.
+    environment: npm-publish
     permissions: { contents: read, id-token: write }
     steps:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
