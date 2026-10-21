@@ -257,7 +257,6 @@ count = array.size(items[1])
         '_PF_COLLECTION_STOP("historical_modified", "array",',
         '_PF_COLLECTION_STOP("na_reference", "array",',
         '_PF_NA_STOP("udt_object", "UDT access on na or invalid object ID")',
-        '_PF_LIMIT_STOP("udt_objects", 2147483647LL, "UDT object-ID capacity exceeded")',
         '_PF_ENGINE_INVARIANT("UDT checkpoint generation exhausted", std::overflow_error)',
         '_PF_ENGINE_INVARIANT("invalid UDT undo generation", std::runtime_error)',
         '_PF_ENGINE_INVARIANT("invalid UDT coordinator checkpoint token", std::runtime_error)',

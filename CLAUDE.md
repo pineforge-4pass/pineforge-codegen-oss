@@ -335,6 +335,20 @@ tests/
    snapshots, retaining traversal order at ties. Inline TA identity keys are
    an unordered membership set.
 
+## Script-state bound evidence
+
+`codegen/state_bounds.py` inventories the emitted persistent declarations and
+exports `strategy_script_state_bounds_v1(size_t*)` before any strategy instance
+or bar is needed. Its cardinality and logical inline-byte proofs are separate:
+`sizeof(std::string)`, a UDT handle and a history horizon never bound reachable
+payloads. Constant array/matrix constructors qualify only without a growing,
+rebinding or escaping use; an input default is not a proof. Unknown means
+external storage is required, not a refusal. `current_storage` still says
+`resident`: this query does not install typed `detail::o1::Store` adapters or
+preallocate the existing collections. Do not advertise it as flat memory.
+UDT IDs use the arena's `std::size_t` index and its maximum as na; the old
+31-bit capacity stop is gone. Identity, alias and rollback tests still apply.
+
 ## Support contracts
 
 Numeric `matrix.sum(id1, id2)` returns a detached matrix for either a matrix or numeric scalar RHS; its existing one-argument aggregate lowering is unchanged. Scalar `matrix.diff`/`matrix.mult` also return detached matrices. Typed matrix/vector multiplication and a variable initialized from namespace `array.concat` are refused with the existing unsupported-function diagnostic. Default/index-only matrix row/column insertion fills with element na; omitted submatrix bounds, sort column and array-fill end use the collection dimensions. `tests/test_matrix_arithmetic_overloads.py` compiles and runs these overloads against the paired runtime.

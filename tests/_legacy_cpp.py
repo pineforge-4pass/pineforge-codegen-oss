@@ -1,4 +1,4 @@
-"""Compare frozen lowering bytes without additive settings/capabilities/stop ABIs."""
+"""Compare frozen lowering bytes without additive metadata/stop ABIs."""
 import re
 
 from pineforge_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP
@@ -41,6 +41,13 @@ def _without_run_failure_scaffold(cpp: str) -> str:
 def legacy_cpp(cpp: str) -> str:
     # Coded-stop ABIs are additive; retain their actual call-site changes.
     cpp = _without_run_failure_scaffold(cpp)
+    # The state-bound query does not change the strategy body. Its actual
+    # rows/types are checked and compiled in test_script_state_bounds.
+    cpp = cpp.replace('#include <cstddef>\n', '')
+    cpp = re.sub(
+        r'^struct _PFScriptStateBoundV1 \{\n.*?^    return bounds;\n}\n\n',
+        '', cpp, flags=re.MULTILINE | re.DOTALL,
+    )
     cpp = cpp.replace(
         '#if __has_include(<pineforge/checked_settings.hpp>)\n'
         '#include <pineforge/checked_settings.hpp>\n#endif\n', '')

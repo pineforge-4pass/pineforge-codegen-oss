@@ -142,6 +142,7 @@ class TopLevelEmitter:
         if getattr(self, "_uses_map", False):
             lines.append('#include <pineforge/map.hpp>')
         lines.append("#include <cstdint>")
+        lines.append("#include <cstddef>")
         lines.append("#include <cmath>")
         lines.append("#include <algorithm>")
         lines.append("#include <cstdlib>")

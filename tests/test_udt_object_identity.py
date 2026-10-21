@@ -45,7 +45,7 @@ observedNested = holder.inner.value
 
 def test_udt_values_emit_nullable_handles_records_and_arenas() -> None:
     cpp = transpile(_ALIAS_COPY_SOURCE)
-    assert "struct Item {\n    int32_t __pf_id = -1;" in cpp
+    assert "struct Item {\n    std::size_t __pf_id = std::numeric_limits<std::size_t>::max();" in cpp
     assert "struct _PFUdtRecord_Item" in cpp
     assert (
         "_PFUdtArena<Item, _PFUdtRecord_Item> "
@@ -192,8 +192,8 @@ int main() {
     strategy.run(&bar, 1);
     if (!strategy.last_error().empty()) return 2;
     if (strategy._pf_udt_Node.size() != 2) return 3;
-    const int32_t root_id = strategy.root.__pf_id;
-    const int32_t copied_id = strategy.copied.__pf_id;
+    const auto root_id = strategy.root.__pf_id;
+    const auto copied_id = strategy.copied.__pf_id;
     strategy.snapshot_script_state();
 
     strategy._pf_udt_Node.get(strategy.alias).value = 9.0;
@@ -459,7 +459,8 @@ observed = holder.value
 '''
     cpp = transpile(source)
     assert "std::deque<_PFSlot> _pf_records_;" in cpp
-    assert "UDT object-ID capacity exceeded" in cpp
+    assert "UDT object-ID capacity exceeded" not in cpp
+    assert "const auto id = _pf_records_.size();" in cpp
     driver = r'''
 #include <iostream>
 int main() {
@@ -702,7 +703,7 @@ observed = item.value + authored.other
 '''
     cpp = transpile(source)
     assert "struct _PFUdtRecord_Item__pf2" in cpp
-    assert "struct _PFUdtRecord_Item {\n    int32_t __pf_id" in cpp
+    assert "struct _PFUdtRecord_Item {\n    std::size_t __pf_id" in cpp
     compile_cpp(cpp, label="udt-record-name-collision")
 
 

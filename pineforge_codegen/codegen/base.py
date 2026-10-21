@@ -4519,11 +4519,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for type_name in self._udt_defs:
             safe_type_name = self._safe_name(type_name)
             lines.append(f"struct {safe_type_name} {{")
-            lines.append("    int32_t __pf_id = -1;")
+            lines.append("    std::size_t __pf_id = std::numeric_limits<std::size_t>::max();")
             lines.append("};")
             lines.append(
                 f"inline bool is_na(const {safe_type_name}& _z) "
-                "{ return _z.__pf_id < 0; }"
+                "{ return _z.__pf_id == std::numeric_limits<std::size_t>::max(); }"
             )
             lines.append("")
 
@@ -4640,11 +4640,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "    }",
                 "",
                 "    _PFHandle create(_PFRecord value) {",
-                "        if (_pf_records_.size() > static_cast<std::size_t>(",
-                "                std::numeric_limits<int32_t>::max())) {",
-                '            _PF_LIMIT_STOP("udt_objects", 2147483647LL, "UDT object-ID capacity exceeded");',
-                "        }",
-                "        const auto id = static_cast<int32_t>(_pf_records_.size());",
+                "        const auto id = _pf_records_.size();",
                 "        _pf_records_.push_back(_PFSlot{std::move(value), 0});",
                 "        return _PFHandle{id};",
                 "    }",
@@ -4653,20 +4649,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 f"{self._udt_arena_template_cpp_name}&>(*this).get(value));",
                 "    }",
                 "    _PFRecord& get(_PFHandle value) {",
-                "        if (value.__pf_id < 0",
-                "                || static_cast<std::size_t>(value.__pf_id) >= _pf_records_.size()) {",
+                "        if (value.__pf_id >= _pf_records_.size()) {",
                 '            _PF_NA_STOP("udt_object", "UDT access on na or invalid object ID");',
                 "        }",
-                "        const auto index = static_cast<std::size_t>(value.__pf_id);",
+                "        const auto index = value.__pf_id;",
                 "        capture(index);",
                 "        return _pf_records_[index].value;",
                 "    }",
                 "    const _PFRecord& get(_PFHandle value) const {",
-                "        if (value.__pf_id < 0",
-                "                || static_cast<std::size_t>(value.__pf_id) >= _pf_records_.size()) {",
+                "        if (value.__pf_id >= _pf_records_.size()) {",
                 '            _PF_NA_STOP("udt_object", "UDT access on na or invalid object ID");',
                 "        }",
-                "        return _pf_records_[static_cast<std::size_t>(value.__pf_id)].value;",
+                "        return _pf_records_[value.__pf_id].value;",
                 "    }",
                 "    const _PFRecord& read(_PFHandle value) const {",
                 "        return get(value);",
@@ -5387,6 +5381,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         _script_state_members = self._collect_script_state_members(
             _script_state_declarations
         )
+        from .state_bounds import build_script_state_bounds
+        self.script_state_bounds = build_script_state_bounds(
+            self, _script_state_declarations, _script_state_members
+        )
         self._emit_script_state_hooks(lines, _script_state_members)
         lines.append("")
         # Its per-strategy cache, outside the checkpointed script state.
@@ -5457,6 +5455,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 12. Close class
         lines.append("};")
         lines.append("")
+
+        from .state_bounds import emit_script_state_bounds
+        emit_script_state_bounds(self, lines)
 
         # 13. extern "C" interface
         self._emit_extern_c(lines)
