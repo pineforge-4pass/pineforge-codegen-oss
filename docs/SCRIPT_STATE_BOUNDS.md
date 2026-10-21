@@ -69,3 +69,23 @@ No capacities, evictions or approximations are introduced. UDT handle IDs now
 use the arena's native index width, removing its previous explicit 31-bit
 capacity refusal. Invalid/na handles still stop at the same access boundary.
 This does not remove the underlying resident STL containers' allocation limits.
+
+During the audit, other A5 lanes began publishing typed prototypes. These are
+outside the populated verification engine used for this change:
+
+- A5-ARR `include/pineforge/array.hpp:350` provides
+  `ScriptArray<T>::preallocated(capacity)` and its `:357` constructor takes a
+  `Store&`; `:441` / `:444` provide checked get/set, and `:649` defines a
+  transaction scope. Its value API does not supply the STL iterator/index
+  interface the current emitter uses for sorting, slices and aggregates
+  (`codegen/tables.py:815`, `:861`, `:873`). It therefore requires actual
+  operation lowering and lifecycle integration, rather than a type alias.
+- A5-STR `include/pineforge/script_string.hpp:20` provides a Store scope and
+  `:38` defines `ScriptString`; the generated strings and helper calls are
+  still the `std::string` path (`codegen/types.py:172`, `codegen/tables.py:1246`).
+- A5-UDT `include/pineforge/detail/udt_graph.hpp` defines byte/scalar access,
+  owning edges, root slots and safe-point collection. The compiler still needs
+  field encodings, live-root registration and callback/rollback coordination.
+
+None of these prototypes has been overlaid into another lane or claimed as a
+verified implementation of this compiler's external-storage requirements.

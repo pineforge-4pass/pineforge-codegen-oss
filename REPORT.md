@@ -15,6 +15,13 @@ payload bound; accepting a metadata-only change as a real storage migration.
 Check: executable generated metadata, compile/run probes, engine-enabled full
 pytest, corpus compile sweep and CPython/Pyodide gates, all through lab remote.
 
+Final repaired-source job: `rj-20261021t005358-08f989`, clean codegen
+`464cc174bc1cd35346000f27a9bfd422c295c4a7`, tree
+`2859390aad1388c5138868b4c5c1cb5ef73f8c1a`, same engine/corpus pair below.
+Steps: pytest, compile-corpus, gate, pyodide. **QUEUED, no host/result yet.**
+The normal pick reports every NTU2, NTU and CLOUD slot occupied. No host
+capacity or account override was used. This job remains **UNVERIFIED**.
+
 ## Source audit
 
 References below are to this codegen repository at the delivered source tree.
@@ -79,6 +86,13 @@ The in-progress A5-UDT `detail/udt_graph.hpp` provides scalar byte access,
 edge IDs, root slots and safe-point collection, but is not a typed replacement
 for the emitted reference-bearing records or collections. It has not been
 overlaid into another lane or represented as verified integration.
+
+Typed prototypes appeared during this audit: A5-ARR `array.hpp` has
+`ScriptArray<T>::preallocated` and Store constructors, A5-STR has a Store-scoped
+`ScriptString`, and A5-UDT has the graph prototype. Their inspected interfaces
+and the emitter compatibility gap are recorded in
+`docs/SCRIPT_STATE_BOUNDS.md:73`. They are not in the populated verification
+engine, and no untested feature branch is represented as integrated storage.
 
 Needed from the engine-side integration: typed collection interfaces, payload
 serialization/alias ownership, Store/Backing lifetime for each run, graph root
@@ -151,7 +165,7 @@ Initial-snapshot CPython/Pyodide full gate: **PASS**, 279 fixtures
 (ok 266/266, err 13), comparator/verdict selftests passed.
 Initial-snapshot Pyodide package gate: **PASS**.
 These results do not verify the later source tree; its run remains pending.
-Engine-enabled full suite and skips: **UNVERIFIED**, job running.
+Repaired-source engine-enabled full suite and skips: **UNVERIFIED**, final job queued.
 Touched-test collection: **UNVERIFIED** until lab output is available.
 
 Initial full-suite failures were scaffold identity comparisons plus matrix
@@ -198,7 +212,9 @@ cannot introduce recursive proof traversal beyond the bounded expression AST.
 - Removal of remaining STL/generation/default-ring/finite-sentinel capacity and
   retention paths through the real external runtime, preserving semantics.
 - Flat resident-memory measurements, external Store linkage, exact Store Tx rollback.
-- Final lab results, corpus collection/no-skips, Pyodide results and Claude review.
+- Repaired-source final lab results and touched-test collect-only; the final
+  job is queued. Earlier corpus/Pyodide results above are verified only for
+  their submitted trees. Claude review remains unperformed.
 - No push or PR is authorized or performed. This lane must not be called ready
   on the basis of this metadata-only milestone.
 
