@@ -1,6 +1,9 @@
 # A5-CGEN — compiler script-state bounds and the external store
 
-**Status: PARTIAL, honestly scoped.** The precalculated TA cache — the one
+**Status: PARTIAL, honestly scoped, green.** Final verification
+`rj-20261021t043103-05daf5` (codegen `02b3c326`, engine `c47e51d8a` + the
+three-line store fix) passed every step: pytest 9904 passed / 44 skipped,
+corpus 312 passed, gate and Pyodide PARITY OK. The precalculated TA cache — the one
 audited container category whose storage the compiler owns end to end and
 whose payload is trivially copyable — now lives in the engine's O(1) store
 (`pineforge/detail/o1_store.hpp`): a fixed resident working set over a
@@ -141,6 +144,9 @@ persistent member.
 
 ## Verified behaviour (tests)
 
+All of the following ran green in `rj-20261021t043103-05daf5` against engine
+`c47e51d8a` + the three-line store fix (companion diff `0e54abb4fcdb`).
+
 `tests/test_script_state_store.py`:
 
 - the cache member is `_PFO1Buffer<double>` and no `std::vector<double>
@@ -172,7 +178,20 @@ collect-only question: the touched modules collect with zero errors.
 | --- | --- | --- |
 | `rj-20261021t012714-82fc2f` | codegen `ed370651`, engine `c47e51d8a` unmodified | **FAIL** 268 failed / 9637 passed / 35 skipped / 8 errors. Root cause: every store `create` throws (`o1 store: backing offset exhausted`). Also exposed two of this lane's own defects (a stray `\` starting the emitted block; the row value quoted). Not a codegen-semantics failure. |
 | `rj-20261021t012730-0c631f` (fail-before) | lane head `0f4cc9d7` + tests only (`tests/test_script_state_store.py`, `tests/_legacy_cpp.py`, `tests/test_codegen_validation_fixes.py`, `tests/test_lazy_source_clock.py`; diff `d7a7c158fa89`) | **Expected FAIL**: **12 failed, 9892 passed, 44 skipped**. The 6 new store tests and the 6 retargeted precalc pins fail; nothing else. |
-| `rj-20261021t021017-06604d` | codegen `312462fa`, engine `c47e51d8a` + the three-line polarity fix (diff `0e54abb4fcdb`) | **QUEUED at the time of writing — see the final message and the job log; this row is not evidence until it returns.** |
+| `rj-20261021t021017-06604d` | codegen `312462fa`, engine `c47e51d8a` + the three-line polarity fix (diff `0e54abb4fcdb`) | **FAIL** 2619 failed / 7151 passed / 135 errors; corpus 312 failed. One of this lane's own defects: the emitter wrote the literal `resident` unquoted into the bound table, so every store-bearing TU failed to compile (`'resident' was not declared in this scope`). |
+| `rj-20261021t033044-41e72a` | codegen `1513a829`, same companion | **FAIL**: **1 failed, 9911 passed, 36 skipped**. The single failure is the new 60,000-bar probe's own driver treating an empty recorded run error as a failure. Corpus/gate/pyodide did not run (no `--keep-going`). |
+| `rj-20261021t043103-05daf5` | codegen `02b3c326`, same companion, `--keep-going` | **PASS.** pytest **9904 passed, 44 skipped, 0 failed, 0 errors** (25m17s); compile-corpus **312 passed, 0 skipped**; gate **279 fixtures, PARITY OK** (ok 266/266, err 13); Pyodide **PARITY OK**, `@pineforge/codegen-pyodide@1.5.0` packed. |
+
+The passing run's skips are the same classes the baseline reported: historical
+comparison commits absent from the clone, clang AST unavailable, empty
+parameter sets and optional population sources. No skip reports a missing
+native input.
+
+Cross-build scaffold normalization is exercised by
+`test_codegen_ta_dynamic_length::test_constant_and_input_lengths_keep_their_cpp`
+and `test_diagnostic_notes[chart_ema]` (both green in `...-05daf5`): the store
+view, owner, export and container spelling are removed from the comparison;
+nothing in the strategy body is.
 
 The fail-before log is `lab remote logs rj-20261021t012730-0c631f --step pytest`
 (local copy sha256 `04b7a71898bdc936b200ac1837935fd96b6cca007f1162ccad36c7495e353e00`).
@@ -196,11 +215,13 @@ The fail-before log is `lab remote logs rj-20261021t012730-0c631f --step pytest`
 
 ## UNVERIFIED / not complete
 
-- The store path's final verification (pytest, corpus compile, gate, pyodide)
-  against the patched companion: job `rj-20261021t021017-06604d`; nothing in
-  this report is a claim about its outcome.
 - The committed store itself (`c47e51d8a`) is defective as committed; this lane
-  did not fix the sibling tree. Cross-lane sign-off needed.
+  did not fix the sibling tree, and the passing run used the patched companion
+  (diff `0e54abb4fcdb`). The store lane must apply the three-line fix and
+  re-verify; until then no downstream lane should depend on the store as
+  committed.
+- The passing run is proof for `02b3c326`; that is the tree this report
+  describes.
 - External routing for every other audited category, and the alias/liveness/root
   analysis and nested serialization they need.
 - Removal of the remaining STL/default-ring/finite-sentinel capacity and
