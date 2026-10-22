@@ -1079,6 +1079,17 @@ compiling and yield an empty string, including the existing string-na typing gap
 - **Helper underscores.** Codegen-internal helpers in `codegen/tables.py`
 are underscore-prefixed (`_matrix_add_row`, `_merge_kwargs`); they
 are not part of the package's external surface.
+- **Type arguments.** A template argument and a type hint parse as the type
+grammar only. `array.new<T>` and `array.from<T>` accept a Pine primitive, a
+drawing/visual type, an enum the script declares, or a declared UDT; anything
+else is refused before generation (and again in the emitter, because a switch
+arm downgrades the checker's error to a warning). A nested element type's
+inner name is not validated; an undeclared one becomes `double` and writes no
+raw text. A call on a user type left after its constructor, `copy` and typed
+methods, an unknown method outside its receiver's own table, and a member read
+on a non-user-type value are refused instead of emitted. A `chart.point` read
+of `time` / `index` / `price` stays allowed; a receiver the resolver cannot
+place keeps the historical pass-through for a Pine table method name.
 - **Reserved names.** `codegen/helpers.py::CPP_RESERVED` carries every C++17
 and C++20 keyword/operator alternative plus header macros and emitter names
 that can collide. `_safe_name` allocates distinct escapes against all authored

@@ -1932,6 +1932,27 @@ class SupportChecker:
             self._err(node, f"array.{name}(...) is not implemented in PineForge runtime.")
             self._visit_children(node)
             return
+        if ns == "array" and name in ("new", "from"):
+            # The element type names a C++ type in the emitted default
+            # initialiser; it must be a Pine type, never arbitrary text.
+            targs = (getattr(node.callee, "annotations", None) or {}).get("template_args") or []
+            targs = [str(t).replace(" ", "") for t in targs]
+            if targs:
+                t = targs[0]
+                allowed_prim = {"float", "int", "bool", "string", "color"}
+                allowed_udt = {
+                    "line", "label", "box", "linefill", "chart.point",
+                    "table", "polyline",
+                }
+                if ("<" not in t and ">" not in t
+                        and t not in allowed_prim
+                        and t not in self._user_types
+                        and t not in self._user_enums
+                        and t not in allowed_udt):
+                    full = t
+                    self._err(node, f"{full}(...) is not implemented in PineForge runtime.")
+                    self._visit_children(node)
+                    return
         if ns == "map" and name not in SUPPORTED_MAP:
             self._err(node, f"map.{name}(...) is not implemented in PineForge runtime.")
             self._visit_children(node)
