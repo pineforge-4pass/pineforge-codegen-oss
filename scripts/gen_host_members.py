@@ -87,8 +87,8 @@ def find_clang(preferred: str | None = None) -> str | None:
         if path is None:
             continue
         try:
-            version = subprocess.run([path, "--version"], capture_output=True, text=True,
-                                     timeout=60).stdout
+            version = subprocess.run([path, "--version"], capture_output=True,
+                                     text=True).stdout
         except OSError:
             continue
         if "clang" in version.lower():
@@ -104,7 +104,7 @@ def emitter_target(repo: Path) -> tuple[tuple[str, ...], str]:
         [sys.executable, "-c",
          "import sys; import pineforge_codegen as pc; "
          "sys.stdout.write(pc.transpile(sys.stdin.read()))"],
-        input=probe, capture_output=True, text=True, timeout=300,
+        input=probe, capture_output=True, text=True,
         env=dict(os.environ, PYTHONPATH=str(repo)), cwd=repo)
     if proc.returncode != 0:
         raise RuntimeError(f"transpile failed:\n{proc.stderr}")
@@ -121,7 +121,7 @@ def _dump(qualified: str, tu: Path, cxx: str, include_dirs: list[str]) -> list[d
     for inc in include_dirs:
         cmd += ["-I", inc]
     cmd += ["-Xclang", "-ast-dump=json", "-Xclang", f"-ast-dump-filter={qualified}", str(tu)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"clang could not read the host header:\n{proc.stderr[-2000:]}")
     decoder, text, pos, out = json.JSONDecoder(), proc.stdout, 0, []

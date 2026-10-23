@@ -16,8 +16,8 @@ deferred refusal, and a key the run was given no series for reads na where
 it is bound and stops the run where it is read.
 
 A PEAD-like synthetic strategy (``request.earnings`` actual and estimate,
-gaps on, lookahead off) books TradingView's trades exactly on NASDAQ:AAPL 1D
-and NYSE:F 15 from the XSYM-B tapes (kept outside this repository).
+gaps on, lookahead off) books TradingView's trades exactly on
+external US-stock tapes (not shipped).
 """
 
 from __future__ import annotations

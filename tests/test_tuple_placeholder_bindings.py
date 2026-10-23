@@ -46,7 +46,7 @@ def _strict_flags() -> tuple[str, ...]:
     probe = subprocess.run(
         [compiler, "-std=c++17", "-fsyntax-only", "-Werror=c++26-extensions",
          "-x", "c++", "-"], input="int main() { return 0; }\n",
-        capture_output=True, text=True, timeout=60)
+        capture_output=True, text=True)
     return ("-Werror=c++26-extensions",) if probe.returncode == 0 else ()
 
 

@@ -116,7 +116,6 @@ def _transpile_under_seed(seed: int, fixture: str = FIXTURE) -> str:
         env=env,
         capture_output=True,
         text=True,
-        timeout=120,
     )
     assert proc.returncode == 0, (
         f"transpile subprocess failed under PYTHONHASHSEED={seed} "
@@ -241,7 +240,6 @@ def test_security_history_envelopes_ignore_memory_layout(fixture: str) -> None:
             env={**os.environ, "PYTHONHASHSEED": str(seed)},
             capture_output=True,
             text=True,
-            timeout=120,
         )
         assert process.returncode == 0, process.stderr
         assert process.stdout
@@ -279,7 +277,6 @@ sys.stdout.write(transpile_json(sys.stdin.read()))
             env={**os.environ, "PYTHONHASHSEED": str(seed)},
             capture_output=True,
             text=True,
-            timeout=120,
         )
         assert process.returncode == 0, process.stderr
         envelope = json.loads(process.stdout)

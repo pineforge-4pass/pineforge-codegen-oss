@@ -52,7 +52,7 @@ What each tape shows:
 - `te_time_bb_chart`, `te_time_bb_tf`: `time()` / `time_close()` with
   `bars_back` and `timeframe_bars_back`, forward and back, on the chart's
   timeframe and on the hour, day, week and month
-  (`tests/test_time_bar_offsets.py`). The same probes' tapes on NASDAQ:AAPL
+  (`tests/test_time_bar_offsets.py`). The same probes' tapes on a US-listed stock,
   15 and 1D, OANDA:XAUUSD 15, OANDA:EURUSD 1D and BINANCE:BTCUSDT 1D -- session
   breaks, weekends and exchange closures -- are replayed cell by cell by the
   engine's `tests/test_time_bars_back_tapes.cpp` (`tests/fixtures/time_bars_back`

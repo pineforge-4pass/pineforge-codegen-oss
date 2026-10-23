@@ -20,6 +20,89 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## 1.6.1 — 2026-10-18
+
+A patch release of the exact engine/codegen pair, paired with engine `v1.6.1`
+and dated 2026-10-18; the prerelease `1.6.1-rc.1` pairs with engine
+`v1.6.1-rc.1`. This entry records what changed in this repository since 1.6.0,
+and nothing else: after
+[#209](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/209) added
+the 1.6.1 changelog entry for `v1.6.1-rc.1`, only the final release-note and
+pairing documentation updates landed before `1.6.1`.
+
+### Compatibility and migration
+
+- No Python, JSON, diagnostic or C ABI contract changes.
+- Strategies that previously failed native C++ compilation when calling a
+  calendar built-in (`hour`, `minute`, `second`, `dayofmonth`, `dayofweek`,
+  `month`, `year`, `weekofyear`) with `timezone=` and no positional `time`
+  argument, or when initializing a `var` array with `array.from(...)` over
+  unary-signed or mixed numeric constants, now emit matching C++ types and
+  compile cleanly.
+- A pair change requires regenerated C++ and relinked strategy libraries against
+  the paired engine release's headers and `libpineforge.a` (README
+  [Engine pairing](README.md#engine-pairing)).
+
+### Changes since 1.6.0
+
+- Bind the omitted `time` argument of calendar built-ins (`hour`, `minute`,
+  `second`, `dayofmonth`, `dayofweek`, `month`, `year`, `weekofyear`) to the
+  active bar's timestamp (`current_bar_.timestamp` on the chart, `bar.timestamp`
+  inside `request.security`) when called with a `timezone=` keyword argument
+  only
+  ([#205](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/205)).
+- Infer a single consistent element type across every `array.from(...)` call
+  (`var` array declarations, plain declarations and inline arguments alike) in
+  `pineforge_codegen/codegen/types.py` and `pineforge_codegen/analyzer/types.py`,
+  preserving `int` for integer constants (including unary-signed constants and
+  function-local constants) and promoting to `double` when any element is
+  `float`. For previously compiling scripts, the observable emitted-C++ change
+  is that an `array.from` whose arguments are all integer, including
+  unary-signed ones like `array.from(-1, 1)`, now emits `std::vector<int>`
+  instead of `std::vector<double>`; with `na` mixed in (`array.from(-1, na)`) it
+  emits `int` with the `int` `na` sentinel, as `array.from(1, na)` already did.
+  Values are unchanged for arithmetic, since `/`, `%`, `math.max` and the array
+  reductions already work in `double`
+  ([#205](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/205)).
+- Group weekly Dependabot pull requests into one pull request per ecosystem
+  (`npm` and `pip`) in `.github/dependabot.yml`
+  ([#206](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/206)).
+
+## 1.6.0 — 2026-10-17
+
+A minor release of the exact engine/codegen pair, paired with engine `v1.6.0`
+and dated 2026-10-17; the prerelease `1.6.0-rc.1` pairs with engine
+`v1.6.0-rc.1`. This entry records what changed in this repository since 1.5.0,
+and nothing else: after
+[#203](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/203) added
+the 1.6.0 changelog entry for `v1.6.0-rc.1`, only the final release-note and
+pairing documentation updates landed before `1.6.0`.
+
+### Compatibility and migration
+
+- The analyzer and the code generator do not change behavior: the only edits
+  under `pineforge_codegen/` since 1.5.0 are comments and docstrings in five
+  files (#202), so the C++ the transpiler emits for a script and the Python
+  and JSON contract are unchanged. No diagnostic code, severity or catalog
+  schema changes.
+- The [release note policy](#release-note-policy) still applies: "A pair
+  change requires regenerated C++ and relinked strategy libraries, even
+  when the C ABI number is unchanged." Regenerate and relink against the
+  new engine's headers and static library.
+- Engine behavior changes, including failure codes and the report contract,
+  are described in the paired engine's own release notes; this entry does
+  not summarize them.
+
+### Changes since 1.5.0
+
+- Remove the 11 gate-corpus pines that copy probes leaving the engine corpus
+  ([#200](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/200)).
+- Remove the subprocess time limits of CI tests and checks
+  ([#201](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/201)).
+- Move the recorded US-listed, futures, forex and metal tapes of the tests to
+  the private fixtures, and reword the comments and docstrings that cited them
+  ([#202](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/202)).
+
 ## 1.5.0 — 2026-10-12
 
 A minor release of the exact engine/codegen pair, paired with engine `v1.5.0`

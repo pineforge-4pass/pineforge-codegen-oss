@@ -349,6 +349,25 @@ INLINE_HISTORY_KINDS = (
 )
 
 
+# Symbols the generated-C++ allowlist (``cpp_allowlist.py``) refuses when
+# they appear bare.  They are legal Pine identifiers (``free`` as in free
+# margin, ``system``/``socket`` as ordinary words), so a script declaration
+# of one must not reach the generated C++ as a bare libc name: the checker
+# would refuse the TU, and the member would shadow the callee.  Reserving
+# them makes ``_safe_name`` emit ``pf_safe_<name>`` instead.
+LIBC_RESERVED_NAMES = frozenset("""
+    __asm __asm__ _Pragma
+    system popen pclose fork vfork posix_spawn posix_spawnp syscall
+    mmap mprotect ptrace
+    exec execl execle execlp execv execve execvp execvpe execveat
+    dlopen dlsym dlclose
+    fopen freopen fdopen open openat
+    socket connect bind listen accept getaddrinfo
+    getenv setenv unsetenv tzset putenv secure_getenv __secure_getenv
+    filesystem fstream ifstream ofstream
+    malloc calloc realloc free memcpy memmove memset
+""".split())
+
 # HOST_MEMBER_NAMES (codegen/host_members.py, derived by
 # scripts/gen_host_members.py from the emitter and the host header): the host
 # members the generated class reads or writes unqualified. A script identifier
@@ -356,7 +375,8 @@ INLINE_HISTORY_KINDS = (
 # close > open`` became the value of ``session.isfirstbar``).
 CPP_RESERVED = set(
     LEGACY_CPP_RESERVED | CPP_KEYWORDS | CPP_CONTEXTUAL |
-    CPP_STANDARD_MACROS | CPP_EMITTER_NAMES | HOST_MEMBER_NAMES
+    CPP_STANDARD_MACROS | CPP_EMITTER_NAMES | HOST_MEMBER_NAMES |
+    LIBC_RESERVED_NAMES
 )
 
 # Temporaries the emitter declares in the C++ it generates around a user's

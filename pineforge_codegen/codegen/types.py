@@ -507,16 +507,25 @@ class TypeInferer:
     def _default_for_spec(self, spec: TypeSpec | None) -> str:
         """Default initialiser for a TypeSpec; vector/map specs get ``T()``.
 
-        UDT specs always brace-init (``T{}``) regardless of whether the UDT was
-        declared in the current translation unit — imported / forward-declared
-        UDTs would otherwise fall through to ``0`` which is type-incompatible.
+        A user type brace-inits its struct name when the type is declared in
+        this translation unit (an imported type is inlined before codegen).
+        An enum element defaults to the double ``na`` (its slot is a double);
+        an undeclared name is not a C++ type and falls back to its slot's
+        default.
         """
         if spec is not None and spec.kind == "udt" and spec.name:
             # Drawing handle default (P2): brace-init the C++ struct name
             # (Line{} = na handle), NOT the lowercase Pine name (line{}).
             if spec.name in DRAWING_TYPE_TO_CPP:
                 return f"{DRAWING_TYPE_TO_CPP[spec.name]}{{}}"
-            return f"{self._safe_name(spec.name)}{{}}"
+            if spec.name in getattr(self, "_enum_defs", ()):
+                # An enum's element slot is a double (``_type_spec_to_cpp``);
+                # the absent value is na<double>(), not the first member and
+                # not the integer sentinel, which a double does not carry.
+                return "na<double>()"
+            if spec.name in getattr(self, "_udt_defs", ()):
+                return f"{self._safe_name(spec.name)}{{}}"
+            return self._default_for_type(self._type_spec_to_cpp(spec))
         cpp_type = self._type_spec_to_cpp(spec)
         if cpp_type.startswith("std::vector") or cpp_type.startswith("PineMap"):
             return f"{cpp_type}()"
@@ -563,8 +572,8 @@ class TypeInferer:
         milliseconds) is 7 776 000 000 on TradingView. Emitted as C++ ``int``
         literal arithmetic the same product overflows (wraps to -813 934 592),
         so a ``(time - t0) > threeMonths`` expiry fires on every bar (round 8
-        family U: latibonit15 execution-signals-confluence, six lanes; lab tv
-        u-lati-levels-nq15 vs the engine, 2026-09-05). ``400 * MS`` over
+        family U: latibonit15 execution-signals-confluence, six lanes; a recorded
+        probe tape vs the engine). ``400 * MS`` over
         ``const int MS = 7200000`` is 2 880 000 000 too (lab tv
         pf-cgs-int64-const, 2026-09-28): the constant is emitted as its
         literal, so the product was the same C++ ``int`` overflow. Folding
@@ -1373,6 +1382,13 @@ class TypeInferer:
         slot populated; recover that exact scalar here rather than silently
         defaulting ``array.from(string_udf())`` to ``std::vector<double>``.
         """
+        if isinstance(node, UnaryOp):
+            if node.op == "not":
+                return TypeSpec.primitive("bool")
+            operand = self._array_from_element_spec(node.operand)
+            if operand is not None and operand.kind == "primitive" and operand.name in ("int", "int64", "float"):
+                return operand
+            return None
         if isinstance(node, BinOp):
             left = self._array_from_element_spec(node.left)
             right = self._array_from_element_spec(node.right)
@@ -1527,12 +1543,30 @@ class TypeInferer:
                 node.name
             )
             if found_udt_binding:
-                return (
-                    TypeSpec.udt(exact_udt)
-                    if exact_udt is not None
-                    else None
-                )
+                if exact_udt is not None:
+                    return TypeSpec.udt(exact_udt)
+                local_cpp = getattr(self, "_current_func_local_types", {}).get(node.name)
+                local_prim = {
+                    "int": "int",
+                    "int64_t": "int64",
+                    "double": "float",
+                    "bool": "bool",
+                    "std::string": "string",
+                }.get(local_cpp)
+                if local_prim is not None:
+                    return TypeSpec.primitive(local_prim)
+                return None
             if self._collection_name_is_lexically_shadowed(node.name):
+                local_cpp = getattr(self, "_current_func_local_types", {}).get(node.name)
+                local_prim = {
+                    "int": "int",
+                    "int64_t": "int64",
+                    "double": "float",
+                    "bool": "bool",
+                    "std::string": "string",
+                }.get(local_cpp)
+                if local_prim is not None:
+                    return TypeSpec.primitive(local_prim)
                 return None
             sym = self.ctx.symbols.resolve(node.name)
             if sym is not None:
@@ -1762,8 +1796,28 @@ class TypeInferer:
                 if targs:
                     return TypeSpec.array(self._type_spec_from_hint_name(targs[0]) or TypeSpec.udt(targs[0]))
                 if func_name == "from" and node.args:
+                    elem_specs = [
+                        self._array_from_element_spec(arg)
+                        for arg in node.args
+                    ]
+                    if any(
+                        s is not None and s.kind == "primitive" and s.name == "float"
+                        for s in elem_specs
+                    ) and all(
+                        (s is None or (s.kind == "primitive" and s.name in ("int", "int64", "float")))
+                        for s in elem_specs
+                    ):
+                        return TypeSpec.array(TypeSpec.primitive("float"))
+                    if any(
+                        s is not None and s.kind == "primitive" and s.name == "int64"
+                        for s in elem_specs
+                    ) and all(
+                        s is not None and s.kind == "primitive" and s.name in ("int", "int64")
+                        for s in elem_specs
+                    ):
+                        return TypeSpec.array(TypeSpec.primitive("int64"))
                     return TypeSpec.array(
-                        self._array_from_element_spec(node.args[0])
+                        elem_specs[0]
                         or TypeSpec.primitive("float")
                     )
                 return TypeSpec.array(TypeSpec.primitive("float"))
@@ -4002,7 +4056,9 @@ class TypeInferer:
                 return "int"
             # format.* constants emit std::string literals (consumed by
             # pine_str_tostring); bare reads must declare std::string.
-            if ename == "format":
+            if ename in ("format", "currency", "order"):
+                return "std::string"
+            if ename == "session" and node.member in ("regular", "extended"):
                 return "std::string"
             if ename == "alert" and node.member in ALERT_FREQ_VALUES:
                 return "std::string"

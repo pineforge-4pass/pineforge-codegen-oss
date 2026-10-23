@@ -13,7 +13,9 @@ from pineforge_codegen.codegen.helpers import NamingHelper
 from pineforge_codegen.errors import CompileError
 from pineforge_codegen.pine_spelling import pine_string_literal
 from tests._compile import run_emitted_tu
+from tests._private_fixtures import private_fixture
 from tests.test_compile_corpus import _resolve_corpus_root
+from tests.test_host_member_names import PRIVATE_STRATEGIES
 from tests.test_string_settings_constants import RECEIPT_DRIVER
 
 
@@ -50,10 +52,12 @@ KNOWN_LIMITS = {
 
 
 def _sources():
-    """Every source once: a copy of one already listed adds no case."""
+    """Every public source once: a copy of one already listed adds no case."""
     sources = [(path, False) for directory in (ROOT / "tests" / "fixtures",
                                               ROOT / "tests" / "gate-corpus")
-               for path in sorted(directory.rglob("*.pine"))]
+               for path in sorted(directory.rglob("*.pine"))
+               if directory != ROOT / "tests" / "fixtures"
+               or path.relative_to(directory).as_posix() not in PRIVATE_STRATEGIES]
     corpus = _resolve_corpus_root()
     if corpus is not None:
         sources.extend((path, True) for path in sorted(corpus.rglob("strategy.pine")))
@@ -111,8 +115,7 @@ def _limits(path):
     return limits
 
 
-@pytest.mark.parametrize("path,is_corpus", _sources(), ids=_case_id)
-def test_input_metadata_matches_receipt_for_every_source(path, is_corpus):
+def _assert_input_metadata_matches_receipt(path, is_corpus):
     source = path.read_text()
     try:
         full = transpile_full(source)
@@ -146,6 +149,16 @@ def test_input_metadata_matches_receipt_for_every_source(path, is_corpus):
             assert value != expected[field], (
                 f"{key}.{field}: the limit is closed, remove it from KNOWN_LIMITS")
     assert seen == {(title, field) for title, fields in limits.items() for field in fields}
+
+
+@pytest.mark.parametrize("path,is_corpus", _sources(), ids=_case_id)
+def test_input_metadata_matches_receipt_for_every_source(path, is_corpus):
+    _assert_input_metadata_matches_receipt(path, is_corpus)
+
+
+@pytest.mark.parametrize("rel", PRIVATE_STRATEGIES)
+def test_private_input_metadata_matches_receipt(rel):
+    _assert_input_metadata_matches_receipt(private_fixture(rel), False)
 
 
 def test_known_limits_name_inputs_of_a_pinned_source():

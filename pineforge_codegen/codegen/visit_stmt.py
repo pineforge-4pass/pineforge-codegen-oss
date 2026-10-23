@@ -315,6 +315,11 @@ class StmtVisitor:
                     # unrelated same-named global/callable UDT must not target-
                     # type a later ``name := na`` as ``State{}``.
                     self._lexical_udt_types[name] = None
+                    self._tuple_binding_cpp_types_by_name[name] = (
+                        tuple_cpp_types[index]
+                        if index < len(tuple_cpp_types)
+                        else "double"
+                    )
                     if (getattr(self, "_active_func_name", None) is not None
                             and not self._decl_binding_is_series(
                                 id(node), name

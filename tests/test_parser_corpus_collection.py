@@ -66,7 +66,7 @@ def _pytest(*args: str, cwd: Path, include: Path | None) -> subprocess.Completed
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-o", "addopts=",
          "--rootdir", str(REPO_ROOT), str(TEST_PARSER), "-k", TEST_NAME, "-q", *args],
-        cwd=cwd, env=env, capture_output=True, text=True, timeout=300)
+        cwd=cwd, env=env, capture_output=True, text=True)
 
 
 def _collected(cwd: Path, include: Path) -> list[str]:

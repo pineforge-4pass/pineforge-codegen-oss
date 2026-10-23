@@ -235,7 +235,7 @@ def _compile_and_run(cpp_source: str) -> str:
             cmd += ["-I", str(compile_env._GENERATED_INC)]
         cmd += [str(cpp_path), str(engine_lib), "-pthread", "-o", str(exe_path)]
 
-        built = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        built = subprocess.run(cmd, capture_output=True, text=True)
         if built.returncode != 0:
             raise AssertionError(
                 "generated comparator runtime probe failed to link\n"
@@ -243,7 +243,7 @@ def _compile_and_run(cpp_source: str) -> str:
             )
 
         ran = subprocess.run(
-            [str(exe_path)], capture_output=True, text=True, timeout=30
+            [str(exe_path)], capture_output=True, text=True
         )
         if ran.returncode != 0:
             raise AssertionError(

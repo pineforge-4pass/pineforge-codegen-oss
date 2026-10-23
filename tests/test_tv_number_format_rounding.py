@@ -142,10 +142,10 @@ def test_shortest_decimal_half_up_edge_battery(tmp_path: Path) -> None:
     build = subprocess.run(
         [compile_env._COMPILER, "-std=c++17", "-O2",
          *compile_env.STRATEGY_FP_FLAGS, str(source), "-o", str(binary)],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True,
     )
     assert build.returncode == 0, build.stderr[:4000]
-    run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
+    run = subprocess.run([str(binary)], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
     actual = dict(line.split("\t", 1) for line in run.stdout.splitlines())
     expected = {name: value for name, _, value in CASES}

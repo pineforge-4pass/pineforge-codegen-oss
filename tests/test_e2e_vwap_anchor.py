@@ -2,7 +2,11 @@
 explicit anchor, including timeframe.change("1D"/"D"), uses the TA1 anchored
 class. The tests compare traced values and trades with a spelled-out running
 sum and assert the first-value bars witnessed by the public TradingView probe
-in ``tests/fixtures/c7_tv_evidence``.
+on the public engine feed. Its crypto tape stays in
+``tests/fixtures/c7_tv_evidence``; its forex tape is kept in a private
+repository and overlaid onto the paired engine's
+``tests/codegen-fixtures/c7_tv_evidence/`` for the private source battery in
+``tests/test_host_member_names.py``.
 
 The old-engine compatibility branch is compiled separately against the
 pre-TA1 engine headers; it retains the former session-day lowering there.
@@ -245,7 +249,7 @@ def test_vwap_anchor_form_equals_spelled_out(case_name: str, outcomes) -> None:
 
 
 def test_vwap_explicit_anchor_first_values(outcomes) -> None:
-    """The public TV probe witnesses the first-value bars on both feeds:
+    """The public TV probe witnesses the first-value bars on the public feed:
     omitted-anchor VWAP starts on bar 0, the explicit daily anchor starts on
     the first daily change, and ``bar_index == 5`` starts on bar 5."""
     subject = ok(outcomes, "first_values")

@@ -1,9 +1,9 @@
 """A session.* flag read with a history offset is the value the flag had on
 that earlier bar, as TradingView's tapes prove.
 
-Two TradingView tapes of one probe on NASDAQ:AAPL 15, 2025-03-03 .. 03-15
-(US DST 03-09), with and without extended hours
-(``fixtures/session_ismarket/cgs2-hist-aapl-15-*``). The probe reverses its
+Two TradingView tapes of one probe on a US-listed stock, with and without
+extended hours, kept in a private repository and overlaid onto the paired
+engine's ``tests/codegen-fixtures/session_ismarket/``. The probe reverses its
 position at the close of every bar (``process_orders_on_close``), so each Entry
 row is one chart bar, dated at its open, and its Signal carries what
 TradingView evaluated there: the seven flags (``C``), the same flags ``[1]``
@@ -11,7 +11,7 @@ TradingView evaluated there: the seven flags (``C``), the same flags ``[1]``
 (``B`` in a block run on every third bar, ``U`` in a function called on odd
 bars, ``Z`` on the lazy side of an ``and``, ``K`` at an offset that changes by
 bar, ``D`` at ``[0]``, ``W`` at ``[64]``; see the README). A third tape, of a
-probe of functions on the extended-hours chart (``cgs2-histfn-aapl-15-ext``),
+probe of functions on the extended-hours chart in the same private folder,
 has one function at two call sites, reads on a lazy operand and in a block
 inside a function, and a ``newSession()`` idiom at two call sites.
 
@@ -42,16 +42,15 @@ and the symbol's session and timezone only.
 
 from __future__ import annotations
 
-import concurrent.futures
 import csv
 import datetime as dt
 import gc
 import hashlib
 import json
-import os
 import re
 import weakref
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -62,10 +61,10 @@ from tests._e2e import (
     REPO_ROOT, build_strategy_library, reference_codegen, run_strategy,
     skip_unless_e2e_env, transpile_json,
 )
+from tests._private_fixtures import private_fixture
 from tests.test_e2e_session_ismarket import next_chart_bar
 
 
-FIXTURES = Path(__file__).parent / "fixtures" / "session_ismarket"
 TAPES = ("cgs2-hist-aapl-15-reg", "cgs2-hist-aapl-15-ext")
 EXTENDED = "cgs2-hist-aapl-15-ext"
 FUNCTIONS = "cgs2-histfn-aapl-15-ext"
@@ -92,6 +91,10 @@ TRACE = "".join(
 # 09:30 and 15:45 bars (lane K-SESSION-WINDOWS), as TradingView's.
 PINNED: dict[str, dict[str, int]] = {}
 QUARTER = 15 * 60_000
+
+
+def tape_file(slug: str, name: str) -> Path:
+    return private_fixture(f"session_ismarket/{slug}/{name}")
 
 
 def _utc_ms(stamp: str, offset_hours: int) -> int:
@@ -122,7 +125,7 @@ def parse_signal(signal: str) -> dict[str, bool]:
 def read_tape(slug: str) -> list[tuple[int, dict[str, bool]]]:
     """(the chart bar's open in UTC ms, TradingView's values) per Entry row,
     in time order. The exports render times at UTC+8."""
-    with (FIXTURES / slug / "tv_trades.csv").open(encoding="utf-8-sig") as fh:
+    with tape_file(slug, "tv_trades.csv").open(encoding="utf-8-sig") as fh:
         rows = [row for row in csv.DictReader(fh) if row["Type"].startswith("Entry")]
     return sorted(((_utc_ms(row["Date and time"], 8), parse_signal(row["Signal"]))
                    for row in rows), key=lambda bar: bar[0])
@@ -226,34 +229,34 @@ if m1 or p1 or q2
 
 
 @pytest.fixture(scope="session")
-def replays(tmp_path_factory) -> dict[str, Replay | Exception]:
-    """Each tape's probe replayed with a trace of every read, and the payload
-    probe on the extended tape's bars; an exception when a build failed."""
-    engine = skip_unless_e2e_env()
+def replays(tmp_path_factory):
+    """Load and cache only the replay a test needs, so a missing private tape
+    skips that test without making it depend on any other tape."""
     base = tmp_path_factory.mktemp("session_history")
-    jobs = {slug: ((FIXTURES / slug / "strategy.pine").read_text(encoding="utf-8") + TRACE,
-                   _replay_stamps(slug), REPO_ROOT) for slug in TAPES}
-    jobs["payload"] = (PAYLOAD_PROBE, _replay_stamps(EXTENDED), REPO_ROOT)
-    jobs[FUNCTIONS] = ((FIXTURES / FUNCTIONS / "strategy.pine").read_text(encoding="utf-8")
-                       + FUNCTION_TRACE, _replay_stamps(FUNCTIONS), REPO_ROOT)
-    legacy = reference_codegen(LEGACY)
-    if legacy is not None:
-        jobs["legacy"] = (jobs[EXTENDED][0], jobs[EXTENDED][1], legacy)
-    results: dict[str, Replay | Exception] = {}
-    workers = max(2, min(4, (os.cpu_count() or 4) // 2))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {key: pool.submit(_replay, engine, base / key, *job)
-                   for key, job in jobs.items()}
-        for key, future in futures.items():
-            try:
-                results[key] = future.result()
-            except Exception as exc:  # judged by the test that needs it
-                results[key] = exc
-    return results
+
+    @cache
+    def load(key: str) -> Replay | Exception | None:
+        slug = EXTENDED if key in ("payload", "legacy") else key
+        if key == "payload":
+            source = PAYLOAD_PROBE
+        else:
+            trace = FUNCTION_TRACE if slug == FUNCTIONS else TRACE
+            source = tape_file(slug, "strategy.pine").read_text(encoding="utf-8") + trace
+        stamps = _replay_stamps(slug)
+        engine = skip_unless_e2e_env()
+        codegen = reference_codegen(LEGACY) if key == "legacy" else REPO_ROOT
+        if codegen is None:
+            return None
+        try:
+            return _replay(engine, base / key, source, stamps, codegen)
+        except Exception as exc:  # judged by the test that needs it
+            return exc
+
+    return load
 
 
-def _ok(replays: dict, key: str) -> Replay:
-    replay = replays[key]
+def _ok(replays, key: str) -> Replay:
+    replay = replays(key)
     if isinstance(replay, Exception):
         pytest.fail(f"[{key}] {replay}", pytrace=False)
     return replay
@@ -268,9 +271,9 @@ def test_tapes_are_the_recorded_exports() -> None:
     follow one rule on every bar of both tapes: the top-level reads are the
     flags of earlier bars, the function's read that of its previous call."""
     for slug in TAPES:
-        metrics = json.loads((FIXTURES / slug / "metrics.json").read_text())
-        tape_bytes = (FIXTURES / slug / "tv_trades.csv").read_bytes()
-        pine_bytes = (FIXTURES / slug / "strategy.pine").read_bytes()
+        metrics = json.loads(tape_file(slug, "metrics.json").read_text())
+        tape_bytes = tape_file(slug, "tv_trades.csv").read_bytes()
+        pine_bytes = tape_file(slug, "strategy.pine").read_bytes()
         assert hashlib.sha256(tape_bytes).hexdigest() == metrics["tvTradesCsvHash"], slug
         assert hashlib.sha256(pine_bytes).hexdigest() == metrics["sourceArtifactHash"], slug
         assert metrics["wsProvenance"]["rangeProof"] == "covered", slug
@@ -286,10 +289,10 @@ def test_tapes_are_the_recorded_exports() -> None:
     assert sum(a != b for a, b in zip(by_bar, by_call)) == 7
     assert sum(v["c_ispremarket"] for v in ext) == 220
     assert sum(v["c_ispostmarket"] for v in ext) == 159
-    metrics = json.loads((FIXTURES / FUNCTIONS / "metrics.json").read_text())
-    assert hashlib.sha256((FIXTURES / FUNCTIONS / "tv_trades.csv").read_bytes()).hexdigest() \
+    metrics = json.loads(tape_file(FUNCTIONS, "metrics.json").read_text())
+    assert hashlib.sha256(tape_file(FUNCTIONS, "tv_trades.csv").read_bytes()).hexdigest() \
         == metrics["tvTradesCsvHash"]
-    assert hashlib.sha256((FIXTURES / FUNCTIONS / "strategy.pine").read_bytes()).hexdigest() \
+    assert hashlib.sha256(tape_file(FUNCTIONS, "strategy.pine").read_bytes()).hexdigest() \
         == metrics["sourceArtifactHash"]
     assert metrics["wsProvenance"]["rangeProof"] == "covered"
     tape = read_function_tape()
@@ -356,9 +359,9 @@ def test_payload_history_runs_on_the_requested_clock(replays) -> None:
 
 
 def test_pre_lane_build_did_not_compile(replays) -> None:
-    if "legacy" not in replays:
+    legacy = replays("legacy")
+    if legacy is None:
         pytest.skip(f"the pre-lane codegen ({LEGACY[:12]}) is not in this checkout's history")
-    legacy = replays["legacy"]
     assert isinstance(legacy, Exception) and "compile failed" in str(legacy)
 
 
@@ -428,7 +431,7 @@ def test_function_reads_its_call_sites_calls(tmp_path: Path) -> None:
 def read_function_tape() -> list[tuple[int, dict]]:
     """(the chart bar's open in UTC ms, TradingView's values) per Entry row of
     the function probe: ``c`` the seven flags by name, then ``a b z k n o``."""
-    with (FIXTURES / FUNCTIONS / "tv_trades.csv").open(encoding="utf-8-sig") as fh:
+    with tape_file(FUNCTIONS, "tv_trades.csv").open(encoding="utf-8-sig") as fh:
         rows = [row for row in csv.DictReader(fh) if row["Type"].startswith("Entry")]
     tape = []
     for row in rows:

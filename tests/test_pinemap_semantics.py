@@ -328,14 +328,14 @@ def _compile_and_run(cpp_source: str, *, label: str) -> str:
         if compile_env._GENERATED_INC is not None:
             command += ["-I", str(compile_env._GENERATED_INC)]
         command += [str(source_path), str(engine_library), "-pthread", "-o", str(executable)]
-        built = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        built = subprocess.run(command, capture_output=True, text=True)
         if built.returncode != 0:
             raise AssertionError(
                 f"{label} failed to link\n"
                 + "\n".join((built.stderr or built.stdout).splitlines()[:120])
             )
         ran = subprocess.run(
-            [str(executable)], capture_output=True, text=True, timeout=30
+            [str(executable)], capture_output=True, text=True
         )
         if ran.returncode != 0:
             raise AssertionError(

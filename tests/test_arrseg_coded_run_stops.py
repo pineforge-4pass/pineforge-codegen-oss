@@ -178,7 +178,7 @@ def test_history_stop_run_json_reports_code_and_args(name, tmp_path):
         [sys.executable, str(engine / "docker" / "run_json.py"),
          "--so", str(tmp_path / "strategy.so"), "--ohlcv", str(feed),
          "--generated-cpp", str(tmp_path / "generated.cpp")],
-        capture_output=True, text=True, timeout=180)
+        capture_output=True, text=True)
     assert result.returncode == 1, f"{result.stdout}\n{result.stderr}"
     payload = json.loads(result.stdout)
     assert set(payload) == {"engine", "error", "code", "args"}

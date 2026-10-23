@@ -11,7 +11,7 @@ job-1361-shitholed-lema-system-v2-4); one that can reach an order, a
 refusal. TradingView's tapes of a strategy with such a watchlist and of the
 same strategy with it deleted are byte for byte one tape
 (``fixtures/xsym_tv/xa_watchlist``), on BINANCE:ETHUSDT.P 15 and on
-NASDAQ:AAPL 15.
+a US-listed stock, 15-minute chart.
 """
 
 from __future__ import annotations

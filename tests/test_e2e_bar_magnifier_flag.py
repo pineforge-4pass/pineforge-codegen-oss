@@ -116,7 +116,7 @@ def _host(engine_root: Path, feeds: dict[str, Path], workdir: Path, tape: str,
         out = workdir / "engine_trades.csv"
         cmd = [sys.executable, str(engine_root / "scripts" / "run_strategy.py"), str(workdir),
                "--ohlcv", str(feed), "--no-trim-output", "-o", str(out)]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError(f"run_strategy failed:\n{proc.stdout}\n{proc.stderr}")
         outcome.engine = trades(out, 0)

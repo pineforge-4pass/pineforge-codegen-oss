@@ -38,6 +38,9 @@ dev = [
     "pytest>=7.0",
 ]
 
+[project.scripts]
+pf-cpp-allowlist = "pineforge_codegen.cpp_allowlist:main"
+
 [project.urls]
 Homepage = "https://github.com/pineforge-4pass/pineforge-codegen-oss"
 Issues = "https://github.com/pineforge-4pass/pineforge-codegen-oss/issues"
