@@ -3,6 +3,7 @@ name: Test
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -13,60 +14,242 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  preflight-docs:
+  authz:
+    name: authz
+    # Standard GitHub-hosted label (owner #1050); never a larger-runner label.
     runs-on: ubuntu-24.04
-    env:
-      PF_CI_LABELS: '["self-hosted","pf-ci","pf-ci-x64"]'
-    outputs:
-      docs_only: ${{ steps.docs.outputs.docs_only }}
+    permissions: {}
+    # No timeout-minutes: the owner's no-time-limits rule (check-no-time-limits refuses new ones).
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Pin the documentation diff base
-        id: base
+      - name: Only our own pull requests and our own events run CI
         env:
-          REF_NAME: ${{ github.ref_name }}
-          BEFORE_SHA: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          WR_HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          WR_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
+          GH_TOKEN: ${{ github.token }}   # read-only use: one permission lookup for workflow_run
+          # Bot logins whose same-repository pull requests count as ours: dependabot[bot] (CI-DEPBOT A)
+          # and the org's own GitHub App bot logins by name (space-separated), nothing else.
+          ALLOWED_BOTS: "dependabot[bot] pineforge-app[bot]"
         run: |
-          set -euo pipefail
-          if [ "$REF_NAME" = main ]; then
-            base="$BEFORE_SHA"
-          else
-            base=$(git rev-parse refs/remotes/origin/main 2>/dev/null || true)
-          fi
-          if git cat-file -e "$base^{commit}" 2>/dev/null; then
-            echo "sha=$base" >> "$GITHUB_OUTPUT"
-          fi
+          set -eu
+          fail() { echo "::error title=authz::$1"; echo "authz: REFUSED: $1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          case "$EVENT" in
+            push|workflow_dispatch|schedule|merge_group|release|workflow_call|repository_dispatch)
+              # Only someone with write access to this repository (or our App's token) can cause these
+              # events; none of them runs pull-request code.
+              ;;
+            workflow_run)
+              # LB-437: bind identity to the triggering run and its re-runner.
+              # These two App bots are fixed canon policy; ALLOWED_BOTS is PR-only.
+              [ -n "${WR_HEAD_REPO:-}" ] || fail "workflow_run head repository is missing"
+              [ -n "${WR_ACTOR:-}" ] || fail "workflow_run triggering actor is missing"
+              [ "$WR_HEAD_REPO" = "$REPO" ] || fail "workflow_run head repository does not match this repository"
+              case "$WR_ACTOR" in
+                "pineforge-app[bot]"|"pineforge-ci-dispatcher[bot]") ;;
+                *"[bot]") fail "workflow_run bot is not on the canon allowlist" ;;
+                *)
+                  perm=$(gh api "repos/$REPO/collaborators/$WR_ACTOR/permission" --jq .permission 2>/dev/null) || fail "workflow_run permission lookup failed"
+                  case "$perm" in admin|maintain|write) ;; *) fail "workflow_run triggering actor does not have write permission" ;; esac ;;
+              esac ;;
+            pull_request)
+              [ "$HEAD_REPO" = "$REPO" ] || fail "pull request from another repository (${HEAD_REPO:-unknown})"
+              [ "$HEAD_IS_FORK" = "false" ] || fail "pull request from a fork"
+              case "$ASSOCIATION" in
+                OWNER|MEMBER|COLLABORATOR) ;;
+                *)
+                  case " $ALLOWED_BOTS " in
+                    *" $PR_AUTHOR "*) ;;
+                    *)
+                      # A member whose org membership is private shows as CONTRIBUTOR: ask GitHub for the
+                      # author's permission on this repository; anything but admin/maintain/write (or a
+                      # failed call) refuses.
+                      perm=$(gh api "repos/$REPO/collaborators/$PR_AUTHOR/permission" --jq .permission 2>/dev/null || echo none)
+                      case "$perm" in admin|maintain|write) ;; *) fail "author ${PR_AUTHOR:-unknown} (${ASSOCIATION:-NONE}) has permission '$perm', not write, and is not an allowlisted bot" ;; esac ;;
+                  esac ;;
+              esac ;;
+            *) fail "event $EVENT does not run CI (pull_request_target and other events are not allowed)" ;;
+          esac
+          echo "authz: allowed ($EVENT${PR_AUTHOR:+ by $PR_AUTHOR})" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Read the base branch's trusted docs rule
-        if: steps.base.outputs.sha != ''
+  changes:
+    name: changes
+    needs: [authz]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+      workflows_only: ${{ steps.classify.outputs.workflows_only }}
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - name: "Check out the exact head with full history"
+        if: "${{ needs.authz.result == 'success' }}"
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.base.outputs.sha }}
-          path: .docs-gate
+          ref: "${{ github.event.pull_request.head.sha || github.sha }}"
+          fetch-depth: 0
           persist-credentials: false
-
-      - name: Preflight and documentation basis
-        id: docs
+      - name: "Classify the PR diff (canonical; copy as is)"
+        id: "classify"
+        if: "${{ needs.authz.result == 'success' }}"
+        shell: "bash"
         env:
-          BASE_SHA: ${{ steps.base.outputs.sha }}
-          HEAD_SHA: ${{ github.sha }}
+          EVENT: "${{ github.event_name }}"
+          PR_BASE: "${{ github.event.pull_request.base.sha }}"
+          PR_HEAD: "${{ github.event.pull_request.head.sha }}"
         run: |
           set -euo pipefail
-          checker=.docs-gate/.github/pineforge/ci/codegen-docs-check.mjs
-          if [ -n "$BASE_SHA" ] && [ -f "$checker" ]; then
-            node "$checker" "$PWD" "$BASE_SHA" "$HEAD_SHA" main
-          else
-            echo 'docs_only=false' >> "$GITHUB_OUTPUT"
+          docs_only=false
+          workflows_only=false
+          code=true
+          if [[ "$EVENT" == pull_request ]]; then
+            [[ "$PR_BASE" =~ ^[0-9a-f]{40}$ && "$PR_HEAD" =~ ^[0-9a-f]{40}$ ]]
+            if ! checkout_head=$(git rev-parse --verify HEAD) ||
+               ! git rev-parse --verify "$PR_BASE^{commit}" > /dev/null ||
+               ! git rev-parse --verify "$PR_HEAD^{commit}" > /dev/null; then
+              printf 'docs_only=false\nworkflows_only=false\ncode=true\n' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            [[ "$checkout_head" == "$PR_HEAD" ]]
+            diff_paths=$(mktemp "$RUNNER_TEMP/ci-changes.XXXXXXXX")
+            if ! git diff --no-ext-diff --no-textconv --no-renames --ignore-submodules=none --raw --no-abbrev -z "$PR_BASE...$PR_HEAD" -- > "$diff_paths"; then
+              printf 'docs_only=false\nworkflows_only=false\ncode=true\n' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            has_docs=false
+            has_workflows=false
+            has_code=false
+            while IFS= read -r -d '' change; do
+              if ! IFS= read -r -d '' path; then
+                echo "::error::incomplete Git raw diff record"
+                exit 1
+              fi
+              if [[ ! "$change" =~ ^:([0-7]{6})[[:space:]]([0-7]{6})[[:space:]] ]]; then
+                echo "::error::invalid Git raw diff modes"
+                exit 1
+              fi
+              old_mode=${BASH_REMATCH[1]}
+              new_mode=${BASH_REMATCH[2]}
+              if [[ ! "$change" =~ ^:[0-7]{6}\ [0-7]{6}\ [0-9a-f]{40}\ [0-9a-f]{40}\ [ACDMRTUXB][0-9]*$ ]]; then
+                has_code=true
+                continue
+              fi
+              if [[ "$old_mode" == 160000 || "$new_mode" == 160000 ]]; then
+                has_code=true
+                continue
+              fi
+              if [[ "$old_mode" != 000000 && "$old_mode" != 100644 ]] ||
+                 [[ "$new_mode" != 000000 && "$new_mode" != 100644 ]]; then
+                has_code=true
+                continue
+              fi
+              case "$path" in
+                docs/*.md|docs/*.rst|docs/*.txt|README.md|CONTRIBUTING.md|CHANGELOG.md|CODE_OF_CONDUCT.md|SECURITY.md|LICENSE|LICENSE.md|LICENSE.txt)
+                  has_docs=true ;;
+                .github/workflows/*)
+                  workflow_name=${path#.github/workflows/}
+                  if [[ "$workflow_name" != */* && ( "$workflow_name" == *.yml || "$workflow_name" == *.yaml ) ]]; then
+                    has_workflows=true
+                  else
+                    has_code=true
+                  fi ;;
+                *)
+                  has_code=true ;;
+              esac
+            done < "$diff_paths"
+            if [[ -n "${change-}" ]]; then
+              has_code=true
+            fi
+            if [[ "$has_code" == false && "$has_workflows" == true ]]; then
+              # LB-570: only tracked head files outside .github may opt in.
+              if inside_worktree=$(git rev-parse --is-inside-work-tree) &&
+                 [[ "$inside_worktree" == true ]] &&
+                 workflow_tests=$(git ls-tree -r --name-only "$PR_HEAD" -- ':(top,literal)ci/workflow-tests'); then
+                if [[ "$workflow_tests" != ci/workflow-tests ]]; then
+                  grep_errors=$(mktemp "$RUNNER_TEMP/ci-workflow-deps.XXXXXXXX")
+                  if git grep --no-textconv -F -l -e '.github/workflows' "$PR_HEAD" -- . ':(top,exclude).github' > /dev/null 2> "$grep_errors"; then
+                    has_code=true
+                  else
+                    grep_status=$?
+                    if [[ "$grep_status" -eq 1 && ! -s "$grep_errors" ]]; then
+                      workflows_only=true
+                      code=false
+                    fi
+                  fi
+                fi
+              fi
+            elif [[ "$has_code" == false && "$has_docs" == true ]]; then
+              docs_only=true
+              code=false
+            fi
           fi
+          printf 'docs_only=%s\nworkflows_only=%s\ncode=%s\n' "$docs_only" "$workflows_only" "$code" >> "$GITHUB_OUTPUT"
+
+  workflow-lint:
+    name: workflow-lint
+    needs: [authz]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: "Check out the exact head with full history"
+        if: "${{ needs.authz.result == 'success' }}"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: "${{ github.event.pull_request.head.sha || github.sha }}"
+          fetch-depth: 0
+          persist-credentials: false
+      - name: "Lint all workflow definitions with pinned actionlint v1.7.12"
+        if: "${{ needs.authz.result == 'success' }}"
+        shell: "bash"
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64)
+              archive=actionlint_1.7.12_linux_amd64.tar.gz
+              sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 ;;
+            aarch64|arm64)
+              archive=actionlint_1.7.12_linux_arm64.tar.gz
+              sha256=325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6 ;;
+            *)
+              echo "::error::workflow-lint requires a supported Linux architecture"
+              exit 1 ;;
+          esac
+          lint_dir=$(mktemp -d "$RUNNER_TEMP/workflow-lint.XXXXXXXX")
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors --speed-limit 1024 --speed-time 60 \
+            --output "$lint_dir/$archive" "https://github.com/rhysd/actionlint/releases/download/v1.7.12/$archive"
+          if ! printf '%s  %s\n' "$sha256" "$lint_dir/$archive" | sha256sum --check --strict --status; then
+            echo "::error::actionlint archive checksum did not match the published pin"
+            exit 1
+          fi
+          tar -xzf "$lint_dir/$archive" -C "$lint_dir" actionlint
+          "$lint_dir/actionlint" -version
+          printf '%s\n' '{"self-hosted-runner":{"labels":["pf-gcp-pr","pf-gcp-main","pf-gcp-post"]}}' > "$lint_dir/actionlint.yaml"
+          git ls-files -z -- .github/workflows > "$lint_dir/workflows"
+          workflows=()
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              *.yml|*.yaml) workflows+=("$path") ;;
+            esac
+          done < "$lint_dir/workflows"
+          if [[ -n "${path-}" ]]; then
+            echo "::error::unterminated Git workflow path"
+            exit 1
+          fi
+          if [[ "${#workflows[@]}" -eq 0 ]]; then
+            echo "::error::no workflow YAML files were found"
+            exit 1
+          fi
+          "$lint_dir/actionlint" -config-file "$lint_dir/actionlint.yaml" -shellcheck= -pyflakes= "${workflows[@]}"
 
   pytest:
-    needs: preflight-docs
-    if: needs.preflight-docs.outputs.docs_only != 'true'
+    needs: [authz, changes]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -88,3 +271,153 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Run test suite
         run: python -m pytest -q
+
+  test-check:
+    needs: [authz, changes, workflow-lint, pytest]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: "Refuse an unauthorised run before anything else"
+        if: "${{ needs.authz.result != 'success' }}"
+        run: |
+          echo "::error::authz did not pass; nothing of this run's code is checked out or run"
+          exit 1
+      - name: "Check out the exact head with full history"
+        if: "${{ needs.authz.result == 'success' }}"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: "${{ github.event.pull_request.head.sha || github.sha }}"
+          fetch-depth: 0
+          persist-credentials: false
+      - name: "Classify the PR diff (canonical; copy as is)"
+        id: "classify"
+        if: "${{ needs.authz.result == 'success' }}"
+        shell: "bash"
+        env:
+          EVENT: "${{ github.event_name }}"
+          PR_BASE: "${{ github.event.pull_request.base.sha }}"
+          PR_HEAD: "${{ github.event.pull_request.head.sha }}"
+        run: |
+          set -euo pipefail
+          docs_only=false
+          workflows_only=false
+          code=true
+          if [[ "$EVENT" == pull_request ]]; then
+            [[ "$PR_BASE" =~ ^[0-9a-f]{40}$ && "$PR_HEAD" =~ ^[0-9a-f]{40}$ ]]
+            if ! checkout_head=$(git rev-parse --verify HEAD) ||
+               ! git rev-parse --verify "$PR_BASE^{commit}" > /dev/null ||
+               ! git rev-parse --verify "$PR_HEAD^{commit}" > /dev/null; then
+              printf 'docs_only=false\nworkflows_only=false\ncode=true\n' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            [[ "$checkout_head" == "$PR_HEAD" ]]
+            diff_paths=$(mktemp "$RUNNER_TEMP/ci-changes.XXXXXXXX")
+            if ! git diff --no-ext-diff --no-textconv --no-renames --ignore-submodules=none --raw --no-abbrev -z "$PR_BASE...$PR_HEAD" -- > "$diff_paths"; then
+              printf 'docs_only=false\nworkflows_only=false\ncode=true\n' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            has_docs=false
+            has_workflows=false
+            has_code=false
+            while IFS= read -r -d '' change; do
+              if ! IFS= read -r -d '' path; then
+                echo "::error::incomplete Git raw diff record"
+                exit 1
+              fi
+              if [[ ! "$change" =~ ^:([0-7]{6})[[:space:]]([0-7]{6})[[:space:]] ]]; then
+                echo "::error::invalid Git raw diff modes"
+                exit 1
+              fi
+              old_mode=${BASH_REMATCH[1]}
+              new_mode=${BASH_REMATCH[2]}
+              if [[ ! "$change" =~ ^:[0-7]{6}\ [0-7]{6}\ [0-9a-f]{40}\ [0-9a-f]{40}\ [ACDMRTUXB][0-9]*$ ]]; then
+                has_code=true
+                continue
+              fi
+              if [[ "$old_mode" == 160000 || "$new_mode" == 160000 ]]; then
+                has_code=true
+                continue
+              fi
+              if [[ "$old_mode" != 000000 && "$old_mode" != 100644 ]] ||
+                 [[ "$new_mode" != 000000 && "$new_mode" != 100644 ]]; then
+                has_code=true
+                continue
+              fi
+              case "$path" in
+                docs/*.md|docs/*.rst|docs/*.txt|README.md|CONTRIBUTING.md|CHANGELOG.md|CODE_OF_CONDUCT.md|SECURITY.md|LICENSE|LICENSE.md|LICENSE.txt)
+                  has_docs=true ;;
+                .github/workflows/*)
+                  workflow_name=${path#.github/workflows/}
+                  if [[ "$workflow_name" != */* && ( "$workflow_name" == *.yml || "$workflow_name" == *.yaml ) ]]; then
+                    has_workflows=true
+                  else
+                    has_code=true
+                  fi ;;
+                *)
+                  has_code=true ;;
+              esac
+            done < "$diff_paths"
+            if [[ -n "${change-}" ]]; then
+              has_code=true
+            fi
+            if [[ "$has_code" == false && "$has_workflows" == true ]]; then
+              # LB-570: only tracked head files outside .github may opt in.
+              if inside_worktree=$(git rev-parse --is-inside-work-tree) &&
+                 [[ "$inside_worktree" == true ]] &&
+                 workflow_tests=$(git ls-tree -r --name-only "$PR_HEAD" -- ':(top,literal)ci/workflow-tests'); then
+                if [[ "$workflow_tests" != ci/workflow-tests ]]; then
+                  grep_errors=$(mktemp "$RUNNER_TEMP/ci-workflow-deps.XXXXXXXX")
+                  if git grep --no-textconv -F -l -e '.github/workflows' "$PR_HEAD" -- . ':(top,exclude).github' > /dev/null 2> "$grep_errors"; then
+                    has_code=true
+                  else
+                    grep_status=$?
+                    if [[ "$grep_status" -eq 1 && ! -s "$grep_errors" ]]; then
+                      workflows_only=true
+                      code=false
+                    fi
+                  fi
+                fi
+              fi
+            elif [[ "$has_code" == false && "$has_docs" == true ]]; then
+              docs_only=true
+              code=false
+            fi
+          fi
+          printf 'docs_only=%s\nworkflows_only=%s\ncode=%s\n' "$docs_only" "$workflows_only" "$code" >> "$GITHUB_OUTPUT"
+      - name: "Require success or independently proven cheap skips"
+        if: "${{ needs.authz.result == 'success' }}"
+        shell: "bash"
+        env:
+          NEEDS: "${{ toJSON(needs) }}"
+          HEAVY_JOBS: "[\"pytest\"]"
+          DOCS_ONLY: "${{ steps.classify.outputs.docs_only }}"
+          WORKFLOWS_ONLY: "${{ steps.classify.outputs.workflows_only }}"
+        run: |
+          set -euo pipefail
+          cd -- "$RUNNER_TEMP"
+          python3 -I -c '
+          import json
+          import os
+          import sys
+          
+          needs = json.loads(os.environ["NEEDS"])
+          heavy = json.loads(os.environ["HEAVY_JOBS"])
+          cheap = (os.environ["DOCS_ONLY"], os.environ["WORKFLOWS_ONLY"]) in {
+              ("true", "false"), ("false", "true"),
+          }
+          valid = (isinstance(needs, dict) and isinstance(heavy, list) and bool(heavy)
+                   and all(isinstance(name, str) and name in needs for name in heavy)
+                   and all(isinstance(value, dict) for value in needs.values()))
+          if valid:
+              valid = all(needs.get(name, {}).get("result") == "success"
+                          for name in ("authz", "changes", "workflow-lint"))
+          if valid:
+              valid = all(value.get("result") == "success"
+                          or (name in heavy and value.get("result") == "skipped" and cheap)
+                          for name, value in needs.items())
+          if not valid:
+              print("::error::a needed job did not succeed or was skipped without PR diff proof")
+              sys.exit(1)
+          '
