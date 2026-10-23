@@ -507,16 +507,25 @@ class TypeInferer:
     def _default_for_spec(self, spec: TypeSpec | None) -> str:
         """Default initialiser for a TypeSpec; vector/map specs get ``T()``.
 
-        UDT specs always brace-init (``T{}``) regardless of whether the UDT was
-        declared in the current translation unit — imported / forward-declared
-        UDTs would otherwise fall through to ``0`` which is type-incompatible.
+        A user type brace-inits its struct name when the type is declared in
+        this translation unit (an imported type is inlined before codegen).
+        An enum element defaults to the double ``na`` (its slot is a double);
+        an undeclared name is not a C++ type and falls back to its slot's
+        default.
         """
         if spec is not None and spec.kind == "udt" and spec.name:
             # Drawing handle default (P2): brace-init the C++ struct name
             # (Line{} = na handle), NOT the lowercase Pine name (line{}).
             if spec.name in DRAWING_TYPE_TO_CPP:
                 return f"{DRAWING_TYPE_TO_CPP[spec.name]}{{}}"
-            return f"{self._safe_name(spec.name)}{{}}"
+            if spec.name in getattr(self, "_enum_defs", ()):
+                # An enum's element slot is a double (``_type_spec_to_cpp``);
+                # the absent value is na<double>(), not the first member and
+                # not the integer sentinel, which a double does not carry.
+                return "na<double>()"
+            if spec.name in getattr(self, "_udt_defs", ()):
+                return f"{self._safe_name(spec.name)}{{}}"
+            return self._default_for_type(self._type_spec_to_cpp(spec))
         cpp_type = self._type_spec_to_cpp(spec)
         if cpp_type.startswith("std::vector") or cpp_type.startswith("PineMap"):
             return f"{cpp_type}()"
@@ -4047,7 +4056,9 @@ class TypeInferer:
                 return "int"
             # format.* constants emit std::string literals (consumed by
             # pine_str_tostring); bare reads must declare std::string.
-            if ename == "format":
+            if ename in ("format", "currency", "order"):
+                return "std::string"
+            if ename == "session" and node.member in ("regular", "extended"):
                 return "std::string"
             if ename == "alert" and node.member in ALERT_FREQ_VALUES:
                 return "std::string"

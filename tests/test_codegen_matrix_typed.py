@@ -377,11 +377,13 @@ var m2 = m.transpose().copy()
     assert "PineGenericMatrix<int> m2" in cpp or "PineGenericMatrix<int>\n    m2" in cpp
 
 
-def test_default_for_unregistered_udt_still_brace_inits():
+def test_default_for_unregistered_udt_is_not_emitted_as_a_type_name():
+    # An undeclared name is not a C++ type.  Imported libraries are inlined
+    # and their types declared, so nothing valid reaches this fallback.
     cg = _make_codegen()
-    cg._udt_defs = {}  # empty — UDT not declared in this TU
+    cg._udt_defs = {}
     spec = TypeSpec.udt("Imported")
-    assert cg._default_for_spec(spec) == "Imported{}"
+    assert cg._default_for_spec(spec) == "0.0"
 
 
 def test_matrix_bool_round_trip():

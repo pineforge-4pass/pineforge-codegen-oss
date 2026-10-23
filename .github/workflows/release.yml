@@ -4,8 +4,9 @@ name: Release
 # Trusted Publishing (OIDC — no stored token), then commit + tag + create a
 # GitHub Release. VERSION is semver; scripts/release_version.py gives each
 # channel its spelling. A prerelease (override 1.0.0-rc.1) ships PyPI 1.0.0rc1,
-# tag v1.0.0-rc.1 as a GitHub prerelease, npm 1.0.0-rc.1 on dist-tag next
-# (publish-pyodide.yml) and tells the hub prerelease=true: never `latest`.
+# tag v1.0.0-rc.1 as a GitHub prerelease and tells the hub prerelease=true:
+# never `latest`. npm 1.0.0-rc.1 on dist-tag next requires a separate manual
+# workflow_dispatch of publish-pyodide.yml on main with the existing tag.
 
 on:
   workflow_dispatch:
@@ -96,8 +97,8 @@ jobs:
 
       # Conformance gate (BLOCKING): the differential parity gate must pass
       # before anything is built, published, or tagged. A gate-broken codegen
-      # fails the release here — nothing reaches PyPI, no tag is pushed (so the
-      # tag->npm trigger never fires), and no GitHub Release is created.
+      # fails the release here — nothing reaches PyPI, no tag is pushed, and no
+      # GitHub Release is created; npm requires a separate manual dispatch on main.
       - name: Run conformance gate (blocking)
         run: |
           python -m pip install -e .
@@ -121,16 +122,16 @@ jobs:
           ls "dist/pineforge_codegen-${PYPI_VERSION}-"*.whl >/dev/null \
             || { echo "::error::no wheel for ${PYPI_VERSION}"; exit 1; }
 
-      # Publish to PyPI BEFORE the tag is pushed. The tag push triggers
-      # publish-pyodide.yml (npm), so PyPI must land first — otherwise a PyPI
-      # failure would leave npm shipping a version PyPI never got.
+      # Publish to PyPI BEFORE the tag is pushed. This release job then sends
+      # codegen-release to the hub after PyPI and BEFORE any npm publish; npm
+      # lags until the manual publish-pyodide.yml dispatch on main.
       - name: Publish to PyPI
         if: ${{ !inputs.dry_run }}
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
 
-      # Commit + tag + push AFTER PyPI succeeds. The `git push --tags` triggers
-      # publish-pyodide.yml for npm (which re-runs the gate — defense in depth),
-      # so the tag only exists once the gate passed and PyPI published.
+      # Commit + tag + push AFTER PyPI succeeds. A tag push publishes no npm;
+      # npm requires a manual workflow_dispatch of publish-pyodide.yml on main
+      # with the existing tag, and re-runs the gate before publishing.
       - name: Commit + tag + push
         if: ${{ !inputs.dry_run }}
         env:

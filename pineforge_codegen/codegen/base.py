@@ -905,6 +905,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._security_calls: list[dict] = [self._normalize_security_call(item) for item in ctx.security_calls]
         # Current function parameter types (set during _emit_func_def)
         self._current_func_param_types: dict[str, str] = {}
+        # The emitted C++ type of each tuple-destructuring binding, so a field
+        # read can recognise a chart.point binding whose TypeSpec is a
+        # deliberate tombstone.
+        self._tuple_binding_cpp_types_by_name: dict[str, str] = {}
         self._current_func_param_specs: dict[str, "TypeSpec"] = {}
         # Copy-on-write lexical collection inventory for the function/method
         # currently being emitted.  Activated by _emit_func_def and restored

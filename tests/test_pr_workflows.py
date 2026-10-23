@@ -132,14 +132,14 @@ def test_concurrency_guard_rejects_shared_non_pr_groups(filename, bad_group):
 
 
 # Independent literal of the SEC846 promotion variant of ci-labels.md's authz.
-# Do not derive the expected policy from the workflow being checked.
-PROMOTE_GUARD = '''
+# Copy the engine reference, including its header, comments and blank separator.
+# Its nested author case is verbatim canon; never derive this from the workflow.
+PROMOTE_GUARD = '''  promote-guard:
     name: promote-guard
     runs-on: ubuntu-latest
     permissions: {}
-    # No timeout-minutes: the owner's no-time-limits rule (check-no-time-limits refuses new ones).
     steps:
-      - name: Only our own pull requests and our own events run CI
+      - name: Only our own merged pull requests and dispatches promote the baseline
         env:
           EVENT: ${{ github.event_name }}
           REPO: ${{ github.repository }}
@@ -149,7 +149,7 @@ PROMOTE_GUARD = '''
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           MERGED: ${{ github.event.pull_request.merged }}
           MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
-          GH_TOKEN: ${{ github.token }}   # read-only use: one permission lookup for the merger
+          GH_TOKEN: ${{ github.token }}   # read-only use: permission lookups for the PR author and merger
           # Bot logins whose same-repository pull requests count as ours: dependabot[bot] (CI-DEPBOT A)
           # and the org's own GitHub App bot logins by name (space-separated), nothing else.
           ALLOWED_BOTS: "dependabot[bot] pineforge-app[bot]"
@@ -177,21 +177,21 @@ PROMOTE_GUARD = '''
                       case "$perm" in admin|maintain|write) ;; *) fail "author ${PR_AUTHOR:-unknown} (${ASSOCIATION:-NONE}) has permission '$perm', not write, and is not an allowlisted bot" ;; esac ;;
                   esac ;;
               esac
-              # Only our own unmerged PRs pass without effect: promote's existing condition skips them.
-              if [ "$MERGED" = "true" ]; then
-                [ -n "$MERGED_BY" ] || fail "pull_request_target merging actor is unknown"
-                case " $ALLOWED_BOTS " in
-                  *" $MERGED_BY "*) ;;
-                  *)
-                    # No author_association exists for the merger: ask GitHub for the actor's permission on
-                    # this repository; anything but admin/maintain/write (or a failed call) refuses.
-                    perm=$(gh api "repos/$REPO/collaborators/$MERGED_BY/permission" --jq .permission 2>/dev/null || echo none)
-                    case "$perm" in admin|maintain|write) ;; *) fail "pull_request_target merging actor ${MERGED_BY:-unknown} has permission '$perm', not write" ;; esac ;;
-                esac
-              fi ;;
-            *) fail "event $EVENT does not run CI (pull_request_target and other events are not allowed)" ;;
+              # Only our own authorised unmerged closes pass without promotion.
+              [ "$MERGED" = "true" ] || { echo "promote-guard: unmerged pull request; promotion is skipped" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+              [ -n "$MERGED_BY" ] || fail "pull_request_target merger is empty"
+              case " $ALLOWED_BOTS " in
+                *" $MERGED_BY "*) ;;
+                *)
+                  # No author_association exists for the merger: ask GitHub for the merger's permission on
+                  # this repository; anything but admin/maintain/write (or a failed call) refuses.
+                  perm=$(gh api "repos/$REPO/collaborators/$MERGED_BY/permission" --jq .permission 2>/dev/null || echo none)
+                  case "$perm" in admin|maintain|write) ;; *) fail "pull_request_target merger ${MERGED_BY:-unknown} has permission '$perm', not write" ;; esac ;;
+              esac ;;
+            *) fail "event $EVENT does not run baseline promotion (only pull_request_target and workflow_dispatch are allowed)" ;;
           esac
           echo "authz: allowed ($EVENT${PR_AUTHOR:+ by $PR_AUTHOR})" >> "$GITHUB_STEP_SUMMARY"
+
 '''
 
 
@@ -210,7 +210,12 @@ def assert_promotion_guard(workflow):
     assert re.findall(r"^    permissions: ([^\n]+)$", guard, re.M) == ["{}"], (
         "promotion guard must have empty job permissions"
     )
-    assert guard.strip() == PROMOTE_GUARD.strip(), "promotion guard differs from pinned policy"
+    guard_block = re.search(
+        r"^  promote-guard:[^\n]*\n.*?(?=^  promote:)", workflow, re.M | re.S
+    )
+    assert guard_block is not None and guard_block[0] == PROMOTE_GUARD, (
+        "promotion guard differs from pinned policy"
+    )
     promote = jobs["promote"]
     assert promote.startswith(
         "\n    needs: [promote-guard]\n"
@@ -339,7 +344,7 @@ PROMOTION_CASES = [
     PromotionCase(
         "contributor-author-write-merger-read",
         {"ASSOCIATION": "CONTRIBUTOR", "PR_AUTHOR": "agent"},
-        1, "pull_request_target merging actor writer has permission 'read', not write",
+        1, "pull_request_target merger writer has permission 'read', not write",
         author_permission="write", author_lookup=True,
         merger_permission="read", merger_lookup=True,
     ),
@@ -360,32 +365,32 @@ PROMOTION_CASES = [
     ),
     PromotionCase(
         "merger-read-permission", {},
-        1, "pull_request_target merging actor writer has permission 'read', not write",
+        1, "pull_request_target merger writer has permission 'read', not write",
         merger_permission="read", merger_lookup=True,
     ),
     PromotionCase(
         "merger-triage-permission", {},
-        1, "pull_request_target merging actor writer has permission 'triage', not write",
+        1, "pull_request_target merger writer has permission 'triage', not write",
         merger_permission="triage", merger_lookup=True,
     ),
     PromotionCase(
         "merger-lookup-fails", {},
-        1, "pull_request_target merging actor writer has permission 'none', not write",
+        1, "pull_request_target merger writer has permission 'none', not write",
         merger_permission="", merger_lookup_exit=1, merger_lookup=True,
     ),
     PromotionCase(
         "merger-lookup-fails-with-write-output", {},
-        1, "pull_request_target merging actor writer has permission 'write\nnone', not write",
+        1, "pull_request_target merger writer has permission 'write\nnone', not write",
         merger_permission="write", merger_lookup_exit=1, merger_lookup=True,
     ),
     PromotionCase(
         "merger-permission-empty", {},
-        1, "pull_request_target merging actor writer has permission '', not write",
+        1, "pull_request_target merger writer has permission '', not write",
         merger_permission="", merger_lookup=True,
     ),
     PromotionCase(
         "empty-merger", {"MERGED_BY": ""},
-        1, "pull_request_target merging actor is unknown",
+        1, "pull_request_target merger is empty",
     ),
     PromotionCase(
         "own-unmerged-member-close", {"MERGED": "false", "MERGED_BY": ""}, 0,
@@ -414,15 +419,15 @@ PROMOTION_CASES = [
     ),
     PromotionCase(
         "push", {"EVENT": "push"},
-        1, "event push does not run CI (pull_request_target and other events are not allowed)",
+        1, "event push does not run baseline promotion (only pull_request_target and workflow_dispatch are allowed)",
     ),
     PromotionCase(
         "workflow-run", {"EVENT": "workflow_run"},
-        1, "event workflow_run does not run CI (pull_request_target and other events are not allowed)",
+        1, "event workflow_run does not run baseline promotion (only pull_request_target and workflow_dispatch are allowed)",
     ),
     PromotionCase(
         "unknown-event", {"EVENT": "unexpected"},
-        1, "event unexpected does not run CI (pull_request_target and other events are not allowed)",
+        1, "event unexpected does not run baseline promotion (only pull_request_target and workflow_dispatch are allowed)",
     ),
 ]
 
@@ -499,6 +504,9 @@ def assert_promotion_guard_case(workflow, case, tmp_path):
     if case.expected_exit == 1:
         assert result.stdout == f"::error title=authz::{case.refusal}\n", case.name
         assert summary == f"authz: REFUSED: {case.refusal}\n", case.name
+    elif env["EVENT"] == "pull_request_target" and env["MERGED"] != "true":
+        assert summary == "promote-guard: unmerged pull request; promotion is skipped\n", case.name
+        assert result.stdout == "", case.name
     else:
         author = f" by {env['PR_AUTHOR']}" if env["PR_AUTHOR"] else ""
         assert summary == f"authz: allowed ({env['EVENT']}{author})\n", case.name
@@ -554,16 +562,16 @@ def test_promotion_guard_rejects_script_replaced_by_exit_zero(tmp_path):
         "contributor-author-lookup-fails", id="failed-author-lookup-accepted",
     ),
     pytest.param(
-        '                    perm=$(gh api "repos/$REPO/collaborators/$MERGED_BY/permission" --jq .permission 2>/dev/null || echo none)\n',
+        '                  perm=$(gh api "repos/$REPO/collaborators/$MERGED_BY/permission" --jq .permission 2>/dev/null || echo none)\n',
         "", "contributor-author-write-merger-read", id="deleted-merger-lookup",
     ),
     pytest.param(
-        '                    perm=$(gh api "repos/$REPO/collaborators/$MERGED_BY/permission" --jq .permission 2>/dev/null || echo none)\n',
-        '                    perm=$(gh api "repos/$REPO/collaborators/$MERGED_BY/permission" --jq .permission 2>/dev/null || echo write)\n',
+        '                  perm=$(gh api "repos/$REPO/collaborators/$MERGED_BY/permission" --jq .permission 2>/dev/null || echo none)\n',
+        '                  perm=$(gh api "repos/$REPO/collaborators/$MERGED_BY/permission" --jq .permission 2>/dev/null || echo write)\n',
         "merger-lookup-fails", id="failed-merger-lookup-accepted",
     ),
     pytest.param(
-        '                [ -n "$MERGED_BY" ] || fail "pull_request_target merging actor is unknown"\n',
+        '              [ -n "$MERGED_BY" ] || fail "pull_request_target merger is empty"\n',
         "", "empty-merger", id="empty-merger-accepted",
     ),
 ])
@@ -595,6 +603,26 @@ def test_promotion_guard_rejects_missing_event_and_identity_fields(name):
 
 
 @pytest.mark.parametrize("original,replacement", [
+    pytest.param(
+        "  promote-guard:\n",
+        "  promote-guard: # changed header\n",
+        id="guard-header-changed",
+    ),
+    pytest.param(
+        "      - name: Only our own merged pull requests and dispatches promote the baseline\n",
+        "      - name: Promote the baseline\n",
+        id="guard-step-text-changed",
+    ),
+    pytest.param(
+        "          # Bot logins whose same-repository pull requests count as ours: dependabot[bot] (CI-DEPBOT A)\n",
+        "",
+        id="guard-bot-comment-removed",
+    ),
+    pytest.param(
+        '          echo "authz: allowed ($EVENT${PR_AUTHOR:+ by $PR_AUTHOR})" >> "$GITHUB_STEP_SUMMARY"\n\n  promote:\n',
+        '          echo "authz: allowed ($EVENT${PR_AUTHOR:+ by $PR_AUTHOR})" >> "$GITHUB_STEP_SUMMARY"\n  promote:\n',
+        id="guard-separator-removed",
+    ),
     pytest.param(
         'fail() { echo "::error title=authz::$1"; echo "authz: REFUSED: $1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }',
         "fail() { :; }",
@@ -636,27 +664,27 @@ def test_promotion_guard_rejects_missing_event_and_identity_fields(name):
         id="non-write-author-accepted",
     ),
     pytest.param(
-        '                    perm=$(gh api "repos/$REPO/collaborators/$MERGED_BY/permission" --jq .permission 2>/dev/null || echo none)\n',
+        '                  perm=$(gh api "repos/$REPO/collaborators/$MERGED_BY/permission" --jq .permission 2>/dev/null || echo none)\n',
         "",
         id="merger-permission-lookup-removed",
     ),
     pytest.param(
-        '                    perm=$(gh api "repos/$REPO/collaborators/$MERGED_BY/permission" --jq .permission 2>/dev/null || echo none)\n',
-        '                    perm=$(gh api "repos/$REPO/collaborators/$MERGED_BY/permission" --jq .permission 2>/dev/null || echo write)\n',
+        '                  perm=$(gh api "repos/$REPO/collaborators/$MERGED_BY/permission" --jq .permission 2>/dev/null || echo none)\n',
+        '                  perm=$(gh api "repos/$REPO/collaborators/$MERGED_BY/permission" --jq .permission 2>/dev/null || echo write)\n',
         id="failed-merger-lookup-accepted",
     ),
     pytest.param(
-        '''case "$perm" in admin|maintain|write) ;; *) fail "pull_request_target merging actor''',
-        '''case "$perm" in admin|maintain|write|read|none) ;; *) fail "pull_request_target merging actor''',
+        '''case "$perm" in admin|maintain|write) ;; *) fail "pull_request_target merger''',
+        '''case "$perm" in admin|maintain|write|read|none) ;; *) fail "pull_request_target merger''',
         id="non-write-merger-accepted",
     ),
     pytest.param(
-        '              if [ "$MERGED" = "true" ]; then\n',
-        '              if [ "$MERGED" = "false" ]; then\n',
+        '              [ "$MERGED" = "true" ] || {',
+        '              [ "$MERGED" = "false" ] || {',
         id="merged-checks-bypassed",
     ),
     pytest.param(
-        '            *) fail "event $EVENT does not run CI (pull_request_target and other events are not allowed)" ;;\n',
+        '            *) fail "event $EVENT does not run baseline promotion (only pull_request_target and workflow_dispatch are allowed)" ;;\n',
         "            *) ;;\n",
         id="unknown-event-accepted",
     ),
@@ -676,7 +704,7 @@ def test_promotion_guard_rejects_missing_event_and_identity_fields(name):
         id="guard-requests-oidc-token",
     ),
     pytest.param(
-        '                [ -n "$MERGED_BY" ] || fail "pull_request_target merging actor is unknown"\n',
+        '              [ -n "$MERGED_BY" ] || fail "pull_request_target merger is empty"\n',
         "",
         id="empty-merger-accepted",
     ),
@@ -687,9 +715,9 @@ def test_promotion_guard_rejects_missing_event_and_identity_fields(name):
         id="guard-receives-secret",
     ),
     pytest.param(
-        "      - name: Only our own pull requests and our own events run CI\n",
+        "      - name: Only our own merged pull requests and dispatches promote the baseline\n",
         "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
-        "      - name: Only our own pull requests and our own events run CI\n",
+        "      - name: Only our own merged pull requests and dispatches promote the baseline\n",
         id="guard-checks-out-code",
     ),
     pytest.param(
