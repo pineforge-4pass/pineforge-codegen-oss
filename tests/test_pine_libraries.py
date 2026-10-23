@@ -10,7 +10,7 @@ its imports ONLY through its own manifest (review XSYM-B P2-3): otherwise a
 probe pinning nothing would transpile on a shard neighbour's pin and measure
 differently by case composition.
 
-The frozen verifier (pineforge-lab 3bac0b7b ``scripts/verify-engine-local.py``
+The frozen campaign verifier (commit 3bac0b7b, ``scripts/verify-engine-local.py``
 line 1698) calls ``transpile((d / "strategy.pine").read_text())``: no slug, no
 options. So the manifest is found by content: the one whose
 ``probe.strategySha256`` is the sha256 of the script. That sha is of the

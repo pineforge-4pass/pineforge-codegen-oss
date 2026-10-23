@@ -196,6 +196,50 @@ from .tables import (
     _merge_kwargs,
 )
 
+# Pine member names the codegen has a lowering for somewhere.  A method the
+# type resolver cannot route back to one of these tables (a history read of a
+# UDT collection field, for example) keeps its historical pass-through
+# spelling; anything else is not a Pine method and must not become C++ text.
+PINEFORGE_MEMBER_NAMES = frozenset(
+    ARRAY_METHODS
+) | frozenset(MAP_METHODS) | frozenset(MATRIX_METHODS) | frozenset(
+    ALL_DRAWING_METHODS
+)
+
+
+def _spec_for_cpp_param(cpp: str | None):
+    """A TypeSpec for an untyped parameter's emitted C++ type, if known.
+
+    Only ``std::string`` is resolved: it carries C++ members of its own, so a
+    Pine method name that collides (``copy``, ``size``, ``clear``) must not
+    pass through.  A numeric parameter has no such members; a collection
+    parameter is resolved by its own spec before this fallback.
+    """
+    if cpp == "std::string":
+        return TypeSpec.primitive("string")
+    return None
+
+
+def _member_name_has_lowering(recv_spec, name: str) -> bool:
+    """Whether ``name`` is a Pine method of a receiver of ``recv_spec``.
+
+    A resolved receiver admits only its own namespace's table: a string has no
+    Pine methods, so a name like ``size`` or ``copy`` must not reach
+    ``std::string``.  An unresolved receiver keeps the historical pass-through
+    for any Pine method name.
+    """
+    if recv_spec is None:
+        return name in PINEFORGE_MEMBER_NAMES
+    if recv_spec.kind == "array":
+        return name in ARRAY_METHODS
+    if recv_spec.kind == "map":
+        return name in MAP_METHODS
+    if recv_spec.kind == "matrix":
+        return name in MATRIX_METHODS
+    if recv_spec.kind == "udt" and recv_spec.name in DRAWING_TYPE_TO_CPP:
+        return name in ALL_DRAWING_METHODS
+    return False
+
 
 def _parse_pine_datestring_ms(text: str) -> int | None:
     """Parse a Pine ``timestamp(dateString)`` literal to Unix milliseconds.
@@ -309,6 +353,25 @@ class CallVisitor:
     # ------------------------------------------------------------------
     # Function-call dispatch
     # ------------------------------------------------------------------
+
+    def _reject_unknown_element_type(self, node, element_spec) -> None:
+        """Refuse an element type that is not a type this unit can name.
+
+        The support checker normally refuses it; a switch arm downgrades that
+        error to a warning, so the emitter checks again and never defaults an
+        undeclared name.
+        """
+        if (element_spec is not None and element_spec.kind == "udt"
+                and element_spec.name
+                and element_spec.name not in self._udt_defs
+                and element_spec.name not in self._enum_defs
+                and element_spec.name not in DRAWING_TYPE_TO_CPP
+                and element_spec.name not in ("table", "polyline")):
+            full = element_spec.name
+            self._codegen_error(
+                node,
+                f"{full}(...) is not implemented in PineForge runtime.",
+            )
 
     def _udt_method_call_emit_name(self, fi, node: FuncCall) -> str:
         """Resolve a UDT method call through the ordinary UDF clone graph."""
@@ -1794,6 +1857,17 @@ class CallVisitor:
                             self._array_method_args(meth, arg_nodes, recv_spec),
                             recv_spec, node,
                         )
+                    if recv_spec is None:
+                        # A builtin namespace's constant lowers to a string
+                        # temporary; its emitted type is what the member
+                        # would be called on.
+                        recv_spec = _spec_for_cpp_param(self._infer_type(obj))
+                    if not _member_name_has_lowering(recv_spec, meth):
+                        full = meth
+                        self._codegen_error(
+                            node,
+                            f"{full}(...) is not implemented in PineForge runtime.",
+                        )
                     args = ", ".join(raw_args)
                     if meth == "delete":
                         meth = "_delete_"
@@ -1943,6 +2017,16 @@ class CallVisitor:
                                 force_stage=self._binds_fresh_array_to_reference(
                                     fi_u, rest_nodes, first_param=1),
                             )
+                    if recv_spec is None:
+                        recv_spec = _spec_for_cpp_param(
+                            self._current_func_param_types.get(obj.name)
+                        ) or _spec_for_cpp_param(self._infer_type(obj))
+                    if not _member_name_has_lowering(recv_spec, meth_raw):
+                        full = meth_raw
+                        self._codegen_error(
+                            node,
+                            f"{full}(...) is not implemented in PineForge runtime.",
+                        )
                     args = ", ".join(self._visit_expr(a) for a in node.args)
                     recv = self._visit_expr(obj)
                     meth = meth_raw
@@ -2166,6 +2250,7 @@ class CallVisitor:
                     spec = self._widen_array_spec_for_name(target, spec)
                 cpp_type = self._type_spec_to_cpp(spec)
                 elem_spec = spec.element if spec.element is not None else TypeSpec.primitive("float")
+                self._reject_unknown_element_type(node, elem_spec)
                 init_default = self._default_for_spec(elem_spec)
                 if node.args:
                     size_arg = self._visit_expr(node.args[0])
@@ -2214,6 +2299,7 @@ class CallVisitor:
                         spec = declared
                     spec = self._widen_array_spec_for_name(target, spec)
                 elem_spec = spec.element
+                self._reject_unknown_element_type(node, elem_spec)
                 for a in node.args:
                     self._warn_narrow_int_element(a, spec, a)
                 elems = ", ".join(
@@ -2738,6 +2824,13 @@ class CallVisitor:
             if func_name == "new":
                 targs = self._template_args_from_call(node)
                 elem_spec = self._type_spec_from_hint_name(targs[0]) if targs else TypeSpec.primitive("float")
+                if elem_spec is None:
+                    full = targs[0]
+                    self._codegen_error(
+                        node,
+                        f"{full}(...) is not implemented in PineForge runtime.",
+                    )
+                self._reject_unknown_element_type(node, elem_spec)
                 args_e = [self._visit_expr(a) for a in node.args]
                 rows = args_e[0] if args_e else "0"
                 cols = args_e[1] if len(args_e) > 1 else "0"
@@ -2952,6 +3045,16 @@ class CallVisitor:
                 hint="Check the spelling; this namespace may not be supported "
                      "by PineForge.",
             )
+        elif namespace is not None:
+            # A UDT name is a value type, not a namespace: its constructor,
+            # copy and typed methods return above.  Anything left is a call
+            # the codegen cannot lower; emitting it raw would write the
+            # user's type name as a C++ namespace qualifier.
+            full = f"{namespace}.{func_name}"
+            self._codegen_error(
+                node,
+                f"{full}(...) is not implemented in PineForge runtime.",
+            )
 
         # Generic function call (user-defined or unknown)
         # Determine which params are series (need Series<double> arg, not scalar)
@@ -3126,7 +3229,8 @@ class CallVisitor:
                 # Mirror Pine default `timeframe.period` instead of hard-coding 15m.
                 all_args.append("script_tf_")
                 ordered_arg_nodes.append(None)
-        prefix = f"{namespace}::" if namespace else ""
+        # Every non-null namespace is refused above (unknown namespace, or a
+        # member call on a user type), so the emitted head is never qualified.
         # Use safe name for user-defined functions to avoid member name collision
         emit_name = self._func_safe_name(func_name) if func_name in self._func_names else func_name
         # Per-call-site variant: if this function has TA/series calls, call the correct variant
@@ -3155,7 +3259,7 @@ class CallVisitor:
             # Inside a per-call-site variant: propagate call-site index to
             # sub-functions that also have variants (for state isolation)
             emit_name = f"{self._func_safe_name(func_name)}_cs{self._active_call_site_idx}"
-        call_head = f"{prefix}{emit_name}"
+        call_head = emit_name
         if namespace is None and func_name in self._func_names:
             return self._ordered_user_call_expr(
                 call_head,

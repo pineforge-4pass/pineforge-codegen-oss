@@ -1177,14 +1177,44 @@ class ExprVisitor:
                 or name in self._current_func_locals
                 or name in self._udt_var_types
             ):
-                safe = self._call_site_var_name(
-                    node.object, self._safe_name(name)
+                # A member the codegen has no lowering for.  A user type's
+                # field is a real C++ member (chart.point keeps its fields
+                # this way); a builtin-backed receiver has no Pine member, so
+                # writing the name raw would read arbitrary C++ state.
+                recv_spec = self._type_spec_from_expr(node.object)
+                tuple_cpp = getattr(
+                    self, "_tuple_binding_cpp_types_by_name", {}
+                ).get(name)
+                point = (
+                    (recv_spec is not None and recv_spec.name == "chart.point")
+                    or self._infer_type(node.object) == "ChartPoint"
+                    or tuple_cpp == "ChartPoint"
                 )
-                return f"{safe}.{node.member}"
+                if point and node.member in ("time", "index", "price"):
+                    safe = self._call_site_var_name(
+                        node.object, self._safe_name(name)
+                    )
+                    return f"{safe}.{node.member}"
+                full = f"{name}.{node.member}"
+                self._codegen_error(
+                    node,
+                    f"{full}(...) is not implemented in PineForge runtime.",
+                )
             if name not in self.ctx.series_vars:
                 # Unknown identifier — likely an enum value
                 return f'std::string("{self._cpp_string_escape(node.member)}")'
-        return f"{obj}.{node.member}"
+        recv_spec = self._type_spec_from_expr(node.object)
+        point = (
+            (recv_spec is not None and recv_spec.name == "chart.point")
+            or self._infer_type(node.object) == "ChartPoint"
+        )
+        if point and node.member in ("time", "index", "price"):
+            return f"{obj}.{node.member}"
+        full = f"{node.member}"
+        self._codegen_error(
+            node,
+            f"{full}(...) is not implemented in PineForge runtime.",
+        )
 
     def _operand_na_kind(self, node, cpp_type: str) -> str | None:
         """Classify a relational operand by the ``na`` sentinel it can carry.

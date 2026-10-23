@@ -650,6 +650,11 @@ class Parser:
 
     def _parse_type_hint_string(self) -> str:
         """Parse primitive, UDT, array<T>, map<K,V>, or postfix-array (``T[]``) hints."""
+        # A type hint is a type grammar, never an arbitrary token's value: a
+        # string or number here would reach the emitted C++ type position.
+        if (self._current().type not in TYPE_KEYWORDS
+                and self._current().type != TokenType.IDENT):
+            self._consume(TokenType.IDENT)  # raises a located ParseError
         base = self._advance().value
         # Library type qualified by its import alias: ``lib.Type``.
         while self._check(TokenType.DOT) and self._peek().type == TokenType.IDENT:
@@ -676,8 +681,12 @@ class Parser:
                     continue
                 if tok.type == TokenType.COMMA:
                     parts.append(",")
-                else:
+                elif (tok.type in TYPE_KEYWORDS
+                      or tok.type in (TokenType.IDENT, TokenType.DOT)):
                     parts.append(str(tok.value))
+                else:
+                    # A string/number/operator inside <...> is not a type.
+                    self._consume(TokenType.IDENT)
                 self._advance()
             base = f"{base}<{''.join(parts)}>"
 
@@ -712,11 +721,20 @@ class Parser:
                     break
                 depth -= 1
                 current.append(">")
-            elif tok.type == TokenType.COMMA and depth == 0:
-                args.append("".join(current).strip())
-                current = []
-            else:
+            elif tok.type == TokenType.COMMA:
+                # A comma at depth 0 separates arguments; inside a nested
+                # <...> it belongs to that type (map<string, float>).
+                if depth == 0:
+                    args.append("".join(current).strip())
+                    current = []
+                else:
+                    current.append(",")
+            elif (tok.type in TYPE_KEYWORDS
+                  or tok.type in (TokenType.IDENT, TokenType.DOT)):
                 current.append(str(tok.value))
+            else:
+                # Template arguments are type names, not literal text.
+                self._consume(TokenType.IDENT)
             self._advance()
         return args
 
@@ -739,6 +757,12 @@ class Parser:
                 if depth == 0:
                     return i + 1 < len(self.tokens) and self.tokens[i + 1].type == TokenType.LPAREN
             elif tt in (TokenType.NEWLINE, TokenType.EOF_TOKEN) and depth > 0:
+                return False
+            elif tt not in TYPE_KEYWORDS and tt not in (
+                TokenType.IDENT, TokenType.DOT, TokenType.COMMA,
+            ):
+                # Not the type grammar: this '<' is an ordinary comparison,
+                # not the opening of template arguments.
                 return False
             i += 1
         return False
