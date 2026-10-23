@@ -260,3 +260,10 @@ tree also found no matches. Neither has this pool-label checker to extend.
 Test collection/execution, generated C++ behavior, engine/corpus parity,
 real GitHub event payloads, deployed fork settings, runner routing,
 permissions and IAM, policy/TypeSafe acceptance and merge completion.
+
+## FINAL INTEGRATION RECORD (supervisor, 10-23 15:15; supersedes every earlier "pending merge", "unmerged index entry", "proxy synchronization" and "final whole-file diff is empty" passage above, which are checkpoint accounts)
+
+- This file is part of the completed two-parent merge commit of branch `ci/sec846-codegen`: first parent `187b90bc9c750d5cc456786abaa75d4b1363d960` (the earlier SEC846 branch), second parent `3ac65032bb23b59bfc9b6fe5ba91b791adc73ee2` (origin/main). The one conflict file, `CONTRIBUTING.md`, is resolved by union; no conflict marker remains.
+- The `promote-guard` block (job header through its blank separator) has MD5 `933cc1f869787b37f3b339978d3828a2`, the same as engine and the workflow template; `tests/test_pr_workflows.py` pins the whole block against one independent literal.
+- The whole codegen and template promotion files are intentionally NOT byte-equal: codegen's cloud SQL proxy wait (PID/liveness loop) differs from the template's, as it does on both mains. The template was NOT changed to match codegen. Any earlier statement that the files are textually equal, or that their whole-file diff is empty, is a superseded checkpoint observation.
+- Nothing was run on the authoring machine (tests, collection, scripts, workflows: NOT RUN).

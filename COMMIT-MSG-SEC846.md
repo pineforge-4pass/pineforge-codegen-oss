@@ -214,3 +214,9 @@ Root handoffs are not edited by this lane. The supervisor installs this
 full replacement and REPORT-SEC846.new.md from the reports directory.
 No repository code was executed or parsed; no file was deleted, staged
 or committed.
+
+FINAL INTEGRATION RECORD (supervisor, 10-23 15:15; supersedes every earlier "pending merge", "unmerged index entry", "proxy synchronization" and "final whole-file diff is empty" passage above, which are checkpoint accounts):
+- This is the completed merge commit of `ci/sec846-codegen`: parents `187b90bc9c750d5cc456786abaa75d4b1363d960` and origin/main `3ac65032bb23b59bfc9b6fe5ba91b791adc73ee2`; CONTRIBUTING.md resolved by union.
+- The promote-guard block has MD5 933cc1f869787b37f3b339978d3828a2, the same as engine and the template; tests/test_pr_workflows.py pins the whole block to one independent literal.
+- Codegen's and the template's whole promotion files are intentionally not byte-equal (cloud SQL proxy wait differs on both mains; the template was not changed to match).
+- Nothing was run on the authoring machine (NOT RUN).
