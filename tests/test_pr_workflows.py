@@ -149,8 +149,7 @@ def authz_script(workflow):
     return scripts[0]
 
 
-def test_test_workflow_runs_package_file_and_entity_checks_on_every_diff():
-    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+def assert_package_file_checks(workflow):
     jobs = job_blocks(workflow)
     assert "package-files" in jobs, "test must have an unconditional package-files light job"
     package = jobs["package-files"]
@@ -169,8 +168,25 @@ def test_test_workflow_runs_package_file_and_entity_checks_on_every_diff():
         assert '        if: "${{ needs.authz.result == \'success\' }}"' in step
     assert "test -f LICENSE" in package
     assert "test -f README.md" in package
-    assert "tests/test_license_entity.py" in package
+    assert re.search(
+        r"^        run: python -m pytest -q tests/test_license_entity\.py$", package, re.M,
+    ), "package-files must execute the entity test"
     assert "needs: [authz, changes, workflow-lint, package-files, pytest]" in jobs["test-check"]
+
+
+def test_test_workflow_runs_package_file_and_entity_checks_on_every_diff():
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    assert_package_file_checks(workflow)
+
+
+def test_package_file_checks_reject_echoed_entity_test():
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    original = "        run: python -m pytest -q tests/test_license_entity.py\n"
+    assert workflow.count(original) == 1, "mutation must find the entity test command exactly once"
+    mutant = workflow.replace(original, "        run: echo tests/test_license_entity.py\n", 1)
+    assert mutant != workflow
+    with pytest.raises(AssertionError, match="package-files must execute the entity test"):
+        assert_package_file_checks(mutant)
 
 
 def test_pytest_checks_out_the_pull_request_head():
@@ -376,18 +392,26 @@ def aggregate_gate_script(workflow):
     return scripts[-1]
 
 
-def assert_aggregate_rejects(workflow, pytest_result, tmp_path):
+def assert_aggregate_rejects(
+    workflow, pytest_result, tmp_path, *, package_result="success", docs_only="false",
+):
     bash = shutil.which("bash")
     if bash is None:
         pytest.fail("NOT RUN: aggregate decision control requires bash on the test runner")
     script = aggregate_gate_script(workflow)
+    aggregate = job_blocks(workflow)["test-check"]
+    dependencies = re.findall(r"^    needs: \[([\w, -]+)\]$", aggregate, re.M)
+    assert len(dependencies) == 1, "test-check must declare one inline dependency list"
+    job_results = {"pytest": pytest_result, "package-files": package_result}
     needs = {
-        "authz": {"result": "success"},
-        "changes": {"result": "success"},
-        "workflow-lint": {"result": "success"},
-        "package-files": {"result": "success"},
-        "pytest": {"result": pytest_result},
+        name: {"result": job_results.get(name, "success")}
+        for name in (item.strip() for item in dependencies[0].split(","))
     }
+    heavy_values = re.findall(r'^          HEAVY_JOBS: ("[^\n]+")$', aggregate, re.M)
+    assert len(heavy_values) == 1, "test-check must declare one double-quoted heavy-job list"
+    # Decode the shipped YAML's JSON-compatible quoting; the real gate
+    # parses the enclosed JSON list itself.
+    heavy_jobs = json.loads(heavy_values[0])
     python3 = shutil.which("python3")
     if python3 is None:
         pytest.fail("NOT RUN: aggregate decision control requires python3 on the test runner")
@@ -395,8 +419,8 @@ def assert_aggregate_rejects(workflow, pytest_result, tmp_path):
         "PATH": str(Path(python3).parent),
         "RUNNER_TEMP": str(tmp_path),
         "NEEDS": json.dumps(needs),
-        "HEAVY_JOBS": '["pytest"]',
-        "DOCS_ONLY": "false",
+        "HEAVY_JOBS": heavy_jobs,
+        "DOCS_ONLY": docs_only,
         "WORKFLOWS_ONLY": "false",
     }
     result = subprocess.run(
@@ -408,7 +432,8 @@ def assert_aggregate_rejects(workflow, pytest_result, tmp_path):
         check=False,
     )
     assert result.returncode == 1, (
-        f"aggregate must refuse pytest={pytest_result}; got {result.returncode}\n"
+        f"aggregate must refuse pytest={pytest_result}, package-files={package_result}, "
+        f"docs_only={docs_only}; got {result.returncode}\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
     assert result.stdout == "::error::a needed job did not succeed or was skipped without PR diff proof\n"
@@ -420,14 +445,52 @@ def test_test_check_rejects_failed_pytest(tmp_path):
     assert_aggregate_rejects(workflow, "failure", tmp_path)
 
 
+@pytest.mark.parametrize("package_result", ["failure", "skipped"])
+def test_test_check_rejects_unsuccessful_package_files_on_docs_only_diff(package_result, tmp_path):
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    assert_aggregate_rejects(
+        workflow, "skipped", tmp_path, package_result=package_result, docs_only="true",
+    )
+    original = "    needs: [authz, changes, workflow-lint, package-files, pytest]\n"
+    replacement = "    needs: [authz, changes, workflow-lint, pytest]\n"
+    assert workflow.count(original) == 1, "mutation must find the aggregate dependency list exactly once"
+    mutant = workflow.replace(original, replacement, 1)
+    assert mutant != workflow
+    with pytest.raises(
+        AssertionError,
+        match=f"aggregate must refuse.*package-files={package_result}, docs_only=true; got 0",
+    ):
+        assert_aggregate_rejects(
+            mutant, "skipped", tmp_path, package_result=package_result, docs_only="true",
+        )
+
+
+def test_test_check_rejects_package_files_added_to_heavy_jobs(tmp_path):
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    original = '          HEAVY_JOBS: "[\\"pytest\\"]"\n'
+    replacement = '          HEAVY_JOBS: "[\\"package-files\\",\\"pytest\\"]"\n'
+    assert workflow.count(original) == 1, "mutation must find the aggregate heavy-job list exactly once"
+    mutant = workflow.replace(original, replacement, 1)
+    assert mutant != workflow
+    with pytest.raises(
+        AssertionError,
+        match="aggregate must refuse.*package-files=skipped, docs_only=true; got 0",
+    ):
+        assert_aggregate_rejects(
+            mutant, "skipped", tmp_path, package_result="skipped", docs_only="true",
+        )
+
+
 def test_test_check_rejects_aggregate_script_replaced_by_exit_zero(tmp_path):
     workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
     script = aggregate_gate_script(workflow)
-    original = textwrap.indent(script, " " * 10)
+    original = textwrap.indent(script, " " * 10, lambda _: True)
+    source = job_blocks(workflow)["test-check"].rsplit("        run: |\n", 1)[1]
+    assert original == source, "aggregate script must preserve the workflow's whitespace"
     assert workflow.count(original) == 1, "mutation must find the aggregate script exactly once"
     mutant = workflow.replace(original, "          exit 0\n", 1)
     assert mutant != workflow
-    with pytest.raises(AssertionError, match="aggregate must refuse"):
+    with pytest.raises(AssertionError, match="aggregate must refuse.*; got 0"):
         assert_aggregate_rejects(mutant, "failure", tmp_path)
 
 
