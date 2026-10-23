@@ -7,6 +7,24 @@ Text marked **since 1.5.0** describes diagnostic additions that 1.4.0 and
 earlier releases do not have: the `note` severity, the `user_message` template
 and the eleven codes that became notes.
 
+## Identifiers in generated C++
+
+Legal Pine identifiers that collide with C++ keywords, engine names or emitter
+temporaries are escaped in generated C++; they remain valid Pine names. The
+existing `pineforge_codegen.codegen.CPP_RESERVED` export contains the explicit
+reserved names. `_safe_name` also escapes emitter temporary patterns and
+allocates a distinct name when the script already uses the preferred escape.
+An identifier that does not collide keeps its spelling.
+
+With the 1.7.0 headers, `report`, `report_sink` and `report_sequence` are reserved
+because `using namespace pineforge;` imports the engine's namespaces. A Pine
+`type report`, for example, becomes `struct pf_safe_report` and its references
+use that name. These namespace names live in `codegen/helpers.py`'s
+`CPP_EMITTER_NAMES`. `codegen/host_members.py`'s `HOST_MEMBER_NAMES` separately
+reserves the public or protected host members the emitter spells, including
+`set_trade_history_streamable`, inherited from `BacktestEngine`. Both sets feed
+the existing `CPP_RESERVED` export; no new reserved-name API is introduced.
+
 ## Optional compiled execution capabilities
 
 Availability: **since 1.2.0**, with engine `v1.2.0`'s capability extension and

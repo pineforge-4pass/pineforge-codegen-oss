@@ -279,11 +279,13 @@ CPP_STANDARD_MACROS = frozenset("""
 # Identifiers used by the emitter as class/type names, namespaces, and
 # generated or inherited methods.  A user member with one of these names can
 # hide a type/callee, or (GeneratedStrategy) conflict with the constructor.
+# The engine's report namespaces are imported by ``using namespace pineforge``;
+# an authored UDT with the same name makes its unqualified type reads ambiguous.
 CPP_EMITTER_NAMES = frozenset("""
     GeneratedStrategy BacktestEngine Bar Series PineArray PineMap PineMatrix
     PineGenericMatrix PineStrategyConfig PineStrategyHost StrategyOverrides
     SymInfo ReportC MagnifierDistribution ChartPoint Line Box Label Linefill
-    std pineforge ta math
+    std pineforge ta math report report_sink report_sequence
     on_bar on_source_bar prepare_script_run configure_pine_strategy
     configure_security_evaluators snapshot_script_state restore_script_state
     commit_script_state set_strategy_override set_input

@@ -1245,7 +1245,7 @@ class TopLevelEmitter:
         # marker in the constructor so the policy cannot be enabled for a
         # reader merely because the constructor is emitted first.
         ctor_body.append(_TRADE_HISTORY_POLICY_MARKER)
-        ctor_body.append("        configure_pine_strategy(cfg);")
+        ctor_body.append("        this->configure_pine_strategy(cfg);")
 
         if init_parts and ctor_body:
             lines.append(f"    explicit GeneratedStrategy() : {', '.join(init_parts)} {{")
@@ -1921,7 +1921,7 @@ class TopLevelEmitter:
 
         lines[marker:marker + 1] = [
             "#if defined(PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1)",
-            "        set_trade_history_streamable(true);",
+            "        this->set_trade_history_streamable(true);",
             "#endif",
         ]
 

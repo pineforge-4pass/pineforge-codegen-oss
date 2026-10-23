@@ -39,16 +39,21 @@ def _without_run_failure_scaffold(cpp: str) -> str:
 
 
 def without_trade_history_policy(cpp: str) -> str:
-    """Remove only CR-150's additive policy block and reader export.
+    """Remove CR-150's additive policy block/export and normalize ctor lookup.
 
     Whole-C++ identity fixtures pinned before L5 compare semantic lowering
     against that accepted scaffold. The L5 raw-output tests cover these two
-    emitted ABI pieces directly, so those fixtures should ignore only this
-    additive surface while retaining every other generated line.
+    emitted ABI pieces directly. CR150-CX also qualifies the constructor's
+    existing configure call with ``this->``; normalize only that statement
+    when comparing historical lowering. Raw constructor compile/spelling
+    coverage lives in test_cr150_constructor_names.py.
     """
+    cpp = cpp.replace(
+        '        this->configure_pine_strategy(cfg);\n',
+        '        configure_pine_strategy(cfg);\n')
     cpp = re.sub(
         r'^#if defined\(PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1\)\n'
-        r'        set_trade_history_streamable\(true\);\n'
+        r'        (?:this->)?set_trade_history_streamable\(true\);\n'
         r'^#endif\n',
         '', cpp, flags=re.MULTILINE)
     return re.sub(
