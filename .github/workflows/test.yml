@@ -89,7 +89,7 @@ jobs:
     steps:
       - name: "Check out the exact head with full history"
         if: "${{ needs.authz.result == 'success' }}"
-        uses: "actions/checkout@v7"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: "${{ github.event.pull_request.head.sha || github.sha }}"
           fetch-depth: 0
@@ -199,7 +199,7 @@ jobs:
     steps:
       - name: "Check out the exact head with full history"
         if: "${{ needs.authz.result == 'success' }}"
-        uses: "actions/checkout@v7"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: "${{ github.event.pull_request.head.sha || github.sha }}"
           fetch-depth: 0
@@ -286,7 +286,7 @@ jobs:
           exit 1
       - name: "Check out the exact head with full history"
         if: "${{ needs.authz.result == 'success' }}"
-        uses: "actions/checkout@v7"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: "${{ github.event.pull_request.head.sha || github.sha }}"
           fetch-depth: 0
