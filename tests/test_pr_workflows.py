@@ -1,4 +1,5 @@
 """Protect workflow concurrency, the trusted gate status and promotion authz."""
+import json
 import re
 import shutil
 import subprocess
@@ -129,6 +130,368 @@ def test_concurrency_guard_rejects_shared_non_pr_groups(filename, bad_group):
     mutant = workflow.replace(original, bad_group, 1)
     with pytest.raises(AssertionError):
         assert_pr_concurrency(mutant, *CONCURRENCY_RULES[filename])
+
+
+def workflow_run_scripts(workflow, job_id):
+    """Extract the block-style run scripts from one shipped workflow job."""
+    body = job_blocks(workflow)[job_id]
+    return [
+        textwrap.dedent(script)
+        for script in re.findall(
+            r"^        run: \|\n((?:          [^\n]*\n|\n)+)", body, re.M
+        )
+    ]
+
+
+def authz_script(workflow):
+    scripts = workflow_run_scripts(workflow, "authz")
+    assert len(scripts) == 1, "test authz must have exactly one inline run script"
+    return scripts[0]
+
+
+def assert_package_file_checks(workflow):
+    jobs = job_blocks(workflow)
+    assert "package-files" in jobs, "test must have an unconditional package-files light job"
+    package = jobs["package-files"]
+    assert re.search(r"^    needs: \[authz\]$", package, re.M)
+    assert re.search(r"^    runs-on: ubuntu-24\.04$", package, re.M)
+    assert re.search(r"^    if:", package, re.M) is None
+    step_lines = package.splitlines()
+    step_starts = [
+        index for index, line in enumerate(step_lines)
+        if line.startswith("      - ")
+    ]
+    assert step_starts, "package-files must define steps"
+    for index, start in enumerate(step_starts):
+        end = step_starts[index + 1] if index + 1 < len(step_starts) else len(step_lines)
+        step = "\n".join(step_lines[start:end])
+        assert '        if: "${{ needs.authz.result == \'success\' }}"' in step
+    assert "test -f LICENSE" in package
+    assert "test -f README.md" in package
+    assert re.search(
+        r"^        run: python -m pytest -q tests/test_license_entity\.py$", package, re.M,
+    ), "package-files must execute the entity test"
+    assert "needs: [authz, changes, workflow-lint, package-files, pytest]" in jobs["test-check"]
+
+
+def test_test_workflow_runs_package_file_and_entity_checks_on_every_diff():
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    assert_package_file_checks(workflow)
+
+
+def test_package_file_checks_reject_echoed_entity_test():
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    original = "        run: python -m pytest -q tests/test_license_entity.py\n"
+    assert workflow.count(original) == 1, "mutation must find the entity test command exactly once"
+    mutant = workflow.replace(original, "        run: echo tests/test_license_entity.py\n", 1)
+    assert mutant != workflow
+    with pytest.raises(AssertionError, match="package-files must execute the entity test"):
+        assert_package_file_checks(mutant)
+
+
+def test_pytest_checks_out_the_pull_request_head():
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    pytest_job = job_blocks(workflow)["pytest"]
+    assert 'ref: "${{ github.event.pull_request.head.sha || github.sha }}"' in pytest_job
+    assert "ref: ${{ github.sha }}" not in pytest_job
+
+
+@dataclass(frozen=True)
+class AuthzCase:
+    name: str
+    env: dict[str, str]
+    expected_exit: int
+    refusal: str = ""
+    lookup_target: str = ""
+    permission: str = "none"
+    lookup_exit: int = 0
+
+
+AUTHZ_CASES = [
+    AuthzCase("push", {"EVENT": "push"}, 0),
+    AuthzCase(
+        "trusted-pull-request",
+        {"EVENT": "pull_request", "ASSOCIATION": "OWNER"},
+        0,
+    ),
+    AuthzCase(
+        "foreign-pull-request",
+        {"EVENT": "pull_request", "HEAD_REPO": "outsider/pineforge-codegen-oss"},
+        1,
+        "pull request from another repository (outsider/pineforge-codegen-oss)",
+    ),
+    AuthzCase(
+        "fork-flag",
+        {"EVENT": "pull_request", "HEAD_IS_FORK": "true"},
+        1,
+        "pull request from a fork",
+    ),
+    AuthzCase(
+        "contributor-write",
+        {"EVENT": "pull_request", "ASSOCIATION": "CONTRIBUTOR", "PR_AUTHOR": "writer"},
+        0,
+        lookup_target="author",
+        permission="write",
+    ),
+    AuthzCase(
+        "contributor-read",
+        {"EVENT": "pull_request", "ASSOCIATION": "CONTRIBUTOR", "PR_AUTHOR": "reader"},
+        1,
+        "author reader (CONTRIBUTOR) has permission 'read', not write, and is not an allowlisted bot",
+        lookup_target="author",
+        permission="read",
+    ),
+    AuthzCase(
+        "allowlisted-pull-request-bot",
+        {
+            "EVENT": "pull_request",
+            "ASSOCIATION": "NONE",
+            "PR_AUTHOR": "dependabot[bot]",
+        },
+        0,
+    ),
+    AuthzCase(
+        "workflow-run-app-bot",
+        {
+            "EVENT": "workflow_run",
+            "WR_HEAD_REPO": "pineforge-4pass/pineforge-codegen-oss",
+            "WR_ACTOR": "pineforge-app[bot]",
+        },
+        0,
+    ),
+    AuthzCase(
+        "workflow-run-foreign-head",
+        {
+            "EVENT": "workflow_run",
+            "WR_HEAD_REPO": "outsider/pineforge-codegen-oss",
+        },
+        1,
+        "workflow_run head repository does not match this repository",
+    ),
+    AuthzCase(
+        "workflow-run-unlisted-bot",
+        {
+            "EVENT": "workflow_run",
+            "WR_HEAD_REPO": "pineforge-4pass/pineforge-codegen-oss",
+            "WR_ACTOR": "other[bot]",
+        },
+        1,
+        "workflow_run bot is not on the canon allowlist",
+    ),
+    AuthzCase(
+        "workflow-run-writer",
+        {
+            "EVENT": "workflow_run",
+            "WR_HEAD_REPO": "pineforge-4pass/pineforge-codegen-oss",
+            "WR_ACTOR": "writer",
+        },
+        0,
+        lookup_target="workflow",
+        permission="write",
+    ),
+    AuthzCase(
+        "unknown-event",
+        {"EVENT": "unexpected"},
+        1,
+        "event unexpected does not run CI (pull_request_target and other events are not allowed)",
+    ),
+]
+
+
+def assert_authz_case(workflow, case, tmp_path):
+    script = authz_script(workflow)
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.fail("NOT RUN: test authz decision table requires bash on the test runner")
+    gh = tmp_path / "gh"
+    gh.write_text(
+        f"#!{bash}\n"
+        'printf "%s\\n" "$*" >> "$GH_CALLS"\n'
+        '[ "$#" -eq 4 ] && [ "$1" = api ] && '
+        '[ "$3" = --jq ] && [ "$4" = .permission ] || exit 97\n'
+        'printf "%s\\n" "$GH_PERMISSION"\n'
+        'exit "$GH_LOOKUP_EXIT"\n',
+        encoding="utf-8",
+    )
+    gh.chmod(0o700)
+    summary_path = tmp_path / "summary"
+    calls_path = tmp_path / "gh-calls"
+    env = {
+        "EVENT": "pull_request",
+        "REPO": "pineforge-4pass/pineforge-codegen-oss",
+        "HEAD_REPO": "pineforge-4pass/pineforge-codegen-oss",
+        "HEAD_IS_FORK": "false",
+        "ASSOCIATION": "MEMBER",
+        "PR_AUTHOR": "member",
+        "WR_HEAD_REPO": "pineforge-4pass/pineforge-codegen-oss",
+        "WR_ACTOR": "writer",
+        "GH_TOKEN": "",
+        "ALLOWED_BOTS": "dependabot[bot] pineforge-app[bot]",
+        **case.env,
+        "PATH": str(tmp_path),
+        "GITHUB_STEP_SUMMARY": str(summary_path),
+        "GH_CALLS": str(calls_path),
+        "GH_PERMISSION": case.permission,
+        "GH_LOOKUP_EXIT": str(case.lookup_exit),
+    }
+    result = subprocess.run(
+        [bash, "--noprofile", "--norc", "-c", script],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == case.expected_exit, (
+        f"{case.name}: expected exit {case.expected_exit}, got {result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert result.stderr == "", f"{case.name}: unexpected shell error: {result.stderr}"
+    summary = summary_path.read_text(encoding="utf-8") if summary_path.exists() else ""
+    calls = calls_path.read_text(encoding="utf-8").splitlines() if calls_path.exists() else []
+    if case.expected_exit:
+        assert result.stdout == f"::error title=authz::{case.refusal}\n", case.name
+        assert summary == f"authz: REFUSED: {case.refusal}\n", case.name
+    else:
+        author = f" by {env['PR_AUTHOR']}" if env["PR_AUTHOR"] else ""
+        assert result.stdout == "", case.name
+        assert summary == f"authz: allowed ({env['EVENT']}{author})\n", case.name
+    if case.lookup_target:
+        actor = env["PR_AUTHOR"] if case.lookup_target == "author" else env["WR_ACTOR"]
+        expected_calls = [
+            f"api repos/{env['REPO']}/collaborators/{actor}/permission --jq .permission"
+        ]
+    else:
+        expected_calls = []
+    assert calls == expected_calls, f"{case.name}: unexpected permission lookups: {calls}"
+
+
+@pytest.mark.parametrize("case", AUTHZ_CASES, ids=[case.name for case in AUTHZ_CASES])
+def test_test_authz_executes_workflow_decision_table(case, tmp_path):
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    assert_authz_case(workflow, case, tmp_path)
+
+
+def test_test_authz_rejects_noop_fail_mutation(tmp_path):
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    original = (
+        '          fail() { echo "::error title=authz::$1"; '
+        'echo "authz: REFUSED: $1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }\n'
+    )
+    assert workflow.count(original) == 1, "mutation must find test authz's fail function exactly once"
+    mutant = workflow.replace(original, "          fail() { :; }\n", 1)
+    assert mutant != workflow
+    case = next(case for case in AUTHZ_CASES if case.name == "foreign-pull-request")
+    with pytest.raises(AssertionError, match=case.name):
+        assert_authz_case(mutant, case, tmp_path)
+
+
+def aggregate_gate_script(workflow):
+    scripts = workflow_run_scripts(workflow, "test-check")
+    assert len(scripts) == 3, "test-check must have refusal, classifier and aggregate scripts"
+    return scripts[-1]
+
+
+def assert_aggregate_rejects(
+    workflow, pytest_result, tmp_path, *, package_result="success", docs_only="false",
+):
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.fail("NOT RUN: aggregate decision control requires bash on the test runner")
+    script = aggregate_gate_script(workflow)
+    aggregate = job_blocks(workflow)["test-check"]
+    dependencies = re.findall(r"^    needs: \[([\w, -]+)\]$", aggregate, re.M)
+    assert len(dependencies) == 1, "test-check must declare one inline dependency list"
+    job_results = {"pytest": pytest_result, "package-files": package_result}
+    needs = {
+        name: {"result": job_results.get(name, "success")}
+        for name in (item.strip() for item in dependencies[0].split(","))
+    }
+    heavy_values = re.findall(r'^          HEAVY_JOBS: ("[^\n]+")$', aggregate, re.M)
+    assert len(heavy_values) == 1, "test-check must declare one double-quoted heavy-job list"
+    # Decode the shipped YAML's JSON-compatible quoting; the real gate
+    # parses the enclosed JSON list itself.
+    heavy_jobs = json.loads(heavy_values[0])
+    python3 = shutil.which("python3")
+    if python3 is None:
+        pytest.fail("NOT RUN: aggregate decision control requires python3 on the test runner")
+    env = {
+        "PATH": str(Path(python3).parent),
+        "RUNNER_TEMP": str(tmp_path),
+        "NEEDS": json.dumps(needs),
+        "HEAVY_JOBS": heavy_jobs,
+        "DOCS_ONLY": docs_only,
+        "WORKFLOWS_ONLY": "false",
+    }
+    result = subprocess.run(
+        [bash, "--noprofile", "--norc", "-c", script],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1, (
+        f"aggregate must refuse pytest={pytest_result}, package-files={package_result}, "
+        f"docs_only={docs_only}; got {result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert result.stdout == "::error::a needed job did not succeed or was skipped without PR diff proof\n"
+    assert result.stderr == ""
+
+
+def test_test_check_rejects_failed_pytest(tmp_path):
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    assert_aggregate_rejects(workflow, "failure", tmp_path)
+
+
+@pytest.mark.parametrize("package_result", ["failure", "skipped"])
+def test_test_check_rejects_unsuccessful_package_files_on_docs_only_diff(package_result, tmp_path):
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    assert_aggregate_rejects(
+        workflow, "skipped", tmp_path, package_result=package_result, docs_only="true",
+    )
+    original = "    needs: [authz, changes, workflow-lint, package-files, pytest]\n"
+    replacement = "    needs: [authz, changes, workflow-lint, pytest]\n"
+    assert workflow.count(original) == 1, "mutation must find the aggregate dependency list exactly once"
+    mutant = workflow.replace(original, replacement, 1)
+    assert mutant != workflow
+    with pytest.raises(
+        AssertionError,
+        match=f"aggregate must refuse.*package-files={package_result}, docs_only=true; got 0",
+    ):
+        assert_aggregate_rejects(
+            mutant, "skipped", tmp_path, package_result=package_result, docs_only="true",
+        )
+
+
+def test_test_check_rejects_package_files_added_to_heavy_jobs(tmp_path):
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    original = '          HEAVY_JOBS: "[\\"pytest\\"]"\n'
+    replacement = '          HEAVY_JOBS: "[\\"package-files\\",\\"pytest\\"]"\n'
+    assert workflow.count(original) == 1, "mutation must find the aggregate heavy-job list exactly once"
+    mutant = workflow.replace(original, replacement, 1)
+    assert mutant != workflow
+    with pytest.raises(
+        AssertionError,
+        match="aggregate must refuse.*package-files=skipped, docs_only=true; got 0",
+    ):
+        assert_aggregate_rejects(
+            mutant, "skipped", tmp_path, package_result="skipped", docs_only="true",
+        )
+
+
+def test_test_check_rejects_aggregate_script_replaced_by_exit_zero(tmp_path):
+    workflow = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    script = aggregate_gate_script(workflow)
+    original = textwrap.indent(script, " " * 10, lambda _: True)
+    source = job_blocks(workflow)["test-check"].rsplit("        run: |\n", 1)[1]
+    assert original == source, "aggregate script must preserve the workflow's whitespace"
+    assert workflow.count(original) == 1, "mutation must find the aggregate script exactly once"
+    mutant = workflow.replace(original, "          exit 0\n", 1)
+    assert mutant != workflow
+    with pytest.raises(AssertionError, match="aggregate must refuse.*; got 0"):
+        assert_aggregate_rejects(mutant, "failure", tmp_path)
 
 
 # Independent literal of the SEC846 promotion variant of ci-labels.md's authz.
