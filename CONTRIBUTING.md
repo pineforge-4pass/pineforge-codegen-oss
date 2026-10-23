@@ -1,4 +1,4 @@
-# Contributing to pineforge-codegen
+# Contributing to Tunaxis Codegen
 
 This is the source-available PineScript v6 to C++ translator. Read the
 [license and contribution terms](LEGAL.md) before sending a material change.
@@ -10,8 +10,9 @@ contact luis@4pass.com.tw before opening a material pull request.
 ## Local setup
 
 Use Python 3.11 or newer, Node 22, a C++17 compiler, CMake, and a matching
-[`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine)
-checkout. Clone codegen and engine as siblings, then install the development
+checkout of the Tunaxis engine (repository
+[`pineforge-engine`](https://github.com/pineforge-4pass/pineforge-engine)).
+Clone codegen and engine as siblings, then install the development
 dependencies from this repository:
 
 ```bash

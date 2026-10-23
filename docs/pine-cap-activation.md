@@ -4,7 +4,8 @@ This note came with the explicit cap attachment
 ([#127](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/127)). It
 now also covers the execution-adapter attachment that followed
 ([#128](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/128)) and
-describes the codegen 1.4.0 / engine `v1.4.0` pair (2026-10-08).
+describes the codegen 1.4.0 pair with the Tunaxis engine (repository
+`pineforge-engine`) at `v1.4.0` (2026-10-08).
 Pre-tag validation used codegen `bfc4ddce` and engine `b3192bfc`, whose
 version files then read `1.3.0`.
 

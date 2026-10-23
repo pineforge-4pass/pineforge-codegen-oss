@@ -1,7 +1,8 @@
 # Public contract for 1.0
 
-The supported Python/JSON contract began in 1.0.0; the sections below identify
-later additions. This revision includes the 1.6.1 pair (2026-10-18).
+The supported Tunaxis (formerly PineForge) Python/JSON contract began in
+1.0.0; the sections below identify later additions. This revision includes
+the 1.6.1 pair (2026-10-18).
 
 Text marked **since 1.5.0** describes diagnostic additions that 1.4.0 and
 earlier releases do not have: the `note` severity, the `user_message` template
@@ -9,8 +10,9 @@ and the eleven codes that became notes.
 
 ## Optional compiled execution capabilities
 
-Availability: **since 1.2.0**, with engine `v1.2.0`'s capability extension and
-the receipt-based admission policy of its live runner.
+Availability: **since 1.2.0**, with the capability extension of the Tunaxis engine
+(repository `pineforge-engine`) at `v1.2.0` and the receipt-based admission policy
+of its live runner.
 
 The receipt proves declarations only, not general live-versus-batch equivalence.
 Its `strategy()` positional arguments follow Pine signature order independently
@@ -115,7 +117,7 @@ expression (`timeframe.period`, a variable's name). [Request
 discovery](#request-discovery) and feed keys use the engine's spelling, in
 which Pine's bare `"D"` / `"W"` / `"M"` / `"S"` are `"1D"` / `"1W"` / `"1M"` /
 `"1S"` and any other text is kept. Discovery folds `literal` and `computed`
-values (`pineforge_codegen.request_discovery.canonical_timeframe`); the engine
+values (`tunaxis_codegen.request_discovery.canonical_timeframe`); the engine
 folds the requested timeframe when it looks a feed up, so a script's `"D"` and
 `"1D"` read the same feed, keyed `"1D"`. An `input` timeframe's `default` and
 its override are raw: fold them the same way. To match a receipt's request to a
@@ -323,7 +325,7 @@ generated code computes them before the first bar:
 | --- | --- |
 | `line` | The 1-based line of the `request.security` call. A helper's request is listed once per symbol and timeframe its call paths pass, each at the request's line. |
 | `fn` | The Pine function, `"request.security"`. |
-| `symbol` | `{"kind": "literal", "value"}`: the exact key, exchange prefix and suffix kept (`"BINANCE:ETHUSDT.P"`). `{"kind": "input", "title", "default"}`: an `input.symbol`, `input.string` or string `input()` (`ticker.standard` / `ticker.inherit` of one too); the key is the run's value of the input, overridden under `title` (the manifest's override key), else `default`. `{"kind": "computed", "expr"[, "value"][, "inputs"]}`: `expr` spells the expression as written, `value` is its key at the inputs' defaults when literals and inputs compute it (string `+`, `==`, `!=`, `and`, `or`, `not`, `?:`; never the chart's own `syminfo.*` strings), and `inputs` names the override keys of the inputs it reads. `{"kind": "unresolvable", "expr"}`: a request whose symbol, timeframe or expression PineForge cannot key before the first bar; no feed serves it, and the run stops where its value is read. |
+| `symbol` | `{"kind": "literal", "value"}`: the exact key, exchange prefix and suffix kept (`"BINANCE:ETHUSDT.P"`). `{"kind": "input", "title", "default"}`: an `input.symbol`, `input.string` or string `input()` (`ticker.standard` / `ticker.inherit` of one too); the key is the run's value of the input, overridden under `title` (the manifest's override key), else `default`. `{"kind": "computed", "expr"[, "value"][, "inputs"]}`: `expr` spells the expression as written, `value` is its key at the inputs' defaults when literals and inputs compute it (string `+`, `==`, `!=`, `and`, `or`, `not`, `?:`; never the chart's own `syminfo.*` strings), and `inputs` names the override keys of the inputs it reads. `{"kind": "unresolvable", "expr"}`: a request whose symbol, timeframe or expression Tunaxis cannot key before the first bar; no feed serves it, and the run stops where its value is read. |
 | `timeframe` | `{"kind": "literal", "value"}` in the engine's spelling: whole minutes (`"240"`), `<n>D`, `<n>W`, `<n>M` or `<n>S` (`"1D"`), Pine's bare `"D"` / `"W"` / `"M"` / `"S"` as `"1D"` / `"1W"` / `"1M"` / `"1S"`; other text is kept as written and no feed matches it. `{"kind": "chart"}`: `timeframe.period`, `timeframe.main_period` or `""`, the chart's timeframe (a run that reads another symbol's feed takes the chart's bars unaggregated). `{"kind": "input", "title", "default"}`: an input's raw value, spelled by the same rule, `""` the chart's. `{"kind": "computed", "expr"[, "value"][, "inputs"]}` as for the symbol, a `switch` of one-expression arms included (no matching arm and no default is the chart's); an empty `value` is the chart's timeframe. |
 | `lookahead`, `gaps` | Booleans: `barmerge.lookahead_on`, `barmerge.gaps_on`. |
 | `ignore_invalid_symbol` | `false` when omitted, else its value (at the inputs' defaults), `null` when not computable. |
@@ -348,7 +350,7 @@ above added: `transpile_full()`'s result and the JSON success envelope gain
 result key or envelope is removed or renamed. 1.2.0, released 2026-10-05,
 implements it with the compiled execution capabilities and the diagnostic
 codes described here added: each `Diagnostic` and each JSON diagnostic gain
-`code` and `args`, and `pineforge_codegen` exports `diagnostics_catalog()`
+`code` and `args`, and `tunaxis_codegen` exports `diagnostics_catalog()`
 and `render_diagnostic()`. No argument, result key or envelope is removed or
 renamed. 1.3.0, released 2026-10-06, implements it unchanged, with the
 confirmed-bar and order-shapes receipts described here added to the generated
@@ -357,7 +359,7 @@ The last 0.x release, 0.10.4, has
 neither the `libraries` argument nor the `diagnostics` key described below.
 
 The supported programmatic entry points are the Python functions
-`pineforge_codegen.transpile` and `pineforge_codegen.transpile_full`, plus the
+`tunaxis_codegen.transpile` and `tunaxis_codegen.transpile_full`, plus the
 `gate/glue.py` `transpile_json` protocol shipped in the Pyodide package. The
 pipeline classes shown in the [README](../README.md#advanced-run-the-pipeline-stages-directly)
 are for advanced inspection and are not part of this 1.0 stability promise.
@@ -375,7 +377,7 @@ transpile_full(pine_source: str, *, check_support: bool = True,
 ```
 
 `transpile()` returns one complete C++ source string. It raises
-`pineforge_codegen.errors.CompileError` for a located parse, support, analysis,
+`tunaxis_codegen.errors.CompileError` for a located parse, support, analysis,
 or generation error; its `diagnostics` attribute carries `Diagnostic` objects.
 `filename` appears in their source locations and in `str(error)`.
 `transpile()` returns no nonfatal diagnostics, neither warnings nor (since
@@ -568,7 +570,7 @@ Every `Diagnostic` (in `transpile_full(...)["diagnostics"]`, in a
   travels with `args.name = "plot"`; a receiver renders or translates it.
 
 `diagnostics_catalog()` returns the catalog, which ships as
-`pineforge_codegen/diagnostics_catalog.json` (schema
+`tunaxis_codegen/diagnostics_catalog.json` (schema
 `pineforge-diagnostics-catalog/v1`, whose id the 1.5.0 additions do not
 change) and is attached to each GitHub release
 (`diagnostics_catalog-v1.3.0.json` for 1.3.0).
@@ -658,7 +660,8 @@ inside a `switch` arm also say that PineForge keeps the arm's lowering, and
 PF-W1067 to PF-W1072, which warn everywhere, name no arm. No warning or note
 template says that PineForge refuses or rejects something, though one may say
 what TradingView refuses or rejects. Beyond these checks a template's exact
-wording is not pinned. A text no template
+wording is not pinned. The user-visible message strings will be renamed to
+Tunaxis in a later release. A text no template
 renders carries `PF-E0000` / `PF-W0000` with the text in `args.message` (and
 `args.hint`); the test suite refuses it. The `message` text itself is
 unchanged and stays the English rendering; `runtime.error` text a strategy
@@ -681,10 +684,11 @@ the support gate and can produce C++ that fails to compile or does not match
 Pine behavior; the 1.0 compatibility promise applies with the default
 `check_support=True`.
 
-There is no installed command-line interface. This package makes no
-process-exit-code promises for a CLI, shell wrapper, or gate script. Consumers
-should use the Python exception and return-value contract or the JSON
-`ok`/`diagnostics` contract.
+There is no installed command-line interface for transpilation.
+`tunaxis-cpp-allowlist` checks generated C++ against the codegen allowlist.
+This contract makes no process-exit-code promises for a CLI, shell wrapper,
+or gate script. Consumers should use the Python exception and return-value
+contract or the JSON `ok`/`diagnostics` contract for transpilation.
 
 Generated C++ has a separate runtime pairing requirement: from 1.0.0 on,
 codegen `X.Y.Z` supports only engine `vX.Y.Z` with that release's generated

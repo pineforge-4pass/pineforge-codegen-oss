@@ -20,6 +20,19 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## Unreleased
+
+### Renamed to Tunaxis
+
+- The product is named **Tunaxis**.
+- The distribution is `tunaxis-codegen`, the import is `tunaxis_codegen`, the
+  CLI is `tunaxis-cpp-allowlist`, and the npm package is `@tunaxis/codegen-pyodide`.
+- The old names keep working through forwarding packages; legacy imports and
+  CLI names remain available.
+- The C++ namespace, headers, macros, environment variables and C ABI remain
+  unchanged for now.
+- The license is now the **Tunaxis Source License 1.3** (the PineForge Source License 1.2, renamed), with the same terms.
+
 ## 1.6.1 — 2026-10-18
 
 A patch release of the exact engine/codegen pair, paired with engine `v1.6.1`
