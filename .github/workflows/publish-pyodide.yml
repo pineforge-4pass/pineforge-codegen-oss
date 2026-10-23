@@ -2,40 +2,104 @@ name: Publish codegen-pyodide
 
 # Builds @pineforge/codegen-pyodide from the GATE-VALIDATED archive and publishes
 # it via npm OIDC Trusted Publishing (mirrors pineforge-codegen-mcp/publish.yml).
-# Auto-release: a `v*` tag push (e.g. created by release.yml) publishes for real,
-# gate-blocked. workflow_dispatch defaults to a DRY RUN (set dry_run=false to
-# publish manually). Publishing only happens after the gate passes.
+# An operator with write access dispatches on main with an existing release tag
+# after release.yml is green (see CONTRIBUTING.md). A tag push publishes nothing.
+# Every run first verifies a release tag on main.
+# Publish checks out its verified commit; manual dispatch defaults to a DRY RUN.
 on:
   workflow_dispatch:
     inputs:
+      tag:
+        description: "Existing release tag on main (vX.Y.Z or vX.Y.Z-{alpha,beta,rc}.N), required for every run."
+        required: true
+        type: string
       dry_run:
         description: "npm publish --dry-run (default true). Set false to actually publish."
         type: boolean
         default: true
-  push:
-    tags: ["v*"]
+      claim_version:
+        description: "placeholder version for the claim job (e.g. 0.0.2 for the OIDC proof)"
+        required: false
+        default: "0.0.1"
+        type: string
+      claim_placeholder:
+        description: "claims the npm name @tunaxis/codegen-pyodide with a 0.0.1 placeholder"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   id-token: write   # npm OIDC Trusted Publishing
 
 concurrency:
-  group: publish-pyodide-${{ github.ref }}
+  group: publish-pyodide-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
-  publish:
+  tag-guard:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.tag.outputs.sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release tag
+        id: tag
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$DISPATCH_REF" != refs/heads/main ]; then
+            echo "::error::workflow must be dispatched on refs/heads/main"
+            exit 1
+          fi
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then
+            echo "::error::invalid release tag '$TAG': expected vX.Y.Z or vX.Y.Z-{alpha,beta,rc}.N"
+            exit 1
+          fi
+          git fetch --tags origin
+          git fetch origin +refs/heads/main:refs/remotes/origin/main
+          if ! TAG_COMMIT=$(git rev-parse -q --verify "refs/tags/${TAG}^{commit}"); then
+            echo "::error::release tag '$TAG' does not exist or does not point to a commit"
+            exit 1
+          fi
+          if ! [[ "$TAG_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::release tag '$TAG' did not resolve to a 40-hex commit"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/main; then
+            echo "::error::release tag '$TAG' is not reachable from refs/remotes/origin/main"
+            exit 1
+          fi
+          printf 'sha=%s\n' "$TAG_COMMIT" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: tag-guard
+    if: ${{ github.ref == 'refs/heads/main' && !inputs.claim_placeholder }}
+    runs-on: ubuntu-latest
+    # GitHub environment with a main-only deployment-branch policy: the server-side bound on npm publishing.
+    environment: npm-publish
     env:
       PYTHONHASHSEED: "0"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ needs.tag-guard.outputs.sha }}
+          persist-credentials: false
 
-      # Tag push must match VERSION (mirrors mcp). Skipped for dispatch.
+      # The verified tag must match VERSION at the pinned commit.
       - name: Verify tag matches VERSION
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
-          TAG_NAME: ${{ github.ref_name }}
+          TAG_NAME: ${{ inputs.tag }}
         run: |
           tag="${TAG_NAME#v}"; file="$(tr -d '[:space:]' < VERSION)"
           if [ "$tag" != "$file" ]; then
@@ -74,7 +138,7 @@ jobs:
       - name: Assemble the package
         run: node scripts/build-npm-package.mjs
 
-      - name: Publish (real on tag push or dispatch dry_run=false; dry-run otherwise)
+      - name: Publish (real on dispatch dry_run=false; dry-run otherwise)
         working-directory: npm
         env:
           EVENT: ${{ github.event_name }}
@@ -85,10 +149,101 @@ jobs:
           # latest, would bypass npm's refusal to move latest to a lower version.
           tag=()
           if [ "$DIST_TAG" != latest ]; then tag=(--tag "$DIST_TAG"); fi
-          if [ "$EVENT" = "push" ] || { [ "$EVENT" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ]; }; then
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$DRY_RUN" = "false" ]; then
             echo "Publishing for real (--access=public, dist-tag ${DIST_TAG})"
             npm publish --access=public ${tag[@]+"${tag[@]}"}
           else
-            echo "DRY RUN (a v* tag push or dispatch with dry_run=false publishes for real)"
+            echo "DRY RUN (dispatch with dry_run=false publishes for real)"
             npm publish --dry-run --access=public ${tag[@]+"${tag[@]}"}
           fi
+
+  claim-npm:
+    needs: tag-guard
+    if: ${{ github.ref == 'refs/heads/main' && inputs.claim_placeholder }}
+    runs-on: ubuntu-24.04
+    # Same environment as `publish`: the placeholder claim is gated by the main-only policy too.
+    environment: npm-publish
+    permissions: { contents: read, id-token: write }
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+
+      - name: Install npm for provenance
+        run: |
+          set -euo pipefail
+          npm install -g npm@^11.5.1
+          node --version
+          npm --version
+
+      - name: Write placeholder package
+        id: claim
+        env:
+          CLAIM_VERSION: ${{ inputs.claim_version }}
+        run: |
+          set -euo pipefail
+          [[ "$CLAIM_VERSION" =~ ^0\.0\.[0-9]+$ ]] || { echo "claim_version must be 0.0.N, got '$CLAIM_VERSION'"; exit 1; }
+          CLAIM_DIR=$RUNNER_TEMP/claim-npm
+          mkdir -p "$CLAIM_DIR"
+          cd "$CLAIM_DIR"
+          printf 'path=%s\n' "$CLAIM_DIR" >> "$GITHUB_OUTPUT"
+          cat > package.json <<'JSON'
+          {
+            "name": "@tunaxis/codegen-pyodide",
+            "version": "0.0.1",
+            "description": "Tunaxis: first release coming soon. https://tunaxis.com",
+            "license": "UNLICENSED",
+            "repository": {
+              "type": "git",
+              "url": "git+https://github.com/pineforge-4pass/pineforge-codegen-oss.git"
+            },
+            "publishConfig": { "access": "public" }
+          }
+          JSON
+          cat > README.md <<'README'
+          Tunaxis: first release coming soon. https://tunaxis.com
+          README
+          node -e 'const fs=require("node:fs");const p=JSON.parse(fs.readFileSync("package.json","utf8"));p.version=process.env.CLAIM_VERSION;fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n")'
+
+      - name: Verify placeholder package
+        working-directory: ${{ steps.claim.outputs.path }}
+        env:
+          PACK_MANIFEST: ${{ runner.temp }}/claim-npm-pack.json
+          CLAIM_VERSION: ${{ inputs.claim_version }}
+        run: |
+          set -euo pipefail
+          npm pack --dry-run --json > "$PACK_MANIFEST"
+          node <<'JS'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const expected = ['README.md', 'package.json'];
+          assert.deepEqual(fs.readdirSync('.').sort(), expected);
+          assert(expected.every(path => fs.statSync(path).isFile()));
+          const packed = JSON.parse(fs.readFileSync(process.env.PACK_MANIFEST, 'utf8'));
+          assert.equal(packed.length, 1);
+          assert.deepEqual(packed[0].files.map(file => file.path).sort(), expected);
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const readme = fs.readFileSync('README.md', 'utf8');
+          assert.equal(pkg.name, '@tunaxis/codegen-pyodide');
+          assert.equal(pkg.version, process.env.CLAIM_VERSION);
+          assert.equal(pkg.license, 'UNLICENSED');
+          assert.equal(pkg.description, 'Tunaxis: first release coming soon. https://tunaxis.com');
+          assert.equal(readme, 'Tunaxis: first release coming soon. https://tunaxis.com\n');
+          assert.deepEqual(pkg.repository, {
+            type: 'git',
+            url: 'git+https://github.com/pineforge-4pass/pineforge-codegen-oss.git'
+          });
+          const { repository, ...metadata } = pkg;
+          assert(!/pineforge/i.test(JSON.stringify(metadata)));
+          JS
+          # Node scans every JSON field except repository; grep scans the rest of the folder.
+          if grep -ri --exclude=package.json pineforge .; then
+            exit 1
+          else
+            test $? -eq 1
+          fi
+
+      - name: Publish placeholder to npm (OIDC trusted publishing, no token)
+        working-directory: ${{ steps.claim.outputs.path }}
+        run: npm publish --access public --provenance

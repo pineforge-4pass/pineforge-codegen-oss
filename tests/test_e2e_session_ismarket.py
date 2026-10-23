@@ -155,7 +155,7 @@ def _cases(chart: str, session: str, timezone: str, legacy: dict[str, int]) -> l
 
 
 CASES = tuple(case for cases in (
-    # The campaign's lane facts (pineforge-lab config/symbol-lanes-v1.json).
+    # The campaign's lane facts (config/symbol-lanes-v1.json of the maintainers' campaign verifier).
     _cases("es1-60-dst-mar", "1700-1600", "America/Chicago", {}),
     _cases("es1-60-dst-nov", "1700-1600", "America/Chicago", {}),
     _cases("es1-60-thanksgiving", "1700-1600", "America/Chicago", {}),
