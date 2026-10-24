@@ -57,6 +57,24 @@ if sample.value > open
     compile_cpp(cpp + _REQUIRE_REPORT_HEADERS, label=f"CR-150 type {name}")
 
 
+@pytest.mark.parametrize("name", ("source", "report"))
+def test_reserved_udt_var_clones_transpile_and_compile(name: str) -> None:
+    """Both written UDF calls need clones with the escaped UDT handle type."""
+    cpp = transpile(_PRELUDE + f"""type {name}
+    float value
+f() =>
+    var {name} s = {name}.new(close)
+    s.value
+x = f() + f()
+plot(x)
+""")
+    code = cpp_code_only(cpp)
+    assert f"struct pf_safe_{name} {{" in code
+    assert not re.search(rf"(?<!\w){name}\s+s_cs\d+\b", code), code
+    assert re.search(rf"\bpf_safe_{name}\s+s_cs\d+\b", code), code
+    compile_cpp(cpp + _REQUIRE_REPORT_HEADERS, label=f"CR-150 cloned type {name}")
+
+
 def test_source_variable_is_escaped_in_generated_code() -> None:
     """Pin raw variable/parameter escaping independently of legacy comparisons."""
     cpp = transpile(_PRELUDE + """read_source(float source) => source + 1.0
