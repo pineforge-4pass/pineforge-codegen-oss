@@ -51,8 +51,9 @@ def without_trade_history_policy(cpp: str) -> str:
     cpp = cpp.replace(
         '        this->configure_pine_strategy(cfg);\n',
         '        configure_pine_strategy(cfg);\n')
-    # The checked-settings receipt embeds the reserved host-member names; the
-    # trade-history setter joined that list when it became a reserved name.
+    # The order-shapes receipt's host_reads records emitted host-member uses.
+    # Non-readers gain this setter element when it becomes reserved; readers
+    # emit no policy call and have no such element.
     cpp = cpp.replace('\\"set_trade_history_streamable\\",', '')
     cpp = re.sub(
         r'^#if defined\(PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1\)\n'

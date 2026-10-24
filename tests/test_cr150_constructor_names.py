@@ -15,13 +15,20 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen.codegen import CPP_RESERVED
-from pineforge_codegen.codegen.helpers import CPP_EMITTER_NAMES, CPP_STANDARD_MACROS
+from pineforge_codegen.codegen.helpers import (
+    CPP_EMITTER_NAMES, CPP_STANDARD_MACROS, cpp_code_only,
+)
 from pineforge_codegen.codegen.host_members import HOST_MEMBER_NAMES
 from tests._compile import compile_cpp
 
 
 _PRELUDE = '//@version=6\nstrategy("CR-150 constructor names")\n'
 _REPORT_NAMES = ("report", "report_sink", "report_sequence")
+_ENGINE_SCOPE_NAMES = (
+    *_REPORT_NAMES, "source", "native_calendar", "RunFailureCode",
+    "pine_color", "QtyType", "CommissionType", "XLoc", "YLoc",
+    "RunFailureInfo", "normalize_timezone_for_posix",
+)
 # Appended after the raw output: an older header must not silently compile
 # away the policy call and give these regressions a false green result.
 _REQUIRE_REPORT_HEADERS = """
@@ -34,9 +41,9 @@ namespace pf_cr150_report_sequence = pineforge::report_sequence;
 """
 
 
-@pytest.mark.parametrize("name", _REPORT_NAMES)
+@pytest.mark.parametrize("name", (*_ENGINE_SCOPE_NAMES, "set_trade_history_streamable"))
 def test_report_namespace_type_transpiles_and_compiles(name: str) -> None:
-    """A legal Pine type must coexist with the engine's imported namespace."""
+    """A legal Pine type must coexist with imported and inherited engine names."""
     source = _PRELUDE + f"""type {name}
     float value
 sample = {name}.new(close)
@@ -46,6 +53,7 @@ if sample.value > open
     cpp = transpile(source)
     # Check spelling before compile_cpp can skip for missing native inputs.
     assert f"struct pf_safe_{name} {{" in cpp
+    assert f"struct {name} {{" not in cpp
     compile_cpp(cpp + _REQUIRE_REPORT_HEADERS, label=f"CR-150 type {name}")
 
 
@@ -181,6 +189,24 @@ def test_trade_history_constructor_compiles(declaration: str) -> None:
     compile_cpp(cpp + _REQUIRE_REPORT_HEADERS, label="CR-150 policy constructor")
 
 
+def test_script_function_named_policy_setter_is_escaped() -> None:
+    """A user function must leave the inherited policy setter reachable."""
+    cpp = transpile(_PRELUDE + """set_trade_history_streamable(x) => x * 2
+y = set_trade_history_streamable(close)
+""")
+    start = cpp.index("class GeneratedStrategy :")
+    end = cpp.index('\nextern "C" {', start)
+    strategy = cpp_code_only(cpp[start:end])
+    assert "pf_safe_set_trade_history_streamable(" in strategy
+    base_call = "this->set_trade_history_streamable(true);"
+    assert strategy.count(base_call) == 1
+    # The sole unescaped occurrence must be the inherited constructor call,
+    # never a script member declaration or a call to the script function.
+    assert not re.search(
+        r"\bset_trade_history_streamable\b", strategy.replace(base_call, "", 1),
+    )
+
+
 def test_constructor_qualifies_host_calls() -> None:
     """Paired with test_trade_history_constructor_compiles, including clang."""
     cpp = transpile(_PRELUDE)
@@ -197,7 +223,7 @@ def test_constructor_qualifies_host_calls() -> None:
 
 def test_reserved_names_remain_exported() -> None:
     """Use the existing codegen export, also consumed by _safe_name."""
-    assert {*_REPORT_NAMES, "set_trade_history_streamable"} <= CPP_RESERVED
+    assert {*_ENGINE_SCOPE_NAMES, "set_trade_history_streamable"} <= CPP_RESERVED
 
 
 def test_noncolliding_type_keeps_its_name() -> None:
