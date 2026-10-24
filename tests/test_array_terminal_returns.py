@@ -12,6 +12,7 @@ from pineforge_codegen.errors import CompileError
 from pineforge_codegen.lexer import Lexer
 from pineforge_codegen.parser import Parser
 from tests._compile import compile_cpp
+from tests._legacy_cpp import without_source_rename
 
 
 _GET_SHAPES_SOURCE = r'''//@version=6
@@ -523,12 +524,13 @@ read_value() =>
     {terminal}
 observed = read_value()
 '''
-    cpp = transpile(source)
+    raw_cpp = transpile(source)
+    cpp = without_source_rename(raw_cpp)
     assert f"{expected_cpp} read_value(" in cpp
     if type_name == "string":
         assert "double read_value(" not in cpp
     assert f"std::vector<{expected_cpp}>(source)" in cpp
-    compile_cpp(cpp)
+    compile_cpp(raw_cpp)
 
 
 @pytest.mark.parametrize(

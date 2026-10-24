@@ -12,6 +12,7 @@ import pytest
 
 from pineforge_codegen import transpile
 from tests import _compile as compile_env
+from tests._legacy_cpp import without_source_rename
 
 
 def _generate(body: str) -> str:
@@ -880,7 +881,7 @@ int main() {
 
 
 def test_array_typed_udf_parameter_methods_route_by_typespec():
-    cpp = transpile(_TYPED_ARRAY_PARAM_METHOD_SOURCE)
+    cpp = without_source_rename(transpile(_TYPED_ARRAY_PARAM_METHOD_SOURCE))
 
     # Declared parameter element types survive into both the C++ reference
     # signature and method lowering (including vector<bool>'s proxy type and a

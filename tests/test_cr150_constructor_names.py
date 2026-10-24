@@ -57,13 +57,49 @@ if sample.value > open
     compile_cpp(cpp + _REQUIRE_REPORT_HEADERS, label=f"CR-150 type {name}")
 
 
+def test_source_variable_is_escaped_in_generated_code() -> None:
+    """Pin raw variable/parameter escaping independently of legacy comparisons."""
+    cpp = transpile(_PRELUDE + """read_source(float source) => source + 1.0
+float source = close
+source := source + 1.0
+observed = read_source(source)
+if observed > open
+    strategy.entry("source", strategy.long)
+""")
+    code = cpp_code_only(cpp)
+    assert re.search(r"\bpf_safe_source\b", code)
+    assert re.search(r"^    double pf_safe_source\b", code, re.MULTILINE)
+    assert "read_source(double pf_safe_source)" in code
+    # For this fixture, base.py emits the host base; emit_top.py emits the
+    # host include, constructor/adapter calls and override setter; and
+    # checked_settings.py emits the config factory. No TA length adapter is
+    # used. These are the only emitter-owned spellings containing `source`.
+    for spelling in (
+        "#include <pineforge/source/pine_strategy_host.hpp>",
+        "pineforge::source::PineStrategyHost",
+        "pineforge::source::PineStrategyConfig",
+        "pineforge::source::StrategyOverrides",
+    ):
+        pattern = rf"(?<!\w){re.escape(spelling)}(?!\w)"
+        assert re.search(pattern, code), spelling
+        code = re.sub(pattern, " ", code)
+    assert not re.search(r"\bsource\b", code)
+
+
 def test_trade_history_policy_macro_variable_transpiles_and_compiles() -> None:
     source = _PRELUDE + """int PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1 = bar_index
 if PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1 > 0
     strategy.entry("L", strategy.long)
 """
     cpp = transpile(source)
-    assert re.search(r"\bint pf_safe_PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1\b", cpp)
+    escaped = "pf_safe_PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1"
+    assert escaped in cpp
+    # The only place the raw macro name may still be spelled is the generated
+    # `#if defined(...)` guard of the policy call; any other use would be the
+    # script's variable reaching the preprocessor unescaped.
+    rest = cpp.replace(escaped, "")
+    guard = "#if defined(PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1)"
+    assert rest.count("PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1") == rest.count(guard)
     compile_cpp(cpp + _REQUIRE_REPORT_HEADERS, label="CR-150 policy macro variable")
 
 

@@ -2,6 +2,27 @@
 import re
 
 from pineforge_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP
+from tests._cpp_tokens import regions
+
+
+def without_source_rename(cpp: str) -> str:
+    """Reverse Opus P2-3's ``source`` reservation for historical comparisons.
+
+    The reservation avoids collisions with engine namespace ``pineforge::source``.
+    Keep this narrow: only the complete C++ identifier ``pf_safe_source``
+    becomes ``source``. Preserve longer identifiers, comments and literals
+    byte for byte so historical lowering checks still catch other drift.
+    The raw-output source reservation regression covers the rename itself.
+    """
+    identifier = re.compile(r"\bpf_safe_source\b")
+    parts = []
+    last = 0
+    for _kind, start, end, _value in regions(cpp):
+        parts.append(identifier.sub("source", cpp[last:start]))
+        parts.append(cpp[start:end])
+        last = end
+    parts.append(identifier.sub("source", cpp[last:]))
+    return "".join(parts)
 
 
 def _without_run_failure_scaffold(cpp: str) -> str:
