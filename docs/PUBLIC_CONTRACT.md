@@ -20,10 +20,16 @@ With the 1.7.0 headers, `report`, `report_sink` and `report_sequence` are reserv
 because `using namespace pineforge;` imports the engine's namespaces. A Pine
 `type report`, for example, becomes `struct pf_safe_report` and its references
 use that name. These namespace names live in `codegen/helpers.py`'s
-`CPP_EMITTER_NAMES`. `codegen/host_members.py`'s `HOST_MEMBER_NAMES` separately
-reserves the public or protected host members the emitter spells, including
-`set_trade_history_streamable`, inherited from `BacktestEngine`. Both sets feed
-the existing `CPP_RESERVED` export; no new reserved-name API is introduced.
+`CPP_EMITTER_NAMES`, which also reserves the generated C export
+`strategy_reads_trade_history`. A Pine type or function of that name uses
+`pf_safe_strategy_reads_trade_history`; the export keeps its public spelling.
+`CPP_STANDARD_MACROS` reserves `PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1`, so a Pine
+variable of that name uses `pf_safe_PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1`
+instead of expanding the engine's feature macro in a declaration.
+`codegen/host_members.py`'s `HOST_MEMBER_NAMES` separately reserves the public or
+protected host members the emitter spells, including
+`set_trade_history_streamable`, inherited from `BacktestEngine`. All three sets
+feed the existing `CPP_RESERVED` export; no new reserved-name API is introduced.
 
 ## Optional compiled execution capabilities
 
