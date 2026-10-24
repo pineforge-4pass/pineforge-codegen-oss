@@ -501,8 +501,8 @@ int main() {
 @pytest.mark.parametrize("legacy", [False, True])
 def test_checked_construction_exposes_the_original_error(legacy):
     cpp = transpile(PRELUDE)
-    assert cpp.count("        configure_pine_strategy(cfg);") == 1
-    cpp = cpp.replace("        configure_pine_strategy(cfg);", '        throw std::runtime_error("constructor stopped");')
+    assert cpp.count("        this->configure_pine_strategy(cfg);") == 1
+    cpp = cpp.replace("        this->configure_pine_strategy(cfg);", '        throw std::runtime_error("constructor stopped");')
     if legacy:
         cpp = _legacy_branch(cpp)
     driver = r'''

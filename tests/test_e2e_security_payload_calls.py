@@ -419,6 +419,60 @@ plot(v + w)
     compile_env.compile_cpp(result["cpp"], label="security-mixed-evaluator")
 
 
+def _assert_chart_mode_source_local_matches_twin(chart_declaration: str) -> None:
+    def script(local: str) -> str:
+        return f"""//@version=6
+strategy("chart mode reserved helper local")
+{chart_declaration}
+float g = close - open
+h() =>
+    {local} = high - low
+    nz({local}) - nz(g[1])
+v = request.security(syminfo.tickerid, "60", h())
+plot(v)
+"""
+
+    cpp = transpile(script("source"))
+    twin_cpp = transpile(script("src"))
+    body = _eval_body(cpp)
+    twin_body = _eval_body(twin_cpp)
+    # g[1] forces chart mode even though h() itself is inlined. Compare
+    # separately transpiled evaluators: this module's replay helper needs a
+    # recorded tape, so arbitrary snippets use the full evaluator text.
+    assert "g[1]" in body and "g[1]" in twin_body
+    assert re.search(r"\b_sec0_h_\d+_src\b", twin_body), twin_body
+    # Reverse just this fixture's local spelling, including its generated
+    # binding identifier. A stray chart/global pf_safe_source becomes bare
+    # src, which still differs from the twin's _sec0_h_<n>_src binding.
+    normalized = re.sub(
+        r"\b(_sec0_h_\d+_)?pf_safe_source\b",
+        lambda match: (match.group(1) or "") + "src",
+        body,
+    )
+    assert normalized == twin_body
+    assert not re.search(r"\bpf_safe_source\b", body), body
+    compile_env.compile_cpp(cpp, label="security-chart-mode-source-local")
+    compile_env.compile_cpp(twin_cpp, label="security-chart-mode-src-local-control")
+
+
+def test_security_chart_mode_helper_local_named_source_transpiles_and_compiles():
+    # No chart source exists to hide an undeclared local in the evaluator.
+    _assert_chart_mode_source_local_matches_twin("")
+
+
+@pytest.mark.parametrize(
+    "chart_declaration",
+    ("source = open", "source = open + 10000.0"),
+    ids=("chart-open", "chart-open-offset"),
+)
+def test_security_chart_mode_helper_local_named_source_shadows_chart_source(
+    chart_declaration,
+):
+    # Change the chart value while keeping h's high-low local unchanged.
+    # The twin renames only the local; the chart source remains in both.
+    _assert_chart_mode_source_local_matches_twin(chart_declaration)
+
+
 def test_ta_tuple_elements_read_their_field_of_the_requested_result():
     src = """//@version=6
 strategy("TA tuple element")
