@@ -1989,7 +1989,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                         if udt_spec is not None
                         else member_udt_type
                     )
-                    handle_cpp = DRAWING_TYPE_TO_CPP.get(udt_t, udt_t)
+                    handle_cpp = DRAWING_TYPE_TO_CPP.get(udt_t, self._safe_name(udt_t))
                     lines.append(f"    {handle_cpp} {cloned_safe} = {handle_cpp}{{}};")
                 elif vname in self._runtime_scalar_var_init_members:
                     # Declaration-site state may remain unreached while COOF

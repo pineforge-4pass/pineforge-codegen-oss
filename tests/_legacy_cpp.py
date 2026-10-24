@@ -2,7 +2,41 @@
 import re
 
 from pineforge_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP
-from tests._cpp_tokens import regions
+from tests._cpp_tokens import code_only, regions
+
+
+# Exact source-bearing spellings emitted by base.py (host base),
+# emit_top.py (two includes, host/config/override uses), checked_settings.py
+# (config), security.py (host time_close), and ta.py (length adapters).
+# Do not allow arbitrary namespaces, paths, or source-qualified members:
+# they could hide an unrenamed script identifier.
+_EMITTER_SOURCE_SPELLINGS = (
+    "#include <pineforge/source/pine_strategy_host.hpp>",
+    "#include <pineforge/source/pine_ta_length.hpp>",
+    "pineforge::source::PineStrategyHost",
+    "pineforge::source::PineStrategyConfig",
+    "pineforge::source::StrategyOverrides",
+    "pineforge::source::SeriesHighest",
+    "pineforge::source::SeriesLowest",
+    "pineforge::source::SeriesHighestBars",
+    "pineforge::source::SeriesLowestBars",
+    "pineforge::source::PineSupertrend",
+    "pineforge::source::FirstCallBound",
+    "pineforge::source::ta_number",
+    "pineforge::source::simple_ta_length",
+)
+
+
+def assert_source_rename_complete(raw_cpp: str) -> None:
+    """Refuse a mixed rename before projecting it onto historical bytes."""
+    code = code_only(raw_cpp)
+    if not re.search(r"\bpf_safe_source\b", code):
+        return
+    for spelling in _EMITTER_SOURCE_SPELLINGS:
+        code = re.sub(rf"(?<![\w:]){re.escape(spelling)}(?!\w)", " ", code)
+    assert not re.search(r"\bsource\b", code), (
+        "partial source rename: unescaped 'source' identifier in generated C++"
+    )
 
 
 def without_source_rename(cpp: str) -> str:
@@ -12,8 +46,10 @@ def without_source_rename(cpp: str) -> str:
     Keep this narrow: only the complete C++ identifier ``pf_safe_source``
     becomes ``source``. Preserve longer identifiers, comments and literals
     byte for byte so historical lowering checks still catch other drift.
+    Refuse a partial rename before reversing any identifiers.
     The raw-output source reservation regression covers the rename itself.
     """
+    assert_source_rename_complete(cpp)
     identifier = re.compile(r"\bpf_safe_source\b")
     parts = []
     last = 0
