@@ -16,20 +16,40 @@ reserved names. `_safe_name` also escapes emitter temporary patterns and
 allocates a distinct name when the script already uses the preferred escape.
 An identifier that does not collide keeps its spelling.
 
-With the 1.7.0 headers, `report`, `report_sink` and `report_sequence` are reserved
-because `using namespace pineforge;` imports the engine's namespaces. A Pine
+The imported engine names `report`, `report_sink`, `report_sequence`, `source`,
+`native_calendar`, `pine_color`, `RunFailureCode`, `RunFailureInfo`, `QtyType`,
+`CommissionType`, `XLoc`, `YLoc` and `normalize_timezone_for_posix` are reserved
+because `using namespace pineforge;` brings them into unqualified lookup. A Pine
 `type report`, for example, becomes `struct pf_safe_report` and its references
-use that name. These namespace names live in `codegen/helpers.py`'s
+use that name. These names live in `codegen/helpers.py`'s
 `CPP_EMITTER_NAMES`, which also reserves the generated C export
 `strategy_reads_trade_history`. A Pine type or function of that name uses
 `pf_safe_strategy_reads_trade_history`; the export keeps its public spelling.
+The same set explicitly reserves the exports `strategy_create`,
+`strategy_create_checked`, `run_backtest`, `run_backtest_full`, `strategy_free`,
+`report_free`, `strategy_set_input`, `strategy_set_override`,
+`strategy_set_magnifier_volume_weighted`, `strategy_set_input_checked`,
+`strategy_set_override_checked` and `run_backtest_full_checked`. Pine identifiers
+use `pf_safe_<name>`; these exports keep their public spellings.
 `CPP_STANDARD_MACROS` reserves `PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1`, so a Pine
 variable of that name uses `pf_safe_PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1`
-instead of expanding the engine's feature macro in a declaration.
+instead of expanding the engine's feature macro in a declaration. It also
+explicitly reserves `PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1`, using the same
+`pf_safe_` escape for a Pine identifier.
 `codegen/host_members.py`'s `HOST_MEMBER_NAMES` separately reserves the public or
 protected host members the emitter spells, including
 `set_trade_history_streamable`, inherited from `BacktestEngine`. All three sets
 feed the existing `CPP_RESERVED` export; no new reserved-name API is introduced.
+
+Since the 1.7.0 trade-history policy addition, generated libraries export
+`int strategy_reads_trade_history(void)`: `1` means the emitted code reads
+closed-trade rows, and `0` means no such read was emitted. A closed-trade count
+alone does not require those rows. For a non-reader, the constructor calls
+`set_trade_history_streamable(true)` under
+`PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1`; a reader emits no policy call.
+The order-shapes receipt's `host_reads` therefore includes the setter only for
+non-readers. Older generated libraries can lack the export; its absence does
+not establish that the script is a non-reader.
 
 ## Optional compiled execution capabilities
 

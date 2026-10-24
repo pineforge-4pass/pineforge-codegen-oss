@@ -264,6 +264,7 @@ CPP_STANDARD_MACROS = frozenset("""
     PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1
     PINEFORGE_HAS_RUN_FAILURE_CODES_V1
     PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1
+    PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1
     _PF_NO_DATA_STOP _PF_OTHER_SYMBOL_STOP _PF_ARRAY_STOP _PF_COLLECTION_STOP
     _PF_NA_STOP _PF_LIMIT_STOP _PF_UNSUPPORTED_STOP _PF_STRING_STOP
     _PF_ENGINE_INVARIANT _PF_INVARIANT_AT _PF_SETTING_FAILURE
@@ -280,13 +281,16 @@ CPP_STANDARD_MACROS = frozenset("""
 # Identifiers used by the emitter as class/type names, namespaces, and
 # generated or inherited methods.  A user member with one of these names can
 # hide a type/callee, or (GeneratedStrategy) conflict with the constructor.
-# The engine's report namespaces are imported by ``using namespace pineforge``;
-# an authored UDT with the same name makes its unqualified type reads ambiguous.
+# Engine namespaces, types and callees are imported by ``using namespace
+# pineforge``; an authored UDT can make its unqualified type reads ambiguous.
 CPP_EMITTER_NAMES = frozenset("""
     GeneratedStrategy BacktestEngine Bar Series PineArray PineMap PineMatrix
     PineGenericMatrix PineStrategyConfig PineStrategyHost StrategyOverrides
     SymInfo ReportC MagnifierDistribution ChartPoint Line Box Label Linefill
     std pineforge ta math report report_sink report_sequence
+    source native_calendar RunFailureCode
+    pine_color QtyType CommissionType XLoc YLoc RunFailureInfo
+    normalize_timezone_for_posix
     on_bar on_source_bar prepare_script_run configure_pine_strategy
     configure_security_evaluators snapshot_script_state restore_script_state
     commit_script_state set_strategy_override set_input
@@ -295,6 +299,11 @@ CPP_EMITTER_NAMES = frozenset("""
     strategy_confirmed_bar_api_version strategy_confirmed_bar_receipt
     strategy_order_shapes_api_version strategy_order_shapes_receipt
     strategy_settings_api_version strategy_get_effective_settings
+    strategy_create strategy_create_checked strategy_free report_free
+    run_backtest run_backtest_full run_backtest_full_checked
+    strategy_set_input strategy_set_input_checked
+    strategy_set_override strategy_set_override_checked
+    strategy_set_magnifier_volume_weighted
     strategy_reads_trade_history
     precalculate
     strategy_entry strategy_close strategy_close_all strategy_exit
