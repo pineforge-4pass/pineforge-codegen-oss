@@ -45,6 +45,7 @@ jobs:
   release:
     if: ${{ !inputs.claim_placeholder }}
     runs-on: ubuntu-latest
+    environment: release
     env:
       BUMP:          ${{ inputs.bump }}
       OVERRIDE:      ${{ inputs.override }}

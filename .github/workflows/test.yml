@@ -246,6 +246,12 @@ jobs:
             exit 1
           fi
           "$lint_dir/actionlint" -config-file "$lint_dir/actionlint.yaml" -shellcheck= -pyflakes= "${workflows[@]}"
+      - name: "Check App token environments"
+        if: "${{ needs.authz.result == 'success' }}"
+        shell: "bash"
+        run: |
+          set -euo pipefail
+          python3 scripts/check_workflow_app_environments.py
 
   pytest:
     needs: [authz, changes]

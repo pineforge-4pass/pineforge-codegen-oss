@@ -221,6 +221,7 @@ def assert_promotion_guard(workflow):
         "\n    needs: [promote-guard]\n"
         "    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true }}\n"
         "    runs-on: ubuntu-latest\n"
+        "    environment: release-bot\n"
         "    steps:\n"
     ), "credential job must depend on the guard without a status-function bypass"
     for key in ("needs", "if", "runs-on", "steps"):
@@ -731,8 +732,8 @@ def test_promotion_guard_rejects_missing_event_and_identity_fields(name):
         id="credential-job-bypasses-failed-guard",
     ),
     pytest.param(
-        "    runs-on: ubuntu-latest\n    steps:\n",
-        "    runs-on: unreviewed-runner\n    steps:\n",
+        "    runs-on: ubuntu-latest\n    environment: release-bot\n    steps:\n",
+        "    runs-on: unreviewed-runner\n    environment: release-bot\n    steps:\n",
         id="credential-runner-changed",
     ),
     pytest.param(

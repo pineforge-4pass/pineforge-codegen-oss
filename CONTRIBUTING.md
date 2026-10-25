@@ -128,6 +128,17 @@ An unmerged close of our own allowed pull request passes the guard with
 promotion skipped. Manual dispatch requires repository write access, and
 every other event is refused.
 
+App-token minting jobs use two main-only GitHub environments: human-dispatched
+release jobs use `release`, with the owner as required reviewer; automatic
+baseline promotion (including its manual re-fire) uses `release-bot`, without
+a reviewer. The `workflow-lint` preflight checks every workflow and requires a
+literal, non-empty job environment for App-token actions or private-key secret
+use, and flags recognizable scripted minting for human review. Keep this change
+in draft until the owner confirms both environments and their same-name secret
+copies exist. For rollback, remove the added `environment:` lines and revert
+their policy pins together; repository-level secret copies remain available
+until the owner deletes them after the dry runs.
+
 ## npm publication (operators)
 
 The release and npm publication workflows run on GitHub-hosted runners.
