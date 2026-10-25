@@ -91,6 +91,112 @@ changes the emitted C++ and the other two only the repository's own CI.
   and `test.yml` adopts the organization's CI canon (CR-241,
   [#243](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/243)).
 
+## 1.6.3 — 2026-10-23
+
+A patch release of the exact engine/codegen pair, paired with engine `v1.6.3`
+and dated 2026-10-23. This entry records what changed in this repository since
+1.6.2 and nothing else: one security fix to the emitted C++, merged from a
+private fork (commit `041889818e2206fdf7261574128064fb0b4142ad`), and four pull
+requests that change only the repository's own CI, publishing and documentation.
+
+### Security
+
+- Published advisory
+  [GHSA-5www-2x9c-mgr6](https://github.com/pineforge-4pass/pineforge-codegen-oss/security/advisories/GHSA-5www-2x9c-mgr6),
+  "Codegen can emit C++ calls and type names taken from the input script"
+  (severity high, CWE-94). Fixed in 1.6.3 of both packages. The affected
+  versions are `pineforge-codegen` from 0.6.4 up to but not including 1.6.3 and
+  `@pineforge/codegen-pyodide` from 0.7.0 up to but not including 1.6.3, which
+  ships the same Python sources. Images of
+  `ghcr.io/pineforge-4pass/pineforge-release` before 1.6.3 contain an affected
+  codegen; the 1.6.3 image contains the fixed one. Upgrade to 1.6.3 or later; the
+  advisory states the mitigation and the upgrade steps and, like this entry,
+  contains no reproduction recipe.
+
+### Compatibility and migration
+
+- Scripts that reached the two affected paths are now refused instead of
+  transpiled. A call or member that the codegen has no lowering for ends with
+  `<name>(...) is not implemented in PineForge runtime.` where it used to be
+  written into the emitted C++; a token that is not a type, in a type position
+  or inside `<...>`, ends with a located parse error; and `array.new` or
+  `array.from` with an undeclared element type is refused with the same
+  "not implemented" message. A script that compiled under 1.6.2 can therefore
+  fail with a compile or parse error under 1.6.3, and this is the intended
+  effect of the fix. For scripts that stay accepted the emitted C++ is unchanged
+  except that the default of an enum-typed element is `na<double>()` (a type
+  name that is not a declared user type falls back to its slot's default) and
+  `format`, `currency` and `order` values are typed `std::string`. A pair change
+  requires regenerated C++ and relinked strategy libraries against the paired
+  engine release's headers and `libpineforge.a` (README
+  [Engine pairing](README.md#engine-pairing)); regenerate any C++ that an
+  affected release produced from a script you do not trust.
+
+### Changes since 1.6.2
+
+- Run every codegen job on GitHub-hosted runners
+  ([#237](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/237)).
+- Publish to npm only by operator dispatch, in the main-only `npm-publish`
+  environment
+  ([#238](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/238)),
+  and state the npm publishing bound as it now exists: both npm jobs run in that
+  environment
+  ([#240](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/240)).
+- Stop naming a retired private campaign repository in five lines of the
+  documentation
+  ([#239](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/239)).
+
+## 1.6.2 — 2026-10-21
+
+A patch release of the exact engine/codegen pair, paired with engine `v1.6.2`
+and dated 2026-10-21; the prerelease `1.6.2-rc.1` (2026-10-19) pairs with engine
+`v1.6.2-rc.1`. This entry records what changed in this repository since 1.6.1
+and nothing else: a checker for generated C++ and a reserved-name change in the
+emitter, a change of the licensor's written entity, and CI changes.
+
+### Compatibility and migration
+
+- New command `pf-cpp-allowlist` (`pineforge_codegen.cpp_allowlist:main`,
+  installed with the package), a checker for a generated C++ translation unit
+  that flags dangerous primitives
+  ([#210](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/210),
+  CR-164 S1). It is a denylist with known false positives, a mitigation and not
+  proof that a unit is safe (the wording of the 1.6.3 security advisory).
+- A script identifier equal to a symbol that the checker refuses when it appears
+  bare (`system`, `free`, `socket`, `open` and the rest of the list in
+  `pineforge_codegen/codegen/helpers.py`, `LIBC_RESERVED_NAMES`) is now emitted
+  as `pf_safe_<name>` instead of the bare libc name, so the emitted C++ for
+  scripts that declare such a name changes.
+- A pair change requires regenerated C++ and relinked strategy libraries against
+  the paired engine release's headers and `libpineforge.a` (README
+  [Engine pairing](README.md#engine-pairing)).
+
+### Changes since 1.6.1
+
+- The licensor entity is written exactly as `PINEFORGE LLC` in `LICENSE`,
+  `LEGAL.md` and `CONTRIBUTING.md`
+  ([#234](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/234)).
+- CI: Linux x64 jobs on the pf-ci-spot pool
+  ([#212](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/212),
+  tracked at fragment b240f6d7 in
+  [#215](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/215)),
+  credentialed release and deploy jobs kept on hosted runners
+  ([#214](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/214)), a
+  guarded job and a token-free OIDC job to claim the PyPI `tunaxis-codegen` and
+  npm `@tunaxis/codegen-pyodide` names with a 0.0.1 placeholder
+  ([#216](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/216),
+  [#217](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/217)), the
+  App-token owner following the repository owner
+  ([#221](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/221)),
+  the open Dependabot bumps folded and pinned by SHA with the exact release
+  ([#223](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/223)),
+  superseded pull-request runs of the gate and test workflows cancelled
+  ([#225](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/225)),
+  `timeout-minutes` dropped from `gate.yml` and `test.yml`
+  ([#233](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/233)),
+  and the pull-request suite skipped on draft pull requests
+  ([#236](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/236)).
+
 ## 1.6.1 — 2026-10-18
 
 A patch release of the exact engine/codegen pair, paired with engine `v1.6.1`
