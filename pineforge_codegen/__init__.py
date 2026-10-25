@@ -26,11 +26,14 @@ def _parse_bounded(pine_source: str, filename: str, budget: TimeBudget | None = 
     ensure_recursion_headroom()
     check_source_size(pine_source, filename)
     budget = budget or TimeBudget(filename)
+    # Normalize once before the pre-pass; all stages use the lexer's text.
+    lexer = Lexer(pine_source, filename=filename, budget=budget)
+    pine_source = lexer.source
     pragmas = extract_pf_trace_pragmas(
         pine_source, filename=filename, budget=budget,
     )
     budget.check(phase=Phase.LEXER)
-    tokens = Lexer(pine_source, filename=filename, budget=budget).tokenize()
+    tokens = lexer.tokenize()
     budget.check(phase=Phase.LEXER)
     ast = Parser(tokens, source=pine_source, filename=filename,
                  budget=budget).parse()
