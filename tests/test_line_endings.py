@@ -186,7 +186,7 @@ def test_pragma_extraction_keeps_source_size_recovery(monkeypatch):
 
 @pytest.mark.parametrize("translate", TRANSPILERS)
 def test_double_crlf_after_code_matches_lf(translate):
-    source = "strategy('Newlines')\r\r\nplot(bar_index)\n"
+    source = "//@version=6\nstrategy('Newlines')\r\r\nplot(bar_index)\n"
     lf_source = source.replace("\r\r\n", "\n\n")
     expected_tokens = Lexer(lf_source).tokenize()
     assert Lexer(source).tokenize() == expected_tokens
@@ -196,7 +196,8 @@ def test_double_crlf_after_code_matches_lf(translate):
 
 @pytest.mark.parametrize("translate", TRANSPILERS)
 def test_double_crlf_after_comment_matches_lf(translate):
-    source = ('// John\'s "Newlines" comment\r\r\n'
+    source = ("//@version=6\n"
+              '// John\'s "Newlines" comment\r\r\n'
               "strategy('Newlines')\nplot(bar_index)\n")
     lf_source = source.replace("\r\r\n", "\n\n")
     expected_tokens = Lexer(lf_source).tokenize()
@@ -211,7 +212,7 @@ def test_double_crlf_after_comment_matches_lf(translate):
     pytest.param('// John\'s "Newlines" comment', id="comment"),
 ])
 def test_double_crlf_line_three_diagnostics_match_lf(translate, first_line):
-    source = first_line + "\r\r\nx = (1 + )\n"
+    source = "//@version=6\n" + first_line + "\r\r\nx = (1 + )\n"
     lf_source = source.replace("\r\r\n", "\n\n")
     with pytest.raises(CompileError) as lf_error:
         translate(lf_source, filename="newlines.pine")
