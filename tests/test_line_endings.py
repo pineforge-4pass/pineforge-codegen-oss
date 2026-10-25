@@ -182,3 +182,81 @@ def test_pragma_extraction_keeps_source_size_recovery(monkeypatch):
     expected = extract_pf_trace_pragmas(source)
     monkeypatch.setattr(limits, "MAX_SOURCE_CHARS", len(source) - 1)
     assert extract_pf_trace_pragmas(source) == expected
+
+
+@pytest.mark.parametrize("translate", TRANSPILERS)
+def test_double_crlf_after_code_matches_lf(translate):
+    source = "strategy('Newlines')\r\r\nplot(bar_index)\n"
+    lf_source = source.replace("\r\r\n", "\n\n")
+    expected_tokens = Lexer(lf_source).tokenize()
+    assert Lexer(source).tokenize() == expected_tokens
+    expected_output = translate(lf_source)
+    assert translate(source) == expected_output
+
+
+@pytest.mark.parametrize("translate", TRANSPILERS)
+def test_double_crlf_after_comment_matches_lf(translate):
+    source = ('// John\'s "Newlines" comment\r\r\n'
+              "strategy('Newlines')\nplot(bar_index)\n")
+    lf_source = source.replace("\r\r\n", "\n\n")
+    expected_tokens = Lexer(lf_source).tokenize()
+    assert Lexer(source).tokenize() == expected_tokens
+    expected_output = translate(lf_source)
+    assert translate(source) == expected_output
+
+
+@pytest.mark.parametrize("translate", TRANSPILERS)
+@pytest.mark.parametrize("first_line", [
+    pytest.param("strategy('Newlines')", id="code"),
+    pytest.param('// John\'s "Newlines" comment', id="comment"),
+])
+def test_double_crlf_line_three_diagnostics_match_lf(translate, first_line):
+    source = first_line + "\r\r\nx = (1 + )\n"
+    lf_source = source.replace("\r\r\n", "\n\n")
+    with pytest.raises(CompileError) as lf_error:
+        translate(lf_source, filename="newlines.pine")
+    with pytest.raises(CompileError) as other_error:
+        translate(source, filename="newlines.pine")
+    assert other_error.value.diagnostics == lf_error.value.diagnostics
+    assert str(other_error.value) == str(lf_error.value)
+    assert other_error.value.format(source) == lf_error.value.format(lf_source)
+
+
+@pytest.mark.parametrize("translate", TRANSPILERS)
+@pytest.mark.parametrize("quote", ["'", '"', "'''", '"""'])
+def test_double_crlf_string_contents_match_lf_pieces(translate, quote):
+    indent = "    " if len(quote) == 1 else ""
+    pieces = ("x\r", "\r\n", indent + "y")
+    lf_pieces = tuple(piece.replace("\r\n", "\n") for piece in pieces)
+    content = "".join(pieces)
+    lf_content = "".join(lf_pieces)
+    # Include a code-line boundary too: its blank line must survive before
+    # either kind of string, without changing the lone CR held as string data.
+    prefix = REPORTER.replace("plot(close)\n", "plot(close)\r\r\n")
+    lf_prefix = prefix.replace("\r\r\n", "\n\n")
+    source = (prefix +
+              f'text = input.string({quote}{content}{quote}, "Text")\n'
+              "plot(str.length(text))\n")
+    lf_source = (lf_prefix +
+                 f'text = input.string({quote}{lf_content}{quote}, "Text")\n'
+                 "plot(str.length(text))\n")
+    lexer = Lexer(source)
+    assert lexer.source == lf_source
+    # Read the LF pieces separately so the preserved data CR cannot combine
+    # with the folded LF into a fresh CRLF on a second normalization pass.
+    expected_value = "".join(
+        token.value
+        for piece in (lf_pieces[0], "".join(lf_pieces[1:]))
+        for token in Lexer(f"{quote}{piece}{quote}").tokenize()
+        if token.type == TokenType.STRING
+    )
+    assert any(token.type == TokenType.STRING and token.value == expected_value
+               for token in lexer.tokenize())
+    # Spell value LFs as Pine escapes in the equivalent LF reference, keeping
+    # its later statement on the same line with an extra physical blank line.
+    reference_content = expected_value.replace("\n", r"\n")
+    reference_source = (lf_prefix +
+                        f'text = input.string({quote}{reference_content}{quote}, "Text")\n'
+                        "\nplot(str.length(text))\n")
+    expected_output = translate(reference_source)
+    assert translate(source) == expected_output

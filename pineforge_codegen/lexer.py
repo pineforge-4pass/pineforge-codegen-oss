@@ -158,8 +158,6 @@ KEYWORDS: dict[str, TokenType] = {
 
 def _normalize_line_endings(source: str) -> str:
     """Fold CRLF everywhere and lone CR only outside string literals."""
-    # A CRLF pair is a line terminator even inside strings or after a backslash.
-    source = source.replace("\r\n", "\n")
     if "\r" not in source:
         return source
     parts: list[str] = []
@@ -168,7 +166,24 @@ def _normalize_line_endings(source: str) -> str:
     while pos < len(source):
         ch = source[pos]
         if delimiter:
+            if ch == "\r" and source.startswith("\r\n", pos):
+                parts.extend((source[start:pos], "\n"))
+                pos += 2
+                start = pos
+                if len(delimiter) == 1:
+                    # Same recovery as _read_quoted at an unwrapped line end.
+                    nxt = indent = pos
+                    while indent < len(source) and source[indent] in " \t":
+                        indent += 1
+                    if indent == nxt or indent >= len(source) or source[indent] in "\r\n":
+                        delimiter = ""
+                continue
             if ch == "\\":
+                if source.startswith("\\\r\n", pos):
+                    parts.extend((source[start:pos + 1], "\n"))
+                    pos += 3
+                    start = pos
+                    continue
                 pos += 2
                 continue
             if source.startswith(delimiter, pos):
@@ -180,7 +195,7 @@ def _normalize_line_endings(source: str) -> str:
                 nxt = indent = pos + 1
                 while indent < len(source) and source[indent] in " \t":
                     indent += 1
-                if indent == nxt or indent >= len(source) or source[indent] == "\n":
+                if indent == nxt or indent >= len(source) or source[indent] in "\r\n":
                     delimiter = ""
         elif source.startswith("//", pos):
             # Quotes in a comment never open a string on a following line.
