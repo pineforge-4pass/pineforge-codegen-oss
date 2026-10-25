@@ -157,7 +157,9 @@ KEYWORDS: dict[str, TokenType] = {
 
 
 def _normalize_line_endings(source: str) -> str:
-    """Fold code/comment line ends, leaving literal string contents intact."""
+    """Fold CRLF everywhere and lone CR only outside string literals."""
+    # A CRLF pair is a line terminator even inside strings or after a backslash.
+    source = source.replace("\r\n", "\n")
     if "\r" not in source:
         return source
     parts: list[str] = []

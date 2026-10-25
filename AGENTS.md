@@ -86,9 +86,11 @@ the `engine_script_run_v19` C++ namespace; see `README.md` and
 adding work:
 
 Before these passes, `_parse_bounded` checks the original source size and
-constructs the lexer, which folds CRLF and lone CR code/comment line endings
-to LF, preserving string literal contents. Its normalized source goes to
-pragma extraction and the parser too; direct `Lexer` callers share the rule.
+constructs the lexer, which folds CRLF to LF, including inside strings, and
+lone CR code/comment line endings. Inside either string kind lone CR stays
+data, a limit for CR-only multiline/wrapped strings. Its normalized source
+goes to pragma extraction and the parser too; direct `Lexer` callers share
+the rule.
 
 1. `pragmas.extract_pf_trace_pragmas` — pulls `// @pf-trace name=expr`
   comments out before the lexer strips comments.

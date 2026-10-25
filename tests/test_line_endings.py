@@ -38,6 +38,14 @@ def _with_line_endings(source, line_ending):
                    for index, line in enumerate(lines[:-1])) + lines[-1]
 
 
+def _string_source(quote):
+    triple = quote * 3
+    return (REPORTER +
+            f'multiline = input.string({triple}abc\n    def\n{triple}, "Multiline")\n'
+            f'wrapped = input.string({quote}abc\n    def{quote}, "Wrapped")\n'
+            "plot(str.length(multiline) + str.length(wrapped))\n")
+
+
 @pytest.mark.parametrize("translate", TRANSPILERS)
 @pytest.mark.parametrize("line_ending", LINE_ENDINGS)
 @pytest.mark.parametrize("source", [pytest.param(REPORTER, id="reporter"),
@@ -58,6 +66,39 @@ def test_lexer_tokens_and_locations_match_lf(line_ending):
 
 
 @pytest.mark.parametrize("translate", TRANSPILERS)
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_string_crlf_emit_identical_cpp(translate, quote):
+    source = _string_source(quote)
+    expected = translate(source)
+    assert translate(_with_line_endings(source, "\r\n")) == expected
+
+
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_string_crlf_tokens_and_locations_match_lf(quote):
+    source = _string_source(quote)
+    expected = Lexer(source).tokenize()
+    values = [token.value for token in expected if token.type == TokenType.STRING]
+    assert "abc def" in values
+    assert "abc\n    def\n" in values
+    assert Lexer(_with_line_endings(source, "\r\n")).tokenize() == expected
+
+
+@pytest.mark.parametrize("translate", TRANSPILERS)
+@pytest.mark.parametrize("quote", ["'", '"', "'''", '"""'])
+def test_escaped_string_crlf_matches_lf(translate, quote):
+    source = (REPORTER +
+              f'text = input.string({quote}abc\\\n    def{quote}, "Text")\n'
+              "plot(str.length(text))\n")
+    expected = Lexer(source).tokenize()
+    assert any(token.type == TokenType.STRING and token.value == "abc\n    def"
+               for token in expected)
+    actual_source = _with_line_endings(source, "\r\n")
+    assert Lexer(actual_source).tokenize() == expected
+    expected_output = translate(source)
+    assert translate(actual_source) == expected_output
+
+
+@pytest.mark.parametrize("translate", TRANSPILERS)
 @pytest.mark.parametrize("line_ending", LINE_ENDINGS)
 def test_line_three_syntax_error_has_identical_diagnostics(translate, line_ending):
     source = "//@version=6\nstrategy('Newlines')\nx = (1 + )\n"
@@ -73,6 +114,33 @@ def test_line_three_syntax_error_has_identical_diagnostics(translate, line_endin
     assert other_error.value.format(_with_line_endings(source, line_ending)) == (
         lf_error.value.format(source)
     )
+
+
+@pytest.mark.parametrize("translate", [Lexer, *TRANSPILERS])
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_unterminated_string_crlf_has_identical_diagnostics(translate, quote):
+    # CRLF used to make a whitespace-only line look like a wrapped line,
+    # swallowing the invalid character. Also cover unindented and EOF recovery.
+    source = (REPORTER + f"first = {quote}abc\n"
+              "    \n"
+              "    @\n"
+              "x = close\n"
+              f"second = {quote}def\n"
+              "x = close\n"
+              f"third = {quote}ghi\n")
+    with pytest.raises(CompileError) as lf_error:
+        result = translate(source, filename="newlines.pine")
+        if translate is Lexer:
+            result.tokenize()
+    with pytest.raises(CompileError) as other_error:
+        result = translate(_with_line_endings(source, "\r\n"),
+                           filename="newlines.pine")
+        if translate is Lexer:
+            result.tokenize()
+    assert all(diagnostic.phase == Phase.LEXER
+               for diagnostic in lf_error.value.diagnostics)
+    assert other_error.value.diagnostics == lf_error.value.diagnostics
+    assert str(other_error.value) == str(lf_error.value)
 
 
 @pytest.mark.parametrize("line_ending", LINE_ENDINGS)
@@ -104,3 +172,13 @@ def test_source_size_is_checked_before_line_endings_shrink(monkeypatch):
         Lexer(source).tokenize()
     monkeypatch.setattr(limits, "MAX_SOURCE_CHARS", len(source))
     assert transpile(source) == transpile(REPORTER)
+
+
+def test_pragma_extraction_keeps_source_size_recovery(monkeypatch):
+    from pineforge_codegen import limits
+    from pineforge_codegen.pragmas import extract_pf_trace_pragmas
+
+    source = REPORTER + "// @pf-trace price=close\n"
+    expected = extract_pf_trace_pragmas(source)
+    monkeypatch.setattr(limits, "MAX_SOURCE_CHARS", len(source) - 1)
+    assert extract_pf_trace_pragmas(source) == expected
