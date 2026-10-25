@@ -20,6 +20,13 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## Unreleased
+
+- Fix `strategy.account_currency` to return the declared constant currency,
+  falling back to the symbol currency when omitted or `currency.NONE`, and
+  support currency-constant comparisons and string concatenation
+  ([#227](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/227)).
+
 ## 1.7.0 — 2026-10-25
 
 A minor release of the exact engine/codegen pair, paired with engine `v1.7.0`
