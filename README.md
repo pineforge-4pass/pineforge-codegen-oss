@@ -83,8 +83,9 @@ Give each input a unique title; different `group=` labels do not separate
 override keys. The paired checked path refuses a shared key and returns a null
 fingerprint for a completed run of such a script even without an override.
 The [1.4.0 migration notes](CHANGELOG.md#140--2026-10-08) cover this change,
-new refusals of some previously accepted settings, and color's string manifest
-versus packed-integer native value. Check stored presets before submitting them.
+new refusals of some previously accepted settings, and that release's color
+metadata mismatch. Current color manifests use `type: "color"` with a packed
+integer default; check stored presets before submitting them.
 Users of `pineforge-hpo` 0.11.0 must preserve the manifest's number type for
 each option at its input boundary; see the [known issue](CHANGELOG.md#known-issues-with-consumers).
 
@@ -243,8 +244,12 @@ not a lossless-string promise. Literal Unicode and escaped backslashes are
 retained. Run-time arithmetic, `not true` and calendar-part `timestamp` values
 still have no published default or unfoldable bounds; a folded
 `timestamp("...")` is a literal. The whole numeric `options` field is omitted
-if any choice is unfoldable. Colors retain their Pine spelling and `string`
-manifest type, while the checked native setter requires a packed integer.
+if any choice is unfoldable. An `input.color` has manifest `type: "color"` and
+a literal-foldable `default` encoded as an unsigned `0xAARRGGBB` integer:
+`color.red` is `4294063685` (`0xFFF23645`), and `color.new` / `color.rgb` include
+their literal transparency. Preserve that integer and pass its decimal text to
+the native input setter. Releases through 1.7.0 published a `string` type and
+Pine spelling for colors; the generated C++ and other input types are unchanged.
 The [contract](docs/PUBLIC_CONTRACT.md#input-manifest-and-override-keys) lists
 these retained limits. The PyPI and Pyodide manifests carry the same fields; no key is
 renamed or removed, and the changelog lists the values that changed.
