@@ -22,6 +22,17 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased
 
+- Fix `input.color` metadata so its default round-trips through the native
+  input setter ([#231](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/231)).
+  Python `transpile_full()` and the Pyodide/glue manifest now report
+  `type: "color"` and an unsigned packed `0xAARRGGBB` integer default for named
+  Pine v6 colors, hex literals and literal `color.new` / `color.rgb` expressions,
+  including transparency. `color.red` is `4294063685` (`0xFFF23645`). Hosts must
+  recognize the new type and preserve the unsigned integer, sending its decimal
+  text to the native setter instead of a Pine expression such as `"color.red"`.
+  `supported` remains true, other input metadata is unchanged, and generated
+  C++ and native setters/receipts retain their existing behavior. Unfoldable
+  defaults retain their previous metadata; accepted expressions are unchanged.
 - Fix `strategy.account_currency` to return the declared constant currency,
   falling back to the symbol currency when omitted or `currency.NONE`, and
   support currency-constant comparisons and string concatenation
