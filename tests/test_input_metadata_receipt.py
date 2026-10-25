@@ -33,9 +33,8 @@ COMPUTED = "the receipt evaluates it at run time; the manifest publishes only a 
 KNOWN_LIMITS = {
     (NUMERIC, "Negated bool"): {
         "default": (None, f"`not true`: {COMPUTED}")},
-    (NUMERIC, "Tint"): {
-        "default": ("color.red", "a color is published by its Pine spelling; "
-                                 "the receipt holds the packed integer")},
+    # #231: Tint now publishes the receipt's packed integer, so it must pass
+    # the ordinary equality check rather than remain a KNOWN_LIMITS exception.
     (NUMERIC, "Expression default"): {
         "default": (None, f"`LEN * 2`: {COMPUTED}")},
     (NUMERIC, "Expression option"): {

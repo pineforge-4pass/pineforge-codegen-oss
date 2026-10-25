@@ -173,6 +173,8 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
       ``min`` / ``max`` / ``step`` / ``options`` (omitted when the
       corresponding signature argument is absent or is not a literal the
       receipt holds); an ``input.symbol`` entry also has ``kind: "symbol"``.
+      An ``input.color`` has ``type: "color"`` and an unsigned packed
+      ``0xAARRGGBB`` integer default when its color expression is literal-foldable.
       See :meth:`CodeGen.extract_input_manifest`.
     - ``strategyParams``: the literal ``strategy(...)`` kwargs the analyzer
       surfaced (e.g. ``initial_capital``, ``pyramiding``).

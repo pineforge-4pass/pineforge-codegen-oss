@@ -136,8 +136,6 @@ def test_values_the_receipt_computes_at_run_time_keep_the_previous_manifest():
     inputs = _numeric_fixture()
     assert inputs["Negated bool"] == {"title": "Negated bool", "type": "bool",
                                       "default": None, "supported": True}
-    assert inputs["Tint"] == {"title": "Tint", "type": "string", "default": "color.red",
-                              "supported": True}
     assert inputs["Expression default"]["default"] is None
     assert "options" not in inputs["Expression option"]
     assert inputs["Expression option"]["default"] == 5
@@ -145,6 +143,14 @@ def test_values_the_receipt_computes_at_run_time_keep_the_previous_manifest():
     assert inputs["Time from parts"]["default"] is None
     assert inputs["Plain constant"] == {"title": "Plain constant", "type": "string",
                                         "default": None, "supported": True}
+
+
+def test_color_default_uses_the_native_setters_packed_integer():
+    # #231 closes the old Pine-spelling/string exception: a host must be able
+    # to submit the published default to the checked native input setter.
+    assert _numeric_fixture()["Tint"] == {
+        "title": "Tint", "type": "color", "default": 0xFFF23645, "supported": True,
+    }
 
 
 @pytest.mark.parametrize("text,value", [

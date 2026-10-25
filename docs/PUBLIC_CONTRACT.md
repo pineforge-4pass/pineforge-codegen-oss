@@ -196,8 +196,10 @@ the 1.3.0 harness used the legacy setters. Some requests that previously
 returned success now fail before execution: a shared `Period` key set to `"7"`
 is `setting_rejected` with reason `ambiguous_key`, textual color `"color.blue"`
 is `expected_integer`, and `"15"` outside choices `[10, 20, 30]` is
-`invalid_input_option`. The color manifest's `string` type and Pine-spelling
-default do not describe the native setter's packed-integer encoding. Validate
+`invalid_input_option`. The 1.4.0 color manifest's `string` type and Pine-spelling
+default did not describe the native setter's packed-integer encoding. Current
+manifests use `type: "color"` with a packed integer default, as defined under
+[Input manifest and override keys](#input-manifest-and-override-keys). Validate
 presets against the compiled settings, including types, bounds and options;
 the checked path also refuses unknown keys and invalid numeric, boolean or
 enum values. An input with `supported: false` rejects a supplied value with
@@ -454,9 +456,9 @@ errors together with either nonfatal level.
 ### Input manifest and override keys
 
 Each manifest entry has `title` (string), `type` (one of `int`, `float`,
-`bool`, `string`, `source`, `enum`), `default` (a literal scalar or `None`) and
-`supported` (boolean; the manifests of releases up to 1.3.0 lack it). It may
-also have `min`, `max`, `step` numeric values and an `options` list. Since 1.1.0,
+`bool`, `string`, `source`, `enum`, `color`), `default` (a literal scalar or
+`None`) and `supported` (boolean; the manifests of releases up to 1.3.0 lack it).
+It may also have `min`, `max`, `step` numeric values and an `options` list. Since 1.1.0,
 an `input.symbol` entry also has `kind` equal to `"symbol"`. An optional field
 is omitted when its argument is absent or cannot be reduced to the supported
 literal form.
@@ -498,6 +500,22 @@ them identically.
 - An enum input publishes its `Enum.member` choices in declaration order as
   `options` and keeps its `Enum.member` `default`, which the receipt encodes as
   the member's index (map it through the receipt's `option_values`).
+- A color input (`input.color`) has `type: "color"`. Its literal-foldable
+  `default` is an unsigned packed `0xAARRGGBB` integer (0 through 4294967295),
+  where `AA` is opacity: 255 is opaque and 0 is transparent. Named Pine v6
+  constants, hex color literals, and `color.new` / `color.rgb` with literal
+  arguments publish the value the generated `get_input_int64` default uses,
+  including transparency. For example, `input.color(color.red, "Line color")`
+  publishes `{"title":"Line color","type":"color","default":4294063685,"supported":true}`
+  (`0xFFF23645`); `color.new(color.red, 50)` publishes `0x80F23645` as an
+  integer. Preserve the unsigned value when reading the JSON. Pass its decimal
+  representation to the native input setter; a Pine expression such as
+  `"color.red"` is not a native input value. This corrects the `string` type and
+  Pine-spelling default published through 1.7.0. `supported` and other input
+  fields, the emitted C++ and the native receipt's storage type (`int`, 64-bit)
+  and historical `kind: "string"` are unchanged. An unfoldable color default
+  retains its previous unpublished value (`None`/JSON `null`); accepted default
+  expressions are unchanged.
 - A typed numeric input (`input.int`, `.float`, `.price`, `.time`) publishes
   numeric `default`, `min`, `max`, `step` and the numeric choices of an
   `options=[...]` dropdown where the receipt's value is a literal: a signed number (`-2.5`), a named constant (`LEN = 14`,
@@ -515,10 +533,6 @@ them identically.
   field is omitted when any choice is unfoldable. These gaps are pinned in
   `tests/test_input_metadata_receipt.py`'s `KNOWN_LIMITS`; its test view maps
   an absent options field to `[]`, which is not the public manifest shape.
-  An `input.color`'s
-  `default` is its Pine spelling (`"color.red"`) and its `type` `string`, where
-  the receipt holds the packed integer required by the checked native setter.
-  Do not submit the manifest's Pine-spelling string as a native color value.
   Apart from the source-input case
   above, a plain `input(...)` whose default is not a literal is typed
   `string` with a `None` default.

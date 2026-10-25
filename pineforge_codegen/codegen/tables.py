@@ -497,17 +497,31 @@ SYMINFO_MEMBER_MAP = {
     "country": "_pf_derive_country(syminfo_.tickerid)",
 }
 
-COLOR_CONST_MAP = {
-    "red": "pine_color::red", "green": "pine_color::green",
-    "blue": "pine_color::blue", "white": "pine_color::white",
-    "black": "pine_color::black", "yellow": "pine_color::yellow",
-    "orange": "pine_color::orange", "purple": "pine_color::purple",
-    "aqua": "pine_color::aqua", "gray": "pine_color::gray",
-    "lime": "pine_color::lime", "maroon": "pine_color::maroon",
-    "navy": "pine_color::navy", "olive": "pine_color::olive",
-    "silver": "pine_color::silver", "teal": "pine_color::teal",
-    "fuchsia": "pine_color::fuchsia",
+# One palette for emission and input defaults: (existing C++ symbol, ARGB).
+# Values are the Pine v6 r,g,b,t readouts in tests/fixtures/color_tv/
+# w11-color-v6-eth15, n0/n1/n2. The native receipt test checks them against
+# the engine's own evaluation of these unchanged symbols.
+_COLOR_CONSTANTS = {
+    "red": ("pine_color::red", 0xFFF23645),
+    "green": ("pine_color::green", 0xFF4CAF50),
+    "blue": ("pine_color::blue", 0xFF2962FF),
+    "white": ("pine_color::white", 0xFFFFFFFF),
+    "black": ("pine_color::black", 0xFF363A45),
+    "yellow": ("pine_color::yellow", 0xFFFDD835),
+    "orange": ("pine_color::orange", 0xFFFF9800),
+    "purple": ("pine_color::purple", 0xFF9C27B0),
+    "aqua": ("pine_color::aqua", 0xFF00BCD4),
+    "gray": ("pine_color::gray", 0xFF787B86),
+    "lime": ("pine_color::lime", 0xFF00E676),
+    "maroon": ("pine_color::maroon", 0xFF880E4F),
+    "navy": ("pine_color::navy", 0xFF311B92),
+    "olive": ("pine_color::olive", 0xFF808000),
+    "silver": ("pine_color::silver", 0xFFB2B5BE),
+    "teal": ("pine_color::teal", 0xFF089981),
+    "fuchsia": ("pine_color::fuchsia", 0xFFE040FB),
 }
+# Keep the re-exported C++ dispatch map's string values and order unchanged.
+COLOR_CONST_MAP = {name: cpp for name, (cpp, _) in _COLOR_CONSTANTS.items()}
 
 # dayofweek.* constants — Pine uses 1=Sunday .. 7=Saturday. Unknown member
 # emits "0" (see _visit_member_access dayofweek arm).
