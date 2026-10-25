@@ -125,8 +125,9 @@ def extract_pf_trace_pragmas(source: str, *, filename: str = "<input>",
                   if (match := _PRAGMA_RE.match(raw)) is not None]
     if not candidates:
         return []
-    lexer = _StringSpanLexer(source, filename=filename, budget=budget)
+    lexer = None
     try:
+        lexer = _StringSpanLexer(source, filename=filename, budget=budget)
         lexer.tokenize()
     except CompileError:
         # This lexical pass only finds string spans. The main Lexer run owns
@@ -135,7 +136,7 @@ def extract_pf_trace_pragmas(source: str, *, filename: str = "<input>",
         pass
     pragmas: list[PfTracePragma] = []
     for lineno, m in candidates:
-        if lineno in lexer.string_lines:
+        if lexer is not None and lineno in lexer.string_lines:
             continue
         name = m.group(1)
         expr_source = m.group(2)

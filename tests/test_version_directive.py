@@ -29,12 +29,10 @@ around ``=`` and at the end; TradingView ends a line at ``\\r\\n``, ``\\r`` or
   ``//@version\\r=\\r6``;
 * ``//@version=5`` followed by ``//@version=6`` compiles as v5: the first wins.
 
-Two divergences are PineForge's lexer, not its directive rule, and predate it.
+One divergence is PineForge's lexer, not its directive rule, and predates it.
 The lexer refuses a form feed outside a comment or string, so the probe with
-one before ``//`` reads as v6 and is refused as "Unexpected character". The
-lexer ends a line only at a line feed and runs a comment to it, so text after
-a bare carriage return on a comment line -- the directive's too -- is part of
-the comment, where TradingView reads it as the next line.
+one before ``//`` reads as v6 and is refused as "Unexpected character".
+Code/comment CRLF and CR line endings are normalized to LF before lexing.
 
 PineForge used to search the raw source for ``//@version=N`` anywhere: it
 refused the space and ``=``-spacing spellings (job-2614-andrewwieiw-frosty-alerts
@@ -117,6 +115,19 @@ def test_pineforge_reads_the_directive_as_tradingview_does(probe):
     elif verdict == "v5":
         with pytest.raises(CompileError, match=r"found //@version=5"):
             transpile(_source(probe))
+    elif "\r" in _source(probe):
+        # A CR after // exposes malformed code on the next line (u11/u13).
+        # Its diagnostics must equal LF's, rather than relying on the old
+        # lexer swallowing that code as part of the comment. Keep the
+        # recorded TradingView fixture unchanged.
+        source = _source(probe)
+        lf = source.replace("\r\n", "\n").replace("\r", "\n")
+        assert Parser([], source=source)._extract_version() is None
+        with pytest.raises(CompileError) as expected:
+            transpile(lf)
+        with pytest.raises(CompileError) as actual:
+            transpile(source)
+        assert actual.value.diagnostics == expected.value.diagnostics
     else:
         with pytest.raises(CompileError, match="Missing PineScript version directive"):
             transpile(_source(probe))
@@ -129,7 +140,7 @@ CANONICAL_BODY = _source(_by_name("t07-main-period-canonical")).split("\n", 1)[1
     ("", "\r"),                      # a \r\n line end
     ("", "\r \t"),                   # blanks on TradingView's next line
     ("", "\r// note"),               # a comment there
-    ("", '\rstrategy.close("L")'),   # code there: the lexer's comment runs over it
+    ("", '\rstrategy.close("L")'),   # code on TradingView's next line
     ("// header\r", ""),             # the directive on TradingView's second line
     ('s = """\r', '\r"""'),          # inside a multiline string
 ])

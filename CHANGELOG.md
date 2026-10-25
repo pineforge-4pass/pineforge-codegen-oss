@@ -37,6 +37,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
   falling back to the symbol currency when omitted or `currency.NONE`, and
   support currency-constant comparisons and string concatenation
   ([#227](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/227)).
+- Accept CRLF and lone CR code line endings like LF across the Python and JSON
+  translation entry points, preserving generated C++, diagnostics and literal
+  string contents ([#230](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/230)).
 
 ## 1.7.0 — 2026-10-25
 

@@ -12,6 +12,8 @@ import importlib.util
 import json
 import os
 
+import pytest
+
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _GLUE_PATH = os.path.join(_REPO_ROOT, "gate", "glue.py")
 
@@ -59,3 +61,22 @@ def test_valid_source_carries_its_warnings():
     assert d["ok"] is True
     assert [e for e in d["diagnostics"]
             if e["message"].startswith("ta.vwap anchor")] == []
+
+
+@pytest.mark.parametrize("line_ending", ["\r\n", "\r"], ids=["crlf", "cr"])
+def test_json_glue_line_endings_emit_identical_cpp(line_ending):
+    glue = _load_glue()
+    source = "//@version=6\nstrategy('Newlines')\nplot(close)\n"
+    expected = json.loads(glue.transpile_json(source))
+    assert expected["ok"] is True
+    assert json.loads(glue.transpile_json(source.replace("\n", line_ending))) == expected
+
+
+@pytest.mark.parametrize("line_ending", ["\r\n", "\r"], ids=["crlf", "cr"])
+def test_json_glue_line_endings_preserve_error_diagnostics(line_ending):
+    glue = _load_glue()
+    source = "//@version=6\nstrategy('Newlines')\nx = (1 + )\n"
+    expected = json.loads(glue.transpile_json(source))
+    assert expected["ok"] is False
+    assert [(d["line"], d["col"]) for d in expected["diagnostics"]] == [(3, 10)]
+    assert json.loads(glue.transpile_json(source.replace("\n", line_ending))) == expected
