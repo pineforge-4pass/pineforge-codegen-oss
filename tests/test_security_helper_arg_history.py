@@ -4,6 +4,11 @@ The hourly inputs and arithmetic below are independent of generated output.
 Every helper call in these Pine scripts runs on every requested bar; sparse
 calls and branches around calls are deliberately outside this contract.
 
+_assert_sampled_sites is a SHAPE PIN of design A: a sampled target has
+exactly one push and one update in the evaluator body. Equally correct
+emission that wraps the pair in a helper would fail this pin despite
+identical behaviour. Compatibility/control rows do not call this pin.
+
 Runtime probes reuse the native synthetic-bar harness, including its engine
 skip guard, from test_security_helper_local_var. A skip is not a runtime
 verdict: the supervisor must run these cases with the paired built engine.
@@ -186,7 +191,11 @@ def _assert_completed(rows: list[_Evaluation], expected: list[float]) -> None:
 
 
 def _assert_sampled_sites(cpp: str, count: int) -> None:
-    """Count sampling cells by operations, without prescribing their names.
+    """SHAPE PIN of design A, without prescribing sampling cells' names.
+
+    A sampled target has exactly one push and one update in the evaluator
+    body. Equally correct emission that wraps the pair in a helper would
+    fail this pin despite identical behaviour.
 
     These helpers have no locals or persistent state. TA uses compute /
     recompute; the old completed-field histories only push. A target with
@@ -214,6 +223,16 @@ def test_reporter_uses_requested_sma_and_preserves_na_argument_samples():
     _assert_sampled_sites(cpp, 1)
     # Hourly SMA samples are na,na,6,9,12. Their two-call differences are
     # na,na,na,na,6-12. In contrast the last chart SMA is (14+15+15)/3.
+    samples = _sma(_hourly_closes(), 3)
+    _assert_completed(_run_requested(cpp)["chart15"], _difference(samples))
+
+
+def test_reporter_lookahead_on_uses_completed_requested_bars_only():
+    pine = _REPORTER.replace(
+        "'60', b)", "'60', b, lookahead=barmerge.lookahead_on)"
+    )
+    cpp = transpile(pine)
+    # The oracle and observer comparison both use completed requested bars.
     samples = _sma(_hourly_closes(), 3)
     _assert_completed(_run_requested(cpp)["chart15"], _difference(samples))
 
@@ -343,7 +362,12 @@ def test_same_requested_slot_replaces_provisional_argument_without_extra_history
                 [row.value for row in provisional],
                 [provisional_expected] * len(provisional),
             )
-    assert h4_counts[0] > h4_counts[1] > h4_counts[2] == 1, h4_counts
+    expected_slots = Counter(hour * _HOUR_MS for hour in range(len(_HOURLY_OPENS)))
+    assert all(
+        Counter(row.timestamp for row in rows if row.complete) == expected_slots
+        for rows in evaluations.values()
+    ), evaluations
+    assert h4_counts[0] > h4_counts[1] > h4_counts[2], h4_counts
 
 
 @pytest.mark.parametrize(
