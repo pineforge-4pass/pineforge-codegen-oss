@@ -1658,6 +1658,15 @@ class TopLevelEmitter:
                 safe = self._safe_name(name)
                 runtime_info = self._runtime_scalar_var_init_by_member.get(name)
                 if (runtime_info is not None
+                        and runtime_info.get("statement_ordered_aggregate")):
+                    if runtime_info.get("is_series"):
+                        # The first slot holds na until the declaration
+                        # evaluates the RHS in statement order. Subsequent
+                        # bars retain the existing carry-forward path.
+                        cpp_type = self._type_spec_to_cpp(runtime_info["type_spec"])
+                        lines.append(f"            {safe}.push({cpp_type}{{}});")
+                    continue
+                if (runtime_info is not None
                         and runtime_info.get("drawing_cpp") is not None):
                     if runtime_info.get("is_series"):
                         self._emit_history_series_write(

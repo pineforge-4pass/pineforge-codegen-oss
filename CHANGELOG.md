@@ -22,6 +22,16 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased
 
+- Initialize a persistent (`var`) UDT, array, map or matrix once at its
+  declaration, in statement order, when its initializer reads a value computed
+  earlier in the statement walk: an earlier declaration, reassignment, field
+  write, collection method or global read by a user helper
+  ([#226](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/226)).
+  The first-bar preamble previously read the zero default. Emitted C++ changes
+  only for scripts with such a dependency; independent constructors and
+  callable-local declarations keep their routes. A `varip` declaration with the
+  same dependency still reads the default; that gap is tracked in
+  [#258](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/258).
 - Fix `input.color` metadata so its default round-trips through the native
   input setter ([#231](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/231)).
   Python `transpile_full()` and the Pyodide/glue manifest now report
