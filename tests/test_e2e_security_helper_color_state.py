@@ -178,10 +178,11 @@ def test_na_color_seed_and_reassignment_match_chart_state(tmp_path):
     assert actual == expected
 
 
-def test_color_admission_keeps_epoch_varip_and_collection_state_refused():
-    # Pair each retained boundary with the newly supported family: this test
-    # must also go RED on main, where the color positive control is refused.
+def test_color_helper_var_state_is_accepted():
     transpile(REPORTER)
+
+
+def test_epoch_varip_and_collection_state_remain_refused():
     epoch = (
         HEADER + "h() =>\n"
         "    var int n = 0\n"
@@ -216,5 +217,6 @@ def test_color_admission_keeps_epoch_varip_and_collection_state_refused():
         "    state.size()\n"
         'out = request.security(syminfo.tickerid, "2", f())\n'
     )
-    with pytest.raises(CompileError, match="supports only int, float, bool and string values"):
+    with pytest.raises(CompileError, match="supports only int, float, bool and string values") as caught:
         transpile(collection)
+    assert any(d.code == "PF-E3093" for d in caught.value.diagnostics)
