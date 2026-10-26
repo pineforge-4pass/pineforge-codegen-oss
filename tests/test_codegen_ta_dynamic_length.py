@@ -31,7 +31,7 @@ from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests._e2e import reference_codegen, transpile_json
-from tests._legacy_cpp import without_trade_history_policy
+from tests._legacy_cpp import without_restore_script_state, without_trade_history_policy
 
 
 # Accepted scaffold for whole-C++ noninterference only; historical semantic
@@ -388,7 +388,10 @@ def test_constant_and_input_lengths_keep_their_cpp(tmp_path: Path) -> None:
     ours = transpile_json(pine)
     before = transpile_json(pine, parent)
     assert ours["ok"] and before["ok"]
-    assert without_trade_history_policy(ours["cpp"]) == without_trade_history_policy(
-        before["cpp"]
-    )
+
+    # The rollback hook leaves requested-evaluation state alone since the
+    # fill-restore fix; everything else must stay identical.
+    assert without_restore_script_state(
+        without_trade_history_policy(ours["cpp"])
+    ) == without_restore_script_state(without_trade_history_policy(before["cpp"]))
     assert "pine_ta_length.hpp" not in ours["cpp"]

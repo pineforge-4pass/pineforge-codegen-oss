@@ -25,9 +25,13 @@ supported as exact pairs; on the 0.x line they are independent. See the
 Planned as 1.8.0, a minor release of the exact engine/codegen pair, paired with
 engine `v1.8.0`. This entry records what changed in this repository since
 1.7.0 and nothing else: four pull requests merged after `v1.7.0`, three
-behaviour changes and one CHANGELOG-only change. The three behaviour changes
-alter the published input manifest, the emitted C++ for scripts that read
-`strategy.account_currency`, and the accepted input (line endings).
+behaviour changes and one CHANGELOG-only change, plus five fixes that ship in
+the same release. The behaviour changes alter the published input manifest, the
+emitted C++ for scripts that read `strategy.account_currency`, for scripts with
+a persistent declaration whose initializer depends on earlier statements, for
+scripts with a helper-local `var color` or a `request.security` rollback hook,
+and the accepted input (line endings, one-line field assignments, an unevaluated
+`request.currency_rate`).
 
 ### Compatibility and migration
 
@@ -48,16 +52,82 @@ alter the published input manifest, the emitted C++ for scripts that read
   emitted C++, the native setters and receipts, and the C ABI are unchanged.
   `pineforge-hpo` accepts color inputs from its 1.8.0 release (a packed integer
   in `0..4294967295`, booleans refused).
-- The emitted C++ is intended to change only for scripts that read
-  `strategy.account_currency` (below); the other changes do not touch code
-  generation for existing inputs. This is the design intent of the pull
-  requests and their tests, not a byte comparison of generated C++ against
-  1.7.0. The diagnostic codes and the catalog schema are not changed.
+- The emitted C++ is intended to change only for the scripts the entries below
+  name: those that read `strategy.account_currency`, whose persistent
+  declarations depend on earlier statements, with a helper-local `var color`,
+  with a helper that reads the history of a derived argument, or with a
+  `request.security` (for the late-restore change alone, only the
+  generated `restore_script_state()` changes, in 72 of the 555 corpus and
+  fixture scripts; the other entries change the scripts they name). This is
+  the design intent of the pull requests and their tests, not a byte
+  comparison of generated C++ against 1.7.0. Nine diagnostic codes are added
+  (`PF-E3093`, the refusal for a helper-local `var` of an unsupported type, and
+  `PF-E3094` through `PF-E3101`, the refusals of a derived helper-argument
+  history) and
+  the user-facing text of `PF-E1088` and `PF-W1088` is reworded; the catalog
+  schema is not changed.
 - Engine behavior changes are described in the paired engine's own release
   notes; this entry does not summarize them.
 
 ### Changes since 1.7.0
 
+- Fix a silent wrong value under `calc_on_order_fills`: a fill recalculation
+  that ran after a deferred `request.security` evaluation (for example a late
+  margin-call liquidation) restored the strategy checkpoint taken before that
+  evaluation and rolled the requested context's own state back (helper-local
+  `var` series, requested TA objects, OHLC and expression histories, mutable
+  copies and bar-index clocks), while the engine's requested aggregators had
+  already advanced. The generated `restore_script_state()` now leaves that
+  requested progression alone and still restores the chart's state and the
+  merged request results; payloads that keep user calls on the chart's bar
+  (the chart-fallback warning) keep their old rollback, and so do the shared
+  helper-local `var` series of a script that has such a payload, so the
+  late-restore loss is fixed for every script without that warning and not
+  for the helper-local state of a script that has it. The emitted C++ changes
+  only in that one function; no engine change or ABI change is involved.
+- Initialize a persistent (`var`) UDT, array, map or matrix once at its
+  declaration, in statement order, when its initializer reads a value computed
+  earlier in the statement walk: an earlier declaration, reassignment, field
+  write, collection method or global read by a user helper
+  ([#226](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/226)).
+  The first-bar preamble previously read the zero default. Emitted C++ changes
+  only for scripts with such a dependency; independent constructors and
+  callable-local declarations keep their routes. A `varip` declaration with the
+  same dependency still reads the default; that gap is tracked in
+  [#258](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/258).
+- Raise currency-conversion errors only when `request.currency_rate` is
+  evaluated, not when the call merely appears in a branch that never runs
+  ([#228](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/228)).
+  No currency-rate data feed is added: an evaluated call stops the run with a
+  no-data error. Only the diagnostic text of scripts that previously failed to
+  translate changes, and the wording of one warning; a call that names its second argument `to = ...` still
+  does not parse, as before.
+- Support explicit and inferred helper-local `var color` state in
+  `request.security`, preserving persistence, transparency and `na`
+  ([#229](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/229)).
+  The epoch-width integer and the collection, object and drawing refusals are
+  unchanged; the refusal for any other unsupported helper-local `var` type has
+  the new code `PF-E3093`.
+- Sample the history of a derived helper argument on the requested context's
+  own bars in `request.security`: a helper such as `f(x) => x[1]` called as
+  `f(close - open)` now reads the previous value of the argument on the
+  requested bars, not the chart's bars
+  ([#229](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/229)).
+  The argument is sampled through one ring per call site, which the
+  late-restore rule above leaves alone with the rest of the requested state.
+  Shapes that cannot be sampled are refused with located errors, `PF-E3094`
+  through `PF-E3101`: a derived history offset that is not a non-negative
+  constant integer, a ring capacity that is not representable, a call that is
+  not unconditional, a helper that depends on other helpers' state, history
+  composed with helper-result history, a mutable global that cannot be
+  replayed, and a parameter whose type or width has no lossless history.
+  Direct OHLC and time bindings, builtin forms and method envelopes keep their
+  existing lowering.
+- Accept a UDT field assignment (`:=`, `+=`, ...) as the body of a one-line
+  function or method, `set(State s) => s.value := 1`, translating like the same
+  body on its own indented line
+  ([#230](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/230)).
+  A plain-name or subscript target in a one-line body keeps its parser error.
 - Fix `input.color` metadata so its default round-trips through the native
   input setter ([#231](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/231),
   [#251](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/251)).
