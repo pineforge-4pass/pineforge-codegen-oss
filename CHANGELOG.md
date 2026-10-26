@@ -93,8 +93,9 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
   The first-bar preamble previously read the zero default. Emitted C++ changes
   only for scripts with such a dependency; independent constructors and
   callable-local declarations keep their routes. A `varip` declaration with the
-  same dependency still reads the default; that gap is tracked in
-  [#258](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/258).
+  same dependency takes the same route, with its storage and once flag left out
+  of the `calc_on_order_fills` rollback checkpoint
+  ([#258](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/258)).
 - Raise currency-conversion errors only when `request.currency_rate` is
   evaluated, not when the call merely appears in a branch that never runs
   ([#228](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/228)).

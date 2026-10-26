@@ -348,8 +348,8 @@ through a user helper, or through another declaration-site `var`) runs at its
 declaration under the existing once flag. An earlier reassignment or collection
 mutation also requires that route. A history-read UDT opens its first slot with
 the typed na handle, then updates that slot at the declaration. Independent
-constructors and preamble-safe aliases retain their emission; `varip` and
-callable-local initialization keep their existing paths.
+constructors and preamble-safe aliases retain their emission; `varip` takes it
+too, and callable-local initialization keeps its existing path.
 `tests/test_var_initializer_statement_order.py` pins the order, trades and
 persistence against paired script controls.
 
