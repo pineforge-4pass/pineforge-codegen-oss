@@ -625,6 +625,13 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._dead_fixnan_indices: set[int] = set()
         self._switch_counter = 0
         self._security_inline_counter = 0
+        # Codegen-only requested argument-history plans. Inner values are
+        # frozen records, so speculative evaluator restore is two levels deep.
+        self._security_arg_inventory: dict[int, dict] = {}
+        self._security_arg_histories: dict[int, dict] = {}
+        self._security_arg_history_sec: int | None = None
+        self._security_arg_history_discovering = False
+        self._security_arg_call_values: dict[tuple, str] = {}
         self._random_call_counter = 0
         self._for_counter = 0
         self._tuple_assign_counter = 0
@@ -4902,6 +4909,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for item in self._security_calls:
             sec_id = item["sec_id"]
             expr_node = item["expr_node"]
+            self._security_arg_inventory[sec_id] = self._security_argument_inventory(item)
+            self._security_arg_history_sec = sec_id
+            self._security_arg_history_discovering = True
             self._validate_security_persistent_var_control_flow(expr_node)
             returns_tuple = item.get("returns_tuple", False)
             tuple_size = item.get("tuple_size", 0)
@@ -5005,11 +5015,18 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             for name in self._security_ta_hist_series_names(sec_id):
                 lines.append(f"    Series<double> {name}{_mbb};")
             self._emit_security_expr_hist_members(sec_id, expr_node, lines, _mbb)
+            # Inside the declaration-derived snapshot/reset inventory. A new
+            # run reuses the explicit constructor capacity, never Series' 500.
+            for cell in self._security_arg_histories.get(sec_id, {}).values():
+                lines.append(f"    Series<double> {cell.member}{{{cell.capacity}}};")
+            self._security_arg_history_discovering = False
             if item.get("foreign"):
                 # configure_security_evaluators() clears it when the site is
                 # registered: its reads stop the run while it is set.
                 lines.append(f"    bool _pf_sec_missing_{sec_id} = true;")
 
+        self._security_arg_history_sec = None
+        self._security_arg_history_discovering = False
         # A recorded request's missing-data flag, set where it is evaluated.
         for n in range(len(self._recorded_sites())):
             lines.append(f"    bool _pf_rec_missing_{n} = true;")

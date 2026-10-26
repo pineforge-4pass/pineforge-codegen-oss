@@ -65,7 +65,7 @@ tables and types come from ``codegen/tables.py``, ``..ast_nodes``,
 from __future__ import annotations
 
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, BreakStmt, ColorLiteral, ContinueStmt, ExprStmt,
@@ -165,12 +165,37 @@ class _SecurityHelperArgumentFrame(dict):
     """
 
     def __init__(self, values: dict, caller_stack: tuple[dict, ...],
-                 method: bool = False) -> None:
+                 method: bool = False, call: FuncCall | None = None) -> None:
         super().__init__(values)
         self.caller_stack = caller_stack
+        self.call = call
+        # Runtime metadata only: the dict's values remain the authored ASTs,
+        # which key TA discovery and binding signatures.
+        self.samples: dict[str, _SecurityArgumentSample] = {}
         # Bound by a typed method call, which every earlier build called on
         # the chart (``_security_info_without_methods``).
         self.method = method
+
+
+@dataclass(frozen=True)
+class _SecurityArgumentHistory:
+    parameter: str
+    argument: ASTNode
+    caller_stack: tuple
+    member: str
+    capacity: int
+
+
+@dataclass(frozen=True)
+class _SecurityArgumentHistoryRead:
+    member: str
+    offset: int
+
+
+@dataclass(frozen=True)
+class _SecurityArgumentSample:
+    current: str
+    member: str
 
 
 class SecurityEmitter:
@@ -1687,19 +1712,22 @@ class SecurityEmitter:
         bound,
         local_index,
         source_node,
-    ) -> Subscript:
+        helper_binding_stack=(),
+    ) -> Subscript | _SecurityArgumentHistoryRead:
         """Apply helper-local history to a supported bound bar series.
 
-        The security runtime currently has native requested-context history
-        storage only for direct OHLC/time bar fields.  Keep that support fence
-        explicit instead of emitting a C++ subscript on a scalar expression
-        for bindings such as ``hl2`` or ``ta.ema(...)``.
+        Keep the established direct-field path first. Only a call at an
+        inventoried position may use a newly sampled argument instead.
         """
         if isinstance(bound, Subscript):
             if not (
                 isinstance(bound.object, Identifier)
                 and self._security_bar_history_field(bound.object) is not None
             ):
+                sampled = self._security_derived_argument_history(
+                    bound, source_node, helper_binding_stack)
+                if sampled is not None:
+                    return sampled
                 self._codegen_error(
                     source_node,
                     "request.security helper-parameter history currently requires "
@@ -1721,11 +1749,475 @@ class SecurityEmitter:
             and self._security_bar_history_field(bound) is not None
         ):
             return Subscript(object=bound, index=local_index)
+        sampled = self._security_derived_argument_history(
+            bound, source_node, helper_binding_stack)
+        if sampled is not None:
+            return sampled
         self._codegen_error(
             source_node,
             "request.security helper-parameter history currently requires "
             "a direct OHLC/time bar-series binding",
         )
+
+    def _security_argument_inventory(self, item: dict) -> dict:
+        """Helper calls reached from the payload root through arithmetic,
+        comparison and parentheses only, without mutating helper/TA inventories.
+
+        A shared definition also reached outside those positions stays on the old
+        path: node identity cannot distinguish those two evaluation edges.
+        """
+        if (item.get("foreign") or item.get("heikinashi")
+                or item.get("is_lower_tf_array")
+                or not isinstance(item.get("tf_node"), StringLiteral)):
+            return {}
+        candidates, outside, seen = {}, set(), set()
+        globals_ = getattr(self.ctx, "global_expr_map", {}) or {}
+        nested_request = False
+
+        def walk(node, inventory: bool, result_history: bool = False) -> None:
+            nonlocal nested_request
+            if not isinstance(node, ASTNode):
+                if isinstance(node, (list, tuple)):
+                    for child in node:
+                        walk(child, False)
+                elif isinstance(node, dict):
+                    for child in node.values():
+                        walk(child, False)
+                return
+            key = (id(node), inventory, result_history)
+            if key in seen:
+                return
+            seen.add(key)
+            if (isinstance(node, FuncCall)
+                    and self._resolve_callee(node.callee)[1] == "request"):
+                nested_request = True
+            if isinstance(node, Identifier):
+                if (self._security_identifier_is_global_binding(node)
+                        and node.name not in self._global_mutable_infos
+                        and node.name in globals_):
+                    walk(globals_[node.name], inventory, result_history)
+                return
+            if isinstance(node, BinOp) and node.op in (
+                "+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=",
+            ):
+                walk(node.left, inventory, result_history)
+                walk(node.right, inventory, result_history)
+                return
+            if isinstance(node, UnaryOp) and node.op in ("+", "-"):
+                walk(node.operand, inventory, result_history)
+                return
+            if isinstance(node, Subscript):
+                # A root result-history spelling is inventoried for a
+                # located refusal only; it is never admitted for sampling.
+                walk(node.object, inventory, True)
+                walk(node.index, False)
+                return
+            if (isinstance(node, FuncCall) and isinstance(node.callee, Identifier)
+                    and node.callee.name in self._func_names):
+                if inventory:
+                    previous = candidates.get(id(node))
+                    candidates[id(node)] = (
+                        node, result_history or bool(previous and previous[1]))
+                else:
+                    outside.add(id(node))
+                info = self._func_info_map.get(node.callee.name)
+                if info is not None and info.node is not None:
+                    walk(info.node.body, False)
+            # Every other edge leaves those positions: builtin/method arguments,
+            # receivers, lazy operands, selections, statements and bodies.
+            for name, value in vars(node).items():
+                if name != "annotations":
+                    walk(value, False)
+
+        walk(item.get("expr_node"), True)
+        if nested_request:
+            return {}
+        return {key: value for key, value in candidates.items() if key not in outside}
+
+    def _security_argument_call_is_conditional(self, root, target) -> bool:
+        """A nested call reached through a branch, loop or once initializer."""
+        seen = set()
+
+        def walk(node, conditional=False):
+            if isinstance(node, dict):
+                return any(walk(child, conditional) for child in node.values())
+            if isinstance(node, (list, tuple)):
+                return any(walk(child, conditional) for child in node)
+            if not isinstance(node, ASTNode):
+                return False
+            key = (id(node), conditional)
+            if key in seen:
+                return False
+            seen.add(key)
+            if self._budget is not None:
+                self._budget.check(node.loc, Phase.CODEGEN)
+            if node is target:
+                return conditional
+            conditional = conditional or isinstance(
+                node, (IfStmt, SwitchStmt, ForStmt, ForInStmt, WhileStmt, Ternary)
+            ) or (isinstance(node, BinOp) and node.op in ("and", "or")) or (
+                isinstance(node, VarDecl) and node.is_var)
+            if isinstance(node, FuncCall) and isinstance(node.callee, Identifier):
+                info = self._func_info_map.get(node.callee.name)
+                if info is not None and info.node is not None:
+                    if walk(info.node.body, conditional):
+                        return True
+            return any(walk(value, conditional) for name, value in vars(node).items()
+                       if name != "annotations")
+
+        info = self._func_info_map.get(root.callee.name)
+        return info is not None and info.node is not None and walk(info.node.body)
+
+    def _security_argument_producers(self, node, bindings=(), seen=None):
+        """The argument's lexical producers, including global replay sources."""
+        if seen is None:
+            seen = set()
+        if not isinstance(node, ASTNode) or id(node) in seen:
+            return
+        seen.add(id(node))
+        yield node
+        if isinstance(node, Identifier):
+            binding = None if self._security_identifier_is_global_binding(node) else (
+                self._security_lookup_helper_binding_context(node.name, bindings))
+            if binding is not None and isinstance(binding[0], ASTNode):
+                yield from self._security_argument_producers(binding[0], binding[1], seen)
+            elif self._security_identifier_is_global_binding(node):
+                info = self._global_mutable_infos.get(node.name)
+                if info is not None:
+                    for stmt in info.source_stmts or []:
+                        yield from self._security_argument_producers(stmt, (), seen)
+                else:
+                    value = (getattr(self.ctx, "global_expr_map", {}) or {}).get(node.name)
+                    yield from self._security_argument_producers(value, (), seen)
+            return
+        if isinstance(node, FuncCall) and isinstance(node.callee, Identifier):
+            info = self._func_info_map.get(node.callee.name)
+            if info is not None and info.node is not None:
+                plan = self._security_helper_call_plan(node, bindings)
+                for stmt in (*plan["body"], plan["expr"]):
+                    yield from self._security_argument_producers(
+                        stmt, plan["binding_stack"], seen)
+        for name, value in vars(node).items():
+            if name == "annotations":
+                continue
+            children = value.values() if isinstance(value, dict) else (
+                value if isinstance(value, (list, tuple)) else (value,))
+            for child in children:
+                yield from self._security_argument_producers(child, bindings, seen)
+
+    def _security_argument_has_conditional_producer(self, node, bindings=()):
+        """Pure selections are values; conditional TA/helper state is excluded."""
+        seen = set()
+
+        def walk(n, stack, conditional=False):
+            if isinstance(n, dict):
+                return any(walk(child, stack, conditional) for child in n.values())
+            if isinstance(n, (list, tuple)):
+                return any(walk(child, stack, conditional) for child in n)
+            if not isinstance(n, ASTNode):
+                return False
+            key = (id(n), conditional, self._security_binding_stack_signature(stack))
+            if key in seen:
+                return False
+            seen.add(key)
+            if self._budget is not None:
+                self._budget.check(n.loc, Phase.CODEGEN)
+            if isinstance(n, Identifier):
+                binding = None if self._security_identifier_is_global_binding(n) else (
+                    self._security_lookup_helper_binding_context(n.name, stack))
+                if binding is not None and isinstance(binding[0], ASTNode):
+                    return walk(binding[0], binding[1], conditional)
+                if (self._security_identifier_is_global_binding(n)
+                        and n.name not in self._global_mutable_infos):
+                    value = (getattr(self.ctx, "global_expr_map", {}) or {}).get(n.name)
+                    return walk(value, (), conditional)
+                return False
+            if conditional and self._get_ta_site(n) is not None:
+                return True
+            if (isinstance(n, FuncCall) and isinstance(n.callee, Identifier)
+                    and n.callee.name in self._func_names):
+                plan = self._security_helper_call_plan(n, stack)
+                if conditional and plan["mode"] != "expr":
+                    return True
+                if walk((*plan["body"], plan["expr"]), plan["binding_stack"], conditional):
+                    return True
+            conditional = conditional or isinstance(
+                n, (Ternary, IfStmt, SwitchStmt, ForStmt, ForInStmt, WhileStmt)
+            ) or (isinstance(n, BinOp) and n.op in ("and", "or")) or (
+                isinstance(n, VarDecl) and n.is_var)
+            return any(walk(value, stack, conditional)
+                       for name, value in vars(n).items() if name != "annotations")
+
+        return walk(node, bindings)
+
+    def _security_argument_value_type(self, node, bindings=(), depth=0):
+        """Scalar family before C++'s generic operator inference loses ints."""
+        if depth > 64 or node is None:
+            return None
+        if isinstance(node, Identifier):
+            binding = None if self._security_identifier_is_global_binding(node) else (
+                self._security_lookup_helper_binding_context(node.name, bindings))
+            if binding is not None and isinstance(binding[0], ASTNode):
+                return self._security_argument_value_type(binding[0], binding[1], depth + 1)
+            if (self._security_identifier_is_global_binding(node)
+                    and node.name not in self._global_mutable_infos
+                    and node.name not in self._input_backed_vars):
+                value = (getattr(self.ctx, "global_expr_map", {}) or {}).get(node.name)
+                if value is not None:
+                    return self._security_argument_value_type(value, (), depth + 1)
+        if isinstance(node, BinOp):
+            if node.op in ("==", "!=", "<", ">", "<=", ">=", "and", "or"):
+                return "bool"
+            left = self._security_argument_value_type(node.left, bindings, depth + 1)
+            right = self._security_argument_value_type(node.right, bindings, depth + 1)
+            if "std::string" in (left, right):
+                return "std::string"
+            if node.op != "/" and left in ("int", "int64_t") and right in ("int", "int64_t"):
+                return "int64_t"
+            return "double" if {left, right} <= {"double", "int", "int64_t"} else None
+        if isinstance(node, UnaryOp):
+            return ("bool" if node.op == "not" else
+                    self._security_argument_value_type(node.operand, bindings, depth + 1))
+        if isinstance(node, Ternary):
+            arms = {self._security_argument_value_type(arm, bindings, depth + 1)
+                    for arm in (node.true_val, node.false_val)}
+            if arms <= {"int", "int64_t"}:
+                return "int64_t"
+            if arms <= {"double", "int", "int64_t"}:
+                return "double"
+            return next(iter(arms)) if len(arms) == 1 else None
+        if (isinstance(node, FuncCall) and isinstance(node.callee, Identifier)
+                and node.callee.name in self._func_names):
+            plan = self._security_helper_call_plan(node, bindings)
+            if plan["mode"] == "expr":
+                return self._security_argument_value_type(
+                    plan["expr"], plan["binding_stack"], depth + 1)
+        return self._infer_type(node)
+
+    def _security_derived_argument_history(self, bound, read, bindings):
+        """Shared admission/refusal at BOTH composer callers and in BOTH modes.
+
+        Only an old composer error reaches here. Outside the position
+        inventory return None, leaving its exact PF-E3011 with its caller.
+        Plans are replaced as frozen values during declaration discovery;
+        evaluator emission only reads them (snapshot/restore is two deep).
+        """
+        sec_id = getattr(self, "_security_arg_history_sec", None)
+        inventory = getattr(self, "_security_arg_inventory", {}).get(sec_id, {})
+        owner = next((frame for frame in reversed(bindings or ())
+                      if read.object.name in frame), None)
+        if not isinstance(owner, _SecurityHelperArgumentFrame) or owner.call is None:
+            return None
+        info = self._func_info_map[owner.call.callee.name]
+        if read.object.name not in self.ctx.func_series_vars.get(info.name, ()):
+            return None
+        frames = [frame for frame in bindings or ()
+                  if isinstance(frame, _SecurityHelperArgumentFrame)]
+        roots = [frame for frame in frames if id(frame.call) in inventory]
+        if not roots or any(frame.method for frame in frames):
+            return None
+        root = roots[0]
+        # Feed and nested-request boundaries retain the old refusal.
+        producers = tuple(self._security_argument_producers(bound, owner.caller_stack))
+        if any(isinstance(n, FuncCall)
+               and self._resolve_callee(n.callee)[1] == "request" for n in producers):
+            return None
+        offset = self._resolve_security_index_literal(read.index, bindings)
+        index_nodes = tuple(self._security_argument_producers(read.index, bindings))
+        if any(isinstance(n, Identifier)
+               and self._security_identifier_is_global_binding(n)
+               and (n.name in self._input_backed_vars
+                    or n.name in self._global_mutable_infos) for n in index_nodes):
+            offset = None
+        # Invalid literal offsets keep their existing refusal, including its
+        # wording/code, rather than becoming a new support restriction.
+        if (offset is not None and offset < 0) or (
+                isinstance(read.index, NumberLiteral)
+                and self._literal_int_for_security_index(read.index) is None):
+            return None
+        if offset is None:
+            self._codegen_error(
+                read,
+                "request.security helper-parameter history currently requires "
+                "a direct OHLC/time bar-series binding; derived helper-parameter "
+                "history requires a non-negative constant integer offset",
+            )
+        capacity = max(offset + 1, self._max_bars_back_cap or 0)
+        # Series takes an int, then converts it to size_t. Never wrap/clamp.
+        if not 1 <= capacity <= 2147483647:
+            self._codegen_error(
+                read,
+                "derived helper-parameter history capacity is not representable "
+                "by the requested argument-history store",
+            )
+        if (self._security_argument_call_is_conditional(root.call, owner.call)
+                or self._security_argument_has_conditional_producer(bound, owner.caller_stack)):
+            self._codegen_error(
+                read,
+                "derived helper-parameter history requires an unconditional "
+                "call outside branches and loops",
+            )
+        body = info.node.body
+        parameter = read.object.name
+        consumes_in_ta = self._security_argument_body_needs_dependencies(body, {parameter})
+        nested_history = any(
+            isinstance(n, FuncCall) and isinstance(n.callee, Identifier)
+            and n.callee.name in self._func_info_map
+            and set(self._func_info_map[n.callee.name].node.params).intersection(
+                self.ctx.func_series_vars.get(n.callee.name, ()))
+            for n in producers)
+        if (owner is not root or len(body) != 1 or not isinstance(body[0], ExprStmt)
+                or consumes_in_ta or nested_history):
+            self._codegen_error(
+                read,
+                "derived helper-parameter history requires dependency-aware "
+                "helper evaluation for this body",
+            )
+        if inventory[id(root.call)][1]:
+            self._codegen_error(
+                read,
+                "composing derived helper-parameter and helper-result history "
+                "is not yet supported",
+            )
+        top_level = self.ctx.ast.body
+        top_level_ids = {id(stmt) for stmt in top_level}
+        request_expr = next(
+            (item["expr_node"] for item in self._security_calls
+             if item["sec_id"] == sec_id), None)
+        request_stmt = next(
+            (stmt for stmt in top_level if request_expr is not None
+             and id(request_expr) in self._security_subtree_ids(stmt)), None)
+        request_loc = getattr(request_stmt, "loc", None)
+        for n in producers:
+            if not (isinstance(n, Identifier)
+                    and self._security_identifier_is_global_binding(n)
+                    and n.name in self._global_mutable_infos):
+                continue
+            mutable = self._global_mutable_infos[n.name]
+            writes = [stmt for stmt in mutable.source_stmts or []
+                      if isinstance(stmt, Assignment)
+                      and self._get_target_name(stmt.target) == n.name]
+            # Only an unconditional full overwrite independent of prior state
+            # before this request's containing statement is replayable.
+            # Identity proves top-level membership; locations prove order.
+            if (not writes or request_loc is None
+                    or any(
+                        id(stmt) not in top_level_ids or stmt.loc is None
+                        or (stmt.loc.line, stmt.loc.col)
+                        >= (request_loc.line, request_loc.col)
+                        for stmt in writes)
+                    or any(
+                        self._security_rebinding_reads_itself(
+                            n.name, stmt, getattr(self.ctx, "global_expr_map", {}) or {})
+                        for stmt in writes)
+                    or any(isinstance(stmt, (IfStmt, ForStmt, ForInStmt, WhileStmt))
+                           for stmt in mutable.source_stmts or [])):
+                self._codegen_error(
+                    read,
+                    "derived helper-parameter history cannot replay this mutable "
+                    "global on requested-bar recomputation",
+                )
+        cpp_type = self._security_argument_value_type(bound, owner.caller_stack)
+        if cpp_type not in ("double", "int", "int64_t"):
+            self._codegen_error(
+                read,
+                "derived helper-parameter history currently supports numeric "
+                "scalar arguments only",
+            )
+        if cpp_type in ("int", "int64_t") and not (
+                isinstance(bound, NumberLiteral) and abs(bound.value) <= 2**53):
+            self._codegen_error(
+                read,
+                "this parameter type or width has no lossless requested "
+                "argument-history store",
+            )
+        # Legacy retry retains all located refusals above. A newly admitted
+        # value may never silently succeed on the chart after requested
+        # lowering failed; its old composer error remains the fallback.
+        if not self._security_requested_calls and not self._security_arg_history_discovering:
+            return None
+        plans = self._security_arg_histories.setdefault(sec_id, {})
+        key = (id(owner.call), parameter)
+        cell = plans.get(key)
+        if cell is None:
+            if not self._security_arg_history_discovering:
+                return None
+            cell = _SecurityArgumentHistory(
+                parameter, bound, owner.caller_stack,
+                f"_sec{sec_id}_arg_hist_{len(plans)}", capacity)
+            plans[key] = cell
+        elif capacity > cell.capacity:
+            if not self._security_arg_history_discovering:
+                return None
+            cell = plans[key] = replace(cell, capacity=capacity)
+        return _SecurityArgumentHistoryRead(cell.member, offset)
+
+    def _security_argument_body_needs_dependencies(self, body, sampled, visiting=()):
+        """TA/nested-history inputs that depend on a newly sampled parameter.
+
+        Propagate that dependency through helper parameters and local values;
+        never replace the lexical AST frame used by TA registration.
+        """
+        def reads(node, names):
+            if not isinstance(node, ASTNode):
+                return False
+            return any(isinstance(n, Identifier) and n.name in names
+                       and not self._security_identifier_is_global_binding(n)
+                       for n, _depth in iter_ast_nodes(node))
+
+        def walk(node, names):
+            if isinstance(node, dict):
+                return any(walk(child, names) for child in node.values())
+            if isinstance(node, (list, tuple)):
+                local = set(names)
+                for child in node:
+                    if walk(child, local):
+                        return True
+                    if isinstance(child, VarDecl):
+                        if reads(child.value, local):
+                            local.add(child.name)
+                        else:
+                            local.discard(child.name)
+                    elif isinstance(child, Assignment):
+                        name = self._get_target_name(child.target)
+                        if reads(child.value, local):
+                            local.add(name)
+                return False
+            if not isinstance(node, ASTNode):
+                return False
+            if self._get_ta_site(node) is not None and reads(node, names):
+                return True
+            if isinstance(node, FuncCall) and isinstance(node.callee, Identifier):
+                info = self._func_info_map.get(node.callee.name)
+                if info is not None and info.node is not None and info.name not in visiting:
+                    args = {
+                        param: node.args[index] if index < len(node.args)
+                        else node.kwargs.get(param)
+                        for index, param in enumerate(info.node.params)
+                    }
+                    dependent = {param for param, arg in args.items() if reads(arg, names)}
+                    if dependent.intersection(self.ctx.func_series_vars.get(info.name, ())):
+                        return True
+                    if dependent and self._security_argument_body_needs_dependencies(
+                            info.node.body, dependent, (*visiting, info.name)):
+                        return True
+            return any(walk(value, names) for key, value in vars(node).items()
+                       if key != "annotations")
+
+        return walk(body, sampled)
+
+    @staticmethod
+    def _security_sampled_argument(name, bindings):
+        """A runtime value/history pair, separate from lexical AST lookup."""
+        for frame in reversed(bindings or ()):
+            if name not in frame:
+                continue
+            bound = frame[name]
+            if isinstance(bound, Identifier) and bound.name == name:
+                continue
+            return (frame.samples.get(name)
+                    if isinstance(frame, _SecurityHelperArgumentFrame) else None)
+        return None
 
     def _collect_security_ohlc_hist_fields(
         self,
@@ -1805,14 +2297,14 @@ class SecurityEmitter:
                             # (``__pf_security_index_``): a dynamic read of the
                             # bound series, never resolved in the caller's.
                             local_index = Identifier(name="__pf_security_index_dynamic")
-                        walk(
-                            self._compose_security_helper_history_subscript(
-                                bound,
-                                local_index,
-                                n,
-                            ),
-                            bound_stack,
-                        )
+                        composed = self._compose_security_helper_history_subscript(
+                            bound, local_index, n, bindings)
+                        if isinstance(composed, _SecurityArgumentHistoryRead):
+                            # Sampling still reads all the argument's own
+                            # dependencies on the requested bar.
+                            walk(bound, bound_stack)
+                        else:
+                            walk(composed, bound_stack)
                     return
                 field = self._security_bar_history_field(n.object)
                 if field is not None:
@@ -3027,6 +3519,26 @@ class SecurityEmitter:
                 self._matrix_specs,
             ) = saved
 
+    def _emit_security_series_value(
+        self, sec_id, ref, expr_cpp, pad, lines, *, single_push=False,
+    ) -> None:
+        """The helper-local requested-slot protocol, shared by argument cells.
+
+        Preserve the shipped spelling for existing locals. A new argument
+        uses one push branch so its once-only sample is explicit in the TU.
+        """
+        if single_push:
+            lines.append(
+                f'{pad}if ({ref}.size() == 0 || security_series_slot_is_new({sec_id})) {{')
+        else:
+            lines.append(f'{pad}if ({ref}.size() == 0) {{')
+            lines.append(f'{pad}    {ref}.push({expr_cpp});')
+            lines.append(f'{pad}}} else if (security_series_slot_is_new({sec_id})) {{')
+        lines.append(f'{pad}    {ref}.push({expr_cpp});')
+        lines.append(f'{pad}}} else {{')
+        lines.append(f'{pad}    {ref}.update({expr_cpp});')
+        lines.append(f'{pad}}}')
+
     def _emit_security_linear_helper_call_scoped(
         self,
         sec_id: int,
@@ -3052,13 +3564,7 @@ class SecurityEmitter:
             """One requested bar's value of a helper local read with history:
             pushed on a new requested bar, rewritten on a recomputation."""
             ref = self._security_helper_series_ref(series_name)
-            lines.append(f'{pad}if ({ref}.size() == 0) {{')
-            lines.append(f'{pad}    {ref}.push({expr_cpp});')
-            lines.append(f'{pad}}} else if (security_series_slot_is_new({sec_id})) {{')
-            lines.append(f'{pad}    {ref}.push({expr_cpp});')
-            lines.append(f'{pad}}} else {{')
-            lines.append(f'{pad}    {ref}.update({expr_cpp});')
-            lines.append(f'{pad}}}')
+            self._emit_security_series_value(sec_id, ref, expr_cpp, pad, lines)
 
         def emit_stmt(stmt: ASTNode, active_bindings: dict[str, str], indent: int) -> None:
             pad = "    " * indent
@@ -3951,6 +4457,7 @@ class SecurityEmitter:
                 for idx, param_name in enumerate(params)
             },
             base_stack,
+            call=node,
         )
         return fi, base_stack + (new_frame,)
 
@@ -6019,9 +6526,15 @@ class SecurityEmitter:
         self._security_global_hist_pushes = pushes = []
         # This evaluator's global history reads lowered as doubles.
         self._security_double_hist_nodes = set()
+        outer_arg_sec = self._security_arg_history_sec
+        outer_arg_values = self._security_arg_call_values
+        self._security_arg_history_sec = item["sec_id"]
+        self._security_arg_call_values = {}
         try:
             self._emit_security_evaluator_body(item, lines)
         finally:
+            self._security_arg_history_sec = outer_arg_sec
+            self._security_arg_call_values = outer_arg_values
             (self._security_shared_calls, self._security_shared_definitions,
              self._security_shared_globals, self._security_global_hist_pushes,
              self._security_double_hist_nodes) = outer
@@ -6490,6 +7003,9 @@ class SecurityEmitter:
             helper_binding_stack = ()
 
         if isinstance(expr_node, Identifier):
+            sample = self._security_sampled_argument(expr_node.name, helper_binding_stack)
+            if sample is not None:
+                return sample.current
             raw_cpp = self._security_raw_cpp.get(expr_node.name)
             if raw_cpp is not None:
                 return raw_cpp
@@ -6639,6 +7155,19 @@ class SecurityEmitter:
 
         if isinstance(expr_node, Subscript):
             if isinstance(expr_node.object, Identifier):
+                sample = self._security_sampled_argument(
+                    expr_node.object.name, helper_binding_stack)
+                if sample is not None:
+                    offset = self._resolve_security_index_literal(
+                        expr_node.index, helper_binding_stack)
+                    if offset is None or offset < 0:
+                        self._codegen_error(
+                            expr_node,
+                            "request.security helper-parameter history currently requires "
+                            "a direct OHLC/time bar-series binding; derived helper-parameter "
+                            "history requires a non-negative constant integer offset",
+                        )
+                    return f"{sample.member}[{offset}]"
                 binding = None
                 if not self._security_identifier_is_global_binding(expr_node.object):
                     binding = self._security_lookup_helper_binding_context(
@@ -6695,7 +7224,10 @@ class SecurityEmitter:
                         bound,
                         local_index,
                         expr_node,
+                        helper_binding_stack,
                     )
+                    if isinstance(composed, _SecurityArgumentHistoryRead):
+                        return f"{composed.member}[{composed.offset}]"
                     return self._build_security_expr(
                         sec_id,
                         composed,
@@ -7157,6 +7689,17 @@ class SecurityEmitter:
                 # Every earlier build called the chart method.
                 self._security_requested_used = True
             if func_name is not None:
+                if id(expr_node) in self._security_arg_inventory.get(sec_id, {}):
+                    # Reach shared refusals before a linear helper's eager TA
+                    # or loop emission, in legacy mode as well as requested.
+                    self._collect_security_ohlc_hist_fields(
+                        expr_node, helper_binding_stack)
+                cells = self._security_arg_histories.get(sec_id, {})
+                sampled_site = any(key[0] == id(expr_node) for key in cells)
+                sample_key = (id(expr_node), self._security_binding_stack_signature(
+                    helper_binding_stack))
+                if sampled_site and sample_key in self._security_arg_call_values:
+                    return self._security_arg_call_values[sample_key]
                 call_key = f"func:{func_name}"
                 if call_key in resolving:
                     self._codegen_error(
@@ -7176,6 +7719,30 @@ class SecurityEmitter:
                     expr_node,
                     helper_binding_stack,
                 )
+                frame = plan["binding_stack"][-1]
+                for parameter in plan["func_info"].node.params:
+                    cell = cells.get((id(expr_node), parameter))
+                    if cell is None:
+                        continue
+                    if emitted_lines is None:
+                        self._codegen_error(
+                            expr_node,
+                            "request.security multi-statement helpers require "
+                            "statement-capable security evaluation context",
+                        )
+                    argument = self._build_security_expr(
+                        sec_id, frame[parameter], ta_range, ta_results, resolving,
+                        security_mutable_names, frame.caller_stack, emitted_lines,
+                    )
+                    current = f"{cell.member}_value"
+                    emitted_lines.append(f"        const double {current} = {argument};")
+                    self._emit_security_series_value(
+                        sec_id, cell.member, current, "        ", emitted_lines,
+                        single_push=True,
+                    )
+                    frame.samples[parameter] = _SecurityArgumentSample(current, cell.member)
+                    # Activate the evaluator's existing mixed-clock guard.
+                    self._security_requested_used = True
                 if plan["mode"] == "expr":
                     resolved = self._build_security_expr(
                         sec_id,
@@ -7202,6 +7769,14 @@ class SecurityEmitter:
                         resolving,
                     )
                 resolving.remove(call_key)
+                if sampled_site:
+                    # One written call is one runtime result per evaluation.
+                    # Distinct AST sites never use the pure-call value key.
+                    first = next(cell for key, cell in cells.items()
+                                 if key[0] == id(expr_node))
+                    result = f"{first.member}_result"
+                    emitted_lines.append(f"        const auto {result} = {resolved};")
+                    resolved = self._security_arg_call_values[sample_key] = result
                 if share_key is not None:
                     resolved = shared[share_key] = self._security_share_pure_call(
                         sec_id, resolved
@@ -7606,6 +8181,9 @@ class SecurityEmitter:
         ``float g = 1`` global is re-emitted as ``1``)."""
         if node is None or depth > 64:
             return False
+        if isinstance(node, Identifier) and self._security_sampled_argument(
+                node.name, helper_binding_stack) is not None:
+            return True
         if (isinstance(node, Subscript)
                 and id(node) in getattr(self, "_security_double_hist_nodes", ())):
             # A global's history read on the requested clock is a double

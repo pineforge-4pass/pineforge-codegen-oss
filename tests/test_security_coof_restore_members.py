@@ -52,6 +52,11 @@ _PAYLOADS = (
         "h() => close * 2\n",
         "h()[1] + (session.ismarket[1] ? 1.0 : 0.0)",
     ),
+    (
+        "argument history ring",
+        "f(x) => x[2] - x\n",
+        "f(close - open)",
+    ),
 )
 
 

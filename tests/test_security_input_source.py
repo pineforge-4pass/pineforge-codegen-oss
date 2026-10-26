@@ -28,16 +28,19 @@ overrides naming the twin's sources each probe replays its twin's tape.
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 
 import pytest
 
 from pineforge_codegen import transpile, transpile_full
-from pineforge_codegen.errors import CompileError
 from tests._compile import compile_cpp
 from tests._e2e import Build, closed_trades, skip_unless_e2e_env
 from tests._security_tapes import mismatches, replay, source, tape_exits
+from tests.test_security_helper_arg_history import (
+    _CHART_CLOSES, _HOURLY_OPENS, _assert_completed, _run_requested,
+)
 
 
 XSYM_A2_TV = Path(__file__).parent / "fixtures" / "xsym_a2_tv"
@@ -151,14 +154,29 @@ def test_source_beside_a_global_under_builtins_reads_the_requested_bar():
     assert not any("on the chart's bar, as before" in d.message for d in result["diagnostics"])
 
 
-def test_history_of_a_reassigned_source_stays_refused():
-    # A reassigned global is not the input's series: its history keeps the
-    # refusal every earlier build gave it.
-    with pytest.raises(CompileError, match="helper-parameter history currently requires"):
-        transpile(PRELUDE + (
-            'var float src = input.source(close, "S")\nsrc := open\n'
-            'f(_s) => _s[1]\n'
-            'x = request.security(syminfo.tickerid, "D", f(src))\n') + TRADE)
+def test_history_of_a_fully_overwritten_source_uses_requested_opens():
+    # Conditional, recurrent and late-write refusal twins: test_security_helper_arg_history_refusals.py.
+    feeds = {"chart15": (15, _CHART_CLOSES)}
+    overwritten = _run_requested(transpile(PRELUDE + (
+        'var float src = input.source(close, "S")\nsrc := open\n'
+        'f(_s) => _s[1]\n'
+        'x = request.security(syminfo.tickerid, "60", f(src))\n'
+        'plot(x)\n')), feeds)["chart15"]
+    direct = _run_requested(transpile(PRELUDE + (
+        'f(_s) => _s[1]\n'
+        'x = request.security(syminfo.tickerid, "60", f(open))\n'
+        'plot(x)\n')), feeds)["chart15"]
+    expected = [math.nan, *_HOURLY_OPENS[:-1]]
+    _assert_completed(direct, expected)
+    _assert_completed(overwritten, expected)
+    assert [(row.timestamp, row.complete) for row in overwritten] == [
+        (row.timestamp, row.complete) for row in direct
+    ]
+    for observed, control in zip(overwritten, direct):
+        if math.isnan(control.value):
+            assert math.isnan(observed.value), (observed, control)
+        else:
+            assert observed.value == control.value, (observed, control)
 
 
 def test_source_payload_replays_tradingview_tapes(tmp_path_factory):
