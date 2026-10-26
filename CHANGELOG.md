@@ -22,6 +22,21 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased
 
+- Fix a silent wrong value under `calc_on_order_fills`: a fill recalculation
+  that ran after a deferred `request.security` evaluation (for example a late
+  margin-call liquidation) restored the strategy checkpoint taken before that
+  evaluation and rolled the requested context's own state back (helper-local
+  `var` series, requested TA objects, OHLC and expression histories, mutable
+  copies and bar-index clocks), while the engine's requested aggregators had
+  already advanced. The generated `restore_script_state()` now leaves that
+  requested progression alone and still restores the chart's state and the
+  merged request results; payloads that keep user calls on the chart's bar
+  (the chart-fallback warning) keep their old rollback, and so do the shared
+  helper-local `var` series of a script that has such a payload, so the
+  late-restore loss is fixed for every script without that warning and not
+  for the helper-local state of a script that has it. The emitted C++ of any
+  script with a `request.security` changes in that one function; no engine
+  change or ABI change is involved.
 - Fix `input.color` metadata so its default round-trips through the native
   input setter ([#231](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/231)).
   Python `transpile_full()` and the Pyodide/glue manifest now report

@@ -5673,6 +5673,7 @@ class SecurityEmitter:
                 reason = self._security_chart_read
         if reason is None:
             lines.extend(body)
+            self._security_eval_info[item["sec_id"]]["chart_fallback"] = False
             return
         self._security_state_restore(snapshot)
         body = []
@@ -5690,6 +5691,7 @@ class SecurityEmitter:
             + "; TradingView evaluates them on the requested bar.",
         )
         lines.extend(body)
+        self._security_eval_info[item["sec_id"]]["chart_fallback"] = True
 
     def _security_state_snapshot(self) -> tuple:
         """The generator's state before an evaluator is emitted: each

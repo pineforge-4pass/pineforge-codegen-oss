@@ -5396,7 +5396,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         _script_state_members = self._collect_script_state_members(
             _script_state_declarations
         )
-        self._emit_script_state_hooks(lines, _script_state_members)
+        # Keep the hooks here in the C++, but emit them only once each
+        # requested evaluator has settled its actual chart-fallback decision.
+        _script_state_hooks_at = len(lines)
         lines.append("")
         # Its per-strategy cache, outside the checkpointed script state.
         _session_market_member_at = len(lines)
@@ -5462,6 +5464,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 11b. security evaluators
         self._emit_security_evaluators(lines)
+
+        _script_state_hooks: list[str] = []
+        self._emit_script_state_hooks(_script_state_hooks, _script_state_members)
+        lines[_script_state_hooks_at:_script_state_hooks_at] = _script_state_hooks
+        _session_market_member_at += len(_script_state_hooks)
 
         # ``_emit_constructor`` runs before function bodies and security
         # evaluators, while the trade-history read flag is set by the call
