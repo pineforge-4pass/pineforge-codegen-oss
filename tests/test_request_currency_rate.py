@@ -96,7 +96,7 @@ def test_never_taken_trade_branch_keeps_runtime_error_in_branch():
 @pytest.mark.parametrize("call", [
     _CALL,
     "request.currency_rate('GBP', 'JPY', true)",
-    "request.currency_rate(to = 'JPY', ignore_invalid_currency = false, from = 'GBP')",
+    "request.currency_rate('GBP', 'JPY', ignore_invalid_currency = false)",
 ])
 def test_evaluated_call_lowers_at_its_assignment(call):
     source = _EVALUATED.replace(_CALL, call)

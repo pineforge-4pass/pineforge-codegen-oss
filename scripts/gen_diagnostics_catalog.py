@@ -1051,10 +1051,13 @@ def main(argv=None) -> int:
         # Ordinary request calls share the nz/fixnan argument binder. Keep
         # these codes' pinned meaning and historical explanation; their short
         # presentation must name the actual callee instead of those two names.
-        for code in ("PF-E1088", "PF-W1088"):
-            catalog["codes"][code]["user_message"] = (
-                "The arguments to {name} do not match its Pine signature."
-            )
+        catalog["codes"]["PF-E1088"]["user_message"] = (
+            "The arguments to {name} do not match its Pine signature."
+        )
+        catalog["codes"]["PF-W1088"]["user_message"] = (
+            "The arguments to {name} do not match its Pine signature. "
+            "In a switch arm PineForge only warns and keeps the arm''s lowering."
+        )
         pruned = prune(catalog, templates)
         if pruned:
             print(f"{len(pruned)} unpinned code(s) no source spells removed: {', '.join(pruned)}")
