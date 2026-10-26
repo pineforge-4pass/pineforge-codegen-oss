@@ -4,6 +4,9 @@ The existing fill strategy supplies the orders and execution counters. Its
 dependency changes on every execution; a control constructs the first value
 inline without ``varip``. Matching it throughout the run checks initialization
 order and that later executions do not repeat the dependent initializer.
+A wrong dependency shows as a different ``observed`` value in the trade tag
+(the first value read as 0 instead of the capital term, or a later value
+instead of the first).
 """
 
 from __future__ import annotations
@@ -102,13 +105,14 @@ def test_dependent_varip_storage_and_latch_stay_out_of_the_checkpoint() -> None:
     restore = restore.split("\n    }", 1)[0]
     on_bar = cpp.split("    void on_source_bar(", 1)[1]
 
-    # Read any declaration-site latch's actual name from its guarded write.
-    # Before the fix, only the shared preamble guard may surround this write;
-    # it belongs to the ordinary checkpoint, rather than to the varip state.
+    # Read the declaration-site once flag's actual name from its guarded
+    # write, then require the flag the lowering of a persistent declaration
+    # names (`_pf_var_init_<member>`), so this half cannot pass without a latch.
     guards = re.findall(
         r"if \(!([A-Za-z_]\w*)\) \{\s*state(?:\.update)?\s*[(=]",
         on_bar,
     )
+    assert "_pf_var_init_state" in guards, guards
     members = {"state", "vpCount"}
     members.update(guard for guard in guards if guard != "_var_initialized")
     assert "GeneratedStrategy::vCount)" in checkpoint
