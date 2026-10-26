@@ -1,0 +1,289 @@
+"""Currency-rate requests stop only when their expression is evaluated."""
+
+from __future__ import annotations
+
+import re
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from pineforge_codegen import transpile, transpile_full
+from pineforge_codegen.errors import CompileError
+from tests import _compile as compile_env
+
+
+_PRELUDE = "//@version=6\nstrategy('Currency branch')\n"
+_CALL = "request.currency_rate('EUR', 'USD')"
+_MESSAGE = (
+    "request.currency_rate needs currency conversion data that PineForge does not have."
+)
+_REPORTER = _PRELUDE + f"rate = true ? 1.0 : {_CALL}\nplot(rate)\n"
+_NEVER_TRADE = _PRELUDE + (
+    "rate = 1.0\n"
+    f"if false\n    strategy.entry('L', strategy.long, qty = 1 * {_CALL})\n"
+    "plot(rate)\n"
+)
+_EVALUATED = _PRELUDE + f"x = {_CALL}\n"
+_SIDE_CALL = (
+    "request.currency_rate(bump(1, 'GBP'), bump(2, 'JPY'), "
+    "ignore_invalid_currency = ignoreCurrency())"
+)
+_SIDE_EFFECTS = _PRELUDE + (
+    "var calls = array.new_int(1, 0)\n"
+    "bump(int digit, string code) =>\n"
+    "    array.set(calls, 0, array.get(calls, 0) * 10 + digit)\n"
+    "    code\n"
+    "ignoreCurrency() =>\n"
+    "    array.set(calls, 0, array.get(calls, 0) * 10 + 3)\n"
+    "    false\n"
+    f"rate = true ? 1.0 : {_SIDE_CALL}\n"
+    "seen = array.get(calls, 0)\n"
+    "plot(rate)\n"
+)
+
+
+def _translated(source: str) -> str:
+    result = transpile_full(source)
+    assert not {
+        diagnostic.code for diagnostic in result["diagnostics"]
+    } & {"PF-E1025", "PF-W1025"}
+    return result["cpp"]
+
+
+def _assignment(cpp: str, name: str) -> str:
+    statements = [
+        line.strip() for line in cpp.splitlines()
+        if re.match(rf"\s*{re.escape(name)}\s*=", line)
+    ]
+    assert len(statements) == 1, statements
+    return statements[0]
+
+
+def _runtime_error_call() -> str:
+    cpp = transpile(_PRELUDE + f'runtime.error("{_MESSAGE}")\n')
+    statements = [
+        line.strip().removesuffix(";") for line in cpp.splitlines()
+        if line.lstrip().startswith("pine_runtime_error(")
+    ]
+    assert len(statements) == 1
+    return statements[0]
+
+
+def test_reporter_ternary_keeps_runtime_error_in_untaken_arm():
+    cpp = _translated(_REPORTER)
+    literal = transpile(_REPORTER.replace(_CALL, "1.0"))
+    before, untaken = _assignment(cpp, "rate").split(" : ", 1)
+    literal_before, _ = _assignment(literal, "rate").split(" : ", 1)
+    stop = _runtime_error_call()
+    assert before == literal_before
+    assert stop not in before and stop in untaken
+    assert cpp.count(stop) == 1
+    assert cpp.index(stop) > cpp.index("void on_source_bar(")
+
+
+def test_never_taken_trade_branch_keeps_runtime_error_in_branch():
+    cpp = _translated(_NEVER_TRADE)
+    literal = transpile(_NEVER_TRADE.replace(_CALL, "1.0"))
+    marker = next(line for line in literal.splitlines() if "if (false) {" in line)
+    before, branch = cpp.split(marker, 1)
+    branch, after = branch.split("\n" + marker.split("if", 1)[0] + "}", 1)
+    stop = _runtime_error_call()
+    assert stop in branch and "strategy_entry(" in branch
+    assert stop not in before + after
+
+
+@pytest.mark.parametrize("call", [
+    _CALL,
+    "request.currency_rate('GBP', 'JPY', true)",
+    "request.currency_rate(to = 'JPY', ignore_invalid_currency = false, from = 'GBP')",
+])
+def test_evaluated_call_lowers_at_its_assignment(call):
+    source = _EVALUATED.replace(_CALL, call)
+    cpp = _translated(source)
+    literal = transpile(source.replace(call, "1.0"))
+    statement = _assignment(cpp, "x")
+    assert statement.split(" = ", 1)[0] == _assignment(literal, "x").split(" = ", 1)[0]
+    stop = _runtime_error_call()
+    assert stop in statement
+    assert cpp.count(stop) == 1
+    assert cpp.index(stop) > cpp.index("void on_source_bar(")
+
+
+def test_switch_arm_no_longer_emits_the_legacy_warning():
+    source = _PRELUDE + f"rate = switch\n    true => {_CALL}\n    => 1.0\nplot(rate)\n"
+    cpp = _translated(source)
+    literal = transpile(source.replace(_CALL, "1.0"))
+    assert "void on_source_bar(" in literal
+    assert _runtime_error_call() in cpp.split("void on_source_bar(", 1)[1]
+
+
+def test_argument_effects_stay_in_the_untaken_expression():
+    cpp = _translated(_SIDE_EFFECTS)
+    literal = transpile(_SIDE_EFFECTS.replace(_SIDE_CALL, "1.0"))
+    before, untaken = _assignment(cpp, "rate").split(" : ", 1)
+    assert before == _assignment(literal, "rate").split(" : ", 1)[0]
+    assert _runtime_error_call() in untaken
+    assert "bump" in untaken and "ignoreCurrency" in untaken
+    assert "bump" not in before and "ignoreCurrency" not in before
+
+
+@pytest.mark.parametrize("arguments", [
+    "",
+    "'EUR'",
+    "'EUR', 'USD', false, true",
+    "'EUR', 'USD', missing = true",
+    "'EUR', 'USD', from = 'GBP'",
+])
+def test_malformed_calls_still_fail_signature_validation(arguments):
+    # A well-formed twin must translate; origin/main refuses it with PF-E1025.
+    _translated(_EVALUATED)
+    source = _EVALUATED.replace(_CALL, f"request.currency_rate({arguments})")
+    with pytest.raises(CompileError) as caught:
+        transpile(source)
+    diagnostics = caught.value.diagnostics
+    assert diagnostics
+    assert all(d.code not in {"PF-E1025", "PF-W1025"} for d in diagnostics)
+    assert any("TradingView:" in d.message and "request.currency_rate" in d.message
+               for d in diagnostics)
+    assert all("nz or fixnan" not in d.user_message for d in diagnostics)
+
+
+def test_skipped_call_arguments_are_still_analyzed():
+    argument = 'input.string("EUR", "From currency")'
+    source = _REPORTER.replace("'EUR'", argument)
+    cpp = _translated(source)
+    assert _runtime_error_call() in _assignment(cpp, "rate")
+    # The same nested input under an ordinary string call has the same
+    # analyzed descriptor, even though neither false arm executes.
+    control = _REPORTER.replace(_CALL, f"str.length({argument})")
+    inputs = transpile_full(source)["inputs"]
+    assert inputs and inputs == transpile_full(control)["inputs"]
+
+
+_TRADE_TAIL = """
+if bar_index == 0
+    strategy.entry('control', strategy.long, qty = rate)
+if bar_index == 2
+    strategy.close('control')
+entryPrice = strategy.closedtrades.entry_price(0)
+exitPrice = strategy.closedtrades.exit_price(0)
+entryTime = strategy.closedtrades.entry_time(0)
+exitTime = strategy.closedtrades.exit_time(0)
+quantity = strategy.closedtrades.size(0)
+profit = strategy.closedtrades.profit(0)
+"""
+
+_BARS = r"""
+    Bar bars[] = {
+        Bar{100.0, 100.0, 100.0, 100.0, 1.0, 60000},
+        Bar{101.0, 101.0, 101.0, 101.0, 1.0, 120000},
+        Bar{102.0, 102.0, 102.0, 102.0, 1.0, 180000},
+        Bar{103.0, 103.0, 103.0, 103.0, 1.0, 240000},
+        Bar{104.0, 104.0, 104.0, 104.0, 1.0, 300000},
+    };
+"""
+
+_SUCCESS_DRIVER = r"""
+#include <iomanip>
+#include <iostream>
+#include <type_traits>
+int main() {
+    static_assert(std::is_same_v<decltype(GeneratedStrategy::rate), double>);
+""" + _BARS + r"""
+    bool saw_trade = false;
+    std::cout << std::setprecision(17);
+    for (bool dynamic : {false, true}) {
+        // Each prefix observes the value passed to plot on that final bar.
+        for (int n = 1; n <= 5; ++n) {
+            GeneratedStrategy strategy;
+            if (dynamic) strategy.run(bars, n, "1", "1");
+            else strategy.run(bars, n);
+            if (!strategy.last_error().empty()) {
+                std::cerr << strategy.last_error();
+                return 2;
+            }
+            saw_trade = saw_trade || strategy.trade_count() > 0;
+            std::cout << strategy.rate << ' ' << strategy.trade_count() << ' '
+                      << strategy.entryPrice << ' ' << strategy.exitPrice << ' '
+                      << strategy.entryTime << ' ' << strategy.exitTime << ' '
+                      << strategy.quantity << ' ' << strategy.profit << '\n';
+        }
+    }
+    return saw_trade ? 0 : 3;
+}
+"""
+
+_STOP_DRIVER = r"""
+#include <iostream>
+int main() {
+""" + _BARS + r"""
+    GeneratedStrategy strategy;
+    ReportC report{};
+    run_backtest_full(&strategy, bars, 5, "", "", 0, 4, 0, &report);
+    report_free(&report);
+    std::cout << strategy.script_bars_processed() << '\n';
+    if (!strategy.last_error().empty()) {
+        std::cerr << strategy.last_error();
+        return 2;
+    }
+    return 0;
+}
+"""
+
+
+def _compile_and_run(source: str, driver: str, directory: Path,
+                     label: str) -> subprocess.CompletedProcess:
+    compile_env.skip_if_no_engine_lib()
+    cpp = _translated(source)
+    assert compile_env._COMPILER is not None and compile_env._ENGINE_LIB is not None
+    path = directory / f"{label}.cpp"
+    executable = directory / label
+    path.write_text(cpp + driver)
+    command = [
+        compile_env._COMPILER, "-std=c++17", "-O0",
+        *compile_env.STRATEGY_FP_FLAGS,
+        *compile_env._include_flags(isolate_headers=False),
+        str(path), str(compile_env._ENGINE_LIB), "-pthread", "-o", str(executable),
+    ]
+    built = subprocess.run(command, capture_output=True, text=True)
+    assert built.returncode == 0, built.stderr or built.stdout
+    return subprocess.run([str(executable)], capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("source, call", [
+    (_REPORTER, _CALL),
+    (_NEVER_TRADE, _CALL),
+    (_NEVER_TRADE.replace("if false", "if close < 0"), _CALL),
+    (_SIDE_EFFECTS, _SIDE_CALL),
+], ids=["reporter", "false-trade-branch", "never-true-trade-branch", "argument-effects"])
+def test_skipped_calls_run_like_literal_replacements(source, call, tmp_path):
+    driver = _SUCCESS_DRIVER
+    if source == _SIDE_EFFECTS:
+        driver = driver.replace("<< strategy.rate", "<< strategy.seen << ' ' << strategy.rate")
+    source += _TRADE_TAIL
+    subject = _compile_and_run(source, driver, tmp_path, "subject")
+    control = _compile_and_run(source.replace(call, "1.0"), driver, tmp_path, "control")
+    assert subject.returncode == control.returncode == 0, subject.stderr + control.stderr
+    assert subject.stderr == control.stderr == ""
+    assert subject.stdout == control.stdout
+    assert len(subject.stdout.splitlines()) == 10
+
+
+@pytest.mark.parametrize("body", [
+    f"x = {_CALL}\n",
+    f"if true\n    x = {_CALL}\n",
+    f"if bar_index == 2\n    x = {_CALL}\n",
+], ids=["top-level", "taken-branch", "later-bar"])
+def test_evaluated_calls_stop_like_runtime_error(body, tmp_path):
+    source = _PRELUDE + body
+    reference = source.replace(f"x = {_CALL}", f'runtime.error("{_MESSAGE}")')
+    subject = _compile_and_run(source, _STOP_DRIVER, tmp_path, "subject")
+    control = _compile_and_run(reference, _STOP_DRIVER, tmp_path, "runtime_error")
+    literal = _compile_and_run(source.replace(_CALL, "1.0"),
+                               _STOP_DRIVER, tmp_path, "literal")
+    assert literal.returncode == 0 and literal.stderr == ""
+    assert subject.returncode == control.returncode != 0
+    assert subject.stdout == control.stdout
+    assert subject.stderr == control.stderr
+    assert _MESSAGE in subject.stderr
