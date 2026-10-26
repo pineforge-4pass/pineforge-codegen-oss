@@ -22,6 +22,9 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased
 
+- Support explicit and inferred helper-local `var color` state in
+  `request.security`, preserving persistence, transparency and `na`
+  ([#229](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/229)).
 - Fix `input.color` metadata so its default round-trips through the native
   input setter ([#231](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/231)).
   Python `transpile_full()` and the Pyodide/glue manifest now report
