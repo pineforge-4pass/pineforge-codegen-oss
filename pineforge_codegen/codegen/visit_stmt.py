@@ -495,8 +495,8 @@ class StmtVisitor:
         # site under a dedicated once flag. This preserves source order (a
         # preceding input/plain/TA declaration is already available) and Pine's
         # first-entry semantics for declarations nested in conditional blocks.
-        # Series, aggregates, constructor constants, and function-local vars
-        # retain their specialized initialization paths.
+        # Aggregates that depend on statement results share this guard;
+        # independent constructors retain their specialized preamble paths.
         if node.is_var or node.is_varip:
             info = self._runtime_scalar_var_init_by_node.get(id(node))
             if info is not None:
@@ -534,6 +534,9 @@ class StmtVisitor:
                         and type_spec.kind in {"map", "matrix"}
                     ):
                         target_cpp_type = self._type_spec_to_cpp(type_spec)
+                    if (info.get("statement_ordered_aggregate")
+                            and type_spec.kind == "udt"):
+                        target_cpp_type = type_spec.name
                     if (
                         target_cpp_type is not None
                         and type_spec is not None
@@ -597,7 +600,8 @@ class StmtVisitor:
                 finally:
                     self._current_input_var_name = previous_input_name
                     self._array_ctor_target_name = previous_ctor_target
-                if info.get("drawing_cpp") is None:
+                if (info.get("drawing_cpp") is None
+                        and not info.get("statement_ordered_aggregate")):
                     init_cpp = self._typed_na_init(
                         init_cpp, member_name, info["ptype"]
                     )

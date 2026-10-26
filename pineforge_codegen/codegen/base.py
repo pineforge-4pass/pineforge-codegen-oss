@@ -396,6 +396,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # is declared when a payload's helper holds one.
         self._security_string_series_declared: bool = False
         self._security_string_series: set[str] = set()
+        # Color var state shares the numeric double map, but reads retain the
+        # ordinary packed-ARGB int64_t type (including its na sentinel).
+        self._security_color_series: set[str] = set()
         # Each request.security evaluator local's C++ type (a string local
         # takes ``na<std::string>()``; the builder's ``/`` reads it).
         self._security_local_cpp_types: dict[str, str] = {}
@@ -1359,6 +1362,83 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             self.ctx, "var_member_owners_by_node", {}
         ) or {}
         top_level_node_ids = {id(stmt) for stmt in self.ctx.ast.body}
+        # These values are assigned by the statement walk, after the legacy
+        # first-bar preamble. Constants are inlined at reads and plain inputs
+        # already run before that preamble, so neither needs a new route.
+        statement_values = set(self._direct_program_tuple_binding_names)
+        for decl, nested in block_declarations(self.ctx.ast.body):
+            if decl.is_var or decl.is_varip:
+                continue
+            if (not nested and decl.name in self._known_vars
+                    and decl.name not in self._input_backed_vars):
+                continue
+            if (not nested and isinstance(decl.value, FuncCall)
+                    and self._is_input_call(decl.value)
+                    and not self._is_source_input(decl.value)):
+                continue
+            statement_values.add(decl.name)
+
+        # A preamble-initialized variable can also have been changed by an
+        # earlier statement (a reassignment, field write or collection method).
+        # Record traversal positions, not node ids, to distinguish preceding
+        # writes from later ones without changing independent initializers.
+        statement_positions = {}
+        first_writes = {}
+        for top in self.ctx.ast.body:
+            if isinstance(top, (FuncDef, MethodDef, TypeDecl, EnumDecl)):
+                continue
+            if self._budget is not None:
+                self._budget.check(top.loc, Phase.CODEGEN)
+            for part in self._walk_ast(top):
+                position = len(statement_positions)
+                statement_positions[id(part)] = position
+                target = None
+                if isinstance(part, Assignment):
+                    target = part.target
+                elif (isinstance(part, FuncCall)
+                        and isinstance(part.callee, MemberAccess)
+                        and self._call_has_ordered_effect(part)):
+                    target = part.callee.object
+                    if (isinstance(target, Identifier)
+                            and target.name in {"array", "map", "matrix"}):
+                        target = part.args[0] if part.args else part.kwargs.get("id")
+                while isinstance(target, (MemberAccess, Subscript)):
+                    target = target.object
+                if (isinstance(target, Identifier)
+                        and target.name in self._all_bound_names):
+                    first_writes.setdefault(target.name, position)
+
+        def reads_statement_value(stmt):
+            scopes = self.ctx.identifier_binding_scopes
+            before = statement_positions.get(id(stmt), -1)
+            pending = [(stmt.value, False)]
+            visited = set()
+            while pending:
+                value, globals_only = pending.pop()
+                if self._budget is not None:
+                    self._budget.check(phase=Phase.CODEGEN)
+                for part in self._walk_ast(value):
+                    if (isinstance(part, Identifier)
+                            and (part.name in statement_values
+                                 or first_writes.get(part.name, before) < before)
+                            and (not globals_only
+                                 or scopes.get(id(part)) == "global")):
+                        return True
+                    # A helper may read an earlier global without receiving
+                    # it as an argument. Use the analyzer's binding identity
+                    # so parameters, locals and loop binders cannot capture
+                    # an unrelated global of the same spelling.
+                    if (not isinstance(part, FuncCall)
+                            or not isinstance(part.callee, Identifier)):
+                        continue
+                    owner = part.callee.name
+                    fi = self._func_info_map.get(owner)
+                    if fi is None or fi.node is None or owner in visited:
+                        continue
+                    visited.add(owner)
+                    pending.append((fi.node, True))
+            return False
+
         for node_id, meta in metadata_by_node.items():
             stmt, member_name, ptype, init_str, is_callable_scoped = meta
             if self._budget is not None:
@@ -1415,10 +1495,25 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 and stmt_spec.kind in {"map", "matrix"}
                 and isinstance(stmt.value, (IfStmt, SwitchStmt))
             )
+            # Aggregate initializers used to bypass declaration-site guards
+            # even when they read a value only the body computes (#226).
+            # Preserve the existing preamble for independent constructors and
+            # aliases, and leave varip/callable lowering unchanged.
+            statement_ordered_aggregate = (
+                stmt.is_var and not stmt.is_varip
+                and not is_callable_scoped
+                and stmt_spec is not None
+                and (
+                    stmt_spec.kind in {"array", "map", "matrix"}
+                    or (stmt_spec.kind == "udt" and stmt_spec.name in self._udt_defs)
+                )
+                and reads_statement_value(stmt)
+            )
             established_decl_site = (
                 (not is_callable_scoped or drawing_cpp is not None)
                 and (
-                    nullable_collection_selection_decl_site
+                    statement_ordered_aggregate
+                    or nullable_collection_selection_decl_site
                     or self._is_runtime_scalar_var_initializer(
                         member_name, ptype, init_str, stmt.value, drawing_cpp,
                         is_series, node_id in top_level_node_ids
@@ -1428,6 +1523,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if not callable_decl_site and not established_decl_site:
                 continue
 
+            if not is_callable_scoped:
+                # Later aggregate aliases/constructors must follow any var
+                # whose initialization moved out of the preamble as well.
+                statement_values.add(stmt.name)
             base_flag = f"_pf_var_init_{self._safe_name(member_name)}"
             flag = allocate_flag(base_flag)
             self._runtime_scalar_var_init_members.add(member_name)
@@ -1441,6 +1540,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 "drawing_cpp": drawing_cpp,
                 "type_spec": stmt_spec,
                 "is_series": is_series,
+                "statement_ordered_aggregate": statement_ordered_aggregate,
             }
             self._runtime_scalar_var_init_by_node[node_id] = info
             base_storage = self._safe_name(member_name)
@@ -5396,7 +5496,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         _script_state_members = self._collect_script_state_members(
             _script_state_declarations
         )
-        self._emit_script_state_hooks(lines, _script_state_members)
+        # Keep the hooks here in the C++, but emit them only once each
+        # requested evaluator has settled its actual chart-fallback decision.
+        _script_state_hooks_at = len(lines)
         lines.append("")
         # Its per-strategy cache, outside the checkpointed script state.
         _session_market_member_at = len(lines)
@@ -5462,6 +5564,11 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 11b. security evaluators
         self._emit_security_evaluators(lines)
+
+        _script_state_hooks: list[str] = []
+        self._emit_script_state_hooks(_script_state_hooks, _script_state_members)
+        lines[_script_state_hooks_at:_script_state_hooks_at] = _script_state_hooks
+        _session_market_member_at += len(_script_state_hooks)
 
         # ``_emit_constructor`` runs before function bodies and security
         # evaluators, while the trade-history read flag is set by the call

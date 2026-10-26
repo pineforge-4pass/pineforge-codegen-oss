@@ -10,7 +10,7 @@ from hashlib import sha256
 
 import pytest
 
-from tests._legacy_cpp import legacy_cpp, without_source_rename
+from tests._legacy_cpp import legacy_cpp, without_restore_script_state, without_source_rename
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError, Phase
 from tests.test_map_param_methods import _compile_and_run
@@ -145,8 +145,10 @@ def test_security_timeframe_clone_keeps_preceding_map_namespace_source_order():
         filename="synthetic-map-source-order.pine",
     )
 
-    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == (
-        "8c6ee0d063e5f87dcf78ba3e5090ac58452f534c7155f2c9785eb2f8ffe553fd"
+    # Hashed with the rollback hook body removed (it is covered by its own
+    # tests): everything else in the emission is exactly what it was.
+    assert sha256(legacy_cpp(without_restore_script_state(cpp)).encode()).hexdigest() == (
+        "25368130bbb9fcdb8cb4ede22ece5616db9342fc1cb631e28a8d02f2c6c92070"
     )
 
 
@@ -163,8 +165,8 @@ observed = foreign
 
     cpp = transpile(source, filename="synthetic-lexical-map-source-order.pine")
 
-    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == (
-        "acd8526526243ffeeb22087a2e29066815cab7fdd79413f2c518d44396374c9a"
+    assert sha256(legacy_cpp(without_restore_script_state(cpp)).encode()).hexdigest() == (
+        "074bda253630d3432f7da1cbf7b799092f411c023820a13c20484f8714beaf15"
     )
 
 
