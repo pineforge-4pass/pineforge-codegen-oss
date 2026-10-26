@@ -179,7 +179,7 @@ KNOWN_MATRIX_OMISSIONS = frozenset({"median"})
 # The other request.* read external aux data feeds, out of scope for offline
 # backtests per coverage.md: intentionally rejected.
 KNOWN_REQUEST_OMISSIONS = frozenset({
-    "currency_rate", "economic", "quandl", "seed",
+    "economic", "quandl", "seed",
 })
 
 # Requests whose data PineForge does not load itself (``external_requests``):
@@ -362,6 +362,7 @@ NAMESPACE_SMOKES = {
     "log.warning":       ('log.warning("hi")',         "pine_log_warning"),
     "log.error":         ('log.error("hi")',           "pine_log_error"),
     "runtime.error":     ('runtime.error("boom")',     "pine_runtime_error"),
+    "request.currency_rate": ('x = request.currency_rate("EUR", "USD")', "pine_runtime_error"),
     "timeframe.change":  ('x = timeframe.change("D")', "tf_change"),
     "timeframe.in_seconds": ('x = timeframe.in_seconds("1")', "tf_to_seconds"),
     "color.new":         ('x = color.new(color.red, 50)', "new_color"),
@@ -471,7 +472,7 @@ def test_no_max_bars_back_leaves_series_at_engine_default():
 # ---------------------------------------------------------------------------
 
 EXPECTED_HARD_REJECT_FUNCS = {
-    "request.seed", "request.quandl", "request.currency_rate",
+    "request.seed", "request.quandl",
 }
 
 
@@ -482,7 +483,9 @@ def test_hard_reject_func_table_covers_known_unsupported_calls():
 
 def test_request_inventory_is_accounted_for():
     assert OFFICIAL_REQUEST == (
-        {"security", "security_lower_tf"} | KNOWN_REQUEST_OMISSIONS | NO_DATA_REQUESTS)
+        {"security", "security_lower_tf"} | set(sigs.REQUEST_FUNCTIONS)
+        | KNOWN_REQUEST_OMISSIONS | NO_DATA_REQUESTS)
+    assert not {f"request.{name}" for name in sigs.REQUEST_FUNCTIONS} & set(HARD_REJECT_FUNC)
     assert set(NO_DATA_REQUEST_FUNC) == (
         {f"request.{name}" for name in NO_DATA_REQUESTS} | {"request.footprint"})
     assert not set(NO_DATA_REQUEST_FUNC) & set(HARD_REJECT_FUNC)
