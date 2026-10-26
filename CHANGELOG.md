@@ -40,6 +40,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
 - Accept CRLF and lone CR code line endings like LF across the Python and JSON
   translation entry points, preserving generated C++, diagnostics and literal
   string contents ([#230](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/230)).
+- Accept a UDT field assignment (`:=`, `+=`, ...) as the body of a one-line
+  function or method, `set(State s) => s.value := 1`, translating like the same
+  body on its own indented line
+  ([#230](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/230)).
 
 ## 1.7.0 — 2026-10-25
 

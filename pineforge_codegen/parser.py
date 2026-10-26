@@ -1258,8 +1258,10 @@ class Parser:
                 return body
 
     @staticmethod
-    def _is_field_or_element_target(expr) -> bool:
-        return isinstance(expr, (MemberAccess, Subscript))
+    def _is_field_target(expr) -> bool:
+        # The reporter's shape is a UDT field (``s.value := 1``). A history or
+        # array subscript is not an assignable target of a one-line body.
+        return isinstance(expr, MemberAccess)
 
     def _parse_line_expr_or_assignment(
         self, *, field_target_only: bool = False
@@ -1269,14 +1271,15 @@ class Parser:
         ``_parse_arm_line`` accepts any assignment target because switch-arm
         statements already have that contract.  An inline function body uses
         the same expression/assignment shape but only promotes a
-        ``MemberAccess`` or ``Subscript`` target to a statement.  Leaving a
-        plain identifier assignment operator unconsumed preserves the
-        function parser's existing syntax error for ``f() => x := 1``.
+        ``MemberAccess`` (UDT field) target to a statement.  Leaving an
+        assignment operator after any other target unconsumed preserves the
+        function parser's existing syntax error for ``f() => x := 1`` and
+        ``f(x) => x[1] := 2``.
         """
         start_tok = self._current()
         expr = self._parse_expression()
         if self._current().type in COMPOUND_ASSIGN_OPS:
-            if field_target_only and not self._is_field_or_element_target(expr):
+            if field_target_only and not self._is_field_target(expr):
                 return ExprStmt(expr=expr)
             op = COMPOUND_ASSIGN_OPS[self._advance().type]
             node = Assignment(target=expr, op=op, value=self._parse_expression())

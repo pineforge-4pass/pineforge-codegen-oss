@@ -113,7 +113,23 @@ f() => value := 1
     assert "COLON_EQUALS" in error.value.diagnostics[0].message
 
 
-RUNTIME_INLINE = """//@version=6
+@pytest.mark.parametrize("definition", [
+    # A plain-name assignment after a field assignment keeps the old rejection:
+    # the comma loop must leave the operator for the caller's diagnostic.
+    "set(State s) => s.value := 1, x := 2",
+    # A history subscript is not an assignable target of a one-line body.
+    "set(State s) => s[1] := 2",
+])
+def test_non_field_assignment_targets_keep_parser_rejection(definition) -> None:
+    source = _function_source(definition)
+
+    with pytest.raises(CompileError) as error:
+        transpile(source)
+    assert error.value.diagnostics[0].phase is Phase.PARSER
+    assert "COLON_EQUALS" in error.value.diagnostics[0].message
+
+
+RUNTIME_INLINE ="""//@version=6
 strategy("single-line field assignment runtime")
 type State
     int value = 0
