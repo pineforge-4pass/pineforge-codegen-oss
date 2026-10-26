@@ -952,8 +952,13 @@ class Parser:
             self._consume(TokenType.DEDENT)
             node = FuncDef(name=name, params=params, body=body, is_single_expr=False)
         else:
-            expr = self._parse_expression()
-            node = FuncDef(name=name, params=params, body=[ExprStmt(expr=expr)], is_single_expr=True)
+            body, is_single_expr = self._parse_inline_func_body()
+            node = FuncDef(
+                name=name,
+                params=params,
+                body=body,
+                is_single_expr=is_single_expr,
+            )
 
         # Record per-param type hints + defaults (mirrors _parse_method_def) so
         # the analyzer can type UDT/string/array params and the codegen can emit
@@ -1080,9 +1085,14 @@ class Parser:
             self._consume(TokenType.DEDENT)
             node = MethodDef(name=name, type_name=type_name, params=params, body=body)
         else:
-            expr = self._parse_expression()
-            node = MethodDef(name=name, type_name=type_name, params=params,
-                            body=[ExprStmt(expr=expr)], is_single_expr=True)
+            body, is_single_expr = self._parse_inline_func_body()
+            node = MethodDef(
+                name=name,
+                type_name=type_name,
+                params=params,
+                body=body,
+                is_single_expr=is_single_expr,
+            )
         node.annotations = {
             "param_type_hints": param_type_hints,
             "param_defaults": param_defaults,
@@ -1241,19 +1251,68 @@ class Parser:
             if self._arm_line_statement_ahead():
                 self._extend_statement_list(body, self._parse_single_statement())
             else:
-                start_tok = self._current()
-                expr = self._parse_expression()
-                if self._current().type in COMPOUND_ASSIGN_OPS:
-                    # A field or element target: ``o.f := v``.
-                    op = COMPOUND_ASSIGN_OPS[self._advance().type]
-                    node = Assignment(target=expr, op=op, value=self._parse_expression())
-                    body.append(self._set_loc(node, start_tok))
-                else:
-                    body.append(ExprStmt(expr=expr))
+                body.append(self._parse_line_expr_or_assignment())
             if not self._match(TokenType.COMMA):
                 return body
             if self._check(TokenType.NEWLINE) or self._check(TokenType.DEDENT) or self._at_end():
                 return body
+
+    @staticmethod
+    def _is_field_or_element_target(expr) -> bool:
+        return isinstance(expr, (MemberAccess, Subscript))
+
+    def _parse_line_expr_or_assignment(
+        self, *, field_target_only: bool = False
+    ):
+        """Parse one expression or compound-assignment statement on a line.
+
+        ``_parse_arm_line`` accepts any assignment target because switch-arm
+        statements already have that contract.  An inline function body uses
+        the same expression/assignment shape but only promotes a
+        ``MemberAccess`` or ``Subscript`` target to a statement.  Leaving a
+        plain identifier assignment operator unconsumed preserves the
+        function parser's existing syntax error for ``f() => x := 1``.
+        """
+        start_tok = self._current()
+        expr = self._parse_expression()
+        if self._current().type in COMPOUND_ASSIGN_OPS:
+            if field_target_only and not self._is_field_or_element_target(expr):
+                return ExprStmt(expr=expr)
+            op = COMPOUND_ASSIGN_OPS[self._advance().type]
+            node = Assignment(target=expr, op=op, value=self._parse_expression())
+            return self._set_loc(node, start_tok)
+        return ExprStmt(expr=expr)
+
+    def _parse_inline_func_body(self) -> tuple[list, bool]:
+        """Parse a function or method body written after ``=>``.
+
+        A plain expression keeps the historical one-ExprStmt,
+        ``is_single_expr=True`` representation.  A field/element assignment
+        is a real statement and therefore uses the normal block representation
+        so the analyzer and code generator apply statement-tail semantics.
+        """
+        first = self._parse_line_expr_or_assignment(field_target_only=True)
+        if not isinstance(first, Assignment):
+            return [first], True
+
+        body = [first]
+        while self._match(TokenType.COMMA):
+            if (
+                self._check(TokenType.NEWLINE)
+                or self._check(TokenType.DEDENT)
+                or self._at_end()
+            ):
+                break
+            stmt = self._parse_line_expr_or_assignment(field_target_only=True)
+            if (
+                isinstance(stmt, ExprStmt)
+                and self._current().type in COMPOUND_ASSIGN_OPS
+            ):
+                # The next statement is a plain-name assignment.  Keep its
+                # operator for the caller's existing statement-end diagnostic.
+                break
+            body.append(stmt)
+        return body, False
 
     def _arm_line_statement_ahead(self) -> bool:
         """Whether an arm line's next statement is one no expression starts:
