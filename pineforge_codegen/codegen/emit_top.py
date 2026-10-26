@@ -933,6 +933,10 @@ class TopLevelEmitter:
             )
             names.update(self._security_ta_hist_series_names(sec_id))
             names.update(self._security_expr_hist_series_names(sec_id))
+            names.update(
+                cell.member
+                for cell in self._security_arg_histories.get(sec_id, {}).values()
+            )
             if sec_id in self._security_bar_index_secs:
                 names.add(self._security_bar_index_member(sec_id))
             for variants in (info.get("ta_variants") or {}).values():
