@@ -150,7 +150,7 @@ from ..ast_nodes import (
     VarDecl,
 )
 from ..collection_history import history_annotation, literal_offset
-from ..external_requests import RECORDED_KEY_ANNOTATION
+from ..external_requests import RECORDED_KEY_ANNOTATION, request_stop_marker
 from ..limits import iter_ast_nodes
 from ..security_contexts import ticker_symbol_arg
 from ..symbols import TypeSpec, method_receiver_type_name
@@ -166,6 +166,7 @@ from .helpers import (
     color_alpha_cast, cpp_is_plain_read, evaluate_args_once,
     na_preserving_int_cast, pine_truth_cast,
 )
+from .run_stops import request_stop
 from .tables import (
     ARRAY_DRAWING_NEW_CTORS,
     ARRAY_METHODS,
@@ -2357,17 +2358,18 @@ class CallVisitor:
             if func_name == "currency_rate":
                 # Keep argument effects and the stop in the expression, so a
                 # skipped branch evaluates neither. The comma's final operand
-                # supplies Pine's float type; pine_runtime_error never returns.
+                # supplies Pine's float type; the no-data shim never returns.
+                marker = request_stop_marker(node)
+                marker["message"] = (
+                    "request.currency_rate needs currency conversion data "
+                    "that PineForge does not have."
+                )
                 args = _merge_kwargs(
                     node.args, node.kwargs,
                     sigs.get_param_names("request", func_name), self._visit_expr,
                 )
                 effects = [f"(void)({arg})" for arg in args]
-                effects += [
-                    'pine_runtime_error(std::string("request.currency_rate needs '
-                    'currency conversion data that PineForge does not have."))',
-                    "na<double>()",
-                ]
+                effects += [request_stop(marker), "na<double>()"]
                 return f"({', '.join(effects)})"
             if func_name == "security":
                 param_names = ["symbol", "timeframe", "expression", "gaps", "lookahead", "ignore_invalid_symbol", "currency"]
