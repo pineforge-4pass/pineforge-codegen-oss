@@ -161,7 +161,6 @@ assert set(NO_DATA_REQUEST_FUNC) == {f"request.{n}" for n in NO_DATA_REQUEST_FUN
 HARD_REJECT_FUNC: dict[str, str] = {
     "request.seed":              "External seed data feeds not available in PineForge.",
     "request.quandl":            "External Quandl data not available in PineForge.",
-    "request.currency_rate":     "Currency conversion data not available in PineForge.",
     # ticker.* chart-type modifiers and cross-symbol constructors — hard reject.
     # NOTE: ticker.heikinashi is handled contextually in _visit_FuncCall (allowed
     # for the chart's own symbol — the engine applies the HA candle transform
@@ -1829,6 +1828,12 @@ class SupportChecker:
             self._check_request_security_lower_tf_symbol(node)
             self._visit_children_const_ok(node)
             return
+        if ns == "request" and name in sigs.REQUEST_FUNCTIONS:
+            # Currency rates have no feed: codegen stops the run only where
+            # the call is evaluated, including when its value reaches a trade.
+            self._check_builtin_arguments(node, full, func=sigs.REQUEST_FUNCTIONS[name])
+            self._visit_children(node)
+            return
         if ns == "request":
             self._err(
                 node,
@@ -2682,16 +2687,15 @@ class SupportChecker:
             return (0, len(missing)), f"is missing its {noun} {listed}", None
         return None
 
-    def _check_builtin_arguments(self, node: FuncCall, name: str) -> bool:
-        """Refuse an ``nz`` / ``fixnan`` call whose arguments bind to none of
-        TradingView's signatures -- ``nz(source)``, ``nz(source,
-        replacement)``, ``fixnan(source)`` -- as TradingView does ("The nz
-        function does not have an argument with the name x"). A call that
-        binds is rewritten positionally by ``builtin_keywords``; before, a
-        keyword crashed the codegen (IndexError) or was dropped. Returns True
-        when the arguments bind.
+    def _check_builtin_arguments(self, node: FuncCall, name: str, *, func=None) -> bool:
+        """Bind an ordinary builtin to its TradingView signatures.
+
+        ``nz`` / ``fixnan`` calls that bind are rewritten positionally by
+        ``builtin_keywords``; request.currency_rate uses the same validation
+        before its evaluation-time stop. Returns True when the arguments bind.
         """
-        func = sigs.BUILTIN_FUNCTIONS[name]
+        if func is None:
+            func = sigs.BUILTIN_FUNCTIONS[name]
         problems = []
         for sig in func.signatures:
             problem = self._ta_binding_problem(sig, node)

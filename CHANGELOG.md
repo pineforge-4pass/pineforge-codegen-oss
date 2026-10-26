@@ -22,6 +22,8 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased
 
+- Raise currency-conversion errors only when `request.currency_rate` is evaluated
+  ([#228](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/228)).
 - Fix `input.color` metadata so its default round-trips through the native
   input setter ([#231](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/231)).
   Python `transpile_full()` and the Pyodide/glue manifest now report

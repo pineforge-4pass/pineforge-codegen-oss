@@ -2354,6 +2354,21 @@ class CallVisitor:
 
         # request.* calls
         if namespace == "request":
+            if func_name == "currency_rate":
+                # Keep argument effects and the stop in the expression, so a
+                # skipped branch evaluates neither. The comma's final operand
+                # supplies Pine's float type; pine_runtime_error never returns.
+                args = _merge_kwargs(
+                    node.args, node.kwargs,
+                    sigs.get_param_names("request", func_name), self._visit_expr,
+                )
+                effects = [f"(void)({arg})" for arg in args]
+                effects += [
+                    'pine_runtime_error(std::string("request.currency_rate needs '
+                    'currency conversion data that PineForge does not have."))',
+                    "na<double>()",
+                ]
+                return f"({', '.join(effects)})"
             if func_name == "security":
                 param_names = ["symbol", "timeframe", "expression", "gaps", "lookahead", "ignore_invalid_symbol", "currency"]
                 all_args = list(node.args)
