@@ -70,7 +70,7 @@ static Bar make_bar(double close, int64_t timestamp) {
     return Bar{close, close, close, close, 1.0, timestamp};
 }
 
-static void report(const GeneratedStrategy& s) {
+static void print_clock_row(const GeneratedStrategy& s) {
     std::cout << std::setprecision(10) << s.lastRoc << ' ' << s.lastChange << ' '
               << s.momHits << ' ' << s.naCount << ' ' << s.lastCum << ' '
               << s.lastBarsSince;
@@ -83,11 +83,11 @@ int main() {
     }
     GeneratedStrategy precalc;
     precalc.run(bars, 12);                // static mode (_use_precalc path)
-    report(precalc);
+    print_clock_row(precalc);
     std::cout << " | ";
     GeneratedStrategy dynamic;
     dynamic.run(bars, 12, "1", "1");      // dynamic mode (inline path)
-    report(dynamic);
+    print_clock_row(dynamic);
     std::cout << '\n';
     return 0;
 }

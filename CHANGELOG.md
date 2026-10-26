@@ -20,6 +20,248 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## Unreleased
+
+Planned as 1.8.0, a minor release of the exact engine/codegen pair, paired with
+engine `v1.8.0`. This entry records what changed in this repository since
+1.7.0 and nothing else: four pull requests merged after `v1.7.0`, three
+behaviour changes and one CHANGELOG-only change. The three behaviour changes
+alter the published input manifest, the emitted C++ for scripts that read
+`strategy.account_currency`, and the accepted input (line endings).
+
+### Compatibility and migration
+
+- Pairs with engine `v1.8.0` exactly. Regenerate strategy C++ with this release
+  and relink every strategy library against the engine `v1.8.0` headers and
+  `libpineforge.a`, even when the C ABI number is unchanged (README
+  [Engine pairing](README.md#engine-pairing)).
+- **Hosts must recognize the new input type `color`.** The input manifest
+  (`transpile_full()` and the Pyodide/glue manifest) now reports every
+  `input.color` entry as `"type": "color"` with an unsigned packed
+  `0xAARRGGBB` integer `default` (`color.red` is `4294063685`, `0xFFF23645`;
+  transparency is included), where 1.7.0 and earlier reported `"type": "string"`
+  with a Pine-spelling default such as `"color.red"`. A host with a closed list
+  of manifest types needs a `color` arm. Treat the default as a number in
+  `0..4294967295`: do not parse it as a signed 32-bit integer, and send its
+  decimal text to the native setter (`get_input_int64`). A default that cannot
+  be folded to a constant keeps its previous (null) metadata. `supported`, the
+  emitted C++, the native setters and receipts, and the C ABI are unchanged.
+  `pineforge-hpo` accepts color inputs from its 1.8.0 release (a packed integer
+  in `0..4294967295`, booleans refused).
+- The emitted C++ is intended to change only for scripts that read
+  `strategy.account_currency` (below); the other changes do not touch code
+  generation for existing inputs. This is the design intent of the pull
+  requests and their tests, not a byte comparison of generated C++ against
+  1.7.0. The diagnostic codes and the catalog schema are not changed.
+- Engine behavior changes are described in the paired engine's own release
+  notes; this entry does not summarize them.
+
+### Changes since 1.7.0
+
+- Fix `input.color` metadata so its default round-trips through the native
+  input setter ([#231](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/231),
+  [#251](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/251)).
+  Python `transpile_full()` and the Pyodide/glue manifest now report
+  `type: "color"` and an unsigned packed `0xAARRGGBB` integer default for named
+  Pine v6 colors, hex literals and literal `color.new` / `color.rgb`
+  expressions, including transparency. Unfoldable defaults retain their previous
+  metadata; accepted expressions are unchanged. See the migration note above.
+- Fix `strategy.account_currency` to return the declared constant currency,
+  falling back to the symbol currency when omitted or `currency.NONE`, and
+  support currency-constant comparisons and string concatenation
+  ([#227](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/227),
+  [#250](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/250)).
+  No currency conversion is added; only the value the script reads changes, so a
+  script that branches on `strategy.account_currency` can now take a different
+  branch than under 1.7.0.
+- Accept CRLF and lone CR code line endings like LF across the Python and JSON
+  translation entry points, preserving generated C++, diagnostics and literal
+  string contents
+  ([#230](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/230),
+  [#252](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/252)).
+  This is the line-ending part of #230; a lone `\r` inside a string literal
+  stays data. Output for LF sources is unchanged.
+- Backfill release notes for earlier codegen releases, including the Security
+  entry for GHSA-5www-2x9c-mgr6
+  ([#248](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/248)).
+
+## 1.7.0 — 2026-10-25
+
+A minor release of the exact engine/codegen pair, paired with engine `v1.7.0`
+and dated 2026-10-25. This entry records what changed in this repository since
+1.6.3, and nothing else: three pull requests merged after `v1.6.3`, one of which
+changes the emitted C++ and the other two only the repository's own CI.
+
+### Compatibility and migration
+
+- Pairs with engine `v1.7.0` exactly. Regenerate strategy C++ with this release
+  and relink every strategy library against the engine `v1.7.0` headers and
+  `libpineforge.a`; this applies even when the C ABI number is unchanged
+  (README [Engine pairing](README.md#engine-pairing)). Replacing the archive
+  alone does not update a statically linked strategy library.
+- The emitted C++ changes, as described below: every generated library gains a
+  new exported function, the generated constructor gains a guarded statement
+  for scripts that do not read closed-trade rows, and the set of reserved names
+  grows. The Python API, the diagnostic codes and severities, and the catalog
+  schema are not changed; the order-shapes receipt's `host_reads` list gains
+  `set_trade_history_streamable` for scripts that do not read closed-trade rows.
+- Engine behavior changes are described in the paired engine's own release
+  notes; this entry does not summarize them.
+
+### Changes since 1.6.3
+
+- Declare whether the emitted code reads closed-trade rows, and let scripts that
+  do not read them opt into streamed trade history
+  ([#213](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/213)).
+  Generated libraries now export `int strategy_reads_trade_history(void)`: `1`
+  when the emitted code reads a `strategy.closedtrades.*` accessor, `0` when it
+  does not. The closed-trade count (`strategy.closedtrades` alone) and the
+  open-trade accessors (`strategy.opentrades.*`) do not count as reads. For a
+  script that does not read closed-trade rows, the generated constructor calls
+  `this->set_trade_history_streamable(true)`, guarded by
+  `#if defined(PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1)` so that it compiles
+  against engine headers that lack the setter; a script that reads closed-trade
+  rows emits no such call, and the order-shapes receipt's `host_reads` names the
+  setter for non-readers only. The constructor's host calls are now qualified
+  (`this->configure_pine_strategy(cfg)`). A library generated by an earlier
+  release has no such export, and its absence does not establish that the
+  script is a non-reader. What the engine does with the streaming setting is
+  described in the engine `v1.7.0` release notes.
+- Reserve more names in generated C++ and escape them as `pf_safe_<name>` when a
+  Pine identifier uses one (same pull request, documented in the new
+  "Identifiers in generated C++" section of
+  [docs/PUBLIC_CONTRACT.md](docs/PUBLIC_CONTRACT.md)): the engine namespaces and
+  types that `using namespace pineforge;` brings into scope (`report`,
+  `report_sink`, `report_sequence`, `source`, `native_calendar`, `pine_color`,
+  `RunFailureCode`, `RunFailureInfo`, `QtyType`, `CommissionType`, `XLoc`,
+  `YLoc`, `normalize_timezone_for_posix`), the generated C exports
+  (`strategy_create`, `strategy_create_checked`, `run_backtest`,
+  `run_backtest_full`, `run_backtest_full_checked`, `strategy_free`,
+  `report_free`, `strategy_set_input`, `strategy_set_input_checked`,
+  `strategy_set_override`, `strategy_set_override_checked`,
+  `strategy_set_magnifier_volume_weighted` and the new
+  `strategy_reads_trade_history`), the feature macros
+  `PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1` and
+  `PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1`, and the host member
+  `set_trade_history_streamable`. A Pine `type report`, for example, now becomes
+  `struct pf_safe_report`; before, such a script could fail to compile against the
+  1.7.0 engine headers with an ambiguous reference. User-defined type handles
+  and `request.security` evaluators use the escaped spelling too. An identifier
+  that does not collide keeps its spelling. The existing `CPP_RESERVED` export lists the new
+  names; no new reserved-name API is introduced.
+- Repository and CI only, no effect on emitted C++ or on the Python and JSON
+  contract: the `promote-baseline` workflow refuses untrusted heads and actors
+  (SEC846,
+  [#242](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/242)),
+  and `test.yml` adopts the organization's CI canon (CR-241,
+  [#243](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/243)).
+
+## 1.6.3 — 2026-10-23
+
+A patch release of the exact engine/codegen pair, paired with engine `v1.6.3`
+and dated 2026-10-23. This entry records what changed in this repository since
+1.6.2 and nothing else: one security fix to the emitted C++, merged from a
+private fork (commit `041889818e2206fdf7261574128064fb0b4142ad`), and four pull
+requests that change only the repository's own CI, publishing and documentation.
+
+### Security
+
+- Published advisory
+  [GHSA-5www-2x9c-mgr6](https://github.com/pineforge-4pass/pineforge-codegen-oss/security/advisories/GHSA-5www-2x9c-mgr6),
+  "Codegen can emit C++ calls and type names taken from the input script"
+  (severity high, CWE-94). Fixed in 1.6.3 of both packages. The affected
+  versions are `pineforge-codegen` from 0.6.4 up to but not including 1.6.3 and
+  `@pineforge/codegen-pyodide` from 0.7.0 up to but not including 1.6.3, which
+  ships the same Python sources. Images of
+  `ghcr.io/pineforge-4pass/pineforge-release` before 1.6.3 contain an affected
+  codegen; the 1.6.3 image contains the fixed one. Upgrade to 1.6.3 or later; the
+  advisory states the mitigation and the upgrade steps and, like this entry,
+  contains no reproduction recipe.
+
+### Compatibility and migration
+
+- Scripts that reached the two affected paths are now refused instead of
+  transpiled. A call or member that the codegen has no lowering for ends with
+  `<name>(...) is not implemented in PineForge runtime.` where it used to be
+  written into the emitted C++; a token that is not a type, in a type position
+  or inside `<...>`, ends with a located parse error; and `array.new` or
+  `array.from` with an undeclared element type is refused with the same
+  "not implemented" message. A script that compiled under 1.6.2 can therefore
+  fail with a compile or parse error under 1.6.3, and this is the intended
+  effect of the fix. For scripts that stay accepted the emitted C++ is unchanged
+  except that the default of an enum-typed element is `na<double>()` (a type
+  name that is not a declared user type falls back to its slot's default) and
+  `format`, `currency` and `order` values are typed `std::string`. A pair change
+  requires regenerated C++ and relinked strategy libraries against the paired
+  engine release's headers and `libpineforge.a` (README
+  [Engine pairing](README.md#engine-pairing)); regenerate any C++ that an
+  affected release produced from a script you do not trust.
+
+### Changes since 1.6.2
+
+- Run every codegen job on GitHub-hosted runners
+  ([#237](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/237)).
+- Publish to npm only by operator dispatch, in the main-only `npm-publish`
+  environment
+  ([#238](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/238)),
+  and state the npm publishing bound as it now exists: both npm jobs run in that
+  environment
+  ([#240](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/240)).
+- Stop naming a retired private campaign repository in five lines of the
+  documentation
+  ([#239](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/239)).
+
+## 1.6.2 — 2026-10-21
+
+A patch release of the exact engine/codegen pair, paired with engine `v1.6.2`
+and dated 2026-10-21; the prerelease `1.6.2-rc.1` (2026-10-19) pairs with engine
+`v1.6.2-rc.1`. This entry records what changed in this repository since 1.6.1
+and nothing else: a checker for generated C++ and a reserved-name change in the
+emitter, a change of the licensor's written entity, and CI changes.
+
+### Compatibility and migration
+
+- New command `pf-cpp-allowlist` (`pineforge_codegen.cpp_allowlist:main`,
+  installed with the package), a checker for a generated C++ translation unit
+  that flags dangerous primitives
+  ([#210](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/210),
+  CR-164 S1). It is a denylist with known false positives, a mitigation and not
+  proof that a unit is safe (the wording of the 1.6.3 security advisory).
+- A script identifier equal to a symbol that the checker refuses when it appears
+  bare (`system`, `free`, `socket`, `open` and the rest of the list in
+  `pineforge_codegen/codegen/helpers.py`, `LIBC_RESERVED_NAMES`) is now emitted
+  as `pf_safe_<name>` instead of the bare libc name, so the emitted C++ for
+  scripts that declare such a name changes.
+- A pair change requires regenerated C++ and relinked strategy libraries against
+  the paired engine release's headers and `libpineforge.a` (README
+  [Engine pairing](README.md#engine-pairing)).
+
+### Changes since 1.6.1
+
+- The licensor entity is written exactly as `PINEFORGE LLC` in `LICENSE`,
+  `LEGAL.md` and `CONTRIBUTING.md`
+  ([#234](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/234)).
+- CI: Linux x64 jobs on the pf-ci-spot pool
+  ([#212](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/212),
+  tracked at fragment b240f6d7 in
+  [#215](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/215)),
+  credentialed release and deploy jobs kept on hosted runners
+  ([#214](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/214)), a
+  guarded job and a token-free OIDC job to claim the PyPI `tunaxis-codegen` and
+  npm `@tunaxis/codegen-pyodide` names with a 0.0.1 placeholder
+  ([#216](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/216),
+  [#217](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/217)), the
+  App-token owner following the repository owner
+  ([#221](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/221)),
+  the open Dependabot bumps folded and pinned by SHA with the exact release
+  ([#223](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/223)),
+  superseded pull-request runs of the gate and test workflows cancelled
+  ([#225](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/225)),
+  `timeout-minutes` dropped from `gate.yml` and `test.yml`
+  ([#233](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/233)),
+  and the pull-request suite skipped on draft pull requests
+  ([#236](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/236)).
+
 ## 1.6.1 — 2026-10-18
 
 A patch release of the exact engine/codegen pair, paired with engine `v1.6.1`

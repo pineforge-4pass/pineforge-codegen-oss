@@ -7,6 +7,50 @@ Text marked **since 1.5.0** describes diagnostic additions that 1.4.0 and
 earlier releases do not have: the `note` severity, the `user_message` template
 and the eleven codes that became notes.
 
+## Identifiers in generated C++
+
+Legal Pine identifiers that collide with C++ keywords, engine names or emitter
+temporaries are escaped in generated C++; they remain valid Pine names. The
+existing `pineforge_codegen.codegen.CPP_RESERVED` export contains the explicit
+reserved names. `_safe_name` also escapes emitter temporary patterns and
+allocates a distinct name when the script already uses the preferred escape.
+An identifier that does not collide keeps its spelling.
+
+The imported engine names `report`, `report_sink`, `report_sequence`, `source`,
+`native_calendar`, `pine_color`, `RunFailureCode`, `RunFailureInfo`, `QtyType`,
+`CommissionType`, `XLoc`, `YLoc` and `normalize_timezone_for_posix` are reserved
+because `using namespace pineforge;` brings them into unqualified lookup. A Pine
+`type report`, for example, becomes `struct pf_safe_report` and its references
+use that name. These names live in `codegen/helpers.py`'s
+`CPP_EMITTER_NAMES`, which also reserves the generated C export
+`strategy_reads_trade_history`. A Pine type or function of that name uses
+`pf_safe_strategy_reads_trade_history`; the export keeps its public spelling.
+The same set explicitly reserves the exports `strategy_create`,
+`strategy_create_checked`, `run_backtest`, `run_backtest_full`, `strategy_free`,
+`report_free`, `strategy_set_input`, `strategy_set_override`,
+`strategy_set_magnifier_volume_weighted`, `strategy_set_input_checked`,
+`strategy_set_override_checked` and `run_backtest_full_checked`. Pine identifiers
+use `pf_safe_<name>`; these exports keep their public spellings.
+`CPP_STANDARD_MACROS` reserves `PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1`, so a Pine
+variable of that name uses `pf_safe_PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1`
+instead of expanding the engine's feature macro in a declaration. It also
+explicitly reserves `PINEFORGE_HAS_SYMBOL_SECURITY_EVAL_V1`, using the same
+`pf_safe_` escape for a Pine identifier.
+`codegen/host_members.py`'s `HOST_MEMBER_NAMES` separately reserves the public or
+protected host members the emitter spells, including
+`set_trade_history_streamable`, inherited from `BacktestEngine`. All three sets
+feed the existing `CPP_RESERVED` export; no new reserved-name API is introduced.
+
+Since the 1.7.0 trade-history policy addition, generated libraries export
+`int strategy_reads_trade_history(void)`: `1` means the emitted code reads
+closed-trade rows, and `0` means no such read was emitted. A closed-trade count
+alone does not require those rows. For a non-reader, the constructor calls
+`set_trade_history_streamable(true)` under
+`PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1`; a reader emits no policy call.
+The order-shapes receipt's `host_reads` therefore includes the setter only for
+non-readers. Older generated libraries can lack the export; its absence does
+not establish that the script is a non-reader.
+
 ## Optional compiled execution capabilities
 
 Availability: **since 1.2.0**, with engine `v1.2.0`'s capability extension and
@@ -152,8 +196,10 @@ the 1.3.0 harness used the legacy setters. Some requests that previously
 returned success now fail before execution: a shared `Period` key set to `"7"`
 is `setting_rejected` with reason `ambiguous_key`, textual color `"color.blue"`
 is `expected_integer`, and `"15"` outside choices `[10, 20, 30]` is
-`invalid_input_option`. The color manifest's `string` type and Pine-spelling
-default do not describe the native setter's packed-integer encoding. Validate
+`invalid_input_option`. The 1.4.0 color manifest's `string` type and Pine-spelling
+default did not describe the native setter's packed-integer encoding. Current
+manifests use `type: "color"` with a packed integer default, as defined under
+[Input manifest and override keys](#input-manifest-and-override-keys). Validate
 presets against the compiled settings, including types, bounds and options;
 the checked path also refuses unknown keys and invalid numeric, boolean or
 enum values. An input with `supported: false` rejects a supplied value with
@@ -410,9 +456,9 @@ errors together with either nonfatal level.
 ### Input manifest and override keys
 
 Each manifest entry has `title` (string), `type` (one of `int`, `float`,
-`bool`, `string`, `source`, `enum`), `default` (a literal scalar or `None`) and
-`supported` (boolean; the manifests of releases up to 1.3.0 lack it). It may
-also have `min`, `max`, `step` numeric values and an `options` list. Since 1.1.0,
+`bool`, `string`, `source`, `enum`, `color`), `default` (a literal scalar or
+`None`) and `supported` (boolean; the manifests of releases up to 1.3.0 lack it).
+It may also have `min`, `max`, `step` numeric values and an `options` list. Since 1.1.0,
 an `input.symbol` entry also has `kind` equal to `"symbol"`. An optional field
 is omitted when its argument is absent or cannot be reduced to the supported
 literal form.
@@ -454,6 +500,22 @@ them identically.
 - An enum input publishes its `Enum.member` choices in declaration order as
   `options` and keeps its `Enum.member` `default`, which the receipt encodes as
   the member's index (map it through the receipt's `option_values`).
+- A color input (`input.color`) has `type: "color"`. Its literal-foldable
+  `default` is an unsigned packed `0xAARRGGBB` integer (0 through 4294967295),
+  where `AA` is opacity: 255 is opaque and 0 is transparent. Named Pine v6
+  constants, hex color literals, and `color.new` / `color.rgb` with literal
+  arguments publish the value the generated `get_input_int64` default uses,
+  including transparency. For example, `input.color(color.red, "Line color")`
+  publishes `{"title":"Line color","type":"color","default":4294063685,"supported":true}`
+  (`0xFFF23645`); `color.new(color.red, 50)` publishes `0x80F23645` as an
+  integer. Preserve the unsigned value when reading the JSON. Pass its decimal
+  representation to the native input setter; a Pine expression such as
+  `"color.red"` is not a native input value. This corrects the `string` type and
+  Pine-spelling default published through 1.7.0. `supported` and other input
+  fields, the emitted C++ and the native receipt's storage type (`int`, 64-bit)
+  and historical `kind: "string"` are unchanged. An unfoldable color default
+  retains its previous unpublished value (`None`/JSON `null`); accepted default
+  expressions are unchanged.
 - A typed numeric input (`input.int`, `.float`, `.price`, `.time`) publishes
   numeric `default`, `min`, `max`, `step` and the numeric choices of an
   `options=[...]` dropdown where the receipt's value is a literal: a signed number (`-2.5`), a named constant (`LEN = 14`,
@@ -471,10 +533,6 @@ them identically.
   field is omitted when any choice is unfoldable. These gaps are pinned in
   `tests/test_input_metadata_receipt.py`'s `KNOWN_LIMITS`; its test view maps
   an absent options field to `[]`, which is not the public manifest shape.
-  An `input.color`'s
-  `default` is its Pine spelling (`"color.red"`) and its `type` `string`, where
-  the receipt holds the packed integer required by the checked native setter.
-  Do not submit the manifest's Pine-spelling string as a native color value.
   Apart from the source-input case
   above, a plain `input(...)` whose default is not a literal is typed
   `string` with a `None` default.

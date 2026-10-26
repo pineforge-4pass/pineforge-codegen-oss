@@ -13,6 +13,7 @@ from pineforge_codegen import diagnostics_catalog, transpile_full
 from pineforge_codegen.errors import CompileError, Level
 from pineforge_codegen.errors import Diagnostic, Phase, SourceLocation
 from pineforge_codegen.diagnostic_codes import classify, parse_template, render, render_diagnostic
+from tests._legacy_cpp import without_trade_history_policy
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diagnostic_notes"
@@ -223,7 +224,11 @@ def test_real_interfaces_keep_notes_and_short_sentences(case):
                             "location": asdict(d.location) if d.location else None,
                             "message": d.message, "hint": d.hint, "code": d.code, "args": d.args})
     assert python_rows == baseline["python"]
-    assert json.dumps(normalized) == PRODUCT_BEFORE["wire"][case["name"]]
+    expected_wire = json.loads(PRODUCT_BEFORE["wire"][case["name"]])
+    if "cpp" in normalized and "cpp" in expected_wire:
+        normalized["cpp"] = without_trade_history_policy(normalized["cpp"])
+        expected_wire["cpp"] = without_trade_history_policy(expected_wire["cpp"])
+    assert json.dumps(normalized) == json.dumps(expected_wire)
     if failure:
         text = PRODUCT_BEFORE["text"][case["name"]]
         assert str(failure) == text["error"]

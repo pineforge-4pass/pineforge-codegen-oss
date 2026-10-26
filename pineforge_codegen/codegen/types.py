@@ -4054,6 +4054,8 @@ class TypeInferer:
                 return "int64_t"
             if ename in self._enum_defs and node.member in self._enum_defs[ename]:
                 return "int"
+            if ename == "strategy" and node.member == "account_currency":
+                return "std::string"
             # format.* constants emit std::string literals (consumed by
             # pine_str_tostring); bare reads must declare std::string.
             if ename in ("format", "currency", "order"):
