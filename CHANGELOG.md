@@ -55,12 +55,15 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
 - The emitted C++ is intended to change only for the scripts the entries below
   name: those that read `strategy.account_currency`, whose persistent
   declarations depend on earlier statements, with a helper-local `var color`,
-  or with a `request.security` (for the late-restore change alone, only the
+  with a helper that reads the history of a derived argument, or with a
+  `request.security` (for the late-restore change alone, only the
   generated `restore_script_state()` changes, in 72 of the 555 corpus and
   fixture scripts; the other entries change the scripts they name). This is
   the design intent of the pull requests and their tests, not a byte
-  comparison of generated C++ against 1.7.0. One diagnostic code is added
-  (`PF-E3093`, the refusal for a helper-local `var` of an unsupported type) and
+  comparison of generated C++ against 1.7.0. Nine diagnostic codes are added
+  (`PF-E3093`, the refusal for a helper-local `var` of an unsupported type, and
+  `PF-E3094` through `PF-E3101`, the refusals of a derived helper-argument
+  history) and
   the user-facing text of `PF-E1088` and `PF-W1088` is reworded; the catalog
   schema is not changed.
 - Engine behavior changes are described in the paired engine's own release
@@ -105,6 +108,21 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
   The epoch-width integer and the collection, object and drawing refusals are
   unchanged; the refusal for any other unsupported helper-local `var` type has
   the new code `PF-E3093`.
+- Sample the history of a derived helper argument on the requested context's
+  own bars in `request.security`: a helper such as `f(x) => x[1]` called as
+  `f(close - open)` now reads the previous value of the argument on the
+  requested bars, not the chart's bars
+  ([#229](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/229)).
+  The argument is sampled through one ring per call site, which the
+  late-restore rule above leaves alone with the rest of the requested state.
+  Shapes that cannot be sampled are refused with located errors, `PF-E3094`
+  through `PF-E3101`: a derived history offset that is not a non-negative
+  constant integer, a ring capacity that is not representable, a call that is
+  not unconditional, a helper that depends on other helpers' state, history
+  composed with helper-result history, a mutable global that cannot be
+  replayed, and a parameter whose type or width has no lossless history.
+  Direct OHLC and time bindings, builtin forms and method envelopes keep their
+  existing lowering.
 - Accept a UDT field assignment (`:=`, `+=`, ...) as the body of a one-line
   function or method, `set(State s) => s.value := 1`, translating like the same
   body on its own indented line
