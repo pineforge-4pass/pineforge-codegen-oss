@@ -124,6 +124,21 @@ def without_trade_history_policy(cpp: str) -> str:
         '', cpp, flags=re.MULTILINE)
 
 
+def without_restore_script_state(cpp: str) -> str:
+    """Remove the body of the generated rollback hook.
+
+    A fill recalculation restores chart state only; the request.security
+    context's own progression is left alone, so that one function's text
+    differs from every older reference. Pins that guard everything else in
+    the emission compare with it removed on both sides.
+    """
+    marker = "    void restore_script_state() override {\n"
+    if marker not in cpp:
+        return cpp
+    start = cpp.index(marker)
+    return cpp[:start] + cpp[cpp.index("\n    }\n", start):]
+
+
 def legacy_cpp(cpp: str) -> str:
     # Coded-stop ABIs are additive; retain their actual call-site changes.
     cpp = _without_run_failure_scaffold(cpp)
