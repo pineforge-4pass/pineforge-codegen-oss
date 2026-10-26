@@ -12,8 +12,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from tests._e2e import Build, execute_all, ok, skip_unless_e2e_env
 from tests import test_e2e_security_coof_restore_witness as witness
 
@@ -110,10 +108,7 @@ def _run(engine: Path, base: Path, feed: Path, aux: Path, key: str, units: int):
 
 
 def test_argument_history_survives_post_commit_margin_fill_restore(tmp_path):
-    try:
-        engine = skip_unless_e2e_env()
-    except pytest.skip.Exception as exc:
-        pytest.fail(f"e2e environment is required for this witness: {exc}", pytrace=False)
+    engine = skip_unless_e2e_env()
     feed, aux, chart, minutes = witness._feeds(tmp_path)
     expected = _oracle(chart, minutes)
     trigger = chart[witness.MARGIN_BAR][0]
