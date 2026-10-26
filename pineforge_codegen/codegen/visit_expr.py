@@ -103,12 +103,14 @@ from ..ast_nodes import (
     MemberAccess,
     NaLiteral,
     NumberLiteral,
+    StrategyDecl,
     StringLiteral,
     Subscript,
     Ternary,
     TupleLiteral,
     UnaryOp,
 )
+from .capabilities import STRATEGY_PARAMETERS
 from .helpers import pine_index_int_cast, unary_sign_cpp
 from .types import COLLECTION_MUTATING_METHODS
 from .tables import (
@@ -671,6 +673,29 @@ class ExprVisitor:
             self._udt_mutable_expr_depth = previous
             self._udt_assignment_target = previous_target
 
+    def _strategy_account_currency_expr(self) -> str:
+        """Read the declaration's literal currency, or the chart's quote currency."""
+        currency = None
+        position = STRATEGY_PARAMETERS.index("currency")
+        for statement in self.ctx.ast.body:
+            if isinstance(statement, StrategyDecl):
+                currency = statement.kwargs.get("currency")
+                if currency is None and len(statement.args) > position:
+                    currency = statement.args[position]
+                break
+        # Read the AST, not strategy_params: its literal extractor also spells
+        # an unresolved Identifier as a string. Declaration variables keep the
+        # existing fallback and unresolved capability receipt.
+        if isinstance(currency, StringLiteral):
+            if currency.value != "NONE":
+                return self._visit_expr(currency)
+        elif (isinstance(currency, MemberAccess)
+                and isinstance(currency.object, Identifier)
+                and currency.object.name == "currency"
+                and currency.member != "NONE"):
+            return self._visit_expr(currency)
+        return "syminfo_.currency"
+
     def _visit_member_access(self, node: MemberAccess) -> str:
         # UDT field whose type was a drawing primitive (label/line/box/
         # linefill/polyline/table/chart.point) — the field is dropped from
@@ -809,7 +834,7 @@ class ExprVisitor:
                 if node.member == "cash":
                     return "2"
                 if node.member == "account_currency":
-                    return "syminfo_.currency"
+                    return self._strategy_account_currency_expr()
                 # Sub-namespaces (oca, direction, risk, commission) handled below
             if ns == "math":
                 if node.member == "pi":

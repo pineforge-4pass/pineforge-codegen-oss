@@ -16,10 +16,13 @@ Mixin contract — host class must provide:
 
 from __future__ import annotations
 
+import math
+
 from ..ast_nodes import (
     ASTNode,
     BinOp,
     BoolLiteral,
+    ColorLiteral,
     FuncCall,
     Identifier,
     MemberAccess,
@@ -30,6 +33,8 @@ from ..ast_nodes import (
 )
 from .. import signatures as sigs
 from ..pine_spelling import expr_start, global_input_calls, input_binding_names
+from .tables import _COLOR_CONSTANTS
+from .visit_expr import _color_literal_to_int64
 
 
 class InputHelper:
@@ -38,11 +43,11 @@ class InputHelper:
     # Maps the input function short-name -> the form-facing type tag emitted in
     # the input manifest (consumed by the host UI's override form). ``price``
     # is a float slider, ``time`` an int timestamp; everything string-like
-    # collapses to "string".
+    # collapses to "string". A color has its own tag and a packed integer.
     _FORM_TYPE = {
         "int": "int", "float": "float", "bool": "bool", "string": "string",
         "source": "source", "enum": "enum", "price": "float", "time": "int",
-        "color": "string", "timeframe": "string", "session": "string",
+        "color": "color", "timeframe": "string", "session": "string",
         "symbol": "string", "text_area": "string",
     }
 
@@ -361,11 +366,67 @@ class InputHelper:
             default = self._get_input_default(node)
             base = self._source_defval_to_base_series(default)
             return f'get_input_source({self._input_key_literal(title)}, {base})[0]'
-        default = self._get_input_default(node)
-        default_cpp = self._visit_expr(default) if default is not None else "0"
+        default_cpp, _ = self._input_default_expression(node)
         getter = self._input_getter_for_call(node, func_name, namespace)
         default_cpp = self._coerce_string_input_default(getter, default_cpp)
         return f'{getter}({self._input_key_literal(title)}, {default_cpp})'
+
+    def _input_default_expression(self, node: FuncCall) -> tuple[str, int | None]:
+        """The getter's unchanged C++ default and its literal color value.
+
+        Both getter emission and the settings descriptor use this path; the
+        manifest reads the descriptor's value rather than evaluating a second
+        copy of the default. Unfoldable colors retain their previous metadata.
+        """
+        default = self._get_input_default(node)
+        cpp = self._visit_expr(default) if default is not None else "0"
+        func_name, namespace = self._resolve_callee(node.callee)
+        color = (self._literal_color_value(default)
+                 if namespace == "input" and func_name == "color" else None)
+        return cpp, color
+
+    def _literal_color_value(self, node) -> int | None:
+        """Evaluate only literal colors using the getter's palette/binding.
+
+        Match the existing color.hpp lowering: RGB channels truncate to int64
+        and keep their low byte; transparency is clamped to 0..100 and alpha
+        rounds half up, not Python's ties-to-even. No user identifiers or
+        arithmetic are newly accepted or folded here.
+        """
+        if isinstance(node, ColorLiteral):
+            return int(_color_literal_to_int64(node.value).removesuffix("LL"), 16)
+        if isinstance(node, MemberAccess) and isinstance(node.object, Identifier):
+            constant = _COLOR_CONSTANTS.get(node.member) if node.object.name == "color" else None
+            return constant[1] if constant is not None else None
+        if not isinstance(node, FuncCall):
+            return None
+        func_name, namespace = self._resolve_callee(node.callee)
+        if namespace != "color" or func_name not in ("new", "rgb"):
+            return None
+        arguments = self._color_arg_nodes(func_name, node)
+        if any(argument is None for argument in arguments):
+            return None
+        if func_name == "new" and len(arguments) == 2:
+            base = self._literal_color_value(arguments[0])
+            transparency = self._literal_or_none(arguments[1], signed=True)
+        elif func_name == "rgb" and len(arguments) in (3, 4):
+            channels = [self._literal_or_none(argument, signed=True) for argument in arguments[:3]]
+            if not all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                       and (not isinstance(value, float) or math.isfinite(value))
+                       and -(1 << 63) < value < (1 << 63) for value in channels):
+                return None
+            red, green, blue = (int(value) & 0xFF for value in channels)
+            base = red << 16 | green << 8 | blue
+            transparency = self._literal_or_none(arguments[3], signed=True) if len(arguments) == 4 else 0
+        else:
+            return None
+        if (base is None or not isinstance(transparency, (int, float))
+                or isinstance(transparency, bool)
+                or (isinstance(transparency, float) and not math.isfinite(transparency))):
+            return None
+        transparency = min(100, max(0, transparency))
+        alpha = math.floor(255.0 * (100.0 - transparency) / 100.0 + 0.5)
+        return alpha << 24 | (base & 0xFFFFFF)
 
     _GETTER_CPP_TYPE = {
         "get_input_bool": "bool", "get_input_int": "int",
@@ -513,9 +574,11 @@ class InputHelper:
         source input's default and choices, an enum's choices and a typed
         numeric input's literal default, bounds and options are the values
         of the checked-settings receipt (the descriptor ``generate()``
-        builds with it). The optional keys are emitted only when the
-        corresponding signature argument is a const literal; a bound/option
-        referencing a non-literal is omitted (never crashes). ``title`` is
+        builds with it). A color has ``type: "color"`` and publishes the
+        getter's literal-foldable unsigned ARGB default. The optional keys are
+        emitted only when the corresponding signature argument is a const
+        literal; a bound/option referencing a non-literal is omitted (never
+        crashes). ``title`` is
         the key the emitted C++ reads the input by: the title argument, else
         the name of the declaration holding the call
         (``pine_spelling.input_binding_names``), else "".

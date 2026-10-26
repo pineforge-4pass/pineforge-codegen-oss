@@ -40,6 +40,9 @@ Mixin contract — host class must provide the following attributes
 - ``self._map_vars`` (``set[str]``): map-typed var members.
 - ``self._strategy_series_vars`` (``set[str]``): series mirrors of
   ``strategy.*`` member values pushed every bar.
+- ``self._reads_trade_history`` (``bool``): set when emitted code reads a
+  ``strategy.closedtrades.*`` accessor; drives the deferred retention policy
+  and the exported reader bit.
 - ``self._timeframe_period_vars`` (``set[str]``): identifiers that
   resolve to ``script_tf_`` in ``configure_security_evaluators``.
 - ``self._udt_defs`` (``dict[str, list]``): UDT name -> field info,
@@ -104,6 +107,9 @@ from .tables import (
 from ..limits import iter_ast_nodes
 from .drawing import DRAWING_LIFETIME_CPP
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
+
+
+_TRADE_HISTORY_POLICY_MARKER = "        /* __PINEFORGE_TRADE_HISTORY_POLICY__ */"
 
 
 class TopLevelEmitter:
@@ -1234,7 +1240,12 @@ class TopLevelEmitter:
         if self._script_has_input_source():
             ctor_body.append("        cfg.src_series_active = true;")
 
-        ctor_body.append("        configure_pine_strategy(cfg);")
+        # The call is resolved after all bodies have been lowered because
+        # closed-trade reads are discovered by the expression visitor. Keep a
+        # marker in the constructor so the policy cannot be enabled for a
+        # reader merely because the constructor is emitted first.
+        ctor_body.append(_TRADE_HISTORY_POLICY_MARKER)
+        ctor_body.append("        this->configure_pine_strategy(cfg);")
 
         if init_parts and ctor_body:
             lines.append(f"    explicit GeneratedStrategy() : {', '.join(init_parts)} {{")
@@ -1895,6 +1906,25 @@ class TopLevelEmitter:
             )
         lines.append(f"{pad}}}")
 
+    def _settle_trade_history_policy(self, lines: list[str]) -> None:
+        """Resolve the constructor's deferred trade-history policy marker."""
+        try:
+            marker = lines.index(_TRADE_HISTORY_POLICY_MARKER)
+        except ValueError as exc:  # pragma: no cover - generation invariant
+            raise AssertionError(
+                "generated constructor lost its trade-history policy marker"
+            ) from exc
+
+        if self._reads_trade_history:
+            del lines[marker]
+            return
+
+        lines[marker:marker + 1] = [
+            "#if defined(PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1)",
+            "        this->set_trade_history_streamable(true);",
+            "#endif",
+        ]
+
     def _emit_extern_c(self, lines: list[str]) -> None:
         lines.append('extern "C" {')
         lines.append("#if defined(PINEFORGE_HAS_RUN_FAILURE_CODES_V1) && defined(PF_SETTINGS_API_VERSION)")
@@ -2016,6 +2046,9 @@ class TopLevelEmitter:
         from .checked_settings import emit_settings_exports
         emit_settings_exports(lines)
         self._capabilities_export_at = len(lines)
+        lines.append("    int strategy_reads_trade_history(void) {")
+        lines.append(f"        return {1 if self._reads_trade_history else 0};")
+        lines.append("    }")
         if self._declares_bar_magnifier():
             # TradingView runs a script that declares use_bar_magnifier = true
             # on its bar magnifier; the host reads this export to run it on

@@ -3608,6 +3608,11 @@ class CallVisitor:
                     if node.args else "0"
                 )
                 is_open = inner.member == "opentrades"
+                if not is_open:
+                    # Closed-trade accessors require the resident trade rows;
+                    # counts and history reads are lowered by visit_expr and
+                    # never enter this branch.
+                    self._reads_trade_history = True
                 # Open trades have no exit metadata in Pine
                 if is_open and func_name in (
                     "exit_price", "exit_time", "exit_comment", "exit_id", "exit_bar_index",

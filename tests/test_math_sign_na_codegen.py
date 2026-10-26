@@ -7,6 +7,7 @@ import re
 from pineforge_codegen import transpile
 from pineforge_codegen.codegen import CodeGen
 from tests._compile import compile_cpp
+from tests._legacy_cpp import without_source_rename
 
 
 _PRELUDE = '//@version=6\nstrategy("math.sign regression")\n'
@@ -29,7 +30,9 @@ def _assert_na_safe_sign(expr: str) -> None:
 
 
 def test_math_sign_kwarg_propagates_float_na_and_evaluates_argument_once():
-    cpp = _gen("float source = na\nresult = math.sign(x=source)\nplot(result)")
+    cpp = without_source_rename(
+        _gen("float source = na\nresult = math.sign(x=source)\nplot(result)")
+    )
     assignment = _assignment(cpp, "result")
     _assert_na_safe_sign(assignment)
     assert assignment.count("(source)") == 1
@@ -37,7 +40,9 @@ def test_math_sign_kwarg_propagates_float_na_and_evaluates_argument_once():
 
 
 def test_math_sign_propagates_int_na_where_int_sentinel_is_representable():
-    cpp = _gen("int source = na\nresult = math.sign(source)\nplot(result)")
+    cpp = without_source_rename(
+        _gen("int source = na\nresult = math.sign(source)\nplot(result)")
+    )
     assignment = _assignment(cpp, "result")
     _assert_na_safe_sign(assignment)
     assert assignment.count("(source)") == 1

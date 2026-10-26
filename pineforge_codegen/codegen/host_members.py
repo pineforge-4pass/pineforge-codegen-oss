@@ -150,6 +150,7 @@ HOST_MEMBER_NAMES = frozenset({
     "set_pine_risk_max_position_size",
     "set_recorded_series",
     "set_strategy_override",
+    "set_trade_history_streamable",
     "signed_position_size",
     "snapshot_script_state",
     "strategy_cancel",

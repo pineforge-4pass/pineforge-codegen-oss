@@ -12,6 +12,7 @@ import pytest
 from pineforge_codegen.errors import CompileError
 from pineforge_codegen import transpile
 from tests import _compile as compile_env
+from tests._legacy_cpp import without_source_rename
 
 
 _SOURCE = """//@version=6
@@ -137,7 +138,7 @@ def _function_body(cpp: str, signature: str) -> str:
 
 
 def test_typed_map_parameter_methods_route_by_typespec_and_keywords():
-    cpp = transpile(_SOURCE)
+    cpp = without_source_rename(transpile(_SOURCE))
 
     assert "double mutate_int(PineMap<std::string, int> target)" in cpp
     assert "double mutate_float(PineMap<std::string, double> target)" in cpp

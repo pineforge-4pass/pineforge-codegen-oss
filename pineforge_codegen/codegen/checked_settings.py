@@ -164,7 +164,12 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
         key = emitter._input_key_literal(name)
         default = emitter._get_input_default(node)
         getter = emitter._input_getter_for_call(node, func_name, namespace)
-        default_lowered = _visit_setting_arg(emitter, default) if default is not None else "0"
+        try:
+            default_lowered, color_default = emitter._input_default_expression(node)
+        except CompileError as error:
+            # As with other settings arguments, preserve body error order.
+            emitter._defer_settings_error(error)
+            default_lowered, color_default = "0", None
         default_cpp = default_lowered
         default_cpp = emitter._coerce_string_input_default(getter, default_cpp)
         value_type = {
@@ -173,6 +178,10 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
             "get_input_string": "string",
         }[getter]
         kind = emitter._FORM_TYPE.get(func_name, value_type) if namespace == "input" else value_type
+        if namespace == "input" and func_name == "color":
+            # The native descriptor's historical kind is part of the emitted
+            # C++: only the Python/JSON manifest changes for #231.
+            kind = "string"
         options = []
         numeric_options = []
         option_values = []
@@ -261,6 +270,9 @@ def emit_settings_members(emitter, lines: list[str], constructor: list[str]) -> 
             manifest["options"] = [_string_setting_value(option) for option in options]
         elif value_type == "enum":
             manifest["options"] = [_string_setting_value(option) for option in options]
+        elif namespace == "input" and func_name == "color":
+            if color_default is not None:
+                manifest["default"] = color_default
         elif namespace == "input" and kind in ("int", "float", "bool"):
             # A typed numeric or bool input publishes the numbers the receipt
             # holds, where its C++ is a plain literal.

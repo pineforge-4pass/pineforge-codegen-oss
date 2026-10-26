@@ -156,6 +156,66 @@ KEYWORDS: dict[str, TokenType] = {
 }
 
 
+def _normalize_line_endings(source: str) -> str:
+    """Fold CRLF everywhere and lone CR only outside string literals."""
+    if "\r" not in source:
+        return source
+    parts: list[str] = []
+    start = pos = 0
+    delimiter = ""
+    while pos < len(source):
+        ch = source[pos]
+        if delimiter:
+            if ch == "\r" and source.startswith("\r\n", pos):
+                parts.extend((source[start:pos], "\n"))
+                pos += 2
+                start = pos
+                if len(delimiter) == 1:
+                    # Same recovery as _read_quoted at an unwrapped line end.
+                    nxt = indent = pos
+                    while indent < len(source) and source[indent] in " \t":
+                        indent += 1
+                    if indent == nxt or indent >= len(source) or source[indent] in "\r\n":
+                        delimiter = ""
+                continue
+            if ch == "\\":
+                if source.startswith("\\\r\n", pos):
+                    parts.extend((source[start:pos + 1], "\n"))
+                    pos += 3
+                    start = pos
+                    continue
+                pos += 2
+                continue
+            if source.startswith(delimiter, pos):
+                pos += len(delimiter)
+                delimiter = ""
+                continue
+            if len(delimiter) == 1 and ch == "\n":
+                # Match _read_quoted's recovery at an unwrapped line end.
+                nxt = indent = pos + 1
+                while indent < len(source) and source[indent] in " \t":
+                    indent += 1
+                if indent == nxt or indent >= len(source) or source[indent] in "\r\n":
+                    delimiter = ""
+        elif source.startswith("//", pos):
+            # Quotes in a comment never open a string on a following line.
+            while pos < len(source) and source[pos] not in "\r\n":
+                pos += 1
+            continue
+        elif ch in "\"'":
+            delimiter = ch * 3 if source.startswith(ch * 3, pos) else ch
+            pos += len(delimiter)
+            continue
+        elif ch == "\r":
+            parts.extend((source[start:pos], "\n"))
+            pos += 2 if source.startswith("\r\n", pos) else 1
+            start = pos
+            continue
+        pos += 1
+    parts.append(source[start:])
+    return "".join(parts)
+
+
 class Lexer:
     """Converts PineScript v6 source string into a list of tokens."""
 
@@ -178,7 +238,8 @@ class Lexer:
 
     def __init__(self, source: str, filename: str = "<input>",
                  budget: TimeBudget | None = None) -> None:
-        self.source = source
+        check_source_size(source, filename)
+        self.source = _normalize_line_endings(source)
         self.filename = filename
         self.pos = 0
         self.line = 1
@@ -233,7 +294,6 @@ class Lexer:
             self._advance()
 
     def tokenize(self) -> list[Token]:
-        check_source_size(self.source, self.filename)
         while not self._at_end():
             self._tokenize_line()
 
