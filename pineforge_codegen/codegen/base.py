@@ -396,6 +396,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # is declared when a payload's helper holds one.
         self._security_string_series_declared: bool = False
         self._security_string_series: set[str] = set()
+        # Color var state shares the numeric double map, but reads retain the
+        # ordinary packed-ARGB int64_t type (including its na sentinel).
+        self._security_color_series: set[str] = set()
         # Each request.security evaluator local's C++ type (a string local
         # takes ``na<std::string>()``; the builder's ``/`` reads it).
         self._security_local_cpp_types: dict[str, str] = {}

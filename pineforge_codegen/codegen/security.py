@@ -1087,7 +1087,9 @@ class SecurityEmitter:
                         )
                         result = sub(
                             rf"\b{re.escape(safe)}\b(?!\s*\[)",
-                            f"{ref}[0]".replace("\\", "\\\\"),
+                            self._security_helper_series_value(
+                                series_name, "0"
+                            ).replace("\\", "\\\\"),
                             result,
                         )
                     else:
@@ -2829,6 +2831,36 @@ class SecurityEmitter:
         )
         return f'{store}["{self._cpp_string_escape(series_name)}"]'
 
+    def _security_helper_series_value(self, series_name: str, index_cpp: str) -> str:
+        """A helper series read, restoring a color's ordinary integer type."""
+        value = f"{self._security_helper_series_ref(series_name)}[{index_cpp}]"
+        if series_name in self._security_color_series:
+            return na_preserving_int_cast(value, PINE_TYPE_TO_CPP[PineType.COLOR])
+        return value
+
+    def _security_helper_var_is_color(self, stmt: VarDecl) -> bool:
+        """Use this declaration's Pine type, never its name or integer width."""
+        if stmt.type_hint:
+            return stmt.type_hint == "color"
+        spec = self.ctx.var_member_type_specs_by_node.get(id(stmt))
+        if spec is not None and spec.kind == "primitive" and spec.name == "color":
+            return True
+        metadata = self.ctx.var_member_metadata_by_node.get(id(stmt))
+        if metadata is not None and metadata[2] == PineType.COLOR:
+            return True
+        # The analyzer's coarse type of a color constructor can be FLOAT.
+        # Reuse the ordinary color-expression typing for its initializer.
+        return self._is_color_value(stmt.value)
+
+    @staticmethod
+    def _security_color_series_store(expr_cpp: str) -> str:
+        """Packed 32-bit ARGB fits exactly in double; preserve color na too."""
+        return (
+            f"[&]() -> double {{ auto _pf_color = ({expr_cpp}); "
+            "return is_na(_pf_color) ? na<double>() : "
+            "static_cast<double>(_pf_color); }()"
+        )
+
     def _security_helper_var_state_type(self, stmt: VarDecl) -> str:
         """The type family of a helper ``var`` whose declaration reads
         ``int64_t``. Its state is a double series (``_security_helper_series_``),
@@ -3014,7 +3046,7 @@ class SecurityEmitter:
         local_series_names = set(plan.get("local_series_names", ()))
 
         def _series_expr(binding_name: str, index_expr: str) -> str:
-            return f"{self._security_helper_series_ref(binding_name)}[{index_expr}]"
+            return self._security_helper_series_value(binding_name, index_expr)
 
         def emit_series_value(series_name: str, expr_cpp: str, pad: str) -> None:
             """One requested bar's value of a helper local read with history:
@@ -3065,17 +3097,32 @@ class SecurityEmitter:
                     cpp_type = None
                     if is_persistent_var or self._security_string_series_declared:
                         cpp_type = self._type_for_decl(stmt)
-                    if is_persistent_var and cpp_type == "int64_t":
+                    is_color_state = (
+                        is_persistent_var and self._security_helper_var_is_color(stmt)
+                    )
+                    if is_color_state:
+                        self._security_color_series.add(series_name)
+                        expr_cpp = self._security_color_series_store(expr_cpp)
+                    elif is_persistent_var and cpp_type == "int64_t":
                         cpp_type = self._security_helper_var_state_type(stmt)
                     if cpp_type == "std::string":
                         self._security_store_string_series(stmt, series_name)
                         if stmt.value is None or isinstance(stmt.value, NaLiteral):
                             expr_cpp = "na<std::string>()"
                     if is_persistent_var:
-                        if cpp_type not in {"double", "int", "bool", "std::string"}:
+                        if not is_color_state and cpp_type == "int64_t":
+                            # Preserve the epoch-width refusal and diagnostic.
                             self._codegen_error(
                                 stmt,
                                 "request.security helper-local var state currently supports only int, float, bool and string values",
+                                hint="Hoist collection, UDT, or drawing state outside request.security().",
+                            )
+                        if not is_color_state and cpp_type not in {
+                            "double", "int", "bool", "std::string"
+                        }:
+                            self._codegen_error(
+                                stmt,
+                                "request.security helper-local var state currently supports only int, float, bool and string values or color values",
                                 hint="Hoist collection, UDT, or drawing state outside request.security().",
                             )
                         # A Pine ``var`` initializer runs once per helper call
@@ -3178,6 +3225,8 @@ class SecurityEmitter:
                     if series_name in self._security_string_series and isinstance(
                             stmt.value, NaLiteral):
                         expr_cpp = "na<std::string>()"
+                    elif series_name in self._security_color_series:
+                        expr_cpp = self._security_color_series_store(expr_cpp)
                 elif stmt.op == ":=":
                     expr_cpp = self._security_local_value(
                         expr_cpp, stmt.value, self._security_local_cpp_types.get(binding),
@@ -6454,7 +6503,7 @@ class SecurityEmitter:
                 if isinstance(bound, str):
                     series_name = self._security_series_binding_target(bound)
                     if series_name is not None:
-                        return f"{self._security_helper_series_ref(series_name)}[0]"
+                        return self._security_helper_series_value(series_name, "0")
                     return bound
                 return self._build_security_expr(
                     sec_id,
@@ -6612,10 +6661,7 @@ class SecurityEmitter:
                                 helper_binding_stack,
                                 emitted_lines,
                             )
-                            return (
-                                f"{self._security_helper_series_ref(series_name)}"
-                                f"[{index_cpp}]"
-                            )
+                            return self._security_helper_series_value(series_name, index_cpp)
                         return bound
                     # Function parameters retain Pine's series identity. Apply
                     # history to the supported bound bar series and compose
@@ -7575,7 +7621,8 @@ class SecurityEmitter:
                     if isinstance(bound, str):
                         series_name = self._security_series_binding_target(bound)
                         if series_name is not None:
-                            return series_name not in self._security_string_series
+                            return (series_name not in self._security_string_series
+                                    and series_name not in self._security_color_series)
                         return self._security_local_cpp_types.get(bound) == "double"
                     return self._security_emits_double(bound, bound_stack, depth + 1)
             else:
