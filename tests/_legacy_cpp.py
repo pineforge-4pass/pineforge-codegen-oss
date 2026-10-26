@@ -2,6 +2,63 @@
 import re
 
 from pineforge_codegen.codegen.run_stops import RUN_STOP_SHIMS_CPP
+from tests._cpp_tokens import code_only, regions
+
+
+# Exact source-bearing spellings emitted by base.py (host base),
+# emit_top.py (two includes, host/config/override uses), checked_settings.py
+# (config), security.py (host time_close), and ta.py (length adapters).
+# Do not allow arbitrary namespaces, paths, or source-qualified members:
+# they could hide an unrenamed script identifier.
+_EMITTER_SOURCE_SPELLINGS = (
+    "#include <pineforge/source/pine_strategy_host.hpp>",
+    "#include <pineforge/source/pine_ta_length.hpp>",
+    "pineforge::source::PineStrategyHost",
+    "pineforge::source::PineStrategyConfig",
+    "pineforge::source::StrategyOverrides",
+    "pineforge::source::SeriesHighest",
+    "pineforge::source::SeriesLowest",
+    "pineforge::source::SeriesHighestBars",
+    "pineforge::source::SeriesLowestBars",
+    "pineforge::source::PineSupertrend",
+    "pineforge::source::FirstCallBound",
+    "pineforge::source::ta_number",
+    "pineforge::source::simple_ta_length",
+)
+
+
+def assert_source_rename_complete(raw_cpp: str) -> None:
+    """Refuse a mixed rename before projecting it onto historical bytes."""
+    code = code_only(raw_cpp)
+    if not re.search(r"\bpf_safe_source\b", code):
+        return
+    for spelling in _EMITTER_SOURCE_SPELLINGS:
+        code = re.sub(rf"(?<![\w:]){re.escape(spelling)}(?!\w)", " ", code)
+    assert not re.search(r"\bsource\b", code), (
+        "partial source rename: unescaped 'source' identifier in generated C++"
+    )
+
+
+def without_source_rename(cpp: str) -> str:
+    """Reverse Opus P2-3's ``source`` reservation for historical comparisons.
+
+    The reservation avoids collisions with engine namespace ``pineforge::source``.
+    Keep this narrow: only the complete C++ identifier ``pf_safe_source``
+    becomes ``source``. Preserve longer identifiers, comments and literals
+    byte for byte so historical lowering checks still catch other drift.
+    Refuse a partial rename before reversing any identifiers.
+    The raw-output source reservation regression covers the rename itself.
+    """
+    assert_source_rename_complete(cpp)
+    identifier = re.compile(r"\bpf_safe_source\b")
+    parts = []
+    last = 0
+    for _kind, start, end, _value in regions(cpp):
+        parts.append(identifier.sub("source", cpp[last:start]))
+        parts.append(cpp[start:end])
+        last = end
+    parts.append(identifier.sub("source", cpp[last:]))
+    return "".join(parts)
 
 
 def _without_run_failure_scaffold(cpp: str) -> str:
@@ -38,9 +95,42 @@ def _without_run_failure_scaffold(cpp: str) -> str:
     return ''.join(output)
 
 
+def without_trade_history_policy(cpp: str) -> str:
+    """Remove CR-150's additive policy block/export and normalize ctor lookup.
+
+    Whole-C++ identity fixtures pinned before L5 compare semantic lowering
+    against that accepted scaffold. The L5 raw-output tests cover these two
+    emitted ABI pieces directly. CR150-CX also qualifies the constructor's
+    existing configure call with ``this->``; normalize only that statement
+    when comparing historical lowering. Raw constructor compile/spelling
+    coverage lives in test_cr150_constructor_names.py.
+    """
+    cpp = cpp.replace(
+        '        this->configure_pine_strategy(cfg);\n',
+        '        configure_pine_strategy(cfg);\n')
+    # The order-shapes receipt's host_reads records emitted host-member uses.
+    # Non-readers gain this setter element when it becomes reserved; readers
+    # emit no policy call and have no such element.
+    cpp = cpp.replace('\\"set_trade_history_streamable\\",', '')
+    cpp = re.sub(
+        r'^#if defined\(PINEFORGE_HAS_TRADE_HISTORY_POLICY_V1\)\n'
+        r'        (?:this->)?set_trade_history_streamable\(true\);\n'
+        r'^#endif\n',
+        '', cpp, flags=re.MULTILINE)
+    return re.sub(
+        r'^    int strategy_reads_trade_history\(void\) \{\n'
+        r'        return [01];\n'
+        r'    \}\n',
+        '', cpp, flags=re.MULTILINE)
+
+
 def legacy_cpp(cpp: str) -> str:
     # Coded-stop ABIs are additive; retain their actual call-site changes.
     cpp = _without_run_failure_scaffold(cpp)
+    # CR-150's trade-history policy and per-strategy reader export are also
+    # additive. Historical lowering oracles intentionally ignore both so the
+    # feature's ABI shape is covered by its own raw-output tests.
+    cpp = without_trade_history_policy(cpp)
     cpp = cpp.replace(
         '#if __has_include(<pineforge/checked_settings.hpp>)\n'
         '#include <pineforge/checked_settings.hpp>\n#endif\n', '')

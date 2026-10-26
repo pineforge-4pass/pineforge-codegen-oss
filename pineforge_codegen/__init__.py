@@ -26,11 +26,14 @@ def _parse_bounded(pine_source: str, filename: str, budget: TimeBudget | None = 
     ensure_recursion_headroom()
     check_source_size(pine_source, filename)
     budget = budget or TimeBudget(filename)
+    # Normalize once before the pre-pass; all stages use the lexer's text.
+    lexer = Lexer(pine_source, filename=filename, budget=budget)
+    pine_source = lexer.source
     pragmas = extract_pf_trace_pragmas(
         pine_source, filename=filename, budget=budget,
     )
     budget.check(phase=Phase.LEXER)
-    tokens = Lexer(pine_source, filename=filename, budget=budget).tokenize()
+    tokens = lexer.tokenize()
     budget.check(phase=Phase.LEXER)
     ast = Parser(tokens, source=pine_source, filename=filename,
                  budget=budget).parse()
@@ -170,6 +173,8 @@ def transpile_full(pine_source: str, *, check_support: bool = True,
       ``min`` / ``max`` / ``step`` / ``options`` (omitted when the
       corresponding signature argument is absent or is not a literal the
       receipt holds); an ``input.symbol`` entry also has ``kind: "symbol"``.
+      An ``input.color`` has ``type: "color"`` and an unsigned packed
+      ``0xAARRGGBB`` integer default when its color expression is literal-foldable.
       See :meth:`CodeGen.extract_input_manifest`.
     - ``strategyParams``: the literal ``strategy(...)`` kwargs the analyzer
       surfaced (e.g. ``initial_capital``, ``pyramiding``).

@@ -1074,21 +1074,24 @@ class SecurityEmitter:
                 for name, bound in frame.items():
                     if not isinstance(bound, str):
                         continue
+                    # Match the expression visitor's C++ spelling, as the
+                    # mutable-global rewrite above does.
+                    safe = self._safe_name(name)
                     series_name = self._security_series_binding_target(bound)
                     if series_name is not None:
                         ref = self._security_helper_series_ref(series_name)
                         result = sub(
-                            rf"\b{re.escape(name)}\b(?=\s*\[)",
+                            rf"\b{re.escape(safe)}\b(?=\s*\[)",
                             ref.replace("\\", "\\\\"),
                             result,
                         )
                         result = sub(
-                            rf"\b{re.escape(name)}\b(?!\s*\[)",
+                            rf"\b{re.escape(safe)}\b(?!\s*\[)",
                             f"{ref}[0]".replace("\\", "\\\\"),
                             result,
                         )
                     else:
-                        result = sub(rf"\b{re.escape(name)}\b", bound, result)
+                        result = sub(rf"\b{re.escape(safe)}\b", bound, result)
         return result
 
     def _security_lookup_helper_binding(

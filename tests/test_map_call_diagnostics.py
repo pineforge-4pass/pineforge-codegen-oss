@@ -10,7 +10,7 @@ from hashlib import sha256
 
 import pytest
 
-from tests._legacy_cpp import legacy_cpp
+from tests._legacy_cpp import legacy_cpp, without_source_rename
 from pineforge_codegen import transpile
 from pineforge_codegen.errors import CompileError, Phase
 from tests.test_map_param_methods import _compile_and_run
@@ -68,7 +68,7 @@ observed = typed_keywords(global_values, global_source)
 
 def test_valid_existing_positional_and_typed_keyword_forms_do_not_drift():
     cpp = transpile(_VALID_EXISTING_FORMS)
-    assert sha256(legacy_cpp(cpp).encode()).hexdigest() == (
+    assert sha256(without_source_rename(legacy_cpp(cpp)).encode()).hexdigest() == (
         "c955f34b39e168579eab09094728963148a1a2c16d5c46b2bc2975d681d7963c"
     )
 

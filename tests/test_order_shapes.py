@@ -314,6 +314,15 @@ def test_host_emission_superset_of_token_crosscheck(body):
     assert scan_host_reads(cpp) <= set(result["host_reads"])
 
 
+def test_host_reads_names_policy_setter_for_non_readers_only():
+    declaration = '//@version=6\nstrategy("trade history host reads")\n'
+    non_reader = receipt("", declaration)
+    reader = receipt("closed_profit = strategy.closedtrades.profit(0)\n", declaration)
+    assert "set_trade_history_streamable" in non_reader["host_reads"]
+    assert "set_trade_history_streamable" not in reader["host_reads"]
+    assert "closed_trade_profit" in reader["host_reads"]
+
+
 def test_host_strings_do_not_create_reads():
     result = receipt('strategy.entry("L", strategy.long, comment="session_islastbar_")\nplot(close, title="pine_time_offset")')
     assert "session_islastbar_" not in result["host_reads"]
