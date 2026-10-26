@@ -30,7 +30,7 @@ DELTAS = (-1, -1, 1, 1, 1, -1, -1, -1, 1, 1, -1, -1)
 
 def _run_values(source, work, *, chart_tf="1"):
     # Transpile before an environment skip, so the regression is visible even
-    # without native inputs. Native compilation/execution belongs in lab CI.
+    # without native inputs. Native compilation/execution belongs in the CI job that has the native engine.
     cpp = transpile(source)
     compile_env.skip_if_no_engine_lib()
     work.mkdir()
