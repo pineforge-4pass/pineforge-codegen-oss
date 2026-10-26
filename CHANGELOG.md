@@ -20,7 +20,10 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
-## Unreleased
+## 1.8.1 — planned
+
+A fix-only patch release of the exact engine/codegen pair; it needs no engine
+change.
 
 - Fix a silent wrong value under `calc_on_order_fills`: a fill recalculation
   that ran after a deferred `request.security` evaluation (for example a late
@@ -34,27 +37,74 @@ supported as exact pairs; on the 0.x line they are independent. See the
   (the chart-fallback warning) keep their old rollback, and so do the shared
   helper-local `var` series of a script that has such a payload, so the
   late-restore loss is fixed for every script without that warning and not
-  for the helper-local state of a script that has it. The emitted C++ of any
-  script with a `request.security` changes in that one function; no engine
-  change or ABI change is involved.
+  for the helper-local state of a script that has it. The emitted C++ changes
+  only in that one function (in 72 of the 555 corpus and fixture scripts); no
+  engine change or ABI change is involved.
+
+## Unreleased
+
+Planned as 1.8.0, a minor release of the exact engine/codegen pair, paired with
+engine `v1.8.0`. This entry records what changed in this repository since
+1.7.0 and nothing else: four pull requests merged after `v1.7.0`, three
+behaviour changes and one CHANGELOG-only change. The three behaviour changes
+alter the published input manifest, the emitted C++ for scripts that read
+`strategy.account_currency`, and the accepted input (line endings).
+
+### Compatibility and migration
+
+- Pairs with engine `v1.8.0` exactly. Regenerate strategy C++ with this release
+  and relink every strategy library against the engine `v1.8.0` headers and
+  `libpineforge.a`, even when the C ABI number is unchanged (README
+  [Engine pairing](README.md#engine-pairing)).
+- **Hosts must recognize the new input type `color`.** The input manifest
+  (`transpile_full()` and the Pyodide/glue manifest) now reports every
+  `input.color` entry as `"type": "color"` with an unsigned packed
+  `0xAARRGGBB` integer `default` (`color.red` is `4294063685`, `0xFFF23645`;
+  transparency is included), where 1.7.0 and earlier reported `"type": "string"`
+  with a Pine-spelling default such as `"color.red"`. A host with a closed list
+  of manifest types needs a `color` arm. Treat the default as a number in
+  `0..4294967295`: do not parse it as a signed 32-bit integer, and send its
+  decimal text to the native setter (`get_input_int64`). A default that cannot
+  be folded to a constant keeps its previous (null) metadata. `supported`, the
+  emitted C++, the native setters and receipts, and the C ABI are unchanged.
+  `pineforge-hpo` accepts color inputs from its 1.8.0 release (a packed integer
+  in `0..4294967295`, booleans refused).
+- The emitted C++ is intended to change only for scripts that read
+  `strategy.account_currency` (below); the other changes do not touch code
+  generation for existing inputs. This is the design intent of the pull
+  requests and their tests, not a byte comparison of generated C++ against
+  1.7.0. The diagnostic codes and the catalog schema are not changed.
+- Engine behavior changes are described in the paired engine's own release
+  notes; this entry does not summarize them.
+
+### Changes since 1.7.0
+
 - Fix `input.color` metadata so its default round-trips through the native
-  input setter ([#231](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/231)).
+  input setter ([#231](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/231),
+  [#251](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/251)).
   Python `transpile_full()` and the Pyodide/glue manifest now report
   `type: "color"` and an unsigned packed `0xAARRGGBB` integer default for named
-  Pine v6 colors, hex literals and literal `color.new` / `color.rgb` expressions,
-  including transparency. `color.red` is `4294063685` (`0xFFF23645`). Hosts must
-  recognize the new type and preserve the unsigned integer, sending its decimal
-  text to the native setter instead of a Pine expression such as `"color.red"`.
-  `supported` remains true, other input metadata is unchanged, and generated
-  C++ and native setters/receipts retain their existing behavior. Unfoldable
-  defaults retain their previous metadata; accepted expressions are unchanged.
+  Pine v6 colors, hex literals and literal `color.new` / `color.rgb`
+  expressions, including transparency. Unfoldable defaults retain their previous
+  metadata; accepted expressions are unchanged. See the migration note above.
 - Fix `strategy.account_currency` to return the declared constant currency,
   falling back to the symbol currency when omitted or `currency.NONE`, and
   support currency-constant comparisons and string concatenation
-  ([#227](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/227)).
+  ([#227](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/227),
+  [#250](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/250)).
+  No currency conversion is added; only the value the script reads changes, so a
+  script that branches on `strategy.account_currency` can now take a different
+  branch than under 1.7.0.
 - Accept CRLF and lone CR code line endings like LF across the Python and JSON
   translation entry points, preserving generated C++, diagnostics and literal
-  string contents ([#230](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/230)).
+  string contents
+  ([#230](https://github.com/pineforge-4pass/pineforge-codegen-oss/issues/230),
+  [#252](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/252)).
+  This is the line-ending part of #230; a lone `\r` inside a string literal
+  stays data. Output for LF sources is unchanged.
+- Backfill release notes for earlier codegen releases, including the Security
+  entry for GHSA-5www-2x9c-mgr6
+  ([#248](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/248)).
 
 ## 1.7.0 — 2026-10-25
 
