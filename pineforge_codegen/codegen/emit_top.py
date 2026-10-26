@@ -908,6 +908,44 @@ class TopLevelEmitter:
             lines.append("};")
             lines.append("")
 
+    def _requested_progression_member_names(self) -> set[str]:
+        """Requested-clock state, using the same metadata as its declarations.
+
+        Evaluator emission records the actual chart-fallback decision before
+        this inventory is read. A fallback site's state must still roll back.
+        The helper maps are shared by all sites, so retain their whole-map
+        restore whenever any site falls back.
+        """
+        names: set[str] = set()
+        if self._security_calls and not any(
+            info.get("chart_fallback", True) for info in self._security_eval_info
+        ):
+            names.add("_security_helper_series_")
+            if self._security_string_series_declared:
+                names.add("_security_helper_series_str_")
+        for info in self._security_eval_info:
+            if info.get("chart_fallback", True):
+                continue
+            sec_id = info["sec_id"]
+            names.update(
+                self._security_ohlc_hist_series_cpp(sec_id, field)
+                for field in self._security_ohlc_hist_fields_by_sec.get(sec_id, ())
+            )
+            names.update(self._security_ta_hist_series_names(sec_id))
+            names.update(self._security_expr_hist_series_names(sec_id))
+            if sec_id in self._security_bar_index_secs:
+                names.add(self._security_bar_index_member(sec_id))
+            for variants in (info.get("ta_variants") or {}).values():
+                names.update(variant["member_name"] for variant in variants)
+            for name in info.get("mutable_globals", []):
+                global_info = self._global_mutable_infos.get(name)
+                if global_info is None:
+                    continue
+                names.add(self._security_state_name(sec_id, name))
+                if getattr(global_info, "is_var", False):
+                    names.add(self._security_init_flag_name(sec_id, name))
+        return names
+
     def _emit_script_state_hooks(self, lines: list[str], members: list[str]) -> None:
         """Emit the engine's Pine rollback checkpoint hook implementation.
 
@@ -969,7 +1007,13 @@ class TopLevelEmitter:
         lines.append("")
         lines.append("    void restore_script_state() override {")
         lines.append("        if (!_pf_script_state_checkpoint_) return;")
+        # Requested evaluators advance independently of chart rollback, like
+        # the engine's requested aggregators. Snapshot/commit still copy all
+        # members; those unused requested copies are harmless.
+        requested_progression = self._requested_progression_member_names()
         for idx, name in enumerate(members):
+            if name in requested_progression:
+                continue
             if handle_aware:
                 lines.append(
                     f"        {checkpoint_traits}<"

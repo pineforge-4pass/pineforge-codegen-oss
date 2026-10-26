@@ -20,6 +20,27 @@ supported as exact pairs; on the 0.x line they are independent. See the
   the release commit. A prerelease note describes changes since the preceding
   prerelease or stable tag; the final stable note consolidates the series.
 
+## 1.8.1 — planned
+
+A fix-only patch release of the exact engine/codegen pair; it needs no engine
+change.
+
+- Fix a silent wrong value under `calc_on_order_fills`: a fill recalculation
+  that ran after a deferred `request.security` evaluation (for example a late
+  margin-call liquidation) restored the strategy checkpoint taken before that
+  evaluation and rolled the requested context's own state back (helper-local
+  `var` series, requested TA objects, OHLC and expression histories, mutable
+  copies and bar-index clocks), while the engine's requested aggregators had
+  already advanced. The generated `restore_script_state()` now leaves that
+  requested progression alone and still restores the chart's state and the
+  merged request results; payloads that keep user calls on the chart's bar
+  (the chart-fallback warning) keep their old rollback, and so do the shared
+  helper-local `var` series of a script that has such a payload, so the
+  late-restore loss is fixed for every script without that warning and not
+  for the helper-local state of a script that has it. The emitted C++ changes
+  only in that one function (in 72 of the 555 corpus and fixture scripts); no
+  engine change or ABI change is involved.
+
 ## Unreleased
 
 Planned as 1.8.0, a minor release of the exact engine/codegen pair, paired with
