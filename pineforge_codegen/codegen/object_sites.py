@@ -47,6 +47,8 @@ MATRIX_COPIES = frozenset((
     "eigenvectors", "kron", "row", "col",
 ))
 MATRIX_BULK_WRITES = frozenset(("fill", "add_row", "add_col", "concat"))
+# The C++ spelling of an array (``_type_spec_to_cpp``): ``std::vector<element>``.
+ARRAY_CPP_PREFIX = "std::vector<"
 
 
 @dataclass(eq=False)
@@ -192,6 +194,34 @@ def field_store_weight(emitter, spec, value, compound=False):
             return 1
         return 0 if emitter._array_arg_kind(value) == "fresh" else copy_weight(spec.element)
     return 0
+
+
+def element_store_weight(element, value, compound=False):
+    """``xs[k] := v``: what an array element of type ``element`` takes, as
+    ``array.set`` stores it. A non-empty string is one object, and so is the
+    string a compound assignment builds; a number, bool, color or handle owns
+    none. An element whose type is not resolved counts as a string."""
+    per = element_weight(element)
+    if per == 1 and not compound and is_empty_string(value):
+        return 0
+    return per
+
+
+def tuple_array_copy_weight(cpp_types, stored=False):
+    """The arrays among a tuple's elements, of C++ types ``cpp_types``, each
+    copied once: an array of strings copies every string it holds, which has
+    no static bound; any other array is one new array, or nothing when a
+    variable takes it (``stored``, as ``held_array_store_weight`` prices a
+    store); a value that is not an array owns none."""
+    weight = 0
+    for cpp_type in cpp_types:
+        if not (cpp_type.startswith(ARRAY_CPP_PREFIX) and cpp_type.endswith(">")):
+            continue
+        if cpp_type[len(ARRAY_CPP_PREFIX):-1] == "std::string":
+            return UNBOUNDED
+        if not stored:
+            weight = _plus(weight, 1)
+    return weight
 
 
 def udt_copy_weight(emitter, type_name):

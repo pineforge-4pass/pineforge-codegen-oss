@@ -106,7 +106,10 @@ from .tables import (
 )
 from ..limits import iter_ast_nodes
 from .drawing import DRAWING_LIFETIME_CPP
-from .object_sites import record_returned_arrays
+from .object_sites import (
+    held_array_store_weight, record_object_site, record_returned_arrays,
+    tuple_array_copy_weight,
+)
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 
 
@@ -1742,6 +1745,10 @@ class TopLevelEmitter:
                 if name in self._array_vars:
                     for stmt in self.ctx.ast.body:
                         if isinstance(stmt, VarDecl) and stmt.name == name:
+                            # An array a variable already holds is copied in
+                            # (object_sites.py).
+                            record_object_site(
+                                self, stmt, held_array_store_weight(self, stmt.value))
                             cpp_val = self._visit_expr(stmt.value)
                             lines.append(f"            {safe} = {cpp_val};")
                             break
@@ -2656,6 +2663,11 @@ class TopLevelEmitter:
                         and fi.returns_tuple and "_" not in s.names):
                     # ``[p, q] = pair(v)`` last returns the declared tuple.
                     self._visit_stmt(s, lines, indent=2)
+                    # Each array the names hold is copied into the returned
+                    # tuple (object_sites.py), typed as their bindings are.
+                    record_object_site(self, s, tuple_array_copy_weight(
+                        [self._tuple_binding_cpp_types_by_name.get(name, "double")
+                         for name in s.names]))
                     declared = TupleLiteral(
                         elements=[Identifier(name=name) for name in s.names]
                     )

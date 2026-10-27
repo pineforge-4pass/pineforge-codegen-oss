@@ -493,11 +493,11 @@ OWNED_ELEMENT_CASES = [
     pytest.param(STRING_MATRIX_ROW_OF_A_FIELD, id="row-of-a-string-matrix-held-in-a-field"),
     # unbounded: the payload is a global whose declaration builds an array, and the evaluator
     # builds it again for every requested bar (counted on the chart alone it would be 1).
-    # Not confirmed by a transpile: that the payload builder accepts this shape is unverified.
+    # The payload builder accepts this shape: the row transpiles it and reads its receipt.
     pytest.param(REQUEST_READING_A_GLOBAL_THAT_BUILDS_AN_ARRAY,
                  id="request-payload-reading-a-global-that-builds-an-array"),
     # unbounded: the same, through a global bound to a user function that builds the array
-    # (counted on the chart alone it would be 1). Not confirmed by a transpile either.
+    # (counted on the chart alone it would be 1); the row transpiles this shape too.
     pytest.param(REQUEST_READING_A_GLOBAL_FROM_A_FUNCTION_BUILDING_AN_ARRAY,
                  id="request-payload-reading-a-global-from-a-function-building-an-array"),
     # unbounded: the string stored in note sits in a for ... in loop, which has no static trip
@@ -592,4 +592,65 @@ COUNTER_UNBOUNDED_CASES = [
 
 @pytest.mark.parametrize("body", COUNTER_UNBOUNDED_CASES)
 def test_receipt_is_unbounded_for_a_loop_that_assigns_its_own_counter(body):
+    assert receipt_text(HEADER + body) == unbounded_receipt()
+
+
+# Copies and stores on the remaining routes: a `var` declaration's first-bar initializer that
+# takes another variable's array, an element stored through `xs[k] := v` (priced as array.set
+# prices it), and a function whose last statement is a tuple declaration, which returns copies
+# of the arrays its names hold. Each value is worked out by hand from the rules above.
+
+VAR_STRING_ARRAY_ALIASED_BY_A_VAR = '''var b = array.from("x", "y")
+var c = b
+'''
+
+VAR_NUMERIC_ARRAY_ALIASED_BY_A_VAR = '''var b = array.from(1.0, 2.0)
+var c = b
+'''
+
+STRING_ELEMENT_STORED_IN_A_STATIC_LOOP = '''names = array.new_string(2)
+for i = 0 to 9
+    names[0] := "x" + str.tostring(i)
+'''
+
+NUMERIC_ELEMENT_STORED_IN_A_STATIC_LOOP = '''levels = array.new_float(2)
+for i = 0 to 9
+    levels[0] := i * 2.0
+'''
+
+STRING_ARRAYS_RETURNED_BY_A_TUPLE_DECLARATION = '''pair() => [array.from("a", "b"), array.from("c")]
+both() =>
+    [p, q] = pair()
+[x, y] = both()
+'''
+
+REMAINING_ROUTE_BOUNDED_CASES = [
+    # array.from over two numbers 1 + var c = b, an array of numbers taken by a variable, 0 = 1
+    pytest.param(VAR_NUMERIC_ARRAY_ALIASED_BY_A_VAR, 1, id="var-numeric-array-aliased-by-a-var"),
+    # array.new_string 1 (no initial value) + i = 0 .. 9 (10 trips) x 1 non-empty string = 1 + 10 = 11
+    pytest.param(STRING_ELEMENT_STORED_IN_A_STATIC_LOOP, 11,
+                 id="string-element-store-in-a-static-loop-counts-every-trip"),
+    # array.new_float 1 + i = 0 .. 9 (10 trips) x 0 (a number owns nothing) = 1
+    pytest.param(NUMERIC_ELEMENT_STORED_IN_A_STATIC_LOOP, 1, id="numeric-element-store-adds-nothing"),
+]
+
+
+@pytest.mark.parametrize(("body", "objects"), REMAINING_ROUTE_BOUNDED_CASES)
+def test_receipt_counts_element_stores_and_leaves_numeric_aliases_at_the_plain_count(body, objects):
+    assert receipt_text(HEADER + body) == bounded_receipt(objects)
+
+
+REMAINING_ROUTE_UNBOUNDED_CASES = [
+    # unbounded: var c = b copies an array of strings the count does not track
+    # (array.from 1 + 2 = 3 without the copy)
+    pytest.param(VAR_STRING_ARRAY_ALIASED_BY_A_VAR, id="var-string-array-aliased-by-a-var"),
+    # unbounded: both() returns copies of p and q, arrays of strings the count does not track
+    # (array.from 1 + 2 + array.from 1 + 1 = 5 without the copies)
+    pytest.param(STRING_ARRAYS_RETURNED_BY_A_TUPLE_DECLARATION,
+                 id="string-arrays-returned-by-a-tuple-declaration"),
+]
+
+
+@pytest.mark.parametrize("body", REMAINING_ROUTE_UNBOUNDED_CASES)
+def test_receipt_is_unbounded_for_owned_copies_on_the_remaining_routes(body):
     assert receipt_text(HEADER + body) == unbounded_receipt()

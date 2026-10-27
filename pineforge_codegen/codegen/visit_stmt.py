@@ -91,6 +91,7 @@ from ..ast_nodes import (
     MemberAccess,
     MethodDef,
     StrategyDecl,
+    Subscript,
     SwitchStmt,
     Ternary,
     TupleAssign,
@@ -102,8 +103,9 @@ from ..ast_nodes import (
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from ..external_requests import UNPINNED_ANNOTATION
 from .object_sites import (
-    element_weight, field_store_weight, held_array_store_weight, is_empty_string,
-    map_method_weight, record_object_site, udt_field_spec,
+    element_store_weight, element_weight, field_store_weight, held_array_store_weight,
+    is_empty_string, map_method_weight, record_object_site, tuple_array_copy_weight,
+    udt_field_spec,
 )
 from .tables import (
     ARRAY_NEW_CTORS,
@@ -1076,13 +1078,21 @@ class StmtVisitor:
 
     def _record_store_objects(self, node: Assignment, target_name: str | None) -> None:
         """What a reassignment creates (object_sites.py): an array a variable
-        already holds is copied into the variable it is stored in, and a
+        already holds is copied into the variable it is stored in, an array
+        element takes what ``array.set`` prices for the same value, and a
         user-type field takes what ``Type.new`` prices for the same value."""
         if target_name is not None:
             if node.op == ":=":
                 record_object_site(self, node, held_array_store_weight(self, node.value))
             return
         target = node.target
+        if isinstance(target, Subscript):
+            # ``xs[k] := v`` sets an element of the current array.
+            spec = self._type_spec_from_expr(target.object)
+            if spec is not None and spec.kind == "array":
+                record_object_site(self, node, element_store_weight(
+                    spec.element, node.value, compound=node.op != ":="))
+            return
         if not isinstance(target, MemberAccess) or self._is_omitted_udt_field(target):
             return
         owner = self._type_spec_from_expr(target.object)
@@ -1439,6 +1449,12 @@ class StmtVisitor:
             temp = f"_tuple_result_{self._tuple_assign_counter}"
             self._tuple_assign_counter += 1
             lines.append(f"{pad}auto {temp} = {call_expr};")
+            # Each named element is copied out of the tuple: an array of
+            # strings with every string it holds (object_sites.py).
+            cpp_types = self._tuple_binding_cpp_types(node)
+            record_object_site(self, node, tuple_array_copy_weight(
+                [cpp_type for name, cpp_type in zip(node.names, cpp_types) if name != "_"],
+                stored=True))
             for idx, name in enumerate(node.names):
                 if name == "_":
                     continue
