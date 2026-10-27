@@ -61,6 +61,7 @@ def test_every_cpp_keyword_compiles_or_pine_rejects_it(name: str) -> None:
     "strategy_capabilities_api_version", "strategy_capabilities_receipt",
     "strategy_confirmed_bar_api_version", "strategy_confirmed_bar_receipt",
     "strategy_order_shapes_api_version", "strategy_order_shapes_receipt",
+    "strategy_id_sites_api_version", "strategy_id_sites_receipt",
     "strategy_settings_api_version", "strategy_get_effective_settings",
     "PF_ABI_VERSION", "PF_NATIVE_API_VERSION",
     "PF_CAPABILITIES_API_VERSION", "PF_SETTINGS_API_VERSION",

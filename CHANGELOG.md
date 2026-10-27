@@ -52,8 +52,9 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
   emitted C++, the native setters and receipts, and the C ABI are unchanged.
   `pineforge-hpo` accepts color inputs from its 1.8.0 release (a packed integer
   in `0..4294967295`, booleans refused).
-- The emitted C++ is intended to change only for the scripts the entries below
-  name: those that read `strategy.account_currency`, whose persistent
+- Every generated strategy library gains the two id-sites receipt exports (see
+  the entry below); trading code is unchanged. Apart from that, the emitted C++
+  is intended to change only for the scripts the entries below name: those that read `strategy.account_currency`, whose persistent
   declarations depend on earlier statements, with a helper-local `var color`,
   with a helper that reads the history of a derived argument, or with a
   `request.security` (for the late-restore change alone, only the
@@ -152,6 +153,19 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
   [#252](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/252)).
   This is the line-ending part of #230; a lone `\r` inside a string literal
   stays data. Output for LF sources is unchanged.
+- Report how many order sites create a computed id in one execution of the
+  script (not per bar: `calc_on_order_fills` runs the script again after each
+  fill). Every generated
+  strategy library also defines `strategy_id_sites_api_version()`, which returns
+  1, and `strategy_id_sites_receipt(s, json, capacity, required, error,
+  error_capacity)`, beside the order-shapes receipt and with the same buffer
+  protocol. Its canonical JSON, `{"strategy":{"ids":{"freshPerBar":K}},"version":1}`,
+  counts the lowered `strategy.entry`, `strategy.order` and `strategy.exit` sites
+  whose `id` is not a literal, once per static call of the function that holds
+  them and once per iteration of a `for` loop with known bounds; a loop without a
+  static bound or a recursion around a computed id gives
+  `{"strategy":{"ids":{"freshPerBarStatus":"unbounded"}},"version":1}`. The
+  emitted C++ of every strategy gains the two exports; trading code is unchanged.
 - Backfill release notes for earlier codegen releases, including the Security
   entry for GHSA-5www-2x9c-mgr6
   ([#248](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/248)).

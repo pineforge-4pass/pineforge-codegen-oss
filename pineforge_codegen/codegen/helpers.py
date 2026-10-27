@@ -298,6 +298,7 @@ CPP_EMITTER_NAMES = frozenset("""
     strategy_capabilities_api_version strategy_capabilities_receipt
     strategy_confirmed_bar_api_version strategy_confirmed_bar_receipt
     strategy_order_shapes_api_version strategy_order_shapes_receipt
+    strategy_id_sites_api_version strategy_id_sites_receipt
     strategy_settings_api_version strategy_get_effective_settings
     strategy_create strategy_create_checked strategy_free report_free
     run_backtest run_backtest_full run_backtest_full_checked
