@@ -5,17 +5,18 @@ A ``strategy.entry``, ``strategy.order`` or ``strategy.exit`` site whose ``id``
 time it runs; a host sizes its per-bar id bookkeeping from how often one bar can
 run such sites. The count follows the program, not the emitted C++: a user
 function counts once per static call of it (transitively), a ``for`` loop whose
-bounds are known before the script runs counts once per iteration, and anything
-without a static bound (a ``while`` or ``for ... in`` loop, a ``for`` loop with a
-computed bound, a recursion) makes the document say ``unbounded``.
+bounds are known before the script runs counts once per iteration unless its
+body assigns the loop's own counter, and anything without a static bound (a
+``while`` or ``for ... in`` loop, a ``for`` loop with a computed bound or a
+body that assigns its counter, a recursion) makes the document say ``unbounded``.
 """
 
 import json
 import math
 
 from ..ast_nodes import (
-    BinOp, ForInStmt, ForStmt, FuncCall, FuncDef, Identifier, MemberAccess, MethodDef,
-    TupleAssign, VarDecl, WhileStmt,
+    Assignment, BinOp, ForInStmt, ForStmt, FuncCall, FuncDef, Identifier, MemberAccess,
+    MethodDef, TupleAssign, VarDecl, WhileStmt,
 )
 from ..limits import iter_ast_nodes, syntax_children
 from .order_shapes import _literal, _site_facts, parameter_class
@@ -78,6 +79,22 @@ def _trip_count(loop, bindings):
     if start is None or end is None or step is None:
         return None
     return abs(end - start) // (abs(step) or 1) + 1
+
+
+def _assigns_counter(loop):
+    """Whether the body of a ``for`` loop assigns the loop's own counter.
+
+    The counter is a variable the body can set (``i := 0``, ``i += 1``), so the loop
+    then runs a number of iterations its bounds do not give. An assignment to the name
+    counts anywhere in the body, a nested block or loop included, even where an inner
+    loop declares the same name for itself: that errs high, and the count must never be low.
+    """
+    for statement in loop.body:
+        for node, _depth in iter_ast_nodes(statement):
+            if (isinstance(node, Assignment) and isinstance(node.target, Identifier)
+                    and node.target.name == loop.var):
+                return True
+    return False
 
 
 class _Index:
@@ -217,6 +234,9 @@ class _Executions:
 
     def _for_cost(self, loop):
         trips = _trip_count(loop, self.facts.get(id(loop), (0, "", {}))[2])
+        if trips is not None and _assigns_counter(loop):
+            # The body moves the counter itself, so the bounds do not say how often it runs.
+            trips = None
         body = self._block_cost(loop.body)
         if trips is not None:
             # Static bounds hold no call, so only the body repeats.

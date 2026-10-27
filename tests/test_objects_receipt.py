@@ -529,3 +529,67 @@ def test_receipt_is_unbounded_for_owned_copies_stores_and_request_payloads(body)
 def test_receipt_leaves_a_reassigned_numeric_array_at_the_plain_count():
     # array.new_float 1 + array.new_float 1 = 2; a numeric array owns no strings, so a := b adds 0
     assert receipt_text(HEADER + NUMERIC_ARRAY_REASSIGNED) == bounded_receipt(2)
+
+
+# A `for` loop whose body assigns its own counter has no static trip count: `i += 1` or `i := 0`
+# in the body makes the loop run more or fewer iterations than its bounds spell, so a creating
+# site in it has no static count. A loop that only reads its counter keeps the count of its
+# bounds, and a body that creates nothing adds nothing either way. Each value is worked out by
+# hand from those rules, never read off a transpile.
+
+FOR_LOOP_ASSIGNING_ITS_COUNTER = '''for i = 0 to 2
+    levels = array.new_float(1)
+    i += 1
+'''
+
+FOR_LOOP_READING_ITS_COUNTER = '''count = 0
+for i = 0 to 2
+    levels = array.new_float(1)
+    count += i
+'''
+
+FOR_LOOP_ASSIGNING_ITS_COUNTER_IN_AN_IF = '''for i = 0 to 2
+    levels = array.new_float(1)
+    if close > open
+        i := i + 1
+'''
+
+FOR_LOOP_ASSIGNING_ITS_COUNTER_IN_AN_INNER_LOOP = '''for i = 0 to 2
+    levels = array.new_float(1)
+    for j = 0 to 1
+        i += j
+'''
+
+FOR_LOOP_ASSIGNING_ITS_COUNTER_AROUND_NOTHING = '''levels = array.new_float(1)
+for i = 0 to 2
+    i += 1
+'''
+
+COUNTER_BOUNDED_CASES = [
+    # 3: the body only reads i (count += i assigns count): abs(2 - 0) // 1 + 1 = 3 iterations x 1 array = 3
+    pytest.param(FOR_LOOP_READING_ITS_COUNTER, 3, id="counter-only-read-keeps-its-trip-count"),
+    # 1: the array before the loop adds 1; the loop's body creates nothing, so it adds 0: 1 + 0 = 1
+    pytest.param(FOR_LOOP_ASSIGNING_ITS_COUNTER_AROUND_NOTHING, 1,
+                 id="counter-assigned-around-nothing-adds-nothing"),
+]
+
+
+@pytest.mark.parametrize(("body", "objects"), COUNTER_BOUNDED_CASES)
+def test_receipt_keeps_the_trip_count_of_a_loop_unless_the_body_assigns_its_counter(body, objects):
+    assert receipt_text(HEADER + body) == bounded_receipt(objects)
+
+
+COUNTER_UNBOUNDED_CASES = [
+    # unbounded: i += 1 moves the counter, so the 3 trips the bounds spell (i = 0, 1, 2) are not the loop's
+    pytest.param(FOR_LOOP_ASSIGNING_ITS_COUNTER, id="counter-assigned-in-the-body-is-unbounded"),
+    # unbounded: i := i + 1 inside an if of the body moves the counter just the same
+    pytest.param(FOR_LOOP_ASSIGNING_ITS_COUNTER_IN_AN_IF, id="counter-assigned-inside-an-if-is-unbounded"),
+    # unbounded: i += j in the body of an inner loop moves the outer counter (the inner loop adds 0)
+    pytest.param(FOR_LOOP_ASSIGNING_ITS_COUNTER_IN_AN_INNER_LOOP,
+                 id="counter-assigned-in-an-inner-loop-is-unbounded"),
+]
+
+
+@pytest.mark.parametrize("body", COUNTER_UNBOUNDED_CASES)
+def test_receipt_is_unbounded_for_a_loop_that_assigns_its_own_counter(body):
+    assert receipt_text(HEADER + body) == unbounded_receipt()

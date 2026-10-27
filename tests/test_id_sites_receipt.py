@@ -663,3 +663,63 @@ def test_receipt_count_is_the_number_of_iterations_the_emitted_loop_makes(body, 
         f"the emitted loop does not make the {iterations} iterations counted by hand: {loop}\n{loop_excerpt(cpp)}")
     # The body holds one computed id, so the receipt's count is the loop's iterations.
     assert receipt_text(source) == expected_receipt(iterations)
+
+
+# A `for` loop whose body assigns its own counter has no trip count its bounds can give: the
+# counter is a plain variable, so `i += 1` or `i := 0` in the body makes the loop run more or
+# fewer iterations than the three `for i = 0 to 2` spells. A computed id in such a loop has no
+# static count, a loop that only reads its counter keeps the count of its bounds, and a body
+# that holds no computed id adds nothing either way. Each value is worked out by hand from
+# those rules, never read off a transpile.
+
+FOR_LOOP_ASSIGNING_ITS_COUNTER = '''for i = 0 to 2
+    strategy.entry("L" + str.tostring(i), strategy.long)
+    i += 1
+'''
+
+FOR_LOOP_READING_ITS_COUNTER = '''count = 0
+for i = 0 to 2
+    strategy.entry("L" + str.tostring(i), strategy.long)
+    count += i
+'''
+
+FOR_LOOP_ASSIGNING_ITS_COUNTER_IN_AN_IF = '''for i = 0 to 2
+    strategy.entry("L" + str.tostring(i), strategy.long)
+    if close > open
+        i := i + 1
+'''
+
+FOR_LOOP_ASSIGNING_ITS_COUNTER_IN_AN_INNER_LOOP = '''for i = 0 to 2
+    strategy.entry("L" + str.tostring(i), strategy.long)
+    for j = 0 to 1
+        i += j
+'''
+
+FOR_LOOP_ASSIGNING_ITS_COUNTER_AROUND_A_LITERAL_ID = '''strategy.entry("D" + str.tostring(bar_index), strategy.short)
+for i = 0 to 2
+    strategy.entry("L", strategy.long)
+    i += 1
+'''
+
+COUNTER_CASES = [
+    # unbounded: i += 1 moves the counter, so the 3 trips the bounds spell (i = 0, 1, 2) are not the loop's
+    pytest.param(FOR_LOOP_ASSIGNING_ITS_COUNTER, UNBOUNDED,
+                 id="counter-assigned-in-the-body-is-unbounded"),
+    # 3: the body only reads i (count += i assigns count): abs(2 - 0) // 1 + 1 = 3 iterations x 1 site = 3
+    pytest.param(FOR_LOOP_READING_ITS_COUNTER, 3,
+                 id="counter-only-read-keeps-its-trip-count"),
+    # unbounded: i := i + 1 inside an if of the body moves the counter just the same
+    pytest.param(FOR_LOOP_ASSIGNING_ITS_COUNTER_IN_AN_IF, UNBOUNDED,
+                 id="counter-assigned-inside-an-if-is-unbounded"),
+    # unbounded: i += j in the body of an inner loop moves the outer counter (the inner loop adds 0)
+    pytest.param(FOR_LOOP_ASSIGNING_ITS_COUNTER_IN_AN_INNER_LOOP, UNBOUNDED,
+                 id="counter-assigned-in-an-inner-loop-is-unbounded"),
+    # 1: the entry before the loop adds 1; the loop's only id is a literal, which adds nothing: 1 + 0 = 1
+    pytest.param(FOR_LOOP_ASSIGNING_ITS_COUNTER_AROUND_A_LITERAL_ID, 1,
+                 id="counter-assigned-around-a-literal-id-adds-nothing"),
+]
+
+
+@pytest.mark.parametrize(("body", "fresh"), COUNTER_CASES)
+def test_receipt_has_no_trip_count_for_a_loop_that_assigns_its_own_counter(body, fresh):
+    assert receipt_text(HEADER + body) == expected_receipt(fresh)
