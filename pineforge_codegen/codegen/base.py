@@ -1505,9 +1505,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             # Aggregate initializers used to bypass declaration-site guards
             # even when they read a value only the body computes (#226).
             # Preserve the existing preamble for independent constructors and
-            # aliases, and leave varip/callable lowering unchanged.
+            # aliases, and leave callable-scoped lowering unchanged.
             statement_ordered_aggregate = (
-                stmt.is_var and not stmt.is_varip
+                (stmt.is_var or stmt.is_varip)
                 and not is_callable_scoped
                 and stmt_spec is not None
                 and (

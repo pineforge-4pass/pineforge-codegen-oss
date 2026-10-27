@@ -331,37 +331,6 @@ observed = s.value + a.size()
         assert f"_pf_var_init_{name}" not in cpp
 
 
-def test_dependent_varip_udt_emission_unchanged_known_gap_not_a_claim() -> None:
-    """KNOWN GAP, NOT A CLAIM OF CORRECTNESS: #226 is fixed for `var` only.
-
-    A dependent `varip` aggregate keeps its pre-fix route (initialized in the
-    first-bar preamble, before the statement that assigns what it reads), so it
-    still reads the member's zero default: the same defect, tracked separately
-    (see the pull request). This row pins only that THIS change does not touch
-    the `varip` emission: the member stays in the preamble and gets no
-    declaration-site once flag. It asserts nothing about the runtime value,
-    because the pre-fix value is the wrong one.
-    """
-    source = """//@version=6
-strategy("dependent varip known gap")
-type State
-    float value
-float base = strategy.initial_capital / 100
-varip state = State.new(value=base)
-observed = state.value
-"""
-    control = source.replace("State.new(value=base)", "State.new(value=0.0)")
-    cpp = transpile(source)
-    # Same preamble route as the literal control: the constructor sits in the
-    # first-bar preamble (one assignment line), and its order against `base`
-    # is the control's.
-    _preamble_member_initializers(cpp, "state")
-    assert _assignment_order(cpp, "state", "base") == _assignment_order(
-        transpile(control), "state", "base"
-    )
-    assert "_pf_var_init_state" not in cpp
-
-
 def test_nested_dependent_udt_initializes_once_on_first_entry() -> None:
     """A block's dependent UDT initializes on its later first execution."""
     source = """//@version=6
