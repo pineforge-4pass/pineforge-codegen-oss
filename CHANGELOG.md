@@ -52,11 +52,13 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
   emitted C++, the native setters and receipts, and the C ABI are unchanged.
   `pineforge-hpo` accepts color inputs from its 1.8.0 release (a packed integer
   in `0..4294967295`, booleans refused).
-- Every generated strategy library gains the two id-sites receipt exports (see
-  the entry below); trading code is unchanged. Apart from that, the emitted C++
-  is intended to change only for the scripts the entries below name: those that read `strategy.account_currency`, whose persistent
-  declarations depend on earlier statements, with a helper-local `var color`,
-  with a helper that reads the history of a derived argument, or with a
+- Every generated strategy library gains the two id-sites receipt exports and
+  the two objects receipt exports (see the entries below); trading code is
+  unchanged. Apart from that, the emitted C++ is intended to change only for the
+  scripts the entries below name: those that read `strategy.account_currency`,
+  whose persistent declarations depend on earlier statements, with a
+  helper-local `var color`, with a helper that reads the history of a derived
+  argument, or with a
   `request.security` (for the late-restore change alone, only the
   generated `restore_script_state()` changes, in 72 of the 555 corpus and
   fixture scripts; the other entries change the scripts they name). This is
@@ -166,6 +168,20 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
   static bound or a recursion around a computed id gives
   `{"strategy":{"ids":{"freshPerBarStatus":"unbounded"}},"version":1}`. The
   emitted C++ of every strategy gains the two exports; trading code is unchanged.
+- Report an upper bound on how many script-owned objects one execution of the
+  script creates (not per bar: `calc_on_order_fills` runs the script again after
+  each fill). Every generated strategy library also defines
+  `strategy_objects_api_version()`, which returns 1, and
+  `strategy_objects_receipt(s, json, capacity, required, error, error_capacity)`,
+  beside the id-sites receipt and with the same buffer protocol. Its canonical
+  JSON, `{"strategy":{"objects":{"perExecution":K}},"version":1}`, bounds the
+  arrays, string elements, maps, matrices, instances of user-defined types and
+  drawing records that one execution of the script body creates; a count the
+  translator cannot bound gives
+  `{"strategy":{"objects":{"perExecutionStatus":"unbounded"}},"version":1}`. A
+  host applies the platform maximum for that document and for any script with
+  `calc_on_order_fills`, and reads an absent export or key as 1. The emitted C++
+  of every strategy gains the two exports; trading code is unchanged.
 - Backfill release notes for earlier codegen releases, including the Security
   entry for GHSA-5www-2x9c-mgr6
   ([#248](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/248)).

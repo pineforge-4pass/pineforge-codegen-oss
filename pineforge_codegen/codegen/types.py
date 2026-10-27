@@ -54,6 +54,7 @@ from .helpers import (
     na_preserving_int_cast,
     pine_truth_cast,
 )
+from .object_sites import array_method_weight, matrix_method_weight, record_object_site
 from .. import signatures as sigs
 from .tables import (
     ALERT_FREQ_VALUES,
@@ -2027,6 +2028,12 @@ class TypeInferer:
                       and node.callee.object.name == "matrix")
         receiver_node = (_matrix_functional_receiver(method, node)
                          if functional else node.callee.object)
+        receiver_spec = (self._type_spec_from_expr(receiver_node)
+                         if receiver_node is not None else None)
+        record_object_site(self, node, "matrix", matrix_method_weight(
+            method,
+            receiver_spec.element if receiver_spec is not None and receiver_spec.kind == "matrix" else None,
+            bool(arguments)))
         receiver = self._checked_matrix_history_receiver(receiver, receiver_node)
         if method in ("add_row", "add_col") and len(arguments) == 2 and arguments[0] is None:
             # Only ``array_id`` is written (``m.add_row(array_id = a)``): the
@@ -2128,6 +2135,9 @@ class TypeInferer:
         spec: TypeSpec | None = None, node: ASTNode | None = None,
     ) -> str:
         """Lower ``arr.method(...)`` to its C++ form, validating numeric requirements."""
+        # An array whose element type is not known counts as one of strings.
+        record_object_site(self, node, "array", array_method_weight(
+            method, spec.element if spec is not None else None))
         if self._array_history_value_names():
             array_expr = f"_pf_array_id({array_expr})"
             if method in ("covariance", "concat") and args:

@@ -169,6 +169,27 @@ the demand as unbounded when `calc_on_order_fills` is on. The receipt describes 
 and adds metadata only: generated trading code is unchanged, and a host that does
 not look for the export is unaffected.
 
+Every generated strategy library also defines `strategy_objects_api_version()`,
+which returns 1, and
+`strategy_objects_receipt(handle, json, capacity, required, error, error_capacity)`,
+beside the id-sites receipt and with the same checked-settings buffer protocol.
+Its immutable canonical JSON (sorted keys, no whitespace) is
+`{"strategy":{"objects":{"perExecution":K}},"version":1}`, where `K` is an upper
+bound on the number of script-owned objects that one execution of the script body
+creates: arrays, string elements, maps, matrices, instances of user-defined types
+and drawing records. When the translator cannot bound that number, the JSON is
+`{"strategy":{"objects":{"perExecutionStatus":"unbounded"}},"version":1}`, with no
+`perExecution` key. `K` is an upper bound, not an exact count. It counts objects
+per execution of the script body, not per bar: the translator cannot bound how
+often the body runs on one bar, because `calc_on_order_fills` (set by the script or
+by a run-time override) runs it again after each fill. A host can size its object
+bookkeeping from `K` times the number of executions it expects, and applies the
+platform maximum when the document is the unbounded one, and also when
+`calc_on_order_fills` is on, whatever `K` says. A host reads an absent export, or a
+document with neither a `perExecution` key nor the unbounded status, as 1. The
+receipt describes the compiled script and adds metadata only: generated trading
+code is unchanged, and a host that does not look for the export is unaffected.
+
 Version 1 has `version`, `declarations`, `requests`, `requirements` and `unresolved`
 keys. Declarations include calculation cadence, close execution, magnifier,
 standard-OHLC fill mode, limit verification, currency and clock settings. Requests

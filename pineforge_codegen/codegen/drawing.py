@@ -23,6 +23,7 @@ import re
 
 from ..ast_nodes import FuncCall, Identifier, MemberAccess
 from ..symbols import method_receiver_type_name
+from .object_sites import record_object_site
 from .tables import (
     ARRAY_VOID_METHODS as _ARRAY_VOID_METHODS,
     DRAWING_ARENA,
@@ -274,6 +275,7 @@ class DrawingVisitor:
         return f"{collector}({handle})" if collector else handle
 
     def _emit_drawing_ctor(self, dtype: str, node: FuncCall) -> str:
+        record_object_site(self, node, "drawing", 1)
         return self._collected(dtype, self._emit_drawing_alloc(dtype, node))
 
     def _emit_drawing_alloc(self, dtype: str, node: FuncCall) -> str:
@@ -391,6 +393,8 @@ class DrawingVisitor:
         ``recv_node`` is the handle receiver; ``arg_nodes`` the remaining args.
         """
         arena = DRAWING_ARENA[dtype]
+        if method == "copy":
+            record_object_site(self, node, "drawing", 1)
         recv = self._visit_expr(recv_node)
         geometry, noop = DRAWING_METHODS_BY_TYPE[dtype]
         if method in noop:

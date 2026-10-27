@@ -101,6 +101,7 @@ from ..ast_nodes import (
 )
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from ..external_requests import UNPINNED_ANNOTATION
+from .object_sites import element_weight, is_empty_string, record_object_site
 from .tables import (
     ARRAY_NEW_CTORS,
     DRAWING_TYPE_TO_CPP,
@@ -724,6 +725,14 @@ class StmtVisitor:
                 )
                 elem_spec = spec.element or elem_spec
                 cpp_type = self._type_spec_to_cpp(spec)
+                # One matrix, and one object per element its initial value
+                # owns (a non-empty string), rows times columns of them.
+                init_node = node.value.args[2] if len(node.value.args) > 2 else None
+                record_object_site(
+                    self, node.value, "matrix", 1,
+                    element_weight(elem_spec)
+                    if init_node is not None and not is_empty_string(init_node) else 0,
+                    node.value.args[:2])
                 if len(node.value.args) > 2:
                     self._warn_narrow_int_element(
                         node.value, spec, node.value.args[2])
@@ -783,6 +792,7 @@ class StmtVisitor:
                 self._map_vars.add(node.name)
                 self._collection_types.setdefault(node.name, spec)
                 cpp_type = self._type_spec_to_cpp(spec)
+                record_object_site(self, node.value, "map", 1)
                 init = f"{cpp_type}::new_()"
                 if is_global_member:
                     lines.append(f"{pad}{safe} = {init};")

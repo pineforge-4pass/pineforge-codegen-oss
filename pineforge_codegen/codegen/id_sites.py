@@ -110,7 +110,11 @@ class _Index:
 
 
 class _Executions:
-    """How often one bar runs the counted sites, from the program's structure."""
+    """How often one bar runs the counted sites, from the program's structure.
+
+    ``counted`` maps a site's node id to its weight: what one run of the site
+    costs, a whole number or ``UNBOUNDED``.
+    """
 
     def __init__(self, ast, index, counted, facts):
         self.ast = ast
@@ -204,7 +208,7 @@ class _Executions:
             return self._for_cost(node)
         if isinstance(node, (ForInStmt, WhileStmt)):
             return self._open_loop_cost(node)
-        total = 1 if id(node) in self.counted else 0
+        total = self.counted.get(id(node), 0)
         if isinstance(node, FuncCall):
             total = _plus(total, self._call_cost(node))
         for child in syntax_children(node):
@@ -230,7 +234,7 @@ class _Executions:
         return _plus(once, UNBOUNDED if repeated else 0)
 
     def total(self):
-        if self.counted - self.index.placed:
+        if set(self.counted) - self.index.placed:
             # A lowered site the program does not hold has no position to count from.
             return UNBOUNDED
         return self._block_cost(self.ast.body)
@@ -245,7 +249,7 @@ def fresh_ids_per_bar(emitter):
     ast = emitter.ctx.ast
     index = _Index(ast, sites)
     facts = _site_facts(ast, emitter.ctx.global_mutable_infos, set(sites) | index.loops)
-    counted = {key for key, record in sites.items()
+    counted = {key: 1 for key, record in sites.items()
                if parameter_class("id", record.parameters["id"],
                                   facts.get(key, (0, "", {}))[2]) == "dynamic"}
     if not counted:

@@ -26,6 +26,7 @@ from ..collection_history import (
 from ..ast_nodes import Assignment, FuncCall, FuncDef, Identifier, MemberAccess, MethodDef, Ternary, VarDecl
 from ..limits import iter_ast_nodes
 from ..symbols import TypeSpec
+from .object_sites import copy_weight, record_object_site
 
 
 class CollectionHistoryEmitter:
@@ -294,6 +295,11 @@ class CollectionHistoryEmitter:
         current = self._visit_expr(node.object)
         use = annotation["use"]
         offset = literal_offset(node)
+        if use == "copy" or use == "reference" and offset in (0, None):
+            # A copy of the collection for a variable or a parameter, or of
+            # the current one for a reference at a zero offset.
+            record_object_site(self, node, "history", copy_weight(
+                getattr(annotation.get("spec"), "element", None)))
         if use == "reference" and offset == 0:
             cpp_type = self._type_spec_to_cpp(annotation["spec"])
             return f"_PFArrayHistoryValue<{cpp_type}>({current})"

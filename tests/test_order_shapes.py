@@ -18,8 +18,8 @@ RECEIPT_PATTERN = r'checked_settings::receipt\(("(?:[^"\\]|\\.)*"), json, capaci
 def receipt(body, declaration=SOURCE, *, check_support=True):
     cpp = transpile(declaration + body, check_support=check_support)
     documents = re.findall(RECEIPT_PATTERN, cpp)
-    # Capabilities, confirmed bar, order shapes, then the id-sites receipt.
-    assert len(documents) == 4
+    # Capabilities, confirmed bar, order shapes, then the id-sites and objects receipts.
+    assert len(documents) == 5
     document = json.loads(documents[2])
     result = json.loads(document)
     assert json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False) == document

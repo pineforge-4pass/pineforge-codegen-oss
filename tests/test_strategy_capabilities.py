@@ -24,7 +24,7 @@ def emitted_receipt(source):
 def emitted_confirmed_receipt(source):
     cpp = transpile(source)
     documents = re.findall(r'checked_settings::receipt\(("(?:[^"\\]|\\.)*"), json, capacity, required\);', cpp)
-    assert len(documents) == 4
+    assert len(documents) == 5
     assert 'strategy_confirmed_bar_api_version(void) { return 1u; }' in cpp
     return json.loads(json.loads(documents[1]))
 

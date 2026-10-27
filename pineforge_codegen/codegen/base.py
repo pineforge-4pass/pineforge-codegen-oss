@@ -242,6 +242,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                  budget: TimeBudget | None = None) -> None:
         self.ctx = ctx
         self._order_shape_calls = {}
+        self._object_sites = {}
         self._order_shape_host_reads: set[str] = set()
         self._order_shape_constructor: list[str] = []
         self._budget = budget
