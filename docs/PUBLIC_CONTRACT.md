@@ -140,6 +140,35 @@ arbitrary order shape is supported in a live run; engine `v1.3.0` does not read 
 Existing capability and confirmed-bar receipts, including their order
 classifications, remain unchanged.
 
+Every generated strategy library also defines `strategy_id_sites_api_version()`,
+which returns 1, and
+`strategy_id_sites_receipt(handle, json, capacity, required, error, error_capacity)`,
+beside the order-shapes receipt and with the same checked-settings buffer
+protocol, whether or not the script places orders. Its immutable canonical JSON
+(sorted keys, no whitespace) is `{"strategy":{"ids":{"freshPerBar":K}},"version":1}`,
+where `K` is the number of lowered `strategy.entry`, `strategy.order` and
+`strategy.exit` sites that can create an order id the script computes: sites whose
+`id` is not a literal string. A literal or empty `id` adds nothing, and
+`strategy.close`, `strategy.close_all`, `strategy.cancel`, `strategy.cancel_all` and
+drawings are never counted. A site in a user function or method counts once per
+static call of that function, transitively, so a function called twice from a
+function called twice counts four times. A site in a `for` loop whose start, end
+and step are known when the script is translated counts once per iteration. When a
+`while` or `for ... in` loop, a `for` loop with a computed bound, or a recursive
+call surrounds a computed `id`, the count has no static bound and the JSON is
+`{"strategy":{"ids":{"freshPerBarStatus":"unbounded"}},"version":1}`, with no
+`freshPerBar` key; a count above 4294967295 is reported the same way. A loop that
+holds only literal ids does not make the count unbounded. `K` is an upper bound,
+not an exact count: both arms of a conditional count, a method call counts by the
+method's name, and a function parameter used as an `id` counts as computed. It
+counts sites per execution of the script body, not per bar: the translator cannot bound how often
+the body runs on one bar, because `calc_on_order_fills` (set by the script or by a
+run-time override) runs it again after each fill. A host can size its order-id
+bookkeeping from `K` times the number of executions it expects, and should treat
+the demand as unbounded when `calc_on_order_fills` is on. The receipt describes the compiled script
+and adds metadata only: generated trading code is unchanged, and a host that does
+not look for the export is unaffected.
+
 Version 1 has `version`, `declarations`, `requests`, `requirements` and `unresolved`
 keys. Declarations include calculation cadence, close execution, magnifier,
 standard-OHLC fill mode, limit verification, currency and clock settings. Requests

@@ -95,6 +95,18 @@ def _without_run_failure_scaffold(cpp: str) -> str:
     return ''.join(output)
 
 
+def without_id_sites_receipt(cpp: str) -> str:
+    """Remove the id-sites receipt export pair, which builds before it do not define.
+
+    The pair is additive metadata beside the order-shapes receipt: whole-C++
+    fixtures and reference builds that predate it compare without it.
+    """
+    return re.sub(
+        r'^    uint32_t strategy_id_sites_api_version\(void\) \{ return 1u; \}\n'
+        r'    int strategy_id_sites_receipt\(.*?^        \}\);\n    \}\n',
+        '', cpp, flags=re.MULTILINE | re.DOTALL)
+
+
 def without_trade_history_policy(cpp: str) -> str:
     """Remove CR-150's additive policy block/export and normalize ctor lookup.
 
@@ -103,8 +115,10 @@ def without_trade_history_policy(cpp: str) -> str:
     emitted ABI pieces directly. CR150-CX also qualifies the constructor's
     existing configure call with ``this->``; normalize only that statement
     when comparing historical lowering. Raw constructor compile/spelling
-    coverage lives in test_cr150_constructor_names.py.
+    coverage lives in test_cr150_constructor_names.py. The id-sites receipt
+    exports are removed as well (``without_id_sites_receipt``).
     """
+    cpp = without_id_sites_receipt(cpp)
     cpp = cpp.replace(
         '        this->configure_pine_strategy(cfg);\n',
         '        configure_pine_strategy(cfg);\n')
