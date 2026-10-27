@@ -243,6 +243,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self.ctx = ctx
         self._order_shape_calls = {}
         self._object_sites = {}
+        # Raised while a request's evaluator is emitted: a creating site it
+        # lowers runs once per requested bar (object_sites.py).
+        self._object_sites_in_request = 0
         self._order_shape_host_reads: set[str] = set()
         self._order_shape_constructor: list[str] = []
         self._budget = budget

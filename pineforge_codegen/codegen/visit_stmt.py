@@ -101,7 +101,10 @@ from ..ast_nodes import (
 )
 from ..symbols import PineType, TypeSpec, method_receiver_type_name
 from ..external_requests import UNPINNED_ANNOTATION
-from .object_sites import element_weight, is_empty_string, record_object_site
+from .object_sites import (
+    element_weight, field_store_weight, held_array_store_weight, is_empty_string,
+    map_method_weight, record_object_site, udt_field_spec,
+)
 from .tables import (
     ARRAY_NEW_CTORS,
     DRAWING_TYPE_TO_CPP,
@@ -501,6 +504,8 @@ class StmtVisitor:
         if node.is_var or node.is_varip:
             info = self._runtime_scalar_var_init_by_node.get(id(node))
             if info is not None:
+                # An array a variable already holds is copied in (object_sites.py).
+                record_object_site(self, node, held_array_store_weight(self, node.value))
                 member_name = info["member_name"]
                 target = self._safe_name(member_name)
                 if self._active_var_remap and target in self._active_var_remap:
@@ -729,7 +734,7 @@ class StmtVisitor:
                 # owns (a non-empty string), rows times columns of them.
                 init_node = node.value.args[2] if len(node.value.args) > 2 else None
                 record_object_site(
-                    self, node.value, "matrix", 1,
+                    self, node.value, 1,
                     element_weight(elem_spec)
                     if init_node is not None and not is_empty_string(init_node) else 0,
                     node.value.args[:2])
@@ -792,7 +797,7 @@ class StmtVisitor:
                 self._map_vars.add(node.name)
                 self._collection_types.setdefault(node.name, spec)
                 cpp_type = self._type_spec_to_cpp(spec)
-                record_object_site(self, node.value, "map", 1)
+                record_object_site(self, node.value, 1)
                 init = f"{cpp_type}::new_()"
                 if is_global_member:
                     lines.append(f"{pad}{safe} = {init};")
@@ -818,6 +823,7 @@ class StmtVisitor:
         # TA call
         site = self._get_ta_site(node.value)
         if site is not None:
+            self._record_ta_site_objects(site, node.value)
             compute_args = self._ta_compute_args_for_site(site)
             ret_type = (
                 self._type_for_decl(node)
@@ -847,6 +853,7 @@ class StmtVisitor:
 
         # Non-var series variable — push instead of declare
         if declaration_is_series:
+            record_object_site(self, node, held_array_store_weight(self, node.value))
             target_cpp_type = self._type_for_decl(node)
             cpp_val = self._visit_rhs_value(
                 node.value,
@@ -866,6 +873,8 @@ class StmtVisitor:
 
         # If/switch expression: x = if cond ... else ...
         if isinstance(node.value, (IfStmt, SwitchStmt)):
+            # An arm's array a variable already holds is copied in (object_sites.py).
+            record_object_site(self, node, held_array_store_weight(self, node.value))
             cpp_type = self._type_for_decl(node) if not is_global_member else None
             selection_cpp_type = (
                 cpp_type
@@ -940,7 +949,9 @@ class StmtVisitor:
                 lines.append(f"{pad}{cpp_type}{ref} {safe} = {cpp_val};")
                 return
 
-        # General declaration
+        # General declaration. An array a variable already holds is copied in
+        # (object_sites.py); a local alias above binds a reference instead.
+        record_object_site(self, node, held_array_store_weight(self, node.value))
         cpp_type = self._type_for_decl(node) if not is_global_member else None
         target_cpp_type = cpp_type or self._nullable_collection_target_cpp_type(
             name=node.name,
@@ -1063,6 +1074,29 @@ class StmtVisitor:
                 f"got {self._type_spec_to_cpp(rhs_spec)}",
             )
 
+    def _record_store_objects(self, node: Assignment, target_name: str | None) -> None:
+        """What a reassignment creates (object_sites.py): an array a variable
+        already holds is copied into the variable it is stored in, and a
+        user-type field takes what ``Type.new`` prices for the same value."""
+        if target_name is not None:
+            if node.op == ":=":
+                record_object_site(self, node, held_array_store_weight(self, node.value))
+            return
+        target = node.target
+        if not isinstance(target, MemberAccess) or self._is_omitted_udt_field(target):
+            return
+        owner = self._type_spec_from_expr(target.object)
+        if owner is None:
+            # An owner whose type is not resolved: its field counts as a string.
+            spec = None
+        elif owner.kind == "udt" and owner.name in self._udt_defs:
+            spec = udt_field_spec(self, owner.name, target.member)
+        else:
+            # A drawing's or a chart point's field holds a number.
+            return
+        record_object_site(self, node, field_store_weight(
+            self, spec, node.value, compound=node.op != ":="))
+
     def _visit_assignment(self, node: Assignment, lines: list[str], pad: str) -> None:
         if isinstance(node.value, FuncCall) and self._is_skip_expr(node.value):
             return
@@ -1072,6 +1106,7 @@ class StmtVisitor:
         # targets otherwise bypass the ordinary identifier assignment path.
         target_name = self._get_target_name(node.target)
         self._validate_matrix_reassignment(node, target_name)
+        self._record_store_objects(node, target_name)
 
         # If/switch expression in assignment: x := if cond ...
         if isinstance(node.value, (IfStmt, SwitchStmt)):
@@ -1928,6 +1963,9 @@ class StmtVisitor:
                 if key_name != "_"
                 else internal_key
             )
+            # The loop walks a new array of the map's keys, once per run of
+            # the loop (object_sites.py).
+            record_object_site(self, node, map_method_weight("keys", iterable_spec))
             lines.append(f"{pad}auto {map_token} = {iterable};")
             lines.append(f"{pad}for (auto {key_cpp} : {map_token}.keys()) {{")
             if value_name != "_":
@@ -2318,6 +2356,10 @@ class StmtVisitor:
                     if self._call_is_void(stmt.expr):
                         self._visit_stmt(stmt, lines, indent)
                         return
+                    # An array a variable already holds, an arm's own local
+                    # too, is copied into the target (object_sites.py).
+                    record_object_site(
+                        self, stmt.expr, held_array_store_weight(self, stmt.expr))
                     cpp = self._coerce_int_slot(
                         self._visit_rhs_value(
                             stmt.expr,

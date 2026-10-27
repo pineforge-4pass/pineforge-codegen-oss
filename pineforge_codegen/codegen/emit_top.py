@@ -106,6 +106,7 @@ from .tables import (
 )
 from ..limits import iter_ast_nodes
 from .drawing import DRAWING_LIFETIME_CPP
+from .object_sites import record_returned_arrays
 from .tv_number_format import TV_NUMBER_FORMAT_CPP
 
 
@@ -2583,6 +2584,8 @@ class TopLevelEmitter:
                 # through to the default return.
                 self._visit_stmt(node.body[0], lines, indent=2)
             elif expr:
+                # An array a variable holds is returned by copy (object_sites.py).
+                record_returned_arrays(self, node, expr)
                 ret_cpp = self._coerce_int_slot(
                     self._visit_rhs_value(
                         expr, target_cpp_type=rhs_return_cpp_type
@@ -2606,6 +2609,9 @@ class TopLevelEmitter:
                     if self._call_is_void(s.expr) or self._is_skip_expr(s.expr):
                         self._visit_stmt(s, lines, indent=2)
                     else:
+                        # An array a variable holds is returned by copy
+                        # (object_sites.py).
+                        record_returned_arrays(self, node, s.expr)
                         ret_cpp = self._coerce_int_slot(
                             self._visit_rhs_value(
                                 s.expr, target_cpp_type=rhs_return_cpp_type
@@ -2629,6 +2635,9 @@ class TopLevelEmitter:
                     else:
                         default_ret = self._default_for_type(ret_type)
                     lines.append(f"        {ret_type} _func_ret = {default_ret};")
+                    # An arm's array a variable holds is copied into the
+                    # returned value (object_sites.py).
+                    record_returned_arrays(self, node, s)
                     self._visit_selection_value(
                         s,
                         "_func_ret",

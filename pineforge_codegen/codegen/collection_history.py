@@ -295,11 +295,13 @@ class CollectionHistoryEmitter:
         current = self._visit_expr(node.object)
         use = annotation["use"]
         offset = literal_offset(node)
-        if use == "copy" or use == "reference" and offset in (0, None):
-            # A copy of the collection for a variable or a parameter, or of
-            # the current one for a reference at a zero offset.
-            record_object_site(self, node, "history", copy_weight(
-                getattr(annotation.get("spec"), "element", None)))
+        if use in ("copy", "reference"):
+            # A copy of the collection for a variable or a parameter, or the
+            # copy a reference holds; a reference at a computed offset that
+            # is zero when it runs copies the current collection twice.
+            copied = copy_weight(getattr(annotation.get("spec"), "element", None))
+            record_object_site(
+                self, node, 2 * copied if use == "reference" and offset is None else copied)
         if use == "reference" and offset == 0:
             cpp_type = self._type_spec_to_cpp(annotation["spec"])
             return f"_PFArrayHistoryValue<{cpp_type}>({current})"

@@ -167,8 +167,9 @@ from .helpers import (
     na_preserving_int_cast, pine_truth_cast,
 )
 from .object_sites import (
-    UNBOUNDED, copy_weight, element_weight, is_empty_string, map_method_weight,
-    owned_elements, record_object_site, request_payload_weight, udt_copy_weight,
+    UNBOUNDED, collection_method_weight, element_weight, field_store_weight,
+    is_empty_string, map_method_weight, owned_elements, record_object_site,
+    request_payload_weight, udt_copy_weight,
 )
 from .run_stops import request_stop
 from .tables import (
@@ -1102,7 +1103,7 @@ class CallVisitor:
         argument in source/signature order, while retaining lvalue aliases and
         extending temporary receiver lifetime through the operation.
         """
-        record_object_site(self, node, "map", map_method_weight(method, spec))
+        record_object_site(self, node, map_method_weight(method, spec))
         args = [self._visit_expr(arg) for arg in arg_nodes]
         if (method == "put" and arg_nodes and spec is not None
                 and spec.kind == "map" and spec.value is not None
@@ -1692,7 +1693,7 @@ class CallVisitor:
                         hint="Call copy() on the UDT object without arguments.",
                     )
                 self._reject_unsupported_udt_copy(recv_spec.name, node)
-                record_object_site(self, node, "object", udt_copy_weight(self, recv_spec.name))
+                record_object_site(self, node, udt_copy_weight(self, recv_spec.name))
                 return self._emit_udt_copy_expr(
                     recv_spec.name,
                     self._visit_expr(callee.object),
@@ -1878,6 +1879,10 @@ class CallVisitor:
                             node,
                             f"{full}(...) is not implemented in PineForge runtime.",
                         )
+                    # A field's matrix (``h.grid.transpose()``) is called as is:
+                    # it creates what the matrix lowering prices.
+                    record_object_site(self, node, collection_method_weight(
+                        recv_spec, meth, bool(node.args or node.kwargs)))
                     args = ", ".join(raw_args)
                     if meth == "delete":
                         meth = "_delete_"
@@ -2037,6 +2042,10 @@ class CallVisitor:
                             node,
                             f"{full}(...) is not implemented in PineForge runtime.",
                         )
+                    # A collection the name registries do not hold is called as
+                    # is: it creates what its lowering prices.
+                    record_object_site(self, node, collection_method_weight(
+                        recv_spec, meth_raw, bool(node.args or node.kwargs)))
                     args = ", ".join(self._visit_expr(a) for a in node.args)
                     recv = self._visit_expr(obj)
                     meth = meth_raw
@@ -2115,6 +2124,7 @@ class CallVisitor:
         # ta.* calls -> member.compute(...)
         site = self._get_ta_site(node)
         if site is not None:
+            self._record_ta_site_objects(site, node)
             # A top-level lazy-edge site already evaluated for this bar in a
             # ``_pf_every_bar_ta_N`` local (see ``_lazy_edge_ta_hoist_plan``):
             # read it instead of stepping the indicator again.
@@ -2203,7 +2213,7 @@ class CallVisitor:
                 )
             if func_name == "new":
                 spec = self._type_spec_from_expr(node) or TypeSpec.map(TypeSpec.primitive("string"), TypeSpec.primitive("float"))
-                record_object_site(self, node, "map", 1)
+                record_object_site(self, node, 1)
                 return f"{self._type_spec_to_cpp(spec)}::new_()"
             if func_name in MAP_METHODS and node.args:
                 m = self._visit_expr(node.args[0])
@@ -2270,7 +2280,7 @@ class CallVisitor:
                         if init_node is not None and not is_empty_string(init_node)
                         or init_node is None and element_weight(elem_spec) == UNBOUNDED
                         else 0)
-                record_object_site(self, node, "array", 1, owns if node.args else 0, node.args[:1])
+                record_object_site(self, node, 1, owns if node.args else 0, node.args[:1])
                 if node.args:
                     size_arg = self._visit_expr(node.args[0])
                     if len(node.args) > 1:
@@ -2319,7 +2329,7 @@ class CallVisitor:
                     spec = self._widen_array_spec_for_name(target, spec)
                 elem_spec = spec.element
                 self._reject_unknown_element_type(node, elem_spec)
-                record_object_site(self, node, "array", 1 + owned_elements(elem_spec, node.args))
+                record_object_site(self, node, 1 + owned_elements(elem_spec, node.args))
                 for a in node.args:
                     self._warn_narrow_int_element(a, spec, a)
                 elems = ", ".join(
@@ -2457,7 +2467,7 @@ class CallVisitor:
                             ltf_all_args.append(None)
                         ltf_all_args[i] = node.kwargs[pname]
                 ltf_expr_node = ltf_all_args[2] if len(ltf_all_args) > 2 else None
-                record_object_site(self, node, "array", request_payload_weight(self, ltf_expr_node))
+                record_object_site(self, node, request_payload_weight(self, ltf_expr_node))
                 for item in self._security_calls:
                     if not item.get("is_lower_tf_array"):
                         continue
@@ -2787,16 +2797,10 @@ class CallVisitor:
 
         # ta.pivot_point_levels — free function, not a stateful indicator
         if namespace == "ta" and func_name == "pivot_point_levels":
-            # Its levels are a new array of numbers.
-            record_object_site(self, node, "array", 1)
-            routed_site = self._get_ta_site(node)
-            if routed_site is not None:
-                compute_args = self._ta_compute_args_for_site(routed_site)
-                ta_mem = self._ta_member_name(routed_site)
-                return (
-                    f"(history_advances_new_bar() ? {ta_mem}.compute({compute_args}) "
-                    f": {ta_mem}.recompute({compute_args}))"
-                )
+            # Its levels are a new array of numbers. A spelling the analyzer
+            # gives a TA site (``_PFPivotPointLevels``) is lowered above, with
+            # every other TA site.
+            record_object_site(self, node, 1)
             if node.kwargs:
                 args = _merge_kwargs(
                     node.args,
@@ -2874,7 +2878,7 @@ class CallVisitor:
                 # owns (a non-empty string), rows times columns of them.
                 init_node = node.args[2] if len(node.args) > 2 else None
                 record_object_site(
-                    self, node, "matrix", 1,
+                    self, node, 1,
                     element_weight(elem_spec)
                     if init_node is not None and not is_empty_string(init_node) else 0,
                     node.args[:2])
@@ -3010,15 +3014,7 @@ class CallVisitor:
                     defaults_run.append(f.default)
                 field_spec = (field_specs.get(f.name)
                               or self._type_spec_from_hint_name(f.type_name))
-                if field_spec is None or (field_spec.kind == "primitive"
-                                          and field_spec.name == "string"):
-                    if value_node is not None and not is_empty_string(value_node):
-                        object_weight += 1
-                elif field_spec.kind == "array":
-                    if value_node is None or isinstance(value_node, NaLiteral):
-                        object_weight += 1
-                    elif self._array_arg_kind(value_node) != "fresh":
-                        object_weight += copy_weight(field_spec.element)
+                object_weight += field_store_weight(self, field_spec, value_node)
                 if value_node is not None:
                     # Fix narrowing: brace-init (``T{.field = v}``) disallows
                     # narrowing. Pine ``int`` UDT fields are emitted as
@@ -3058,7 +3054,7 @@ class CallVisitor:
                                else self._udt_array_field_value(
                                    array_field, value_node, val))
                     field_inits.append(f".{self._safe_name(f.name)} = {val}")
-            record_object_site(self, node, "object", object_weight, defaults=defaults_run)
+            record_object_site(self, node, object_weight, defaults=defaults_run)
             return self._emit_udt_new_expr(namespace, field_inits)
 
         # UDT copy: TypeName.copy(obj)
@@ -3070,7 +3066,7 @@ class CallVisitor:
                     hint="Prefer the canonical object.copy() form.",
                 )
             self._reject_unsupported_udt_copy(namespace, node)
-            record_object_site(self, node, "object", udt_copy_weight(self, namespace))
+            record_object_site(self, node, udt_copy_weight(self, namespace))
             return self._emit_udt_copy_expr(
                 namespace,
                 self._visit_expr(node.args[0]),
@@ -3864,7 +3860,7 @@ class CallVisitor:
     def _visit_str_call(self, func_name: str, node) -> str:
         if func_name == "split":
             # A new array of as many strings as the text holds parts.
-            record_object_site(self, node, "array", UNBOUNDED)
+            record_object_site(self, node, UNBOUNDED)
         args = _merge_kwargs(node.args, node.kwargs,
                              sigs.get_param_names("str", func_name), self._visit_expr)
         arg_nodes = _merge_kwargs(

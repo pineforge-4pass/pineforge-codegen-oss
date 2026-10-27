@@ -6803,8 +6803,14 @@ class SecurityEmitter:
 
         for item in self._security_calls:
             self._refuse_security_reference_history(item)
-        for item in self._security_calls:
-            self._emit_security_evaluator_requested(item, lines)
+        # An evaluator runs once per requested bar: every creating site it
+        # lowers has no static bound (object_sites.py).
+        self._object_sites_in_request += 1
+        try:
+            for item in self._security_calls:
+                self._emit_security_evaluator_requested(item, lines)
+        finally:
+            self._object_sites_in_request -= 1
 
         # Dispatch method. Security evaluators fire BEFORE on_bar, so we also
         # gate a TA reset here: whichever path fires first (evaluate_security

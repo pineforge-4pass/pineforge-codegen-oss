@@ -2030,7 +2030,7 @@ class TypeInferer:
                          if functional else node.callee.object)
         receiver_spec = (self._type_spec_from_expr(receiver_node)
                          if receiver_node is not None else None)
-        record_object_site(self, node, "matrix", matrix_method_weight(
+        record_object_site(self, node, matrix_method_weight(
             method,
             receiver_spec.element if receiver_spec is not None and receiver_spec.kind == "matrix" else None,
             bool(arguments)))
@@ -2136,7 +2136,7 @@ class TypeInferer:
     ) -> str:
         """Lower ``arr.method(...)`` to its C++ form, validating numeric requirements."""
         # An array whose element type is not known counts as one of strings.
-        record_object_site(self, node, "array", array_method_weight(
+        record_object_site(self, node, array_method_weight(
             method, spec.element if spec is not None else None))
         if self._array_history_value_names():
             array_expr = f"_pf_array_id({array_expr})"

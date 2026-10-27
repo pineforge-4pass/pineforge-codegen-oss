@@ -36,6 +36,7 @@ from ..ast_nodes import (
 from ..pine_spelling import blank_string_literals
 from ..symbols import PineType
 from .helpers import pine_index_int_cast
+from .object_sites import record_object_site
 from .tables import (
     BAR_SERIES_PUSH,
     TA_CHART_PREV_CLOSE,
@@ -65,6 +66,13 @@ class TaSiteHelper:
         if node is None:
             return None
         return self._ta_site_map.get(id(node))
+
+    def _record_ta_site_objects(self, site: "TACallSite", node) -> None:
+        """What one call of a TA site creates (object_sites.py): the levels of
+        ``ta.pivot_point_levels`` (``_PFPivotPointLevels``) are a new array of
+        numbers on every call."""
+        if site.class_name == "_PFPivotPointLevels":
+            record_object_site(self, node, 1)
 
     def _ta_member_name(self, site: "TACallSite") -> str:
         """Resolve the C++ member name for a TA site, applying any active per-site remap.
@@ -1308,6 +1316,7 @@ class TaSiteHelper:
         arguments of a copy whose length the constructor cannot take
         (``_ta_security_plan``), a series argument rendered in the requested
         context."""
+        self._record_ta_site_objects(site, site.node)
         args = self._security_ta_compute_args_for_site_base(
             sec_id, site, ta_results, security_mutable_names,
             helper_binding_stack, emitted_lines,

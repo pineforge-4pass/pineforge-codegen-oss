@@ -275,7 +275,7 @@ class DrawingVisitor:
         return f"{collector}({handle})" if collector else handle
 
     def _emit_drawing_ctor(self, dtype: str, node: FuncCall) -> str:
-        record_object_site(self, node, "drawing", 1)
+        record_object_site(self, node, 1)
         return self._collected(dtype, self._emit_drawing_alloc(dtype, node))
 
     def _emit_drawing_alloc(self, dtype: str, node: FuncCall) -> str:
@@ -394,7 +394,7 @@ class DrawingVisitor:
         """
         arena = DRAWING_ARENA[dtype]
         if method == "copy":
-            record_object_site(self, node, "drawing", 1)
+            record_object_site(self, node, 1)
         recv = self._visit_expr(recv_node)
         geometry, noop = DRAWING_METHODS_BY_TYPE[dtype]
         if method in noop:

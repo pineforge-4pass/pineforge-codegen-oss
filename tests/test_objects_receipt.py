@@ -352,3 +352,180 @@ def test_exports_are_emitted_once_in_the_block_of_the_other_receipts():
     for name in ("strategy_id_sites_api_version", "strategy_id_sites_receipt", *OBJECTS_NAMES):
         assert settings_block(cpp, name) == block, (
             f"{name} must sit in the #ifdef PF_SETTINGS_API_VERSION group of strategy_order_shapes_receipt")
+
+
+# More creating shapes. A site counts the same objects on every route that lowers it: a TA call
+# used as a value, a matrix method called on a field of a user type, a request payload, a history
+# reference and a function's return, and a string stored in a field or copied into another array.
+# The expectations come from the same rules, worked out by hand.
+
+PIVOT_LEVELS_DECLARATION = 'levels = ta.pivot_point_levels("Traditional", timeframe.change("D"))\n'
+
+PIVOT_LEVELS_WITH_A_CONSTANT_ANCHOR = 'levels = ta.pivot_point_levels("Traditional", true)\n'
+
+PIVOT_LEVELS_AS_AN_ARGUMENT = 'first_level = array.get(ta.pivot_point_levels("Traditional", true), 0)\n'
+
+PIVOT_LEVELS_IN_A_FUNCTION_CALLED_TWICE = '''level_of() =>
+    array.get(ta.pivot_point_levels("Traditional", true), 0)
+first_level = level_of()
+second_level = level_of()
+'''
+
+MATRIX_RESULTS_OF_A_FIELD = '''type Holder
+    matrix<float> grid
+h = Holder.new(matrix.new<float>(2, 2, 1.0))
+matrix<float> flipped = h.grid.transpose()
+array<float> first_row = h.grid.row(0)
+'''
+
+STRING_MATRIX_ROW_OF_A_FIELD = '''type Names
+    matrix<string> cells
+n = Names.new(matrix.new<string>(2, 2, "a"))
+array<string> first_row = n.cells.row(0)
+'''
+
+REQUEST_READING_A_GLOBAL_THAT_BUILDS_AN_ARRAY = '''total = array.sum(array.from(close, open))
+requested = request.security(syminfo.tickerid, "1", total)
+'''
+
+REQUEST_READING_A_GLOBAL_FROM_A_FUNCTION_BUILDING_AN_ARRAY = '''pair_total() =>
+    array.sum(array.from(close, open))
+total = pair_total()
+requested = request.security(syminfo.tickerid, "1", total)
+'''
+
+STRING_FIELD_STORED_IN_A_FOR_IN_LOOP = '''type Row
+    string note
+rows = array.new<Row>()
+rows.push(Row.new())
+for r in rows
+    r.note := "seen"
+'''
+
+STRING_FIELD_STORED_IN_A_STATIC_LOOP = '''type Trade
+    string note
+var t = Trade.new()
+for i = 0 to 4
+    t.note := "entry " + str.tostring(i)
+'''
+
+STRING_ARRAY_REBOUND_TO_AN_ARRAY_FIELD = '''type Bag
+    array<string> xs
+names = array.from("a", "b")
+bag = Bag.new()
+bag.xs := names
+'''
+
+STRING_ARRAY_REASSIGNED = '''a = array.new_string(0)
+b = array.from("x", "y")
+a := b
+'''
+
+STRING_ARRAY_ALIASED = '''b = array.from("x", "y")
+c = b
+'''
+
+NUMERIC_ARRAY_REASSIGNED = '''a = array.new_float(0)
+b = array.new_float(2)
+a := b
+'''
+
+ARRAY_HISTORY_REFERENCE = '''a = array.from(1.0, 2.0)
+earlier = a[1]
+n = array.size(earlier)
+'''
+
+FOR_IN_OVER_A_STRING_KEYED_MAP = '''m = map.new<string, float>()
+m.put("a", 1.0)
+total = 0.0
+for [k, v] in m
+    total += v
+'''
+
+FUNCTION_RETURNING_A_GLOBAL_FLOAT_ARRAY = '''levels = array.new_float(3)
+levels_now() =>
+    levels
+snapshot = levels_now()
+'''
+
+FUNCTION_RETURNING_A_GLOBAL_STRING_ARRAY = '''names = array.new_string(2, "a")
+names_now() =>
+    names
+snapshot = names_now()
+'''
+
+# (body, objects one execution creates), worked out by hand from the rules in the module
+# docstring (the arithmetic is on the row), never read off a transpile.
+LOWERING_ROUTE_CASES = [
+    # ta.pivot_point_levels builds a new array of levels on every call = 1
+    pytest.param(PIVOT_LEVELS_DECLARATION, 1, id="pivot-levels-declaration-counts-its-array"),
+    # the same call with a constant anchor = 1
+    pytest.param(PIVOT_LEVELS_WITH_A_CONSTANT_ANCHOR, 1,
+                 id="pivot-levels-with-a-constant-anchor-counts-its-array"),
+    # the call is the array that array.get reads, and array.get creates nothing = 1
+    pytest.param(PIVOT_LEVELS_AS_AN_ARGUMENT, 1, id="pivot-levels-as-an-argument-count-their-array"),
+    # level_of() holds 1 pivot array and has 2 static calls: 2 x 1 = 2
+    pytest.param(PIVOT_LEVELS_IN_A_FUNCTION_CALLED_TWICE, 2, id="pivot-levels-in-a-function-called-twice"),
+    # the receivers are a field of a user type:
+    # Holder.new 1 + matrix.new 1 + transpose 1 + row 1 = 4
+    pytest.param(MATRIX_RESULTS_OF_A_FIELD, 4, id="matrix-results-of-a-field-count-one-each"),
+    # array.from 1 + the copy of a that the history keeps when the bar ends 1
+    # + the copy earlier is bound to 1 = 3
+    pytest.param(ARRAY_HISTORY_REFERENCE, 3, id="history-reference-of-an-array-counts-its-copy"),
+    # Trade.new 1 + i = 0 .. 4 (5 trips) x 1 non-empty string stored in note = 1 + 5 = 6
+    pytest.param(STRING_FIELD_STORED_IN_A_STATIC_LOOP, 6,
+                 id="string-field-store-in-a-static-loop-counts-every-trip"),
+    # array.new_float 1 + the copy levels_now() hands back (an array a variable holds, by value) 1 = 2
+    pytest.param(FUNCTION_RETURNING_A_GLOBAL_FLOAT_ARRAY, 2,
+                 id="function-returning-a-global-float-array-counts-the-copy"),
+]
+
+
+@pytest.mark.parametrize(("body", "objects"), LOWERING_ROUTE_CASES)
+def test_receipt_counts_objects_made_through_every_lowering_route(body, objects):
+    assert receipt_text(HEADER + body) == bounded_receipt(objects)
+
+
+# Each of these makes strings or arrays at a rate the count does not track, so no number holds.
+OWNED_ELEMENT_CASES = [
+    # unbounded: row copies the strings of a string matrix held in a field
+    # (Names.new 1 + matrix.new<string> 1 + 2 x 2 strings = 6 without the row)
+    pytest.param(STRING_MATRIX_ROW_OF_A_FIELD, id="row-of-a-string-matrix-held-in-a-field"),
+    # unbounded: the payload is a global whose declaration builds an array, and the evaluator
+    # builds it again for every requested bar (counted on the chart alone it would be 1).
+    # Not confirmed by a transpile: that the payload builder accepts this shape is unverified.
+    pytest.param(REQUEST_READING_A_GLOBAL_THAT_BUILDS_AN_ARRAY,
+                 id="request-payload-reading-a-global-that-builds-an-array"),
+    # unbounded: the same, through a global bound to a user function that builds the array
+    # (counted on the chart alone it would be 1). Not confirmed by a transpile either.
+    pytest.param(REQUEST_READING_A_GLOBAL_FROM_A_FUNCTION_BUILDING_AN_ARRAY,
+                 id="request-payload-reading-a-global-from-a-function-building-an-array"),
+    # unbounded: the string stored in note sits in a for ... in loop, which has no static trip
+    # count (array.new 1 + Row.new 1 = 2 without the store)
+    pytest.param(STRING_FIELD_STORED_IN_A_FOR_IN_LOOP, id="string-field-store-in-a-for-in-loop"),
+    # unbounded: the field takes a copy of names, an array of strings the count does not track
+    # (array.from 1 + 2 + Bag.new 1 + its array field 1 = 5 without the copy)
+    pytest.param(STRING_ARRAY_REBOUND_TO_AN_ARRAY_FIELD, id="string-array-rebound-to-an-array-field"),
+    # unbounded: a := b copies an array of strings the count does not track
+    # (array.new_string 1 + array.from 1 + 2 = 4 without the copy)
+    pytest.param(STRING_ARRAY_REASSIGNED, id="string-array-reassigned-from-another-array"),
+    # unbounded: c = b copies the same array of strings (array.from 1 + 2 = 3 without the copy)
+    pytest.param(STRING_ARRAY_ALIASED, id="string-array-aliased-by-a-declaration"),
+    # unbounded: for [k, v] in m builds the key array of a string-keyed map, which copies its
+    # strings, as m.keys() does (map.new 1 + put 1 + the key "a" 1 = 3 without the loop)
+    pytest.param(FOR_IN_OVER_A_STRING_KEYED_MAP, id="for-in-loop-over-a-string-keyed-map"),
+    # unbounded: names_now() hands back a copy of an array of strings
+    # (array.new_string 1 + 2 = 3 without the copy)
+    pytest.param(FUNCTION_RETURNING_A_GLOBAL_STRING_ARRAY,
+                 id="function-returning-a-global-string-array"),
+]
+
+
+@pytest.mark.parametrize("body", OWNED_ELEMENT_CASES)
+def test_receipt_is_unbounded_for_owned_copies_stores_and_request_payloads(body):
+    assert receipt_text(HEADER + body) == unbounded_receipt()
+
+
+def test_receipt_leaves_a_reassigned_numeric_array_at_the_plain_count():
+    # array.new_float 1 + array.new_float 1 = 2; a numeric array owns no strings, so a := b adds 0
+    assert receipt_text(HEADER + NUMERIC_ARRAY_REASSIGNED) == bounded_receipt(2)
