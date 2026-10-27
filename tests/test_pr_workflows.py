@@ -27,7 +27,10 @@ def job_blocks(text):
     matches = list(re.finditer(
         r"""^  ([\w-]+|'[^']+'|"[^"]+"):[ \t]*(?:#.*)?$""", body, re.M
     ))
-    assert matches, "workflow jobs must use the checked block format"
+    job_lines = re.findall(r"^  [^\s#][^\n]*$", body, re.M)
+    assert matches and len(matches) == len(job_lines), (
+        "workflow jobs must use the checked block format"
+    )
     return {
         match[1].strip("'\""): body[
             match.end():matches[index + 1].start() if index + 1 < len(matches) else len(body)
@@ -559,6 +562,11 @@ PROMOTE_GUARD = '''  promote-guard:
 
 
 def assert_promotion_guard(workflow):
+    assert not re.search(
+        r"""^(?:defaults|env|'defaults'|'env'|"defaults"|"env")[ \t]*:[ \t]*""",
+        workflow,
+        re.M,
+    ), "promotion must not define workflow-level defaults or env"
     trigger = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
     assert re.findall(r"^  ([a-z_]+):", trigger, re.M) == [
         "pull_request_target", "workflow_dispatch",
@@ -595,6 +603,42 @@ def assert_promotion_guard(workflow):
 def test_promote_baseline_requires_trusted_head_author_and_merger():
     workflow = (WORKFLOWS / "promote-baseline.yml").read_text(encoding="utf-8")
     assert_promotion_guard(workflow)
+
+
+def test_promotion_guard_rejects_inline_job_mapping():
+    workflow = (WORKFLOWS / "promote-baseline.yml").read_text(encoding="utf-8")
+    inline_job = (
+        '  bypass: {runs-on: ubuntu-latest, steps: [{run: "true", env: '
+        '{APP_KEY: "${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}"}}]}\n'
+    )
+    jobs_marker = "\njobs:\n"
+    assert workflow.count(jobs_marker) == 1
+    mutant = workflow.replace(jobs_marker, jobs_marker + inline_job, 1)
+    assert mutant != workflow
+    with pytest.raises(AssertionError, match="checked block format"):
+        assert_promotion_guard(mutant)
+
+
+@pytest.mark.parametrize("inherited", [
+    pytest.param(
+        "defaults:\n"
+        "  run:\n"
+        '    shell: \'bash -c "bash {0}; exit 0"\'\n',
+        id="workflow-default-shell",
+    ),
+    pytest.param(
+        "env: {APP_KEY: '${{ secrets.PINEFORGE_APP_PRIVATE_KEY }}'}\n",
+        id="workflow-env-secret",
+    ),
+])
+def test_promotion_guard_rejects_workflow_level_inherited_settings(inherited):
+    workflow = (WORKFLOWS / "promote-baseline.yml").read_text(encoding="utf-8")
+    jobs_marker = "\njobs:\n"
+    assert workflow.count(jobs_marker) == 1
+    mutant = workflow.replace(jobs_marker, "\n" + inherited + "jobs:\n", 1)
+    assert mutant != workflow
+    with pytest.raises(AssertionError, match="workflow-level"):
+        assert_promotion_guard(mutant)
 
 
 @dataclass(frozen=True)
