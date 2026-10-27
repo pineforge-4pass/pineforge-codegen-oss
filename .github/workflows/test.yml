@@ -3,7 +3,6 @@ name: Test
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -229,7 +228,6 @@ jobs:
           fi
           tar -xzf "$lint_dir/$archive" -C "$lint_dir" actionlint
           "$lint_dir/actionlint" -version
-          printf '%s\n' '{"self-hosted-runner":{"labels":["pf-gcp-pr","pf-gcp-main","pf-gcp-post"]}}' > "$lint_dir/actionlint.yaml"
           git ls-files -z -- .github/workflows > "$lint_dir/workflows"
           workflows=()
           while IFS= read -r -d '' path; do
@@ -245,7 +243,7 @@ jobs:
             echo "::error::no workflow YAML files were found"
             exit 1
           fi
-          "$lint_dir/actionlint" -config-file "$lint_dir/actionlint.yaml" -shellcheck= -pyflakes= "${workflows[@]}"
+          "$lint_dir/actionlint" -config-file .github/actionlint.yaml -shellcheck= -pyflakes= "${workflows[@]}"
       - name: "Check App token environments"
         if: "${{ needs.authz.result == 'success' }}"
         shell: "bash"
