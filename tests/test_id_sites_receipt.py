@@ -182,7 +182,7 @@ RECURSIVE_FUNCTION = '''countdown(int n) =>
 total = countdown(2)
 '''
 
-# The cases of the brief, (a) to (j): the lowered sites that create a computed id.
+# The id-site cases, (a) to (j): the lowered sites that create a computed id.
 CASES = [
     pytest.param("plot(close)\n", 0, id="a-no-order-call"),
     pytest.param(LITERAL_IDS, 0, id="b-literal-ids-only"),
@@ -218,7 +218,7 @@ while count < bar_index % 3
 strategy.entry("D" + str.tostring(bar_index), strategy.short)
 '''
 
-# Cases the contract's wording settles that the brief does not list: the "empty" id class, an
+# Cases the contract's wording settles beyond the list above: the "empty" id class, an
 # id given by keyword, an id that is not a literal because it is an input, close_all and
 # cancel_all, a call chain through two user functions (one site per call path), and an
 # unbounded loop that holds only a literal id (it creates no computed id, so it adds nothing).
