@@ -892,7 +892,7 @@ def test_security_allowed_params_locked():
 
 
 def test_hard_reject_includes_external_request_feeds():
-    """request.seed / quandl / currency_rate remain hard-rejected because
+    """request.seed / quandl remain hard-rejected because
     PineForge has no auxiliary-data ingestion path; request.financial /
     dividends / earnings / splits are refused only when their value can reach
     a trade (NO_DATA_REQUEST_FUNC). request.security_lower_tf was removed
@@ -900,11 +900,14 @@ def test_hard_reject_includes_external_request_feeds():
     for fn in (
         "request.seed",
         "request.quandl",
-        "request.currency_rate",
     ):
         assert fn in HARD_REJECT_FUNC, f"{fn} should remain hard-rejected"
     for fn in ("request.financial", "request.dividends", "request.earnings", "request.splits"):
         assert fn in NO_DATA_REQUEST_FUNC and fn not in HARD_REJECT_FUNC, fn
+    # Currency conversion stops only when the call is evaluated, regardless
+    # of whether its value can reach a trade.
+    assert "request.currency_rate" not in HARD_REJECT_FUNC
+    assert "request.currency_rate" not in NO_DATA_REQUEST_FUNC
     assert "request.security_lower_tf" not in HARD_REJECT_FUNC, (
         "request.security_lower_tf is now supported; it should not be in HARD_REJECT_FUNC"
     )

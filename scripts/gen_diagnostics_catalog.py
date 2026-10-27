@@ -1048,6 +1048,16 @@ def main(argv=None) -> int:
     if args.write:
         ensure_uncatalogued(catalog)
         added = merge(catalog, templates)
+        # Ordinary request calls share the nz/fixnan argument binder. Keep
+        # these codes' pinned meaning and historical explanation; their short
+        # presentation must name the actual callee instead of those two names.
+        catalog["codes"]["PF-E1088"]["user_message"] = (
+            "The arguments to {name} do not match its Pine signature."
+        )
+        catalog["codes"]["PF-W1088"]["user_message"] = (
+            "The arguments to {name} do not match its Pine signature. "
+            "In a switch arm PineForge only warns and keeps the arm''s lowering."
+        )
         pruned = prune(catalog, templates)
         if pruned:
             print(f"{len(pruned)} unpinned code(s) no source spells removed: {', '.join(pruned)}")

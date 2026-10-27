@@ -409,6 +409,18 @@ _syminfo_fn("ticker", _sig([("symbol", S)], ret=S))
 
 
 # ============================================================================
+# request.* calls using ordinary signature binding (security has custom rules)
+# ============================================================================
+
+REQUEST_FUNCTIONS: dict[str, IntrinsicFunc] = {
+    "currency_rate": _func(
+        "request.currency_rate",
+        _sig([("from", S), ("to", S), ("ignore_invalid_currency", B, False)]),
+    ),
+}
+
+
+# ============================================================================
 # Standalone built-in functions (no namespace)
 # ============================================================================
 
@@ -762,6 +774,8 @@ def get_param_names(namespace: str | None, func_name: str) -> list[str] | None:
         return MAP_FUNCTIONS[func_name].param_names
     if namespace == "syminfo" and func_name in SYMINFO_FUNCTIONS:
         return SYMINFO_FUNCTIONS[func_name].param_names
+    if namespace == "request" and func_name in REQUEST_FUNCTIONS:
+        return REQUEST_FUNCTIONS[func_name].param_names
     if namespace is None and func_name in BUILTIN_FUNCTIONS:
         return BUILTIN_FUNCTIONS[func_name].param_names
     return None
@@ -785,6 +799,8 @@ def get_return_type(namespace: str | None, func_name: str,
         func = MAP_FUNCTIONS.get(func_name)
     elif namespace == "syminfo":
         func = SYMINFO_FUNCTIONS.get(func_name)
+    elif namespace == "request":
+        func = REQUEST_FUNCTIONS.get(func_name)
     elif namespace is None:
         func = BUILTIN_FUNCTIONS.get(func_name)
 
@@ -810,6 +826,8 @@ def is_intrinsic_function(namespace: str | None, func_name: str) -> bool:
         return func_name in MAP_FUNCTIONS
     if namespace == "syminfo":
         return func_name in SYMINFO_FUNCTIONS
+    if namespace == "request":
+        return func_name in REQUEST_FUNCTIONS
     if namespace is None:
         return func_name in BUILTIN_FUNCTIONS
     return False

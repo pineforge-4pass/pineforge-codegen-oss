@@ -262,15 +262,41 @@ plot(direct + composed)
     compile_env.compile_cpp(cpp, label="security-helper-parameter-history")
 
 
-def test_helper_parameter_history_rejects_non_bar_series_binding():
+def test_helper_parameter_history_samples_derived_bar_series():
+    """Two-minute requested bars with closes 3,6,9,12,15: [1] is na,4,7,10,13."""
+    import math
+
     src = """//@version=6
-strategy("security helper expression history reject")
+strategy("security helper expression history")
 f(float src) =>
     src[1]
 out = request.security(syminfo.tickerid, "2", f(close + 1.0))
 """
-    with pytest.raises(CompileError, match="direct OHLC/time bar-series binding"):
-        transpile(src)
+    driver = r"""
+#include <iostream>
+struct TwoMinuteObserver : GeneratedStrategy {
+    void evaluate_security(int sec_id, const Bar& bar, bool complete) override {
+        GeneratedStrategy::evaluate_security(sec_id, bar, complete);
+        if (sec_id == 0 && complete) std::cout << _req_sec_0 << '\n';
+    }
+};
+int main() {
+    TwoMinuteObserver strategy;
+    Bar bars[] = {
+        Bar{3.0, 3.0, 3.0, 3.0, 1.0, 0},
+        Bar{6.0, 6.0, 6.0, 6.0, 1.0, 120000},
+        Bar{9.0, 9.0, 9.0, 9.0, 1.0, 240000},
+        Bar{12.0, 12.0, 12.0, 12.0, 1.0, 360000},
+        Bar{15.0, 15.0, 15.0, 15.0, 1.0, 480000},
+    };
+    strategy.run(bars, 5, "2", "2");
+    return 0;
+}
+"""
+    values = [float(value) for value in _compile_and_run(transpile(src) + driver).split()]
+    assert len(values) == 5
+    assert math.isnan(values[0])
+    assert values[1:] == [4.0, 7.0, 10.0, 13.0]
 
 
 def test_helper_parameter_history_index_binding_matches_declaration_prepass():
