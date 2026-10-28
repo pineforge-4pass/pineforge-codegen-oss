@@ -412,10 +412,10 @@ TYPED_MUTATIONS = [
     ("bool_reverse", "bool", "", "true, false, false", "", "a.reverse()\na.size()", "", 3, [False, False, True], "", 3, [False, False, True]),
     # Clear removes both strings and returns 0; replay must restore their original order.
     ("string_clear", "std::string", "", '"beta", "alpha"', "", "a.clear()\na.size()", "", 0, [], "", 0, []),
-    # Full fill replaces both original words with the supplied new or next string.
-    ("string_fill", "std::string", "", '"beta", "alpha"', "string word", "a.fill(word)\na.first()", '"new"', "new", ["new", "new"], '"next"', "next", ["next", "next"]),
-    # Ascending string order is alpha,beta,gamma, whose first element is alpha.
-    ("string_sort", "std::string", "", '"beta", "alpha", "gamma"', "", "a.sort()\na.first()", "", "alpha", ["alpha", "beta", "gamma"], "", "alpha", ["alpha", "beta", "gamma"]),
+    # Filling [beta,alpha] with new or next replaces both strings and keeps size 2.
+    ("string_fill", "std::string", "", '"beta", "alpha"', "string word", "a.fill(word)\na.size()", '"new"', 2, ["new", "new"], '"next"', 2, ["next", "next"]),
+    # Byte order alpha < beta < gamma sorts [beta,alpha,gamma] to [alpha,beta,gamma], size 3.
+    ("string_sort", "std::string", "", '"beta", "alpha", "gamma"', "", "a.sort()\na.size()", "", 3, ["alpha", "beta", "gamma"], "", 3, ["alpha", "beta", "gamma"]),
     # Concat appends the separate [tail,last] root to [beta,alpha], producing four words.
     ("string_concat", "std::string", 'var b = array.from("tail", "last")\n', '"beta", "alpha"', "", "a.concat(b)\na.size()", "", 4, ["beta", "alpha", "tail", "last"], "", 4, ["beta", "alpha", "tail", "last"]),
 ]
