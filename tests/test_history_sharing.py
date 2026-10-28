@@ -233,7 +233,7 @@ alias = a
         "return na<int>(); return _pf_history_array[_pf_history_offset]; }());"
     ) in cpp
     assert "_pf_collection_hist_a.reference(" not in cpp
-    assert "        _pf_collection_hist_a.open(a, history_advances_new_bar());" in cpp
+    assert "        _pf_collection_hist_a.open_slot(a, history_advances_new_bar());" in cpp
     assert "        _pf_collection_hist_a.close(a);" in cpp
     assert "class _PFCachedCollectionHistory" not in cpp
     assert cpp == _eager_cpp(source, monkeypatch)
@@ -308,12 +308,12 @@ static std::vector<Bar> bars(int count) {
 }
 template <typename S>
 auto open_history(S& s, bool advance, int) -> decltype(
-    s._pf_collection_hist_a.open(s.a, advance, s._pf_history_versions), void()) {
-    s._pf_collection_hist_a.open(s.a, advance, s._pf_history_versions);
+    s._pf_collection_hist_a.open_slot(s.a, advance, s._pf_history_versions), void()) {
+    s._pf_collection_hist_a.open_slot(s.a, advance, s._pf_history_versions);
 }
 template <typename S>
 void open_history(S& s, bool advance, long) {
-    s._pf_collection_hist_a.open(s.a, advance);
+    s._pf_collection_hist_a.open_slot(s.a, advance);
 }
 template <typename S>
 auto close_history(S& s, int) -> decltype(
@@ -978,7 +978,7 @@ def test_distinct_owners_keep_independent_caches_on_the_same_version_clock():
     strategy.mutate(7);
     open_history(strategy, true, 0);
     close_history(strategy, 0);
-    second.open(strategy.b, true, strategy._pf_history_versions);
+    second.open_slot(strategy.b, true, strategy._pf_history_versions);
     second.close(strategy.b, strategy._pf_history_versions);
     open_history(strategy, true, 0);
     assert((first.at(1) == std::vector<int>{2, 5, 7}));

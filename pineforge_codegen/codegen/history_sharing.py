@@ -114,7 +114,7 @@ class @HISTORY@ {
     uint64_t cached_content_ = 0;
 public:
     explicit @HISTORY@(int max_len = 500) : slots_(max_len) {}
-    void open(const T& value, bool new_slot, const @CLOCK@& versions) {
+    void open_slot(const T& value, bool new_slot, const @CLOCK@& versions) {
         close(value, versions);
         if (new_slot) slots_.push(nullptr);
         else slots_.update(nullptr);
