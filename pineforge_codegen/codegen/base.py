@@ -4636,7 +4636,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         for type_name in self._udt_defs:
             self._udt_record_cpp_names[type_name] = (
                 self._allocate_generated_cpp_name(
-                    f"_PFUdtRecord_{type_name}", global_used
+                    self._udt_record_cpp_type(type_name), global_used
                 )
             )
 
