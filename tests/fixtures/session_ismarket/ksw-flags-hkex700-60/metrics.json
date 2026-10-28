@@ -14,11 +14,6 @@
   "tvTradesCsvHash": "2ec27bec172e1955cb9b3859c3b0c7831d30a8c64718e9c8aa1c3eb6bb0074a2",
   "wsProvenance": {
     "schemaVersion": 1,
-    "wsEndpoint": "wss://history-data.tradingview.com/socket.io/websocket?from=chart%2F&type=chart&auth=sessionid",
-    "authUser": "luisleo52655",
-    "accountType": "pro_premium_expert",
-    "pineId": "USER;3c3ee73838da415d9f6fb36ccd7cbe97",
-    "pineVersion": "0.88762",
     "symbol": "HKEX:700",
     "interval": "60",
     "requestedRange": {

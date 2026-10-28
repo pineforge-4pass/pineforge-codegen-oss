@@ -14,11 +14,6 @@
   "tvTradesCsvHash": "cf258e419e30230e1a2c617badeda8cff61d082dea83f5db7fdd336cbfa9d964",
   "wsProvenance": {
     "schemaVersion": 1,
-    "wsEndpoint": "wss://history-data.tradingview.com/socket.io/websocket?from=chart%2F&type=chart&auth=sessionid",
-    "authUser": "luisleo52655",
-    "accountType": "pro_premium_expert",
-    "pineId": "USER;3c3ee73838da415d9f6fb36ccd7cbe97",
-    "pineVersion": "0.89895",
     "symbol": "BINANCE:BTCUSDT",
     "interval": "15",
     "requestedRange": {
