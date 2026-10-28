@@ -154,6 +154,9 @@ class TopLevelEmitter:
         lines.append("#include <numeric>")
         lines.append("#include <string>")
         lines.append("#include <vector>")
+        if getattr(self, "_array_journal_members", {}):
+            lines.extend(("#include <functional>", "#include <limits>",
+                          "#include <stdexcept>", "#include <utility>"))
         if self._uses_tv_number_format:
             lines.extend(("#include <charconv>", "#include <system_error>",
                           "#include <stdexcept>"))
@@ -530,7 +533,9 @@ class TopLevelEmitter:
         Precalculated TA result vectors and their mode flag are immutable once
         the engine starts its broker walk.  Copying an O(number-of-bars) cache
         before every COOF execution would be both unnecessary and catastrophic,
-        so those implementation caches are the sole exclusions.  The live TA
+        so those implementation caches are excluded. Varip state is excluded
+        too. A collection journal owns its records outside this inventory;
+        its enrolled roots remain inventoried and use checkpoint tokens. The live TA
         objects themselves remain captured because dynamic/magnifier runs call
         ``compute`` and mutate them.
         """
@@ -542,6 +547,9 @@ class TopLevelEmitter:
             if name is None:
                 continue
             if name == "_use_precalc" or name.startswith("_precalc_"):
+                continue
+            if (getattr(self, "_array_journal_members", {})
+                    and name == self._array_journal_member_name):
                 continue
             if name in seen:
                 raise AssertionError(f"duplicate generated script-state member: {name}")
@@ -590,8 +598,8 @@ class TopLevelEmitter:
         Unlike per-bar rollback, a new lifecycle also invalidates precalculated
         vectors and initialization latches. Constructor arguments are taken from
         the constructor's own plan; declaration defaults cover every other
-        member. The only nonassignable state is the UDT undo coordinator/arenas,
-        whose explicit reset retains their stable internal pointers.
+        member. Nonassignable undo coordinators and UDT arenas use explicit
+        resets that retain their stable internal pointers.
         """
         constructor_values: dict[str, str] = {}
         for initializer in self._script_constructor_initializers:
@@ -620,6 +628,10 @@ class TopLevelEmitter:
             if name in seen:
                 raise AssertionError(f"duplicate generated lifecycle member: {name}")
             seen.add(name)
+            if (getattr(self, "_array_journal_members", {})
+                    and name == self._array_journal_member_name):
+                lines.append(f"        this->{name}.reset_for_run();")
+                continue
             if name in udt_state:
                 lines.append(f"        this->{name}.reset_for_run();")
                 continue
@@ -958,7 +970,8 @@ class TopLevelEmitter:
         rollback updates every alias. Generated UDT arenas snapshot each owned
         record once; nested UDT/map/matrix fields therefore restore through
         their numeric/shared IDs without recursively walking object graphs.
-        Vectors snapshot their elements, including UDT handle values. Drawing
+        Proven primitive array roots use undo tokens; other vectors snapshot
+        their elements, including UDT handle values. Drawing
         handles themselves are stable ids and their arenas are captured in the
         same checkpoint.
 
@@ -973,9 +986,13 @@ class TopLevelEmitter:
             or getattr(self, "_uses_matrix", False)
             or getattr(self, "_udt_defs", {})
         )
+        journal_members = getattr(self, "_array_journal_members", {})
+        journal = (f"this->{self._array_journal_member_name}" if journal_members else None)
         lines.append("    struct _PFScriptState {")
         for idx, name in enumerate(members):
-            if handle_aware:
+            if name in journal_members:
+                lines.append(f"        {self._array_journal_cpp_name}::Token _pf_value_{idx};")
+            elif handle_aware:
                 lines.append(
                     f"        {checkpoint_traits}<"
                     f"decltype(GeneratedStrategy::{name})>::snapshot_type "
@@ -997,9 +1014,14 @@ class TopLevelEmitter:
         lines.append("    std::optional<_PFScriptState> _pf_script_state_checkpoint_;")
         lines.append("")
         lines.append("    void snapshot_script_state() override {")
+        if journal:
+            generation = self._array_journal_generation_name
+            lines.append(f"        const auto {generation} = {journal}.next_generation();")
         lines.append("        _pf_script_state_checkpoint_.emplace(_PFScriptState{")
         for name in members:
-            if handle_aware:
+            if name in journal_members:
+                lines.append(f"            {{&this->{name}, {generation}}},")
+            elif handle_aware:
                 lines.append(
                     f"            {checkpoint_traits}<"
                     f"decltype(GeneratedStrategy::{name})>::take({name}),"
@@ -1007,16 +1029,25 @@ class TopLevelEmitter:
             else:
                 lines.append(f"            {name},")
         lines.append("        });")
+        if journal:
+            # Publish only after every unchanged member snapshot succeeded.
+            lines.append(f"        {journal}.begin({generation});")
         lines.append("    }")
         lines.append("")
         lines.append("    void restore_script_state() override {")
         lines.append("        if (!_pf_script_state_checkpoint_) return;")
+        if journal:
+            for idx, name in enumerate(members):
+                if name in journal_members:
+                    lines.append(
+                        f"        {journal}.validate(_pf_script_state_checkpoint_->_pf_value_{idx}, this->{name});")
+            lines.append(f"        {journal}.restore();")
         # Requested evaluators advance independently of chart rollback, like
         # the engine's requested aggregators. Snapshot/commit still copy all
         # members; those unused requested copies are harmless.
         requested_progression = self._requested_progression_member_names()
         for idx, name in enumerate(members):
-            if name in requested_progression:
+            if name in requested_progression or name in journal_members:
                 continue
             if handle_aware:
                 lines.append(
@@ -1742,7 +1773,7 @@ class TopLevelEmitter:
                     for stmt in self.ctx.ast.body:
                         if isinstance(stmt, VarDecl) and stmt.name == name:
                             cpp_val = self._visit_expr(stmt.value)
-                            lines.append(f"            {safe} = {cpp_val};")
+                            lines.append(f"            {self._array_journal_initializer(safe, cpp_val)}")
                             break
                     continue
                 if name in self._matrix_specs:
