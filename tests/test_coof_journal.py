@@ -527,13 +527,8 @@ int main() {
     _enrolled(cpp)
 
 
-@pytest.mark.parametrize("choice, content", [
-    # The first switch arm initializes [2,5] before appending 11.
-    (0, [2, 5, 11]),
-    # The default switch arm initializes [7,9] before appending 11.
-    (1, [7, 9, 11]),
-])
-def test_selection_initializer_restores_its_empty_member_and_latch(choice, content):
+@pytest.mark.parametrize("choice", [0, 1])
+def test_untyped_selection_initializer_keeps_eager_checkpoint(choice, monkeypatch):
     source = HEADER + f'''choice = input.int({choice}, "Choice")
 var a = switch choice
     0 => array.from(2, 5)
@@ -541,27 +536,82 @@ var a = switch choice
 a.push(11)
 '''
     cpp = transpile(source)
+    # Untyped array selections have no collection TypeSpec, regardless of the selected arm.
+    assert "            a,\n" in _snapshot(cpp)
+    assert "_pf_array_journal" not in cpp
+    assert cpp == _eager_cpp(source, monkeypatch)
+
+
+@pytest.mark.parametrize("initializer", [
+    # The explicit default and the first case each replace the member once.
+    pytest.param("switch selected\n    1 => array.from(2, 5)\n    => array.from(7, 9)\n", id="switch"),
+    # Both if branches assign through the same declaration-site once guard.
+    pytest.param("if selected == 1\n    array.from(2, 5)\nelse\n    array.from(7, 9)\n", id="if"),
+])
+@pytest.mark.parametrize("choice, content", [
+    # Choice 0 computes selected=1, initializes [2,5], then appends 11.
+    (0, [2, 5, 11]),
+    # Choice 1 computes selected=2, initializes [7,9], then appends 11.
+    (1, [7, 9, 11]),
+])
+def test_selection_initializer_restores_its_empty_member_and_latch(
+    choice, content, initializer, monkeypatch,
+):
+    # The type hint proves array storage; the computed selector requires initialization in statement order.
+    source = (HEADER + f'choice = input.int({choice}, "Choice")\n'
+              + "selected = choice + 1\nvar array<int> a = " + initializer + "a.push(11)\n")
+    cpp = transpile(source)
     _enrolled(cpp)
+    # One typed member and one copied once latch serve both instrumented arms.
+    assert "    std::vector<int> a;\n" in cpp
+    assert "            _pf_var_init_a,\n" in _snapshot(cpp)
+    assert cpp.count("if (!_pf_var_init_a)") == 1
+    assert cpp.count("this->_pf_array_journal.replace(a,") == 2
+    # Disabling the journal keeps the same initializer and latch on the eager rollback path.
+    eager = _eager_cpp(source, monkeypatch)
+    assert "            a,\n" in _snapshot(eager)
+    assert "            _pf_var_init_a,\n" in _snapshot(eager)
+    assert "_pf_array_journal" not in eager
     driver = r'''
 #include <cassert>
 #include <iostream>
 int main() {
     GeneratedStrategy strategy;
     Bar bar{1.0, 1.0, 1.0, 1.0, 1.0, 0};
+    // Before the first execution, the member is empty and neither initializer has run.
+    assert(strategy.a.empty());
+    assert(!strategy._var_initialized);
+    assert(!strategy._pf_var_init_a);
     strategy.snapshot_script_state();
     strategy.on_source_bar(bar);
     assert((strategy.a == EXPECTED));
+    assert(strategy._var_initialized);
+    assert(strategy._pf_var_init_a);
+    // Both restore calls recover the empty checkpoint and its false once latches.
     strategy.restore_script_state();
     assert(strategy.a.empty());
+    assert(!strategy._var_initialized);
+    assert(!strategy._pf_var_init_a);
+    strategy.restore_script_state();
+    assert(strategy.a.empty());
+    assert(!strategy._var_initialized);
+    assert(!strategy._pf_var_init_a);
+    // Restoring the latch lets the same selection initialize again before the append.
     strategy.on_source_bar(bar);
     assert((strategy.a == EXPECTED));
+    assert(strategy._var_initialized);
+    assert(strategy._pf_var_init_a);
     strategy.restore_script_state();
     assert(strategy.a.empty());
+    assert(!strategy._var_initialized);
+    assert(!strategy._pf_var_init_a);
     std::cout << "ok\n";
 }
 '''.replace("EXPECTED", _cpp_vector(content))
     # Undo the append before restoring the initializer's empty preimage and once latch.
     assert run_emitted_tu(cpp, driver, opt="-O2", label="selected array initializer") == "ok\n"
+    # An eager payload checkpoint must restore the same empty member and false latches.
+    assert run_emitted_tu(eager, driver, opt="-O2", label="eager selected array initializer") == "ok\n"
 
 
 @pytest.mark.parametrize("opt", ["-O0", "-O2"])
