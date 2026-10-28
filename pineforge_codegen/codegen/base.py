@@ -4688,6 +4688,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             return None
 
     def _prepare_array_journal(self) -> None:
+        self._plan_array_mutations()
+
+    def _plan_array_mutations(self, sharing=None) -> None:
         """Prove complete write coverage before choosing any payload tokens.
 
         Unique declarations plus exact call-node identities keep this separate
@@ -4695,8 +4698,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         graph includes callable bodies and traces without expanding call paths.
         Unproved storage, escapes and requested dependencies stay eager.
         """
-        self._array_journal_members: dict[str, VarDecl] = {}
-        self._array_journal_calls: dict[int, str] = {}
+        if sharing is None:
+            self._array_journal_members: dict[str, VarDecl] = {}
+            self._array_journal_calls: dict[int, str] = {}
         if self._uses_map or self._uses_matrix or self._udt_defs:
             return
         from .capabilities import STRATEGY_PARAMETERS
@@ -4708,7 +4712,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 if flag is None and len(statement.args) > position:
                     flag = statement.args[position]
                 enabled = isinstance(flag, BoolLiteral) and flag.value is True
-        if not enabled:
+        if not enabled and sharing is None:
             return
 
         roots = [self.ctx.ast]
@@ -4835,7 +4839,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     or len(bindings.get(safe, ())) != 1
                     or bindings[safe][0] is not declaration
                     or name in ambiguous_names
-                    or name in history_names or name in self.ctx.series_vars
+                    or (name in history_names if sharing is None else not sharing.candidate(declaration))
+                    or name in self.ctx.series_vars
                     or safe in self._series_var_member_names
                     or (isinstance(declaration.value, (IfStmt, SwitchStmt))
                         and id(declaration) not in self._runtime_scalar_var_init_by_node)
@@ -4863,6 +4868,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 invalid.add(name)
                 continue
             parent = parents[key]
+            if sharing is not None:
+                handled, node, parent = sharing.use(node, parent, parents, mutable_targets)
+                if handled:
+                    continue
             call = None
             method = None
             if (isinstance(parent, MemberAccess) and parent.object is node
@@ -4900,8 +4909,12 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             if method in changing and owners[key] in live:
                 mutated.add(name)
 
-        admitted = {name for name in candidates if name in mutated and name not in invalid}
+        admitted = {name for name in candidates
+                    if (sharing is not None or name in mutated) and name not in invalid}
         if not admitted:
+            return
+        if sharing is not None:
+            sharing.admit(self, candidates, admitted, calls, bindings)
             return
         self._array_journal_members = {
             self._safe_name(name): declaration for name, declaration in candidates.items()
@@ -4921,6 +4934,9 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
     def _array_journal_initializer(self, member: str, value: str) -> str:
         if member in getattr(self, "_array_journal_members", {}):
             return f"this->{self._array_journal_member_name}.replace({member}, {value});"
+        writer = self._history_sharing_writer(member)
+        if writer is not None:
+            return f"{writer}.replace({member}, {value});"
         return f"{member} = {value};"
 
     def generate(self) -> str:
@@ -4981,6 +4997,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._prescan_strategy_series()
         self._prescan_session_history()
         self._prepare_array_journal()
+        self._prepare_history_sharing()
         self._security_ohlc_hist_fields_by_sec: dict[int, set[str]] = {}
         # A source input's selected series read at a history offset in a
         # payload: (key, default) -> (the input call, its history field).
@@ -5835,9 +5852,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
 
         # 8e. The copies an array or a matrix variable's executions left
         #     (pineforge_codegen/collection_history.py).
+        self._emit_history_version_clock(lines)
         for variable in self._collection_history_variables():
             lines.append(
-                f"    _PFCollectionHistory<{self._collection_history_cpp_type(variable)}> "
+                f"    {self._collection_history_class(variable)}<{self._collection_history_cpp_type(variable)}> "
                 f"{self._collection_history_member(variable)}"
                 f"{self._collection_history_capacity(variable)};"
             )

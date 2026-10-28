@@ -2223,14 +2223,13 @@ class TypeInferer:
                      else ARRAY_METHODS)
 
             def lower_receiver(recv: str) -> str:
-                journaled = (id(node) in getattr(self, "_array_journal_calls", {})
-                             and method in ARRAY_JOURNAL_DELTA_METHODS | ARRAY_JOURNAL_FULL_METHODS)
+                adapter = self._array_write_adapter(node, method)
                 lowered = evaluate_args_once(
                     bound_args, ARRAY_ARGS_READ_REPEATEDLY.get(method, ()),
                     lambda a: journal_array_method(
-                        recv, method, a, f"this->{self._array_journal_member_name}",
+                        recv, method, a, adapter,
                         normalize_negative=not self._pine_v5_body,
-                    ) if journaled else table[method](recv, a), "_pf_array_a",
+                    ) if adapter is not None else table[method](recv, a), "_pf_array_a",
                 )
                 for token, original in reversed(arg_bindings):
                     lowered = (

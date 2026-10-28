@@ -157,6 +157,7 @@ class TopLevelEmitter:
         if getattr(self, "_array_journal_members", {}):
             lines.extend(("#include <functional>", "#include <limits>",
                           "#include <stdexcept>", "#include <utility>"))
+        self._emit_history_sharing_includes(lines)
         if self._uses_tv_number_format:
             lines.extend(("#include <charconv>", "#include <system_error>",
                           "#include <stdexcept>"))
@@ -551,6 +552,8 @@ class TopLevelEmitter:
             if (getattr(self, "_array_journal_members", {})
                     and name == self._array_journal_member_name):
                 continue
+            if self._history_version_clock_member(name):
+                continue
             if name in seen:
                 raise AssertionError(f"duplicate generated script-state member: {name}")
             seen.add(name)
@@ -628,6 +631,9 @@ class TopLevelEmitter:
             if name in seen:
                 raise AssertionError(f"duplicate generated lifecycle member: {name}")
             seen.add(name)
+            if self._history_version_clock_member(name):
+                lines.append(f"        this->{name}.reset_for_run();")
+                continue
             if (getattr(self, "_array_journal_members", {})
                     and name == self._array_journal_member_name):
                 lines.append(f"        this->{name}.reset_for_run();")

@@ -1204,7 +1204,7 @@ class StmtVisitor:
             int_slot = self._int_slot_cpp_type(target_name)
             if node.op == ":=":
                 val_cpp = self._coerce_int_slot(val_cpp, node.value, int_slot)
-                lines.append(f"{pad}{safe} = {val_cpp};")
+                lines.append(f"{pad}{self._array_journal_initializer(safe, val_cpp)}")
             else:
                 rhs = self._compound_assign_rhs(safe, node.op, val_cpp)
                 if rhs is not None:

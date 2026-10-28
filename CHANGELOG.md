@@ -22,6 +22,14 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased
 
+- Reuse unchanged primitive-array history snapshots when every write can be
+  tracked, while preserving detached historical values and order-fill rollback.
+
+- Avoid copying growing primitive arrays at each order-fill checkpoint when
+  their writes can be tracked completely. Rollback records individual edits;
+  bulk operations retain full preimages, and other arrays keep their existing
+  snapshots.
+
 Planned as 1.8.0, a minor release of the exact engine/codegen pair, paired with
 engine `v1.8.0`. This entry records what changed in this repository since
 1.7.0 and nothing else: four pull requests merged after `v1.7.0`, three
