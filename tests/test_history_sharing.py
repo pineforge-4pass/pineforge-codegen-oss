@@ -559,18 +559,25 @@ def test_whole_array_replacement_and_input_overrides_change_the_frozen_version(r
 ''')
 
 
+@pytest.mark.parametrize("initializer", [
+    # The computed selector reaches the first switch arm only for choice zero.
+    pytest.param("switch selected\n    1 => array.from(2, 5)\n    => array.from(7, 9)\n", id="switch"),
+    # The same computed selector drives the if-expression arm.
+    pytest.param("if selected == 1\n    array.from(2, 5)\nelse\n    array.from(7, 9)\n", id="if"),
+])
 @pytest.mark.parametrize("choice, values", [
-    # Choice 0 initializes [2,5] once at the declaration.
+    # Choice 0 computes selected=1 and initializes [2,5] once at the declaration.
     (0, "{2, 5}"),
-    # Choice 1 initializes [7,9] once at the declaration.
+    # Choice 1 computes selected=2 and initializes [7,9] once at the declaration.
     (1, "{7, 9}"),
 ])
-def test_selected_first_initialization_and_its_latch_restore_together(choice, values):
-    cpp = transpile(COOF_HEADER + f'''choice = input.int({choice}, "Choice")
-var a = switch choice
-    0 => array.from(2, 5)
-    => array.from(7, 9)
-''' + HISTORY)
+def test_selected_first_initialization_and_its_latch_restore_together(
+    initializer, choice, values,
+):
+    source = (COOF_HEADER + f'''choice = input.int({choice}, "Choice")
+selected = choice + 1
+var array<int> a = ''' + initializer + HISTORY)
+    cpp = transpile(source)
     _shared(cpp)
     # A checkpoint before initialization restores empty storage, token, history and the once latch.
     _native(cpp, f'''
@@ -593,12 +600,27 @@ var a = switch choice
 ''')
 
 
+@pytest.mark.parametrize("choice", [0, 1])
+def test_untyped_selection_keeps_the_eager_history_output(choice, monkeypatch):
+    source = COOF_HEADER + f'''choice = input.int({choice}, "Choice")
+var a = switch choice
+    0 => array.from(2, 5)
+    => array.from(7, 9)
+''' + HISTORY
+    cpp = transpile(source)
+    # The array selection has no resolved collection TypeSpec, so it remains on the eager path.
+    assert OLD_MEMBER in cpp
+    assert "class _PFCachedCollectionHistory" not in cpp
+    assert cpp == _eager_cpp(source, monkeypatch)
+
+
 def test_dynamic_changed_zero_writes_live_array_and_nonzero_keeps_error_order():
     cpp = transpile(HEADER + SEED + '''offset = input.int(0, "Offset")
 if bar_index == 2
     array.set(a[offset], 1, 9)
 ''' + HISTORY)
     _shared(cpp, capacity=None)
+    assert cpp.count(WRITER + ".save_set(__pf_array, (size_t)__pf_array_index)") == 1
     # Offset 0 changes [2,5] to [2,9]; offset 1 is immutable and offset 9 is missing.
     _native(cpp, r'''
     GeneratedStrategy strategy;

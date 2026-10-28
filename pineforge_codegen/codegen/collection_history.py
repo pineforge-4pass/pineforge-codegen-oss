@@ -75,6 +75,23 @@ class CollectionHistoryEmitter:
         plan = self._history_sharing_plan()
         if plan is not None and id(node) in plan.calls:
             return plan.writer(plan.calls[id(node)])
+        if plan is not None:
+            # Recover the stable owner from an annotated history-changing
+            # receiver when exact call-node admission is unavailable, so a
+            # zero-offset change still advances the same content token.
+            receiver = None
+            callee = getattr(node, "callee", None)
+            if (isinstance(callee, MemberAccess)
+                    and isinstance(callee.object, Identifier)
+                    and callee.object.name == "array"):
+                receiver = (node.args[0] if node.args
+                            else node.kwargs.get("id"))
+            annotation = history_annotation(receiver)
+            if (annotation is not None and annotation.get("use") == "change"
+                    and isinstance(receiver.object, Identifier)):
+                member = self._safe_name(receiver.object.name)
+                if member in plan.members:
+                    return plan.writer(member)
         return None
 
     def _matrix_history_value_names(self) -> set[str]:
