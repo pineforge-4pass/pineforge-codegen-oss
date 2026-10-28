@@ -2,7 +2,6 @@
   "title": "CG-ISMARKET session flags",
   "slug": "cgs2-flags-tse7203-15",
   "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
   "exportedAt": "2026-09-26T09:27:40.216Z",
   "chart": {
     "symbol": "TSE:7203",

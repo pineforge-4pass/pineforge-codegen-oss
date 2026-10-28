@@ -2,7 +2,6 @@
   "title": "TA1 probe - ta.vwap first session day",
   "slug": "ta1-vwap-first-day-eth",
   "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
   "exportedAt": "2026-09-24T02:48:23.310Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",

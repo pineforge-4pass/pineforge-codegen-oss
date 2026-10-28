@@ -2,7 +2,6 @@
   "title": "W8B readout: setters on boxes max_boxes_count evicted",
   "slug": "w8b-box-evict-setter",
   "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
   "exportedAt": "2026-09-27T16:02:04.163Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",

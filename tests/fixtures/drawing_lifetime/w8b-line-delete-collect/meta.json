@@ -2,7 +2,6 @@
   "title": "W8B readout: deleted and collected lines",
   "slug": "w8b-line-delete-collect",
   "source": "pineforge-workflow campaign lab tv",
-  "channel": "ws-report-v1",
   "exportedAt": "2026-09-27T16:23:46.027Z",
   "chart": {
     "symbol": "BINANCE:ETHUSDT.P",

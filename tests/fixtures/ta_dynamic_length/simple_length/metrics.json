@@ -8,7 +8,6 @@
   "deepBacktesting": true,
   "trades": 300,
   "tvTradesCsv": "tv_trades.csv",
-  "tapeChannel": "ws-report-v1",
   "sourceCanonicalization": "pine-facade-v1",
   "sourceArtifactHash": "2fa028fbfebc2bb26888af25d8593568d03cdda1d85081dafb124cf05dca6f21",
   "tvTradesCsvHash": "a27a1d7c1f1e4d0247ce026becfb09f3939e75b275a8516fbd2d7818080cc013",
