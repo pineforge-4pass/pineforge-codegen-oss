@@ -213,5 +213,5 @@ def test_the_tapes_are_the_recorded_exports():
         meta = json.loads((FIXTURES / case.tape / "meta.json").read_text())
         digest = hashlib.sha256((FIXTURES / case.tape / "tv_trades.csv").read_bytes()).hexdigest()
         assert digest == metrics["tvTradesCsvHash"] == meta["tv_trades_sha256"], case.tape
-        assert metrics["wsProvenance"]["rangeProof"] == "covered", case.tape
+        assert metrics["rangeProvenance"]["rangeProof"] == "covered", case.tape
         assert (metrics["symbol"], metrics["interval"]) == ("BINANCE:ETHUSDT.P", "15"), case.tape

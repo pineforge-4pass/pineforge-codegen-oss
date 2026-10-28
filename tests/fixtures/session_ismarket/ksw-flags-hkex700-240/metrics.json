@@ -11,7 +11,7 @@
   "sourceCanonicalization": "pine-facade-v1",
   "sourceArtifactHash": "1a78deccefb408d955112da398240e8fc5b146d126c40e514ee24078e4af83d4",
   "tvTradesCsvHash": "749048b62deb91a92aa670f1ad4ad9a33c92b8d86ea0ef9b6b6a4f68be6bdb8a",
-  "wsProvenance": {
+  "rangeProvenance": {
     "schemaVersion": 1,
     "symbol": "HKEX:700",
     "interval": "240",

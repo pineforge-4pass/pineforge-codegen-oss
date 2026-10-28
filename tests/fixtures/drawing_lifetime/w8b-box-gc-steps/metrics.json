@@ -11,7 +11,7 @@
   "sourceCanonicalization": "pine-facade-v1",
   "sourceArtifactHash": "89f721945aebed8ad4c4b493b7761f15d1b9ed7c8cce8f4d2b3b32fc06f0684a",
   "tvTradesCsvHash": "daab96f7e1c0330f50b06a2d6100bb72f7e47746ac3e901f1600b4840929971e",
-  "wsProvenance": {
+  "rangeProvenance": {
     "schemaVersion": 1,
     "symbol": "BINANCE:ETHUSDT.P",
     "interval": "15",

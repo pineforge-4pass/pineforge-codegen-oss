@@ -13,6 +13,7 @@ _DIGESTS = {
     "2f2e271b7ecdb1039b6d97f664f3845440a4d4255a5e202f5675a3bc2d7c0a0d",
     "44ec77b8af0a1695673311afebfb03777b47a440b42f8ca645dccf6f7ec2840a",
     "c4f10090301877a3c66dab40886391f4b1a2c846589bc350cd7280d640665b05",
+    "43aedf0da625b9fa4471ce529f1a90986b09381637edc666d1f46ffb0ec5b96f",
 }
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 _JOINED_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+")

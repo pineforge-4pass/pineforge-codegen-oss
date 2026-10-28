@@ -193,7 +193,7 @@ def test_the_tapes_are_the_recorded_exports():
         pine = hashlib.sha256((FIXTURES / tape / "strategy.pine").read_bytes()).hexdigest()
         assert digest == metrics["tvTradesCsvHash"] == meta["tv_trades_sha256"], tape
         assert pine == meta["pine_sha256"], tape
-        assert metrics["wsProvenance"]["rangeProof"] == "covered", tape
+        assert metrics["rangeProvenance"]["rangeProof"] == "covered", tape
         assert (metrics["symbol"], metrics["interval"]) == ("BINANCE:ETHUSDT.P", "15"), tape
         assert (meta["chart"]["from"], meta["chart"]["to"]) == ("2026-01-29", "2026-02-01"), tape
         declared = "use_bar_magnifier=true" in (FIXTURES / tape / "strategy.pine").read_text()
