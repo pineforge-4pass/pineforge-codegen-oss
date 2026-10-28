@@ -1,4 +1,4 @@
-"""Requested-context substitutions preserve timezone lambdas' local bindings."""
+"""Requested-context substitutions preserve fixed timezone lambda bodies."""
 
 from __future__ import annotations
 
@@ -73,7 +73,19 @@ def _evaluator(cpp: str) -> str:
     return cpp[start:cpp.index("void evaluate_security(", start)]
 
 
+def _assert_intact_lambda_bodies(cpp: str) -> None:
+    # Match the suffix boundaries so a substituted member or type is still inspected.
+    bodies = re.findall(
+        r"(?:static thread_local std::string _last_tz; |struct tm tm_buf; )"
+        r".*?\}\(\)", cpp, re.DOTALL,
+    )
+    assert bodies  # Every caller supplies at least one timezone lambda.
+    for body in bodies:
+        assert not re.search(r"_sec\d+_", body)
+
+
 def _assert_calendar_locals(cpp: str) -> None:
+    _assert_intact_lambda_bodies(cpp)
     assert CALENDAR_BODY in cpp  # The calendar's tm, mutex and lock retain their bindings.
     assert not re.search(
         r"(?:struct tm|std::mutex|std::lock_guard<std::mutex>)\s+"
@@ -100,6 +112,66 @@ def _assert_calendar_locals(cpp: str) -> None:
     ("_pf_ts_mu_lock", "_pf_ts_mu_lock", "(_sec0__pf_ts_mu_lock + [&]() -> int64_t { "),
     # Offset one reads the prior requested value beside the ordinary lock_guard.
     ("_pf_ts_mu_lock", "_pf_ts_mu_lock[1]", "(_sec0__pf_ts_mu_lock[1] + [&]() -> int64_t { "),
+    # The scalar tm is the requested sum operand, separate from the struct type.
+    ("tm", "tm", "(_sec0_tm + [&]()"),
+    # Offset one indexes the requested tm series, leaving the struct type intact.
+    ("tm", "tm[1]", "(_sec0_tm[1] + [&]()"),
+    # The scalar empty is rebound in the sum, never in the timezone's member call.
+    ("empty", "empty", "(_sec0_empty + [&]()"),
+    # Offset one reads the requested empty series, leaving the member call intact.
+    ("empty", "empty[1]", "(_sec0_empty[1] + [&]()"),
+    # The scalar mutex is rebound in the sum, separate from the standard type.
+    ("mutex", "mutex", "(_sec0_mutex + [&]()"),
+    # Offset one indexes the requested mutex series, leaving the standard type intact.
+    ("mutex", "mutex[1]", "(_sec0_mutex[1] + [&]()"),
+    # The scalar lock_guard is rebound in the sum, separate from the lock type.
+    ("lock_guard", "lock_guard", "(_sec0_lock_guard + [&]()"),
+    # Offset one reads the requested lock_guard series, leaving the lock type intact.
+    ("lock_guard", "lock_guard[1]", "(_sec0_lock_guard[1] + [&]()"),
+    # The scalar tm_year is rebound in the sum, separate from the tm member.
+    ("tm_year", "tm_year", "(_sec0_tm_year + [&]()"),
+    # Offset one indexes the requested tm_year series, leaving the year member intact.
+    ("tm_year", "tm_year[1]", "(_sec0_tm_year[1] + [&]()"),
+    # The scalar tm_mon is rebound in the sum, separate from the tm member.
+    ("tm_mon", "tm_mon", "(_sec0_tm_mon + [&]()"),
+    # Offset one indexes the requested tm_mon series, leaving the month member intact.
+    ("tm_mon", "tm_mon[1]", "(_sec0_tm_mon[1] + [&]()"),
+    # The scalar tm_mday is rebound in the sum, separate from the tm member.
+    ("tm_mday", "tm_mday", "(_sec0_tm_mday + [&]()"),
+    # Offset one indexes the requested tm_mday series, leaving the day member intact.
+    ("tm_mday", "tm_mday[1]", "(_sec0_tm_mday[1] + [&]()"),
+    # The scalar tm_hour is rebound in the sum, separate from the tm member.
+    ("tm_hour", "tm_hour", "(_sec0_tm_hour + [&]()"),
+    # Offset one indexes the requested tm_hour series, leaving the hour member intact.
+    ("tm_hour", "tm_hour[1]", "(_sec0_tm_hour[1] + [&]()"),
+    # The scalar tm_min is rebound in the sum, separate from the tm member.
+    ("tm_min", "tm_min", "(_sec0_tm_min + [&]()"),
+    # Offset one indexes the requested tm_min series, leaving the minute member intact.
+    ("tm_min", "tm_min[1]", "(_sec0_tm_min[1] + [&]()"),
+    # The scalar tm_sec is rebound in the sum, separate from the tm member.
+    ("tm_sec", "tm_sec", "(_sec0_tm_sec + [&]()"),
+    # Offset one indexes the requested tm_sec series, leaving the second member intact.
+    ("tm_sec", "tm_sec[1]", "(_sec0_tm_sec[1] + [&]()"),
+    # The scalar tm_isdst is rebound in the sum, separate from the tm member.
+    ("tm_isdst", "tm_isdst", "(_sec0_tm_isdst + [&]()"),
+    # Offset one indexes the requested tm_isdst series, leaving the DST member intact.
+    ("tm_isdst", "tm_isdst[1]", "(_sec0_tm_isdst[1] + [&]()"),
+    # The scalar timegm is rebound in the sum, separate from the UTC conversion call.
+    ("timegm", "timegm", "(_sec0_timegm + [&]()"),
+    # Offset one reads the requested timegm series, leaving the conversion call intact.
+    ("timegm", "timegm[1]", "(_sec0_timegm[1] + [&]()"),
+    # The scalar mktime is rebound in the sum, separate from the local conversion call.
+    ("mktime", "mktime", "(_sec0_mktime + [&]()"),
+    # Offset one reads the requested mktime series, leaving the conversion call intact.
+    ("mktime", "mktime[1]", "(_sec0_mktime[1] + [&]()"),
+    # The scalar c_str is rebound in the sum, separate from the timezone's member call.
+    ("c_str", "c_str", "(_sec0_c_str + [&]()"),
+    # Offset one indexes the requested c_str series, leaving the member calls intact.
+    ("c_str", "c_str[1]", "(_sec0_c_str[1] + [&]()"),
+    # The scalar int64_t is rebound in the sum; the fixed body's integer types stay.
+    ("int64_t", "int64_t", "(_sec0_int64_t + [&]()"),
+    # Offset one reads the requested int64_t series; the fixed body's types stay.
+    ("int64_t", "int64_t[1]", "(_sec0_int64_t[1] + [&]()"),
 ])
 def test_calendar_locals_survive_mutable_request_names(calendar, name, read, sum_prefix):
     body = _evaluator(transpile(_source(name, read, calendar)))
@@ -124,9 +196,11 @@ def test_calendar_locals_survive_mutable_request_names(calendar, name, read, sum
 ])
 def test_colliding_and_noncolliding_scripts_keep_the_original_calendar_bytes(calendar, prefix):
     plain = _evaluator(transpile(_source("counter", "counter[1]", calendar)))
+    _assert_intact_lambda_bodies(plain)
     assert prefix + CALENDAR_BODY in plain
     # The collision twin fails until the same calendar suffix is preserved there.
     colliding = _evaluator(transpile(_source("t", "t[1]", calendar)))
+    _assert_intact_lambda_bodies(colliding)
     assert prefix + CALENDAR_BODY in colliding
 
 
@@ -210,6 +284,58 @@ class _RewriteHost(SecurityEmitter, NamingHelper):
         self._global_mutable_infos = {
             name: SimpleNamespace(is_series=True) for name in names
         }
+        self._security_string_series = set()
+        self._security_color_series = set()
+
+
+def test_calendar_body_preserves_mutable_and_helper_bindings():
+    host = _RewriteHost("mutex", "tm_year", "t")
+    host._global_mutable_infos["mutex"].is_series = False
+    calendar = _timestamp_calendar_lambda(
+        'std::string("UTC")', "1970", "1", "2",
+        "mutex + tm_year + tm_year[1]", "empty + c_str + c_str[1]", "t[1]",
+    )
+    rendered = host._rewrite_security_cpp(
+        calendar + " + mutex + tm_year + tm_year[1] + empty + c_str + c_str[1]"
+        + ' + std::string("mutex tm_year empty c_str t").size() + \'t\'',
+        0, {"mutex", "tm_year", "t"},
+        ({"empty": "_sec0_calendar_empty", "c_str": "@series:calendar:c_str"},),
+    )
+    _assert_calendar_locals(rendered)
+    # The hour binds the scalar mutex, current tm_year and prior tm_year in order.
+    assert "int _hr = (_sec0_mutex + _sec0_tm_year[0] + _sec0_tm_year[1]); " in rendered
+    # The minute binds a helper scalar and both the current and prior helper series.
+    assert (
+        'int _min = (_sec0_calendar_empty + _security_helper_series_["calendar:c_str"][0]'
+        ' + _security_helper_series_["calendar:c_str"][1]); '
+    ) in rendered
+    assert "int _sc = (_sec0_t[1]); " in rendered  # The seconds read the prior requested t.
+    # The same bindings reach the trailing reads; quoted names and the character stay literal.
+    assert rendered.endswith(
+        " + _sec0_mutex + _sec0_tm_year[0] + _sec0_tm_year[1] + _sec0_calendar_empty"
+        ' + _security_helper_series_["calendar:c_str"][0]'
+        ' + _security_helper_series_["calendar:c_str"][1]'
+        ' + std::string("mutex tm_year empty c_str t").size() + \'t\''
+    )
+
+
+def test_calendar_body_preserves_string_helper_series_binding():
+    host = _RewriteHost()
+    host._security_string_series = {"calendar:empty"}
+    calendar = _timestamp_calendar_lambda(
+        '(empty == std::string("") ? empty[1] : empty)', "1970", "1", "2", "8", "0", "0",
+    )
+    rendered = host._rewrite_security_cpp(
+        calendar, 0, set(), ({"empty": "@series:calendar:empty"},),
+    )
+    _assert_calendar_locals(rendered)
+    # The timezone reads current, prior and current string history in its original ternary.
+    assert (
+        "std::string _tz = pineforge::normalize_timezone_for_posix("
+        '((_security_helper_series_str_["calendar:empty"][0] == std::string("")'
+        ' ? _security_helper_series_str_["calendar:empty"][1]'
+        ' : _security_helper_series_str_["calendar:empty"][0]))); '
+    ) in rendered
 
 
 def test_nested_calendar_arguments_rewrite_without_capturing_either_lambda():
@@ -225,12 +351,14 @@ def test_nested_calendar_arguments_rewrite_without_capturing_either_lambda():
         outer + ' + t[1] + std::string("t _pf_ts_mu _pf_ts_mu_lock").size()',
         0, {"t", "_pf_ts_mu", "_pf_ts_mu_lock"},
     )
+    _assert_intact_lambda_bodies(rendered)
     assert rendered.count(CALENDAR_BODY) == 2  # Each of the two calls owns its own tm and mutex.
     assert "int _sc = (_sec0_t[1]); " in rendered  # The inner second is the user's prior t.
     assert "/ 1000 + _sec0__pf_ts_mu[1] + _sec0__pf_ts_mu_lock[1]" in rendered  # Outer seconds use both histories.
     assert ' + _sec0_t[1] + std::string("t _pf_ts_mu _pf_ts_mu_lock").size()' in rendered  # Only the outside read changes.
     # A surrounding fallback may rewrite the already-rendered expression again.
     repeated = host._rewrite_security_cpp(rendered, 0, {"t", "_pf_ts_mu", "_pf_ts_mu_lock"})
+    _assert_intact_lambda_bodies(repeated)
     assert repeated.count(CALENDAR_BODY) == 2  # Neither pass changes either local scope.
     assert "int _sc = (_sec0_t[1]); " in repeated  # Rebinding does not add another request prefix.
 
@@ -251,6 +379,7 @@ def test_time_field_template_locals_survive_request_rewriting(name, seconds):
                              'std::string("Asia/Taipei")'),
         0, {name},
     )
+    _assert_intact_lambda_bodies(rendered)
     assert FIELD_BODY in rendered
     assert seconds in rendered
 

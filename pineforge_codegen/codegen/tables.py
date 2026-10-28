@@ -119,19 +119,15 @@ _TZ_TIME_FIELD_BODY = (
     "} "
 )
 
-TIMEZONE_LAMBDA_LOCAL_SCOPES = {
-    TIMESTAMP_CALENDAR_BODY: frozenset("""
-        _tz _yr _mo _dy _hr _min _sc _last_tz _last_yr _last_mo _last_dy
-        _last_hr _last_min _last_sc _last_res t _res _pf_ts_mu _pf_ts_mu_lock
-        _old _old_tz _had_old
-    """.split()),
-    **{
-        _TZ_TIME_FIELD_BODY + f"return {field_expr}; }}()": frozenset("""
-            _tz _secs tm_buf _pf_tz_mu _pf_tz_lock _old _old_tz _had_old
-        """.split())
+# Retain recognition of the time-field template for direct callers; it is
+# not emitted today because time fields use the engine's pine_<field>().
+TIMEZONE_LAMBDA_BODIES = (
+    TIMESTAMP_CALENDAR_BODY,
+    *(
+        _TZ_TIME_FIELD_BODY + f"return {field_expr}; }}()"
         for field_expr in TIME_FIELD_EXPRS.values()
-    },
-}
+    ),
+)
 
 
 def tz_time_field_lambda(field_expr: str, ts_arg: str, tz_arg: str) -> str:

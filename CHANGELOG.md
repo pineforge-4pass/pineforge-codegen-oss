@@ -31,7 +31,7 @@ emitted C++ for scripts that read `strategy.account_currency`, have a
 persistent declaration whose initializer depends on earlier statements, have a
 helper-local `var color` or a `request.security` rollback hook, use a pivot-levels
 helper or an array or matrix history read, bind `fclose`, or have a calendar
-timestamp lambda whose local names collide with requested-context bindings,
+timestamp lambda whose body identifiers collide with requested-context bindings,
 and the accepted input (line endings, one-line field assignments, an unevaluated
 `request.currency_rate`).
 
@@ -61,7 +61,7 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
   earlier statements, with a helper-local `var color`, with a helper that reads
   the history of a derived argument, with a pivot-levels helper or an array or
   matrix history read, that bind `fclose`, with a calendar timestamp lambda
-  whose local names collide with requested-context bindings, or with a
+  whose body identifiers collide with requested-context bindings, or with a
   `request.security` (for the late-restore change alone, only the
   generated `restore_script_state()` changes, in 72 of the 555 corpus and
   fixture scripts; the other entries change the scripts they name). This is
@@ -77,9 +77,10 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
 
 ### Changes since 1.7.0
 
-- Preserve the calendar timestamp lambda's local bindings when a request
+- Preserve the calendar timestamp lambda's fixed body when a request
   expression also reads a mutable global, helper local, loop counter or tuple
-  element named `t`, `_pf_ts_mu` or `_pf_ts_mu_lock`, including history reads.
+  element whose name matches a body identifier, including history reads.
+  Calendar argument expressions still read their requested-context bindings.
 - Avoid libc name collisions in generated C++: pivot-level helpers use
   `open_price`, array and matrix history helpers use `open_slot`, and authored
   `fclose` names are escaped. Scripts using either helper change only that
