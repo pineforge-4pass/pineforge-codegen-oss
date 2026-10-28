@@ -329,8 +329,14 @@ def _assert_receipt_text(cpp: str, channel: Channel, text: Text, name: str) -> N
 
 
 def _expect_case_failure(case_body, name: str) -> None:
-    # A parser exception or an internal AssertionError cannot count as a kill.
-    with pytest.raises(AssertionError, match=re.escape(name) + r": (generated C\+\+|decoded|emitted)"):
+    # A parser exception or an internal AssertionError cannot count as a kill,
+    # with one exception: the emitter's own duplicate script-state member
+    # invariant is the defence that catches a weakened name allocator, so it
+    # counts as the kill for the name-collision case only.
+    pattern = re.escape(name) + r": (generated C\+\+|decoded|emitted)"
+    if name == "name_collision":
+        pattern += r"|duplicate generated script-state member: pf_safe_"
+    with pytest.raises(AssertionError, match=pattern):
         case_body()
 
 
