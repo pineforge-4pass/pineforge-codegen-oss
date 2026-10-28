@@ -1,7 +1,7 @@
 """Generated names and fallback comments protect their own text boundaries.
 
-The public transpiler remains the entry point for every emitted-output case.
-Token substitutions exercise emission independently of identifier grammar.
+Name cases use the public transpiler with identifier token substitutions.
+Fallback comment units call the emitter with names outside Pine's grammar.
 Controls repeat the same assertion body with one protection weakened.
 """
 
@@ -17,6 +17,9 @@ import pytest
 
 from pineforge_codegen import transpile
 from pineforge_codegen import library_inline
+from pineforge_codegen.analyzer import Analyzer
+from pineforge_codegen.ast_nodes import FuncCall, Identifier, MemberAccess
+from pineforge_codegen.codegen import CodeGen
 from pineforge_codegen.codegen import emit_top, types
 from pineforge_codegen.codegen.helpers import NamingHelper
 from pineforge_codegen.codegen.security import SecurityEmitter
@@ -24,9 +27,9 @@ from pineforge_codegen.codegen.tables import TIME_FIELD_EXPRS
 from pineforge_codegen.codegen.visit_call import CallVisitor
 from pineforge_codegen.codegen.visit_expr import ExprVisitor
 from pineforge_codegen.cpp_allowlist import check_generated_cpp
-from pineforge_codegen.lexer import Lexer
+from pineforge_codegen.lexer import Lexer, TokenType
 from pineforge_codegen.library_modules import LibraryModule
-from pineforge_codegen.tokens import TokenType
+from pineforge_codegen.parser import Parser
 
 from tests._cpp_tokens import code_only, regions
 
@@ -356,7 +359,7 @@ def test_record_encoding_preserves_authored_support_name(monkeypatch):
 @dataclass(frozen=True)
 class CommentChannel:
     name: str
-    body: str
+    namespace: str
     expected: str
     security: bool = False
 
@@ -364,29 +367,28 @@ class CommentChannel:
 COMMENT_CHANNELS = (
     # Direct delimiters are split; the backslash and LF become three backslashes and n.
     CommentChannel(
-        "ta_comment", "// @pf-trace probe=ta.Boundary()\n",
-        r"/* unsupported: ta.Edge* /Guard/ *\\\n/Guard/ * */",
+        "ta_comment", "ta",
+        r"na<double>() /* unsupported: ta.Edge* /Guard/ *\\\n/Guard/ * */",
     ),
     # The symbol-information fallback retains the same single-line escaped name.
     CommentChannel(
-        "symbol_comment", "// @pf-trace probe=syminfo.Boundary()\n",
-        r"/* unsupported: syminfo.Edge* /Guard/ *\\\n/Guard/ * */",
+        "symbol_comment", "syminfo",
+        r"na<double>() /* unsupported: syminfo.Edge* /Guard/ *\\\n/Guard/ * */",
     ),
-    # The string fallback stays nested in a numeric length expression for tracing.
+    # The string fallback returns an empty string before its single escaped comment.
     CommentChannel(
-        "string_comment", "// @pf-trace probe=str.length(str.Boundary())\n",
-        r"/* unsupported: str.Edge* /Guard/ *\\\n/Guard/ * */",
+        "string_comment", "str",
+        r'std::string("") /* unsupported: str.Edge* /Guard/ *\\\n/Guard/ * */',
     ),
     # Chart-context math retains its zero result and one complete block comment.
     CommentChannel(
-        "math_comment", "// @pf-trace probe=math.Boundary()\n",
-        r"/* unsupported: math.Edge* /Guard/ *\\\n/Guard/ * */",
+        "math_comment", "math",
+        r"0.0 /* unsupported: math.Edge* /Guard/ *\\\n/Guard/ * */",
     ),
     # Requested-context math has its own fallback emitter and the same inert comment.
     CommentChannel(
-        "security_math_comment",
-        'value = request.security(syminfo.tickerid, "60", math.abs(close))\n',
-        r"/* unsupported: math.Edge* /Guard/ *\\\n/Guard/ * */", security=True,
+        "security_math_comment", "math",
+        r"0.0 /* unsupported: math.Edge* /Guard/ *\\\n/Guard/ * */", security=True,
     ),
 )
 
@@ -396,34 +398,78 @@ COMMENT_CHANNELS = (
     "method", ("_cpp_comment_escape", "_cpp_string_escape"),
     ids=("comment_escape", "string_escape"),
 )
-def test_fallback_comment_inertness(monkeypatch, row, method):
-    if row.security:
-        def security_math(self, sec_id, func_name, node, *args, **kwargs):
-            # Substitute at the requested evaluator's name boundary, after
-            # ordinary support checking and request registration have run.
-            return SECURITY_MATH(self, sec_id, "Edge*/Guard/*\\\n/Guard/*", node, *args, **kwargs)
-
-        monkeypatch.setattr(SecurityEmitter, "_build_security_math_call", security_math)
-    else:
-        _substitute_token(monkeypatch, "Edge*/Guard/*\\\n/Guard/*")
+def test_fallback_comment_interpolation_unit(monkeypatch, row, method):
+    # Delimiters and line breaks cannot be part of a Pine function identifier.
+    program = Parser(Lexer(PRELUDE + TRADE).tokenize()).parse()
+    emitter = CodeGen(Analyzer(program).analyze())
+    authored = "Edge*/Guard/*\\\n/Guard/*"
+    node = FuncCall(callee=MemberAccess(
+        object=Identifier(name=row.namespace), member=authored,
+    ))
 
     def case_body():
-        cpp = transpile(PRELUDE + row.body + TRADE)
-        comments = [
-            value for kind, _start, _end, value in regions(cpp)
-            if kind == "comment" and value.startswith("/* unsupported:")
-        ]
-        assert row.expected in comments, (
-            f"{row.name}: emitted fallback comment is missing or split"
+        if row.security:
+            cpp = emitter._build_security_math_call(
+                0, authored, node, range(0), {}, set(), set(), (), None,
+            )
+        elif row.namespace == "str":
+            cpp = emitter._visit_str_call(authored, node)
+        elif row.namespace == "math":
+            cpp = emitter._visit_math_call(authored, node)
+        else:
+            cpp = emitter._visit_func_call(node)
+        assert "\n" not in cpp and "\r" not in cpp, (
+            f"{row.name}: emitted fallback comment contains a physical line break"
         )
         assert "Guard" not in code_only(cpp), (
             f"{row.name}: emitted function text left its comment"
+        )
+        assert cpp == row.expected, (
+            f"{row.name}: emitted fallback expression changed or split"
         )
         _assert_clean(cpp, row.name)
 
     _paired_control(
         monkeypatch, NamingHelper, method, staticmethod(lambda value: value),
         case_body, row.name,
+    )
+
+
+@pytest.mark.parametrize(
+    "method", ("_cpp_comment_escape", "_cpp_string_escape"),
+    ids=("comment_escape", "string_escape"),
+)
+def test_security_math_fallback_comment_inertness(monkeypatch, method):
+    name = "security_math_comment"
+
+    def security_math(self, sec_id, func_name, node, *args, **kwargs):
+        # Supply the requested evaluator's function name after registration.
+        return SECURITY_MATH(self, sec_id, "Edge*/Guard/*\\\n/Guard/*", node, *args, **kwargs)
+
+    monkeypatch.setattr(SecurityEmitter, "_build_security_math_call", security_math)
+
+    def case_body():
+        cpp = transpile(
+            PRELUDE
+            + 'value = request.security(syminfo.tickerid, "60", math.abs(close))\n'
+            + TRADE
+        )
+        comments = [
+            value for kind, _start, _end, value in regions(cpp)
+            if kind == "comment" and value.startswith("/* unsupported:")
+        ]
+        # Escaping the backslash then LF gives three backslashes and n; delimiters split.
+        assert r"/* unsupported: math.Edge* /Guard/ *\\\n/Guard/ * */" in comments, (
+            f"{name}: emitted fallback comment is missing or split"
+        )
+        assert "Guard" not in code_only(cpp), (
+            f"{name}: emitted function text left its comment"
+        )
+        _assert_clean(cpp, name)
+
+    _paired_control(
+        monkeypatch, NamingHelper, method, staticmethod(lambda value: value),
+        case_body, name,
     )
 
 
