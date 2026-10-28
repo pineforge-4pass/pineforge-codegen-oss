@@ -217,18 +217,22 @@ alias = a
     monkeypatch.setattr(CodeGen, "_prepare_history_sharing", check_registration)
     cpp = transpile(source)
     assert checked == [True]  # One transpilation reaches the planner boundary once.
-    # Original eager emission stores a vector, a nullable history binding and four history slots.
+    # Original eager emission keeps a as a vector, unused b as a scalar and four history slots.
     assert "    std::vector<int> a;" in cpp
-    assert "    _PFArrayHistoryValue<std::vector<int>> b;" in cpp
+    assert "    double b = 0.0;" in cpp
     assert OLD_MEMBER in cpp
-    # The dynamic binding remains a reference; only the original two-argument open and close remain.
+    # The unused dynamic binding keeps the legacy checked element read (no wrapper reference);
+    # only the original two-argument open and close remain.
     assert (
-        "        b = _pf_collection_hist_a.reference("
-        "([&](){ auto _pf_idx_v = (k); "
+        "        b = ([&]() -> int { const auto& _pf_history_array = a; "
+        "const int _pf_history_offset = ([&](){ auto _pf_idx_v = (k); "
         "using _pf_idx_t = std::decay_t<decltype(_pf_idx_v)>; "
         "if constexpr (std::is_same_v<_pf_idx_t, bool>) return (int)_pf_idx_v; "
-        "else return is_na(_pf_idx_v) ? na<int>() : (int)_pf_idx_v; }()), a);"
+        "else return is_na(_pf_idx_v) ? na<int>() : (int)_pf_idx_v; }()); "
+        "if (_pf_history_offset < 0 || static_cast<size_t>(_pf_history_offset) >= _pf_history_array.size()) "
+        "return na<int>(); return _pf_history_array[_pf_history_offset]; }());"
     ) in cpp
+    assert "_pf_collection_hist_a.reference(" not in cpp
     assert "        _pf_collection_hist_a.open(a, history_advances_new_bar());" in cpp
     assert "        _pf_collection_hist_a.close(a);" in cpp
     assert "class _PFCachedCollectionHistory" not in cpp
