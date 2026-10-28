@@ -426,12 +426,12 @@ class TopLevelEmitter:
                 "    ta::PivotPointLevels impl_;",
                 "public:",
                 "    std::vector<double> compute(const std::string& type, bool anchor,"
-                " bool developing, double open, double high, double low, double close) {",
-                "        return impl_.compute(type, anchor, developing, open, high, low, close);",
+                " bool developing, double open_price, double high, double low, double close) {",
+                "        return impl_.compute(type, anchor, developing, open_price, high, low, close);",
                 "    }",
                 "    std::vector<double> recompute(const std::string& type, bool anchor,"
-                " bool developing, double open, double high, double low, double close) {",
-                "        return impl_.recompute(type, anchor, developing, open, high, low, close);",
+                " bool developing, double open_price, double high, double low, double close) {",
+                "        return impl_.recompute(type, anchor, developing, open_price, high, low, close);",
                 "    }",
                 "};",
                 "#else",

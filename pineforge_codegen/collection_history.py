@@ -385,7 +385,7 @@ public:
     explicit _PFCollectionHistory(int max_len = 500) : slots_(max_len) {}
     // An execution of the variable's declaration begins: the previous one's
     // slot keeps its copy, and this one's opens.
-    void open(const T& value, bool new_slot) {
+    void open_slot(const T& value, bool new_slot) {
         close(value);
         if (new_slot) slots_.push(nullptr);
         else slots_.update(nullptr);

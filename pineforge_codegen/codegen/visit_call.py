@@ -191,6 +191,7 @@ from .tables import (
     STR_ARGS_READ_REPEATEDLY,
     STR_FUNC_MAP,
     TIME_FIELD_EXPRS,
+    TIMESTAMP_CALENDAR_BODY,
     _math_minmax_na_expr,
     _math_round_digits_expr,
     _matrix_functional_receiver,
@@ -307,33 +308,7 @@ def _timestamp_calendar_lambda(tz: str, yr: str, mo: str, dy: str,
         f"std::string _tz = pineforge::normalize_timezone_for_posix(({tz})); "
         f"int _yr = ({yr}); int _mo = ({mo}); int _dy = ({dy}); "
         f"int _hr = ({hr}); int _min = ({mn}); int _sc = ({sc}); "
-        f"static thread_local std::string _last_tz; "
-        f"static thread_local int _last_yr = -1, _last_mo = -1, _last_dy = -1, _last_hr = -1, _last_min = -1, _last_sc = -1; "
-        f"static thread_local int64_t _last_res = -1; "
-        f"if (_last_res != -1 && _last_tz == _tz && _last_yr == _yr && _last_mo == _mo && _last_dy == _dy && _last_hr == _hr && _last_min == _min && _last_sc == _sc) {{ "
-        f"return _last_res; "
-        f"}} "
-        f"struct tm t = {{}}; "
-        f"t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
-        f"t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
-        f"t.tm_isdst = -1; "
-        f"int64_t _res; "
-        f"if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") {{ "
-        f"_res = (int64_t)timegm(&t) * 1000; "
-        f"}} else {{ "
-        f"static std::mutex _pf_ts_mu; "
-        f"std::lock_guard<std::mutex> _pf_ts_mu_lock(_pf_ts_mu); "
-        f"const char* _old = std::getenv(\"TZ\"); "
-        f"std::string _old_tz = _old ? _old : \"\"; bool _had_old = (_old != nullptr); "
-        f"::setenv(\"TZ\", _tz.c_str(), 1); ::tzset(); "
-        f"_res = (int64_t)mktime(&t) * 1000; "
-        f"if (_had_old) {{ ::setenv(\"TZ\", _old_tz.c_str(), 1); }} "
-        f"else {{ ::unsetenv(\"TZ\"); }} ::tzset(); "
-        f"}} "
-        f"_last_tz = _tz; _last_yr = _yr; _last_mo = _mo; _last_dy = _dy; _last_hr = _hr; _last_min = _min; _last_sc = _sc; "
-        f"_last_res = _res; "
-        f"return _res; "
-        f"}}()"
+        + TIMESTAMP_CALENDAR_BODY
     )
 
 
