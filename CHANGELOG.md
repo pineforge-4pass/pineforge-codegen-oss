@@ -72,6 +72,10 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
 
 ### Changes since 1.7.0
 
+- Avoid libc name collisions in generated C++: pivot-level helpers use
+  `open_price`, array and matrix history helpers use `open_slot`, and authored
+  `fclose` names are escaped. Scripts using either helper change only that
+  renamed identifier; scripts binding `fclose` change its escaped spelling.
 - Fix a silent wrong value under `calc_on_order_fills`: a fill recalculation
   that ran after a deferred `request.security` evaluation (for example a late
   margin-call liquidation) restored the strategy checkpoint taken before that

@@ -281,7 +281,7 @@ def test_a_history_read_array_keeps_its_vector_and_its_copies():
     assert "_pf_collection_hist_vm.at(1)" in cpp
     # Each execution of the declaration opens a slot; the bar's end closes
     # it with a copy of the value.
-    assert "_pf_collection_hist_a.open(a, history_advances_new_bar());" in cpp
+    assert "_pf_collection_hist_a.open_slot(a, history_advances_new_bar());" in cpp
     assert "_pf_collection_hist_a.close(a);" in cpp
     compile_cpp(cpp, label="history members")
 
@@ -717,8 +717,8 @@ def test_sibling_blocks_keep_a_history_each():
         "    r += na(x[1]) ? -1 : (x[1]).size()\n"))
     assert "_pf_collection_hist_x{2};" in cpp
     assert "_pf_collection_hist_1_x{2};" in cpp
-    first = cpp.index("_pf_collection_hist_x.open(x,")
-    second = cpp.index("_pf_collection_hist_1_x.open(x,")
+    first = cpp.index("_pf_collection_hist_x.open_slot(x,")
+    second = cpp.index("_pf_collection_hist_1_x.open_slot(x,")
     # Each declaration first closes the other's history.
     assert cpp.rindex("_pf_collection_hist_1_x.close(x);", 0, first) >= 0
     assert cpp.rindex("_pf_collection_hist_x.close(x);", 0, second) > first

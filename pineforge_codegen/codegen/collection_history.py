@@ -6,7 +6,7 @@ pineforge_codegen/collection_history.py). Such a variable keeps its own
 ``std::vector`` or matrix member, so every other operation on it keeps its
 C++; beside it, ``_pf_collection_hist_<name>`` keeps the copies its
 executions left. Each execution of the declaration -- each bar, for a top
-level ``var`` -- opens a slot (``open``) and the end of the bar closes it with
+level ``var`` -- opens a slot (``open_slot``) and the end of the bar closes it with
 a copy (``close``), so ``a[1]`` is the array as the previous bar left it,
 TradingView's read-only history (fixtures/array_history_tv).
 """
@@ -221,7 +221,7 @@ class CollectionHistoryEmitter:
 
     def _collection_history_open(self, variable) -> str:
         """The statement opening a declaration's slot."""
-        return (f"{self._collection_history_member(variable)}.open("
+        return (f"{self._collection_history_member(variable)}.open_slot("
                 f"{self._safe_name(variable.name)}, history_advances_new_bar());")
 
     def _collection_history_close(self, variable) -> str:

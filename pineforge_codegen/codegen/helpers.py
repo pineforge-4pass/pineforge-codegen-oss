@@ -371,7 +371,7 @@ LIBC_RESERVED_NAMES = frozenset("""
     mmap mprotect ptrace
     exec execl execle execlp execv execve execvp execvpe execveat
     dlopen dlsym dlclose
-    fopen freopen fdopen open openat
+    fopen freopen fdopen fclose open openat
     socket connect bind listen accept getaddrinfo
     getenv setenv unsetenv tzset putenv secure_getenv __secure_getenv
     filesystem fstream ifstream ofstream
