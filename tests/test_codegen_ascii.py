@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 import re
 
@@ -9,6 +10,7 @@ import pytest
 
 from pineforge_codegen import transpile, transpile_full
 from pineforge_codegen.codegen import CodeGen
+from pineforge_codegen.codegen.ascii import ascii_cpp
 from pineforge_codegen.errors import CompileError
 from pineforge_codegen.pine_spelling import pine_string_literal
 from tests._cpp_tokens import code_only, regions, string_values
@@ -42,6 +44,174 @@ STRINGS = (
     # A literal backslash and "u202E" stay ordinary data before U+00E9.
     ("\\u202E\u00e9", r"\\u202E\303\251", b"\\u202E\xc3\xa9", 9),
 )
+
+
+@pytest.mark.parametrize("cpp,expected", (
+    # Escaping the first-line comment leaves U+2603 before U+202E on line 3.
+    ("// \u00e9\nvoid f() {\n  \u2603 \u202e;\n}\n",
+     "non-ASCII C++ code point U+2603 at line 3"),
+    # U+200B is a zero-width space outside any token, after one newline.
+    ("int value = 0;\n\u200b\n",
+     "non-ASCII C++ code point U+200B at line 2"),
+    # U+202E is a directional override outside any token on line 2.
+    ("void f() {\n  \u202e\n}\n",
+     "non-ASCII C++ code point U+202E at line 2"),
+    # U+00A0 between the type and name is a non-ASCII space on line 1.
+    ("int\u00a0value = 1;\n",
+     "non-ASCII C++ code point U+00A0 at line 1"),
+))
+def test_unhandled_non_ascii_code_is_an_emitter_invariant_error(cpp, expected):
+    with pytest.raises(AssertionError) as error:
+        ascii_cpp(cpp)
+    assert str(error.value) == expected
+
+
+@pytest.mark.parametrize("literal", (
+    # U+00E9 is one wide code unit, not the two UTF-8 bytes C3 A9.
+    'L"\u00e9"',
+    # UTF-16 must retain U+00E9 as one code unit.
+    'u"\u00e9"',
+    # UTF-32 must retain U+00E9 as one code unit.
+    'U"\u00e9"',
+    # UTF-8 prefixed strings are outside the ordinary-string emitter contract.
+    'u8"\u00e9"',
+    # A raw string would read backslash-octal text as ordinary characters.
+    'R"(\u00e9)"',
+    # A custom raw delimiter does not change the literal's byte contract.
+    'R"tag(\u00e9)tag"',
+    # Wide raw strings have both the wide and raw-literal restrictions.
+    'LR"(\u00e9)"',
+    # UTF-16 raw strings also bypass escape decoding.
+    'uR"(\u00e9)"',
+    # UTF-32 raw strings also bypass escape decoding.
+    'UR"(\u00e9)"',
+    # A UTF-8 raw prefix must be recognized as a whole token.
+    'u8R"(\u00e9)"',
+    # Wide character literals cannot be rewritten as ordinary UTF-8 bytes.
+    "L'\u00e9'",
+    # UTF-8 character literals are also outside the emitter contract.
+    "u8'\u00e9'",
+))
+def test_prefixed_literals_are_an_emitter_invariant_error(literal):
+    with pytest.raises(AssertionError) as error:
+        ascii_cpp("int value = 0;\n" + literal + ";\n")
+    # The prefix follows exactly one newline, so only its line number is reported.
+    assert str(error.value) == "unexpected prefixed C++ literal at line 2"
+
+
+@pytest.mark.parametrize("literal", (
+    # U+00E9 is C3 A9; two octal escapes would make a multicharacter constant.
+    "'\u00e9'",
+    # U+0301 is CC 81; even an ASCII base cannot make this a single-byte character.
+    "'e\u0301'",
+))
+def test_non_ascii_character_literals_are_an_emitter_invariant_error(literal):
+    with pytest.raises(AssertionError) as error:
+        ascii_cpp("int value = 0;\nint letter = " + literal + ";\n")
+    # The character literal starts on line 2, and its authored text stays private.
+    assert str(error.value) == "non-ASCII C++ character literal at line 2"
+
+
+@pytest.mark.parametrize("cpp,expected", (
+    # The separator belongs to 1000; alpha (CE B1) remains a code identifier.
+    ("constexpr int total = 1'000;\nint \u03b1 = total;\nchar mark = 'x';\n",
+     "constexpr int total = 1'000;\nint pf_utf8_ceb1 = total;\nchar mark = 'x';\n"),
+    # 0xA'B is 171; alpha (CE B1) and the escaped quote stay separate tokens.
+    ("constexpr int total = 0xA'B;\nint \u03b1 = total;\nchar mark = '\\'';\n",
+     "constexpr int total = 0xA'B;\nint pf_utf8_ceb1 = total;\nchar mark = '\\'';\n"),
+))
+def test_digit_separators_do_not_hide_code_between_character_literals(cpp, expected):
+    assert ascii_cpp(cpp) == expected
+
+
+_EMITTER_LITERAL_TOKENS = re.compile(
+    r"(?P<comment>//[^\r\n]*|/\*.*?(?:\*/|\Z))"
+    r"|(?P<number>(?:[0-9]|\.[0-9])(?:[eEpP][+-]|[\w.]|'[\w])*)"
+    r"""|(?P<prefix>\b(?:u8|[LuU])["']|\b(?:u8|[LuU])?R")"""
+    r"""|(?P<quoted>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')"""
+    r"|(?P<type>\b(?:wchar_t|char16_t|char32_t)\b)",
+    re.DOTALL,
+)
+
+
+def _emitter_literal_hits(
+        source: str, *, literal_grammars: frozenset[str] = frozenset()
+) -> set[tuple[str, str]]:
+    """Inspect string templates, excluding documentation and regex grammars."""
+    tree = ast.parse(source)
+    excluded = set()
+    keyword_table = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            excluded.add(node.value)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "re" and node.func.attr == "compile"):
+            excluded.update(ast.walk(node))
+        if isinstance(node, ast.JoinedStr):
+            excluded.update(part for part in node.values if isinstance(part, ast.Constant))
+        if isinstance(node, ast.Assign):
+            targets = {target.id for target in node.targets if isinstance(target, ast.Name)}
+            if targets & literal_grammars:
+                excluded.update(ast.walk(node.value))
+            if "CPP_KEYWORDS" in targets:
+                keyword_table.update(ast.walk(node.value))
+
+    hits = set()
+    for node in ast.walk(tree):
+        if node in excluded:
+            continue
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            text = node.value
+        elif isinstance(node, ast.JoinedStr):
+            text = "".join(part.value if isinstance(part, ast.Constant) else "pf_value"
+                           for part in node.values)
+        else:
+            continue
+        owner = "CPP_KEYWORDS" if node in keyword_table else ""
+        hits.update((owner, match.group()) for match in _EMITTER_LITERAL_TOKENS.finditer(text)
+                    if match.lastgroup in {"prefix", "type"})
+    return hits
+
+
+def test_emitter_templates_use_only_ordinary_byte_literals():
+    package = Path(__file__).resolve().parents[1] / "pineforge_codegen"
+    # These checker tables recognize tokens; their strings are never emitted.
+    literal_grammars = {
+        "cpp_allowlist.py": frozenset({"_RAW_PREFIXES", "_QUOTED_PREFIXES"}),
+    }
+    hits = {
+        (path.relative_to(package).as_posix(), owner, token)
+        for path in sorted(package.rglob("*.py"))
+        for owner, token in _emitter_literal_hits(
+            path.read_text(encoding="utf-8"),
+            literal_grammars=literal_grammars.get(path.relative_to(package).as_posix(),
+                                                 frozenset()),
+        )
+    }
+    # Only these three reserved keywords occur; no literal prefix is permitted.
+    assert hits == {
+        ("codegen/helpers.py", "CPP_KEYWORDS", "wchar_t"),
+        ("codegen/helpers.py", "CPP_KEYWORDS", "char16_t"),
+        ("codegen/helpers.py", "CPP_KEYWORDS", "char32_t"),
+    }
+
+
+def test_emitter_literal_scan_detects_prefixes_and_wide_types():
+    source = (
+        "def emit(name):\n"
+        "    return (f'L\"{name}\"', 'u\"text\"', 'U\"text\"', 'u8\"text\"',\n"
+        "            'R\"(text)\"',\n"
+        "            \"int n = 1'000; auto text = u8R\\\"(x)\\\"; char c = 'x';\",\n"
+        "            'wchar_t a; char16_t b; char32_t c;')\n"
+    )
+    # Six prefixes, including the one after a digit separator, and three types are code.
+    assert _emitter_literal_hits(source) == {
+        ("", 'L"'), ("", 'u"'), ("", 'U"'), ("", 'u8"'), ("", 'R"'),
+        ("", 'u8R"'),
+        ("", "wchar_t"), ("", "char16_t"), ("", "char32_t"),
+    }
 
 
 def _literal(cpp: str, spelling: str) -> tuple[str, str]:
