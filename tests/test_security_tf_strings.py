@@ -20,7 +20,6 @@ from pineforge_codegen.codegen.security import SecurityEmitter
 from pineforge_codegen.errors import CompileError
 from pineforge_codegen.pine_spelling import pine_string_literal
 
-from pineforge_codegen.codegen.helpers import NamingHelper
 from tests._cpp_tokens import assert_inert, assert_only_in_strings, string_values
 
 PRELUDE = '//@version=6\nstrategy("t")\n'
@@ -142,10 +141,14 @@ def unchecked_timeframes(monkeypatch):
                          ids=["close", *PAYLOAD_READS.keys()])
 def test_every_timeframe_paste_is_escaped(unchecked_timeframes, expression, sample):
     cpp = transpile(_reach_source(expression, pine_string_literal(sample)))
+    assert cpp.isascii()
     assert_inert(cpp, "PFTF")
     assert_only_in_strings(cpp, "PFTF")
-    escaped = NamingHelper._cpp_string_escape(sample)
-    assert f'register_security_eval(0, "{escaped}", input_tf_, false, false);' in cpp
+    (registration,) = [line.strip() for line in cpp.split("\n")
+                       if line.lstrip().startswith("register_security_eval(")]
+    assert registration.startswith("register_security_eval(0, ")
+    assert registration.endswith(", input_tf_, false, false);")
+    assert string_values(registration) == [sample]
     assert sample in string_values(cpp)
     assert "\0" not in cpp
 
@@ -155,10 +158,14 @@ def test_every_timeframe_paste_is_escaped(unchecked_timeframes, expression, samp
 def test_every_lower_timeframe_paste_is_escaped(unchecked_timeframes, shape, sample):
     template = _shapes(LOWER_TF)[shape]
     cpp = transpile(PRELUDE + template.format(tf=pine_string_literal(sample)))
+    assert cpp.isascii()
     assert_inert(cpp, "PFTF")
     assert_only_in_strings(cpp, "PFTF")
-    escaped = NamingHelper._cpp_string_escape(sample)
-    assert f'(0, "{escaped}", input_tf_);' in cpp
+    (registration,) = [line.strip() for line in cpp.split("\n")
+                       if line.lstrip().startswith("register_security_lower_tf_eval(")]
+    assert registration.startswith("register_security_lower_tf_eval(0, ")
+    assert registration.endswith(", input_tf_);")
+    assert string_values(registration) == [sample]
     assert sample in string_values(cpp)
     assert "\0" not in cpp
 

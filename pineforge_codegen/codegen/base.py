@@ -299,6 +299,7 @@ TA_TUPLE_RESULT_TYPES = {
 
 # CPP_RESERVED + the NamingHelper mixin are pulled in from helpers.py so the
 # small naming/walk utilities can be shared with future visitor mixins.
+from .ascii import ascii_cpp
 from .collection_history import CollectionHistoryEmitter
 from .helpers import (
     CPP_RESERVED, INLINE_HISTORY_KINDS, SESSION_FLAG_MEMBERS, NamingHelper,
@@ -4964,7 +4965,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                 raise first from None
             if self._deferred_settings_errors:
                 raise self._deferred_settings_errors[0]
-            return cpp
+            return ascii_cpp(cpp, reserved=self._safe_name_occupied)
         finally:
             self._deferred_settings_errors = None
 
