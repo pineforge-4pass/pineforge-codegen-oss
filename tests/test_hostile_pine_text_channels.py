@@ -400,7 +400,8 @@ COMMENT_CHANNELS = (
 )
 def test_fallback_comment_interpolation_unit(monkeypatch, row, method):
     # Delimiters and line breaks cannot be part of a Pine function identifier.
-    program = Parser(Lexer(PRELUDE + TRADE).tokenize()).parse()
+    source = PRELUDE + TRADE
+    program = Parser(Lexer(source).tokenize(), source=source).parse()
     emitter = CodeGen(Analyzer(program).analyze())
     authored = "Edge*/Guard/*\\\n/Guard/*"
     node = FuncCall(callee=MemberAccess(
