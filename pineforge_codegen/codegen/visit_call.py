@@ -299,11 +299,10 @@ def _timestamp_calendar_lambda(tz: str, yr: str, mo: str, dy: str,
     explicit tz expression, the numeric form passes ``syminfo_.timezone``
     (Pine v6: "If the timezone argument is not specified, the function uses
     the exchange time zone (syminfo.timezone)"). UTC / "" / "Etc/UTC" stays on
-    the ``timegm`` fast path — byte-identical to the historical numeric
-    emission for UTC symbols; anything else takes the mutex-guarded
-    setenv+``mktime`` block with ``tm_isdst = -1`` so DST is resolved by the
-    tz database. A per-call-site thread_local memo keeps the setenv churn to
-    one flip per distinct (tz, fields) tuple.
+    the ``timegm`` fast path. Rejected zones also use UTC; accepted non-UTC
+    zones take the mutex-guarded setenv+``mktime`` block with ``tm_isdst = -1``
+    so DST is resolved by the tz database. A per-call-site thread_local memo
+    keeps the setenv churn to one flip per distinct (tz, fields) tuple.
     """
     return (
         f"[&]() -> int64_t {{ "
