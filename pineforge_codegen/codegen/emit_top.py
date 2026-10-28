@@ -1797,7 +1797,7 @@ class TopLevelEmitter:
                                     self._matrix_specs[name]
                                 ),
                             )
-                            lines.append(f"            {safe} = {cpp_val};")
+                            lines.append(f"            {self._array_journal_initializer(safe, cpp_val)}")
                             break
                     continue
                 if name in self._map_vars:
@@ -1810,7 +1810,7 @@ class TopLevelEmitter:
                                     self._map_spec_for_name(name)
                                 ),
                             )
-                            lines.append(f"            {safe} = {cpp_val};")
+                            lines.append(f"            {self._array_journal_initializer(safe, cpp_val)}")
                             break
                     continue
                 if name in self._runtime_scalar_var_init_members:

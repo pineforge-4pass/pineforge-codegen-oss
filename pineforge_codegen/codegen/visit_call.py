@@ -132,6 +132,8 @@ all tables it needs come from ``codegen/tables.py``, AST classes from
 
 from __future__ import annotations
 
+from . import graph_journal
+
 from ..ast_nodes import (
     ASTNode,
     Assignment,
@@ -1063,6 +1065,7 @@ class CallVisitor:
 
     def _map_param_method_expr(
         self, map_expr: str, method: str, arg_nodes: list, spec: TypeSpec,
+        node=None,
     ) -> str:
         """Lower one map operation with receiver-first, ordered single use.
 
@@ -1082,6 +1085,7 @@ class CallVisitor:
             # ``_wide_int_arith_cpp``) narrows na-preserving into the int
             # value (quirk 9), as an int array's element does.
             args[-1] = na_preserving_int_cast(args[-1], "int")
+        map_expr = graph_journal.receiver(self, map_expr, "map", method, node)
         occupied = "\n".join((map_expr, *args))
         counter = getattr(self, "_map_param_arg_counter", 0)
         bindings: list[tuple[str, str]] = []
@@ -1686,6 +1690,7 @@ class CallVisitor:
                     callee.member,
                     arg_nodes,
                     recv_spec,
+                    node,
                 )
             if recv_spec is not None and recv_spec.kind == "udt" and recv_spec.name:
                 mk = f"{recv_spec.name}.{callee.member}"
@@ -1823,6 +1828,7 @@ class CallVisitor:
                             meth,
                             arg_nodes,
                             recv_spec,
+                            node,
                         )
                     raw_args = [self._visit_expr(a) for a in node.args]
                     if recv_spec is not None and recv_spec.kind == "array" and meth in ARRAY_METHODS:
@@ -1906,7 +1912,7 @@ class CallVisitor:
                             allow_keywords=True,
                         )
                         return self._map_param_method_expr(
-                            m, meth_raw, arg_nodes, param_spec
+                            m, meth_raw, arg_nodes, param_spec, node
                         )
                     recv_spec = self._collection_spec_for_name(oname)
                     # Resolve the lexical TypeSpec once and route by its exact
@@ -1926,7 +1932,7 @@ class CallVisitor:
                             allow_keywords=False,
                         )
                         return self._map_param_method_expr(
-                            m, meth_raw, arg_nodes, recv_spec
+                            m, meth_raw, arg_nodes, recv_spec, node
                         )
                     if (
                         recv_spec is not None
@@ -2152,7 +2158,7 @@ class CallVisitor:
                 allow_keywords=False,
             )
             return self._map_param_method_expr(
-                m, func_name, arg_nodes, namespace_spec
+                m, func_name, arg_nodes, namespace_spec, node
             )
 
         # map.method(m, args...) — functional form
@@ -2174,7 +2180,7 @@ class CallVisitor:
                 m = self._visit_expr(node.args[0])
                 spec = self._type_spec_from_expr(node.args[0]) if node.args else None
                 return self._map_param_method_expr(
-                    m, func_name, list(node.args[1:]), spec
+                    m, func_name, list(node.args[1:]), spec, node
                 )
             return "0"
 

@@ -32,6 +32,7 @@ from .. import signatures as sigs
 from ..errors import CompileError, Diagnostic, Level, Phase, SourceLocation
 from ..limits import TimeBudget, iter_ast_nodes, syntax_children
 from ..matrix_overloads import matrix_sum_has_rhs
+from . import graph_journal
 from ..session_reads import emitted_session_reads
 from ..block_locals import block_declarations, decl_key
 from ..pine_spelling import (
@@ -5004,6 +5005,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         self._prescan_session_history()
         self._prepare_array_journal()
         self._prepare_history_sharing()
+        graph_journal.prepare(self)
         self._security_ohlc_hist_fields_by_sec: dict[int, set[str]] = {}
         # A source input's selected series read at a history offset in a
         # payload: (key, default) -> (the input call, its history field).
@@ -5034,7 +5036,8 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         # 1. Includes
         self._emit_includes(lines)
         if self._array_journal_members:
-            lines.append(ARRAY_JOURNAL_CPP.replace("@JOURNAL@", self._array_journal_cpp_name))
+            lines.append(graph_journal.runtime(self, ARRAY_JOURNAL_CPP).replace(
+                "@JOURNAL@", self._array_journal_cpp_name))
 
         # 1b. User-defined object handles and backing records.
         #

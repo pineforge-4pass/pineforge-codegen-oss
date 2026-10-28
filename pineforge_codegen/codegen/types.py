@@ -36,6 +36,8 @@ from __future__ import annotations
 import contextlib
 import re
 
+from . import graph_journal
+
 from ..ast_nodes import (
     ASTNode, Assignment, BinOp, BoolLiteral, ColorLiteral, ExprStmt, FuncCall, FuncDef,
     Identifier, IfStmt,
@@ -2031,6 +2033,7 @@ class TypeInferer:
         receiver_node = (_matrix_functional_receiver(method, node)
                          if functional else node.callee.object)
         receiver = self._checked_matrix_history_receiver(receiver, receiver_node)
+        receiver = graph_journal.receiver(self, receiver, "matrix", method, node)
         if method in ("add_row", "add_col") and len(arguments) == 2 and arguments[0] is None:
             # Only ``array_id`` is written (``m.add_row(array_id = a)``): the
             # call is the array-only form, which appends it.

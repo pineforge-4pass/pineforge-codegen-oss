@@ -22,14 +22,6 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 ## Unreleased
 
-- Reuse unchanged primitive-array history snapshots when every write can be
-  tracked, while preserving detached historical values and order-fill rollback.
-
-- Avoid copying growing primitive arrays at each order-fill checkpoint when
-  their writes can be tracked completely. Rollback records individual edits;
-  bulk operations retain full preimages, and other arrays keep their existing
-  snapshots.
-
 Planned as 1.8.0, a minor release of the exact engine/codegen pair, paired with
 engine `v1.8.0`. This entry records what changed in this repository since
 1.7.0 and nothing else: four pull requests merged after `v1.7.0`, three
@@ -93,6 +85,18 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
   `open_price`, array and matrix history helpers use `open_slot`, and authored
   `fclose` names are escaped. Scripts using either helper change only that
   renamed identifier; scripts binding `fclose` change its escaped spelling.
+- Avoid copying growing primitive arrays at each order-fill checkpoint when
+  their writes can be tracked completely. Rollback records individual edits;
+  bulk operations retain full preimages, and other arrays keep their existing
+  snapshots. The generated strategy class of a script that uses this is not
+  copyable or movable.
+- Avoid checkpoint copies for isolated primitive maps and matrices with fully
+  tracked writes. Sparse writes use individual undo records; bulk mutations
+  save at most one full preimage per root between checkpoint or restore
+  boundaries. Dense writes switch to that preimage after exhausting the
+  element-count budget, preserving key order, matrix shape and handle identity.
+- Reuse unchanged primitive-array history snapshots when every write can be
+  tracked, while preserving detached historical values and order-fill rollback.
 - Fix a silent wrong value under `calc_on_order_fills`: a fill recalculation
   that ran after a deferred `request.security` evaluation (for example a late
   margin-call liquidation) restored the strategy checkpoint taken before that
