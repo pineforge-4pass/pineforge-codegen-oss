@@ -4826,6 +4826,10 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
             pending_owners.extend(call_graph.get(owner, ()))
 
         history_names = {value.name for value in self.ctx.collection_history.values()}
+        # Sharing may reject every owner; discovery must not register unrelated
+        # history bindings earlier than the original emission path would.
+        history_values = (self._array_history_value_names(register=False)
+                          if sharing is not None else None)
         metadata = self.ctx.var_member_metadata_by_node
         candidates: dict[str, VarDecl] = {}
         for declaration in self.ctx.ast.body:
@@ -4840,6 +4844,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     or bindings[safe][0] is not declaration
                     or name in ambiguous_names
                     or (name in history_names if sharing is None else not sharing.candidate(declaration))
+                    or (sharing is not None and safe in self._array_journal_members)
                     or name in self.ctx.series_vars
                     or safe in self._series_var_member_names
                     or (isinstance(declaration.value, (IfStmt, SwitchStmt))
@@ -4848,7 +4853,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     or spec.element.kind != "primitive"
                     or spec.element.name not in {"int", "int64", "float", "bool", "string", "color"}
                     or ("value", name) in requested
-                    or name in self._array_history_value_names()):
+                    or name in (self._array_history_value_names() if sharing is None else history_values)):
                 continue
             candidates[name] = declaration
         if not candidates:
@@ -4914,6 +4919,7 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
         if not admitted:
             return
         if sharing is not None:
+            self._array_history_value_names()
             sharing.admit(self, candidates, admitted, calls, bindings)
             return
         self._array_journal_members = {

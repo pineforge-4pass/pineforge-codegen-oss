@@ -39,6 +39,9 @@ class CollectionHistoryEmitter:
         self._history_sharing = HistorySharingPlan(self)
         if self._history_sharing.variables:
             self._plan_array_mutations(self._history_sharing)
+        assert self._history_sharing.members.keys().isdisjoint(
+            getattr(self, "_array_journal_members", {})
+        ), "array journal and history sharing owners must be disjoint"
 
     def _history_sharing_plan(self):
         plan = getattr(self, "_history_sharing", None)
@@ -145,7 +148,8 @@ class CollectionHistoryEmitter:
                     f'return {receiver}; }}())')
         return receiver
 
-    def _array_history_value_names(self) -> dict[str, TypeSpec]:
+    def _array_history_value_names(self, *, register: bool = True) -> dict[str, TypeSpec]:
+        """Return history bindings, deferring registration for ownership probes."""
         cached = getattr(self, "_array_history_value_specs", None)
         if cached is not None:
             return cached
@@ -184,10 +188,11 @@ class CollectionHistoryEmitter:
                 if name not in specs:
                     specs[name] = specs[source]
                     pending.append(name)
-        for name, spec in specs.items():
-            self._array_vars.add(name)
-            self._collection_types[name] = spec
-        self._array_history_value_specs = specs
+        if register:
+            for name, spec in specs.items():
+                self._array_vars.add(name)
+                self._collection_types[name] = spec
+            self._array_history_value_specs = specs
         return specs
 
     def _array_history_value_cpp_type(self, name: str) -> str | None:

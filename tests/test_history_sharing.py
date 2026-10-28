@@ -1,4 +1,4 @@
-"""Frozen array versions and exact rollback; native and E2E rows are LAB-ONLY."""
+"""Frozen array versions and exact rollback with the paired engine build."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 import pytest
 
 from pineforge_codegen import transpile
+from pineforge_codegen.ast_nodes import VarDecl
 from pineforge_codegen.codegen import base, tables
 from pineforge_codegen.codegen.base import CodeGen
 from pineforge_codegen.collection_history import ARRAY_CHANGING_METHODS
@@ -145,6 +146,95 @@ def test_one_uncovered_mutator_disables_the_entire_owner(monkeypatch):
     assert tables.ARRAY_JOURNAL_DELTA_METHODS | tables.ARRAY_JOURNAL_FULL_METHODS == ARRAY_CHANGING_METHODS
 
 
+JOURNAL_AND_HISTORY_SOURCE = COOF_HEADER + SEED + '''var journaled = array.from(7, 9)
+journaled.push(11)
+a[1] += 4
+''' + HISTORY
+
+
+def test_a_journal_enrolled_owner_keeps_eager_history(monkeypatch):
+    _shared(transpile(JOURNAL_AND_HISTORY_SOURCE))
+    prepare = CodeGen._prepare_array_journal
+
+    def enroll_history(self):
+        prepare(self)
+        # Only journaled has no history; extend enrollment to the other real declaration.
+        assert set(self._array_journal_members) == {"journaled"}
+        self._array_journal_members["a"] = next(
+            node for node in self.ctx.ast.body if isinstance(node, VarDecl) and node.name == "a"
+        )
+
+    monkeypatch.setattr(CodeGen, "_prepare_array_journal", enroll_history)
+    cpp = transpile(JOURNAL_AND_HISTORY_SOURCE)
+    # An existing journal claim keeps the original history template and both journal write sites.
+    assert OLD_MEMBER in cpp
+    assert "class _PFCachedCollectionHistory" not in cpp
+    assert "this->_pf_array_journal.replace(a," in cpp
+    assert cpp.count("this->_pf_array_journal.save_set(_pf_history_array, (size_t)_pf_history_offset)") == 1
+    assert cpp == _eager_cpp(JOURNAL_AND_HISTORY_SOURCE, monkeypatch)
+
+
+def test_overlapping_completed_plans_fail_before_emission(monkeypatch):
+    plan_mutations = CodeGen._plan_array_mutations
+
+    def overlap(self, sharing=None):
+        plan_mutations(self, sharing)
+        if sharing is not None:
+            # The ordinary plans own journaled and a separately; inject an overlap after admission.
+            assert set(self._array_journal_members) == {"journaled"}
+            assert set(sharing.members) == {"a"}
+            self._array_journal_members["a"] = next(
+                node for node in self.ctx.ast.body if isinstance(node, VarDecl) and node.name == "a"
+            )
+
+    monkeypatch.setattr(CodeGen, "_plan_array_mutations", overlap)
+    with pytest.raises(AssertionError, match="array journal and history sharing owners must be disjoint"):
+        transpile(JOURNAL_AND_HISTORY_SOURCE)
+
+
+@pytest.mark.parametrize("header", [HEADER, COOF_HEADER])
+def test_unproved_history_binding_keeps_registration_and_original_fragments(header, monkeypatch):
+    source = header.replace(")\n", ", max_bars_back=4)\n") + SEED + '''k = input.int(1)
+b = a[k]
+alias = a
+''' + HISTORY
+    prepare = CodeGen._prepare_history_sharing
+    checked = []
+
+    def check_registration(self):
+        arrays = self._array_vars.copy()
+        types = self._collection_types.copy()
+        # History excludes a from the journal, and no earlier emitter has registered wrappers.
+        assert getattr(self, "_array_history_value_specs", None) is None
+        prepare(self)
+        # The live alias excludes a from sharing, so planning must register no new bindings.
+        assert self._history_sharing.members == {}
+        assert self._array_vars == arrays
+        assert self._collection_types == types
+        assert getattr(self, "_array_history_value_specs", None) is None
+        checked.append(True)
+
+    monkeypatch.setattr(CodeGen, "_prepare_history_sharing", check_registration)
+    cpp = transpile(source)
+    assert checked == [True]  # One transpilation reaches the planner boundary once.
+    # Original eager emission stores a vector, a nullable history binding and four history slots.
+    assert "    std::vector<int> a;" in cpp
+    assert "    _PFArrayHistoryValue<std::vector<int>> b;" in cpp
+    assert OLD_MEMBER in cpp
+    # The dynamic binding remains a reference; only the original two-argument open and close remain.
+    assert (
+        "        b = _pf_collection_hist_a.reference("
+        "([&](){ auto _pf_idx_v = (k); "
+        "using _pf_idx_t = std::decay_t<decltype(_pf_idx_v)>; "
+        "if constexpr (std::is_same_v<_pf_idx_t, bool>) return (int)_pf_idx_v; "
+        "else return is_na(_pf_idx_v) ? na<int>() : (int)_pf_idx_v; }()), a);"
+    ) in cpp
+    assert "        _pf_collection_hist_a.open(a, history_advances_new_bar());" in cpp
+    assert "        _pf_collection_hist_a.close(a);" in cpp
+    assert "class _PFCachedCollectionHistory" not in cpp
+    assert cpp == _eager_cpp(source, monkeypatch)
+
+
 def test_generated_history_support_names_avoid_authored_bindings():
     cpp = transpile(HEADER + '''int _PFCachedCollectionHistory = 2
 int _PFHistoryVersionClock = 5
@@ -164,6 +254,27 @@ def test_traced_writes_stay_after_the_freeze_and_mark_the_next_version():
     close = cpp.index("_pf_collection_hist_a.close(a, this->_pf_history_versions);")
     mutation = cpp.index(WRITER + ".save_remove(__pf_array, __pf_array.size()-1)")
     assert mutation > close
+    # Bar 1 closes [2,5] before popping 5; bars 2/3/4 close [2], copying 2+1 elements.
+    _native(cpp, r'''
+    struct TracedStrategy : GeneratedStrategy {
+        void on_source_bar(const Bar& bar) override {
+            trace_enabled_ = true;
+            GeneratedStrategy::on_source_bar(bar);
+        }
+    } strategy;
+    auto feed = bars(5);
+    strategy.run(feed.data(), 5);
+    assert(strategy.last_error().empty());
+    assert((strategy.a == std::vector<int>{2}));
+    auto& h = strategy._pf_collection_hist_a;
+    assert((h.at(1) == std::vector<int>{2}));
+    assert((h.at(2) == std::vector<int>{2}));
+    assert((h.at(3) == std::vector<int>{2, 5}));
+    assert(&h.at(1) == &h.at(2));
+    assert(&h.at(2) != &h.at(3));
+    assert(pf_test_freezes == 2);
+    assert(pf_test_copied_elements == 3);
+''')
 
 
 def _count_freezes(cpp):
@@ -213,7 +324,7 @@ void close_history(S& s, long) {
 
 
 def _native(cpp, body, *, opt="-O2"):
-    # LAB-ONLY: the same native helper links the full emitted TU to the paired runtime.
+    # The native helper links the full emitted TU to the paired runtime.
     driver = DRIVER_SUPPORT + "\nint main() {\n" + body + '\nstd::cout << "ok\\n";\n}\n'
     assert run_emitted_tu(_count_freezes(cpp), driver, opt=opt, label="frozen array versions") == "ok\n"
 
@@ -237,14 +348,23 @@ seen.push(na(a[1]) ? -1 : (a[1]).get(1))
     assert((h.at(3) == std::vector<int>{2, 5}));
     assert(&h.at(1) == &h.at(2));
     assert(&h.at(2) == &h.at(3));
-    assert(&h.at(1) != &strategy.a);
     assert(h.is_na(4));
+    // A live element write changes [2,5] to [2,9], but cannot alter any frozen payload.
+    strategy.a.at(1) = 9;
+    assert((strategy.a == std::vector<int>{2, 9}));
+    assert((h.at(1) == std::vector<int>{2, 5}));
+    assert((h.at(2) == std::vector<int>{2, 5}));
+    assert((h.at(3) == std::vector<int>{2, 5}));
 ''')
 
 
 @pytest.mark.parametrize("write, seen, first, previous, copied", [
     # Appending 7 on bar 2 freezes [2,5] once and [2,5,7] once: 2+3 elements.
     ("a.push(7)", "{-1, 2, 2, 3, 3}", "{2, 5, 7}", "{2, 5}", 5),
+    # A literal-zero method receiver writes the same live owner: 2+3 elements.
+    ("(a[0]).push(7)", "{-1, 2, 2, 3, 3}", "{2, 5, 7}", "{2, 5}", 5),
+    # The namespace zero receiver also freezes [2,5] and [2,5,7], copying 2+3 elements.
+    ("array.push(a[0], 7)", "{-1, 2, 2, 3, 3}", "{2, 5, 7}", "{2, 5}", 5),
     # Set changes a value without changing length: 2+2 elements.
     ("a.set(1, 9)", "{-1, 2, 2, 2, 2}", "{2, 9}", "{2, 5}", 4),
     # Restoring 5 still writes twice; identical contents belong to distinct versions.
@@ -406,6 +526,14 @@ MUTATIONS = [
     ("2, 5", "int value", "a[1] := value\na.get(1)", "9", 9, "{2, 9}", "7", 7, "{2, 7}", 6, ""),
     # Legacy += adds 4 or 6 to the restored 5, yielding 9 or 11.
     ("2, 5", "int value", "a[1] += value\na.get(1)", "4", 9, "{2, 9}", "6", 11, "{2, 11}", 6, ""),
+    # Legacy -= gives 12-3=9 or 12-5=7; seed and two branches copy 2+2+2 elements.
+    ("2, 12", "int value", "a[1] -= value\na.get(1)", "3", 9, "{2, 9}", "5", 7, "{2, 7}", 6, ""),
+    # Legacy *= gives 12*3=36 or 12*2=24; all three frozen vectors have two elements.
+    ("2, 12", "int value", "a[1] *= value\na.get(1)", "3", 36, "{2, 36}", "2", 24, "{2, 24}", 6, ""),
+    # Legacy /= gives exact quotients 12/3=4 or 12/4=3; three versions copy 2+2+2 elements.
+    ("2, 12", "int value", "a[1] /= value\na.get(1)", "3", 4, "{2, 4}", "4", 3, "{2, 3}", 6, ""),
+    # Legacy %= gives fmod(12,5)=2 or fmod(12,7)=5; two lvalue visits still copy 2+2+2.
+    ("2, 12", "int value", "a[1] %= value\na.get(1)", "5", 2, "{2, 2}", "7", 5, "{2, 5}", 6, ""),
 ]
 
 
@@ -535,6 +663,8 @@ def test_second_run_starts_with_an_empty_history_and_a_fresh_cache():
     "array.from(value + 0.0, value + 1.0)",
     # Both floating switch arms pass through the same assignment boundary.
     "switch value\n        7 => array.from(7.0, 8.0)\n        => array.from(value + 0.0, value + 1.0)",
+    # The if-expression selects [7,8] for 7 and computes [11,12] for override 11.
+    "if value == 7\n        array.from(7.0, 8.0)\n    else\n        array.from(value + 0.0, value + 1.0)",
 ])
 def test_whole_array_replacement_and_input_overrides_change_the_frozen_version(replacement):
     cpp = transpile(HEADER + 'value = input.int(7, "Replacement")\n'
@@ -896,13 +1026,48 @@ if armed
 ''')
 
 
+def test_typed_scalar_method_marks_its_global_array_write():
+    cpp = transpile(HEADER + SEED + '''method append(int amount) =>
+    a.push(amount)
+    a.size()
+var int result = 0
+value = input.int(7, "Append")
+if bar_index == 2
+    result := value.append()
+''' + HISTORY)
+    _shared(cpp)
+    # The scalar receiver supplies 7, then 11; each run freezes [2,5] and its three-element append.
+    _native(cpp, r'''
+    GeneratedStrategy strategy;
+    auto feed = bars(5);
+    strategy.run(feed.data(), 5);
+    assert(strategy.last_error().empty());
+    assert(strategy.result == 3);
+    assert((strategy.a == std::vector<int>{2, 5, 7}));
+    assert((strategy._pf_collection_hist_a.at(1) == std::vector<int>{2, 5, 7}));
+    assert((strategy._pf_collection_hist_a.at(3) == std::vector<int>{2, 5}));
+    assert(pf_test_freezes == 2);
+    assert(pf_test_copied_elements == 5);
+    strategy.set_input("Append", "11");
+    strategy.run(feed.data(), 5);
+    assert(strategy.last_error().empty());
+    assert(strategy.result == 3);
+    assert((strategy.a == std::vector<int>{2, 5, 11}));
+    assert((strategy._pf_collection_hist_a.at(1) == std::vector<int>{2, 5, 11}));
+    assert((strategy._pf_collection_hist_a.at(3) == std::vector<int>{2, 5}));
+    // Each fresh run copies 2+3 elements across two versions: four freezes and ten elements.
+    assert(pf_test_freezes == 4);
+    assert(pf_test_copied_elements == 10);
+''')
+
+
 HISTORY_TRACE_NAMES = ("current_value", "previous_value", "older_value")
 
 
 def _scheduled_source(units, eager=False):
     source = schedule._source(units).replace("callbacks += 1\n", '''callbacks += 1
 var a = array.from(2, 5)
-if bar_index == 2 or bar_index == 4
+if bar_index == 2 or bar_index == 3 or bar_index == 4
     a.set(1, chartWalks)
 previous = na(a[1]) ? -1 : (a[1]).get(1)
 older = na(a[3]) ? -1 : (a[3]).get(1)
@@ -954,21 +1119,21 @@ SCHEDULED_VALUES = [
     (5, 5, -1),
     # Bar 2 writes walk 3; its previous slot still holds 5.
     (3, 5, -1),
-    # Both executions of bar 3 retain 3, with bar 0's 5 three slots back.
-    (3, 3, 5),
-    # Bar 4 writes walk 5 and still sees 3 from bar 3 and 5 from bar 1.
-    (5, 3, 5),
+    # Bar 3 writes walk 4, with bar 2's 3 and bar 0's 5 in the past slots.
+    (4, 3, 5),
+    # Bar 4 writes walk 5 and sees committed 4 from bar 3, not the callback's abandoned 5.
+    (5, 4, 5),
     # Bar 5 sees 5 from bar 4 and 3 from bar 2.
     (5, 5, 3),
-    # Bar 6 sees 5 from bar 5 and 3 from bar 3.
-    (5, 5, 3),
+    # Bar 6 sees 5 from bar 5 and the committed 4 from bar 3.
+    (5, 5, 4),
     # Bar 7 sees the repeated 5 at both historical offsets.
     (5, 5, 5),
 ]
 
 
 def test_shared_history_matches_eager_execution_during_real_fill_callbacks(tmp_path):
-    # LAB-ONLY: use the established funded control and the real late margin callback.
+    # Use the established funded control and the real late margin callback.
     _shared(transpile(_scheduled_source(3)))
     assert "class _PFCachedCollectionHistory" not in transpile(_scheduled_source(3, eager=True))
     engine = skip_unless_e2e_env()
@@ -999,7 +1164,8 @@ def test_shared_history_matches_eager_execution_during_real_fill_callbacks(tmp_p
     # One late margin fill reduces three units to two and adds exactly one callback.
     assert [(row["position"], row["closed"], row["margin"]) for row in late] == [(3, 0, 0), (2, 1, 1)]
     assert [row["chart_walks"] for row in late] == [4, 5]
-    assert [tuple(row[name] for name in HISTORY_TRACE_NAMES) for row in late] == [(3, 3, 5), (3, 3, 5)]
+    # The ordinary close writes 4; the late callback writes provisional 5 into the same bar's slot.
+    assert [tuple(row[name] for name in HISTORY_TRACE_NAMES) for row in late] == [(4, 3, 5), (5, 3, 5)]
     assert late[1]["margin_price"] == 100_000_000.25
     assert late[1]["callbacks"] - late[0]["callbacks"] == 1
     assert rows[chart[4][0]][0]["callbacks"] - late[1]["callbacks"] == 1
@@ -1010,7 +1176,9 @@ def test_shared_history_matches_eager_execution_during_real_fill_callbacks(tmp_p
     for index, bar in enumerate(chart):
         for execution, row in enumerate(rows[bar[0]]):
             is_late = index == 3 and execution == 1
-            assert tuple(row[name] for name in HISTORY_TRACE_NAMES) == SCHEDULED_VALUES[index]
+            # Only the late callback holds provisional 5; the next bar restores committed 4.
+            expected_history = (5, 3, 5) if is_late else SCHEDULED_VALUES[index]
+            assert tuple(row[name] for name in HISTORY_TRACE_NAMES) == expected_history
             assert (row["higher"], row["finer"]) == (higher[index], finer[index])
             assert row["position"] == (2 if is_late else positions[index])
             assert row["closed"] == row["margin"] == (1 if is_late else closed[index])
