@@ -531,13 +531,14 @@ def test_second_run_starts_with_an_empty_history_and_a_fresh_cache():
 
 
 @pytest.mark.parametrize("replacement", [
-    # A direct vector replacement is tracked after its RHS evaluates.
-    "array.from(value, value + 1)",
-    # Both switch arms pass through the same assignment boundary.
-    "switch value\n        7 => array.from(7, 8)\n        => array.from(value, value + 1)",
+    # Floating operands keep the replacement and its owner the same vector type.
+    "array.from(value + 0.0, value + 1.0)",
+    # Both floating switch arms pass through the same assignment boundary.
+    "switch value\n        7 => array.from(7.0, 8.0)\n        => array.from(value + 0.0, value + 1.0)",
 ])
 def test_whole_array_replacement_and_input_overrides_change_the_frozen_version(replacement):
-    cpp = transpile(HEADER + 'value = input.int(7, "Replacement")\n' + SEED
+    cpp = transpile(HEADER + 'value = input.int(7, "Replacement")\n'
+                    + "var a = array.from(2.0, 5.0)\n"
                     + "if bar_index == 2\n    a := " + replacement + "\n" + HISTORY)
     _shared(cpp)
     # Default 7 gives [7,8]; override 11 gives [11,12]; each run freezes two two-element versions.
@@ -546,14 +547,19 @@ def test_whole_array_replacement_and_input_overrides_change_the_frozen_version(r
     auto feed = bars(5);
     strategy.run(feed.data(), 5);
     assert(strategy.last_error().empty());
-    assert((strategy._pf_collection_hist_a.at(1) == std::vector<int>{7, 8}));
-    assert((strategy._pf_collection_hist_a.at(3) == std::vector<int>{2, 5}));
+    // Closes A,A,B,B,B leave bar 3's B at offset 1 and bar 1's A at offset 3.
+    assert((strategy._pf_collection_hist_a.at(1) == std::vector<double>{7.0, 8.0}));
+    assert((strategy._pf_collection_hist_a.at(3) == std::vector<double>{2.0, 5.0}));
+    // A=[2,5] and B=[7,8] each freeze once, copying 2+2 elements.
     assert(pf_test_freezes == 2);
+    assert(pf_test_copied_elements == 4);
     strategy.set_input("Replacement", "11");
     strategy.run(feed.data(), 5);
     assert(strategy.last_error().empty());
-    assert((strategy._pf_collection_hist_a.at(1) == std::vector<int>{11, 12}));
-    assert((strategy._pf_collection_hist_a.at(3) == std::vector<int>{2, 5}));
+    // The new run keeps A=[2,5] and replaces B with [11,12] on bar 2.
+    assert((strategy._pf_collection_hist_a.at(1) == std::vector<double>{11.0, 12.0}));
+    assert((strategy._pf_collection_hist_a.at(3) == std::vector<double>{2.0, 5.0}));
+    // Two more two-element versions make four freezes and eight elements in total.
     assert(pf_test_freezes == 4);
     assert(pf_test_copied_elements == 8);
 ''')
@@ -600,16 +606,22 @@ var array<int> a = ''' + initializer + HISTORY)
 ''')
 
 
-@pytest.mark.parametrize("choice", [0, 1])
+@pytest.mark.parametrize("choice", [
+    0,  # The explicit arm selects [2,5], but supplies no collection TypeSpec.
+    1,  # The default arm selects [7,9], with the same unresolved declaration.
+])
 def test_untyped_selection_keeps_the_eager_history_output(choice, monkeypatch):
+    # A resolved seed must share while the unresolved selection keeps every byte.
+    _shared(transpile(COOF_HEADER + SEED + HISTORY))
     source = COOF_HEADER + f'''choice = input.int({choice}, "Choice")
 var a = switch choice
     0 => array.from(2, 5)
     => array.from(7, 9)
 ''' + HISTORY
     cpp = transpile(source)
-    # The array selection has no resolved collection TypeSpec, so it remains on the eager path.
-    assert OLD_MEMBER in cpp
+    # With no collection TypeSpec, a[3] registers scalar Series<double> storage.
+    assert "    Series<double> a;" in cpp
+    assert "_pf_collection_hist_a" not in cpp
     assert "class _PFCachedCollectionHistory" not in cpp
     assert cpp == _eager_cpp(source, monkeypatch)
 
@@ -621,7 +633,7 @@ if bar_index == 2
 ''' + HISTORY)
     _shared(cpp, capacity=None)
     assert cpp.count(WRITER + ".save_set(__pf_array, (size_t)__pf_array_index)") == 1
-    # Offset 0 changes [2,5] to [2,9]; offset 1 is immutable and offset 9 is missing.
+    # Offset 0 changes [2,5] to [2,9]; offset 1 is immutable and offset 3 is not yet available at bar 2 (history capacity is 4, so a larger offset would fail the run configuration instead).
     _native(cpp, r'''
     GeneratedStrategy strategy;
     auto feed = bars(5);
@@ -637,7 +649,7 @@ if bar_index == 2
     assert(strategy.last_error() == "Cannot modify the elements of a historical array or any slices of that array. Instead of modifying an array referenced by an ID retrieved with the `[]` operator, create a shallow copy of the array with `array.copy()`, then modify the copy or a slice of that copy.");
     assert((strategy.a == std::vector<int>{2, 5}));
     assert(pf_test_freezes == 3);
-    strategy.set_input("Offset", "9");
+    strategy.set_input("Offset", "3");
     strategy.run(feed.data(), 5);
     assert(strategy.last_error() == "Cannot call array methods when id of array is na.");
     assert((strategy.a == std::vector<int>{2, 5}));
