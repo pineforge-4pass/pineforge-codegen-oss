@@ -4836,14 +4836,14 @@ class CodeGen(CallVisitor, ExprVisitor, StmtVisitor, TopLevelEmitter, SecurityEm
                     or bindings[safe][0] is not declaration
                     or name in ambiguous_names
                     or name in history_names or name in self.ctx.series_vars
-                    or name in self._array_history_value_names()
                     or safe in self._series_var_member_names
                     or (isinstance(declaration.value, (IfStmt, SwitchStmt))
                         and id(declaration) not in self._runtime_scalar_var_init_by_node)
                     or spec is None or spec.kind != "array" or spec.element is None
                     or spec.element.kind != "primitive"
                     or spec.element.name not in {"int", "int64", "float", "bool", "string", "color"}
-                    or ("value", name) in requested):
+                    or ("value", name) in requested
+                    or name in self._array_history_value_names()):
                 continue
             candidates[name] = declaration
         if not candidates:

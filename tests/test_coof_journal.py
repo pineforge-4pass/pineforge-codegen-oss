@@ -27,9 +27,9 @@ def _enrolled(cpp, name="a", generation="_pf_next_generation"):
     # A stable root contributes an address token, never its vector payload.
     snapshot = _snapshot(cpp)
     assert f"            {name},\n" not in snapshot
-    assert f"{{&this->{name}, {generation}}}" in snapshot
     assert "class _PFArrayJournal" in cpp
-    assert f"decltype(GeneratedStrategy::{name})>::take({name})" not in snapshot
+    assert "        _pf_script_state_checkpoint_.emplace(_PFScriptState{\n" in snapshot
+    assert f"            {{&this->{name}, {generation}}},\n" in snapshot
 
 
 def _eager_cpp(source, monkeypatch):
@@ -80,6 +80,8 @@ def test_array_journal_catalogue_is_closed():
     ("a.fill(7, index_to=1)", "this->_pf_array_journal.fill(__pf_array,"),
     # Sort saves the original permutation instead of sorting again during undo.
     ("a.sort()", "this->_pf_array_journal.sort(a, a.begin(), a.end())"),
+    # Descending sort supplies the greater comparator on its journaled branch.
+    ("a.sort(order.descending)", "this->_pf_array_journal.sort(a, a.begin(), a.end(), std::greater<>())"),
     # Reverse uses the same conservative full-preimage policy.
     ("a.reverse()", "this->_pf_array_journal.reverse(a, a.begin(), a.end())"),
     # Legacy assignment records one checked lvalue immediately before the write.
@@ -166,6 +168,33 @@ FALLBACKS = [
 def test_ineligible_sources_keep_eager_output_byte_for_byte(source, monkeypatch):
     cpp = transpile(source)
     assert "_pf_array_journal" not in cpp
+    assert cpp == _eager_cpp(source, monkeypatch)
+
+
+def test_scalar_candidate_does_not_register_array_history_during_planning(monkeypatch):
+    source = HEADER + """var int count = 1
+values = array.from(2, 5)
+previous = values[1]
+size = na(previous) ? count : previous.size()
+"""
+    prepare = CodeGen._prepare_array_journal
+
+    def plan(self):
+        calls = []
+        history_names = self._array_history_value_names
+
+        def counted_history_names():
+            calls.append(True)
+            return history_names()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(self, "_array_history_value_names", counted_history_names)
+            prepare(self)
+        # The only persistent declaration is scalar, so no array candidate needs registration.
+        assert calls == []
+
+    monkeypatch.setattr(CodeGen, "_prepare_array_journal", plan)
+    cpp = transpile(source)
     assert cpp == _eager_cpp(source, monkeypatch)
 
 
@@ -280,6 +309,8 @@ MUTATIONS = [
     ("clear_push", "2, 5", "int value", "a.clear()\na.push(value)\na.size()", "7", 1, [7], "9", 1, [9]),
     # Sort changes [3,1,2] to [1,2,3]; rollback must recover the original permutation.
     ("sort", "3, 1, 2", "", "a.sort()\na.first()", "", 1, [1, 2, 3], "", 1, [1, 2, 3]),
+    # Descending sort orders [3,1,2] as [3,2,1] and returns its first 3.
+    ("sort_descending", "3, 1, 2", "", "a.sort(order.descending)\na.first()", "", 3, [3, 2, 1], "", 3, [3, 2, 1]),
     # Reverse maps [3,1,2] to [2,1,3], with no arithmetic undo.
     ("reverse", "3, 1, 2", "", "a.reverse()\na.first()", "", 2, [2, 1, 3], "", 2, [2, 1, 3]),
     # A full fill overwrites both cells with its actual parameter.
@@ -296,19 +327,26 @@ MUTATIONS = [
     ("element", "2, 5", "int value", "a[1] := value\na.get(1)", "9", 9, [2, 9], "7", 7, [2, 7]),
     # Compound += uses the prior 5, so adding 4 gives 9 and adding 6 gives 11.
     ("compound_element", "2, 5", "int value", "a[1] += value\na.get(1)", "4", 9, [2, 9], "6", 11, [2, 11]),
+    # 17/4=4.25 and 17/6=2.833... truncate to 4 and 2 in the int slot; both undo to 17.
+    ("divide_element", "2, 17", "int value", "a[1] /= value\na.get(1)", "4", 4, [2, 4], "6", 2, [2, 2]),
+    # 17%4=1 and 17%6=5; replay restores the original 17 after either pair of slot records.
+    ("remainder_element", "2, 17", "int value", "a[1] %= value\na.get(1)", "4", 1, [2, 1], "6", 5, [2, 5]),
+    # Subtracting 4 or 6 from the saved 17 yields 13 or 11 without changing the first 2.
+    ("subtract_element", "2, 17", "int value", "a[1] -= value\na.get(1)", "4", 13, [2, 13], "6", 11, [2, 11]),
+    # Multiplying the saved 17 by 4 or 6 yields 68 or 102; rollback restores [2,17].
+    ("multiply_element", "2, 17", "int value", "a[1] *= value\na.get(1)", "4", 68, [2, 68], "6", 102, [2, 102]),
 ]
 
 
-def _cpp_vector(values):
-    return "std::vector<int>{" + ", ".join(str(value) for value in values) + "}"
+def _cpp_vector(values, element_type="int"):
+    return f"std::vector<{element_type}>{{" + ", ".join(json.dumps(value) for value in values) + "}"
 
 
-@pytest.mark.parametrize("row", MUTATIONS, ids=[row[0] for row in MUTATIONS])
-def test_emitted_mutations_restore_twice_and_reuse_the_baseline(row):
+def _assert_mutation_rollback(row, *, element_type="int", extra="", opt="-O2"):
     name, seed, signature, body, call, result, content, again, result2, content2 = row
-    cpp = transpile(_native_source(seed, signature, body, call))
+    cpp = transpile(_native_source(seed, signature, body, call, extra=extra))
     _enrolled(cpp)
-    original = "std::vector<int>{" + seed + "}"
+    original = f"std::vector<{element_type}>{{" + seed + "}"
     driver = f"""
 #include <cassert>
 #include <iostream>
@@ -319,15 +357,15 @@ int main() {{
     assert(strategy.last_error().empty());
     assert((strategy.a == {original}));
     strategy.snapshot_script_state();
-    assert(strategy.mutate({call}) == {result});
-    assert((strategy.a == {_cpp_vector(content)}));
+    assert(strategy.mutate({call}) == {json.dumps(result)});
+    assert((strategy.a == {_cpp_vector(content, element_type)}));
     strategy.restore_script_state();
     assert((strategy.a == {original}));
     assert(strategy._pf_array_journal.empty());
     strategy.restore_script_state();
     assert((strategy.a == {original}));
-    assert(strategy.mutate({again}) == {result2});
-    assert((strategy.a == {_cpp_vector(content2)}));
+    assert(strategy.mutate({again}) == {json.dumps(result2)});
+    assert((strategy.a == {_cpp_vector(content2, element_type)}));
     strategy.restore_script_state();
     assert((strategy.a == {original}));
     assert(strategy._pf_array_journal.empty());
@@ -335,7 +373,59 @@ int main() {{
 }}
 """
     # Reverse replay recovers the literal seed after either speculative sequence.
-    assert run_emitted_tu(cpp, driver, opt="-O2", label=name) == "ok\n"
+    assert run_emitted_tu(cpp, driver, opt=opt, label=name) == "ok\n"
+
+
+@pytest.mark.parametrize("row", MUTATIONS, ids=[row[0] for row in MUTATIONS])
+def test_emitted_mutations_restore_twice_and_reuse_the_baseline(row):
+    _assert_mutation_rollback(row)
+
+
+@pytest.mark.parametrize("operator, records", [
+    # Division spells the checked target as both the read and the assignment lvalue.
+    ("/=", 2),
+    # fmod likewise evaluates two checked targets, each saving the unchanged slot.
+    ("%=", 2),
+    # Native subtraction evaluates its checked lvalue once.
+    ("-=", 1),
+    # Native multiplication also has just one checked lvalue evaluation.
+    ("*=", 1),
+])
+def test_legacy_compound_assignments_record_each_checked_target(operator, records):
+    cpp = transpile(_native_source("2, 17", "int value", f"a[1] {operator} value\na.get(1)", "4"))
+    _enrolled(cpp)
+    assert cpp.count("this->_pf_array_journal.save_set(_pf_history_array, (size_t)_pf_history_offset)") == records
+
+
+TYPED_MUTATIONS = [
+    # Insert false at 1 or true at the end of [true,false], yielding three literal bits.
+    ("bool_insert", "bool", "", "true, false", "int index, bool value", "a.insert(index, value)\na.size()", "1, false", 3, [True, False, False], "2, true", 3, [True, False, True]),
+    # Prepending false or true keeps the original [true,false] suffix and returns size 3.
+    ("bool_unshift", "bool", "", "true, false", "bool value", "a.unshift(value)\na.size()", "false", 3, [False, True, False], "true", 3, [True, True, False]),
+    # Remove index 1's false or index 0's true by value, keeping the other two bits in order.
+    ("bool_remove", "bool", "", "true, false, true", "int index", "a.remove(index)", "1", False, [True, True], "0", True, [False, True]),
+    # Pop materializes the final false before shrinking [true,false] to [true].
+    ("bool_pop", "bool", "", "true, false", "", "a.pop()", "", False, [True], "", False, [True]),
+    # Shift materializes the initial true before moving the remaining false into slot 0.
+    ("bool_shift", "bool", "", "true, false", "", "a.shift()", "", True, [False], "", True, [False]),
+    # Reversing [true,false,false] yields [false,false,true], still of size 3.
+    ("bool_reverse", "bool", "", "true, false, false", "", "a.reverse()\na.size()", "", 3, [False, False, True], "", 3, [False, False, True]),
+    # Clear removes both strings and returns 0; replay must restore their original order.
+    ("string_clear", "std::string", "", '"beta", "alpha"', "", "a.clear()\na.size()", "", 0, [], "", 0, []),
+    # Full fill replaces both original words with the supplied new or next string.
+    ("string_fill", "std::string", "", '"beta", "alpha"', "string word", "a.fill(word)\na.first()", '"new"', "new", ["new", "new"], '"next"', "next", ["next", "next"]),
+    # Ascending string order is alpha,beta,gamma, whose first element is alpha.
+    ("string_sort", "std::string", "", '"beta", "alpha", "gamma"', "", "a.sort()\na.first()", "", "alpha", ["alpha", "beta", "gamma"], "", "alpha", ["alpha", "beta", "gamma"]),
+    # Concat appends the separate [tail,last] root to [beta,alpha], producing four words.
+    ("string_concat", "std::string", 'var b = array.from("tail", "last")\n', '"beta", "alpha"', "", "a.concat(b)\na.size()", "", 4, ["beta", "alpha", "tail", "last"], "", 4, ["beta", "alpha", "tail", "last"]),
+]
+
+
+@pytest.mark.parametrize("row", TYPED_MUTATIONS, ids=[row[0] for row in TYPED_MUTATIONS])
+@pytest.mark.parametrize("opt", ["-O0", "-O2"])
+def test_typed_mutations_restore_twice_and_reuse_the_baseline(row, opt):
+    name, element_type, extra, *mutation = row
+    _assert_mutation_rollback((name, *mutation), element_type=element_type, extra=extra, opt=opt)
 
 
 def test_commit_adopts_the_array_and_next_bar_reset_releases_records():
@@ -567,11 +657,19 @@ def test_selection_initializer_restores_its_empty_member_and_latch(
     assert "            _pf_var_init_a,\n" in _snapshot(cpp)
     assert cpp.count("if (!_pf_var_init_a)") == 1
     assert cpp.count("this->_pf_array_journal.replace(a,") == 2
-    # Disabling the journal keeps the same initializer and latch on the eager rollback path.
+    # Declaration order is a, the two ordinary globals, then the aggregate, declaration and input latches.
     eager = _eager_cpp(source, monkeypatch)
-    assert "            a,\n" in _snapshot(eager)
-    assert "            _pf_var_init_a,\n" in _snapshot(eager)
-    assert "_pf_array_journal" not in eager
+    assert _snapshot(eager) == (
+        "        _pf_script_state_checkpoint_.emplace(_PFScriptState{\n"
+        "            a,\n"
+        "            choice,\n"
+        "            selected,\n"
+        "            _var_initialized,\n"
+        "            _pf_var_init_a,\n"
+        "            _inputs_initialized_,\n"
+        "        });\n"
+        "    }\n\n"
+    )
     driver = r'''
 #include <cassert>
 #include <iostream>
@@ -763,6 +861,18 @@ int main() {
     ("a.set(2, 9)", "array.from(2, 5)", [2, 5], "Index 2 is out of bounds. Array size is 2"),
     # A typed na index is rejected before saving or replacing an element.
     ("a.set(int(na), 9)", "array.from(2, 5)", [2, 5], "Index na is out of bounds. Array size is 2"),
+    # Insertion may append at 2, but index 3 exceeds the size-2 insertion boundary.
+    ("a.insert(3, 9)", "array.from(2, 5)", [2, 5], "Index 3 is out of bounds. Array size is 2"),
+    # End-relative -3 normalizes to -1 for size 2 and fails before an insertion record.
+    ("a.insert(-3, 9)", "array.from(2, 5)", [2, 5], "Index -3 is out of bounds. Array size is 2"),
+    # An na insertion index stops before the journal receives any edit.
+    ("a.insert(int(na), 9)", "array.from(2, 5)", [2, 5], "Index na is out of bounds. Array size is 2"),
+    # Removal needs an existing slot, so index 2 is outside [2,5].
+    ("a.remove(2)", "array.from(2, 5)", [2, 5], "Index 2 is out of bounds. Array size is 2"),
+    # End-relative -3 again normalizes below zero and preserves both elements.
+    ("a.remove(-3)", "array.from(2, 5)", [2, 5], "Index -3 is out of bounds. Array size is 2"),
+    # An na removal index stops before saving or erasing either element.
+    ("a.remove(int(na))", "array.from(2, 5)", [2, 5], "Index na is out of bounds. Array size is 2"),
 ])
 def test_rejected_mutations_leave_no_undo_record(operation, seed, content, message):
     source = (HEADER + f"var a = {seed}\nmutate() =>\n    {operation}\n    0\n"
