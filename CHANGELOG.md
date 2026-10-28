@@ -27,9 +27,11 @@ engine `v1.8.0`. This entry records what changed in this repository since
 1.7.0 and nothing else: four pull requests merged after `v1.7.0`, three
 behaviour changes and one CHANGELOG-only change, plus five fixes that ship in
 the same release. The behaviour changes alter the published input manifest, the
-emitted C++ for scripts that read `strategy.account_currency`, for scripts with
-a persistent declaration whose initializer depends on earlier statements, for
-scripts with a helper-local `var color` or a `request.security` rollback hook,
+emitted C++ for scripts that read `strategy.account_currency`, have a
+persistent declaration whose initializer depends on earlier statements, have a
+helper-local `var color` or a `request.security` rollback hook, use a pivot-levels
+helper or an array or matrix history read, bind `fclose`, or have a calendar
+timestamp lambda whose local names collide with requested-context bindings,
 and the accepted input (line endings, one-line field assignments, an unevaluated
 `request.currency_rate`).
 
@@ -54,9 +56,12 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
   in `0..4294967295`, booleans refused).
 - Every generated strategy library gains the two id-sites receipt exports (see
   the entry below); trading code is unchanged. Apart from that, the emitted C++
-  is intended to change only for the scripts the entries below name: those that read `strategy.account_currency`, whose persistent
-  declarations depend on earlier statements, with a helper-local `var color`,
-  with a helper that reads the history of a derived argument, or with a
+  is intended to change only for the scripts the entries below name: those that
+  read `strategy.account_currency`, whose persistent declarations depend on
+  earlier statements, with a helper-local `var color`, with a helper that reads
+  the history of a derived argument, with a pivot-levels helper or an array or
+  matrix history read, that bind `fclose`, with a calendar timestamp lambda
+  whose local names collide with requested-context bindings, or with a
   `request.security` (for the late-restore change alone, only the
   generated `restore_script_state()` changes, in 72 of the 555 corpus and
   fixture scripts; the other entries change the scripts they name). This is

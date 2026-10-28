@@ -147,6 +147,46 @@ def test_calendar_locals_survive_helper_local_bindings(name):
     assert "int _sec0_calendar_" in body  # The helper still has its requested-context local.
 
 
+def test_calendar_locals_survive_helper_loop_counter_binding():
+    source = HEADER + """calendar() =>
+    stamp = 0
+    for t = 0 to 1
+        stamp := timestamp(1970, 1, 2, 8, 0, int(t))
+    stamp
+out = request.security(syminfo.tickerid, "60", calendar())
+"""
+    body = _evaluator(transpile(source))
+    _assert_calendar_locals(body)  # The loop's t leaves the calendar's tm binding intact.
+    # A counted loop declares its requested-context t from its saved start value.
+    assert re.search(
+        r"for \(int _sec0_calendar_\d+_t = _sec0_calendar_\d+_for_start;", body,
+    )
+    # The explicit seconds cast reads the requested loop counter once.
+    assert re.search(
+        r"int _sc = \(\[&\]\(\)\{ auto _pf_v = \(_sec0_calendar_\d+_t\); ", body,
+    )
+
+
+def test_calendar_locals_survive_helper_tuple_element_binding():
+    source = HEADER + """parts() =>
+    [int(close), int(open)]
+calendar() =>
+    [t, _] = parts()
+    timestamp(1970, 1, 2, 8, 0, int(t))
+out = request.security(syminfo.tickerid, "60", calendar())
+"""
+    body = _evaluator(transpile(source))
+    _assert_calendar_locals(body)  # The tuple's t leaves the calendar's tm binding intact.
+    # Element zero binds t to the helper's requested-context tuple result.
+    assert re.search(
+        r"auto _sec0_calendar_\d+_t = std::get<0>\(_sec0_calendar_\d+_tuple\);", body,
+    )
+    # The explicit seconds cast reads the requested tuple element once.
+    assert re.search(
+        r"int _sc = \(\[&\]\(\)\{ auto _pf_v = \(_sec0_calendar_\d+_t\); ", body,
+    )
+
+
 def test_all_colliding_calendar_arguments_still_read_requested_history():
     source = HEADER + """var int t = 1
 var int _pf_ts_mu = 2
