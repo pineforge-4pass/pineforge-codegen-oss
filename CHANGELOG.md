@@ -24,15 +24,16 @@ supported as exact pairs; on the 0.x line they are independent. See the
 
 Planned as 1.8.0, a minor release of the exact engine/codegen pair, paired with
 engine `v1.8.0`. This entry records what changed in this repository since
-1.7.0 and nothing else: four pull requests merged after `v1.7.0`, three
-behaviour changes and one CHANGELOG-only change, plus five fixes that ship in
-the same release. The behaviour changes alter the published input manifest, the
-emitted C++ for scripts that read `strategy.account_currency`, have a
-persistent declaration whose initializer depends on earlier statements, have a
-helper-local `var color` or a `request.security` rollback hook, use a pivot-levels
-helper or an array or matrix history read, bind `fclose`, or have a calendar
-timestamp lambda whose body identifiers collide with requested-context bindings,
-and the accepted input (line endings, one-line field assignments, an unevaluated
+1.7.0 and nothing else: the behaviour changes, the CHANGELOG-only change and
+the fixes that ship in the same release. The behaviour changes alter the
+published input manifest, the emitted C++ for scripts that read
+`strategy.account_currency`, have a persistent declaration whose initializer
+depends on earlier statements, have a helper-local `var color` or a
+`request.security` rollback hook, use a pivot-levels helper or an array or
+matrix history read, bind `fclose`, have a calendar timestamp lambda whose body
+identifiers collide with requested-context bindings, or use
+`calc_on_order_fills` with growing primitive arrays, maps or matrices, and the
+accepted input (line endings, one-line field assignments, an unevaluated
 `request.currency_rate`).
 
 ### Compatibility and migration
@@ -97,6 +98,8 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
   element-count budget, preserving key order, matrix shape and handle identity.
 - Reuse unchanged primitive-array history snapshots when every write can be
   tracked, while preserving detached historical values and order-fill rollback.
+  The generated strategy class of a script that uses this is not copyable or
+  movable.
 - Fix a silent wrong value under `calc_on_order_fills`: a fill recalculation
   that ran after a deferred `request.security` evaluation (for example a late
   margin-call liquidation) restored the strategy checkpoint taken before that
