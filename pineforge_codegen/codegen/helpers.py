@@ -359,19 +359,19 @@ INLINE_HISTORY_KINDS = (
 )
 
 
-# Symbols the generated-C++ allowlist (``cpp_allowlist.py``) refuses when
-# they appear bare.  They are legal Pine identifiers (``free`` as in free
-# margin, ``system``/``socket`` as ordinary words), so a script declaration
-# of one must not reach the generated C++ as a bare libc name: the checker
-# would refuse the TU, and the member would shadow the callee.  Reserving
-# them makes ``_safe_name`` emit ``pf_safe_<name>`` instead.
+# Names reserved defensively against generated-C++ allowlist refusals and
+# callee shadowing. They are legal Pine identifiers (``free`` as in free
+# margin, ``system``/``socket`` as ordinary words). The allowlist
+# (``cpp_allowlist.py``) refuses many bare; ``fclose`` is refused only when
+# its address is taken. Reserving them makes ``_safe_name`` emit
+# ``pf_safe_<name>`` instead.
 LIBC_RESERVED_NAMES = frozenset("""
     __asm __asm__ _Pragma
     system popen pclose fork vfork posix_spawn posix_spawnp syscall
     mmap mprotect ptrace
     exec execl execle execlp execv execve execvp execvpe execveat
     dlopen dlsym dlclose
-    fopen freopen fdopen open openat
+    fopen freopen fdopen fclose open openat
     socket connect bind listen accept getaddrinfo
     getenv setenv unsetenv tzset putenv secure_getenv __secure_getenv
     filesystem fstream ifstream ofstream

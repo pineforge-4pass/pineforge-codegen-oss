@@ -90,7 +90,16 @@ from ..symbols import PineType, method_receiver_type_name
 from .tables import (
     BAR_BUILTINS, DRAWING_TYPE_TO_CPP, MATH_FUNC_MAP, PINE_TYPE_TO_CPP, SECURITY_BAR_FIELDS,
     SECURITY_BAR_FIELD_EXPRS, SECURITY_BAR_FIELD_TYPES, TA_TUPLE_FIELDS,
+    TIMEZONE_LAMBDA_BODIES,
     _math_minmax_na_expr, _math_round_digits_expr, _merge_kwargs,
+)
+
+
+_SECURITY_CPP_LITERALS = re.compile(r'"(?:[^"\\\n]|\\.)*"' + r"|'(?:[^'\\\n]|\\.)*'")
+_SECURITY_CPP_SCOPES = re.compile(
+    _SECURITY_CPP_LITERALS.pattern + "|" + "|".join(
+        r"\b" + re.escape(body) for body in TIMEZONE_LAMBDA_BODIES
+    )
 )
 
 
@@ -1067,22 +1076,35 @@ class SecurityEmitter:
         security_mutable_names: set[str],
         helper_binding_stack: tuple[dict[str, ASTNode], ...] | None = None,
     ) -> str:
-        import re
-
         # The names below are C++ tokens of the rendered text: a string
         # literal's contents (``"bull"`` beside a helper local ``bull``) stay.
-        literals = re.compile(r'"(?:[^"\\\n]|\\.)*"' + r"|'(?:[^'\\\n]|\\.)*'")
-
-        def sub(pattern: str, repl: str, text: str) -> str:
-            out, last = [], 0
-            for match in literals.finditer(text):
-                out.append(re.sub(pattern, repl, text[last:match.start()]))
-                out.append(match.group(0))
-                last = match.end()
-            out.append(re.sub(pattern, repl, text[last:]))
-            return "".join(out)
-
         result = cpp.replace("current_bar_.", "bar.")
+        # Recognize the exact emitted suffixes before any substitution can
+        # change them. They contain no script expressions, so every token
+        # inside stays intact; argument initializers remain outside. Literals
+        # participate so template-like text inside a string is never a scope.
+        parts: list[tuple[str, bool]] = []
+        last = 0
+        for match in _SECURITY_CPP_SCOPES.finditer(result):
+            if match.group(0) not in TIMEZONE_LAMBDA_BODIES:
+                continue
+            parts.append((result[last:match.start()], False))
+            parts.append((match.group(0), True))
+            last = match.end()
+        parts.append((result[last:], False))
+
+        def sub(pattern: str, repl: str) -> None:
+            for index, (text, protected) in enumerate(parts):
+                if protected:
+                    continue
+                out, last = [], 0
+                for match in _SECURITY_CPP_LITERALS.finditer(text):
+                    out.append(re.sub(pattern, repl, text[last:match.start()]))
+                    out.append(match.group(0))
+                    last = match.end()
+                out.append(re.sub(pattern, repl, text[last:]))
+                parts[index] = ("".join(out), protected)
+
         for name in sorted(security_mutable_names, key=len, reverse=True):
             info = self._global_mutable_infos.get(name)
             if info is None:
@@ -1090,10 +1112,10 @@ class SecurityEmitter:
             safe = self._safe_name(name)
             state = self._security_state_name(sec_id, name)
             if getattr(info, "is_series", False):
-                result = sub(rf"\b{re.escape(safe)}\b(?=\s*\[)", state, result)
-                result = sub(rf"\b{re.escape(safe)}\b(?!\s*\[)", f"{state}[0]", result)
+                sub(rf"\b{re.escape(safe)}\b(?=\s*\[)", state)
+                sub(rf"\b{re.escape(safe)}\b(?!\s*\[)", f"{state}[0]")
             else:
-                result = sub(rf"\b{re.escape(safe)}\b", state, result)
+                sub(rf"\b{re.escape(safe)}\b", state)
         if helper_binding_stack:
             for frame in helper_binding_stack:
                 for name, bound in frame.items():
@@ -1105,21 +1127,19 @@ class SecurityEmitter:
                     series_name = self._security_series_binding_target(bound)
                     if series_name is not None:
                         ref = self._security_helper_series_ref(series_name)
-                        result = sub(
+                        sub(
                             rf"\b{re.escape(safe)}\b(?=\s*\[)",
                             ref.replace("\\", "\\\\"),
-                            result,
                         )
-                        result = sub(
+                        sub(
                             rf"\b{re.escape(safe)}\b(?!\s*\[)",
                             self._security_helper_series_value(
                                 series_name, "0"
                             ).replace("\\", "\\\\"),
-                            result,
                         )
                     else:
-                        result = sub(rf"\b{re.escape(safe)}\b", bound, result)
-        return result
+                        sub(rf"\b{re.escape(safe)}\b", bound)
+        return "".join(text for text, _protected in parts)
 
     def _security_lookup_helper_binding(
         self,

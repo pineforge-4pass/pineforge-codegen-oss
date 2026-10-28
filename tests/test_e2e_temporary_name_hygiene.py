@@ -76,6 +76,15 @@ def test_an_authored_temporary_spelling_is_escaped(name):
     assert not re.search(rf"^\s+{re.escape(name)} = ", cpp, re.M)
 
 
+def test_an_authored_fclose_name_is_escaped():
+    cpp = transpile(HEAD + "fclose = close * 2\nif fclose > close\n"
+                           '    strategy.entry("L", strategy.long)\n')
+    # No authored name occupies the reserved binding's unsuffixed escape.
+    assert re.search(r"\bpf_safe_fclose\b", cpp)
+    # The script's assignment uses that escape at the start of its statement.
+    assert not re.search(r"^\s+fclose = ", cpp, re.M)
+
+
 def test_a_name_spelled_like_an_array_history_member_is_escaped():
     # An array's history member, _pf_collection_hist_<name> (a later
     # declaration's _pf_collection_hist_<n>_<name>), beside a script

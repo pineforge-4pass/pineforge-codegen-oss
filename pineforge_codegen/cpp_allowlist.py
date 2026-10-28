@@ -211,9 +211,9 @@ _LIBC_DECAY_NAMES = frozenset(
 
 # The two sealed timezone statement runs (ASSESSMENT.md section 1f).  They
 # start at the non-UTC ``else`` branch and are matched token for token
-# against the strings in ``codegen/tables.py`` (tz_time_field_lambda) and
-# ``codegen/visit_call.py`` (_timestamp_calendar_lambda).  Only identifiers
-# inside a matched run may name the environment calls.
+# against the strings in ``codegen/tables.py`` (``_TZ_TIME_FIELD_BODY`` and
+# ``TIMESTAMP_CALENDAR_BODY``). Only identifiers inside a matched run may
+# name the environment calls.
 _SEALED_TZ_FIELD_RUN = (
     "else", "{", "static", "std", ":", ":", "mutex", "_pf_tz_mu", ";",
     "std", ":", ":", "lock_guard", "<", "std", ":", ":", "mutex", ">",
