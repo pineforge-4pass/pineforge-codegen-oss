@@ -70,6 +70,70 @@ TIME_FIELD_EXPRS = {
 }
 
 
+# These suffixes contain only emitter-owned code. Keep the argument
+# initializers outside them so requested-context rewrites still reach the
+# user's expressions without capturing the lambdas' local bindings.
+TIMESTAMP_CALENDAR_BODY = (
+    "static thread_local std::string _last_tz; "
+    "static thread_local int _last_yr = -1, _last_mo = -1, _last_dy = -1, _last_hr = -1, _last_min = -1, _last_sc = -1; "
+    "static thread_local int64_t _last_res = -1; "
+    "if (_last_res != -1 && _last_tz == _tz && _last_yr == _yr && _last_mo == _mo && _last_dy == _dy && _last_hr == _hr && _last_min == _min && _last_sc == _sc) { "
+    "return _last_res; "
+    "} "
+    "struct tm t = {}; "
+    "t.tm_year = _yr - 1900; t.tm_mon = _mo - 1; "
+    "t.tm_mday = _dy; t.tm_hour = _hr; t.tm_min = _min; t.tm_sec = _sc; "
+    "t.tm_isdst = -1; "
+    "int64_t _res; "
+    "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") { "
+    "_res = (int64_t)timegm(&t) * 1000; "
+    "} else { "
+    "static std::mutex _pf_ts_mu; "
+    "std::lock_guard<std::mutex> _pf_ts_mu_lock(_pf_ts_mu); "
+    "const char* _old = std::getenv(\"TZ\"); "
+    "std::string _old_tz = _old ? _old : \"\"; bool _had_old = (_old != nullptr); "
+    "::setenv(\"TZ\", _tz.c_str(), 1); ::tzset(); "
+    "_res = (int64_t)mktime(&t) * 1000; "
+    "if (_had_old) { ::setenv(\"TZ\", _old_tz.c_str(), 1); } "
+    "else { ::unsetenv(\"TZ\"); } ::tzset(); "
+    "} "
+    "_last_tz = _tz; _last_yr = _yr; _last_mo = _mo; _last_dy = _dy; _last_hr = _hr; _last_min = _min; _last_sc = _sc; "
+    "_last_res = _res; "
+    "return _res; "
+    "}()"
+)
+
+_TZ_TIME_FIELD_BODY = (
+    "struct tm tm_buf; "
+    "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") { "
+    "gmtime_r(&_secs, &tm_buf); "
+    "} else { "
+    "static std::mutex _pf_tz_mu; "
+    "std::lock_guard<std::mutex> _pf_tz_lock(_pf_tz_mu); "
+    "const char* _old = std::getenv(\"TZ\"); "
+    "std::string _old_tz = _old ? _old : \"\"; bool _had_old = (_old != nullptr); "
+    "::setenv(\"TZ\", _tz.c_str(), 1); ::tzset(); "
+    "localtime_r(&_secs, &tm_buf); "
+    "if (_had_old) { ::setenv(\"TZ\", _old_tz.c_str(), 1); } "
+    "else { ::unsetenv(\"TZ\"); } ::tzset(); "
+    "} "
+)
+
+TIMEZONE_LAMBDA_LOCAL_SCOPES = {
+    TIMESTAMP_CALENDAR_BODY: frozenset("""
+        _tz _yr _mo _dy _hr _min _sc _last_tz _last_yr _last_mo _last_dy
+        _last_hr _last_min _last_sc _last_res t _res _pf_ts_mu _pf_ts_mu_lock
+        _old _old_tz _had_old
+    """.split()),
+    **{
+        _TZ_TIME_FIELD_BODY + f"return {field_expr}; }}()": frozenset("""
+            _tz _secs tm_buf _pf_tz_mu _pf_tz_lock _old _old_tz _had_old
+        """.split())
+        for field_expr in TIME_FIELD_EXPRS.values()
+    },
+}
+
+
 def tz_time_field_lambda(field_expr: str, ts_arg: str, tz_arg: str) -> str:
     """Inline C++ lambda decomposing a Unix-ms timestamp in a timezone.
 
@@ -83,21 +147,7 @@ def tz_time_field_lambda(field_expr: str, ts_arg: str, tz_arg: str) -> str:
         "[&]() -> int { "
         f"std::string _tz = pineforge::normalize_timezone_for_posix(({tz_arg})); "
         f"time_t _secs = (time_t)(({ts_arg}) / 1000); "
-        "struct tm tm_buf; "
-        "if (_tz.empty() || _tz == \"UTC\" || _tz == \"Etc/UTC\") { "
-        "gmtime_r(&_secs, &tm_buf); "
-        "} else { "
-        "static std::mutex _pf_tz_mu; "
-        "std::lock_guard<std::mutex> _pf_tz_lock(_pf_tz_mu); "
-        "const char* _old = std::getenv(\"TZ\"); "
-        "std::string _old_tz = _old ? _old : \"\"; bool _had_old = (_old != nullptr); "
-        "::setenv(\"TZ\", _tz.c_str(), 1); ::tzset(); "
-        "localtime_r(&_secs, &tm_buf); "
-        "if (_had_old) { ::setenv(\"TZ\", _old_tz.c_str(), 1); } "
-        "else { ::unsetenv(\"TZ\"); } ::tzset(); "
-        "} "
-        f"return {field_expr}; "
-        "}()"
+        + _TZ_TIME_FIELD_BODY + f"return {field_expr}; }}()"
     )
 
 

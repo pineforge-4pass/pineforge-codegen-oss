@@ -72,6 +72,9 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
 
 ### Changes since 1.7.0
 
+- Preserve the calendar timestamp lambda's local bindings when a request
+  expression also reads a mutable global, helper local, loop counter or tuple
+  element named `t`, `_pf_ts_mu` or `_pf_ts_mu_lock`, including history reads.
 - Avoid libc name collisions in generated C++: pivot-level helpers use
   `open_price`, array and matrix history helpers use `open_slot`, and authored
   `fclose` names are escaped. Scripts using either helper change only that
