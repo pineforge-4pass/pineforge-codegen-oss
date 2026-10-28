@@ -626,14 +626,22 @@ var a = switch choice
     assert cpp == _eager_cpp(source, monkeypatch)
 
 
-def test_dynamic_changed_zero_writes_live_array_and_nonzero_keeps_error_order():
-    cpp = transpile(HEADER + SEED + '''offset = input.int(0, "Offset")
+@pytest.mark.parametrize("operation", [
+    # Both receiver spellings reach the same live array at offset zero.
+    "array.set(a[offset], 1, 9)",
+    "(a[offset]).set(1, 9)",
+])
+def test_dynamic_changed_zero_writes_live_array_and_nonzero_keeps_error_order(operation):
+    cpp = transpile('//@version=6\nstrategy("frozen arrays", max_bars_back=4)\n'
+                    + SEED + f'''offset = input.int(0, "Offset")
 if bar_index == 2
-    array.set(a[offset], 1, 9)
+    {operation}
 ''' + HISTORY)
-    _shared(cpp, capacity=None)
+    # Four slots retain offsets 0..3; at bar 2, slot 3 has not been populated.
+    _shared(cpp)
+    # One authored set has one dirty site in either receiver spelling.
     assert cpp.count(WRITER + ".save_set(__pf_array, (size_t)__pf_array_index)") == 1
-    # Offset 0 changes [2,5] to [2,9]; offset 1 is immutable and offset 3 is not yet available at bar 2 (history capacity is 4, so a larger offset would fail the run configuration instead).
+    # Offset 0 writes [2,9]; offset 1 is immutable; offset 3 is missing before any write.
     _native(cpp, r'''
     GeneratedStrategy strategy;
     auto feed = bars(5);
@@ -642,17 +650,27 @@ if bar_index == 2
     assert((strategy.a == std::vector<int>{2, 9}));
     assert((strategy._pf_collection_hist_a.at(1) == std::vector<int>{2, 9}));
     assert((strategy._pf_collection_hist_a.at(3) == std::vector<int>{2, 5}));
+    // Five closes A,A,B,B,B freeze two two-element versions.
     assert(pf_test_freezes == 2);
+    assert(pf_test_copied_elements == 4);
     assert(&strategy._pf_collection_hist_a.changed(0, strategy.a) == &strategy.a);
     strategy.set_input("Offset", "1");
     strategy.run(feed.data(), 5);
     assert(strategy.last_error() == "Cannot modify the elements of a historical array or any slices of that array. Instead of modifying an array referenced by an ID retrieved with the `[]` operator, create a shallow copy of the array with `array.copy()`, then modify the copy or a slice of that copy.");
     assert((strategy.a == std::vector<int>{2, 5}));
+    // The failed receiver adds only the seed's freeze, before bar 2 opens.
     assert(pf_test_freezes == 3);
-    strategy.set_input("Offset", "3");
-    strategy.run(feed.data(), 5);
-    assert(strategy.last_error() == "Cannot call array methods when id of array is na.");
-    assert((strategy.a == std::vector<int>{2, 5}));
+    assert(pf_test_copied_elements == 6);
+    // A runtime failure seals the host; a fresh host reaches the next receiver error.
+    GeneratedStrategy missing;
+    missing.set_input("Offset", "3");
+    missing.run(feed.data(), 5);
+    assert(missing.last_error() == "Cannot call array methods when id of array is na.");
+    // Bars 0/1 ran; bar 2 opened, but missing slot 3 stopped the set before it wrote.
+    assert((missing.a == std::vector<int>{2, 5}));
+    assert((missing._pf_collection_hist_a.at(1) == std::vector<int>{2, 5}));
+    assert(missing._pf_collection_hist_a.is_na(3));
+    // The fresh host adds one two-element seed freeze: four freezes, eight elements.
     assert(pf_test_freezes == 4);
     assert(pf_test_copied_elements == 8);
 ''')
