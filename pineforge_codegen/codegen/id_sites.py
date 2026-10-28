@@ -6,9 +6,9 @@ time it runs; a host sizes its per-bar id bookkeeping from how often one bar can
 run such sites. The count follows the program, not the emitted C++: a user
 function counts once per static call of it (transitively), a ``for`` loop whose
 bounds are known before the script runs counts once per iteration unless its
-body assigns the loop's own counter, and anything without a static bound (a
-``while`` or ``for ... in`` loop, a ``for`` loop with a computed bound or a
-body that assigns its counter, a recursion) makes the document say ``unbounded``.
+body assigns the loop's own counter or declares a variable of the same name, and
+anything without a static bound (a ``while`` or ``for ... in`` loop, any other
+``for`` loop, a recursion) makes the document say ``unbounded``.
 """
 
 import json
@@ -85,14 +85,22 @@ def _assigns_counter(loop):
     """Whether the body of a ``for`` loop assigns the loop's own counter.
 
     The counter is a variable the body can set (``i := 0``, ``i += 1``), so the loop
-    then runs a number of iterations its bounds do not give. An assignment to the name
-    counts anywhere in the body, a nested block or loop included, even where an inner
-    loop declares the same name for itself: that errs high, and the count must never be low.
+    then runs a number of iterations its bounds do not give. A declaration of its name
+    can set it too: where the name is a member the script declares in a block, the
+    codegen writes ``i = i - 1`` as an assignment of that name, which inside the C++
+    loop is the counter; a tuple declaration (``[i, x] = f()``) counts the same way.
+    An assignment or a declaration of the name counts anywhere in the body, a nested
+    block or loop included, even where it only shadows the counter or an inner loop
+    declares the same name for itself: that errs high, and the count must never be low.
     """
     for statement in loop.body:
         for node, _depth in iter_ast_nodes(statement):
             if (isinstance(node, Assignment) and isinstance(node.target, Identifier)
                     and node.target.name == loop.var):
+                return True
+            if isinstance(node, VarDecl) and node.name == loop.var:
+                return True
+            if isinstance(node, TupleAssign) and loop.var in node.names:
                 return True
     return False
 

@@ -164,8 +164,9 @@ and the accepted input (line endings, one-line field assignments, an unevaluated
   protocol. Its canonical JSON, `{"strategy":{"ids":{"freshPerBar":K}},"version":1}`,
   counts the lowered `strategy.entry`, `strategy.order` and `strategy.exit` sites
   whose `id` is not a literal, once per static call of the function that holds
-  them and once per iteration of a `for` loop with known bounds; a loop without a
-  static bound or a recursion around a computed id gives
+  them and once per iteration of a `for` loop with known bounds, unless its body
+  assigns the loop's counter or declares a variable of the same name; any other
+  loop or a recursion around a computed id gives
   `{"strategy":{"ids":{"freshPerBarStatus":"unbounded"}},"version":1}`. The
   emitted C++ of every strategy gains the two exports; trading code is unchanged.
 - Report an upper bound on how many script-owned objects one execution of the

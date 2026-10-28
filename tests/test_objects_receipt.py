@@ -31,9 +31,10 @@ emitted).
 
 The cost algebra is the one of the id-sites receipt: a site counts once per static call of the
 user function that holds it (transitively) and once per iteration of a ``for`` loop whose start,
-end and step are known when the script is translated, and both arms of an ``if`` count. A
-``while`` or ``for ... in`` loop, a ``for`` loop with a computed bound and a recursion around a
-creating site have no static bound, while a loop around a body that creates nothing adds nothing.
+end and step are known when the script is translated, unless its body assigns the loop's counter
+or declares a variable of the same name, and both arms of an ``if`` count. A ``while`` or
+``for ... in`` loop, any other ``for`` loop and a recursion around a creating site have no static
+bound, while a loop around a body that creates nothing adds nothing.
 The copy of an array of strings is unbounded, because the number of strings it owns is not
 tracked.
 
@@ -653,4 +654,136 @@ REMAINING_ROUTE_UNBOUNDED_CASES = [
 
 @pytest.mark.parametrize("body", REMAINING_ROUTE_UNBOUNDED_CASES)
 def test_receipt_is_unbounded_for_owned_copies_on_the_remaining_routes(body):
+    assert receipt_text(HEADER + body) == unbounded_receipt()
+
+
+# Tuples held before their names take them. A tuple chosen by an `if` or a `switch` is built in a
+# named temporary, which the names copy whichever way they bind: in one declaration, or one by one
+# when a name is stored in its own member (a function declaring a `var` of the same name makes it
+# one). A tuple a call returns is held the same way when a name is so stored, and each element is
+# copied out of it. A function whose last statement is a tuple declaration returns copies of the
+# arrays its names hold, arrays of numbers included. Each value is worked out by hand from the
+# rules above.
+
+STRING_ARRAYS_SELECTED_BY_AN_IF = '''[x, y] = if close > open
+    [array.from("a", "b"), array.from("c")]
+else
+    [array.from("d"), array.from("e")]
+'''
+
+NUMERIC_ARRAYS_SELECTED_BY_AN_IF = '''[x, y] = if close > open
+    [array.from(1.0), array.from(2.0)]
+else
+    [array.from(3.0), array.from(4.0)]
+'''
+
+STRING_ARRAY_SELECTED_INTO_A_MEMBER = '''left() =>
+    var float state = 1.0
+    state += 1.0
+    state
+a = left()
+[state, names] = if close > open
+    [100.0, array.from("a", "b")]
+else
+    [200.0, array.from("c")]
+read() => state
+b = read()
+'''
+
+STRING_ARRAY_DESTRUCTURED_INTO_A_MEMBER = '''left() =>
+    var float state = 1.0
+    state += 1.0
+    state
+pair() => [100.0, array.from("a", "b")]
+a = left()
+[state, names] = pair()
+read() => state
+b = read()
+'''
+
+NUMERIC_ARRAYS_RETURNED_BY_A_TUPLE_DECLARATION = '''pair() => [array.from(1.0, 2.0), array.from(3.0)]
+both() =>
+    [p, q] = pair()
+[x, y] = both()
+'''
+
+HELD_TUPLE_BOUNDED_CASES = [
+    # array.from over one number 1 in each of the four arm elements (both arms count) = 4; x and y
+    # take a copy of the selected tuple, arrays of numbers taken by variables, which adds 0: 4 + 0 = 4
+    pytest.param(NUMERIC_ARRAYS_SELECTED_BY_AN_IF, 4, id="numeric-arrays-selected-by-an-if"),
+    # pair() makes array.from over two numbers 1 + array.from over one number 1 = 2; both() returns
+    # a copy of each array p and q hold, one new array each, 1 + 1 = 2: 2 + 2 = 4
+    pytest.param(NUMERIC_ARRAYS_RETURNED_BY_A_TUPLE_DECLARATION, 4,
+                 id="numeric-arrays-returned-by-a-tuple-declaration"),
+]
+
+
+@pytest.mark.parametrize(("body", "objects"), HELD_TUPLE_BOUNDED_CASES)
+def test_receipt_counts_numeric_arrays_copied_out_of_a_held_tuple(body, objects):
+    assert receipt_text(HEADER + body) == bounded_receipt(objects)
+
+
+HELD_TUPLE_UNBOUNDED_CASES = [
+    # unbounded: x and y take a copy of the selected tuple, arrays of strings the count does not
+    # track (array.from 1 + 2, 1 + 1, 1 + 1 and 1 + 1 in the two arms = 9 without the copy)
+    pytest.param(STRING_ARRAYS_SELECTED_BY_AN_IF, id="string-arrays-selected-by-an-if"),
+    # unbounded: left() declares a var named state, so the top-level state is stored in its own
+    # member; the selected tuple is copied into a second temporary, and names takes a copy of its
+    # array of strings (array.from 1 + 2 + array.from 1 + 1 = 5 without the copies)
+    pytest.param(STRING_ARRAY_SELECTED_INTO_A_MEMBER, id="string-array-selected-into-a-member"),
+    # unbounded: left() declares a var named state, so the top-level state is stored in its own
+    # member; the tuple pair() returns is held, and names takes a copy of its array of strings
+    # (array.from 1 + 2 = 3 without the copy)
+    pytest.param(STRING_ARRAY_DESTRUCTURED_INTO_A_MEMBER,
+                 id="string-array-destructured-into-a-member"),
+]
+
+
+@pytest.mark.parametrize("body", HELD_TUPLE_UNBOUNDED_CASES)
+def test_receipt_is_unbounded_for_string_arrays_copied_out_of_a_held_tuple(body):
+    assert receipt_text(HEADER + body) == unbounded_receipt()
+
+
+# A declaration of the counter's name in the body of a `for` loop is a new variable in Pine, but
+# where the name is a member (an `if` block of the script declares it) the declaration is written
+# as an assignment of that name, which inside the emitted loop is the counter: the loop then runs
+# a number of iterations its bounds do not give. A declaration of another name keeps the count of
+# the bounds. Each value is worked out by hand from those rules, never read off a transpile.
+
+FOR_LOOP_REDECLARING_ITS_COUNTER = '''if close > open
+    i = 0.0
+for i = 0 to 9 by 3
+    i = i - 1
+    levels = array.new_float(1)
+'''
+
+FOR_LOOP_DECLARING_ANOTHER_NAME = '''if close > open
+    k = 0.0
+for i = 0 to 9 by 3
+    k = i - 1
+    levels = array.new_float(1)
+'''
+
+COUNTER_DECLARATION_BOUNDED_CASES = [
+    # 4: k = i - 1 declares another name, so i = 0, 3, 6, 9: abs(9 - 0) // 3 + 1 = 4 iterations
+    # x 1 array = 4
+    pytest.param(FOR_LOOP_DECLARING_ANOTHER_NAME, 4,
+                 id="declaration-of-another-name-keeps-its-trip-count"),
+]
+
+
+@pytest.mark.parametrize(("body", "objects"), COUNTER_DECLARATION_BOUNDED_CASES)
+def test_receipt_keeps_the_trip_count_of_a_loop_whose_body_declares_another_name(body, objects):
+    assert receipt_text(HEADER + body) == bounded_receipt(objects)
+
+
+COUNTER_DECLARATION_UNBOUNDED_CASES = [
+    # unbounded: i = i - 1 writes the counter, so the body starts at i = 0, 2, 4, 6 and 8, 5 trips
+    # (reading the bounds alone would give abs(9 - 0) // 3 + 1 = 4 iterations x 1 array = 4)
+    pytest.param(FOR_LOOP_REDECLARING_ITS_COUNTER, id="counter-redeclared-in-the-body-is-unbounded"),
+]
+
+
+@pytest.mark.parametrize("body", COUNTER_DECLARATION_UNBOUNDED_CASES)
+def test_receipt_is_unbounded_for_a_loop_whose_body_redeclares_its_counter(body):
     assert receipt_text(HEADER + body) == unbounded_receipt()

@@ -12,8 +12,9 @@ a parameter or a field already holds when another variable, a field or a
 function's value takes it. The count follows the program with the id-sites
 algebra: a site counts once per static call of the user function that holds
 it (transitively), once per iteration of a ``for`` loop whose bounds are
-known before the script runs, and in both arms of an ``if``; a ``while`` or
-``for ... in`` loop, a ``for`` loop with a computed bound or a recursion
+known before the script runs unless its body assigns the loop's counter or
+declares a variable of the same name, and in both arms of an ``if``; a
+``while`` or ``for ... in`` loop, any other ``for`` loop or a recursion
 around a creating site has no static bound, and neither has a creating site
 a ``request.security`` expression can reach (in its own syntax, in a function
 it calls, or in the value of a global that either of them reads, which the

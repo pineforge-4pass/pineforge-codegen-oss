@@ -1536,6 +1536,10 @@ class StmtVisitor:
             self._visit_if_switch_expr(
                 node.value, temp, lines, len(pad) // 4, target_cpp_type=tuple_t
             )
+            # The selected tuple is a named one, so the names copy it out,
+            # whichever way they bind: an array of strings with every string
+            # it holds, typed as the selection (object_sites.py).
+            record_object_site(self, node, tuple_array_copy_weight(types, stored=True))
             emit_call_tuple(temp)
             return
 

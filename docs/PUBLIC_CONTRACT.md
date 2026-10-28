@@ -153,9 +153,10 @@ where `K` is the number of lowered `strategy.entry`, `strategy.order` and
 drawings are never counted. A site in a user function or method counts once per
 static call of that function, transitively, so a function called twice from a
 function called twice counts four times. A site in a `for` loop whose start, end
-and step are known when the script is translated counts once per iteration. When a
-`while` or `for ... in` loop, a `for` loop with a computed bound, or a recursive
-call surrounds a computed `id`, the count has no static bound and the JSON is
+and step are known when the script is translated counts once per iteration, unless
+its body assigns the loop's counter or declares a variable of the same name. When a
+`while` or `for ... in` loop, any other `for` loop, or a recursive call surrounds a
+computed `id`, the count has no static bound and the JSON is
 `{"strategy":{"ids":{"freshPerBarStatus":"unbounded"}},"version":1}`, with no
 `freshPerBar` key; a count above 4294967295 is reported the same way. A loop that
 holds only literal ids does not make the count unbounded. `K` is an upper bound,
@@ -179,7 +180,11 @@ bound on the number of script-owned objects that one execution of the script bod
 creates: arrays, string elements, maps, matrices, instances of user-defined types
 and drawing records. When the translator cannot bound that number, the JSON is
 `{"strategy":{"objects":{"perExecutionStatus":"unbounded"}},"version":1}`, with no
-`perExecution` key. `K` is an upper bound, not an exact count. It counts objects
+`perExecution` key. A creating site in a `for` loop whose start, end and step are
+known when the script is translated counts once per iteration, unless its body
+assigns the loop's counter or declares a variable of the same name; a `while` or
+`for ... in` loop, any other `for` loop, or a recursive call around a creating site
+leaves the number unbounded. `K` is an upper bound, not an exact count. It counts objects
 per execution of the script body, not per bar: the translator cannot bound how
 often the body runs on one bar, because `calc_on_order_fills` (set by the script or
 by a run-time override) runs it again after each fill. A host can size its object

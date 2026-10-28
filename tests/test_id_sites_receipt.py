@@ -723,3 +723,40 @@ COUNTER_CASES = [
 @pytest.mark.parametrize(("body", "fresh"), COUNTER_CASES)
 def test_receipt_has_no_trip_count_for_a_loop_that_assigns_its_own_counter(body, fresh):
     assert receipt_text(HEADER + body) == expected_receipt(fresh)
+
+
+# A declaration of the counter's name in the body of a `for` loop is a new variable in Pine, but
+# where the name is a member (an `if` block of the script declares it) the declaration is written
+# as an assignment of that name, which inside the emitted loop is the counter: the loop then runs
+# a number of iterations its bounds do not give. A declaration of another name keeps the count of
+# the bounds. Each value is worked out by hand from those rules, never read off a transpile.
+
+FOR_LOOP_REDECLARING_ITS_COUNTER = '''if close > open
+    i = 0.0
+for i = 0 to 9 by 3
+    i = i - 1
+    strategy.entry("L" + str.tostring(bar_index), strategy.long)
+'''
+
+FOR_LOOP_DECLARING_ANOTHER_NAME = '''if close > open
+    k = 0.0
+for i = 0 to 9 by 3
+    k = i - 1
+    strategy.entry("L" + str.tostring(bar_index), strategy.long)
+'''
+
+COUNTER_DECLARATION_CASES = [
+    # unbounded: i = i - 1 writes the counter, so the body starts at i = 0, 2, 4, 6 and 8, 5 trips
+    # (reading the bounds alone would give abs(9 - 0) // 3 + 1 = 4 iterations x 1 site = 4)
+    pytest.param(FOR_LOOP_REDECLARING_ITS_COUNTER, UNBOUNDED,
+                 id="counter-redeclared-in-the-body-is-unbounded"),
+    # 4: k = i - 1 declares another name, so i = 0, 3, 6, 9: abs(9 - 0) // 3 + 1 = 4 iterations
+    # x 1 site = 4
+    pytest.param(FOR_LOOP_DECLARING_ANOTHER_NAME, 4,
+                 id="declaration-of-another-name-keeps-its-trip-count"),
+]
+
+
+@pytest.mark.parametrize(("body", "fresh"), COUNTER_DECLARATION_CASES)
+def test_receipt_has_no_trip_count_for_a_loop_whose_body_redeclares_its_counter(body, fresh):
+    assert receipt_text(HEADER + body) == expected_receipt(fresh)
